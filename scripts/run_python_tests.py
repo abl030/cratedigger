@@ -41,6 +41,7 @@ from scripts.run_test_suite import (
     CheckFailureMarker,
     CheckMetricsMarker,
     _default_min_headroom_bytes,
+    recommended_worker_count,
 )
 
 ExcInfo = (
@@ -1399,56 +1400,6 @@ def _parse_nonnegative_int(value: str) -> int:
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be at least 0")
     return parsed
-
-
-def recommended_worker_count(cpu_count: int) -> int:
-    """Use three quarters of the host's threads, with no fixed ceiling.
-
-    Issue #1131: the prior ``cpu_count // 2`` formula, capped at a flat 12,
-    predates issue #1111's admission control and per-run headroom
-    precondition (``scripts/run_test_suite.py::_check_suite_headroom``),
-    which now fails the whole suite closed before any phase runs if the
-    shared test RAM root lacks headroom, and predates this same issue's own
-    ~61% ephemeral-PostgreSQL RAM/tmpfs diet and ``test_nix_module``
-    concurrency cap (at most 2 heavy nix evals at once, regardless of the
-    overall worker count). Those changes are what make raising the ceiling
-    safe; the flat cap chosen before them was leaving real throughput on a
-    quiet host on the table (8 workers on a 16-thread host).
-
-    Measured on a quiet 16-thread/8-physical-core host (epimetheus, this
-    issue's own review — see the PR body for the full table): Python-phase
-    internal wall time was 164.5s/12 workers, 157.7s/16, then WORSE at
-    157.8s/20 and 162.3s/24 — and 20 and 24 workers each additionally
-    produced 2 spurious failures in unrelated, pre-existing timing-budget
-    tests (``test_discogs_artist_concurrency``,
-    ``test_node_jsonl_worker``) that never fail at 12 or 16, i.e. real
-    degradation, not just a slower average. Peak tmpfs on that same host
-    grew roughly linearly with worker count (776 MB/12 workers up to
-    1331 MB/24, of a 6.3 GB root) with peak RAM well within budget
-    throughout (11.1-14.1 GB of 62 GB) — safely below both the per-run
-    headroom precondition's floor and the root's own capacity at every
-    measured point, including past the knee.
-
-    Three quarters lands exactly on the operator's stated target of 12
-    workers on a 16-thread host (comfortably below that knee, ~4% slower
-    than the 16-worker optimum with meaningfully more RAM/tmpfs margin and
-    zero observed flakiness) while a 30-core host lands at 22 — a
-    deliberate undershoot of the stated ~25/30 target, since that host's
-    tmpfs budget is proportionally the tighter of the two (3.2 GB there
-    vs. 6.3 GB on epimetheus) and this issue's measurement pass could not
-    directly verify it under the "no heavy gates on the contended local
-    host" constraint; ``CRATEDIGGER_TEST_JOBS`` remains the override for
-    either direction on any installation. No fixed ceiling beyond that:
-    a far larger host is assumed to carry proportionally more RAM too,
-    and issue #1111's own headroom/admission mechanism, plus the
-    ENOSPC-classified infrastructure-failure handling
-    ``scripts/run_python_tests.py::_classify_target_infrastructure_failure``
-    already provides, is the fail-closed backstop if that assumption is
-    ever wrong on a given installation.
-    """
-    if cpu_count < 1:
-        raise ValueError("cpu_count must be at least 1")
-    return max(1, cpu_count * 3 // 4)
 
 
 def _default_worker_count() -> int:

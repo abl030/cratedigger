@@ -164,7 +164,18 @@ PhaseExecutor = Callable[[PhaseSpec, tuple[str, ...], Path], PhaseExecution]
 #: ``_execute_suite``) to signal every currently-running phase process, and
 #: written by ``execute_phase`` from whichever thread is running that phase.
 _active_processes: dict[object, subprocess.Popen[bytes]] = {}
-_active_processes_lock = threading.Lock()
+#: RLock, not Lock (issue #1131 review B2): the SIGINT/SIGTERM/SIGHUP handler
+#: always runs on the main thread, and the main thread also runs
+#: ``execute_phase`` for the trailing "python" phase — so a signal landing
+#: while that thread holds this lock inside ``execute_phase`` (registering
+#: or de-registering its own process) makes the handler re-enter the SAME
+#: thread's lock. A plain non-reentrant ``Lock`` deadlocks there
+#: (unkillable — SIGTERM cannot interrupt a thread blocked acquiring its
+#: own already-held lock), which is strictly worse than the pre-#1131
+#: handler, which took no lock at all. ``RLock`` allows the same thread to
+#: re-enter; a *different* thread (the leading-phase-group thread) still
+#: blocks normally until the main thread releases it.
+_active_processes_lock = threading.RLock()
 
 
 def _utc_now() -> str:
@@ -565,20 +576,135 @@ def reap_stale_check_bundles(
     return tuple(reaped)
 
 
+def recommended_worker_count(cpu_count: int) -> int:
+    """Use three quarters of the host's threads, with no fixed ceiling.
+
+    Issue #1131: the prior ``cpu_count // 2`` formula, capped at a flat 12,
+    predates issue #1111's admission control and per-run headroom
+    precondition (``_check_suite_headroom`` below), which now fails the
+    whole suite closed before any phase runs if the shared test RAM root
+    lacks headroom, and predates this same issue's own ~61%
+    ephemeral-PostgreSQL RAM/tmpfs diet and ``test_nix_module``
+    concurrency cap (at most 2 heavy nix evals at once, regardless of the
+    overall worker count). Those changes are what make raising the
+    ceiling safe; the flat cap chosen before them was leaving real
+    throughput on a quiet host on the table (8 workers on a 16-thread
+    host).
+
+    Measured on a quiet 16-thread/8-physical-core host (epimetheus, this
+    issue's own review — see the PR body for the full table): Python-phase
+    internal wall time was 164.5s/12 workers, 157.7s/16, then WORSE at
+    157.8s/20 and 162.3s/24 — and 20 and 24 workers each additionally
+    produced 2 spurious failures in unrelated, pre-existing timing-budget
+    tests (``test_discogs_artist_concurrency``, ``test_node_jsonl_worker``)
+    that never fail at 12 or 16, i.e. real degradation, not just a slower
+    average. Peak tmpfs on that same host grew roughly linearly with
+    worker count (776 MB/12 workers up to 1331 MB/24, of a 6.3 GB root)
+    with peak RAM well within budget throughout (10.9-13.8 GB of 62 GB).
+
+    Three quarters lands exactly on the operator's stated target of 12
+    workers on a 16-thread host (comfortably below the knee above, ~4%
+    slower than the 16-worker optimum with meaningfully more RAM/tmpfs
+    margin and zero observed flakiness). On a 30-core host it lands at
+    22, independently measured live (issue #1131 review, canonical
+    ``run_tests.sh`` with the phase overlap below also active): wall
+    107.4s, 6/6 phases PASSED, Python phase 102.1s, peak tmpfs 1178 MB of
+    3245 MB (36%), peak RAM 19.3 GB of 30 GB, peak load1 21.08.
+
+    That measured peak tmpfs (1178-1331 MB depending on host) EXCEEDS the
+    OLD flat 1 GiB (1073.7 MB) headroom-precondition floor below — a run
+    admitted with only slightly more than 1 GiB free could have exhausted
+    the root mid-run under this worker count on the tighter host.
+    ``_default_min_headroom_bytes`` below is worker-aware for exactly
+    that reason: its unset-default floor scales with THIS formula's own
+    prediction (via ``_expected_worker_count``), so admission now refuses
+    a run that does not have enough headroom for the workers it is about
+    to start, rather than admitting it and finding out mid-run. No fixed
+    ceiling beyond the three-quarters fraction itself: a far larger host
+    is assumed to carry proportionally more RAM too, and that
+    worker-aware floor, plus the ENOSPC-classified infrastructure-failure
+    handling
+    ``scripts/run_python_tests.py::_classify_target_infrastructure_failure``
+    already provides, is the fail-closed backstop if that assumption is
+    ever wrong on a given installation. ``CRATEDIGGER_TEST_JOBS`` remains
+    the override in either direction, honored by both this function's own
+    caller (``run_python_tests.py::_default_worker_count``) and by
+    ``_expected_worker_count`` below.
+    """
+    if cpu_count < 1:
+        raise ValueError("cpu_count must be at least 1")
+    return max(1, cpu_count * 3 // 4)
+
+
+def _expected_worker_count() -> int:
+    """Best-effort prediction of the Python phase's own worker count.
+
+    Used ONLY to size the tmpfs headroom floor before any phase has
+    actually run (issue #1131 review N1) — not authoritative. Mirrors
+    ``run_python_tests.py::_default_worker_count``'s precedence
+    (``CRATEDIGGER_TEST_JOBS`` override, else ``recommended_worker_count``),
+    but never raises on a malformed override: a bad value here just falls
+    back to the formula's own estimate for sizing purposes, since the
+    real, authoritative parse — and its hard failure on a genuinely
+    malformed override — happens later, inside that phase's own argparse.
+    """
+    configured = os.environ.get("CRATEDIGGER_TEST_JOBS")
+    if configured is not None:
+        try:
+            parsed = int(configured)
+        except ValueError:
+            parsed = 0
+        if parsed >= 1:
+            return parsed
+    return recommended_worker_count(os.cpu_count() or 1)
+
+
+#: Issue #1131 review N1: base term for the worker-aware headroom floor
+#: below — the reviewer's own suggested model
+#: (``max(1 GiB, 256 MB + 64 MB * jobs)``), sized to sit comfortably above
+#: the measured peaks in ``recommended_worker_count``'s docstring (a
+#: 1664 MB floor at doc1's 22 workers against a measured 1178 MB peak —
+#: roughly 41% margin), not to exactly track them.
+_HEADROOM_BASE_BYTES = 256 * 1024 * 1024
+_HEADROOM_PER_WORKER_BYTES = 64 * 1024 * 1024
+
+
 def _default_min_headroom_bytes() -> int:
-    """Read the same env var and default scripts/test_tmpfs.sh uses."""
+    """Read the same env var scripts/test_tmpfs.sh uses; the DEFAULT (no
+    override) scales with the Python phase's own expected worker count.
+
+    Issue #1131 review N1: raising the default worker count means more
+    concurrent ephemeral PostgreSQL clusters, so a flat 1 GiB floor no
+    longer bounds a run's OWN peak tmpfs on a tight host — doc1 (30
+    cores, 3.2 GB root) measured a 1178 MB peak at 22 workers, above the
+    flat 1 GiB (1073.7 MB) floor a run could previously have been
+    admitted under. The unset-default floor is now
+    ``max(DEFAULT_MIN_HEADROOM_BYTES, _HEADROOM_BASE_BYTES +
+    _HEADROOM_PER_WORKER_BYTES * _expected_worker_count())`` — see
+    ``recommended_worker_count``'s docstring for the measured evidence.
+    An EXPLICIT ``CRATEDIGGER_TEST_RAM_MIN_BYTES`` override is still
+    respected exactly as given, with no worker-aware adjustment: this
+    scaling only fills in the unset default. ``scripts/test_tmpfs.sh``'s
+    own shell-entry guard deliberately stays a flat 1 GiB for the
+    DIFFERENT case it covers — a bare interactive ``nix-shell`` entry,
+    skipped entirely once ``CRATEDIGGER_SUITE_OWNS_HEADROOM`` is set,
+    where no worker count is even known yet.
+    """
     raw = os.environ.get("CRATEDIGGER_TEST_RAM_MIN_BYTES")
-    if raw is None:
-        return DEFAULT_MIN_HEADROOM_BYTES
-    try:
-        value = int(raw)
-    except ValueError:
-        value = -1
-    if value < 0:
-        raise ValueError(
-            "CRATEDIGGER_TEST_RAM_MIN_BYTES must be a non-negative integer"
-        )
-    return value
+    if raw is not None:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = -1
+        if value < 0:
+            raise ValueError(
+                "CRATEDIGGER_TEST_RAM_MIN_BYTES must be a non-negative integer"
+            )
+        return value
+    return max(
+        DEFAULT_MIN_HEADROOM_BYTES,
+        _HEADROOM_BASE_BYTES + _HEADROOM_PER_WORKER_BYTES * _expected_worker_count(),
+    )
 
 
 def _check_suite_headroom(runtime: Path, *, minimum_bytes: int) -> None:
@@ -1034,10 +1160,21 @@ def _execute_suite(
     phase before it (issue #1131): the five cheap gates (js-syntax,
     js-unit, pyright, ruff, vulture) total roughly 30s against a Python
     phase running 150-190s, on an otherwise mostly-idle box for that
-    whole window. Any other phase shape — no phase named "python", or one
-    where it isn't last (every custom ``phases=`` list this module's own
-    contract tests below construct) — runs every phase strictly serially,
-    unchanged from before this issue.
+    whole window. A ``phases=`` plan with no phase named "python", or one
+    where a "python"-named phase exists but isn't last, keeps every phase
+    strictly serial, unchanged from before this issue — most of this
+    module's own contract tests use exactly that shape (custom phase
+    names, e.g. ``test_command_start_failure_is_indexed_and_does_not_
+    stop_later_phase``'s "missing"/"later"). At least one contract test
+    below (``test_one_invocation_indexes_simultaneous_failures_from_
+    every_phase``) deliberately builds a python-LAST plan and so exercises
+    the concurrent path too. Its exact-order assertions (``summary.phases``
+    compared as an ordered tuple, failure identities compared as an
+    ordered list) still hold under concurrency, NOT because they are
+    order-insensitive, but because ``summary.phases`` always publishes to
+    each phase's fixed PLAN index regardless of which thread, or in what
+    order, phases actually finish — see ``run_one_phase`` below. That test
+    is therefore not evidence this plan shape runs serially.
     """
     bundle = _create_bundle(runtime)
     started_at = _utc_now()
@@ -1245,12 +1382,20 @@ def _execute_suite(
     leading_thread: threading.Thread | None = None
     try:
         if leading_indices:
-            leading_thread = threading.Thread(
+            candidate_thread = threading.Thread(
                 target=run_phase_sequence,
                 args=(leading_indices,),
                 name="cratedigger-check-leading-phases",
             )
-            leading_thread.start()
+            # Issue #1131 review N5: only assign to `leading_thread` (the
+            # variable `finally` below checks) AFTER `.start()` actually
+            # succeeds. Assigning first would make a `.start()` exception
+            # unwind into `finally` calling `.join()` on a never-started
+            # thread, which raises `RuntimeError: cannot join thread
+            # before it is started` — masking the real exception that
+            # caused this unwind in the first place.
+            candidate_thread.start()
+            leading_thread = candidate_thread
         run_phase_sequence(remaining_indices)
     finally:
         if leading_thread is not None:
