@@ -33,9 +33,12 @@ from lib.import_execution import (
 )
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
+    IMPORT_JOB_YOUTUBE,
     ImportJob,
     force_import_dedupe_key,
     force_import_payload,
+    youtube_import_dedupe_key,
+    youtube_import_payload,
 )
 from lib.pipeline_db import PipelineDB
 from lib.pipeline_db.cleanup_journal import CleanupJournalIntent
@@ -427,6 +430,63 @@ class _StartupRecoveryBuilders:
         assert self.db.mark_import_job_preview_importable(job.id) is not None
         assert claim_next_import_job(
             self.db, worker_id="force-before-restart",
+        ) is not None
+        authorized = self.db.authorize_import_job_launch(
+            job.id,
+            request_id=self.request_id,
+            release_id=self.mb_release_id,
+            source_path=canonical_path,
+        )
+        assert authorized is not None
+        return authorized
+
+    def _youtube_launched_job(self, canonical_path: str) -> ImportJob:
+        """Drive a youtube_import job to an authorized Beets launch.
+
+        Issue #1089 review round 3 item 1: unlike force (whose
+        ``beets_launch_source_path`` records the operator's ORIGINAL
+        failed path, never where Beets actually imports from — see
+        ``_force_launched_job``), YouTube's own launch-authorization
+        identity check (``authorize_import_job_launch``'s
+        ``job.payload->>'staged_path'`` branch) uses the SAME staged path
+        the ingest worker's child actually reads from. The debris check
+        therefore runs against the stored ``beets_launch_source_path``
+        UNCHANGED for this lane — this helper deliberately mirrors
+        ``_force_launched_job`` structurally while authorizing at
+        ``canonical_path`` directly, with no separate action-copy path.
+        """
+        download_log_id = self.db.log_download(
+            self.request_id,
+            outcome="rejected",
+            error_message="youtube owner source",
+        )
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=self.request_id,
+            dedupe_key=youtube_import_dedupe_key(download_log_id),
+            payload=youtube_import_payload(
+                staged_path=canonical_path,
+                request_id=self.request_id,
+                browse_id="MPREb_test_browse_id",
+                download_log_id=download_log_id,
+            ),
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id=self.mb_release_id,
+            source_path=canonical_path,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        assert self.db.set_import_job_candidate_evidence(
+            job.id, persisted.id,
+        )
+        assert self.db.mark_import_job_preview_importable(job.id) is not None
+        assert claim_next_import_job(
+            self.db, worker_id="youtube-before-restart",
         ) is not None
         authorized = self.db.authorize_import_job_launch(
             job.id,
@@ -1084,6 +1144,55 @@ class _StartupRecoveryContract(_StartupRecoveryBuilders):
         case.assertIn(str(album_id), message)
         case.assertEqual(self.db.list_denylist_rows(), [])
 
+    def test_youtube_launched_job_removes_its_own_beets_debris_at_startup(
+        self,
+    ) -> None:
+        """Issue #1089 review round 3 item 1.
+
+        The YouTube branch of the confinement-root ternary
+        (``force_action_copy_path_fn(job.id) if job.job_type ==
+        IMPORT_JOB_FORCE else job.beets_launch_source_path``) had ZERO
+        behavioral coverage — every prior debris-removal pin in this file
+        drove either the automation lane or the force lane. Mirrors
+        ``test_force_launched_job_removes_its_own_beets_debris_at_startup``,
+        but for a launched ``youtube_import`` job whose debris album's
+        items sit under the SAME staged/launch source path (correct for
+        this lane — see ``_youtube_launched_job``), and deliberately injects
+        the shared ``_no_force_action_copy_path`` stub (which returns a
+        benign but WRONG string, distinct from any real album path) as
+        ``force_action_copy_path_fn`` — so an unconditional-force-path
+        mutant would misroute this YouTube job's confinement check to that
+        benign string and wrongly report ``not_confined``, catching the
+        exact "the ternary always takes the force branch" defect even
+        though the stub itself never raises or opens real config.
+        """
+        case = self._case()
+        path = self._album_dir("frozen-youtube-ghost", "01 - Track.mp3")
+        job = self._youtube_launched_job(path)
+        db_path, root, runtime_config = self._beets_fixture()
+        album_id = self._seed_debris_album(
+            db_path, root, release_id=self.mb_release_id, source_dir=path,
+        )
+
+        with patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(runtime_config),
+        }):
+            recovered = self.db.recover_running_import_jobs(
+                requeue_message="safe to replay",
+                recovery_message="importer restarted mid-import",
+                debris_removal_fn=self._debris_removal_fn(db_path, root),
+                force_action_copy_path_fn=_no_force_action_copy_path,
+            )
+
+        case.assertEqual([item.id for item in recovered], [job.id])
+        case.assertEqual(recovered[0].status, "failed")
+        with BeetsDB(str(db_path), library_root=str(root)) as beets:
+            case.assertIsNone(beets.get_album_detail(album_id))
+        message = str(recovered[0].message)
+        case.assertIn("recovery debris removed", message)
+        case.assertIn(str(album_id), message)
+        case.assertEqual(self.db.list_denylist_rows(), [])
+
     def test_force_launched_job_ignores_the_stale_original_path(
         self,
     ) -> None:
@@ -1160,11 +1269,21 @@ class _StartupRecoveryContract(_StartupRecoveryBuilders):
         case.assertEqual([item.id for item in recovered], [job.id])
         case.assertEqual(recovered[0].status, "failed")
         message = str(recovered[0].message)
-        case.assertIn("recovery debris check raised", message)
+        case.assertIn("recovery debris check_raised", message)
         case.assertIn("DatabaseError", message)
         case.assertIn(
             "database disk image is malformed", message,
         )
+        # Issue #1089 review round 3 item 3: the caught exception reaches
+        # ``result.recovery_debris_removal`` through the SAME typed
+        # ``RecoveryDebrisReport`` encoding every other outcome uses —
+        # not a hand-typed dict with a different shape.
+        result = recovered[0].result
+        assert result is not None
+        removal = result["recovery_debris_removal"]
+        assert isinstance(removal, dict)
+        case.assertEqual(removal["outcome"], "check_raised")
+        case.assertIn("DatabaseError", str(removal["detail"]))
 
     def test_recover_abandoned_running_jobs_forwards_debris_removal_fn_to_both_sweeps(
         self,

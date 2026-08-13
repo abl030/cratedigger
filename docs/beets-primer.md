@@ -106,8 +106,12 @@ Cratedigger has three Beets mutation lanes:
    so it silently retagged nothing on the common case. `beet modify` sets one
    field by query; it needs no candidate mapping and makes no network call.
 
-Lane 3 is deliberately the narrowest of the three, and
-every clause is load-bearing:
+Lane 3 is deliberately the narrowest of the three — narrower than Lane 1's
+full harness-driven import, and narrower than Lane 2's exact-album delete
+child in EITHER of its two modes (a whole album's files and catalog row in
+the destructive mode, a whole album's catalog row alone in the
+metadata-only mode) — Lane 3 mutates exactly one field on one album by
+query. Every clause is load-bearing:
 
 - **`-a` targets Albums, not Items.** `Album.try_sync(inherit=True)` (the
   default) fans every inheritable fixed attribute — `mb_albumid` is one — out

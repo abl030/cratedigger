@@ -2141,7 +2141,11 @@ class TestImportJobQueueAPI(unittest.TestCase):
         production default for ``force_action_copy_path_fn`` must derive
         the SAME path ``lib.import_preview.force_action_copy_path`` itself
         computes from the currently configured runtime — not a hand-typed
-        approximation the two could silently drift from."""
+        approximation the two could silently drift from. Limit (review
+        round 3 item 6): ``read_runtime_config`` is patched away here, so
+        this proves the two callers agree on how to TURN a config into a
+        path, never that ``_default_force_action_copy_path`` resolves the
+        real config source correctly on its own."""
         from unittest.mock import patch
 
         from lib.config import CratediggerConfig

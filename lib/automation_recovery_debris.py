@@ -34,18 +34,29 @@ source path rather than the configured library root, because crash debris
 is — by construction — an album whose files never reached the library. The
 automation lane's processing source tree itself is left for the existing
 journaled cleanup (``lib.processing_cleanup``) to remove. Issue #1089
-review MINOR-6: this composes safely regardless of that cleanup's own
-ordering — a prior round claimed both automation callers always run this
-check BEFORE that cleanup, which is false for
-``_self_heal_automation_world_failure`` entered from
+review MINOR-6 (correcting two overclaims in one pass — a mis-ordering
+claim, then a mis-mechanism claim written to fix it): a prior round claimed
+both automation callers always run this check BEFORE that cleanup, which
+is false for ``_self_heal_automation_world_failure`` entered from
 ``scripts/importer.py::process_claimed_job``'s terminal-stage ``except``
 (``_complete_automation_processing_cleanup`` already ran once, successfully
-or not, before that self-heal call). The TRUE reason it is safe either way:
-confinement here is purely lexical (``Path(launch_source_path).resolve(strict=False)``
-plus string-prefix comparison against each recorded item path) and never
-touches the filesystem, so it composes identically whether the cleanup that
-follows — or already ran — finds a fresh source tree, a resumed journal from
-an earlier interrupted attempt, or an already-removed one.
+or not, before that self-heal call). The round that corrected THAT then
+claimed confinement is "purely lexical" and "never touches the
+filesystem" — also false: ``lib.beets_delete._confined_path`` resolves
+each candidate path with ``Path.resolve(strict=False)``, which performs
+real ``readlink``/``lstat`` syscalls against every path COMPONENT that
+currently exists on disk (only the FINAL component may be absent), by its
+own docstring rejecting "lexical OR SYMLINK escapes." For a launch source
+path with a symlinked component, resolving it before the cleanup below
+runs (symlink still present) can disagree with resolving it after (symlink
+removed) — a real, reviewer-demonstrated divergence, fail-closed in
+direction (a symlinked path can read as confined before cleanup and
+not-confined after, never the reverse). The honest claim: this is a
+read-only, symlink-resolving check that never MUTATES the filesystem, and
+it composes safely across cleanup ordering for any launch source path with
+NO symlinked component — which is every path the automation and force
+lanes actually construct (``processing_dir``-rooted trees this pipeline
+itself creates, never operator-supplied or symlinked).
 
 Issue #1089 review round 1 (B1) widened the exposure this module covers: a
 killed automation import is not only the restart-based "owner process
@@ -137,6 +148,17 @@ RecoveryDebrisOutcomeKind = Literal[
     # designed backstop that surfaces it on the very next world audit,
     # independent of whether this recovery ever gets a further attempt.
     "beets_unavailable",
+    # Issue #1089 review round 3 item 3: ``debris_removal_fn`` itself
+    # raised something ``beets_authority_availability_category`` cannot
+    # classify (e.g. SQLITE_CORRUPT/NOTADB from a kill mid-write). This
+    # outcome kind is never produced by ``remove_recovery_debris`` in this
+    # module — it is what the MAJOR-2 per-job guard in
+    # ``PipelineDB.recover_running_import_jobs`` (and its
+    # ``FakePipelineDB`` mirror) constructs when it catches that raise, so
+    # the same ``RecoveryDebrisReport`` shape (and the same
+    # ``msgspec.to_builtins`` encoding) reaches ``result.recovery_debris_removal``
+    # regardless of which branch produced it.
+    "check_raised",
 ]
 
 
@@ -300,8 +322,12 @@ def remove_recovery_debris(
 
     # ``strict=False``: the launch source folder may already be gone (a
     # resumed cleanup journal, or a prior interrupted recovery attempt) —
-    # this only compares recorded item-path strings, it never touches the
-    # filesystem.
+    # this read-only, symlink-resolving check never MUTATES the filesystem
+    # (issue #1089 review MINOR-6: it is not purely lexical — resolve()
+    # performs real readlink/lstat syscalls against every path component
+    # that still exists — but it composes safely regardless of cleanup
+    # ordering for every launch source path this pipeline actually
+    # constructs, since none of them has a symlinked component).
     root = Path(launch_source_path).resolve(strict=False)
 
     try:

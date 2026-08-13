@@ -13,6 +13,7 @@ import psycopg2.extras
 from lib import transitions
 from lib.automation_recovery_debris import (
     RecoveryDebrisRemovalFn,
+    RecoveryDebrisReport,
     remove_recovery_debris,
 )
 from lib.import_execution import (
@@ -1372,13 +1373,21 @@ class _ImportJobsMixin(
                     "Automatic replay refused because Beets may have mutated "
                     "the library"
                 )
-                confinement_path = (
-                    force_action_copy_path_fn(job.id)
-                    if job.job_type == IMPORT_JOB_FORCE
-                    else job.beets_launch_source_path
-                )
-                recovery_debris_removal: dict[str, object]
                 try:
+                    # Issue #1089 review round 3 item 4: the confinement-root
+                    # derivation moved inside this guard too —
+                    # ``force_action_copy_path_fn``'s production default
+                    # calls ``read_runtime_config()``, which can raise
+                    # exactly the unclassified-exception blast radius
+                    # (e.g. ``PermissionError``) this guard exists to stop,
+                    # even though nothing reachable today actually triggers
+                    # it (``enforce_beets_startup`` proves config readable
+                    # before this sweep ever runs).
+                    confinement_path = (
+                        force_action_copy_path_fn(job.id)
+                        if job.job_type == IMPORT_JOB_FORCE
+                        else job.beets_launch_source_path
+                    )
                     debris_report = debris_removal_fn(
                         launch_release_id=job.beets_launch_release_id,
                         launch_source_path=confinement_path,
@@ -1398,33 +1407,25 @@ class _ImportJobsMixin(
                     # mirrored here. The row still terminalizes and the
                     # sweep keeps moving (invariant 11); the raw exception
                     # is recorded in the job's audit, never swallowed.
-                    detail = f"{type(exc).__name__}: {exc}"
+                    debris_report = RecoveryDebrisReport(
+                        outcome="check_raised",
+                        detail=f"{type(exc).__name__}: {exc}",
+                    )
+                if debris_report.outcome != "no_launch":
                     no_replay_reason = (
-                        f"{no_replay_reason}; recovery debris check raised: "
-                        f"{detail}"
+                        f"{no_replay_reason}; recovery debris "
+                        f"{debris_report.outcome}"
                     )
-                    recovery_debris_removal = {
-                        "outcome": "check_raised",
-                        "detail": detail,
-                    }
-                else:
-                    if debris_report.outcome != "no_launch":
+                    if debris_report.album_id is not None:
                         no_replay_reason = (
-                            f"{no_replay_reason}; recovery debris "
-                            f"{debris_report.outcome}"
+                            f"{no_replay_reason} "
+                            f"(beets album {debris_report.album_id})"
                         )
-                        if debris_report.album_id is not None:
-                            no_replay_reason = (
-                                f"{no_replay_reason} "
-                                f"(beets album {debris_report.album_id})"
-                            )
-                        if debris_report.detail:
-                            no_replay_reason = (
-                                f"{no_replay_reason}: {debris_report.detail}"
-                            )
-                    recovery_debris_removal = msgspec.to_builtins(
-                        debris_report,
-                    )
+                    if debris_report.detail:
+                        no_replay_reason = (
+                            f"{no_replay_reason}: {debris_report.detail}"
+                        )
+                recovery_debris_removal = msgspec.to_builtins(debris_report)
                 terminal = self.persist_import_terminal_outcome(
                     non_automation_failure_terminal_outcome(
                         job,
