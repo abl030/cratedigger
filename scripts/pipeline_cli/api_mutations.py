@@ -59,6 +59,13 @@ TIMEOUT_FOLDER_READ_SECONDS = 180.0
 """Beets distance: tag reads across every file in the folder plus one MB
 or Discogs mirror lookup."""
 
+TIMEOUT_QUARANTINE_SCAN_SECONDS = 60.0
+"""Triage quarantine: one ``get_wrong_matches`` projection plus four
+immediate-children ``scandir``/``stat`` walks (download-dir-rooted and
+processing-side ``failed_imports``/``wrong_matches``) over virtiofs — no
+writes and no lock contention, but each root can hold many accumulated
+folders, so this stays above the plain enqueue deadline."""
+
 TIMEOUT_POLL_SECONDS = 30.0
 """One bulk-triage status poll; the sweep itself is unbounded by design."""
 

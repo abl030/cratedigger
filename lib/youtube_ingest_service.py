@@ -494,6 +494,16 @@ def _default_stage_dir(src: Path, dest: Path) -> None:
     output to the configured auto-import staging child. ``shutil.move``
     handles cross-filesystem boundaries (copy-then-delete fallback). The
     parent directory is created if missing.
+
+    Residual (issue #1122, review round 2): the auto-import root itself is
+    externally provisioned (live: ``abl030:users 2775``, not
+    cratedigger-owned) -- the empty-parent prune guard
+    (``lib.processing_paths.protected_staging_roots``) stops this PR's
+    specific defect, but if that root is ever removed by some OTHER path,
+    this ``mkdir(parents=True, exist_ok=True)`` silently recreates it
+    owned by the cratedigger service identity instead of restoring the
+    original ownership -- an ownership-drift residual this PR does not
+    close.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():

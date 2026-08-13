@@ -20,7 +20,7 @@ from lib.import_manifest import (
     move_failed_import_whole,
     tracked_audio_paths_for_downloads,
 )
-from lib.processing_paths import processing_albums_dir, source_dirs_for_album
+from lib.processing_paths import protected_staging_roots, source_dirs_for_album
 from lib.quality import ValidationResult, rejection_backfill_override
 from lib.release_identity import normalize_release_id
 from lib.staged_album import StagedAlbum
@@ -83,6 +83,7 @@ def _delete_rejected_source_cancellable(
     path: str,
     *,
     processing_dir: str,
+    beets_staging_dir: str,
     cancellation_token: CancellationToken | None,
 ) -> None:
     """Destroy a rejected candidate's source outright — no quarantine.
@@ -91,16 +92,24 @@ def _delete_rejected_source_cancellable(
     rips have no salvage value for operator review, so nothing is moved into
     ``wrong_matches/`` or ``failed_imports/`` and no worklist row is created.
 
-    ``path`` is a canonical processing album — a direct, flat child of
-    ``<processing_dir>/albums/`` (CLAUDE.md invariant 9) — so its parent IS
-    that shared root. ``protected_parent`` (issue #1077, "smalls" round-2
-    review) stops ``_cleanup_staged_dir``'s empty-parent prune from ever
-    removing it: a real guard, not the incidental protection of lock-shard
+    ``path`` is USUALLY a canonical processing album — a direct, flat
+    child of ``<processing_dir>/albums/`` (CLAUDE.md invariant 9) — but a
+    YouTube rescue's staged audio is never materialized there (it imports
+    in place from the auto-import staging child, issue #1122 F1/F2), so
+    ``audio_corrupt`` can reach this function with either shared root as
+    ``path``'s parent. ``protected_parents`` (issue #1077, "smalls"
+    round-2 review; widened to a set in issue #1122, review round 2) stops
+    ``_cleanup_staged_dir``'s empty-parent prune from ever removing
+    either one: a real guard, not the incidental protection of lock-shard
     files that happen to never be unlinked.
     """
     _checkpoint(cancellation_token)
     _cleanup_staged_dir(
-        path, protected_parent=processing_albums_dir(processing_dir),
+        path,
+        protected_parents=protected_staging_roots(
+            processing_dir=processing_dir,
+            beets_staging_dir=beets_staging_dir,
+        ),
     )
 
 
@@ -360,6 +369,7 @@ def _handle_rejected_result(
             _delete_rejected_source_cancellable(
                 staged_album.current_path,
                 processing_dir=ctx.cfg.processing_dir,
+                beets_staging_dir=ctx.cfg.beets_staging_dir,
                 cancellation_token=cancellation_token,
             )
         except ExecutionCancelled:

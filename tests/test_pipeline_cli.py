@@ -2031,81 +2031,23 @@ class TestMainExitCodes(unittest.TestCase):
         )
         self.assertEqual(db.close_calls, 1)
 
-    def test_quarantine_main_maps_runtime_config_failure_and_closes_db(self):
-        argv = [
-            "pipeline_cli.py",
-            "--dsn",
-            "postgresql://example/test",
-            "triage",
-            "quarantine",
-            "--json",
-        ]
-        db = FakePipelineDB()
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with patch.object(sys, "argv", argv), patch(
-            "lib.config.read_runtime_config",
-            side_effect=PermissionError("runtime config unreadable"),
-        ), patch(
-            "scripts.pipeline_cli.cli.PipelineDB",
-            return_value=db,
-        ), redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
-            pipeline_cli.main()
-
-        self.assertEqual(raised.exception.code, 5)
-        self.assertEqual(stderr.getvalue(), "")
-        payload = json.loads(stdout.getvalue())
-        self.assertIn("error", payload)
-        self.assertIn("runtime configuration", payload["error"])
-        self.assertEqual(db.close_calls, 1)
-
-    def test_quarantine_main_maps_db_construction_failure_to_json_exit_5(self):
-        argv = [
-            "pipeline_cli.py",
-            "--dsn",
-            "postgresql://example/test",
-            "triage",
-            "quarantine",
-            "--json",
-        ]
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with patch.object(sys, "argv", argv), patch(
-            "scripts.pipeline_cli.cli.PipelineDB",
-            side_effect=RuntimeError("database unavailable"),
-        ), redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
-            pipeline_cli.main()
-
-        self.assertEqual(raised.exception.code, 5)
-        self.assertEqual(stderr.getvalue(), "")
-        self.assertEqual(
-            json.loads(stdout.getvalue()),
-            {"error": "Could not open pipeline database for quarantine scan"},
-        )
-
-    def test_quarantine_main_maps_db_construction_failure_to_human_exit_5(self):
-        argv = [
-            "pipeline_cli.py",
-            "--dsn",
-            "postgresql://example/test",
-            "triage",
-            "quarantine",
-        ]
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with patch.object(sys, "argv", argv), patch(
-            "scripts.pipeline_cli.cli.PipelineDB",
-            side_effect=RuntimeError("database unavailable"),
-        ), redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
-            pipeline_cli.main()
-
-        self.assertEqual(raised.exception.code, 5)
-        self.assertEqual(stdout.getvalue(), "")
-        self.assertIn("Quarantine scan unavailable", stderr.getvalue())
-        self.assertIn(
-            "Could not open pipeline database for quarantine scan",
-            stderr.getvalue(),
-        )
+    # #1122 F1 removed the three ``test_quarantine_main_maps_*`` tests that
+    # lived here: ``triage quarantine`` no longer constructs a PipelineDB in
+    # main() at all (it exits through the API-relay branch first, alongside
+    # every other #1063 command), so "PipelineDB construction fails for
+    # quarantine" is not a reachable scenario any more. What they covered is
+    # covered elsewhere now: PipelineDB is never constructed for quarantine
+    # (``TestMainProtectedPathDispatch.test_main_routes_every_protected_path_command_without_a_db``,
+    # which now includes ``["triage", "quarantine"]``); the SERVICE's own
+    # runtime-config-read failure maps to ``QuarantineScanError`` in
+    # ``tests/test_quarantine_triage_service.py::test_unreadable_runtime_config_fails_closed``
+    # (#1122 review NEW-1); the ROUTE's generic ``QuarantineScanError`` -> 503
+    # mapping is pinned in ``tests/web/test_routes_triage.py``
+    # (``test_quarantine_filesystem_failure_returns_503``, exercised via a
+    # filesystem failure rather than a config failure, plus the separate DB
+    # acquisition failure in ``test_quarantine_db_acquisition_failure_returns_stable_503``);
+    # and the CLI's relay of any such 503 to exit 5, in both JSON and human
+    # form, is pinned in ``TestCmdTriageQuarantine`` below.
 
     def test_main_propagates_command_return_code(self):
         argv = [
@@ -2151,6 +2093,28 @@ class TestMainProtectedPathDispatch(_FakeDbWebServerCase):
         constructor.assert_not_called()
         return cast(int, raised.exception.code), stdout.getvalue()
 
+    def test_main_routes_triage_quarantine(self):
+        """#1122 F1: ``triage quarantine`` reaches the real route, and
+        function end-to-end through ``main()`` — not just when
+        ``cmd_triage_quarantine`` is called directly."""
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        os.makedirs(os.path.join(root, "failed_imports", "Main Wiring Orphan"))
+        config_path = os.path.join(root, "config.ini")
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(f"[Slskd]\ndownload_dir = {root}\n")
+        self.enterContext(patch.dict(
+            os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+            clear=False,
+        ))
+
+        code, out = self._main("triage", "quarantine", "--json")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [f["name"] for f in json.loads(out)["folders"]],
+            ["Main Wiring Orphan"],
+        )
+
     def test_main_routes_wrong_match_delete(self):
         root = self.enterContext(tempfile.TemporaryDirectory())
         source = seed_visible_wrong_match(self.db, root)
@@ -2189,6 +2153,7 @@ class TestMainProtectedPathDispatch(_FakeDbWebServerCase):
             ["beets-distance", str(source.download_log_id), RELEASE_B],
             ["import-preview", "--download-log-id",
              str(source.download_log_id)],
+            ["triage", "quarantine"],
         ):
             with self.subTest(command=argv_tail[0]):
                 # Only the dispatch boundary is under test here (``_main``
@@ -5525,6 +5490,139 @@ class TestCmdBeetsDistance(_FakeDbWebServerCase):
         self.assertEqual(resolved, discogs_release)
 
 
+class TestCmdTriageQuarantine(_FakeDbWebServerCase):
+    """``pipeline-cli triage quarantine`` is a thin adapter over ``GET
+    /api/triage/quarantine`` (issue #1122 F1). The processing tree it
+    scans is a private ``0700 cratedigger:users`` directory readable only
+    by the web service identity — run directly in the invoking operator's
+    own CLI process, the scan raised ``EACCES`` and killed the WHOLE view
+    (proved empirically against the real root during review), taking down
+    the download-dir-rooted roots the operator could otherwise have read
+    too. Routing through the canonical web route, exactly like
+    ``force-import``/``replace``/``beets-distance``, makes ONE identity own
+    those filesystem facts. Service-layer correctness (which folders are
+    orphans, special-bucket exclusion, config resolution) lives in
+    ``tests.test_quarantine_triage_service`` /
+    ``tests.test_quarantine_triage_generated`` and the route's own contract
+    in ``tests.web.test_routes_triage``; here we pin the CLI ⇄ route wiring
+    and the status-code ⇄ exit-code mapping.
+    """
+
+    def _run_quarantine(self, root, *, json_out=False):
+        config_path = os.path.join(root, "config.ini")
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(f"[Slskd]\ndownload_dir = {root}\n")
+        args = argparse.Namespace(
+            json=json_out, api_endpoint=TcpApiEndpoint(self.base),
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.dict(
+            os.environ,
+            {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+            clear=False,
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_triage_quarantine(None, args)
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def test_quarantine_json_matches_typed_service_shape(self):
+        from lib.quarantine_triage_service import QuarantineTriageResult
+
+        with tempfile.TemporaryDirectory() as root:
+            quarantine = os.path.join(root, "failed_imports")
+            referenced = os.path.join(quarantine, "Referenced")
+            orphan = os.path.join(quarantine, "Orphan")
+            os.makedirs(referenced)
+            os.makedirs(orphan)
+            _seed_id = self.db.add_request("Artist", "Album", "request")
+            self.db.log_download(
+                _seed_id,
+                outcome="rejected",
+                validation_result={
+                    "failed_path": "failed_imports/Referenced",
+                    "scenario": "high_distance",
+                },
+            )
+
+            rc, out, err = self._run_quarantine(root, json_out=True)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        result = msgspec.convert(json.loads(out), type=QuarantineTriageResult)
+        self.assertEqual([folder.name for folder in result.folders], ["Orphan"])
+
+    def test_quarantine_human_output_names_every_root(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "failed_imports", "Visible Orphan"))
+            os.makedirs(os.path.join(root, "wrong_matches", "Wrong Orphan"))
+            # The default processing_dir (no [Paths] override in
+            # _run_quarantine's config) resolves to ``<root>/processing``.
+            os.makedirs(os.path.join(
+                root, "processing", "albums", "failed_imports",
+                "Processing Failed Orphan",
+            ))
+            os.makedirs(os.path.join(
+                root, "processing", "albums", "wrong_matches",
+                "Processing Orphan",
+            ))
+            rc, out, err = self._run_quarantine(root)
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        self.assertIn("Visible Orphan", out)
+        self.assertIn("Wrong Orphan", out)
+        self.assertIn("Processing Failed Orphan", out)
+        self.assertIn("Processing Orphan", out)
+        self.assertIn("Processing wrong-matches root:", out)
+        self.assertIn("Processing failed-import root:", out)
+        self.assertIn(
+            os.path.join(root, "processing", "albums", "wrong_matches"), out,
+        )
+        self.assertIn(
+            os.path.join(root, "processing", "albums", "failed_imports"), out,
+        )
+
+    def test_quarantine_scan_error_returns_5_with_json_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, "failed_imports"), "w", encoding="utf-8") as f:
+                f.write("not a directory")
+            rc, out, err = self._run_quarantine(root, json_out=True)
+        self.assertEqual(rc, 5)
+        self.assertEqual(err, "")
+        self.assertIn("error", json.loads(out))
+
+    def test_quarantine_scan_error_human_output_reports_the_api_refusal(self):
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, "failed_imports"), "w", encoding="utf-8") as f:
+                f.write("not a directory")
+            rc, out, err = self._run_quarantine(root)
+        self.assertEqual(rc, 5)
+        self.assertEqual(err, "")
+        self.assertIn("API refused", out)
+
+    def test_quarantine_transport_failure_returns_exit_5_with_no_direct_scan(self):
+        """#1122 F1: no direct-filesystem fallback. When the API/socket is
+        unreachable the command exits 5 and reads nothing — it must NEVER
+        fall back to scanning the private processing tree directly as the
+        invoking operator, which is exactly the bug this fix closes. That
+        guarantee is structural, not just behavioral: ``scripts.pipeline_cli
+        .triage`` no longer imports ``lib.quarantine_triage_service`` at
+        all (grep confirms it), so there is no owned function left to mock
+        here — mocking one just to assert non-invocation would be exactly
+        the kind of owned-function patch code-quality.md's leaf-seam-only
+        mock rule forbids, for a guarantee the missing import already
+        proves.
+        """
+        args = argparse.Namespace(
+            json=False,
+            # Nothing listens on this port.
+            api_endpoint=TcpApiEndpoint("http://127.0.0.1:1"),
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_triage_quarantine(None, args)
+        self.assertEqual(rc, 5)
+
+
 class TestCmdYoutubeAlbum(unittest.TestCase):
     """``pipeline-cli youtube-album`` wraps
     ``lib.youtube_album_service.resolve_youtube_album``. Counterpart of
@@ -5982,21 +6080,6 @@ class TestPipelineCliTriage(unittest.TestCase):
             rc = pipeline_cli.cmd_triage_show(db, args)
         return rc, stdout.getvalue(), stderr.getvalue()
 
-    def _run_quarantine(self, db, root, *, json_out=False):
-        config_path = os.path.join(root, "config.ini")
-        with open(config_path, "w", encoding="utf-8") as f:
-            f.write(f"[Slskd]\ndownload_dir = {root}\n")
-        args = argparse.Namespace(json=json_out)
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with patch.dict(
-            os.environ,
-            {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
-            clear=False,
-        ), redirect_stdout(stdout), redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_triage_quarantine(db, args)
-        return rc, stdout.getvalue(), stderr.getvalue()
-
     def _run_stop(
         self, db, rid, *, signal_token="a" * 64,
         json_out=False,
@@ -6079,55 +6162,15 @@ class TestPipelineCliTriage(unittest.TestCase):
         self.assertEqual(rc, 5)
         self.assertIn("unavailable", err)
 
-    def test_quarantine_json_matches_typed_service_shape(self):
-        from lib.quarantine_triage_service import QuarantineTriageResult
-
-        db = FakePipelineDB()
-        with tempfile.TemporaryDirectory() as root:
-            quarantine = os.path.join(root, "failed_imports")
-            referenced = os.path.join(quarantine, "Referenced")
-            orphan = os.path.join(quarantine, "Orphan")
-            os.makedirs(referenced)
-            os.makedirs(orphan)
-            _seed_id = db.add_request("Artist", "Album", "request")
-            db.log_download(
-                _seed_id,
-                outcome="rejected",
-                validation_result={
-                    "failed_path": "failed_imports/Referenced",
-                    "scenario": "high_distance",
-                },
-            )
-
-            rc, out, err = self._run_quarantine(db, root, json_out=True)
-
-        self.assertEqual(rc, 0)
-        self.assertEqual(err, "")
-        result = msgspec.convert(json.loads(out), type=QuarantineTriageResult)
-        self.assertEqual([folder.name for folder in result.folders], ["Orphan"])
-
-    def test_quarantine_human_output_names_folder(self):
-        with tempfile.TemporaryDirectory() as root:
-            os.makedirs(os.path.join(root, "failed_imports", "Visible Orphan"))
-            os.makedirs(os.path.join(root, "wrong_matches", "Wrong Orphan"))
-            rc, out, err = self._run_quarantine(
-                FakePipelineDB(), root,
-            )
-        self.assertEqual(rc, 0)
-        self.assertEqual(err, "")
-        self.assertIn("Visible Orphan", out)
-        self.assertIn("Wrong Orphan", out)
-
-    def test_quarantine_scan_error_returns_5_with_json_error(self):
-        with tempfile.TemporaryDirectory() as root:
-            with open(os.path.join(root, "failed_imports"), "w", encoding="utf-8") as f:
-                f.write("not a directory")
-            rc, out, err = self._run_quarantine(
-                FakePipelineDB(), root, json_out=True,
-            )
-        self.assertEqual(rc, 5)
-        self.assertEqual(err, "")
-        self.assertIn("error", json.loads(out))
+    # #1122 F1 moved the quarantine CLI tests that lived here
+    # (test_quarantine_json_matches_typed_service_shape,
+    # test_quarantine_human_output_names_folder,
+    # test_quarantine_scan_error_returns_5_with_json_error, and their
+    # ``_run_quarantine`` helper) into ``TestCmdTriageQuarantine`` below,
+    # which extends ``_FakeDbWebServerCase``: the command now relays
+    # through a real ``GET /api/triage/quarantine`` instead of calling
+    # ``list_unreferenced_quarantine_folders`` directly, so its tests need
+    # the same real-HTTP-server harness every other #1063 CLI adapter uses.
 
     def test_show_human_renders_request_meta_and_search_log(self):
         from lib.triage_service import TriageResult  # noqa: F401

@@ -59,7 +59,9 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
 
     LIST_REQUIRED_FIELDS: ClassVar = {"results", "next_after", "page_size", "filter"}
     QUARANTINE_REQUIRED_FIELDS: ClassVar = {
-        "quarantine_root", "wrong_matches_root", "folders", "special_buckets",
+        "quarantine_root", "wrong_matches_root",
+        "processing_failed_imports_root", "processing_wrong_matches_root",
+        "folders", "special_buckets",
     }
     QUARANTINE_FOLDER_REQUIRED_FIELDS: ClassVar = {"name", "path", "mtime_ns"}
 
@@ -82,9 +84,24 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
             referenced = os.path.join(quarantine, "Referenced")
             orphan = os.path.join(quarantine, "Orphan")
             wrong_orphan = os.path.join(root, "wrong_matches", "Wrong Orphan")
+            # #1122 item 1 / F3: the DEFAULT processing_dir (no [Paths]
+            # override in this config) resolves to
+            # ``<config_dir>/processing`` — i.e. the same ``root`` this test
+            # already uses for the slskd download dir — so BOTH live
+            # processing-side roots are scanned too.
+            processing_failed_orphan = os.path.join(
+                root, "processing", "albums", "failed_imports",
+                "Processing Failed Orphan",
+            )
+            processing_orphan = os.path.join(
+                root, "processing", "albums", "wrong_matches",
+                "Processing Orphan",
+            )
             os.makedirs(referenced)
             os.makedirs(orphan)
             os.makedirs(wrong_orphan)
+            os.makedirs(processing_failed_orphan)
+            os.makedirs(processing_orphan)
             request_id = self.db.add_request("Artist", "Album", "request")
             self.db.log_download(
                 request_id,
@@ -102,15 +119,26 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
             self, data, self.QUARANTINE_REQUIRED_FIELDS,
             "quarantine triage response",
         )
-        self.assertEqual(len(data["folders"]), 2)
+        self.assertEqual(len(data["folders"]), 4)
         _assert_required_fields(
             self, data["folders"][0], self.QUARANTINE_FOLDER_REQUIRED_FIELDS,
             "quarantine folder",
         )
         result = msgspec.convert(data, type=QuarantineTriageResult)
         self.assertEqual(
+            result.processing_failed_imports_root,
+            os.path.join(root, "processing", "albums", "failed_imports"),
+        )
+        self.assertEqual(
+            result.processing_wrong_matches_root,
+            os.path.join(root, "processing", "albums", "wrong_matches"),
+        )
+        self.assertEqual(
             [folder.name for folder in result.folders],
-            ["Orphan", "Wrong Orphan"],
+            [
+                "Orphan", "Processing Failed Orphan", "Processing Orphan",
+                "Wrong Orphan",
+            ],
         )
 
     def test_quarantine_filesystem_failure_returns_503(self):

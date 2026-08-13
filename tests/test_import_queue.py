@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from unittest.mock import ANY, MagicMock, patch
 
 import msgspec
@@ -1637,6 +1637,12 @@ class TestImporterWorker(unittest.TestCase):
             assert updated is not None
             result = updated.result
             assert isinstance(result, dict)
+            # Issue #1122: the live terminal commit must durably persist the
+            # scenario the failure-lane startup replay later reads back
+            # (``_replay_force_wrong_match_outcome``) — never assumed.
+            self.assertEqual(
+                result["post_commit_wrong_match_scenario"], "audio_corrupt",
+            )
             cleanup = result["cleanup"]
             assert isinstance(cleanup, dict)
             self.assertEqual(cleanup["outcome"], "deleted_operator_force_source")
@@ -2385,6 +2391,533 @@ class TestImporterWorker(unittest.TestCase):
         assert isinstance(cleanup, dict)
         self.assertTrue(cleanup["removed"])
 
+    def test_replay_force_wrong_match_outcome_reconstructs_every_field(
+        self,
+    ) -> None:
+        """Direct seam test: the replay reconstruction is exact (#1122).
+
+        The startup query already excludes every ``deferred=True`` row
+        from ever reaching ``_replay_force_wrong_match_outcome`` — so no
+        end-to-end pin can mutant-test this reconstruction in isolation.
+        This drives the helper directly against a real persisted
+        ``ImportJob`` to close that gap.
+        """
+        from scripts.importer import _replay_force_wrong_match_outcome
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="replay-outcome-seam",
+            payload=force_import_payload(
+                download_log_id=1, failed_path="/tmp/replay-seam",
+            ),
+        )
+        db.mark_import_job_failed(
+            job.id,
+            error="Another import is already in progress",
+            result={
+                "success": False,
+                "message": "Another import is already in progress",
+                "deferred": True,
+                "code": None,
+                "post_commit_wrong_match_scenario": None,
+            },
+            message="Another import is already in progress",
+        )
+        stored = db.get_import_job(job.id)
+        assert stored is not None
+
+        outcome = _replay_force_wrong_match_outcome(stored)
+
+        self.assertEqual(
+            outcome.message, "Another import is already in progress",
+        )
+        self.assertIsNone(outcome.code)
+        self.assertTrue(outcome.deferred)
+        self.assertIsNone(outcome.post_commit_wrong_match_scenario)
+
+    def test_startup_replay_deletes_wrong_match_source_after_force_success_crash(
+        self,
+    ) -> None:
+        """Issue #1122: a crash between the terminal commit and the live
+        dismissal call still converges on the next startup replay — the row
+        is consumed and the source folder is gone.
+        """
+        from scripts import importer
+
+        db = FakePipelineDB()
+        root, source = _make_failed_import_source()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"archival raw audio")
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                ),
+            )
+            # Simulates a crash right after the terminal commit: the job is
+            # COMPLETED but the live _dismiss_successful_force_import
+            # call never ran, so result carries no
+            # wrong_match_dismissal receipt.
+            db.mark_import_job_completed(
+                job.id,
+                result={
+                    "success": True, "message": "imported",
+                    "deferred": False, "code": None,
+                    "post_commit_wrong_match_scenario": None,
+                },
+                message="imported",
+            )
+
+            # Preconditions: the crash window is real.
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+
+            importer.recover_abandoned_running_jobs(db)
+
+            self.assertFalse(os.path.exists(source))
+            self.assertEqual(db.get_wrong_matches(), [])
+            converged = db.get_import_job(job.id)
+            assert converged is not None
+            dismissal = self._result(converged)["wrong_match_dismissal"]
+            assert isinstance(dismissal, dict)
+            self.assertTrue(dismissal["success"])
+            self.assertEqual(
+                dismissal["deleted_path"], os.path.abspath(source),
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_startup_replay_deletes_audio_corrupt_source_after_force_failure_crash(
+        self,
+    ) -> None:
+        """Issue #1122 failure lane: same crash window, audio_corrupt.
+
+        The failure-lane receipt (cleanup) is missing after the crash;
+        replay must reach the SAME delete decision the live D3 path reaches.
+        """
+        from scripts import importer
+
+        db = FakePipelineDB()
+        root, source = _make_failed_import_source()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"corrupt bytes")
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                ),
+            )
+            db.mark_import_job_failed(
+                job.id,
+                error="beets rejected: audio_corrupt",
+                result={
+                    "success": False, "message": "Rejected: audio_corrupt",
+                    "deferred": False, "code": None,
+                    "post_commit_wrong_match_scenario": "audio_corrupt",
+                },
+                message="Rejected: audio_corrupt",
+            )
+
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+
+            importer.recover_abandoned_running_jobs(db)
+
+            self.assertFalse(os.path.exists(source))
+            self.assertEqual(db.get_wrong_matches(), [])
+            converged = db.get_import_job(job.id)
+            assert converged is not None
+            cleanup = self._result(converged)["cleanup"]
+            assert isinstance(cleanup, dict)
+            self.assertEqual(cleanup["outcome"], "deleted_operator_force_source")
+            self.assertEqual(cleanup["deleted_path"], os.path.abspath(source))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_startup_replay_preserves_source_for_non_audio_corrupt_force_failure_crash(
+        self,
+    ) -> None:
+        """Must-still-work: an ordinary reject's crash window must not
+        delete the operator's quarantine source on replay — only
+        audio_corrupt ever does.
+        """
+        from scripts import importer
+
+        db = FakePipelineDB()
+        root, source = _make_failed_import_source()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"legitimate audio")
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                ),
+            )
+            db.mark_import_job_failed(
+                job.id,
+                error="beets rejected: high_distance",
+                result={
+                    "success": False, "message": "Rejected: high_distance",
+                    "deferred": False, "code": None,
+                    "post_commit_wrong_match_scenario": "high_distance",
+                },
+                message="Rejected: high_distance",
+            )
+
+            importer.recover_abandoned_running_jobs(db)
+
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            converged = db.get_import_job(job.id)
+            assert converged is not None
+            cleanup = self._result(converged)["cleanup"]
+            assert isinstance(cleanup, dict)
+            self.assertEqual(cleanup["outcome"], "preserved_operator_force_source")
+            self.assertTrue(cleanup["skipped"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_startup_replay_never_runs_wrong_match_cleanup_for_requeue_failed(
+        self,
+    ) -> None:
+        """Must-still-work: requeue_failed never gets a wrong-match
+        cleanup decision, live or replayed — the requeue UPDATE itself
+        failing says nothing about the candidate (mirrors the live
+        process_claimed_job's own U2 comment).
+        """
+        from scripts import importer
+
+        db = FakePipelineDB()
+        root, source = _make_failed_import_source()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                ),
+            )
+            db.mark_import_job_failed(
+                job.id,
+                error="requeue failed",
+                result={
+                    "success": False,
+                    "message": "requeue UPDATE failed: boom",
+                    "deferred": False,
+                    "code": DISPATCH_CODE_REQUEUE_FAILED,
+                    "post_commit_wrong_match_scenario": None,
+                },
+                message="requeue UPDATE failed: boom",
+            )
+
+            importer.recover_abandoned_running_jobs(db)
+
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            converged = db.get_import_job(job.id)
+            assert converged is not None
+            self.assertNotIn("cleanup", self._result(converged))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_startup_replay_never_runs_wrong_match_cleanup_for_deferred_failure(
+        self,
+    ) -> None:
+        """Must-still-work: a ``deferred`` terminal failure (e.g. release-
+        lock contention) never gets a wrong-match cleanup decision, live
+        or replayed — ``_cleanup_failed_force_import``'s own first line
+        skips it live (mirrors ``test_deferred_force_import_preserves_
+        source_and_wrong_match`` above, extended across a startup replay).
+        """
+        from scripts import importer
+
+        db = FakePipelineDB()
+        root, source = _make_failed_import_source()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                ),
+            )
+            db.mark_import_job_failed(
+                job.id,
+                error="Another import is already in progress",
+                result={
+                    "success": False,
+                    "message": "Another import is already in progress",
+                    "deferred": True,
+                    "code": None,
+                    "post_commit_wrong_match_scenario": None,
+                },
+                message="Another import is already in progress",
+            )
+
+            importer.recover_abandoned_running_jobs(db)
+
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            converged = db.get_import_job(job.id)
+            assert converged is not None
+            self.assertNotIn("cleanup", self._result(converged))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_startup_replay_retries_a_previously_failed_receipt_not_parks_it(
+        self,
+    ) -> None:
+        """Issue #1122 review MAJOR-1: a receipt PRESENT with
+        ``success: false`` (e.g. an EACCES-shaped ``path_unavailable``,
+        the #1063 shape) must be retried on the next startup, never
+        treated as done. A presence-only predicate (``NOT result ?
+        'wrong_match_dismissal'``) would park this row forever — the exact
+        duplicate-import park this PR exists to close, and a violation of
+        CLAUDE.md invariant 11.
+        """
+        from scripts import importer
+
+        db = FakePipelineDB()
+        root, source = _make_failed_import_source()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"archival raw audio")
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                ),
+            )
+            # A receipt WAS already written by a prior replay attempt, but
+            # the cleanup itself failed (e.g. a transient EACCES) — the
+            # crash window this pin proves closed is "receipt present but
+            # unsuccessful", not "receipt entirely missing".
+            db.mark_import_job_completed(
+                job.id,
+                result={
+                    "success": True, "message": "imported",
+                    "deferred": False, "code": None,
+                    "post_commit_wrong_match_scenario": None,
+                    "wrong_match_dismissal": {
+                        "success": False, "download_log_id": log_id,
+                        "error": "path_unavailable: EACCES",
+                    },
+                },
+                message="imported",
+            )
+
+            # Precondition: the row still needs work.
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+
+            importer.recover_abandoned_running_jobs(db)
+
+            # Retried and this time succeeds — nothing in the fake
+            # actually blocks the real deletion, mirroring how a real
+            # transient EACCES would clear on a later attempt.
+            self.assertFalse(os.path.exists(source))
+            self.assertEqual(db.get_wrong_matches(), [])
+            converged = db.get_import_job(job.id)
+            assert converged is not None
+            dismissal = self._result(converged)["wrong_match_dismissal"]
+            assert isinstance(dismissal, dict)
+            self.assertTrue(dismissal["success"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_startup_replay_never_touches_a_historical_row_without_the_era_marker(
+        self,
+    ) -> None:
+        """Issue #1122 review MAJOR-2/3: a completed force job whose
+        result predates the ``post_commit_wrong_match_scenario`` marker
+        (any pre-#1122 or otherwise non-adjudicating shape) must never be
+        selected by the startup sweep — a bare presence check would have
+        deleted its source. Measured live on doc2: 619 such rows at first
+        startup (477 completed, 142 failed), none of them actual
+        crash-window rows — the #1077 D10 sweep had already emptied those
+        quarantine roots 26 hours earlier, so a presence-only predicate
+        was harmless only by accident of timing.
+        """
+        from scripts import importer
+
+        db = FakePipelineDB()
+        root, source = _make_failed_import_source()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"pre-feature completed force import")
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                ),
+            )
+            # No era marker at all: this row predates issue #1122's
+            # ``_job_result`` change.
+            db.mark_import_job_completed(
+                job.id, result={"success": True}, message="imported",
+            )
+
+            importer.recover_abandoned_running_jobs(db)
+
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            converged = db.get_import_job(job.id)
+            assert converged is not None
+            self.assertNotIn(
+                "wrong_match_dismissal", self._result(converged),
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_startup_replay_survives_one_raising_job_and_continues_the_sweep(
+        self,
+    ) -> None:
+        """Issue #1122 review MEDIUM-4: an unguarded exception in the
+        failure-lane cleanup helper must not crash the whole startup
+        sweep. Unlike ``_record_terminal_force_action_cleanup``'s callee
+        (fully exception-safe internally), ``_cleanup_failed_force_import``'s
+        ``audio_corrupt`` branch calls DB methods with no internal guard —
+        an escape there would otherwise propagate through
+        ``recover_abandoned_running_jobs`` into ``main()``, crash-looping
+        the whole importer under ``Restart=on-failure`` over one bad row.
+        """
+        from scripts import importer
+
+        db = FakePipelineDB()
+        root1, source1 = _make_failed_import_source()
+        root2, source2 = _make_failed_import_source()
+        try:
+            with open(os.path.join(source1, "01.mp3"), "wb") as handle:
+                handle.write(b"raising job source")
+            with open(os.path.join(source2, "01.mp3"), "wb") as handle:
+                handle.write(b"second job source")
+            log_id1 = self._log_wrong_match(
+                db, request_id=42, failed_path=source1,
+            )
+            job1 = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id1),
+                payload=force_import_payload(
+                    download_log_id=log_id1, failed_path=source1,
+                ),
+            )
+            db.mark_import_job_failed(
+                job1.id,
+                error="beets rejected: audio_corrupt",
+                result={
+                    "success": False, "message": "Rejected: audio_corrupt",
+                    "deferred": False, "code": None,
+                    "post_commit_wrong_match_scenario": "audio_corrupt",
+                },
+                message="Rejected: audio_corrupt",
+            )
+
+            log_id2 = self._log_wrong_match(
+                db, request_id=43, failed_path=source2,
+            )
+            job2 = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=43,
+                dedupe_key=force_import_dedupe_key(log_id2),
+                payload=force_import_payload(
+                    download_log_id=log_id2, failed_path=source2,
+                ),
+            )
+            db.mark_import_job_failed(
+                job2.id,
+                error="beets rejected: audio_corrupt",
+                result={
+                    "success": False, "message": "Rejected: audio_corrupt",
+                    "deferred": False, "code": None,
+                    "post_commit_wrong_match_scenario": "audio_corrupt",
+                },
+                message="Rejected: audio_corrupt",
+            )
+
+            real_get_entry = db.get_download_log_entry
+
+            def _raise_for_job1(log_id: int):
+                if log_id == log_id1:
+                    raise RuntimeError("DB connection dropped")
+                return real_get_entry(log_id)
+
+            with patch.object(
+                db, "get_download_log_entry", side_effect=_raise_for_job1,
+            ):
+                # Must not raise out of the sweep itself.
+                importer.recover_abandoned_running_jobs(db)
+
+            # job1: untouched, left exactly as it was for the next retry.
+            self.assertTrue(os.path.isdir(source1))
+            self.assertEqual(
+                len([
+                    row for row in db.get_wrong_matches()
+                    if row["download_log_id"] == log_id1
+                ]),
+                1,
+            )
+            stored_job1 = db.get_import_job(job1.id)
+            assert stored_job1 is not None
+            self.assertNotIn("cleanup", self._result(stored_job1))
+
+            # job2: still converged normally — one bad job does not stop
+            # the sweep from processing the rest.
+            self.assertFalse(os.path.exists(source2))
+            self.assertEqual(
+                len([
+                    row for row in db.get_wrong_matches()
+                    if row["download_log_id"] == log_id2
+                ]),
+                0,
+            )
+            stored_job2 = db.get_import_job(job2.id)
+            assert stored_job2 is not None
+            cleanup2 = self._result(stored_job2)["cleanup"]
+            assert isinstance(cleanup2, dict)
+            self.assertEqual(
+                cleanup2["outcome"], "deleted_operator_force_source",
+            )
+        finally:
+            shutil.rmtree(root1, ignore_errors=True)
+            shutil.rmtree(root2, ignore_errors=True)
+
     def test_importer_does_not_claim_job_waiting_for_preview(self):
         from scripts import importer
 
@@ -2951,6 +3484,11 @@ class TestImporterWorker(unittest.TestCase):
                 return []
 
             def list_terminal_force_action_cleanup_jobs(
+                self,
+            ) -> list[ImportJob]:
+                return []
+
+            def list_terminal_force_wrong_match_cleanup_jobs(
                 self,
             ) -> list[ImportJob]:
                 return []
@@ -7443,6 +7981,119 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
         self.assertFalse(outcome.success)
         self.assertIn("request_id", outcome.message)
 
+    def test_wrong_status_guards_the_shared_auto_import_staging_root(self):
+        """Issue #1122 item 4 (widened, review round 2): the wrong-status
+        branch's ``staged_path`` (``payload.staged_path``) is a direct
+        child of the shared, externally provisioned auto-import staging
+        root (``lib.processing_paths.stage_to_ai_root(auto_import=True)``
+        of ``cfg.beets_staging_dir`` — the same root every other unit
+        stages into, per ``scripts/youtube_ingest_worker.py``'s
+        ``build_service``). Before this fix the returned
+        ``PostCommitCleanup`` carried no protected parent at all, so
+        ``_run_post_commit_cleanup``'s empty-parent prune (``lib.dispatch.
+        helpers._cleanup_staged_dir``) could ``rmdir`` that shared root the
+        moment this album's staged folder was its only child — the same
+        shape issue #1077 guarded at every other real caller of that
+        helper."""
+        from lib.processing_paths import stage_to_ai_root
+        from scripts import importer
+
+        with tempfile.TemporaryDirectory() as root:
+            cfg = CratediggerConfig(
+                beets_staging_dir=os.path.join(root, "Incoming"),
+            )
+            auto_import_root = stage_to_ai_root(
+                staging_dir=cfg.beets_staging_dir, auto_import=True,
+            )
+            staged_path = os.path.join(
+                auto_import_root, "Artist-Album-browse-request-42-log-21",
+            )
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42, status="imported", mb_release_id="mbid-yt-wrong-status",
+            ))
+            job = self._enqueue_youtube_job(
+                db, request_id=42, staged_path=staged_path, download_log_id=21,
+            )
+            self._mark_importable(db, job)
+            claimed = self._claim(db)
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+
+            outcome = importer.execute_youtube_import_job(
+                db,  # pyright: ignore[reportArgumentType]
+                claimed,
+                ctx=ctx,
+            )
+
+        self.assertFalse(outcome.success)
+        self.assertIn("YouTube import requires wanted/unsearchable", outcome.message)
+        cleanup = outcome.post_commit_cleanup
+        assert cleanup is not None
+        self.assertEqual(cleanup.staged_path, staged_path)
+        assert cleanup.staged_path_protected_parents is not None
+        self.assertIn(auto_import_root, cleanup.staged_path_protected_parents)
+
+    def test_wrong_status_post_commit_cleanup_never_removes_the_auto_import_root(
+        self,
+    ) -> None:
+        """Behavior twin of the seam test above: drives the real
+        ``scripts.importer._run_post_commit_cleanup`` (→ real
+        ``lib.dispatch.helpers._cleanup_staged_dir``) over the real
+        ``DispatchOutcome`` the wrong-status branch returns, with the
+        staged folder as the auto-import root's ONLY child — the exact
+        shape that makes the unguarded empty-parent prune remove the
+        shared, externally provisioned staging root out from under every
+        other in-flight request."""
+        from lib.processing_paths import stage_to_ai_root
+        from scripts import importer
+        from scripts.importer import _run_post_commit_cleanup
+
+        with tempfile.TemporaryDirectory() as root:
+            cfg = CratediggerConfig(
+                beets_staging_dir=os.path.join(root, "Incoming"),
+            )
+            auto_import_root = stage_to_ai_root(
+                staging_dir=cfg.beets_staging_dir, auto_import=True,
+            )
+            staged_path = os.path.join(
+                auto_import_root, "Artist-Album-browse-request-42-log-22",
+            )
+            os.makedirs(staged_path)
+            with open(os.path.join(staged_path, "01.opus"), "wb") as handle:
+                handle.write(b"audio")
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42, status="imported", mb_release_id="mbid-yt-wrong-status-2",
+            ))
+            job = self._enqueue_youtube_job(
+                db, request_id=42, staged_path=staged_path, download_log_id=22,
+            )
+            self._mark_importable(db, job)
+            claimed = self._claim(db)
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+
+            outcome = importer.execute_youtube_import_job(
+                db,  # pyright: ignore[reportArgumentType]
+                claimed,
+                ctx=ctx,
+            )
+            details = _run_post_commit_cleanup(outcome)
+
+            assert details is not None
+            staged_path_detail = details["staged_path"]
+            assert isinstance(staged_path_detail, dict)
+            self.assertTrue(staged_path_detail["success"])
+            self.assertFalse(os.path.exists(staged_path))
+            self.assertTrue(
+                os.path.isdir(auto_import_root),
+                "the shared auto-import staging root must survive even "
+                "though it is now empty — it is externally provisioned, "
+                "not a disposable per-artist directory",
+            )
+            self.assertEqual(os.listdir(auto_import_root), [])
+
     def test_malformed_payload_is_rejected_at_import_job_row_boundary(self):
         """Missing required YT fields never reach an importer consumer."""
         from lib.import_queue import ImportJob
@@ -9011,6 +9662,461 @@ def _completion_stub_execute_fn(
         )
 
     return execute
+
+
+# The five terminal-outcome classes a force job's wrong-match receipt can
+# reach (issue #1122). ``failed_requeue_failed`` and ``failed_deferred`` are
+# both "never adjudicated" classes, for different reasons: the live path
+# (``process_claimed_job``'s U2 comment) never even CALLS the wrong-match
+# cleanup decision for ``requeue_failed`` (the requeue UPDATE itself failed,
+# a DB transient, not a verdict about the candidate); for a ``deferred``
+# outcome (e.g. release-lock contention) the cleanup helper IS called live
+# but its own first line skips the decision immediately.
+_WRONG_MATCH_REPLAY_OUTCOMES: tuple[str, ...] = (
+    "completed",
+    "failed_audio_corrupt",
+    "failed_other_scenario",
+    "failed_requeue_failed",
+    "failed_deferred",
+)
+
+# Issue #1122 review MAJOR-2/3: the review's live doc2 measurement found the
+# ORIGINAL predicate (presence-of-key, no era marker) selected 619 pre-feature
+# rows at first startup (477 completed, 142 failed) — zero of them actual
+# crash-window rows. These five classes are the non-adjudicating shapes that
+# must NEVER be selected/replayed after the era-marker fix, built via the
+# REAL producers where one currently exists (test-fidelity.md Rule C).
+_WRONG_MATCH_REPLAY_HISTORICAL_WORLDS: tuple[str, ...] = (
+    "historical_completed_no_marker",
+    "historical_executor_crash",
+    "historical_operator_cleanup",
+    "historical_preview_shape",
+    "historical_null_result",
+)
+
+_WRONG_MATCH_REPLAY_ALL_WORLDS: tuple[str, ...] = (
+    *_WRONG_MATCH_REPLAY_OUTCOMES,
+    *_WRONG_MATCH_REPLAY_HISTORICAL_WORLDS,
+)
+
+# Both the checker and the world builder share this membership set: every
+# outcome the live path never adjudicates, so replay must write no receipt
+# and touch neither the source nor the row.
+_NEVER_ADJUDICATED_OUTCOMES: tuple[str, ...] = (
+    "failed_requeue_failed",
+    "failed_deferred",
+    *_WRONG_MATCH_REPLAY_HISTORICAL_WORLDS,
+)
+
+
+def _wrong_match_replay_terminal_result(
+    outcome: str,
+) -> tuple[str, dict[str, object], str]:
+    """Return (job status, ``_job_result``-shaped payload, error) for a class.
+
+    Calls the REAL ``scripts.importer._job_result`` producer (issue #1122
+    review MINOR-5) instead of hand-typing the shape, so a change to
+    ``_job_result``'s own fields breaks this fixture — never silently
+    drifts from what the live terminal commit actually persists.
+    """
+    from scripts.importer import _job_result
+
+    if outcome == "completed":
+        return "completed", _job_result(DispatchOutcome(
+            success=True, message="imported",
+            post_commit_wrong_match_scenario=None,
+        )), ""
+    if outcome == "failed_audio_corrupt":
+        return "failed", _job_result(DispatchOutcome(
+            success=False, message="Rejected: audio_corrupt",
+            post_commit_wrong_match_scenario="audio_corrupt",
+        )), "beets rejected: audio_corrupt"
+    if outcome == "failed_other_scenario":
+        return "failed", _job_result(DispatchOutcome(
+            success=False, message="Rejected: high_distance",
+            post_commit_wrong_match_scenario="high_distance",
+        )), "beets rejected: high_distance"
+    if outcome == "failed_requeue_failed":
+        return "failed", _job_result(DispatchOutcome(
+            success=False, message="requeue UPDATE failed: boom",
+            code=DISPATCH_CODE_REQUEUE_FAILED,
+        )), "requeue failed"
+    if outcome == "failed_deferred":
+        return "failed", _job_result(DispatchOutcome(
+            success=False,
+            message="Another import is already in progress",
+            deferred=True,
+        )), "Another import is already in progress"
+    raise AssertionError(f"unrecognised outcome {outcome!r}")
+
+
+def wrong_match_replay_violations(
+    *,
+    outcome: str,
+    source_existed_before_replay: bool,
+    source_exists_after_replay: bool,
+    wrong_match_visible_after_replay: bool,
+    receipt: dict[str, object] | None,
+) -> list[str]:
+    """Issue #1122's crash-window invariant, per terminal outcome class.
+
+    - ``completed`` (success lane, D7) and ``failed_audio_corrupt`` (failure
+      lane, D3): the source is gone and the row is consumed after replay —
+      regardless of whether it was already gone before replay started
+      (idempotent retry).
+    - ``failed_other_scenario``: replay must never change the source or the
+      row; the receipt records ``preserved_operator_force_source``.
+    - Every name in ``_NEVER_ADJUDICATED_OUTCOMES`` (``failed_requeue_failed``,
+      ``failed_deferred``, and the five ``historical_*`` classes): replay
+      must never write ANY receipt and must never touch the source or the
+      row. The live path never adjudicated the candidate for any of
+      these — either it never reaches the wrong-match decision at all
+      (``requeue_failed``, every historical/non-adjudicating shape lacking
+      the era marker) or it reaches the decision and short-circuits
+      immediately (``deferred``) — and replay must reach that identical
+      no-op, not fabricate a verdict.
+
+    Accumulates every violated clause rather than stopping at the first, so
+    a world violating more than one clause cannot mask the others.
+    """
+    violations: list[str] = []
+    if outcome in ("completed", "failed_audio_corrupt"):
+        if source_exists_after_replay:
+            violations.append(
+                f"{outcome}: source must be deleted by replay"
+            )
+        if wrong_match_visible_after_replay:
+            violations.append(
+                f"{outcome}: wrong-match row must be consumed by replay"
+            )
+        if receipt is None:
+            violations.append(f"{outcome}: replay must record a receipt")
+    elif outcome == "failed_other_scenario":
+        if source_exists_after_replay != source_existed_before_replay:
+            violations.append(
+                "failed_other_scenario: replay must never touch the source"
+            )
+        if not wrong_match_visible_after_replay:
+            violations.append(
+                "failed_other_scenario: row must remain visible after replay"
+            )
+        if (
+            receipt is None
+            or receipt.get("outcome") != "preserved_operator_force_source"
+        ):
+            violations.append(
+                "failed_other_scenario: receipt must record preservation"
+            )
+    elif outcome in _NEVER_ADJUDICATED_OUTCOMES:
+        if receipt is not None:
+            violations.append(
+                f"{outcome}: replay must never record a receipt"
+            )
+        if source_exists_after_replay != source_existed_before_replay:
+            violations.append(
+                f"{outcome}: replay must never touch the source"
+            )
+        if not wrong_match_visible_after_replay:
+            violations.append(
+                f"{outcome}: replay must never touch the row"
+            )
+    else:
+        violations.append(f"unrecognised outcome {outcome!r}")
+    return violations
+
+
+class TestForceWrongMatchReceiptStartupReplayGenerated(unittest.TestCase):
+    """Generated: issue #1122's crash-window invariant over the outcome space.
+
+    Drives the REAL ``importer.recover_abandoned_running_jobs`` startup
+    sweep over every terminal outcome class a force job's wrong-match
+    receipt can reach — the five adjudicating/no-op classes, crossed with
+    whether the source folder was already removed before replay ever runs
+    (the idempotent-retry sub-case the deterministic pins above don't
+    separately cover) — PLUS the five historical/non-adjudicating shapes
+    the review round (MAJOR-2/3) proved a presence-only predicate would
+    have selected and replayed against live production data.
+    """
+
+    def _world(
+        self,
+        outcome: str,
+        *,
+        source_already_deleted: bool,
+    ) -> tuple[FakePipelineDB, str, ImportJob]:
+        db = FakePipelineDB()
+        root, source = _make_failed_import_source()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        with open(os.path.join(source, "01.mp3"), "wb") as handle:
+            handle.write(b"generated wrong-match audio")
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        db.log_download(
+            42,
+            soulseek_username="alice",
+            outcome="rejected",
+            validation_result={
+                "scenario": "high_distance", "failed_path": source,
+            },
+        )
+        log_id = db.download_logs[-1].id
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=(
+                f"generated-wrong-match:{outcome}:{source_already_deleted}"
+            ),
+            payload=force_import_payload(
+                download_log_id=log_id, failed_path=source,
+            ),
+        )
+
+        if outcome in _WRONG_MATCH_REPLAY_OUTCOMES:
+            status, result, error = _wrong_match_replay_terminal_result(
+                outcome,
+            )
+            message = str(result["message"])
+            if status == "completed":
+                db.mark_import_job_completed(
+                    job.id, result=result, message=message,
+                )
+            else:
+                db.mark_import_job_failed(
+                    job.id, error=error, result=result, message=message,
+                )
+        elif outcome == "historical_completed_no_marker":
+            # Live-row evidence: 477 of the 619 pre-feature rows doc2
+            # measured were exactly this shape — a 'completed' force job
+            # from before ``_job_result`` ever wrote the era marker. The
+            # measured live shape is the older three-key
+            # ``{deferred, message, success}`` payload (review round 3,
+            # MINOR-2), not a bare ``{"success": True}`` — selection is
+            # identical either way (both lack the marker), but the fixture
+            # should say what was actually measured.
+            db.mark_import_job_completed(
+                job.id,
+                result={
+                    "deferred": False, "message": "imported",
+                    "success": True,
+                },
+                message="imported",
+            )
+        elif outcome == "historical_executor_crash":
+            # The literal shape ``process_claimed_job``'s own top-level
+            # exception handler writes (``scripts/importer.py``, BEFORE
+            # ``_job_result`` is ever computed) — constructed directly
+            # rather than driving that call chain live, since doing so
+            # would need a new ``cast(Any, ...)`` escape hatch for one
+            # shape a deterministic pin in this same file
+            # (``test_crashed_force_job_is_failed_not_parked``) already
+            # exercises end-to-end through the real code path.
+            db.mark_import_job_failed(
+                job.id, error="RuntimeError: generated executor crash",
+                result={"success": False},
+            )
+        elif outcome == "historical_operator_cleanup":
+            # Real producer: the actual ``mark_import_job_failed`` DB
+            # method, called directly with no ``result`` kwarg — mirrors
+            # ``tests/test_wrong_matches_cleanup.py``'s own "operator
+            # cancelled" pattern for an ad hoc administrative
+            # terminalization outside the adjudicating decision path.
+            db.mark_import_job_failed(job.id, error="operator cancelled")
+        elif outcome == "historical_preview_shape":
+            # Real producer (review round 3, MEDIUM-1 corrected a false
+            # "no current producer" claim): TWO live paths write the
+            # literal ``{"preview": <preview_result>}`` shape into
+            # ``result`` —
+            # ``lib/pipeline_db/import_jobs.py::mark_import_job_preview_failed``
+            # (called from ``scripts/import_preview_worker.py``'s
+            # ``job.request_id is None or request is None`` branch) and
+            # ``lib/pipeline_db/terminal_outcomes.py::
+            # persist_preview_terminal_outcome``'s non-automation branch
+            # (called via ``lib.dispatch._record_preview_measurement_failed``,
+            # ``import_preview_worker.py:952``). Live proof: force job
+            # 59313 (2026-07-25). Driven directly through the simpler of
+            # the two real producers — the write method itself decides
+            # the exact ``result`` shape, so calling it directly is the
+            # real producer, not a stand-in for it (freshly enqueued
+            # ``job`` is already ``status='queued',
+            # preview_status='waiting'``, exactly this method's
+            # precondition).
+            db.mark_import_job_preview_failed(
+                job.id,
+                preview_status="measurement_failed",
+                error="measurement_crashed",
+                preview_result={
+                    "reason": "measurement_crashed",
+                    "detail": "measurement_failed",
+                    "source_path": "",
+                },
+                message="Preview measurement failed: measurement_crashed",
+            )
+        elif outcome == "historical_null_result":
+            # A genuinely NULL ``result`` column has no public-API
+            # constructor — reach into the fake's own row store directly,
+            # mirroring the real-PG test's raw ``UPDATE ... result = NULL``.
+            db.mark_import_job_failed(job.id, error="unknown")
+            for row in db._import_jobs:
+                if row["id"] == job.id:
+                    row["result"] = None
+                    break
+        else:
+            raise AssertionError(f"unrecognised outcome {outcome!r}")
+
+        if source_already_deleted:
+            shutil.rmtree(source)
+        return db, source, job
+
+    @given(
+        outcome=st.sampled_from(_WRONG_MATCH_REPLAY_ALL_WORLDS),
+        source_already_deleted=st.booleans(),
+    )
+    def test_generated_startup_replay_reaches_the_live_decision(
+        self,
+        outcome: str,
+        source_already_deleted: bool,
+    ) -> None:
+        from scripts import importer
+
+        db, source, job = self._world(
+            outcome, source_already_deleted=source_already_deleted,
+        )
+        source_existed_before = os.path.isdir(source)
+
+        importer.recover_abandoned_running_jobs(db)
+
+        converged = db.get_import_job(job.id)
+        assert converged is not None
+        result = converged.result or {}
+        raw_wrong_match_dismissal = result.get("wrong_match_dismissal")
+        raw_cleanup = result.get("cleanup")
+        raw_receipt = (
+            raw_wrong_match_dismissal
+            if raw_wrong_match_dismissal is not None else raw_cleanup
+        )
+        receipt = raw_receipt if isinstance(raw_receipt, dict) else None
+        violations = wrong_match_replay_violations(
+            outcome=outcome,
+            source_existed_before_replay=source_existed_before,
+            source_exists_after_replay=os.path.exists(source),
+            wrong_match_visible_after_replay=bool(db.get_wrong_matches()),
+            receipt=receipt,
+        )
+        self.assertEqual(violations, [], violations)
+
+
+class TestWrongMatchReplayViolationsTripOnViolations(unittest.TestCase):
+    """Known-bad self-tests: each clause of the checker must trip alone.
+
+    Each row is (desc, outcome, source_existed_before_replay,
+    source_exists_after_replay, wrong_match_visible_after_replay, receipt,
+    expected_message) — explicit positional fields rather than a
+    ``dict[str, object]`` kwargs blob, so Pyright can verify every argument
+    against ``wrong_match_replay_violations``'s real parameter types.
+    """
+
+    CASES: ClassVar[
+        list[tuple[str, str, bool, bool, bool, dict[str, object] | None, str]]
+    ] = [
+        (
+            "completed source survives", "completed",
+            True, True, False, {"success": True},
+            "completed: source must be deleted by replay",
+        ),
+        (
+            "completed row still visible", "completed",
+            True, False, True, {"success": True},
+            "completed: wrong-match row must be consumed by replay",
+        ),
+        (
+            "completed missing receipt", "completed",
+            True, False, False, None,
+            "completed: replay must record a receipt",
+        ),
+        (
+            "audio_corrupt source survives", "failed_audio_corrupt",
+            True, True, False,
+            {"outcome": "deleted_operator_force_source"},
+            "failed_audio_corrupt: source must be deleted by replay",
+        ),
+        (
+            "audio_corrupt row still visible", "failed_audio_corrupt",
+            True, False, True,
+            {"outcome": "deleted_operator_force_source"},
+            "failed_audio_corrupt: wrong-match row must be consumed by replay",
+        ),
+        (
+            "audio_corrupt missing receipt", "failed_audio_corrupt",
+            True, False, False, None,
+            "failed_audio_corrupt: replay must record a receipt",
+        ),
+        (
+            "preserve touches source", "failed_other_scenario",
+            True, False, True,
+            {"outcome": "preserved_operator_force_source"},
+            "failed_other_scenario: replay must never touch the source",
+        ),
+        (
+            "preserve clears row", "failed_other_scenario",
+            True, True, False,
+            {"outcome": "preserved_operator_force_source"},
+            "failed_other_scenario: row must remain visible after replay",
+        ),
+        (
+            "preserve wrong receipt", "failed_other_scenario",
+            True, True, True,
+            {"outcome": "deleted_operator_force_source"},
+            "failed_other_scenario: receipt must record preservation",
+        ),
+        (
+            "requeue_failed writes a receipt", "failed_requeue_failed",
+            True, True, True, {"outcome": "anything"},
+            "failed_requeue_failed: replay must never record a receipt",
+        ),
+        (
+            "requeue_failed touches source", "failed_requeue_failed",
+            True, False, True, None,
+            "failed_requeue_failed: replay must never touch the source",
+        ),
+        (
+            "requeue_failed clears row", "failed_requeue_failed",
+            True, True, False, None,
+            "failed_requeue_failed: replay must never touch the row",
+        ),
+        (
+            "deferred writes a receipt", "failed_deferred",
+            True, True, True, {"outcome": "anything"},
+            "failed_deferred: replay must never record a receipt",
+        ),
+        (
+            "deferred touches source", "failed_deferred",
+            True, False, True, None,
+            "failed_deferred: replay must never touch the source",
+        ),
+        (
+            "deferred clears row", "failed_deferred",
+            True, True, False, None,
+            "failed_deferred: replay must never touch the row",
+        ),
+        (
+            "unrecognised outcome", "bogus",
+            True, True, True, None,
+            "unrecognised outcome 'bogus'",
+        ),
+    ]
+
+    def test_each_clause_trips_with_its_own_message(self) -> None:
+        for (
+            desc, outcome, before, after, visible, receipt, expected_message,
+        ) in self.CASES:
+            with self.subTest(desc=desc):
+                violations = wrong_match_replay_violations(
+                    outcome=outcome,
+                    source_existed_before_replay=before,
+                    source_exists_after_replay=after,
+                    wrong_match_visible_after_replay=visible,
+                    receipt=receipt,
+                )
+                self.assertIn(expected_message, violations)
 
 
 class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):

@@ -2174,6 +2174,73 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             )
             self.assertEqual(os.listdir(albums_root), [])
 
+    def test_audio_corrupt_delete_never_removes_the_auto_import_root(self):
+        """Issue #1122, review round 3 (F-A hold): the processing-albums-
+        root pin above proves protected_staging_roots protects
+        processing_albums_dir, but a site-local mutant reverting
+        lib.download_rejection._delete_rejected_source_cancellable's
+        protected_parents back to
+        frozenset({processing_albums_dir(processing_dir)}) alone survives
+        the entire suite -- nothing exercises this call site with a
+        YouTube-shaped current_path. A YouTube rescue's staged audio is
+        never materialized under the canonical processing root (it
+        imports in place from the auto-import staging child), so
+        audio_corrupt can reach this exact function with the auto-import
+        root as current_path's parent instead. Same shape as
+        TestCleanupStagedDirProtectedRoots.
+        test_youtube_shaped_success_path_protects_the_auto_import_root in
+        tests/test_import_one_stages.py, but through the real rejection
+        path (_handle_rejected_result), not the harness."""
+        from lib.config import CratediggerConfig
+        from lib.download_rejection import _handle_rejected_result
+        from lib.processing_paths import stage_to_ai_root
+        from lib.quality import ValidationResult
+        from lib.staged_album import StagedAlbum
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processing_dir = _private_processing_dir(tmpdir)
+            beets_staging_dir = os.path.join(tmpdir, "Incoming")
+            auto_import_root = stage_to_ai_root(
+                staging_dir=beets_staging_dir, auto_import=True,
+            )
+            os.makedirs(auto_import_root)
+            current_path = os.path.join(auto_import_root, "Artist - Album")
+            os.makedirs(current_path)
+            with open(os.path.join(current_path, "01.opus"), "wb") as handle:
+                handle.write(b"corrupt bytes")
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=556, status="downloading", mb_release_id="test-mbid-556",
+            ))
+            cfg = CratediggerConfig(
+                processing_dir=processing_dir,
+                beets_staging_dir=beets_staging_dir,
+            )
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+            album = make_grab_list_entry(
+                files=[make_download_file(username="peer556")],
+                artist="Artist", title="Album",
+                mb_release_id="test-mbid-556", db_request_id=556,
+                db_source="request",
+            )
+            result = ValidationResult(
+                valid=False, distance=None, scenario="audio_corrupt",
+                detail="garbled",
+            )
+            staged_album = StagedAlbum(current_path=current_path, request_id=556)
+
+            _handle_rejected_result(album, result, staged_album, ctx)
+
+            self.assertFalse(os.path.exists(current_path))
+            self.assertTrue(
+                os.path.isdir(auto_import_root),
+                "the shared auto-import staging root must survive even "
+                "though it is now empty -- it is externally provisioned, "
+                "not a disposable per-artist directory",
+            )
+            self.assertEqual(os.listdir(auto_import_root), [])
+
     def test_audio_corrupt_delete_failure_still_records_rejection(self):
         """Issue #1077, F4: a failed delete must never block the rejection
         record — invariant 11 ("broken worlds surface and restart; nothing

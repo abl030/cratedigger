@@ -453,6 +453,27 @@ def _reject_nonstandard_json_constant(value: str) -> None:
     raise ValueError(f"nonstandard JSON constant: {value}")
 
 
+def _jsonb_scalar_text(value: object) -> str | None:
+    """Mirror Postgres jsonb ``->>``/``#>>`` text-extraction semantics.
+
+    Real SQL's ``->>``/``#>>`` return the JSON value's TEXT form: a JSON
+    boolean becomes the literal ``"true"``/``"false"``, a JSON string
+    passes through unchanged, and a missing key or JSON ``null`` becomes
+    SQL NULL. Comparing a Python ``bool`` via ``is not True`` (the pre-fix
+    shape) diverges from this the moment a value is stored as the JSON
+    STRING ``"true"`` rather than the JSON boolean ``true`` — the real
+    query's ``IS DISTINCT FROM 'true'`` treats both identically, since both
+    stringify to the same text (issue #1122 review MINOR-6).
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
 class FakePipelineDB:
     """In-memory fake for PipelineDB — records mutations for test assertions.
 
@@ -1551,6 +1572,59 @@ class FakePipelineDB:
             )
             if removed is not True:
                 rows.append(row)
+        rows.sort(key=lambda row: (
+            _as_datetime(row.get("created_at")),
+            int(row["id"]),
+        ))
+        return [ImportJob.from_row(copy.deepcopy(row)) for row in rows]
+
+    def list_terminal_force_wrong_match_cleanup_jobs(self) -> list[ImportJob]:
+        from lib.dispatch import DISPATCH_CODE_REQUEUE_FAILED
+
+        rows = []
+        for row in self._import_jobs:
+            if row.get("job_type") != IMPORT_JOB_FORCE:
+                continue
+            result = row.get("result")
+            result_dict = result if isinstance(result, dict) else {}
+            # Era-AND-lane marker (issue #1122 review MAJOR-2/3): only a row
+            # whose terminal commit went through ``_job_result`` carries this
+            # key. Absent for every historical/non-adjudicating shape
+            # (pre-#1122 rows, preview-stage terminalization, the
+            # executor-crash literal, ad hoc operator terminalization) and
+            # for a genuinely NULL ``result`` column — all stay receiptless
+            # forever by design, mirroring the real SQL's ``result ?
+            # 'post_commit_wrong_match_scenario'`` top-level AND clause.
+            if "post_commit_wrong_match_scenario" not in result_dict:
+                continue
+            status = row.get("status")
+            if status == "completed":
+                dismissal = result_dict.get("wrong_match_dismissal")
+                success = (
+                    dismissal.get("success")
+                    if isinstance(dismissal, dict) else None
+                )
+                # Success-KEYED, not presence-keyed (MAJOR-1): a receipt
+                # can be present with success=false (entry not found, an
+                # unsafe path, an rmtree failure, EACCES-shaped
+                # path_unavailable — the #1063 shape) and must still be
+                # retried, never parked.
+                if _jsonb_scalar_text(success) != "true":
+                    rows.append(row)
+            elif status == "failed":
+                cleanup = result_dict.get("cleanup")
+                success = (
+                    cleanup.get("success")
+                    if isinstance(cleanup, dict) else None
+                )
+                if (
+                    _jsonb_scalar_text(success) != "true"
+                    and _jsonb_scalar_text(result_dict.get("code"))
+                        != DISPATCH_CODE_REQUEUE_FAILED
+                    and _jsonb_scalar_text(result_dict.get("deferred"))
+                        != "true"
+                ):
+                    rows.append(row)
         rows.sort(key=lambda row: (
             _as_datetime(row.get("created_at")),
             int(row["id"]),

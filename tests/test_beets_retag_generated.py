@@ -1,4 +1,5 @@
-"""Generated properties for the one-album ``beet modify`` retag (#1059/#1087).
+"""Generated properties for the one-album ``beet modify`` retag
+(#1059/#1087/#1093).
 
 The pins in ``tests/test_beets_retag.py`` prove the exact branches; these
 properties patrol the world space around them, driving the REAL
@@ -24,27 +25,53 @@ G2  ``beet modify`` is invoked at most once, and only in the single world
     that authorizes a library mutation: the old id uniquely held and the
     new id not held at all. An ambiguous or absent old side, or an
     already-present new side, must never reach it.
-G3  The query handed to ``modify`` always names the OLD identity and the
+G3  The query handed to ``modify`` always names the OLD identity (both by
+    the guard-resolved primary key and the identity value) and the
     assignment always names the NEW identity — never the other way, and
     never each other. Retagging the survivor is a no-op at best and a
-    wrong-album mutation at worst.
+    wrong-album mutation at worst. This is a CALL-ARGUMENT seam check
+    (recomputes ``retag_album_query``/``retag_assignment`` and compares) —
+    legitimate for that narrow claim, but NOT evidence that
+    ``retag_album_query``'s own selection mechanism agrees with the guard's;
+    see M1 below for that.
 G4  Both sides held never returns a ready outcome. Two installed albums that
     MusicBrainz now calls one release is the operator's decision.
+G5  (#1093 item 5, both review rounds) A ``failed`` detail's own words must
+    match what the re-read library actually shows, in every direction:
+    "did not move" only when the old id is STILL held by the SAME album;
+    "moved off" only when the old id is observably GONE (Missing, never
+    Ambiguous — every Ambiguous reason still requires a matching row);
+    "changed occupant" only when a DIFFERENT album now holds it. Each
+    direction has shipped as a real, reachable self-contradiction at least
+    once.
+M1  (#1093 item 2, review F2 + round 3 F1) The retag query's compiled SQL
+    clause and the post-retag guard's own matching SQL
+    (``BeetsDB.resolve_current_release`` — the exact method
+    ``retag_merged_album`` re-reads the library with, not the unrelated
+    ``_matching_album_ids``) select the SAME row for every ``mb_albumid``
+    storage shape a raw third-party writer could produce, crossed against
+    every case the QUERIED identity itself could take — computed via two
+    INDEPENDENTLY executed SQL statements against the same real
+    beets-schema data, never by recomputing one mechanism and comparing it
+    to itself. G3 cannot stand in for this: recomputing ``retag_album_query``
+    on both sides of a comparison can never fail on a change to what that
+    function selects.
 
-``TestRealModifyRetagOverItemCountBoundaries`` below is NOT a fifth
-generated property, and does not claim to be. #1075 DID ship a
-real-subprocess test (``TestRealMbsyncMovesIdentityNotFiles``), so a real
-subprocess is not what was missing; its fixture modelled a
-RECORDING-PRESERVING merge, so the predecessor primitive's item-to-track
-mapping matched and the merge it cannot actually follow — a RELEASE-ONLY
-one — never ran. The lesson: a real subprocess is necessary, not
-sufficient; it must run over a world shaped like the failure. That class is
-composed with the T6/T7 deterministic pins over three hand-reasoned
-item-count equivalence classes (0 / 1 / 2) — see the class docstring for
-why that partition is honest as pins, not claimed as an independently
-certified generated domain. Every genuinely combinatorial property
-(cardinality × modify-result × post-state, G1–G4) still runs through
-Hypothesis via ``TestRetagProperties``.
+``TestRealModifyRetagOverItemCountBoundaries`` below is NOT a generated
+property, and does not claim to be. #1075 DID ship a real-subprocess test
+(``TestRealMbsyncMovesIdentityNotFiles``), so a real subprocess is not what
+was missing; its fixture modelled a RECORDING-PRESERVING merge, so the
+predecessor primitive's item-to-track mapping matched and the merge it
+cannot actually follow — a RELEASE-ONLY one — never ran. The lesson: a real
+subprocess is necessary, not sufficient; it must run over a world shaped
+like the failure. That class is composed with the T6/T7 deterministic pins
+over three hand-reasoned item-count equivalence classes (0 / 1 / 2) — see
+the class docstring for why that partition is honest as pins, not claimed
+as an independently certified generated domain. Every genuinely
+combinatorial property (cardinality × modify-result × post-state, G1–G5)
+runs through Hypothesis via ``TestRetagProperties``; M1 is a narrower,
+independent property over generated ``mb_albumid`` storage shapes and runs
+via ``TestQueryAndGuardConvergeOnStorageShape``.
 """
 
 from __future__ import annotations
@@ -52,15 +79,23 @@ from __future__ import annotations
 import logging
 import sqlite3
 import subprocess as sp
+import tempfile
 import unittest
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
+from functools import cache
+from pathlib import Path
 
+from beets import library as beets_library
+from beets.dbcore.query import CollectionQuery
+from beets.library.queries import parse_query_parts
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.beets_db import (
+    BeetsDB,
     CurrentBeetsAmbiguous,
     CurrentBeetsMissing,
     CurrentBeetsResolution,
@@ -141,7 +176,7 @@ def check_ready_only_when_rekeyable(
 
 
 def check_modify_only_for_a_uniquely_held_old_id(
-    calls: list[tuple[str, str]],
+    calls: list[tuple[tuple[str, str], str]],
     *,
     old_before: CurrentBeetsResolution,
     new_before: CurrentBeetsResolution,
@@ -170,30 +205,57 @@ def check_modify_only_for_a_uniquely_held_old_id(
 
 
 def check_query_and_assignment_name_the_right_identity(
-    calls: list[tuple[str, str]],
+    calls: list[tuple[tuple[str, str], str]],
     *,
     old_identity: ReleaseIdentity,
     new_identity: ReleaseIdentity,
+    old_before: CurrentBeetsResolution,
 ) -> None:
-    """G3 — the query targets the album we are moving AWAY from, and the
-    assignment carries the identity we are moving TO. Never confused, never
-    swapped."""
-    for query, assignment in calls:
-        if new_identity.release_id in query:
+    """G3 — the query targets the album we are moving AWAY from (both the
+    resolved primary key AND the identity value), and the assignment
+    carries the identity we are moving TO. Never confused, never swapped.
+
+    This is a CALL-ARGUMENT seam check — it recomputes
+    :func:`retag_album_query`/:func:`retag_assignment` and compares, which
+    is legitimate for its OWN narrow claim ("did the caller pass the
+    builder's real output through unmodified") but is NOT, and cannot be,
+    evidence that :func:`retag_album_query`'s own selection semantics agree
+    with the guard's (`.claude/rules/code-quality.md` § "Agree by
+    construction stops at the outermost real adapter" — recomputing the
+    same function on both sides of a comparison can never fail on a change
+    to that function). See ``TestQueryAndGuardConvergeOnStorageShape``
+    below for the real, independently-computed mechanism-convergence
+    property (#1093 item 2 review F2).
+    """
+    if not calls:
+        return
+    old_before_is_unique = isinstance(old_before, CurrentBeetsUnique)
+    if not old_before_is_unique:
+        raise AssertionError(
+            "beet modify was invoked without a uniquely-held old id to pin "
+            f"the query to: old_before={old_before!r}"
+        )
+    for query_tokens, assignment in calls:
+        for query in query_tokens:
+            if new_identity.release_id in query:
+                raise AssertionError(
+                    f"modify query names the survivor {new_identity.release_id}: "
+                    f"{query!r}"
+                )
+        if query_tokens != retag_album_query(
+            old_identity, album_id=old_before.album_id,
+        ):
             raise AssertionError(
-                f"modify query names the survivor {new_identity.release_id}: "
-                f"{query!r}"
-            )
-        if query != retag_album_query(old_identity):
-            raise AssertionError(
-                "modify query is not the anchored query for the old "
-                f"identity {old_identity.release_id}: {query!r}"
+                "modify query is not the compound exact-match query for "
+                f"the old identity {old_identity.release_id} pinned to "
+                f"album {old_before.album_id}: {query_tokens!r}"
             )
         if old_identity.release_id in assignment:
             raise AssertionError(
                 "modify assignment names the merged-away id "
                 f"{old_identity.release_id}: {assignment!r}"
             )
+
         if assignment != retag_assignment(new_identity):
             raise AssertionError(
                 "modify assignment is not the survivor assignment for "
@@ -216,6 +278,120 @@ def check_both_held_is_never_ready(
             f"outcome {outcome!r} authorizes a rekey while the library holds "
             "BOTH sides of the merge; merging or deleting either album is an "
             "operator decision"
+        )
+
+
+def check_failure_detail_does_not_contradict_the_observed_move(
+    outcome: str,
+    detail: str,
+    *,
+    old_before: CurrentBeetsResolution,
+    old_after: CurrentBeetsResolution,
+    new_before: CurrentBeetsResolution,
+    new_after: CurrentBeetsResolution,
+) -> None:
+    """G5 (#1093 item 5, both review rounds; round 3 F-4) — the failure
+    detail's own words must match what ``old_after`` actually shows,
+    checked in EVERY direction the production wording can claim:
+
+    * "did not move" is true ONLY when ``old_after`` is STILL
+      ``CurrentBeetsUnique`` at the SAME ``album_id`` ``old_before`` named
+      — round 1's shipped bug claimed this whenever ``old_after`` was
+      merely non-Unique, which is false the moment ``old_after`` shows the
+      id already gone (Missing) or a DIFFERENT album now occupying it.
+    * "moved off" is true ONLY when ``old_after`` is ``CurrentBeetsMissing``
+      — round 1's first fix pass claimed this whenever ``old_after`` was
+      not ``CurrentBeetsUnique`` at all, which is false for
+      ``CurrentBeetsAmbiguous``: every Ambiguous reason
+      (``multiple_matches``/``conflicting_identity``/``empty_topology``/
+      ``invalid_path``/``unresolved_relative_path``/``split_topology``)
+      requires at least one matching album row, so the id is STILL held,
+      never gone.
+    * "changed occupant" is true ONLY when ``old_after`` is
+      ``CurrentBeetsUnique`` at a DIFFERENT ``album_id`` than
+      ``old_before`` named — never when nothing changed, and never when
+      the id is ambiguous or missing instead.
+    * A "did not move" detail may NEVER also claim library-wide stasis
+      (round 3 F-4): a CONCURRENT writer can move ``new_identity``
+      independently of this execution's row (``old_after`` unchanged,
+      ``new_after`` differing from ``new_before``) — the production
+      wording was corrected to scope its subject to "the row this
+      execution targeted", never "the library", but this clause still
+      inspects ``new_before``/``new_after`` so it can catch a regression
+      back to the retired, self-contradicting "library"-scoped wording:
+      that phrase paired with a genuinely moved ``new_after`` is exactly
+      the shipped self-contradiction.
+    """
+    if outcome != RETAG_FAILED:
+        return
+    old_before_id = (
+        old_before.album_id if isinstance(old_before, CurrentBeetsUnique) else None
+    )
+    if "did not move" in detail:
+        unchanged = (
+            isinstance(old_after, CurrentBeetsUnique)
+            and old_before_id is not None
+            and old_after.album_id == old_before_id
+        )
+        if not unchanged:
+            raise AssertionError(
+                "detail claims the library did not move, but old_after "
+                f"({old_after!r}) is not the same album old_before "
+                f"({old_before!r}) named"
+            )
+        if "library" in detail and new_before != new_after:
+            raise AssertionError(
+                "detail claims the WHOLE LIBRARY did not move, but "
+                f"new_after ({new_after!r}) differs from new_before "
+                f"({new_before!r}) — a \"did not move\" claim may only "
+                "ever be scoped to the row this execution targeted"
+            )
+    if "moved off" in detail:
+        old_is_gone = isinstance(old_after, CurrentBeetsMissing)
+        if not old_is_gone:
+            raise AssertionError(
+                "detail claims the library moved off the old id, but "
+                f"old_after is {old_after!r}, not CurrentBeetsMissing "
+                "(still held)"
+            )
+    if "changed occupant" in detail:
+        different_occupant = (
+            isinstance(old_after, CurrentBeetsUnique)
+            and old_before_id is not None
+            and old_after.album_id != old_before_id
+        )
+        if not different_occupant:
+            raise AssertionError(
+                "detail claims the old id changed occupant, but old_after "
+                f"({old_after!r}) is not a different album than old_before "
+                f"({old_before!r})"
+            )
+
+
+def check_query_and_guard_agree_on_storage_shape(
+    *,
+    guard_matches: bool,
+    query_matches: bool,
+    shape: MbAlbumidStorageShape,
+    identity_case: str,
+) -> None:
+    """M1 (#1093 item 2, review F2 + round 3 F1) — the retag query's
+    compiled SQL clause and the post-retag guard's own matching SQL
+    (``lib.beets_db.BeetsDB.resolve_current_release`` — the exact method
+    ``retag_merged_album`` re-reads with) must select the SAME row for
+    every ``mb_albumid`` storage shape a raw third-party writer could
+    produce, and for every case the QUERIED identity itself could take.
+    ``guard_matches``/``query_matches`` are each computed by an
+    INDEPENDENT SQL execution (see ``TestQueryAndGuardConvergeOnStorageShape``)
+    — this checker only compares the two booleans, so it cannot pass "by
+    construction" the way a checker that recomputes one side from the
+    other can (`.claude/rules/code-quality.md` § "Agree by construction").
+    """
+    if guard_matches != query_matches:
+        raise AssertionError(
+            f"guard and query DISAGREE on storage shape {shape.label!r} "
+            f"({shape.value!r}) with queried identity_case={identity_case!r}: "
+            f"guard_matches={guard_matches}, query_matches={query_matches}"
         )
 
 
@@ -245,6 +421,7 @@ POST_STATES = st.sampled_from([
     "old_gone_new_absent",
     "both_present",
     "old_ambiguous",
+    "old_displaced",
 ])
 
 
@@ -267,14 +444,23 @@ def _apply_post_state(beets: FakeBeetsDB, post_state: str) -> None:
         beets.set_album_ids_for_release(MERGED, [7])
         beets.set_album_ids_for_release(SURVIVOR, [8])
         return
+    if post_state == "old_displaced":
+        # #1093 review round 2 sub-point — a DIFFERENT single album (9, not
+        # the original 7) now occupies the old id: the "changed occupant"
+        # shape, distinct from both "did not move" (still 7) and "moved
+        # off" (empty).
+        beets.set_album_ids_for_release(MERGED, [9])
+        return
     beets.set_album_ids_for_release(MERGED, [7, 8])
 
 
 def _modify(
-    result: str, apply_post_state: Callable[[], None], calls: list[tuple[str, str]],
-) -> Callable[[str, str], ModifyRetagRun]:
-    def run(query: str, assignment: str) -> ModifyRetagRun:
-        calls.append((query, assignment))
+    result: str,
+    apply_post_state: Callable[[], None],
+    calls: list[tuple[tuple[str, str], str]],
+) -> Callable[[tuple[str, str], str], ModifyRetagRun]:
+    def run(query_tokens: tuple[str, str], assignment: str) -> ModifyRetagRun:
+        calls.append((query_tokens, assignment))
         apply_post_state()
         if result == "raises_timeout":
             raise sp.TimeoutExpired(cmd=["beets", "modify"], timeout=120)
@@ -295,7 +481,7 @@ def _snapshot(
 
 
 class TestRetagProperties(unittest.TestCase):
-    """G1–G4 over every world, driving the real retag against the real fake."""
+    """G1–G5 over every world, driving the real retag against the real fake."""
 
     @settings(deadline=None)
     @given(
@@ -316,6 +502,26 @@ class TestRetagProperties(unittest.TestCase):
     @example(
         old_ids=(7,), new_ids=(8,), modify_result="exit_0", post_state="moved",
     )
+    # #1093 item 5 — the world that produced the self-contradictory
+    # "did not move" detail: a partial move where the old id genuinely
+    # moves away but the survivor lands ambiguous across two albums.
+    @example(
+        old_ids=(7,), new_ids=(), modify_result="exit_0",
+        post_state="moved_ambiguous",
+    )
+    # #1093 review round 2 (F1) — the reviewer's own counterexample: a
+    # concurrent writer lands a second album at the old id while modify
+    # moves nothing; old_after is Ambiguous, never "moved off".
+    @example(
+        old_ids=(7,), new_ids=(), modify_result="exit_1",
+        post_state="old_ambiguous",
+    )
+    # #1093 review round 2 sub-point — a DIFFERENT album occupies the old
+    # id afterward: neither "did not move" nor "moved off" is true.
+    @example(
+        old_ids=(7,), new_ids=(), modify_result="exit_0",
+        post_state="old_displaced",
+    )
     def test_every_world_upholds_the_retag_invariants(
         self,
         old_ids: tuple[int, ...],
@@ -325,7 +531,7 @@ class TestRetagProperties(unittest.TestCase):
     ) -> None:
         beets = library(old_album_ids=old_ids, new_album_ids=new_ids)
         old_before, new_before = _snapshot(beets)
-        calls: list[tuple[str, str]] = []
+        calls: list[tuple[tuple[str, str], str]] = []
 
         with _silence_logs():
             result = retag_merged_album(
@@ -346,10 +552,15 @@ class TestRetagProperties(unittest.TestCase):
             calls, old_before=old_before, new_before=new_before,
         )
         check_query_and_assignment_name_the_right_identity(
-            calls, old_identity=OLD, new_identity=NEW,
+            calls, old_identity=OLD, new_identity=NEW, old_before=old_before,
         )
         check_both_held_is_never_ready(
             result.outcome, old_before=old_before, new_before=new_before,
+        )
+        check_failure_detail_does_not_contradict_the_observed_move(
+            result.outcome, result.detail,
+            old_before=old_before, old_after=old_after,
+            new_before=new_before, new_after=new_after,
         )
         self.assertTrue(result.detail, "every outcome carries a diagnostic")
 
@@ -395,7 +606,7 @@ class TestRetagProperties(unittest.TestCase):
                 return inner.resolve_current_releases(identities)
 
         resolver = Unreadable()
-        calls: list[tuple[str, str]] = []
+        calls: list[tuple[tuple[str, str], str]] = []
         with _silence_logs():
             result = retag_merged_album(
                 resolver,
@@ -414,6 +625,277 @@ class TestRetagProperties(unittest.TestCase):
             # The retag path was never taken, so only one snapshot happened
             # and every answer is backed by a real observation.
             self.assertNotEqual(result.outcome, RETAG_RETAGGED)
+
+
+# ---------------------------------------------------------------------------
+# M1 — the query and the guard converge on every REAL mb_albumid storage
+# shape, proven by two independently executed SQL statements (#1093 item 2
+# review F2)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class MbAlbumidStorageShape:
+    label: str
+    #: The raw value written into the `mb_albumid` column via a raw
+    #: third-party SQL write (never through Beets' own ORM, which always
+    #: writes `str`). `bytes` produces a genuine SQLite BLOB storage class;
+    #: `None` produces NULL; `str` produces plain TEXT.
+    value: bytes | str | None
+
+
+#: Every storage shape a raw third-party writer could put in `mb_albumid`:
+#: the exact target value, an unrelated value, case/whitespace variants, a
+#: same-prefix decoy, NULL, and BLOB-encoded bytes (both matching and not).
+MB_ALBUMID_STORAGE_SHAPES: tuple[MbAlbumidStorageShape, ...] = (
+    MbAlbumidStorageShape("exact_text", MERGED),
+    MbAlbumidStorageShape("different_text", SURVIVOR),
+    MbAlbumidStorageShape("case_upper", MERGED.upper()),
+    MbAlbumidStorageShape("whitespace_trailing", MERGED + " "),
+    MbAlbumidStorageShape("whitespace_leading", " " + MERGED),
+    MbAlbumidStorageShape("whitespace_newline", MERGED + "\n"),
+    MbAlbumidStorageShape("prefix_extended", MERGED + "0"),
+    MbAlbumidStorageShape("prefix_truncated", MERGED[:-1]),
+    MbAlbumidStorageShape("blob_exact", MERGED.encode("utf-8")),
+    MbAlbumidStorageShape("blob_different", SURVIVOR.encode("utf-8")),
+    MbAlbumidStorageShape("null", None),
+)
+
+MB_ALBUMID_STORAGE_SHAPE_STRATEGY = st.sampled_from(MB_ALBUMID_STORAGE_SHAPES)
+
+def _queried_identity(case: str) -> ReleaseIdentity:
+    """The QUERIED identity's own case (#1093 review round 3, F1 secondary
+    finding; round-3-of-round-3 N-3 — this is a plain two-literal helper,
+    not a Hypothesis strategy: nothing in this module draws a case at
+    random, so no ``st.sampled_from`` object sits over it).
+
+    ``case="exact"`` — the ONLY case the fuzzed property below draws, and
+    the ONLY case reachable in production. Verified, not merely asserted:
+    EVERY ``ReleaseIdentity`` that reaches
+    :func:`lib.beets_retag.retag_merged_album` is built via
+    ``ReleaseIdentity.from_id`` (traced through both call sites in
+    ``lib/download_validation.py`` — ``old_identity =
+    ReleaseIdentity.from_id(normalize_release_id(stored_release_id))`` and
+    ``new_identity = ReleaseIdentity.from_id(survivor)``), and ``from_id``
+    normalizes (lowercases UUIDs) internally.
+
+    ``case="upper"`` is called directly, ONCE, by
+    :class:`TestKnownUnreachableQueriedIdentityCaseDivergence` below — the
+    one combination NOT reachable this way — proving the boundary
+    empirically rather than asserting it, per the "state the invariant
+    explicitly" branch of the review finding: widening the FUZZED property
+    to draw it would patrol a genuine, but currently unreachable,
+    pre-existing defect in ``resolve_current_releases`` itself (its SQL
+    comparison and Python-side re-key disagree on which side to normalize)
+    — a defect in a WIDELY shared method well beyond the retag module's
+    scope, not something to silently absorb into #1093.
+    """
+    release_id = MERGED if case == "exact" else MERGED.upper()
+    return ReleaseIdentity(source="musicbrainz", release_id=release_id)
+
+
+@cache
+def _mb_albumid_convergence_world() -> tuple[Path, int, Path]:
+    """One real beets-schema SQLite file (module-cached, built ONCE): a
+    single album row whose ``mb_albumid`` generated examples overwrite via
+    raw SQL, then read back through two independent mechanisms. Real beets
+    schema (via a real ``beets.library.Library``), not a hand-derived
+    approximation — so a future schema change is reflected here too. The
+    library root is returned too: the guard side
+    (``BeetsDB.resolve_current_release``) resolves item paths against it
+    (#1093 review round 3, F1)."""
+    tmp = tempfile.mkdtemp(prefix="cratedigger_mb_albumid_convergence_")
+    root = Path(tmp) / "library"
+    root.mkdir()
+    album_dir = root / "Convergence Artist" / "1999 - Album"
+    album_dir.mkdir(parents=True)
+    track_path = album_dir / "01 Track.mp3"
+    track_path.write_bytes(b"placeholder")
+    library_db = Path(tmp) / "library.db"
+    lib = beets_library.Library(str(library_db), str(root))
+    item = beets_library.Item(
+        path=str(track_path), title="Track", artist="Convergence Artist",
+        album="Album", albumartist="Convergence Artist", track=1, disc=1,
+        year=1999, mb_albumid=MERGED,
+        mb_trackid="00000000-1111-4111-8111-111111111111",
+    )
+    album = lib.add_album([item])
+    if album.id is None:
+        raise AssertionError("seeded Beets album is missing its database id")
+    album_id = album.id
+    lib._close()
+    return library_db, album_id, root
+
+
+def _write_mb_albumid(
+    library_db: Path, album_id: int, value: bytes | str | None,
+) -> None:
+    """A raw third-party SQL write — the shape a writer OTHER than Beets
+    itself (which always writes ``str``) could produce."""
+    conn = sqlite3.connect(str(library_db))
+    conn.execute(
+        "UPDATE albums SET mb_albumid = ? WHERE id = ?", (value, album_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _guard_matches(
+    library_db: Path, library_root: Path, identity: ReleaseIdentity,
+) -> bool:
+    """The REAL guard — ``lib.beets_db.BeetsDB.resolve_current_release`` —
+    the EXACT method :func:`lib.beets_retag.retag_merged_album` re-reads
+    the library with both before AND after ``beet modify`` runs. NOT
+    ``_matching_album_ids``: that method has exactly one production caller
+    (``get_all_album_ids_for_release``, consumed only by
+    ``harness/import_one.py``'s post-import stale cleanup) and is a
+    bystander to the retag guard entirely — a mutation to
+    ``resolve_current_releases``' own SQL (verified live: a real
+    case-insensitivity mutant, `LOWER(...)` on both the SQL comparison and
+    the Python-side re-key, made the guard match a row this query does
+    not) left the bystander-driven version of this property green on all
+    11 examples — one per entry in ``MB_ALBUMID_STORAGE_SHAPES`` — (#1093
+    review round 3, F1). A fresh read-only connection per call, mirroring
+    how production reopens it."""
+    with BeetsDB(str(library_db), library_root=str(library_root)) as beets:
+        resolution = beets.resolve_current_release(identity)
+    return not isinstance(resolution, CurrentBeetsMissing)
+
+
+def _query_matches(library_db: Path, album_id: int, identity: ReleaseIdentity) -> bool:
+    """The REAL retag query's compiled clause — parsed via the real Beets
+    query parser, executed directly against the SAME data on a connection
+    carrying Beets' own UDFs (via a real, throwaway ``Library``, never a
+    hand-copied ``regexp()`` re-implementation), so a reverted-to-regex
+    mutant is evaluated faithfully rather than merely erroring on a missing
+    SQL function."""
+    id_token, mb_albumid_token = retag_album_query(identity, album_id=album_id)
+    query, _sort = parse_query_parts(
+        [id_token, mb_albumid_token], beets_library.Album,
+    )
+    assert isinstance(query, CollectionQuery)  # narrow for pyright
+    sql, params = query.clause()
+    assert sql is not None
+    conn = sqlite3.connect(str(library_db))
+    throwaway_lib = beets_library.Library(str(library_db))
+    throwaway_lib.add_functions(conn)
+    throwaway_lib._close()
+    rows = conn.execute(f"SELECT id FROM albums WHERE {sql}", params).fetchall()
+    conn.close()
+    matched_ids = {int(row[0]) for row in rows}
+    return album_id in matched_ids
+
+
+class TestQueryAndGuardConvergeOnStorageShape(unittest.TestCase):
+    """M1 (#1093 item 2, review F2 + round 3 F1) — the retag query's
+    compiled clause and the guard's own matching SQL
+    (``BeetsDB.resolve_current_release``, the exact method
+    ``retag_merged_album`` re-reads with — NOT the unrelated
+    ``_matching_album_ids``, whose only production caller is
+    ``harness/import_one.py``'s post-import stale cleanup) agree on EVERY
+    generated ``mb_albumid`` storage shape, crossed against every case the
+    QUERIED identity itself could take, computed via two INDEPENDENT SQL
+    executions against the SAME real beets-schema row — never by
+    recomputing one mechanism and comparing it to itself.
+
+    This is the real property G3 cannot be: G3 (in
+    ``check_query_and_assignment_name_the_right_identity``) recomputes
+    :func:`retag_album_query` on both sides of its comparison, which
+    proves the CALLER passed the builder's real output through unmodified
+    but is structurally incapable of catching a change to what
+    :func:`retag_album_query` itself selects — reverting it to the retired
+    anchored-regex form still passes G3 (both sides call the same mutated
+    function), but fails THIS property immediately, because
+    ``_query_matches`` parses and executes the query's own compiled SQL
+    independently of ``_guard_matches``. Live-verified the same way in the
+    other direction: a real mutant making ``resolve_current_releases``
+    case-insensitive (`LOWER(...)` on the SQL comparison AND the Python-side
+    re-key) is invisible to a guard side driven by ``_matching_album_ids``
+    (all 11 examples — one per ``MB_ALBUMID_STORAGE_SHAPES`` entry —
+    passed) but is caught immediately once the guard side drives the real
+    ``resolve_current_release``.
+    """
+
+    @settings(deadline=None)
+    @given(shape=MB_ALBUMID_STORAGE_SHAPE_STRATEGY)
+    def test_query_and_guard_agree_on_every_storage_shape(
+        self, shape: MbAlbumidStorageShape,
+    ) -> None:
+        """Queries with ``identity_case="exact"`` — the ONLY case reachable
+        in production (see :func:`_queried_identity`). The ``"upper"``
+        case is exercised separately, deterministically, in
+        :class:`TestKnownUnreachableQueriedIdentityCaseDivergence`."""
+        library_db, album_id, library_root = _mb_albumid_convergence_world()
+        _write_mb_albumid(library_db, album_id, shape.value)
+        identity = _queried_identity("exact")
+
+        guard_matches = _guard_matches(library_db, library_root, identity)
+        query_matches = _query_matches(library_db, album_id, identity)
+
+        check_query_and_guard_agree_on_storage_shape(
+            guard_matches=guard_matches, query_matches=query_matches,
+            shape=shape, identity_case="exact",
+        )
+
+
+class TestKnownUnreachableQueriedIdentityCaseDivergence(unittest.TestCase):
+    """#1093 review round 3, F1 secondary finding — the ONE combination
+    excluded from the fuzzed property above, driven for real rather than
+    left silently untested.
+
+    Algebraically: ``resolve_current_releases`` matches a row iff its SQL
+    WHERE clause (exact, case-sensitive comparison against the RAW queried
+    ``identity.release_id``) selects it AND the Python-side re-key
+    (``normalize_release_id(stored_value)`` looked up in a dict keyed by
+    that SAME raw ``identity.release_id``) also finds it. The retag
+    query's ``MatchQuery`` matches a row iff the SQL comparison alone
+    selects it. The two mechanisms therefore diverge EXACTLY when
+    ``stored_value == identity.release_id`` (so the query matches, and the
+    guard's SQL half matches too) but
+    ``normalize_release_id(stored_value) != identity.release_id`` (so the
+    guard's Python-side re-key misses) — which, since the two are already
+    equal, reduces to: ``identity.release_id`` is not already in its own
+    normalized form. Every OTHER storage shape in
+    ``MB_ALBUMID_STORAGE_SHAPES`` either does not equal the ``"upper"``
+    identity at all, or (for ``"exact"``) is already normalized, so this
+    is PROVABLY the only divergent point in the whole 11-shape × 2-case
+    grid — not a sampled coincidence.
+
+    This is a genuine, PRE-EXISTING defect in ``resolve_current_releases``
+    itself (its SQL comparison and its Python-side re-key disagree about
+    which side of the comparison gets normalized) — unrelated to
+    #1093's actual scope (unifying the retag query's OWN selection
+    mechanism with the guard's) and reachable only through a queried
+    identity that ``ReleaseIdentity.from_id`` — the sole constructor for
+    every identity that reaches :func:`lib.beets_retag.retag_merged_album`
+    in production — can never produce. Fixing ``resolve_current_releases``
+    itself is out of scope here: it is a widely shared method with many
+    consumers beyond the retag module that this PR has not audited.
+    """
+
+    def test_a_matching_but_non_normalized_identity_diverges(self) -> None:
+        shape = next(
+            s for s in MB_ALBUMID_STORAGE_SHAPES if s.label == "case_upper"
+        )
+        library_db, album_id, library_root = _mb_albumid_convergence_world()
+        _write_mb_albumid(library_db, album_id, shape.value)
+        identity = _queried_identity("upper")
+
+        guard_matches = _guard_matches(library_db, library_root, identity)
+        query_matches = _query_matches(library_db, album_id, identity)
+
+        self.assertFalse(
+            guard_matches,
+            "resolve_current_releases's Python-side re-key normalizes the "
+            "stored value but looks it up in a dict keyed by the RAW "
+            "queried identity, so a same-case-but-not-normalized match "
+            "misses — this assertion is the known defect, not a bug in "
+            "this test",
+        )
+        self.assertTrue(
+            query_matches,
+            "the retag query's MatchQuery does a single exact SQL "
+            "comparison with no re-key step, so it DOES match here",
+        )
 
 
 class TestRealModifyRetagOverItemCountBoundaries(unittest.TestCase):
@@ -471,11 +953,13 @@ class TestRealModifyRetagOverItemCountBoundaries(unittest.TestCase):
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Every checker owes a planted violation proving it can fail."""
 
-    def _unique(self, identity: ReleaseIdentity) -> CurrentBeetsUnique:
+    def _unique(
+        self, identity: ReleaseIdentity, *, album_id: int = 7,
+    ) -> CurrentBeetsUnique:
         return CurrentBeetsUnique(
             identity=identity,
-            album_id=7,
-            album_path="/library/album-7",
+            album_id=album_id,
+            album_path=f"/library/album-{album_id}",
             items=(),
             selectors=(f"mb_albumid:{identity.release_id}",),
         )
@@ -505,48 +989,118 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             )
 
     def test_modify_on_a_missing_old_id_is_rejected(self) -> None:
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError, r"only a uniquely held old album",
+        ):
             check_modify_only_for_a_uniquely_held_old_id(
-                [(retag_album_query(OLD), retag_assignment(NEW))],
+                [(retag_album_query(OLD, album_id=7), retag_assignment(NEW))],
                 old_before=self._missing(OLD),
                 new_before=self._missing(NEW),
             )
 
     def test_modify_while_the_survivor_is_already_held_is_rejected(self) -> None:
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"collide two albums under one duplicate key",
+        ):
             check_modify_only_for_a_uniquely_held_old_id(
-                [(retag_album_query(OLD), retag_assignment(NEW))],
+                [(retag_album_query(OLD, album_id=7), retag_assignment(NEW))],
                 old_before=self._unique(OLD),
                 new_before=self._unique(NEW),
             )
 
     def test_modify_invoked_twice_is_rejected(self) -> None:
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"beet modify was invoked 2 times for one album",
+        ):
             check_modify_only_for_a_uniquely_held_old_id(
-                [(retag_album_query(OLD), retag_assignment(NEW))] * 2,
+                [(retag_album_query(OLD, album_id=7), retag_assignment(NEW))] * 2,
                 old_before=self._unique(OLD),
                 new_before=self._missing(NEW),
             )
 
     def test_a_query_naming_the_survivor_is_rejected(self) -> None:
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError, r"modify query names the survivor",
+        ):
             check_query_and_assignment_name_the_right_identity(
-                [(retag_album_query(NEW), retag_assignment(NEW))],
-                old_identity=OLD, new_identity=NEW,
+                [(retag_album_query(NEW, album_id=7), retag_assignment(NEW))],
+                old_identity=OLD, new_identity=NEW, old_before=self._unique(OLD),
             )
 
-    def test_an_unanchored_query_is_rejected(self) -> None:
-        with self.assertRaises(AssertionError):
+    def test_a_query_using_a_different_mechanism_is_rejected(self) -> None:
+        """#1093 (round-3-of-round-3 N-4 correction) — the invariant this
+        self-test proves ("the query can only ever name albums filed
+        under exactly the old id") is now enforced through the
+        exact-match mechanism, not a different one; this world names the
+        old id's value token with a single ``:`` (real beets:
+        ``field:value`` with no further prefix falls to the field's
+        default query class, ``SubstringQuery`` for ``mb_albumid`` — NOT
+        a regex; that requires the DOUBLE colon ``field::value``, which is
+        what #1093 actually retired, ``mb_albumid::^<id>\\Z``) instead of
+        the exact-match ``:=`` token the module actually emits, and the
+        checker must still catch the mismatch even with a correct id
+        token alongside it."""
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"is not the compound exact-match query for",
+        ):
             check_query_and_assignment_name_the_right_identity(
-                [(f"mb_albumid:{MERGED}", retag_assignment(NEW))],
-                old_identity=OLD, new_identity=NEW,
+                [(("id:=7", f"mb_albumid:{MERGED}"), retag_assignment(NEW))],
+                old_identity=OLD, new_identity=NEW, old_before=self._unique(OLD),
             )
 
     def test_an_assignment_naming_the_merged_away_id_is_rejected(self) -> None:
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError, r"names the merged-away id",
+        ):
             check_query_and_assignment_name_the_right_identity(
-                [(retag_album_query(OLD), retag_assignment(OLD))],
-                old_identity=OLD, new_identity=NEW,
+                [(retag_album_query(OLD, album_id=7), retag_assignment(OLD))],
+                old_identity=OLD, new_identity=NEW, old_before=self._unique(OLD),
+            )
+
+    def test_a_syntactically_valid_but_wrong_assignment_is_rejected(
+        self,
+    ) -> None:
+        """#1093 round-3 review F-2 — the checker's FINAL clause
+        (``assignment != retag_assignment(new_identity)``) was unreached by
+        every existing self-test: the only prior "wrong assignment" world
+        (``test_an_assignment_naming_the_merged_away_id_is_rejected``, just
+        above) uses ``retag_assignment(OLD)``, whose value literally
+        contains ``old_identity.release_id`` — so it always trips the
+        EARLIER "names the merged-away id" clause first, never this one.
+        This world names neither the old id nor the exact new-identity
+        assignment (an uppercased variant of the real
+        ``retag_assignment(NEW)`` value — same shape, wrong case, so it
+        equality-compares false without containing either id string) —
+        every earlier clause passes, and only the final clause can fire.
+        """
+        wrong_assignment = retag_assignment(NEW).upper()
+        self.assertNotIn(OLD.release_id, wrong_assignment)
+        self.assertNotEqual(wrong_assignment, retag_assignment(NEW))
+
+        with self.assertRaisesRegex(
+            AssertionError, r"is not the survivor assignment for",
+        ):
+            check_query_and_assignment_name_the_right_identity(
+                [(retag_album_query(OLD, album_id=7), wrong_assignment)],
+                old_identity=OLD, new_identity=NEW, old_before=self._unique(OLD),
+            )
+
+    def test_modify_invoked_while_the_old_id_became_ambiguous_is_rejected(
+        self,
+    ) -> None:
+        """G3's own id-pin sub-clause (#1093 review residual): the query
+        must be pinned to the OLD id's resolved album_id, which only
+        exists when old_before is uniquely held. An Ambiguous old_before
+        reaching this checker (a world G2 alone would not catch, since G2
+        governs whether modify SHOULD have run, not what it was pinned to)
+        is rejected outright — there is no album_id to pin the query to."""
+        with self.assertRaisesRegex(AssertionError, "without a uniquely-held"):
+            check_query_and_assignment_name_the_right_identity(
+                [(retag_album_query(OLD, album_id=7), retag_assignment(NEW))],
+                old_identity=OLD, new_identity=NEW, old_before=self._ambiguous(OLD),
             )
 
     def test_a_ready_outcome_on_the_double_sided_merge_is_rejected(self) -> None:
@@ -556,6 +1110,166 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 old_before=self._unique(OLD),
                 new_before=self._unique(NEW),
             )
+
+    def test_a_did_not_move_claim_while_the_old_id_is_missing_is_rejected(
+        self,
+    ) -> None:
+        """G5 (#1093 item 5, round 1) — the exact contradiction: the old id
+        moved away (Missing), so a detail claiming "did not move" is a lie."""
+        with self.assertRaisesRegex(AssertionError, "is not the same album old_before"):
+            check_failure_detail_does_not_contradict_the_observed_move(
+                RETAG_FAILED,
+                "beet modify exited 0, but the row this execution targeted "
+                f"did not move: {MERGED} is not held; {SURVIVOR} is "
+                "ambiguous (multiple_matches) across albums 7, 8",
+                old_before=self._unique(OLD), old_after=self._missing(OLD),
+                new_before=self._missing(NEW), new_after=self._missing(NEW),
+            )
+
+    def test_a_did_not_move_claim_while_the_old_id_is_ambiguous_is_rejected(
+        self,
+    ) -> None:
+        """The other non-Unique shape: the old id is now ambiguous, which
+        is equally not "did not move" (it changed FROM Unique)."""
+        with self.assertRaisesRegex(AssertionError, "is not the same album old_before"):
+            check_failure_detail_does_not_contradict_the_observed_move(
+                RETAG_FAILED,
+                "beet modify exited 0, but the row this execution targeted "
+                f"did not move: {MERGED} is ambiguous (multiple_matches) "
+                f"across albums 7, 8; {SURVIVOR} is not held",
+                old_before=self._unique(OLD), old_after=self._ambiguous(OLD),
+                new_before=self._missing(NEW), new_after=self._missing(NEW),
+            )
+
+    def test_a_did_not_move_claim_while_a_different_album_now_occupies_it_is_rejected(
+        self,
+    ) -> None:
+        """G5 (#1093 review round 2 sub-point) — old_after IS still Unique,
+        but at a DIFFERENT album than old_before named: the original
+        occupant is gone, a different album took the id. Still not "did
+        not move"."""
+        with self.assertRaisesRegex(AssertionError, "is not the same album old_before"):
+            check_failure_detail_does_not_contradict_the_observed_move(
+                RETAG_FAILED,
+                "beet modify exited 0, but the row this execution targeted "
+                f"did not move: {MERGED} is uniquely held as album 9; "
+                f"{SURVIVOR} is not held",
+                old_before=self._unique(OLD, album_id=7),
+                old_after=self._unique(OLD, album_id=9),
+                new_before=self._missing(NEW), new_after=self._missing(NEW),
+            )
+
+    def test_a_did_not_move_claim_while_the_old_id_is_still_unique_passes(
+        self,
+    ) -> None:
+        """Must-still-work: the ONE world where "did not move" is true —
+        the checker must not reject a truthful detail."""
+        check_failure_detail_does_not_contradict_the_observed_move(
+            RETAG_FAILED,
+            "beet modify exited 0, but the row this execution targeted did "
+            f"not move: {MERGED} is uniquely held as album 7; {SURVIVOR} is "
+            "not held",
+            old_before=self._unique(OLD, album_id=7),
+            old_after=self._unique(OLD, album_id=7),
+            new_before=self._missing(NEW), new_after=self._missing(NEW),
+        )
+
+    def test_a_did_not_move_claim_scoped_to_the_library_while_the_survivor_moved_is_rejected(
+        self,
+    ) -> None:
+        """#1093 round 3 review F-4 — the ADDED clause: a detail using the
+        RETIRED, over-broad "the library did not move" wording is rejected
+        the moment new_after shows the survivor genuinely moved
+        (Missing before, uniquely held afterward) — even though old_after
+        is unchanged and would otherwise satisfy the existing clause. This
+        is the exact self-contradiction the production wording was
+        corrected to stop making (production now says "the row this
+        execution targeted", never "the library" — see the sibling
+        "passes" test above); this self-test proves the checker itself
+        would still catch a regression back to the retired phrasing."""
+        with self.assertRaisesRegex(AssertionError, "WHOLE LIBRARY"):
+            check_failure_detail_does_not_contradict_the_observed_move(
+                RETAG_FAILED,
+                "beet modify exited 0, but the library did not move: "
+                f"{MERGED} is uniquely held as album 7; {SURVIVOR} is "
+                "uniquely held as album 8",
+                old_before=self._unique(OLD, album_id=7),
+                old_after=self._unique(OLD, album_id=7),
+                new_before=self._missing(NEW),
+                new_after=self._unique(NEW, album_id=8),
+            )
+
+    def test_a_moved_off_claim_while_the_old_id_is_ambiguous_is_rejected(
+        self,
+    ) -> None:
+        """G5's converse clause (#1093 review round 2, F1) — "moved off"
+        must imply the old id is actually GONE. Ambiguous means the
+        opposite: at least one album row still matches it."""
+        with self.assertRaisesRegex(AssertionError, "moved off"):
+            check_failure_detail_does_not_contradict_the_observed_move(
+                RETAG_FAILED,
+                "beet modify exited 0; the library moved off "
+                f"{MERGED} but did not land at a state the caller may "
+                f"rekey onto: {MERGED} is now ambiguous (multiple_matches) "
+                f"across albums 7, 9; {SURVIVOR} is not held",
+                old_before=self._unique(OLD, album_id=7),
+                old_after=self._ambiguous(OLD),
+                new_before=self._missing(NEW), new_after=self._missing(NEW),
+            )
+
+    def test_a_moved_off_claim_while_the_old_id_is_missing_passes(self) -> None:
+        """Must-still-work: "moved off" is true exactly when old_after is
+        Missing."""
+        check_failure_detail_does_not_contradict_the_observed_move(
+            RETAG_FAILED,
+            "beet modify exited 0; the library moved off "
+            f"{MERGED} but did not land at a state the caller may rekey "
+            f"onto: {MERGED} is now not held; {SURVIVOR} is not held",
+            old_before=self._unique(OLD, album_id=7),
+            old_after=self._missing(OLD),
+            new_before=self._missing(NEW), new_after=self._missing(NEW),
+        )
+
+    def test_a_changed_occupant_claim_while_the_album_is_unchanged_is_rejected(
+        self,
+    ) -> None:
+        """G5's third clause (#1093 review round 2) — "changed occupant"
+        must imply a DIFFERENT album than old_before named; claiming it
+        while nothing actually changed is equally a lie."""
+        with self.assertRaisesRegex(AssertionError, "changed occupant"):
+            check_failure_detail_does_not_contradict_the_observed_move(
+                RETAG_FAILED,
+                f"beet modify exited 0; {MERGED} changed occupant: was "
+                f"album 7, is now uniquely held as album 7; {SURVIVOR} is "
+                "not held",
+                old_before=self._unique(OLD, album_id=7),
+                old_after=self._unique(OLD, album_id=7),
+                new_before=self._missing(NEW), new_after=self._missing(NEW),
+            )
+
+    def test_a_changed_occupant_claim_for_a_genuinely_different_album_passes(
+        self,
+    ) -> None:
+        """Must-still-work: "changed occupant" is true exactly when
+        old_after is Unique at a different album_id than old_before."""
+        check_failure_detail_does_not_contradict_the_observed_move(
+            RETAG_FAILED,
+            f"beet modify exited 0; {MERGED} changed occupant: was album "
+            f"7, is now uniquely held as album 9; {SURVIVOR} is not held",
+            old_before=self._unique(OLD, album_id=7),
+            old_after=self._unique(OLD, album_id=9),
+            new_before=self._missing(NEW), new_after=self._missing(NEW),
+        )
+
+    def test_a_non_failed_outcome_is_not_checked(self) -> None:
+        """The clause only governs FAILED details — a retagged/ambiguous
+        outcome's detail is out of scope regardless of its wording."""
+        check_failure_detail_does_not_contradict_the_observed_move(
+            RETAG_RETAGGED, "the library did not move",
+            old_before=self._unique(OLD), old_after=self._missing(OLD),
+            new_before=self._missing(NEW),
+            new_after=self._unique(NEW, album_id=8),
+        )
 
     @staticmethod
     def _real_observation(
@@ -598,11 +1312,12 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         self.assertIn("RELOCATED", str(caught.exception))
 
     def test_a_pruned_sidecar_is_rejected(self) -> None:
-        with self.assertRaises(AssertionError) as caught:
+        with self.assertRaisesRegex(
+            AssertionError, "sidecar is gone from the album directory",
+        ):
             check_real_modify_retag_moved_every_identity(self._real_observation(
                 entries=("01 Installed 1.mp3", "02 Installed 2.mp3"),
             ))
-        self.assertIn("sidecar", str(caught.exception))
 
     def test_an_album_that_never_moved_is_rejected(self) -> None:
         """The exact ``-a``-less mutant: items moved, the album row did not."""
@@ -648,6 +1363,36 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             ))
         self.assertIn("unexpectedly carries items", str(caught.exception))
 
+    def test_a_guard_query_storage_shape_disagreement_is_rejected(self) -> None:
+        """M1 (#1093 item 2, review F2) — a hand-built divergence between
+        the two independently-computed booleans must trip."""
+        with self.assertRaisesRegex(AssertionError, "DISAGREE"):
+            check_query_and_guard_agree_on_storage_shape(
+                guard_matches=True, query_matches=False,
+                shape=MbAlbumidStorageShape("hand_built", MERGED),
+                identity_case="exact",
+            )
+        with self.assertRaisesRegex(AssertionError, "DISAGREE"):
+            check_query_and_guard_agree_on_storage_shape(
+                guard_matches=False, query_matches=True,
+                shape=MbAlbumidStorageShape("hand_built", MERGED),
+                identity_case="upper",
+            )
+
+    def test_a_guard_query_storage_shape_agreement_passes(self) -> None:
+        """Must-still-work: the checker accepts agreement in both
+        directions (both matched, or neither did)."""
+        check_query_and_guard_agree_on_storage_shape(
+            guard_matches=True, query_matches=True,
+            shape=MbAlbumidStorageShape("hand_built", MERGED),
+            identity_case="exact",
+        )
+        check_query_and_guard_agree_on_storage_shape(
+            guard_matches=False, query_matches=False,
+            shape=MbAlbumidStorageShape("hand_built", MERGED),
+            identity_case="upper",
+        )
+
     def test_checkers_accept_the_legitimate_retag(self) -> None:
         """Must-still-work: a real successful retag passes every checker."""
         check_real_modify_retag_moved_every_identity(self._real_observation())
@@ -661,18 +1406,26 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             new_after=self._unique(NEW),
         )
         check_modify_only_for_a_uniquely_held_old_id(
-            [(retag_album_query(OLD), retag_assignment(NEW))],
+            [(retag_album_query(OLD, album_id=7), retag_assignment(NEW))],
             old_before=self._unique(OLD),
             new_before=self._missing(NEW),
         )
         check_query_and_assignment_name_the_right_identity(
-            [(retag_album_query(OLD), retag_assignment(NEW))],
-            old_identity=OLD, new_identity=NEW,
+            [(retag_album_query(OLD, album_id=7), retag_assignment(NEW))],
+            old_identity=OLD, new_identity=NEW, old_before=self._unique(OLD),
         )
         check_both_held_is_never_ready(
             RETAG_AMBIGUOUS,
             old_before=self._unique(OLD),
             new_before=self._unique(NEW),
+        )
+        check_failure_detail_does_not_contradict_the_observed_move(
+            RETAG_FAILED,
+            "beet modify exited 0, but the row this execution targeted did "
+            f"not move: {MERGED} is uniquely held as album 7; {SURVIVOR} is "
+            "not held",
+            old_before=self._unique(OLD), old_after=self._unique(OLD),
+            new_before=self._missing(NEW), new_after=self._missing(NEW),
         )
 
 
