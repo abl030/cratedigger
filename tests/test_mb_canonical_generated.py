@@ -27,6 +27,21 @@ R4  A returned survivor is always a MusicBrainz UUID. A Discogs numeric or
     a garbage token never escapes as a release identity.
 R5  Non-MusicBrainz identities and unconfigured processes never touch the
     network at all — inertness is observable, not merely intended.
+R6  (#1089 BLOCKING-1) The tagged ``canonical_release_status`` and the
+    collapsed ``canonical_release_id`` never disagree: redirected iff the
+    collapsed answer is that same survivor, otherwise the collapsed answer
+    is ``None``.
+R7  (#1089 BLOCKING-1 / MAJOR-2 / MINOR-1) A fetch that raised, a
+    redirect whose body names no usable MusicBrainz id, or a malformed
+    top-level envelope shape (not even the ``{"payload":...,
+    "redirected":...}`` contract) is NEVER ``CanonicalReleaseCurrent`` —
+    the exact bug this property exists to kill: a configured-but-down or
+    misbehaving mirror must never be read as "MusicBrainz confirms this
+    request was never merged". ``envelope_could_legitimately_be_current``
+    derives the real per-example fact from the generated envelope itself
+    (review round 2: an earlier version hardcoded ``fetch_raised=False`` at
+    the non-raising call site, which made this clause unfalsifiable there
+    — a planted mutant reverting the MAJOR-2 fix survived 13/13).
 """
 
 from __future__ import annotations
@@ -39,7 +54,14 @@ from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-from lib.mb_canonical import canonical_release_id
+from lib.mb_canonical import (
+    CanonicalReleaseAnswer,
+    CanonicalReleaseCurrent,
+    CanonicalReleaseRedirected,
+    CanonicalReleaseUnavailable,
+    canonical_release_id,
+    canonical_release_status,
+)
 from lib.release_identity import detect_release_source, normalize_release_id
 
 # The live merge probed on 2026-08-06 (request 316).
@@ -90,6 +112,83 @@ def check_no_fetch_attempted(calls: list[str]) -> None:
     if calls:
         raise AssertionError(
             f"a lookup that must be inert reached the network: {calls!r}"
+        )
+
+
+def check_tagged_status_agrees_with_collapsed_answer(
+    status: CanonicalReleaseAnswer, answer: str | None,
+) -> None:
+    """R6 — ``canonical_release_id`` is DEFINED IN TERMS OF the tagged
+    status; this is the composed relationship, not an assumption."""
+    if isinstance(status, CanonicalReleaseRedirected):
+        if answer != status.survivor:
+            raise AssertionError(
+                f"tagged status redirected to {status.survivor!r} but the "
+                f"collapsed resolver returned {answer!r}"
+            )
+        return
+    if answer is not None:
+        raise AssertionError(
+            f"collapsed resolver returned {answer!r} but the tagged status "
+            f"was {status!r} (not redirected)"
+        )
+
+
+def envelope_could_legitimately_be_current(envelope: object) -> bool:
+    """The REAL ground-truth fact
+    :func:`check_never_current_without_a_real_answer` needs: could THIS raw
+    envelope, independent of what the resolver actually did with it, ever
+    legitimately represent MusicBrainz having answered "current"?
+
+    Derived structurally from the raw generated envelope — mirrors the
+    ``redirected`` local the property already computes for
+    :func:`check_redirect_proof` at its own call site, never a hand-typed
+    literal (#1089 MAJOR-2, review round 2): passing a hardcoded
+    ``fetch_raised=False`` at the non-raising call site made this clause
+    unfalsifiable there — a fetch that never raises but returns an unusable
+    envelope (a redirect whose body names no usable MusicBrainz id, or a
+    top-level shape that isn't even the ``{"payload":..., "redirected":...}``
+    contract) is exactly the world the checker exists to catch, and that
+    world has ``fetch_raised=False`` by construction. This helper answers
+    the same "was an answer usable" question the checker's OTHER call site
+    (the fetch-raises property) already answers by construction of its own
+    domain — it does not re-derive the resolver's Redirected/Current split,
+    only the narrower "may Current ever be legitimate" gate, using the same
+    identity-detection facts every release-id consumer already relies on.
+    """
+    if not isinstance(envelope, dict):
+        return False
+    redirected = envelope.get("redirected")
+    if not isinstance(redirected, bool):
+        return False
+    if redirected is False:
+        return True
+    payload = envelope.get("payload")
+    payload_dict = payload if isinstance(payload, dict) else {}
+    canonical = normalize_release_id(payload_dict.get("id"))
+    return detect_release_source(canonical) == "musicbrainz"
+
+
+def check_never_current_without_a_real_answer(
+    status: CanonicalReleaseAnswer, *, answer_was_usable: bool,
+) -> None:
+    """R7 (#1089 BLOCKING-1 / MAJOR-2) — Current is reachable ONLY when the
+    raw envelope could legitimately represent a genuine MusicBrainz answer.
+
+    The exact regression this checker exists to kill: an earlier
+    implementation classified a redirect whose body named no usable
+    MusicBrainz id as ``CanonicalReleaseCurrent`` — indistinguishable from
+    "MusicBrainz genuinely confirmed no merge" — when it is really an
+    unusable response shape (``CanonicalReleaseUnavailable``). A raised
+    fetch is the same world with ``answer_was_usable=False`` by
+    construction; a malformed top-level envelope shape is too (#1089
+    MINOR-1).
+    """
+    if not answer_was_usable and isinstance(status, CanonicalReleaseCurrent):
+        raise AssertionError(
+            "a world with no usable answer was classified as "
+            "CanonicalReleaseCurrent — a down mirror or an unusable "
+            "response must never read as a confirmed non-merge"
         )
 
 
@@ -173,6 +272,18 @@ class TestResolverProperties(unittest.TestCase):
     # where the body names a successor the transport never redirected to.
     @example(envelope={"payload": {"id": SURVIVOR}, "redirected": True})
     @example(envelope={"payload": {"id": SURVIVOR}, "redirected": False})
+    # #1089 MAJOR-2 (review round 2): the exact shipped-and-reverted bug —
+    # a redirect observed, but the body's id is unusable. Pinned because the
+    # checker's own gate at this call site was the thing that failed to
+    # catch it; a randomized-only example must not be the only defense.
+    @example(envelope={"payload": {"id": "not-a-uuid"}, "redirected": True})
+    # #1089 MINOR-1: malformed top-level envelope shapes, the exact set the
+    # reviewer probed live.
+    @example(envelope=None)
+    @example(envelope=[])
+    @example(envelope="a bare string")
+    @example(envelope={})
+    @example(envelope={"payload": {"id": SURVIVOR}})
     def test_every_envelope_upholds_the_resolver_invariants(
         self, envelope: object,
     ) -> None:
@@ -188,6 +299,18 @@ class TestResolverProperties(unittest.TestCase):
         check_never_the_requested_id(answer, STORED)
         check_answer_is_a_musicbrainz_id(answer)
         self.assertEqual(len(calls), 1, "a configured MB lookup must fetch once")
+
+        # R6/R7 (#1089): the tagged sibling, same envelope, its own fetch —
+        # calling both through ONE shared fetch would double-count "fetched
+        # once" for each.
+        tagged_fetch, tagged_calls = _recording_fetch(envelope)
+        status = canonical_release_status(STORED, ws2_base=BASE, fetch=tagged_fetch)
+        check_tagged_status_agrees_with_collapsed_answer(status, answer)
+        check_never_current_without_a_real_answer(
+            status,
+            answer_was_usable=envelope_could_legitimately_be_current(envelope),
+        )
+        self.assertEqual(len(tagged_calls), 1)
 
     @settings(deadline=None)
     @given(exc=FETCH_EXCEPTIONS)
@@ -206,6 +329,21 @@ class TestResolverProperties(unittest.TestCase):
 
         self.assertIsNone(answer)
         self.assertEqual(len(calls), 1)
+
+        # R7 (#1089 BLOCKING-1): a raised fetch is ALWAYS "unavailable",
+        # never a false "current" — the exact resolver-silence bug.
+        # ``answer_was_usable=False`` is accurate BY CONSTRUCTION of this
+        # test's own domain (every example here drives a fetch that
+        # raises), not a hardcoded literal standing in for a real fact —
+        # unlike the envelope property above, there is no other outcome
+        # this call site could ever observe. The preceding assertEqual is
+        # already strictly stronger; this call keeps the checker's own
+        # contract exercised at both its call sites.
+        tagged_fetch, tagged_calls = _recording_fetch(None, raises=exc)
+        status = canonical_release_status(STORED, ws2_base=BASE, fetch=tagged_fetch)
+        self.assertEqual(status, CanonicalReleaseUnavailable())
+        check_never_current_without_a_real_answer(status, answer_was_usable=False)
+        self.assertEqual(len(tagged_calls), 1)
 
     @settings(deadline=None)
     @given(
@@ -226,6 +364,15 @@ class TestResolverProperties(unittest.TestCase):
         self.assertIsNone(answer)
         check_no_fetch_attempted(calls)
 
+        tagged_fetch, tagged_calls = _recording_fetch(
+            {"payload": {"id": SURVIVOR}, "redirected": True},
+        )
+        status = canonical_release_status(
+            release_id, ws2_base=BASE, fetch=tagged_fetch,
+        )
+        self.assertEqual(status, CanonicalReleaseUnavailable())
+        check_no_fetch_attempted(tagged_calls)
+
     @settings(deadline=None)
     @given(base=st.sampled_from(["", "   ", "/", None]))
     def test_an_unconfigured_process_is_inert(self, base: str | None) -> None:
@@ -239,6 +386,15 @@ class TestResolverProperties(unittest.TestCase):
 
         self.assertIsNone(answer)
         check_no_fetch_attempted(calls)
+
+        tagged_fetch, tagged_calls = _recording_fetch(
+            {"payload": {"id": SURVIVOR}, "redirected": True},
+        )
+        status = canonical_release_status(
+            STORED, ws2_base=base or "", fetch=tagged_fetch,
+        )
+        self.assertEqual(status, CanonicalReleaseUnavailable())
+        check_no_fetch_attempted(tagged_calls)
 
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
@@ -276,6 +432,63 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         check_never_the_requested_id(SURVIVOR, STORED)
         check_answer_is_a_musicbrainz_id(SURVIVOR)
         check_no_fetch_attempted([])
+        check_tagged_status_agrees_with_collapsed_answer(
+            CanonicalReleaseRedirected(SURVIVOR), SURVIVOR,
+        )
+        check_tagged_status_agrees_with_collapsed_answer(
+            CanonicalReleaseCurrent(), None,
+        )
+        check_tagged_status_agrees_with_collapsed_answer(
+            CanonicalReleaseUnavailable(), None,
+        )
+        check_never_current_without_a_real_answer(
+            CanonicalReleaseUnavailable(), answer_was_usable=False,
+        )
+        check_never_current_without_a_real_answer(
+            CanonicalReleaseCurrent(), answer_was_usable=True,
+        )
+        self.assertTrue(envelope_could_legitimately_be_current(
+            {"payload": {"id": SURVIVOR}, "redirected": False},
+        ))
+        self.assertFalse(envelope_could_legitimately_be_current(
+            {"payload": {"id": "not-a-uuid"}, "redirected": True},
+        ))
+
+    def test_a_redirected_status_disagreeing_with_the_answer_is_rejected(
+        self,
+    ) -> None:
+        with self.assertRaises(AssertionError):
+            check_tagged_status_agrees_with_collapsed_answer(
+                CanonicalReleaseRedirected(SURVIVOR), STORED,
+            )
+
+    def test_a_collapsed_answer_with_no_redirected_status_is_rejected(
+        self,
+    ) -> None:
+        with self.assertRaises(AssertionError):
+            check_tagged_status_agrees_with_collapsed_answer(
+                CanonicalReleaseCurrent(), SURVIVOR,
+            )
+
+    def test_a_raised_fetch_classified_as_current_is_rejected(self) -> None:
+        """R7 (#1089) — the exact shipped bug, reverted and re-caught: an
+        earlier implementation returned ``CanonicalReleaseCurrent`` for a
+        redirect whose body named no usable MusicBrainz id."""
+        with self.assertRaises(AssertionError):
+            check_never_current_without_a_real_answer(
+                CanonicalReleaseCurrent(), answer_was_usable=False,
+            )
+
+    def test_an_unusable_top_level_shape_is_never_legitimately_current(
+        self,
+    ) -> None:
+        """#1089 MINOR-1 — the malformed shapes the reviewer probed."""
+        for envelope in (None, [], "a bare string", {},
+                         {"payload": {"id": SURVIVOR}}):
+            with self.subTest(envelope=envelope):
+                self.assertFalse(
+                    envelope_could_legitimately_be_current(envelope),
+                )
 
 
 if __name__ == "__main__":

@@ -114,7 +114,7 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
     }
     DISK_COVERAGE_ROW_FIELDS: ClassVar = {
         "id", "status", "artist_name", "album_title", "mb_release_id",
-        "discogs_release_id",
+        "discogs_release_id", "source",
     }
 
     def setUp(self) -> None:

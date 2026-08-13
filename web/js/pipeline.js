@@ -155,6 +155,58 @@ export async function loadPipelineDashboard() {
 }
 
 /**
+ * Operator action (#1089): rekey an `imported` request's ledger onto the
+ * MusicBrainz merge survivor Beets already holds. Called from the Disk
+ * Coverage drift panel's "Follow MB merge" button
+ * (`pipeline_dashboard.js::renderDriftRow`). Request-ledger-only — never
+ * mutates Beets.
+ *
+ * On success (`outcome: "rekeyed"`) the whole dashboard reloads, so the row
+ * disappears once the request is no longer off-disk. On refusal the row's
+ * own inline note shows the outcome and message (never just a toast, which
+ * an operator working through several drift rows could miss) and the
+ * button re-arms for retry.
+ *
+ * @param {number} requestId
+ * @param {HTMLButtonElement} btn
+ * @returns {Promise<void>}
+ */
+export async function mergeRekeyRequest(requestId, btn) {
+  const note = document.getElementById(`drift-note-${requestId}`);
+  btn.disabled = true;
+  btn.textContent = 'Rekeying...';
+  try {
+    const r = await fetch(`${API}/api/pipeline/${requestId}/merge-rekey`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: '{}',
+    });
+    const data = await r.json();
+    if (r.ok && data.outcome === 'rekeyed') {
+      toast(`Request #${requestId} rekeyed to ${data.new_release_id}`);
+      void loadPipelineDashboard();
+      return;
+    }
+    btn.disabled = false;
+    btn.textContent = 'Follow MB merge';
+    const message = `${data.outcome || 'refused'}: ${data.error_message || data.error || 'merge rekey refused'}`;
+    if (note) {
+      note.textContent = message;
+      note.className = 'drift-row-note metric-bad';
+    }
+    toast(message, true);
+  } catch (_e) {
+    btn.disabled = false;
+    btn.textContent = 'Follow MB merge';
+    if (note) {
+      note.textContent = 'Merge-rekey request failed';
+      note.className = 'drift-row-note metric-bad';
+    }
+    toast('Merge-rekey request failed', true);
+  }
+}
+
+/**
  * Render the pipeline view from cached data.
  *
  * Dispatches on `state.pipelineView`:

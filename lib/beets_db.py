@@ -163,6 +163,16 @@ def beets_authority_availability_category(exc: Exception) -> str | None:
     return f"sqlite_{primary_code}"
 
 
+#: Shared operator-facing message for every caller that classifies a Beets
+#: authority failure via :func:`beets_authority_availability_category` and
+#: takes the retryable-503 lane — ``web/routes/pipeline.py`` (the original
+#: site) and ``lib/merge_rekey_service.py`` (#1089). One canonical string so
+#: the two never drift apart (CLAUDE.md's "No Parallel Code Paths").
+BEETS_AUTHORITY_UNAVAILABLE_MESSAGE = (
+    "Current Beets authority is unavailable; retry later."
+)
+
+
 def _raise_conflicting_release_identities(
     resolutions: dict[ReleaseIdentity, CurrentBeetsResolution],
 ) -> None:

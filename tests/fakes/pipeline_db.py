@@ -540,9 +540,10 @@ class FakePipelineDB:
         self.update_request_fields_calls: list[tuple[int, dict[str, Any]]] = []
         # The MusicBrainz merge rekey (#1059) — (request_id, old, new, job).
         # Recorded so ordering tests can prove the row never moves before the
-        # library retag reached a ready outcome.
+        # library retag reached a ready outcome. ``job`` is ``None`` for the
+        # operator merge-rekey arm (#1089), which holds no import claim.
         self.update_request_release_for_merge_calls: list[
-            tuple[int, str, str, int]] = []
+            tuple[int, str, str, int | None]] = []
         # U13 unfindable detection writers. The R20 runtime guard
         # asserts these recorders fire while the cursor-mutation
         # recorders (``record_consumed_search_attempt_calls``,
@@ -5538,16 +5539,20 @@ class FakePipelineDB:
         *,
         old_release_id: str,
         new_release_id: str,
-        expected_import_job_id: int,
+        expected_import_job_id: int | None,
     ) -> bool:
-        """Mirror ``PipelineDB.update_request_release_for_merge`` (#1059).
+        """Mirror ``PipelineDB.update_request_release_for_merge`` (#1059, #1089).
 
         Same predicates as production's compare-and-set: the row still holds
         ``old_release_id``, and the caller still holds the import claim that
-        authorizes an identity write — either the automation owner pointer
-        (``processing`` + ``active_automation_import_job_id``) or a
+        authorizes an identity write — the automation owner pointer
+        (``processing`` + ``active_automation_import_job_id``), a
         ``running`` ``force_import`` job on an unowned, non-``replaced`` row
-        (#1080). A survivor already held by another request is production's
+        (#1080), or the operator arm (#1089): ``expected_import_job_id is
+        None``, ``status == 'imported'``, no automation owner, and no
+        ``queued``/``running`` import job at all for this request — a real
+        job id supplied by either claim arm NEVER satisfies this one. A
+        survivor already held by another request is production's
         ``UNIQUE(mb_release_id)`` violation, which this write reports as False
         rather than raising.
 
@@ -5573,9 +5578,18 @@ class FakePipelineDB:
         row = self._requests.get(request_id)
         if row is None or row.get("mb_release_id") != old_release_id:
             return False
-        job = self.get_import_job(expected_import_job_id)
+        job = (
+            self.get_import_job(expected_import_job_id)
+            if expected_import_job_id is not None else None
+        )
         automation_claim = (
-            row.get("status") == "processing"
+            # Mirrors SQL's three-valued ``column = NULL`` — NEVER true, even
+            # when the column itself is also NULL — which Python's ``==``
+            # does not: without this guard ``None == None`` admits a
+            # ``processing`` + unowned row whenever a caller (only the
+            # operator arm, #1089) passes no job id at all.
+            expected_import_job_id is not None
+            and row.get("status") == "processing"
             and row.get("active_automation_import_job_id")
             == expected_import_job_id
         )
@@ -5587,7 +5601,17 @@ class FakePipelineDB:
             and row.get("active_automation_import_job_id") is None
             and row.get("status") not in ("processing", "replaced")
         )
-        if not (automation_claim or force_claim):
+        operator_claim = (
+            expected_import_job_id is None
+            and row.get("status") == "imported"
+            and row.get("active_automation_import_job_id") is None
+            and not any(
+                candidate.get("request_id") == request_id
+                and candidate.get("status") in ("queued", "running")
+                for candidate in self._import_jobs
+            )
+        )
+        if not (automation_claim or force_claim or operator_claim):
             return False
         for other_id, other in self._requests.items():
             if other_id != request_id and other.get("mb_release_id") == new_release_id:

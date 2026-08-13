@@ -11,10 +11,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 import unittest
 
 from lib.quality import AlbumQualityEvidenceFile
 from lib.quality_evidence import (
+    SnapshotAudioFilesError,
+    fingerprint_album_path,
+    snapshot_audio_files,
     snapshot_fingerprint,
 )
 
@@ -143,6 +148,50 @@ class TestSnapshotFingerprintFormula(unittest.TestCase):
 
         expected = hashlib.sha256(b"[]").hexdigest()
         self.assertEqual(snapshot_fingerprint([]), expected)
+
+
+class TestFingerprintAlbumPath(unittest.TestCase):
+    """#1089 NOTE-H / NOTE-I (review round 3): the ONE canonical
+    ``snapshot_audio_files`` + ``snapshot_fingerprint`` composition, shared
+    by ``lib.world_audit_service`` and ``lib.merge_rekey_service`` — never a
+    second, textually-duplicated formula."""
+
+    def test_matches_the_manual_composition_for_a_real_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = os.path.join(tmp_dir, "01 Track.flac")
+            with open(path, "wb") as handle:
+                handle.write(b"\x00" * 128)
+
+            self.assertEqual(
+                fingerprint_album_path(tmp_dir),
+                snapshot_fingerprint(snapshot_audio_files(tmp_dir)),
+            )
+
+    def test_a_genuinely_empty_directory_is_none_not_the_empty_digest(
+        self,
+    ) -> None:
+        """#1089 NOTE-I: an installed album with zero audio files is not a
+        witnessable survivor — never the well-defined empty-list digest
+        ``snapshot_fingerprint([])`` itself deliberately returns."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            self.assertIsNone(fingerprint_album_path(tmp_dir))
+            self.assertNotEqual(fingerprint_album_path(tmp_dir), snapshot_fingerprint([]))
+
+    def test_a_vanished_directory_is_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            missing = os.path.join(tmp_dir, "does-not-exist")
+            self.assertIsNone(fingerprint_album_path(missing))
+
+    def test_a_genuine_stat_failure_still_raises(self) -> None:
+        """Uncomputable-by-error stays distinct from uncomputable-by-empty
+        — a caller needs to tell "nothing here" from "couldn't look"."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            os.symlink(
+                os.path.join(tmp_dir, "does-not-exist.flac"),
+                os.path.join(tmp_dir, "01 Track.flac"),
+            )
+            with self.assertRaises(SnapshotAudioFilesError):
+                fingerprint_album_path(tmp_dir)
 
 
 if __name__ == "__main__":

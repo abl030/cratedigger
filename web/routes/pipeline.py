@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import msgspec
 
 from lib.beets_db import (
+    BEETS_AUTHORITY_UNAVAILABLE_MESSAGE,
     CurrentBeetsUnique,
     beets_authority_availability_category,
     exact_release_identity_matches,
@@ -52,9 +53,10 @@ from web.download_history_view import (
 
 DEFAULT_PIPELINE_LOG_LIMIT = 50
 MAX_PIPELINE_LOG_LIMIT = 500
-CURRENT_BEETS_UNAVAILABLE_MESSAGE = (
-    "Current Beets authority is unavailable; retry later."
-)
+#: Re-exported for existing callers/tests of this module; the canonical
+#: definition lives in ``lib.beets_db`` (#1089) so ``lib/merge_rekey_service.py``
+#: shares the exact same string instead of a parallel copy.
+CURRENT_BEETS_UNAVAILABLE_MESSAGE = BEETS_AUTHORITY_UNAVAILABLE_MESSAGE
 
 
 def _pipeline_log_limit(params: dict[str, list[str]]) -> int:

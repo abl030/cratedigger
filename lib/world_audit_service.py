@@ -19,7 +19,7 @@ from lib.beets_db import (
     beets_authority_availability_category,
 )
 from lib.quality import AlbumQualityEvidence
-from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
+from lib.quality_evidence import fingerprint_album_path
 from lib.release_identity import ReleaseIdentity
 from lib.world_invariants import (
     DenylistAuthoritySnapshot,
@@ -172,10 +172,6 @@ def _current_evidence_id(row: Mapping[str, Any]) -> int | None:
     return int(raw) if isinstance(raw, int) else None
 
 
-def _fingerprint(album_path: str) -> str:
-    return snapshot_fingerprint(snapshot_audio_files(album_path))
-
-
 def _sorted_violations(
     violations: Sequence[WorldViolation],
 ) -> tuple[WorldViolation, ...]:
@@ -297,7 +293,7 @@ def audit_world(
     memberships: list[RequestMembershipSnapshot] = []
     evidence_snapshots: list[EvidenceDiskSnapshot] = []
     fingerprint_failures: set[int] = set()
-    fingerprint_cache: dict[int, str] = {}
+    fingerprint_cache: dict[int, str | None] = {}
     linked_evidence_count = 0
     identified_requests: list[tuple[Mapping[str, Any], int, ReleaseIdentity]] = []
 
@@ -344,9 +340,25 @@ def audit_world(
         actual_fingerprint: str | None = None
         if current is not None:
             try:
-                actual_fingerprint = fingerprint_cache.get(current.album_id)
-                if actual_fingerprint is None:
-                    actual_fingerprint = _fingerprint(current.album_path)
+                # #1089 NOTE-H (review round 3): fingerprint_album_path can
+                # legitimately return None (a vanished/empty album), so a
+                # cache keyed on "value is None means uncached" would
+                # recompute that album's walk on every hit instead of
+                # caching the negative result. Membership, not value,
+                # decides cache presence. This is not ONLY a caching fix:
+                # it also makes one edge stricter than before — an
+                # evidence row whose recorded snapshot_fingerprint happens
+                # to equal the empty-list digest, checked against a now-
+                # empty album, used to read as coherent (both sides the
+                # same digest string) and now reports
+                # evidence_fingerprint_mismatch (a real string vs None),
+                # which is the correct call: the album is actually gone.
+                if current.album_id in fingerprint_cache:
+                    actual_fingerprint = fingerprint_cache[current.album_id]
+                else:
+                    actual_fingerprint = fingerprint_album_path(
+                        current.album_path,
+                    )
                     fingerprint_cache[current.album_id] = actual_fingerprint
             except OSError as exc:
                 fingerprint_failures.add(request_id)

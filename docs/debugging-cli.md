@@ -23,7 +23,7 @@ ssh doc2 'pipeline-cli routes --json'
 The installed wrapper has two independent authority shapes:
 
 - `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
-  `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
+  `merge-rekey`, `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
   `wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
   `force-import`, `beets-distance`,
   `import-preview --download-log-id`, and `triage quarantine` connect to
@@ -138,7 +138,7 @@ remains after a purge failure.
 ## API-backed mutation commands
 
 `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
-`resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
+`merge-rekey`, `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
 `wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
 `force-import`, `beets-distance`, and
 `import-preview --download-log-id` call the canonical web route over the
@@ -302,6 +302,39 @@ inside socket authorization, never credentials.
   conflicts emit the shared typed error and exit 4; expected Beets authority
   unavailability emits the retryable typed error and exits 5. Neither condition
   is rendered as an actionable Missing cohort.
+- `pipeline-cli merge-rekey` — Rekey an imported request onto the MusicBrainz
+  merge survivor Beets already holds, through its canonical web route.
+  Request-ledger-only; never mutates Beets. Refuses `not_merged` (422) when
+  MusicBrainz ANSWERED and names no redirect for the stored id (e.g. request
+  #8792, Slipknot Vol. 3 — two current albums, no merge) — distinct from
+  `mirror_unavailable` (503), which means no answer was obtained at all
+  (unconfigured, or the mirror is unreachable); a down mirror is never read
+  as MusicBrainz confirming the request was never merged.
+  `library_not_at_survivor` (409) unless Beets resolves exactly one album at
+  the survivor first, and `library_still_at_stored` (409) unless Beets
+  resolves NOTHING at the merged-away id — "the survivor is occupied" alone
+  does not witness the library actually moved, nor that the album occupying
+  it is this request's own: the survivor adoption must be witnessed against
+  the request's linked current evidence, or the request refuses
+  `evidence_fingerprint_mismatch` (409) — no linked evidence at all, a
+  linked evidence row that no longer exists, unreadable survivor files, a
+  survivor album that walked cleanly but has zero audio files (vanished or
+  genuinely empty — not witnessable), or a freshly computed content
+  fingerprint that genuinely does not match all produce this outcome; an
+  unrelated, pipeline-untracked album can otherwise sit at the merged MBID
+  and the merge-rekey action would transplant this request's proof onto
+  bytes nobody measured for it, so the operator decides in every case.
+  `survivor_collision` (409)
+  when a rival request or a colliding evidence fingerprint already occupies
+  the survivor (an operator must resolve it directly — retrying cannot
+  help); `rekey_refused` (409) covers the write's own refusal, with two
+  differently-worded causes (#1089 MINOR-4, review round 2): a
+  PRE-EXISTING queued/running import job — the most ordinary cause, where
+  nothing raced and the message says wait for it to finish rather than
+  retry — or a genuine race (the request's own status/owner/identity
+  changed concurrently, or a rival took the survivor in the same instant),
+  where the message says retry. `beets_unavailable` (503) is a classified
+  Beets SQLite authority failure.
 - `pipeline-cli pipeline-delete` — Delete a pipeline request through its canonical web route.
 - `pipeline-cli quality` — Simulate quality decisions and replay current candidate evidence.
 - `pipeline-cli query` — Run one read-only SQL statement, or the explicit write escape hatch.

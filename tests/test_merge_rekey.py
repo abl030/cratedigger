@@ -1446,12 +1446,15 @@ class TestCanonicalLookupStartupWiring(unittest.TestCase):
 
     It would report "no redirect" forever with no error anywhere, so the
     wiring owes a test of both halves: that the helper really configures the
-    operator's mirror, and that the importer's ``main`` really calls it. The
-    importer is the ONE process that reaches the merge seam — the main loop
-    enqueues automation jobs and this worker drains them
-    (``lib.download.poll_active_downloads`` →
+    operator's mirror, and that EACH process reaching a merge seam really
+    calls it. Two processes reach one (#1059's importer sweep — the main loop
+    enqueues automation jobs and ``scripts.importer`` drains them via
+    ``lib.download.poll_active_downloads`` →
     ``scripts.importer.execute_automation_import_job`` →
-    ``lib.download._run_completed_processing``).
+    ``lib.download._run_completed_processing``) — and, since #1089, the web
+    server's operator merge-rekey route via ``MergeRekeyService``. The
+    wiring helper itself now lives in ``lib.mb_canonical`` (moved out of
+    ``scripts.importer`` in #1089), shared so the two callers cannot drift.
     """
 
     def setUp(self) -> None:
@@ -1470,8 +1473,10 @@ class TestCanonicalLookupStartupWiring(unittest.TestCase):
         )
 
     def test_a_configured_mirror_becomes_the_ws2_base(self) -> None:
-        from lib.mb_canonical import configured_canonical_base
-        from scripts.importer import configure_canonical_release_lookup
+        from lib.mb_canonical import (
+            configure_canonical_release_lookup,
+            configured_canonical_base,
+        )
 
         configure_canonical_release_lookup(self._cfg("http://192.168.1.43:5000"))
 
@@ -1482,13 +1487,13 @@ class TestCanonicalLookupStartupWiring(unittest.TestCase):
     def test_a_blank_mirror_leaves_resolution_inert_and_warns(self) -> None:
         from lib.mb_canonical import (
             configure_canonical_base,
+            configure_canonical_release_lookup,
             configured_canonical_base,
         )
-        from scripts.importer import configure_canonical_release_lookup
 
         configure_canonical_base("http://stale/ws/2")
 
-        with self.assertLogs("cratedigger-importer", level="WARNING") as logs:
+        with self.assertLogs("cratedigger", level="WARNING") as logs:
             configure_canonical_release_lookup(self._cfg("   "))
 
         self.assertIsNone(configured_canonical_base())
@@ -1509,6 +1514,21 @@ class TestCanonicalLookupStartupWiring(unittest.TestCase):
 
         self.assertEqual(_startup_wiring_calls(planted), [])
 
+    def test_the_web_server_entrypoint_actually_wires_it(self) -> None:
+        """The second caller (#1089): would fail if dropped from web ``main``."""
+        self.assertEqual(
+            _startup_wiring_calls(_web_server_source()),
+            ["configure_canonical_release_lookup"],
+        )
+
+    def test_a_web_main_without_the_wiring_call_is_detected(self) -> None:
+        """Known-bad self-test for the web-server half of the wiring check."""
+        planted = _web_server_source().replace(
+            "    configure_canonical_release_lookup(admitted_config)\n", "", 1,
+        )
+
+        self.assertEqual(_startup_wiring_calls(planted), [])
+
 
 def _importer_source() -> str:
     import scripts.importer
@@ -1518,11 +1538,20 @@ def _importer_source() -> str:
         return handle.read()
 
 
+def _web_server_source() -> str:
+    import web.server
+
+    assert web.server.__file__ is not None
+    with open(web.server.__file__, encoding="utf-8") as handle:
+        return handle.read()
+
+
 def _startup_wiring_calls(source: str) -> list[str]:
-    """Names called directly from ``scripts/importer.py::main``'s own body.
+    """Names called directly from a module-level ``main``'s own body.
 
     A deliberately bounded syntactic check over ONE named function, not a
-    semantic scanner: it answers "does ``main`` call this" and nothing else.
+    semantic scanner: it answers "does ``main`` call
+    ``configure_canonical_release_lookup``" and nothing else.
     """
     import ast
 

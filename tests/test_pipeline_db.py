@@ -42,6 +42,8 @@ from lib.import_queue import (
     ImportJob,
     force_import_payload,
 )
+from lib.mb_canonical import CanonicalReleaseRedirected
+from lib.merge_rekey_service import RESULT_REKEYED, MergeRekeyService
 from lib.pipeline_db import (
     JELLYFIN_PIN_STATUSES,
     PLEX_PIN_STATUSES,
@@ -64,7 +66,7 @@ from lib.quality import (
     VerifiedLosslessProof,
     legacy_unrecorded_audio_validation_report,
 )
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
@@ -17636,6 +17638,457 @@ class TestMergeRekeyUnderAForceClaim(unittest.TestCase):
         assert still is not None
         self.assertEqual(still["mb_release_id"], frozen_release_id)
         self.assertEqual(still["status"], "replaced")
+
+
+@requires_postgres
+class TestMergeRekeyUnderOperatorClaim(unittest.TestCase):
+    """The operator arm of the merge-rekey fence, in real PostgreSQL (#1089).
+
+    The operator button never holds an import claim — it acts directly on an
+    ``imported`` row nothing else currently owns. Every refusal world here
+    writes NOTHING to either the request row or its evidence (Rule A: both
+    are asserted, not just the boolean return).
+
+    Authority: "really we need to re-key mbid and beets don't we so they go
+    away. we could surface these here and have a button which re-keys with
+    the current machinery we've built couldn't we?" —
+    https://github.com/abl030/cratedigger/issues/1089#issuecomment-5274933957
+    """
+
+    MERGED = "6b209cc5-62b0-4ef7-9336-c2dbd876301a"
+    SURVIVOR = "9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4"
+
+    def setUp(self) -> None:
+        self.db = make_db()
+        self.addCleanup(self.db.close)
+        self.request_id = self.db.add_request(
+            mb_release_id=self.MERGED,
+            artist_name="DICE",
+            album_title="Midnight Zoo",
+            source="request",
+            status="imported",
+        )
+
+    def _stored_release_id(self) -> str | None:
+        row = self.db.get_request(self.request_id)
+        assert row is not None
+        value = row["mb_release_id"]
+        return None if value is None else str(value)
+
+    def _rekey(self, *, expected_import_job_id: int | None = None) -> bool:
+        return self.db.update_request_release_for_merge(
+            self.request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=expected_import_job_id,
+        )
+
+    def _evidence_release_id(self, evidence_id: int) -> str | None:
+        cur = self.db._execute(
+            "SELECT mb_release_id FROM album_quality_evidence WHERE id = %s",
+            (evidence_id,),
+        )
+        row = cur.fetchone()
+        return None if row is None else str(row["mb_release_id"])
+
+    def _seed_evidence(self, release_id: str) -> int:
+        evidence = make_album_quality_evidence(
+            mb_release_id=release_id,
+            source_path=f"/library/{release_id}",
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01 Installed.flac",
+                size_bytes=4242,
+                mtime_ns=1_700_000_000_000_000_000,
+                extension="flac",
+                container="flac",
+                codec="flac",
+            )],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=900,
+                avg_bitrate_kbps=950,
+                median_bitrate_kbps=940,
+                format="FLAC",
+            ),
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        return stored.id
+
+    def _queue_force_job(self) -> int:
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.request_id,
+            dedupe_key=f"force-{self.request_id}",
+            payload=force_import_payload(
+                download_log_id=1, failed_path="/quarantine/dice",
+            ),
+        )
+        return job.id
+
+    def test_the_operator_arm_rekeys_an_imported_unowned_unclaimed_request(
+        self,
+    ) -> None:
+        self.assertTrue(self._rekey())
+
+        row = self.db.get_request(self.request_id)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.SURVIVOR)
+        self.assertEqual(row["status"], "imported")
+        self.assertIsNone(row["active_automation_import_job_id"])
+        cur = self.db._execute(
+            "SELECT mb_release_id FROM album_requests WHERE id = %s",
+            (self.request_id,),
+        )
+        stored = cur.fetchone()
+        assert stored is not None
+        self.assertEqual(stored["mb_release_id"], self.SURVIVOR)
+
+    def test_the_operator_arm_moves_evidence_with_the_request(self) -> None:
+        moving_id = self._seed_evidence(self.MERGED)
+
+        self.assertTrue(self._rekey())
+
+        self.assertEqual(self._evidence_release_id(moving_id), self.SURVIVOR)
+
+    def test_the_full_service_witness_pass_composes_with_the_real_move(
+        self,
+    ) -> None:
+        """#1089 MINOR-F (review round 3): the deterministic/generated
+        ``tests.test_merge_rekey_service`` suites cover this composition
+        against ``FakePipelineDB``; this is the REAL-PostgreSQL leg —
+        driving the actual ``MergeRekeyService.rekey_request`` (mandatory
+        witness, #1089 MAJOR-C, included) against this class's real ``db``,
+        with a real on-disk survivor album whose bytes match the request's
+        linked current evidence exactly. Proves the witness-pass path and
+        the row+evidence move compose against real PostgreSQL, not only the
+        fake.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            real_path = os.path.join(tmp_dir, "01 Track.flac")
+            with open(real_path, "wb") as handle:
+                handle.write(b"\x00" * 4242)
+            evidence = make_album_quality_evidence(
+                mb_release_id=self.MERGED,
+                source_path=tmp_dir,
+                files=[AlbumQualityEvidenceFile(
+                    relative_path="01 Track.flac",
+                    size_bytes=4242,
+                    mtime_ns=1_700_000_000_000_000_000,
+                    extension="flac",
+                    container="flac",
+                    codec="flac",
+                )],
+            )
+            self.db.upsert_album_quality_evidence(evidence)
+            stored = self.db.find_album_quality_evidence(
+                mb_release_id=self.MERGED,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            self.assertTrue(
+                self.db.set_request_current_evidence(
+                    self.request_id, stored.id,
+                ),
+            )
+
+            beets = FakeBeetsDB()
+            beets.set_album_ids_for_release(self.SURVIVOR, [19345])
+            beets.set_item_paths(self.SURVIVOR, [(19345, real_path)])
+            service = MergeRekeyService(
+                self.db,
+                beets,
+                canonical_release_fn=(
+                    lambda _release_id: CanonicalReleaseRedirected(
+                        self.SURVIVOR,
+                    )
+                ),
+            )
+
+            result = service.rekey_request(self.request_id)
+
+            self.assertEqual(result.outcome, RESULT_REKEYED)
+            self.assertEqual(self._stored_release_id(), self.SURVIVOR)
+            self.assertEqual(
+                self._evidence_release_id(stored.id), self.SURVIVOR,
+            )
+
+    def test_a_non_imported_status_refuses_and_writes_nothing(self) -> None:
+        for status in ("wanted", "downloading", "unsearchable"):
+            with self.subTest(status=status):
+                db = make_db()
+                self.addCleanup(db.close)
+                request_id = db.add_request(
+                    mb_release_id=self.MERGED,
+                    artist_name="DICE",
+                    album_title="Midnight Zoo",
+                    source="request",
+                    status=status,
+                )
+                evidence_id = self._seed_evidence_for(db, self.MERGED)
+
+                self.assertFalse(db.update_request_release_for_merge(
+                    request_id,
+                    old_release_id=self.MERGED,
+                    new_release_id=self.SURVIVOR,
+                    expected_import_job_id=None,
+                ))
+
+                row = db.get_request(request_id)
+                assert row is not None
+                self.assertEqual(row["mb_release_id"], self.MERGED)
+                self.assertEqual(
+                    self._evidence_release_id_for(db, evidence_id),
+                    self.MERGED,
+                )
+
+    def test_a_processing_status_refuses_and_writes_nothing(self) -> None:
+        """#1089 MINOR-7: the contract names ``processing`` explicitly as a
+        status the operator arm must refuse. A real owning automation job is
+        required — migration 066's owner-equivalence CHECK forbids a
+        ``processing`` row with no attached job, so a fake status string
+        alone would not be reachable in real PostgreSQL."""
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = db.add_request(
+            mb_release_id=self.MERGED,
+            artist_name="DICE",
+            album_title="Midnight Zoo (processing)",
+            source="request",
+        )
+        enqueued = "2026-08-13T00:00:00+00:00"
+        self.assertTrue(db.set_downloading(
+            request_id,
+            json.dumps({
+                "filetype": "flac",
+                "enqueued_at": enqueued,
+                "last_progress_at": enqueued,
+                "files": [],
+            }),
+            expected_status="wanted",
+        ))
+        handoff = db.handoff_automation_import(
+            request_id=request_id,
+            expected_enqueued_at=enqueued,
+            canonical_path="/processing/albums/dice-midnight-zoo",
+            message="MINOR-7 processing fixture",
+        )
+        self.assertTrue(handoff.committed)
+        evidence_id = self._seed_evidence_for(db, self.MERGED)
+
+        self.assertFalse(db.update_request_release_for_merge(
+            request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=None,
+        ))
+
+        row = db.get_request(request_id)
+        assert row is not None
+        self.assertEqual(row["status"], "processing")
+        self.assertEqual(row["mb_release_id"], self.MERGED)
+        self.assertEqual(
+            self._evidence_release_id_for(db, evidence_id), self.MERGED,
+        )
+
+    def test_a_replaced_status_refuses_and_writes_nothing(self) -> None:
+        """#1089 MINOR-7: the contract names ``replaced`` explicitly — a
+        frozen audit ancestor is never rekeyed, even though its
+        ``mb_release_id`` is otherwise untouched by supersession."""
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = db.add_request(
+            mb_release_id=self.MERGED,
+            artist_name="DICE",
+            album_title="Midnight Zoo (replaced)",
+            source="request",
+        )
+        evidence_id = self._seed_evidence_for(db, self.MERGED)
+        db.supersede_request_mbid(
+            request_id,
+            new_mb_release_id="d0000000-0000-0000-0000-000000000001",
+            new_mb_release_group_id=None,
+            new_mb_artist_id=None,
+            new_artist_name="DICE",
+            new_album_title="Midnight Zoo (successor pressing)",
+            new_year=None,
+            new_country=None,
+            new_tracks=[],
+        )
+
+        self.assertFalse(db.update_request_release_for_merge(
+            request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=None,
+        ))
+
+        row = db.get_request(request_id)
+        assert row is not None
+        self.assertEqual(row["status"], "replaced")
+        self.assertEqual(row["mb_release_id"], self.MERGED)
+        self.assertEqual(
+            self._evidence_release_id_for(db, evidence_id), self.MERGED,
+        )
+
+    def _seed_evidence_for(self, db: "PipelineDB", release_id: str) -> int:
+        evidence = make_album_quality_evidence(
+            mb_release_id=release_id, source_path=f"/library/{release_id}",
+        )
+        db.upsert_album_quality_evidence(evidence)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        return stored.id
+
+    def _evidence_release_id_for(self, db: "PipelineDB", evidence_id: int) -> str | None:
+        cur = db._execute(
+            "SELECT mb_release_id FROM album_quality_evidence WHERE id = %s",
+            (evidence_id,),
+        )
+        row = cur.fetchone()
+        return None if row is None else str(row["mb_release_id"])
+
+    def test_a_queued_job_of_any_type_blocks_the_operator_arm(self) -> None:
+        from lib.import_queue import IMPORT_JOB_YOUTUBE
+
+        for job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_YOUTUBE):
+            with self.subTest(job_type=job_type):
+                db = make_db()
+                self.addCleanup(db.close)
+                request_id = db.add_request(
+                    mb_release_id=self.MERGED,
+                    artist_name="DICE",
+                    album_title=f"Midnight Zoo ({job_type})",
+                    source="request",
+                    status="imported",
+                )
+                if job_type == IMPORT_JOB_FORCE:
+                    db.enqueue_import_job(
+                        IMPORT_JOB_FORCE,
+                        request_id=request_id,
+                        dedupe_key=f"force-{request_id}",
+                        payload=force_import_payload(
+                            download_log_id=1, failed_path="/quarantine/dice",
+                        ),
+                    )
+                else:
+                    from lib.import_queue import youtube_import_payload
+                    db.enqueue_import_job(
+                        IMPORT_JOB_YOUTUBE,
+                        request_id=request_id,
+                        payload=youtube_import_payload(
+                            staged_path="/Incoming/auto-import/dice",
+                            request_id=request_id,
+                            browse_id="MPREb_dice",
+                            download_log_id=9,
+                        ),
+                    )
+
+                self.assertFalse(db.update_request_release_for_merge(
+                    request_id,
+                    old_release_id=self.MERGED,
+                    new_release_id=self.SURVIVOR,
+                    expected_import_job_id=None,
+                ))
+
+                row = db.get_request(request_id)
+                assert row is not None
+                self.assertEqual(row["mb_release_id"], self.MERGED)
+
+    def test_a_running_force_job_blocks_the_operator_arm(self) -> None:
+        job_id = self._queue_force_job()
+        self.assertIsNotNone(self.db.mark_import_job_preview_importable(
+            job_id, preview_result={}, message="ready",
+        ))
+        claimed = self.db.claim_force_import_job_under_lock(
+            job_id, request_id=self.request_id, worker_id="pg-operator-fence-test",
+        )
+        assert claimed is not None and claimed.status == "running"
+
+        self.assertFalse(self._rekey())
+
+        self.assertEqual(self._stored_release_id(), self.MERGED)
+
+    def test_a_terminal_job_on_this_request_never_blocks_the_operator_arm(
+        self,
+    ) -> None:
+        """Must-still-work: a completed job on this request is inert."""
+        job_id = self._queue_force_job()
+        self.assertIsNotNone(self.db.mark_import_job_completed(
+            job_id, result={}, message="done",
+        ))
+
+        self.assertTrue(self._rekey())
+
+        self.assertEqual(self._stored_release_id(), self.SURVIVOR)
+
+    def test_a_real_job_id_never_satisfies_the_operator_arm(self) -> None:
+        """``expected_import_job_id IS NULL`` guards the operator arm.
+
+        A completed job on this request — otherwise no different from the
+        must-still-work world above — must still refuse when the caller
+        supplies its id instead of ``None``: the force arm refuses it (not
+        ``running``) and the operator arm refuses it (not ``NULL``), so
+        NEITHER arm may admit the write.
+        """
+        job_id = self._queue_force_job()
+        self.assertIsNotNone(self.db.mark_import_job_completed(
+            job_id, result={}, message="done",
+        ))
+
+        self.assertFalse(self._rekey(expected_import_job_id=job_id))
+
+        self.assertEqual(self._stored_release_id(), self.MERGED)
+
+    def test_a_stale_identity_refuses_and_writes_nothing(self) -> None:
+        self.assertFalse(self.db.update_request_release_for_merge(
+            self.request_id,
+            old_release_id="00000000-0000-4000-8000-000000000000",
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=None,
+        ))
+
+        self.assertEqual(self._stored_release_id(), self.MERGED)
+
+    def test_a_survivor_another_request_holds_refuses_and_writes_nothing(
+        self,
+    ) -> None:
+        other = self.db.add_request(
+            mb_release_id=self.SURVIVOR,
+            artist_name="DICE",
+            album_title="Midnight Zoo (other pressing)",
+            source="request",
+        )
+        moving_id = self._seed_evidence(self.MERGED)
+
+        self.assertFalse(self._rekey())
+
+        self.assertEqual(self._stored_release_id(), self.MERGED)
+        self.assertEqual(self._evidence_release_id(moving_id), self.MERGED)
+        other_row = self.db.get_request(other)
+        assert other_row is not None
+        self.assertEqual(other_row["mb_release_id"], self.SURVIVOR)
+
+    def test_an_evidence_fingerprint_collision_refuses_and_writes_nothing(
+        self,
+    ) -> None:
+        moving_id = self._seed_evidence(self.MERGED)
+        colliding_id = self._seed_evidence(self.SURVIVOR)
+
+        self.assertFalse(self._rekey())
+
+        self.assertEqual(self._stored_release_id(), self.MERGED)
+        self.assertEqual(self._evidence_release_id(moving_id), self.MERGED)
+        self.assertEqual(self._evidence_release_id(colliding_id), self.SURVIVOR)
 
 
 if __name__ == "__main__":

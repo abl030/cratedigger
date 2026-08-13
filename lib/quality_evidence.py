@@ -651,6 +651,45 @@ def snapshot_fingerprint(files: list[AlbumQualityEvidenceFile]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def fingerprint_album_path(album_path: str) -> str | None:
+    """Fresh-Beets-authority content fingerprint of one album directory, or
+    ``None`` when nothing is there to witness (#1089 NOTE-H / NOTE-I,
+    review round 3).
+
+    The composition of the two primitives above (``snapshot_audio_files`` +
+    ``snapshot_fingerprint``) shared by ``lib.merge_rekey_service`` and
+    ``lib.world_audit_service``, which had two textually-identical copies
+    of the same formula before this extraction (CLAUDE.md's "No Parallel
+    Code Paths"). NOT yet universal: ``lib.sidecar_service`` and
+    ``lib.import_preview`` still re-derive the same two-call sequence
+    independently for their own quality-critical paths — deliberately out
+    of scope for this extraction (#1089 m2, review round 4), tracked as a
+    follow-up consolidation rather than folded in here.
+
+    Deliberately DIFFERENT from ``snapshot_fingerprint([])``'s own
+    contract: that primitive treats the empty list as a well-defined,
+    stable digest (its own docstring — a legitimate answer for a caller
+    that wants to compare "zero files now" against "zero files before").
+    This higher-level function is for a different question — "is this
+    directory currently witnessable at all" — and answers ``None`` for a
+    vanished or genuinely-empty album directory, never the empty-list
+    digest: a linked evidence row whose OWN recorded fingerprint happens to
+    be that exact empty-list digest (a plausible, if degenerate, historical
+    value) must never silently read as "matches" against an album that is
+    actually gone. An installed album with zero audio files is not a
+    witnessable survivor.
+
+    Raises ``SnapshotAudioFilesError`` exactly like
+    ``snapshot_audio_files`` itself for a genuine walk/stat failure — this
+    function does not swallow that; only the "walked cleanly and found
+    nothing" case becomes ``None``.
+    """
+    files = snapshot_audio_files(album_path)
+    if not files:
+        return None
+    return snapshot_fingerprint(files)
+
+
 def _snapshot_match_key(
     file: AlbumQualityEvidenceFile,
 ) -> tuple[str, int, str, str, str | None]:

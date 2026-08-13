@@ -551,11 +551,19 @@ def _api_fixture_slug(path: str) -> str:
 
 def configure_live_db_metadata(config: DevConfig) -> None:
     """Replace process-global mirror origins for one live-db dev session."""
+    from lib.mb_canonical import configure_canonical_base
     from web import discogs, mb
     from web.api_bases import PUBLIC_MB_WS2_BASE
 
-    mb.MB_API_BASE = config.mb_api or PUBLIC_MB_WS2_BASE
+    mb_ws2_base = config.mb_api or PUBLIC_MB_WS2_BASE
+    mb.MB_API_BASE = mb_ws2_base
     discogs.DISCOGS_API_BASE = config.discogs_api
+    # Without this, the dev server's merge-rekey button (#1089) always
+    # answers mirror_unavailable — the module starts inert and looks
+    # healthy either way, per configure_canonical_release_lookup's own
+    # docstring. Wire it exactly like MB_API_BASE above so both live-db and
+    # a second dev server in the same process see the same MB origin.
+    configure_canonical_base(mb_ws2_base)
 
 
 def configure_live_db(

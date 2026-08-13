@@ -15,7 +15,7 @@ mechanical pattern as the ``lib/quality/`` split, issue #477):
     imports.py           force-import / import-jobs / import-job-recovery /
                        import-preview
     api_mutations.py     API-backed pipeline-delete / set-quality / upgrade /
-                         wrong-match-converge / resolve-rg
+                         wrong-match-converge / resolve-rg / merge-rekey
     wrong_match.py       wrong-match-triage / -triage-cancel / -delete /
                        -delete-group
     search_plan.py       search-plan show / regenerate / dry-run /
@@ -73,6 +73,7 @@ from scripts.pipeline_cli.album_requests import (
     tracks_from_mb_release,
 )
 from scripts.pipeline_cli.api_mutations import (
+    cmd_merge_rekey,
     cmd_pipeline_delete,
     cmd_resolve_rg,
     cmd_set_quality,
@@ -145,6 +146,7 @@ __all__ = [
     "cmd_library_delete",
     "cmd_list",
     "cmd_long_tail",
+    "cmd_merge_rekey",
     "cmd_pipeline_delete",
     "cmd_quality",
     "cmd_query",

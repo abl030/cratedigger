@@ -21,6 +21,7 @@ from scripts.pipeline_cli.album_requests import (
     cmd_status,
 )
 from scripts.pipeline_cli.api_mutations import (
+    cmd_merge_rekey,
     cmd_pipeline_delete,
     cmd_resolve_rg,
     cmd_set_quality,
@@ -113,6 +114,7 @@ def main(*, api_socket: str | None = None):
         "upgrade": cmd_upgrade,
         "wrong-match-converge": cmd_wrong_match_converge,
         "resolve-rg": cmd_resolve_rg,
+        "merge-rekey": cmd_merge_rekey,
         "wrong-match-delete": cmd_wrong_match_delete,
         "wrong-match-delete-group": cmd_wrong_match_delete_group,
         "wrong-match-triage": cmd_wrong_match_triage,
