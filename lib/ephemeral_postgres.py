@@ -103,34 +103,49 @@ class EphemeralPostgres:
             "-c synchronous_commit=off",
             # wal_level=minimal cannot start with wal_senders > 0 — nothing
             # here streams, replicates, or does PITR, so replica-level WAL
-            # (the default) buys this cluster nothing. Beyond shrinking
-            # what's retained, minimal also lets Postgres skip WAL entirely
-            # for operations on a relation created or truncated in the SAME
-            # transaction — tests TRUNCATE between runs, so that path is hit
-            # constantly here.
+            # (the default) buys this cluster nothing and minimal drops
+            # some replica-only record content for free. NOT a measured WAL
+            # *volume* win: minimal's well-known same-transaction
+            # create/truncate WAL-skip never triggers here — `PipelineDB`
+            # runs autocommit=True (lib/pipeline_db/_core.py) and the test
+            # helper's TRUNCATE is its own statement, so it commits before
+            # any test writes a row and every later INSERT is a different
+            # transaction. 100% of this PR's measured pg_wal reduction (see
+            # the PR body) is the min/max_wal_size ceiling change below, not
+            # this setting.
             "-c wal_level=minimal",
             "-c max_wal_senders=0",
             # 2MB is the hard-enforced floor with 1MB WAL segments (initdb
             # --wal-segsize=1 below); measured empirically (issue #1131) —
             # postgres refuses to start below it. Pushed to the floor
-            # deliberately: a wider ceiling measured zero wall-time benefit
-            # on a 553-real-DB-test burst (both landed at ~14s) while
-            # costing an extra ~8MB of retained WAL for every doubling, so
-            # there is no knee to stop at short of the floor itself — the
-            # checkpoint churn this forces is CPU work against RAM, not disk
-            # I/O, and this cluster has nothing else to do with that CPU.
+            # deliberately: sweeping the same 553-real-DB-test burst across
+            # 2MB/4MB/8MB/16MB/64MB ceilings measured zero wall-time
+            # difference (all landed within 13.1s-14.9s, no trend) while
+            # post-run pg_wal tracked the ceiling itself roughly 1:1 (~4MB
+            # at 4MB, ~8MB at 8MB, ~16MB at 16MB) — so every doubling costs
+            # real retained WAL and there is no knee to stop at short of the
+            # floor itself. The checkpoint churn this forces is CPU work
+            # against RAM, not disk I/O, and this cluster has nothing else
+            # to do with that CPU.
             "-c min_wal_size=2MB",
             "-c max_wal_size=8MB",
-            # The much smaller max_wal_size above forces frequent
-            # checkpoints; both of these silence the resulting log spam
-            # ("checkpoint starting: wal" and "checkpoints are occurring too
-            # frequently") — that log lives in this same tmpdir on the same
-            # tmpfs, so left on it would claw back a meaningful slice of the
-            # WAL saving over a real worker's lifetime (measured: ~50KB of
-            # spam from ONE 553-test module before these were added, at
-            # zero cost since nothing here reads this cluster's checkpoint
-            # telemetry).
-            "-c checkpoint_warning=0",
+            # checkpoint_warning stays at its default: it is the one in-band
+            # signal that would tell an operator this cluster's own
+            # min_wal_size/max_wal_size ceiling has been pushed too small
+            # for some future heavier workload, and silencing it in the
+            # same commit that ships that tiny ceiling would blind exactly
+            # the diagnostic needed to notice. log_checkpoints=off is kept:
+            # unlike the warning, its "checkpoint starting"/"checkpoint
+            # complete" LOG lines carry no diagnostic value (routine
+            # per-checkpoint telemetry, not a signal anything is wrong), and
+            # the much smaller max_wal_size above makes checkpoints frequent
+            # enough that logging every one is real (if modest) tmpfs-
+            # resident log growth for no offsetting benefit: measured on
+            # ONE 553-test module with checkpoint_warning genuinely live,
+            # log_checkpoints=off keeps pg.log ~17KB above the stock-config
+            # baseline instead of ~50KB (both on) — nowhere near a
+            # "meaningful slice" of the pg_wal saving, as an earlier draft
+            # of this comment overstated, but a real and free reduction.
             "-c log_checkpoints=off",
             # Autovacuum exists to reclaim space and update planner stats
             # over a database's working lifetime. Nothing here has one:

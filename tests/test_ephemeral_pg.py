@@ -13,6 +13,16 @@ from unittest.mock import patch
 import psycopg2
 
 from lib.ephemeral_postgres import EphemeralPostgres, EphemeralPostgresError
+from scripts.run_world_model_burst import IN_PROCESS_JOB_CAP
+
+
+def _server_option_int(options: tuple[str, ...], name: str) -> int:
+    """Read an integer ``-c name=value`` out of ``_server_options``."""
+    prefix = f"-c {name}="
+    for option in options:
+        if option.startswith(prefix):
+            return int(option.removeprefix(prefix))
+    raise AssertionError(f"{name!r} not found in server options: {options!r}")
 
 
 class TestEphemeralPostgresFailures(unittest.TestCase):
@@ -61,15 +71,29 @@ class TestEphemeralPostgresFailures(unittest.TestCase):
 
 
 class TestEphemeralPostgresIsolation(unittest.TestCase):
+    def test_server_options_open_with_the_private_socket_and_local_listener(
+        self,
+    ) -> None:
+        """Issue #1131 review round 2 (F7): split out from the checkpoint
+        pin below — this test's name now matches exactly what it asserts."""
+        pg = EphemeralPostgres()
+        pg._socket_tmpdir = Path("/tmp/cdpg-socket-contract")
+
+        self.assertEqual(
+            pg._server_options[:2],
+            (
+                "-k /tmp/cdpg-socket-contract",
+                "-c listen_addresses=''",
+            ),
+        )
+
     def test_server_options_bound_delayed_relation_unlink_lifetime(self) -> None:
         pg = EphemeralPostgres()
         pg._socket_tmpdir = Path("/tmp/cdpg-checkpoint-contract")
 
         self.assertEqual(
-            pg._server_options[:4],
+            pg._server_options[2:4],
             (
-                "-k /tmp/cdpg-checkpoint-contract",
-                "-c listen_addresses=''",
                 "-c checkpoint_timeout=30s",
                 "-c checkpoint_completion_target=0.1",
             ),
@@ -77,8 +101,8 @@ class TestEphemeralPostgresIsolation(unittest.TestCase):
 
     def test_server_options_include_the_disposable_diet_settings(self) -> None:
         """Issue #1131: argv-pins the RAM/tmpfs trims, split out from the
-        checkpoint/delayed-unlink pin above so each test's name matches what
-        it actually asserts."""
+        socket/checkpoint pins above so each test's name matches what it
+        actually asserts."""
         pg = EphemeralPostgres()
         pg._socket_tmpdir = Path("/tmp/cdpg-diet-contract")
 
@@ -93,12 +117,24 @@ class TestEphemeralPostgresIsolation(unittest.TestCase):
                 "-c max_wal_senders=0",
                 "-c min_wal_size=2MB",
                 "-c max_wal_size=8MB",
-                "-c checkpoint_warning=0",
                 "-c log_checkpoints=off",
                 "-c autovacuum=off",
                 "-c max_connections=50",
             ),
         )
+
+    def test_max_connections_exceeds_the_world_model_burst_job_cap(self) -> None:
+        """Issue #1131 review round 2 (F2): the genuinely load-bearing
+        invariant, pinned statically against the REAL imported
+        `IN_PROCESS_JOB_CAP` — not a hand-copied number — so raising that
+        cap flips this pin without a live cluster, threads, or timing.
+        """
+        pg = EphemeralPostgres()
+        pg._socket_tmpdir = Path("/tmp/cdpg-max-connections-contract")
+
+        max_connections = _server_option_int(pg._server_options, "max_connections")
+
+        self.assertGreater(max_connections, IN_PROCESS_JOB_CAP)
 
     def test_initdb_args_skip_fsync_and_shrink_wal_segments(self) -> None:
         """Issue #1131: mirrors the `_server_options` seam pin above.
@@ -150,7 +186,6 @@ class TestEphemeralPostgresIsolation(unittest.TestCase):
                     "current_setting('max_wal_senders'), "
                     "current_setting('min_wal_size'), "
                     "current_setting('max_wal_size'), "
-                    "current_setting('checkpoint_warning'), "
                     "current_setting('log_checkpoints'), "
                     "current_setting('autovacuum'), "
                     "current_setting('max_connections')"
@@ -159,7 +194,7 @@ class TestEphemeralPostgresIsolation(unittest.TestCase):
                     cursor.fetchone(),
                     (
                         "16MB", "off", "off", "off", "minimal", "0", "2MB", "8MB",
-                        "0", "off", "off", "50",
+                        "off", "off", "50",
                     ),
                 )
 
@@ -170,6 +205,18 @@ class TestEphemeralPostgresIsolation(unittest.TestCase):
             with psycopg2.connect(pg.dsn) as connection, connection.cursor() as cursor:
                 cursor.execute("SHOW wal_segment_size")
                 self.assertEqual(cursor.fetchone(), ("1MB",))
+
+    def test_live_cluster_keeps_checkpoint_warning_at_its_default(self) -> None:
+        """Issue #1131 review round 2 (F5): checkpoint_warning is
+        deliberately NOT silenced — it is the one in-band signal that would
+        tell an operator this cluster's own min_wal_size/max_wal_size
+        ceiling has been pushed too small for some future workload, and
+        this proves it is genuinely live, not accidentally still 0."""
+        with EphemeralPostgres() as pg:
+            assert pg.dsn is not None
+            with psycopg2.connect(pg.dsn) as connection, connection.cursor() as cursor:
+                cursor.execute("SHOW checkpoint_warning")
+                self.assertEqual(cursor.fetchone(), ("30s",))
 
     def test_long_tmpdir_keeps_socket_path_below_postgres_limit(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as root:
@@ -203,22 +250,32 @@ class TestEphemeralPostgresIsolation(unittest.TestCase):
         self.assertEqual(databases, ("cratedigger_test",) * 4)
 
     def test_admits_more_than_the_world_model_burst_cap_concurrently(self) -> None:
-        """Issue #1131: max_connections must clear more than the canonical
-        suite's own handful of threads.
+        """Issue #1131: end-to-end companion to the static
+        `test_max_connections_exceeds_the_world_model_burst_job_cap` pin
+        above — proves a real cluster actually admits that many real
+        connections, not just that the arithmetic works out.
 
         scripts/run_world_model_burst.py runs ONE coordinator-owned cluster
-        (this same `EphemeralPostgres`) with up to `IN_PROCESS_JOB_CAP` (30)
+        (this same `EphemeralPostgres`) with up to `IN_PROCESS_JOB_CAP`
         concurrent child processes, each holding a connection to its own
         cloned database on that cluster, plus transient createdb/dropdb
-        maintenance connections for every clone create/drop. Deliberately
-        not importing that constant — scripts/run_world_model_burst.py
-        imports this module, so importing it back would be circular — but
-        the number below must stay above it: a too-low max_connections
-        fails closed with "sorry, too many clients already", which a
-        Barrier forces every successful connection to prove did not happen
-        by holding them all open simultaneously before releasing any.
+        maintenance connections for every clone create/drop. The count
+        below is derived from the real imported constant (round 2 review
+        F2: an earlier version hardcoded 32 behind a false "circular
+        import" excuse — scripts/run_world_model_burst.py never imports
+        this test module, so importing it here is safe and
+        tests/test_world_model_coordinator.py already does).
+
+        `barrier.wait` is a deadlock guard, not the assertion (round 2
+        review F4): a genuine per-connection failure calls `barrier.abort()`
+        so every OTHER waiting thread fails fast instead of silently
+        timing out and reporting a `BrokenBarrierError` that looks like a
+        scheduling delay. The timeout itself is generous — this repo's own
+        shared test host is documented to run under real load — so a slow
+        but eventually-successful connection is never mistaken for a
+        rejected one.
         """
-        concurrent_connections = 32  # > IN_PROCESS_JOB_CAP (30) in that script
+        concurrent_connections = IN_PROCESS_JOB_CAP + 2
 
         with EphemeralPostgres() as pg:
             assert pg.dsn is not None
@@ -228,12 +285,13 @@ class TestEphemeralPostgresIsolation(unittest.TestCase):
             def connect_and_hold(_: int) -> None:
                 try:
                     with psycopg2.connect(pg.dsn) as connection:
-                        barrier.wait(timeout=10)
+                        barrier.wait(timeout=60)
                         with connection.cursor() as cursor:
                             cursor.execute("SELECT 1")
                             cursor.fetchone()
                 except BaseException as error:  # noqa: BLE001 - proving admission
                     errors.append(error)
+                    barrier.abort()
 
             with ThreadPoolExecutor(max_workers=concurrent_connections) as executor:
                 list(executor.map(connect_and_hold, range(concurrent_connections)))
