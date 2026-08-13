@@ -123,6 +123,10 @@ def bitrate_derivation_violations(
     Accumulating rather than short-circuiting: each clause is evaluated on
     every world, so an earlier violation can never mask a later one.
     """
+    # Two clauses below are deliberately SUBSUMED rather than independent:
+    # when the ratio is an exact integer, `nearest` equals it, and a negative
+    # `derived` can never equal a non-negative `nearest`. They are kept for
+    # the named diagnosis they produce, not for extra detection power.
     violations: list[str] = []
     degenerate = compressed_bytes <= 0 or sample_count <= 0 or sample_rate <= 0
     if degenerate:

@@ -227,14 +227,21 @@ class TestNeedsSpectralCheckDecisions(unittest.TestCase):
         self.assertFalse(self._run("", False))
 
     def test_vbr_threshold_table(self):
-        """VBR branch: gate only when avg is unknown or < threshold."""
+        """VBR branch: gate when avg is unknown or at/below the threshold."""
         CASES = [
             # (desc, avg_kbps, expected)
             ("avg unknown → gate (conservative)",          None, True),
             ("go_team case — avg 182 < 210 → gate",         182, True),
             ("live issue #93 avg 182kbps transcode",        182, True),
             ("just below threshold — 200 → gate",           200, True),
-            ("at threshold — 210 is NOT below → skip",      210, False),
+            # Inclusive since PR #1144: per-track rates are rounded to the
+            # nearest integer rather than floored, so a true 209.6 album now
+            # reads exactly 210. A strict `<` would silently stop scanning it
+            # in the last kbps before the boundary — where a fake V0 is most
+            # likely to sit. Reading exactly the threshold is "not yet proven
+            # above it". See TestVbrScanThresholdIsInclusive.
+            ("at threshold — 210 is not proven above → gate", 210, True),
+            ("first kbps proven above threshold — 211 → skip", 211, False),
             ("genuine V0 avg ~245 → skip",                  245, False),
             ("genuine V0 avg ~260 → skip",                  260, False),
             ("very low 96kbps → gate",                       96, True),
@@ -1066,3 +1073,45 @@ class TestFallbackSkippedWhenBeetsFindsNoAlbum(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestVbrScanThresholdIsInclusive(unittest.TestCase):
+    """A rounded average must not round an album out of the transcode scan.
+
+    ``average_bitrate_kbps_from_frames`` reports the nearest integer rather
+    than the floor (PR #1144). That lifts a per-track rate by up to one kbps,
+    so an album whose true average sits just under
+    ``cfg.quality_ranks.mp3_vbr.excellent`` can now read exactly the
+    threshold. With a strict ``<`` that album silently stops being scanned —
+    the issue #93 fake-V0 gate losing coverage in the last kbps before the
+    boundary, which is the one place a fake V0 is most likely to sit.
+
+    The threshold is therefore inclusive: reading exactly the threshold is
+    "not yet proven above it", and the conservative action is to scan.
+    """
+
+    THRESHOLD = 210
+
+    def _run(self, avg_kbps: int | None) -> bool:
+        from lib.measurement import _needs_spectral_check
+        return _needs_spectral_check(
+            "mp3", True,
+            lossless_candidate=False,
+            avg_bitrate_kbps=avg_kbps,
+            vbr_threshold_kbps=self.THRESHOLD,
+        )
+
+    def test_album_landing_exactly_on_the_threshold_is_still_scanned(self) -> None:
+        # True per-track rate 209.6: floored to 209 before the rounding fix,
+        # rounded to 210 after it. Both must still be scanned.
+        self.assertTrue(self._run(209), "below threshold must scan")
+        self.assertTrue(self._run(self.THRESHOLD), "exactly at threshold must scan")
+
+    def test_genuinely_above_threshold_still_skips(self) -> None:
+        # Must-still-work guard: a real V0 (~245) is not dragged into the scan.
+        for avg in (self.THRESHOLD + 1, 245, 260):
+            with self.subTest(avg=avg):
+                self.assertFalse(self._run(avg))
+
+    def test_unknown_average_remains_conservative(self) -> None:
+        self.assertTrue(self._run(None))

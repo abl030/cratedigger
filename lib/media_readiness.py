@@ -386,6 +386,19 @@ def _repair_flac_total_samples(path: Path, sample_count: int) -> bool:
         os.close(fd)
 
 
+def kbps_from_bps(bits_per_second: int) -> int:
+    """Nearest-integer kbps for a bit-per-second rate.
+
+    The ONE bps->kbps reduction. Both sides of every quality comparison must
+    round the same way or identical audio compares unequal: the candidate is
+    measured frame-by-frame here, while the installed copy is reduced from
+    Beets' stored per-item rates in ``lib.beets_db``. Flooring one side while
+    rounding the other reintroduces exactly the one-kbps skew that
+    ``average_bitrate_kbps_from_frames`` exists to remove.
+    """
+    return (bits_per_second + 500) // 1000
+
+
 def average_bitrate_kbps_from_frames(
     compressed_bytes: int,
     sample_count: int,
@@ -403,18 +416,27 @@ def average_bitrate_kbps_from_frames(
     path yielded ``255.99999999999997`` and reported 255.
 
     That single kbps is not cosmetic. Per-track bitrate uniformity is what
-    ``is_cbr`` is derived from, one odd track makes a constant-bitrate album
-    look variable, and MP3 then ranks through ``cfg.mp3_vbr``
-    (transparent >= 245) instead of ``cfg.mp3_cbr`` (transparent >= 320) —
-    a two-tier swing on identical audio.
+    the two decision-path ``is_cbr`` derivations read
+    (``harness/import_one.py`` for the candidate, ``lib.beets_db`` for the
+    installed copy; the preview lane instead reads mutagen's declared
+    ``bitrate_mode``). One odd track makes a constant-bitrate album look
+    variable, and MP3 then ranks through ``cfg.mp3_vbr``
+    (transparent >= 245) instead of ``cfg.mp3_cbr`` (transparent >= 320).
+    At 255 kbps that ladder swap alone is GOOD -> TRANSPARENT, two tiers;
+    on the live album it was enough to put the candidate's TRANSPARENT above
+    the installed copy's EXCELLENT and trigger the re-import.
 
     The quotient is therefore evaluated as an exact integer ratio and
     rounded half-up. Rounding rather than truncating is the second half:
     a real stream rarely lands on an exact integer, and flooring biases
-    every such track downward.
+    every such track downward. Half-up rather than banker's rounding is
+    deliberate — it is parity-independent, so a constant stream whose
+    tracks all land on ``x.5`` cannot be split by the tie rule.
 
-    Returns None when any input is non-positive — a rate cannot be derived
-    and the caller must not invent one.
+    Returns None when any input is non-positive. ``_frame_facts`` and
+    ``_stream_facts`` already reject those upstream, so no production caller
+    reaches it today; the guard is fail-closed legislation for this
+    module-public helper rather than a live branch.
     """
     if compressed_bytes <= 0 or sample_count <= 0 or sample_rate <= 0:
         return None

@@ -200,15 +200,27 @@ class TestAverageBitrateDerivationPin(unittest.TestCase):
         )
 
     def test_rate_is_rounded_to_nearest_not_truncated(self) -> None:
-        # 44100 Hz, 1152-sample frames: a real stream rarely lands on an exact
-        # integer. Nearest-integer is the honest report; flooring always biases
-        # a constant stream downward and can break uniformity on one track.
-        sample_rate, sample_count = 44_100, 44_100  # exactly 1 second
-        for exact_bits, expected in ((191_600, 192), (192_400, 192), (191_499, 191)):
-            with self.subTest(exact_bits=exact_bits):
+        # A real stream rarely lands on an exact integer. Nearest-integer is
+        # the honest report; flooring always biases a constant stream downward
+        # and can break uniformity on a single track.
+        #
+        # Exactly one second at 44100 Hz, so kbps == bytes * 8 / 1000 and the
+        # cases below are the byte counts that bracket the 191.5 rounding
+        # boundary. Byte counts, not bit counts: the input is bytes, and a
+        # "bits" spelling that is not a multiple of eight would be a fixture
+        # that cannot exist.
+        sample_rate, sample_count = 44_100, 44_100
+        cases = (
+            (23_950, 192),  # 191.600 kbps -> up
+            (24_050, 192),  # 192.400 kbps -> down
+            (23_937, 191),  # 191.496 kbps -> down, just under the boundary
+            (23_938, 192),  # 191.504 kbps -> up, just over it
+        )
+        for compressed_bytes, expected in cases:
+            with self.subTest(compressed_bytes=compressed_bytes):
                 self.assertEqual(
                     average_bitrate_kbps_from_frames(
-                        exact_bits // 8, sample_count, sample_rate,
+                        compressed_bytes, sample_count, sample_rate,
                     ),
                     expected,
                 )
