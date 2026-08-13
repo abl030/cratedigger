@@ -244,6 +244,10 @@ inside socket authorization, never credentials.
 ## Command capability surface
 
 - `pipeline-cli add` — Add a MusicBrainz or Discogs request.
+- `pipeline-cli audit retag-divergence` — Read-only census of albums whose
+  Beets DB ``mb_albumid`` moved but whose installed file tags did not (the
+  retag ``-W`` residual, #1093 item 1). CLI exit 0 iff `status="clean"`;
+  `divergence_found` and `beets_unavailable` both exit 1.
 - `pipeline-cli audit world` — Read-only PipelineDB, Beets, evidence, and disk coherence audit.
 - `pipeline-cli ban-source` — Remove a server-resolved bad rip and requeue its request when appropriate.
 - `pipeline-cli beets-distance` — Measure a rejected download against an exact
@@ -432,6 +436,45 @@ notification.
 Authority: "A stable or shrinking known cohort should be reported as tracked
 debt rather than making an otherwise successful daily run fail." —
 <https://github.com/abl030/cratedigger/issues/910>
+
+## Retag divergence audit scope
+
+`pipeline-cli audit retag-divergence` and `GET /api/audit/retag-divergence`
+are thin adapters over the same read-only `lib/retag_divergence_audit.py`
+service and return the same report shape. It never changes PostgreSQL,
+Beets, or library files.
+
+The import-time MusicBrainz merge retag (`lib/beets_retag.py`) runs
+`beet modify -a -M -W -y`. `-W` is deliberate and stays: it keeps the retag
+to one `Album.store()` transaction instead of a partial per-file write race.
+The accepted cost is that a successful retag moves the Beets DB's
+`mb_albumid` without touching any installed file's tag — so after a
+successful retag whose subsequent import rejects, the DB names the survivor
+while every installed file still carries the merged-away id. This audit is
+the cohort-wide instrument for that residual (issue #1093 item 1): it reads
+every Beets album's own DB `mb_albumid` beside each item's installed file
+tag and reports every album where they disagree.
+
+Per-item classification: `agrees` (not reported), `diverges` (the DB names
+an identity the file tag does not match, including a blank file tag — the
+`-W` residual shape), `file_tag_present_db_absent` (the DB has no
+`mb_albumid` at all but the file tag still carries one — the #570 Discogs
+neutralization shape, expected near-zero and never filtered), and
+`unreadable` (the file could not be read — fail closed, never counted as
+agreeing). Per-album classification aggregates its items by fixed
+precedence — `unreadable` > `diverges` > `file_tag_present_db_absent` >
+`agrees` — plus `empty` for a real zero-item album row. Only non-agreeing
+albums are listed; full counts (`albums_scanned`, `items_read`,
+`items_unreadable`, and one count per non-agreeing class) are always
+reported.
+
+Machine-readable output has `status` (`clean`, `divergence_found`, or
+`beets_unavailable`), `complete`, `counts`, and `albums` (only the
+non-agreeing ones, each with every item's classification). The CLI exits 0
+iff `status="clean"` — both `divergence_found` and the expected-unavailable
+`beets_unavailable` exit 1, since neither is a clean report the operator
+can trust. An unexpected schema, decoder, invariant, programming, close, or
+serialization defect remains a transport failure: CLI exit 5 or HTTP 503.
 
 ## Live-corpus render differential
 

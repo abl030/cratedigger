@@ -11,6 +11,7 @@ from typing import Any, Self
 
 from lib.beets_db import (
     AlbumInfo,
+    BeetsAlbumIdentityRow,
     BeetsWorldAlbum,
     CurrentBeetsAmbiguous,
     CurrentBeetsItem,
@@ -62,6 +63,7 @@ class FakeBeetsDB:
         self._item_metadata: dict[str, dict[int, CurrentBeetsItem]] = {}
         self._release_identities: list[dict[str, Any]] = []
         self._world_albums: list[BeetsWorldAlbum] = []
+        self._album_mb_identities: list[BeetsAlbumIdentityRow] = []
         # Default return values for unseeded keys — match the real
         # BeetsDB's "no row" shapes so tests don't crash on missing
         # explicit seeds.
@@ -199,6 +201,9 @@ class FakeBeetsDB:
 
     def set_world_albums(self, rows: list[BeetsWorldAlbum]) -> None:
         self._world_albums = list(rows)
+
+    def set_album_mb_identities(self, rows: list[BeetsAlbumIdentityRow]) -> None:
+        self._album_mb_identities = list(rows)
 
     def set_tracks_for_release(
         self, release_id: str, tracks: list[dict[str, Any]],
@@ -531,6 +536,9 @@ class FakeBeetsDB:
 
     def list_world_albums(self) -> list[BeetsWorldAlbum]:
         return list(self._world_albums)
+
+    def list_album_mb_identities(self) -> list[BeetsAlbumIdentityRow]:
+        return list(self._album_mb_identities)
 
     def get_all_album_ids_for_release(self, release_id: str) -> list[int]:
         self.get_all_album_ids_for_release_calls.append(release_id)

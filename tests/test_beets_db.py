@@ -1861,5 +1861,73 @@ class TestListWorldAlbums(unittest.TestCase):
         self.assertEqual(rows[1].item_paths, ())
 
 
+class TestListAlbumMbIdentities(unittest.TestCase):
+    """Pin for the #1093 item 1 divergence-audit read (issue #1093)."""
+
+    def test_returns_raw_mb_albumid_alone_with_resolved_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            library_root = os.path.join(tmpdir, "library")
+            _create_test_db(db_path)
+            _insert_album(
+                db_path,
+                1,
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                [
+                    (320000, "Artist/Album/01.flac"),
+                    (320000, "Artist/Album/02.flac"),
+                ],
+                discogs_albumid=12856590,
+            )
+            conn = sqlite3.connect(db_path)
+            # A Discogs-sourced album: discogs_albumid carries the release,
+            # mb_albumid is the beets zero/empty sentinel — must normalize
+            # to "", never fall back to the discogs identity (unlike
+            # list_world_albums, this read is mb_albumid-only).
+            conn.execute(
+                "INSERT INTO albums (id, mb_albumid, discogs_albumid) "
+                "VALUES (2, '', 67890)"
+            )
+            conn.execute(
+                "INSERT INTO items (id, album_id, path) "
+                "VALUES (10, 2, 'Artist/Discogs Album/01.mp3')"
+            )
+            # An album row that survived its last item's deletion — a real,
+            # reachable Beets state (T7 in tests/test_beets_retag.py).
+            conn.execute(
+                "INSERT INTO albums (id, mb_albumid, discogs_albumid) "
+                "VALUES (3, 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 0)"
+            )
+            conn.commit()
+            conn.close()
+
+            with BeetsDB(db_path, library_root=library_root) as db:
+                rows = db.list_album_mb_identities()
+
+        self.assertEqual([row.album_id for row in rows], [1, 2, 3])
+        self.assertEqual(
+            rows[0].mb_albumid, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        )
+        self.assertEqual(
+            rows[0].item_paths,
+            (
+                os.path.join(library_root, "Artist", "Album", "01.flac"),
+                os.path.join(library_root, "Artist", "Album", "02.flac"),
+            ),
+        )
+        # Discogs-sourced album: mb_albumid reads as absent, never the
+        # discogs_albumid value.
+        self.assertEqual(rows[1].mb_albumid, "")
+        self.assertEqual(
+            rows[1].item_paths,
+            (os.path.join(library_root, "Artist", "Discogs Album", "01.mp3"),),
+        )
+        # Zero-item album row: identity present, no item paths.
+        self.assertEqual(
+            rows[2].mb_albumid, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        )
+        self.assertEqual(rows[2].item_paths, ())
+
+
 if __name__ == "__main__":
     unittest.main()

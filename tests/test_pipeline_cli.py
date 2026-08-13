@@ -7398,5 +7398,128 @@ class TestWorldAuditCLI(unittest.TestCase):
         self.assertTrue(args.json)
 
 
+class TestRetagDivergenceAuditCLI(unittest.TestCase):
+    """`pipeline-cli audit retag-divergence` (#1093 item 1)."""
+
+    def test_clean_report_exits_zero(self) -> None:
+        import scripts.pipeline_cli.audit as audit_cli
+
+        beets = FakeBeetsDB()
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", return_value=beets),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["status"], "clean")
+        self.assertEqual(payload["albums"], [])
+
+    def test_divergence_found_exits_one(self) -> None:
+        """Drives the REAL default leaf reader — the seeded path does not
+        exist, so it fails closed to ``unreadable`` (never ``agrees``),
+        which alone is enough to flip the CLI's exit code."""
+        import scripts.pipeline_cli.audit as audit_cli
+        from lib.beets_db import BeetsAlbumIdentityRow
+
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1,
+                mb_albumid="7aabf975-9a06-4b2e-854c-2c700380ebd5",
+                item_paths=("/nonexistent/library/Album/01.flac",),
+            ),
+        ])
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", return_value=beets),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertEqual(payload["status"], "divergence_found")
+        self.assertEqual(len(payload["albums"]), 1)
+        self.assertEqual(payload["albums"][0]["album_class"], "unreadable")
+
+    def test_expected_beets_unavailability_exits_one(self) -> None:
+        import scripts.pipeline_cli.audit as audit_cli
+
+        failure = sqlite3.OperationalError("database is locked")
+        failure.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", side_effect=failure),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertEqual(payload["status"], "beets_unavailable")
+        self.assertFalse(payload["complete"])
+
+    def test_unexpected_failure_remains_exit_five(self) -> None:
+        import scripts.pipeline_cli.audit as audit_cli
+
+        output = io.StringIO()
+        with (
+            patch.object(
+                audit_cli,
+                "_open_beets",
+                side_effect=RuntimeError("programmer defect"),
+            ),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        self.assertEqual(rc, 5)
+        self.assertEqual(
+            json.loads(output.getvalue())["error"],
+            "retag_divergence_audit_failed",
+        )
+
+    def test_parser_exposes_nested_audit_retag_divergence_command(self) -> None:
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        args = parser.parse_args(["audit", "retag-divergence", "--json"])
+
+        self.assertEqual(args.command, "audit")
+        self.assertEqual(args.audit_command, "retag-divergence")
+        self.assertTrue(args.json)
+
+
 if __name__ == "__main__":
     unittest.main()

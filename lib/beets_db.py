@@ -1242,6 +1242,44 @@ class BeetsDB:
             ))
         return albums
 
+    def list_album_mb_identities(self) -> "list[BeetsAlbumIdentityRow]":
+        """Return every Beets album's DB ``mb_albumid`` beside its item paths.
+
+        Deliberately narrower than :meth:`list_world_albums`, which merges
+        ``mb_albumid`` and ``discogs_albumid`` into one release-identity set
+        — the retag ``-W`` divergence audit (#1093 item 1) compares the raw
+        ALBUM-row MusicBrainz value alone against each item's installed file
+        tag, and folding in ``discogs_albumid`` would misclassify a
+        Discogs-sourced album's blank ``mb_albumid`` as anything other than
+        "absent".
+        """
+        rows = self._conn.execute(
+            "SELECT a.id, a.mb_albumid, i.path "
+            "FROM albums a "
+            "LEFT JOIN items i ON i.album_id = a.id "
+            "ORDER BY a.id ASC, i.id ASC"
+        ).fetchall()
+        mb_albumid_by_album: dict[int, object] = {}
+        paths_by_album: dict[int, list[str]] = {}
+        order: list[int] = []
+        for raw_album_id, raw_mb_albumid, raw_path in rows:
+            album_id = int(raw_album_id)
+            if album_id not in mb_albumid_by_album:
+                mb_albumid_by_album[album_id] = raw_mb_albumid
+                paths_by_album[album_id] = []
+                order.append(album_id)
+            if raw_path is not None:
+                paths_by_album[album_id].append(self._resolve_path(raw_path))
+
+        return [
+            BeetsAlbumIdentityRow(
+                album_id=album_id,
+                mb_albumid=normalize_release_id(mb_albumid_by_album[album_id]),
+                item_paths=tuple(paths_by_album[album_id]),
+            )
+            for album_id in order
+        ]
+
     @staticmethod
     def _album_row_to_dict(r: tuple[object, ...]) -> dict[str, object]:
         """Convert a standard album query row to dict.
@@ -1280,4 +1318,20 @@ class BeetsWorldAlbum:
     album_id: int
     release_ids: tuple[str, ...]
     album_path: str
+    item_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class BeetsAlbumIdentityRow:
+    """One Beets album's DB MusicBrainz identity beside its item file paths.
+
+    ``mb_albumid`` is normalized ("" when absent) and is the ALBUM row's
+    value alone — never merged with ``discogs_albumid`` the way
+    :class:`BeetsWorldAlbum` does. The retag ``-W`` divergence audit
+    (#1093 item 1) needs exactly this: the DB identity a successful retag
+    moved, compared against what each installed file's own tag still says.
+    """
+
+    album_id: int
+    mb_albumid: str
     item_paths: tuple[str, ...]

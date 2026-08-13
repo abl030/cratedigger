@@ -6074,6 +6074,29 @@ class TestPipelineDBFakeContractInternals(unittest.TestCase):
 class TestFakeBeetsDB(unittest.TestCase):
     """Self-tests for FakeBeetsDB — the minimal in-memory BeetsDB stand-in."""
 
+    def test_album_mb_identities_round_trip(self) -> None:
+        """#1093 item 1 — the retag divergence audit's read seam."""
+        from lib.beets_db import BeetsAlbumIdentityRow
+
+        beets = FakeBeetsDB()
+        self.assertEqual(beets.list_album_mb_identities(), [])
+
+        rows = [
+            BeetsAlbumIdentityRow(
+                album_id=7,
+                mb_albumid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                item_paths=("/library/Artist/Album/01.flac",),
+            ),
+            BeetsAlbumIdentityRow(album_id=8, mb_albumid="", item_paths=()),
+        ]
+        beets.set_album_mb_identities(rows)
+
+        self.assertEqual(beets.list_album_mb_identities(), rows)
+        # Returns a fresh list — callers mutating the result never poison
+        # the fake's seeded state.
+        beets.list_album_mb_identities().append(rows[0])
+        self.assertEqual(beets.list_album_mb_identities(), rows)
+
     def test_current_resolver_preserves_cardinality_and_topology(self) -> None:
         from lib.beets_db import CurrentBeetsAmbiguous, CurrentBeetsUnique
         from lib.release_identity import ReleaseIdentity

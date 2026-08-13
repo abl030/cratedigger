@@ -146,7 +146,18 @@ load-bearing:
   `-W` stays; the mitigation is visibility, not a different flag. Every
   successful retag records the divergence in its outcome detail
   (`lib/beets_retag.py`) so an operator can find "DB identity moved, file
-  tags did not" in the audit trail rather than never knowing.
+  tags did not" in the audit trail for that ONE retag rather than never
+  knowing. For the COHORT — every album whose DB identity and file tags
+  currently disagree, not just the one this retag just moved —
+  `pipeline-cli audit retag-divergence` / `GET /api/audit/retag-divergence`
+  (`lib/retag_divergence_audit.py`, issue #1093 item 1) is the read-only
+  census: it reads every Beets album's own `mb_albumid` beside each item's
+  installed file tag and reports every album where they disagree, with a
+  distinct bucket for this `-W` shape versus the unrelated #570 Discogs
+  neutralization shape (DB absent, file still tagged). It never writes to
+  Beets, PostgreSQL, or the filesystem — a reconciler is a separate,
+  larger option nobody has built. `docs/debugging-cli.md` § "Retag
+  divergence audit scope" is the full report-shape reference.
 - **One album.** The regex is anchored, so it can only name albums filed under
   exactly the merged-away release id.
 - **Only on `mbid_not_found`, only under an exact import claim**, and only

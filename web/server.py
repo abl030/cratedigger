@@ -101,6 +101,7 @@ from web.routes import pipeline as _pipeline_routes
 from web.routes import pipeline_dashboard as _pipeline_dashboard_routes
 from web.routes import pipeline_mutations as _pipeline_mutations_routes
 from web.routes import release_identity_routes as _release_identity_routes
+from web.routes import retag_divergence_audit as _retag_divergence_audit_routes
 from web.routes import search_plan as _search_plan_routes
 from web.routes import triage as _triage_routes
 from web.routes import world_audit as _world_audit_routes
@@ -135,6 +136,7 @@ ALL_ROUTES: list[RouteRegistration] = merge_registries(
     _triage_routes,
     _youtube_routes,
     _world_audit_routes,
+    _retag_divergence_audit_routes,
 )
 
 _db_dsn = None
