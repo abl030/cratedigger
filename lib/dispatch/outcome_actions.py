@@ -37,7 +37,6 @@ from lib.dispatch.types import (
     ImportAttemptResult,
     PostCommitCleanup,
 )
-from lib.processing_paths import processing_albums_dir
 from lib.quality import (
     DownloadInfo,
     QualityRankConfig,
@@ -82,7 +81,7 @@ def _reject_import_from_evidence_decision(
     import_job_id: int | None = None,
     source_download_log_id: int | None = None,
     quality_ranks: QualityRankConfig | None = None,
-    processing_dir: str | None = None,
+    protected_roots: frozenset[str] | None = None,
 ) -> DispatchOutcome:
     """Record a persisted-evidence rejection before beets can mutate files.
 
@@ -208,26 +207,27 @@ def _reject_import_from_evidence_decision(
         source_path_cleanup_scenario,
         action,
     ):
-        # Issue #1077, R3-3: this reject path's ``staged_path`` can be the
-        # canonical processing album directly under
-        # ``<processing_dir>/albums/`` — the same Nix-provisioned root
-        # ``_cleanup_staged_dir``'s empty-parent prune must never remove.
-        # Guard both the synchronous cleanup here AND the deferred
-        # post-commit plan the same way; the deferred branch has no other
-        # way to carry the guard across the boundary to
+        # Issue #1077, R3-3 (widened issue #1122, review round 2): this
+        # reject path's ``staged_path`` can be the canonical processing
+        # album directly under ``<processing_dir>/albums/`` OR a YouTube
+        # rescue's auto-import staging child (it imports in place, never
+        # materialized under the canonical root) — either is a shared,
+        # deploy-provisioned root ``_cleanup_staged_dir``'s empty-parent
+        # prune must never remove. ``protected_roots`` is the caller's
+        # ONE derivation (``lib.processing_paths.protected_staging_roots``)
+        # covering both; this function stays decoupled from
+        # ``processing_dir``/``beets_staging_dir`` naming. Guard both the
+        # synchronous cleanup here AND the deferred post-commit plan the
+        # same way; the deferred branch has no other way to carry the guard
+        # across the boundary to
         # ``scripts/importer.py::_run_post_commit_cleanup``.
-        protected_parent = (
-            processing_albums_dir(processing_dir)
-            if processing_dir is not None
-            else None
-        )
         if import_job_id is not None:
             cleanup_plan = PostCommitCleanup(
                 staged_path=staged_path,
-                staged_path_protected_parent=protected_parent,
+                staged_path_protected_parents=protected_roots,
             )
         else:
-            _cleanup_staged_dir(staged_path, protected_parent=protected_parent)
+            _cleanup_staged_dir(staged_path, protected_parents=protected_roots)
     return DispatchOutcome(
         success=False,
         message=f"Rejected by persisted quality evidence: {decision}",

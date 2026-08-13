@@ -625,6 +625,8 @@ ALLOWLIST: dict[str, str] = {
         "list[ImportJob] — typed dataclass rows, no dict projection",
     "list_terminal_force_action_cleanup_jobs":
         "list[ImportJob] — typed terminal cleanup rows, no dict projection",
+    "list_terminal_force_wrong_match_cleanup_jobs":
+        "list[ImportJob] — typed terminal cleanup rows, no dict projection",
     "list_automation_import_jobs_for_startup_recovery":
         "list[ImportJob] — exact processing-owner typed dataclass rows, "
         "no dict projection",

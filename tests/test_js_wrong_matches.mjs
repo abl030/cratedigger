@@ -1937,6 +1937,55 @@ console.log('an unobservable source is surfaced, never silently dropped');
     'must still work: an ordinary entry keeps both actions enabled');
 }
 
+console.log('the detail card renders operator-facing scenario detail copy (#1122 item 2)');
+{
+  // #1077's sweep-anomaly copy and #1099's refusal classifications both
+  // land in `detail` (web/routes/imports.py's per-entry dict) with no
+  // surface before this fix -- the JS never read `e.detail` at all.
+  const withDetail = {
+    download_log_id: 91,
+    soulseek_username: 'peer',
+    distance: 0.05,
+    scenario: 'high_distance',
+    detail: 'could not verify the curated move source was fully consumed',
+  };
+  const html = __test__.renderEntry(withDetail, 180, 42);
+  assert(html.includes('could not verify the curated move source was fully consumed'),
+    'the detail copy reaches the operator');
+  assert(html.includes('p-detail-label">Detail<'),
+    'the detail row carries its own labeled field, distinct from scenario');
+
+  const escaped = __test__.renderEntry({
+    download_log_id: 92,
+    soulseek_username: 'peer',
+    distance: 0.05,
+    detail: '<script>alert(1)</script>',
+  }, 180, 42);
+  assert(!escaped.includes('<script>alert(1)</script>'),
+    'detail copy is escaped, not injected raw');
+  assert(escaped.includes(esc('<script>alert(1)</script>')),
+    'the escaped form of the detail text is present');
+
+  // Most rows have no detail at all -- the card must not grow an empty
+  // block for them (most rejections never populate this field).
+  const withoutDetail = __test__.renderEntry({
+    download_log_id: 93,
+    soulseek_username: 'peer',
+    distance: 0.05,
+  }, 180, 42);
+  assert(!withoutDetail.includes('p-detail-label">Detail<'),
+    'must still work: an entry with no detail renders no Detail row at all');
+
+  const nullDetail = __test__.renderEntry({
+    download_log_id: 94,
+    soulseek_username: 'peer',
+    distance: 0.05,
+    detail: null,
+  }, 180, 42);
+  assert(!nullDetail.includes('p-detail-label">Detail<'),
+    'must still work: an explicit null detail also renders no Detail row');
+}
+
 console.log('a partial group delete asks for attention and re-renders');
 {
   // Found by the disposable Rule D fixture (issue #1063): one folder

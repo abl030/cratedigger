@@ -9,7 +9,10 @@ from lib.processing_paths import (
     attempt_fingerprint,
     canonical_folder_for_row,
     canonical_processing_path,
+    processing_albums_dir,
+    protected_staging_roots,
     stage_to_ai_path,
+    stage_to_ai_root,
 )
 
 
@@ -236,3 +239,33 @@ class TestFingerprintSuffixNameLimit(unittest.TestCase):
     def test_short_names_are_untouched(self):
         self.assertEqual(
             self._name("Artist"), "Artist - T (2024) [aabbccdd]")
+
+
+class TestProtectedStagingRoots(unittest.TestCase):
+    """Issue #1122, review round 2: ONE derivation owner for every root a
+    staged-dir empty-parent prune (``lib.dispatch.helpers._cleanup_staged_
+    dir`` and its ``harness.import_one`` twin) must never remove."""
+
+    def test_returns_both_shared_roots(self):
+        roots = protected_staging_roots(
+            processing_dir="/processing", beets_staging_dir="/incoming",
+        )
+        self.assertEqual(
+            roots,
+            frozenset({
+                processing_albums_dir("/processing"),
+                stage_to_ai_root(staging_dir="/incoming", auto_import=True),
+            }),
+        )
+
+    def test_exactly_two_distinct_roots(self):
+        roots = protected_staging_roots(
+            processing_dir="/processing", beets_staging_dir="/incoming",
+        )
+        self.assertEqual(len(roots), 2)
+
+    def test_result_is_a_frozenset(self):
+        roots = protected_staging_roots(
+            processing_dir="/processing", beets_staging_dir="/incoming",
+        )
+        self.assertIsInstance(roots, frozenset)

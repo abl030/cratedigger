@@ -5,14 +5,20 @@ The request/cohort subcommands wrap the U15 triage service:
   * ``pipeline-cli triage show <id>`` — per-request composition.
   * ``pipeline-cli triage list --filter=<spec>`` — cohort listing.
 
-Issue #573 W2 adds ``pipeline-cli triage quarantine``. It wraps the separate
-read-only ``lib.quarantine_triage_service`` lifecycle view and mirrors
-``GET /api/triage/quarantine``.
+Issue #573 W2 added ``pipeline-cli triage quarantine``, originally a direct
+wrapper around the read-only ``lib.quarantine_triage_service`` lifecycle
+view. Issue #1122 F1 moved it onto the canonical
+``GET /api/triage/quarantine`` route instead: the processing tree it scans
+is a private ``0700 cratedigger:users`` directory readable only by the web
+service identity, so running the scan in the invoking operator's own
+process raised ``EACCES`` and killed the whole view — the same #1063 shape
+that already moved ``force-import``, ``replace``, and the rest of that
+cohort onto the permissioned Unix socket.
 
-Both adhere to CLAUDE.md § "CLI ⇄ API surface symmetry": each one is a
-thin wrapper around ``lib.triage_service``; the matching HTTP routes
-(U17) wrap the same service with the same outcome → exit-code /
-status-code mapping.
+All three adhere to CLAUDE.md § "CLI ⇄ API surface symmetry": each one is a
+thin wrapper — either directly over ``lib.triage_service``, or (quarantine)
+over the canonical web mutation route — with the same outcome → exit-code /
+status-code mapping as its HTTP sibling.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import msgspec
 
 from lib.convergence_service import parse_signal_token
+from lib.json_narrow import is_object_list, is_str_object_dict
 
 # The canonical machine-parseable forms come from the service-layer
 # ``VALID_FILTER_FORMS`` (single source of truth across CLI and HTTP);
@@ -34,13 +41,19 @@ from lib.convergence_service import parse_signal_token
 from lib.triage_service import VALID_FILTER_FORMS as _TRIAGE_VALID_FILTER_FORMS_BASE
 from lib.triage_service import VALID_FILTER_FORMS_TEXT as _TRIAGE_FILTER_FORMS_TEXT
 from scripts.pipeline_cli._format import _format_dt, _json_default, _truncate
+from scripts.pipeline_cli.api_mutations import (
+    TIMEOUT_QUARANTINE_SCAN_SECONDS,
+    _ApiMutation,
+    relay_rendered,
+    render_api_error,
+)
 
 if TYPE_CHECKING:
     from lib.convergence_service import (
         ConvergenceSignal,
         StopConvergedSearchResult,
     )
-    from lib.pipeline_db.rows import AlbumRequestRow, WrongMatchCandidateRow
+    from lib.pipeline_db.rows import AlbumRequestRow
     from lib.triage_service import ParsedTriageFilter
 
 
@@ -82,16 +95,6 @@ class _TriagePipelineDB(Protocol):
     def stop_search_for_convergence(
         self, request_id: int, *, signal_token: str,
     ) -> StopConvergedSearchResult: ...
-
-
-class _QuarantineWrongMatchesDB(Protocol):
-    """Narrow ``db`` shape ``cmd_triage_quarantine`` touches (issue #784,
-    #409 pattern) — mirrors
-    ``lib.quarantine_triage_service._WrongMatchesDB`` structurally so the
-    concrete DB conforms without importing the private symbol across the
-    module boundary."""
-
-    def get_wrong_matches(self) -> list[WrongMatchCandidateRow]: ...
 
 
 _TRIAGE_VALID_FILTER_FORMS = (
@@ -493,55 +496,61 @@ def cmd_triage_list(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_triage_quarantine(
-    db: _QuarantineWrongMatchesDB, args: argparse.Namespace,
-) -> int:
-    """List unreferenced immediate folders under both quarantine roots.
-
-    Exit codes:
-      * 0 — complete read-only scan (including an empty result)
-      * 5 — configuration, DB, decode, or filesystem scan unavailable
-    """
-    from lib.quarantine_triage_service import (
-        QuarantineScanError,
-        list_unreferenced_quarantine_folders,
+def _render_quarantine(status: int, payload: dict[str, object]) -> None:
+    """Human-text rendering of ``GET /api/triage/quarantine``'s payload."""
+    if payload.get("quarantine_root") is None:
+        render_api_error(status, payload)
+        return
+    print(f"  Failed-import root: {payload.get('quarantine_root')}")
+    print(f"  Wrong-matches root: {payload.get('wrong_matches_root')}")
+    print(
+        f"  Processing failed-import root: "
+        f"{payload.get('processing_failed_imports_root')}"
     )
-
-    json_mode = bool(getattr(args, "json", False))
-    try:
-        result = list_unreferenced_quarantine_folders(db)
-    except QuarantineScanError as exc:
-        return _quarantine_scan_unavailable(args, str(exc))
-
-    if json_mode:
-        print(json.dumps(
-            msgspec.to_builtins(result),
-            indent=2,
-            sort_keys=True,
-        ))
-        return 0
-
-    print(f"  Failed-import root: {result.quarantine_root}")
-    print(f"  Wrong-matches root: {result.wrong_matches_root}")
-    if not result.folders:
+    print(
+        f"  Processing wrong-matches root: "
+        f"{payload.get('processing_wrong_matches_root')}"
+    )
+    folders_raw = payload.get("folders")
+    folders = folders_raw if is_object_list(folders_raw) else []
+    if not folders:
         print("  No unreferenced quarantine folders.")
-        return 0
-    for folder in result.folders:
-        print(f"  {folder.name}  mtime_ns={folder.mtime_ns}")
-        print(f"    {folder.path}")
-    print(f"  ({len(result.folders)} folders)")
-    return 0
+        return
+    for folder in folders:
+        if not is_str_object_dict(folder):
+            continue
+        print(f"  {folder.get('name')}  mtime_ns={folder.get('mtime_ns')}")
+        print(f"    {folder.get('path')}")
+    print(f"  ({len(folders)} folders)")
 
 
-def _quarantine_scan_unavailable(
-    args: argparse.Namespace, error: str,
+def cmd_triage_quarantine(
+    _db: object, args: argparse.Namespace,
 ) -> int:
-    """Render the quarantine command's stable unavailable mapping."""
-    if bool(getattr(args, "json", False)):
-        print(json.dumps({"error": error}, indent=2, sort_keys=True))
-    else:
-        print(f"  Quarantine scan unavailable: {error}", file=sys.stderr)
-    return 5
+    """List unreferenced immediate folders under every quarantine root.
+
+    Thin adapter over ``GET /api/triage/quarantine`` (issue #1122 F1): the
+    processing tree it scans is a private ``0700 cratedigger:users``
+    directory readable only by the web service identity. Executed in the
+    invoking operator's own process, the scan raised ``EACCES`` and killed
+    the WHOLE view (the JSON/text results the operator could otherwise
+    read from the download-dir-rooted roots too) — the same #1063 shape
+    already used by ``force-import``, ``replace``, ``beets-distance``, and
+    the rest of that cohort. There is no direct-filesystem fallback: if
+    the socket/API is unreachable the command exits 5 and reads nothing.
+
+    Exit codes, derived from the route's status codes:
+      * 0 — 200 complete read-only scan (including an empty result)
+      * 5 — 503 configuration, DB, decode, or filesystem scan unavailable,
+            or the API itself is unreachable
+    """
+    return relay_rendered(
+        args.api_endpoint,
+        _ApiMutation(path="/api/triage/quarantine", body={}, method="GET"),
+        render=_render_quarantine,
+        json_output=bool(getattr(args, "json", False)),
+        timeout_seconds=TIMEOUT_QUARANTINE_SCAN_SECONDS,
+    )
 
 
 def add_triage_subparser(
@@ -592,8 +601,9 @@ def add_triage_subparser(
 
     p_tr_quarantine = tr_sub.add_parser(
         "quarantine",
-        help="Read-only list of immediate failed_imports and wrong_matches "
-             "album folders with no visible Wrong Matches reference",
+        help="Read-only list of immediate failed_imports/wrong_matches album "
+             "folders (under both the slskd download dir and the "
+             "processing tree) with no visible Wrong Matches reference",
     )
     p_tr_quarantine.add_argument(
         "--json", action="store_true",

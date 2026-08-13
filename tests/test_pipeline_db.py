@@ -1380,6 +1380,210 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual(job.dedupe_key, dedupe)
         self.assertFalse(job.deduped)
 
+    def test_list_terminal_force_wrong_match_cleanup_jobs_selects_missing_receipts(
+        self,
+    ) -> None:
+        """Issue #1122: the predicate is a positive selection rule, not an
+        exclusion enumeration.
+
+        Real-PG proof of the JSONB predicate in
+        ``list_terminal_force_wrong_match_cleanup_jobs`` — the ``?``
+        key-existence operator, the ``#>>`` nested-success extraction, and
+        ``IS DISTINCT FROM`` NULL handling are exactly the class of
+        behavior a fake cannot validate. Covers the review-round
+        corrections: MAJOR-1 (success-keyed, not presence-keyed — a
+        receipt can be present with ``success: false``), MAJOR-2/3 (the
+        ``post_commit_wrong_match_scenario`` era-AND-lane marker excludes
+        every historical/non-adjudicating shape by construction, not by
+        naming each one).
+        """
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+
+        def _force_job(suffix: str):
+            return self.db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=self.req_id,
+                dedupe_key=f"force-wrong-match-predicate:{suffix}",
+                payload=force_import_payload(
+                    download_log_id=1,
+                    failed_path="/tmp/predicate-source",
+                ),
+            )
+
+        # -- completed arm --------------------------------------------------
+
+        # Marker present, receipt entirely missing -> included.
+        completed_missing = _force_job("completed-missing")
+        self.db.mark_import_job_completed(
+            completed_missing.id,
+            result={
+                "success": True, "message": "done", "deferred": False,
+                "code": None, "post_commit_wrong_match_scenario": None,
+            },
+            message="done",
+        )
+
+        # Marker present, receipt present but success=false (e.g. entry
+        # not found, unsafe path, rmtree failure, EACCES) -> included:
+        # MAJOR-1's exact fix. A presence-only check would park this row.
+        completed_failed_receipt = _force_job("completed-failed-receipt")
+        self.db.mark_import_job_completed(
+            completed_failed_receipt.id,
+            result={
+                "success": True, "message": "done", "deferred": False,
+                "code": None, "post_commit_wrong_match_scenario": None,
+                "wrong_match_dismissal": {
+                    "success": False, "error": "path_unavailable: EACCES",
+                },
+            },
+            message="done",
+        )
+
+        # Marker present, receipt proven successful -> excluded.
+        completed_successful_receipt = _force_job("completed-successful-receipt")
+        self.db.mark_import_job_completed(
+            completed_successful_receipt.id,
+            result={
+                "success": True, "message": "done", "deferred": False,
+                "code": None, "post_commit_wrong_match_scenario": None,
+                "wrong_match_dismissal": {"success": True},
+            },
+            message="done",
+        )
+
+        # -- failed arm -------------------------------------------------
+
+        # Marker present, receipt entirely missing, ordinary code ->
+        # included.
+        failed_missing = _force_job("failed-missing")
+        self.db.mark_import_job_failed(
+            failed_missing.id,
+            error="beets rejected: audio_corrupt",
+            result={
+                "success": False, "message": "rejected", "deferred": False,
+                "code": None,
+                "post_commit_wrong_match_scenario": "audio_corrupt",
+            },
+            message="rejected",
+        )
+
+        # Marker present, receipt present but success=false -> included
+        # (MAJOR-1, failure arm).
+        failed_failed_receipt = _force_job("failed-failed-receipt")
+        self.db.mark_import_job_failed(
+            failed_failed_receipt.id,
+            error="beets rejected: audio_corrupt",
+            result={
+                "success": False, "message": "rejected", "deferred": False,
+                "code": None,
+                "post_commit_wrong_match_scenario": "audio_corrupt",
+                "cleanup": {
+                    "success": False, "outcome": "deleted_operator_force_source",
+                    "error": "path_unavailable: EACCES",
+                },
+            },
+            message="rejected",
+        )
+
+        # Marker present, receipt proven successful -> excluded.
+        failed_successful_receipt = _force_job("failed-successful-receipt")
+        self.db.mark_import_job_failed(
+            failed_successful_receipt.id,
+            error="beets rejected",
+            result={
+                "success": False, "message": "rejected", "deferred": False,
+                "code": None,
+                "post_commit_wrong_match_scenario": "high_distance",
+                "cleanup": {
+                    "success": True,
+                    "outcome": "preserved_operator_force_source",
+                },
+            },
+            message="rejected",
+        )
+
+        # Marker present, receipt missing, but ``requeue_failed`` — the
+        # live code never runs the wrong-match decision for this code ->
+        # excluded.
+        failed_requeue = _force_job("failed-requeue")
+        self.db.mark_import_job_failed(
+            failed_requeue.id,
+            error="requeue failed",
+            result={
+                "success": False, "message": "requeue UPDATE failed",
+                "deferred": False, "code": "requeue_failed",
+                "post_commit_wrong_match_scenario": None,
+            },
+            message="requeue UPDATE failed",
+        )
+
+        # Marker present, receipt missing, but ``deferred`` — e.g.
+        # release-lock contention. The live cleanup helper IS called but
+        # its own first line skips the decision immediately, so no
+        # receipt ever lands; replay must not manufacture one -> excluded.
+        failed_deferred = _force_job("failed-deferred")
+        self.db.mark_import_job_failed(
+            failed_deferred.id,
+            error="Another import is already in progress",
+            result={
+                "success": False,
+                "message": "Another import is already in progress",
+                "deferred": True, "code": None,
+                "post_commit_wrong_match_scenario": None,
+            },
+            message="Another import is already in progress",
+        )
+
+        # -- historical / non-adjudicating shapes (MAJOR-2/3) ------------
+
+        # Completed, NO era marker at all (pre-#1122 shape) -> excluded
+        # forever by design, even though a bare presence check would have
+        # selected it.
+        historical_completed = _force_job("historical-completed-no-marker")
+        self.db.mark_import_job_completed(
+            historical_completed.id,
+            result={"success": True},
+            message="done",
+        )
+
+        # Failed, NO era marker (e.g. the executor-crash literal
+        # ``{"success": false}`` written before ``_job_result`` is ever
+        # computed, or any other historical/operator shape) -> excluded.
+        historical_failed = _force_job("historical-failed-no-marker")
+        self.db.mark_import_job_failed(
+            historical_failed.id,
+            error="RuntimeError: boom",
+            result={"success": False},
+            message="Executor crashed",
+        )
+
+        # Failed with a genuinely NULL ``result`` column -> excluded: no
+        # marker can be present in a NULL column, so this stays receiptless
+        # forever by the same rule, not a special case.
+        historical_null_result = _force_job("historical-null-result")
+        self.db._execute(
+            "UPDATE import_jobs SET status = 'failed', result = NULL "
+            "WHERE id = %s",
+            (historical_null_result.id,),
+        )
+        self.db.conn.commit()
+
+        selected = {
+            job.id
+            for job in self.db.list_terminal_force_wrong_match_cleanup_jobs()
+        }
+        self.assertIn(completed_missing.id, selected)
+        self.assertIn(completed_failed_receipt.id, selected)
+        self.assertNotIn(completed_successful_receipt.id, selected)
+        self.assertIn(failed_missing.id, selected)
+        self.assertIn(failed_failed_receipt.id, selected)
+        self.assertNotIn(failed_successful_receipt.id, selected)
+        self.assertNotIn(failed_requeue.id, selected)
+        self.assertNotIn(failed_deferred.id, selected)
+        self.assertNotIn(historical_completed.id, selected)
+        self.assertNotIn(historical_failed.id, selected)
+        self.assertNotIn(historical_null_result.id, selected)
+
     def test_enqueue_youtube_import_is_allowed_by_pg_constraint(self):
         from lib.import_queue import (
             IMPORT_JOB_YOUTUBE,

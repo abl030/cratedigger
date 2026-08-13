@@ -81,8 +81,9 @@ Cratedigger has exactly three Beets mutation lanes:
 2. An explicitly operator-authorized library deletion resolves one exact Beets
    album primary key and drives the exact-album delete child.
 3. The import-time MusicBrainz merge retag runs `beet modify -a -M -W -y`
-   under an anchored `mb_albumid::^<old-id>\Z` query and a `mb_albumid=<new-id>`
-   assignment (`lib/beets_retag.py`), from inside whichever importer lane
+   under a compound exact-match query — `id:=<album_id>` AND
+   `mb_albumid:=<old-id>` — and a `mb_albumid=<new-id>` assignment
+   (`lib/beets_retag.py`), from inside whichever importer lane
    holds the request's exact import claim — the automation processing owner,
    or a claimed force-import job (#1080). Issue #1087 replaced the original
    `beet mbsync -M` primitive: `mbsync` maps library items onto a fetched
@@ -96,9 +97,13 @@ load-bearing:
 
 - **`-a` targets Albums, not Items.** `Album.try_sync(inherit=True)` (the
   default) fans every inheritable fixed attribute — `mb_albumid` is one — out
-  to every item and stores it. Drop `-a` and the query matches ITEMS instead:
-  each item's own `mb_albumid` moves while the ALBUM row's does not, leaving
-  the library split into disagreeing identity fields.
+  to every item and stores it. Drop `-a` and the query matches ITEMS instead,
+  and the `id:=<album_id>` clause then binds to the ITEMS table's own
+  independent primary key namespace: only whichever item's OWN id happens to
+  coincide with the guard-resolved album id can move at all (live-verified: a
+  single coincidental collision, not every item). Either way the ALBUM row's
+  `mb_albumid` does not move, leaving the library split into disagreeing
+  identity fields.
 - **Identity only, never a tag write, never layout.** `-M` (`--nomove`) and
   `-W` (`--nowrite`) are mandatory; `modify` otherwise honours `import.move` /
   `import.write`, which the config contract pins to `yes`. `-W` is the one
@@ -147,8 +152,36 @@ load-bearing:
   successful retag records the divergence in its outcome detail
   (`lib/beets_retag.py`) so an operator can find "DB identity moved, file
   tags did not" in the audit trail rather than never knowing.
-- **One album.** The regex is anchored, so it can only name albums filed under
-  exactly the merged-away release id.
+- **One album, one selection mechanism, pinned to the exact row the guard
+  resolved.** The `mb_albumid:=<old-id>` half is exact SQL-equality
+  (Beets' `=` prefix), not a regex, so it can only name albums filed under
+  exactly the merged-away release id — and it selects with the SAME
+  mechanism the post-retag guard (`lib/beets_db.py::
+  BeetsDB.resolve_current_releases`) already reads the library back with,
+  rather than two independently-correct mechanisms that could silently
+  disagree (#1093). Before #1093 this was an anchored regex evaluated by
+  Beets' SQLite `regexp()` UDF, which decodes a BLOB-stored `mb_albumid`
+  before matching; a value stored that way (only reachable via a
+  third-party raw-SQL writer, since Beets itself always writes `str`)
+  could match the regex while staying invisible to the guard's
+  exact-equality read. Live-verified against a real BLOB write: the
+  retired regex form matched it, the exact-match form and the guard both
+  now report it absent. The `id:=<album_id>` half closes a narrower,
+  still-real gap: the guard resolves the row on one connection, then
+  `beet modify` re-selects by value on a separate connection at a later
+  time, so a value-only query would retag WHOEVER holds that value at
+  `modify`-time, not only the row the guard actually authorized. Pinning
+  the primary key makes the guard's resolution literally the selection —
+  by ROWID, not a row identity guaranteed unique forever: `albums.id` is
+  `INTEGER PRIMARY KEY` with no `AUTOINCREMENT` (live-verified against the
+  real schema), so SQLite may reuse a deleted album's rowid for a later
+  insert; the value clause stays alongside it as the compare-and-set, so a
+  row that has already moved off the old id since the guard's read is not
+  blindly overwritten by primary key alone. Live-verified against a real
+  subprocess: correct id + correct value retags; correct value with a
+  WRONG id (a different album now holding the resolved id) is refused
+  untouched; correct id with a CHANGED value (something else retagged
+  this exact album since the guard's read) is refused the same way.
 - **Only on `mbid_not_found`, only under an exact import claim**, and only
   when MusicBrainz observably redirects the stored id to a survivor Beets just
   offered as a candidate. Two claims qualify, and they are the two the

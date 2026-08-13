@@ -25,8 +25,8 @@ The installed wrapper has two independent authority shapes:
 - `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
   `merge-rekey`, `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
   `wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
-  `force-import`, `beets-distance`, and
-  `import-preview --download-log-id` connect to
+  `force-import`, `beets-distance`,
+  `import-preview --download-log-id`, and `triage quarantine` connect to
   `/run/cratedigger-web/web.sock`. The caller must be a
   member of `services.cratedigger.web.accessGroup` (default
   `cratedigger-web`). That membership grants complete local HTTP/API authority,
@@ -39,7 +39,11 @@ The installed wrapper has two independent authority shapes:
   cleared their Wrong Matches pointers, and claimed success. Routing them
   through the socket makes ONE identity own those filesystem facts. There is no
   direct-database fallback: if the socket is unreachable the command exits 5
-  and changes nothing.
+  and changes nothing. `triage quarantine` joined the cohort in issue #1122
+  F1: it only READS the processing tree rather than destroying anything, but
+  the identity problem is the same — run in the operator's own process the
+  scan raised `EACCES` and killed the whole view, including the
+  download-dir-rooted roots the operator could otherwise have read.
 - Every other command retains its existing resource-specific boundary:
   PostgreSQL credentials/peer identity for database work, filesystem and Beets
   access for media/quarantine operations, and the relevant secret-file groups
@@ -343,7 +347,7 @@ inside socket authorization, never credentials.
 - `pipeline-cli show` — Show a request, attempts, and quality state.
 - `pipeline-cli status` — Show request counts by lifecycle status.
 - `pipeline-cli triage list` — List a named triage cohort.
-- `pipeline-cli triage quarantine` — Read-only unreferenced immediate quarantine-folder scan.
+- `pipeline-cli triage quarantine` — Read-only unreferenced immediate quarantine-folder scan through its canonical web route.
 - `pipeline-cli triage show` — Compose per-request unfindable, field, search,
   and provisional-lossless convergence forensics. A converged row prints the
   distinct peer/snapshot/codec counts, raw cliff range and spread, and opaque

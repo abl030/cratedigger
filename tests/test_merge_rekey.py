@@ -289,8 +289,8 @@ def real_retag_over(
     library exactly as the real command mutates the real one.
     """
 
-    def run_modify(query: str, assignment: str) -> ModifyRetagRun:
-        del query, assignment
+    def run_modify(query_tokens: tuple[str, str], assignment: str) -> ModifyRetagRun:
+        del query_tokens, assignment
         if moves:
             beets.set_album_ids_for_release(MERGED, [])
             beets.set_album_ids_for_release(SURVIVOR, [7])

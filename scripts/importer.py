@@ -94,6 +94,7 @@ from lib.terminal_outcomes import (
     PendingImportTerminalOutcome,
     non_automation_failure_terminal_outcome,
 )
+from lib.wrong_matches import WrongMatchSourceDB
 from lib.youtube_ingest_service import (
     YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES,
 )
@@ -134,6 +135,13 @@ def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
         "message": outcome.message,
         "deferred": outcome.deferred,
         "code": outcome.code,
+        # Durably records the decision ``_cleanup_failed_force_import`` (the
+        # failure lane) needs, so a startup replay can rebuild an equivalent
+        # ``DispatchOutcome`` from persisted state alone after a crash
+        # between the terminal commit and the live wrong-match cleanup call
+        # (issue #1122) — never from a live outcome the process may not
+        # still have.
+        "post_commit_wrong_match_scenario": outcome.post_commit_wrong_match_scenario,
     }
 
 
@@ -177,9 +185,23 @@ class _ForceActionCleanupDB(Protocol):
     ) -> ImportJob | None: ...
 
 
+class _ForceWrongMatchCleanupDB(_ForceActionCleanupDB, WrongMatchSourceDB, Protocol):
+    """Persistence surface for durable force wrong-match source receipts.
+
+    Sibling of ``_ForceActionCleanupDB`` for the OTHER terminal force
+    receipt (issue #1122): the original Wrong Matches source's row
+    consumption and folder deletion/preservation. Extends
+    ``WrongMatchSourceDB`` because the replay calls the exact same
+    ``_dismiss_successful_force_import`` / ``_cleanup_failed_force_import``
+    helpers the live path calls.
+    """
+
+    def list_terminal_force_wrong_match_cleanup_jobs(self) -> list[ImportJob]: ...
+
+
 class _StartupRecoveryDB(
     _AutomationRecoveryDB,
-    _ForceActionCleanupDB,
+    _ForceWrongMatchCleanupDB,
     Protocol,
 ):
     """Complete persistence surface used by the one-shot startup sweep."""
@@ -232,14 +254,15 @@ def _run_post_commit_cleanup(
         try:
             from lib.dispatch.helpers import _cleanup_staged_dir
 
-            # Issue #1077, R3-3: this is the third real caller of
-            # ``_cleanup_staged_dir`` and the one furthest from ``cfg`` —
-            # the guard has to travel through the ``PostCommitCleanup``
-            # plan itself (``staged_path_protected_parent``) since this
-            # function only ever receives ``outcome: DispatchOutcome``.
+            # Issue #1077, R3-3 (widened issue #1122, review round 2):
+            # this is a real caller of ``_cleanup_staged_dir`` furthest
+            # from ``cfg`` — the guard has to travel through the
+            # ``PostCommitCleanup`` plan itself
+            # (``staged_path_protected_parents``) since this function only
+            # ever receives ``outcome: DispatchOutcome``.
             _cleanup_staged_dir(
                 plan.staged_path,
-                protected_parent=plan.staged_path_protected_parent,
+                protected_parents=plan.staged_path_protected_parents,
             )
             details["staged_path"] = {
                 "path": plan.staged_path,
@@ -433,7 +456,7 @@ def _record_terminal_force_action_cleanup(
 
 
 def _cleanup_failed_force_import(
-    db: PipelineDB,
+    db: WrongMatchSourceDB,
     job: ImportJob,
     outcome: DispatchOutcome,
 ) -> dict[str, object] | None:
@@ -497,7 +520,7 @@ def _cleanup_failed_force_import(
 
 
 def _dismiss_successful_force_import(
-    db: PipelineDB,
+    db: WrongMatchSourceDB,
     job: ImportJob,
 ) -> dict[str, object] | None:
     """Consume a successfully imported source's Wrong Matches folder.
@@ -552,6 +575,79 @@ def _dismiss_successful_force_import(
             "failed_path_hint": failed_path_hint,
             "error": f"{type(exc).__name__}: {exc}",
         }
+
+
+def _replay_force_wrong_match_outcome(job: ImportJob) -> DispatchOutcome:
+    """Rebuild a minimal outcome from durable state, never a live one.
+
+    Startup replay (issue #1122) has no ``DispatchOutcome`` — the process
+    that produced it may be long gone. ``_cleanup_failed_force_import``
+    reads ``deferred``, the wrong-match ``post_commit_wrong_match_scenario``
+    decision, and ``code``/``message`` for audit text — every one of those
+    was durably persisted into ``result`` by ``_job_result`` at the SAME
+    terminal commit that wrote the job's ``failed`` status, so they are
+    read back here instead of invented.
+
+    ``deferred`` matters even at a terminal ``failed`` status: a force job
+    can reach ``failed`` with ``deferred=True`` (e.g. release-lock
+    contention — ``lib/dispatch/core.py``'s ``"Another import is already
+    in progress"`` outcome) — the live call still skips the wrong-match
+    decision via ``_cleanup_failed_force_import``'s own first line, and
+    replay must reach that identical no-op rather than invent a delete/
+    preserve verdict the live path never made. The startup query's own
+    predicate already excludes these rows from ever reaching this
+    function; reconstructing ``deferred`` here too is defense in depth,
+    not the only guard.
+    """
+    stored = job.result or {}
+    message = stored.get("message")
+    code = stored.get("code")
+    scenario = stored.get("post_commit_wrong_match_scenario")
+    return DispatchOutcome(
+        success=False,
+        message=message if isinstance(message, str) else "",
+        deferred=stored.get("deferred") is True,
+        code=code if isinstance(code, str) else None,
+        post_commit_wrong_match_scenario=(
+            scenario if isinstance(scenario, str) else None
+        ),
+    )
+
+
+def _record_terminal_force_wrong_match_cleanup(
+    db: _ForceWrongMatchCleanupDB,
+    job: ImportJob,
+) -> ImportJob | None:
+    """Replay the durable wrong-match source receipt for one terminal force job.
+
+    Sibling of ``_record_terminal_force_action_cleanup`` (issue #1122): a
+    crash between the terminal commit and the live
+    ``_dismiss_successful_force_import`` (success) /
+    ``_cleanup_failed_force_import`` (failure) call leaves that receipt
+    missing. This calls the SAME helper the live path calls — so the
+    delete/preserve policy is identical either way — over durably
+    persisted state alone, and is idempotent: retried every startup until
+    the receipt lands (CLAUDE.md invariant 11).
+    """
+    if job.status == "completed":
+        dismissal = _dismiss_successful_force_import(db, job)
+        key = "wrong_match_dismissal"
+    elif job.status == "failed":
+        dismissal = _cleanup_failed_force_import(
+            db, job, _replay_force_wrong_match_outcome(job),
+        )
+        key = "cleanup"
+    else:
+        return None
+    if dismissal is None:
+        return None
+    try:
+        return db.merge_import_job_result(job.id, {key: dismissal})
+    except Exception:
+        logger.exception(
+            "Failed to record wrong-match cleanup receipt for job %s", job.id,
+        )
+        return None
 
 
 def execute_import_job(
@@ -920,8 +1016,10 @@ def execute_youtube_import_job(
     the staged audio manifest, so the rejection paths inside
     ``_handle_rejected_result`` find no peers to denylist.
     """
+    from lib.config import read_runtime_config
     from lib.download_processing import process_completed_album
     from lib.download_reconstruction import reconstruct_grab_list_entry
+    from lib.processing_paths import protected_staging_roots
 
     request_id = job.request_id
     if request_id is None:
@@ -936,6 +1034,29 @@ def execute_youtube_import_job(
         return DispatchOutcome(False, f"Album request {request_id} not found")
     status = str(row.get("status") or "")
     if status not in YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES:
+        # Issue #1122 item 4 (widened, review round 2): payload.staged_path
+        # is a direct child of the shared, externally provisioned
+        # auto-import staging root (the U6 worker's build_service stages
+        # every YT rescue there — see
+        # lib.youtube_ingest_service.YoutubeIngestService.staging_root and
+        # scripts/youtube_ingest_worker.py). Without this guard,
+        # _run_post_commit_cleanup's empty-parent prune
+        # (lib.dispatch.helpers._cleanup_staged_dir) could rmdir that
+        # shared root the moment this album's staged folder was its only
+        # child. Uses the same protected_staging_roots(...) derivation as
+        # every other _cleanup_staged_dir producer (lib/dispatch/core.py,
+        # lib/dispatch/outcome_actions.py, lib/download_rejection.py) and
+        # its harness/import_one.py twin — this producer only needs the
+        # auto-import root, but passing the shared set is the one obvious
+        # way rather than a narrower hand-built form. ctx is always None
+        # from the production caller at this point (the runtime context
+        # below is only built after this early return), so the config is
+        # resolved directly — mirroring the getattr(ctx, "cfg", None) or
+        # read_runtime_config() pattern used by the FORCE branch above.
+        # Ownership-drift residual (root deleted -> recreated
+        # cratedigger-owned by the next rescue): see
+        # lib.processing_paths.protected_staging_roots's docstring.
+        cfg = getattr(ctx, "cfg", None) or read_runtime_config()
         return DispatchOutcome(
             False,
             (
@@ -944,6 +1065,10 @@ def execute_youtube_import_job(
             ),
             post_commit_cleanup=PostCommitCleanup(
                 staged_path=payload.staged_path,
+                staged_path_protected_parents=protected_staging_roots(
+                    processing_dir=cfg.processing_dir,
+                    beets_staging_dir=cfg.beets_staging_dir,
+                ),
             ),
         )
 
@@ -2019,6 +2144,25 @@ def recover_abandoned_running_jobs(
     # the job result; every missing/failed marker is retried on this startup.
     for job in db.list_terminal_force_action_cleanup_jobs():
         _record_terminal_force_action_cleanup(db, job, job)
+    for job in db.list_terminal_force_wrong_match_cleanup_jobs():
+        try:
+            _record_terminal_force_wrong_match_cleanup(db, job)
+        except Exception:
+            # One unrecoverable job must not crash the whole importer
+            # process (issue #1122 review MEDIUM-4): unlike
+            # ``_record_terminal_force_action_cleanup``'s own callee
+            # (fully exception-safe internally), ``_cleanup_failed_force_import``'s
+            # ``audio_corrupt`` branch calls DB methods with no internal
+            # guard, and an escape here would otherwise propagate through
+            # this startup sweep into ``main()`` — a full process exit
+            # under ``Restart=on-failure`` takes the entire import queue
+            # down in a 5s crash loop over one bad row. The row is left
+            # exactly as it was and retried on the next startup.
+            logger.exception(
+                "Recovery pass failed for wrong-match cleanup job %s; "
+                "continuing",
+                job.id,
+            )
     recovered.extend(recover_abandoned_automation_owners(
         db,
         liveness_probe=liveness_probe,

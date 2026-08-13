@@ -713,6 +713,91 @@ class _ImportJobsMixin(
         """)
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
+    def list_terminal_force_wrong_match_cleanup_jobs(self) -> list[ImportJob]:
+        """Return terminal force jobs whose wrong-match source receipt is not proven done.
+
+        Positive selection rule (issue #1122, review round: MAJOR-1/2/3
+        corrected an unsound exclusion-enumeration draft):
+
+        1. ``result ? 'post_commit_wrong_match_scenario'`` — the era-AND-lane
+           marker. Only a row whose terminal commit went through
+           ``scripts/importer.py::_job_result`` carries this key (written
+           unconditionally, including a ``null`` value for
+           ``scenario=None`` — JSONB ``?`` matches a null-valued key, it
+           only fails on a genuinely ABSENT key or a NULL ``result``
+           column). This is what makes the rule closed: every OTHER
+           terminalization shape — pre-#1122 historical rows (measured
+           live: 619 on doc2 at first startup, 477 completed + 142 failed,
+           none of them actual crash-window rows), preview-stage
+           terminalization, the executor-crash literal
+           ``{"success": false}`` (``process_claimed_job``'s top exception
+           handler, which returns before ``_job_result`` is ever computed),
+           and ad hoc operator terminalization — lacks this key and is
+           excluded by construction, not by naming each shape. Those rows
+           stay receiptless forever by design: they never adjudicated the
+           candidate, so replaying anything for them would be a fabricated
+           verdict, and their quarantine folders (if any) were already
+           swept by the #1077 D10 cleanup sweep. This closure is a
+           single-writer invariant, review-enforced: only
+           ``scripts/importer.py::_job_result`` may ever write
+           ``post_commit_wrong_match_scenario``; a second writer
+           re-widens this predicate back to pre-#1122 behavior.
+        2. The receipt itself must be PROVEN successful, not merely
+           PRESENT: ``result #>> '{wrong_match_dismissal,success}'`` /
+           ``result #>> '{cleanup,success}'`` ``IS DISTINCT FROM 'true'``.
+           Both ``_dismiss_successful_force_import`` and
+           ``cleanup_wrong_match_source`` (via ``_cleanup_failed_force_import``'s
+           ``audio_corrupt`` branch) can and routinely do write a receipt
+           with ``success: false`` — entry not found, an unsafe path, an
+           ``rmtree`` failure, or an EACCES-shaped ``path_unavailable`` (the
+           #1063 shape). A presence-only check (``NOT result ?
+           'wrong_match_dismissal'``) would treat that failed receipt as
+           "done" and park the row forever — the exact duplicate-import
+           park this method exists to close, and a violation of CLAUDE.md
+           invariant 11. Keying on proven success instead means a
+           persistently failing cleanup is retried every startup
+           (acceptable cadence) rather than parked (never acceptable).
+           This sibling of ``list_terminal_force_action_cleanup_jobs``
+           mirrors that method's own success-keyed check
+           (``#>> '{force_action_cleanup,removed}' IS DISTINCT FROM
+           'true'``) rather than the presence check this method used
+           before the fix.
+
+        Two exclusions remain in the failure arm. Both rows carry the era
+        marker (``_job_result`` computed their ``result`` before the branch
+        below), but the live path still never reaches a wrong-match
+        decision for them, so replay must not either:
+
+        - ``code = 'requeue_failed'``: ``process_claimed_job`` never even
+          calls ``_cleanup_failed_force_import`` for this code — the
+          requeue UPDATE itself failed (a DB transient), not a verdict
+          about the candidate.
+        - ``deferred = true`` (e.g. release-lock contention —
+          ``lib/dispatch/core.py``'s ``"Another import is already in
+          progress"`` outcome): ``_cleanup_failed_force_import`` IS called
+          live, but its own first line (``if outcome.deferred: return
+          None``) skips the decision — the outcome never adjudicated the
+          candidate at all.
+        """
+        cur = self._execute("""
+            SELECT *
+            FROM import_jobs
+            WHERE job_type = 'force_import'
+              AND result ? 'post_commit_wrong_match_scenario'
+              AND (
+                  (status = 'completed'
+                   AND result #>> '{wrong_match_dismissal,success}'
+                       IS DISTINCT FROM 'true')
+                  OR
+                  (status = 'failed'
+                   AND result #>> '{cleanup,success}' IS DISTINCT FROM 'true'
+                   AND result ->> 'code' IS DISTINCT FROM 'requeue_failed'
+                   AND result ->> 'deferred' IS DISTINCT FROM 'true')
+              )
+            ORDER BY created_at ASC, id ASC
+        """)
+        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+
 
     def peek_import_job_candidates(
         self,
