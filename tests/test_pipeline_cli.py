@@ -7310,6 +7310,18 @@ class TestDestructiveCliAdapters(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
 
 
+class _BrokenPipeStdout:
+    """A stdout stand-in whose every write raises ``BrokenPipeError`` —
+    models a downstream reader (e.g. ``| head``) that closed its end
+    early (#1093 review round 4, finding 8)."""
+
+    def write(self, _data: str) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def flush(self) -> None:
+        pass
+
+
 class TestWorldAuditCLI(unittest.TestCase):
     def test_json_keeps_bucket_b_visible_without_failing(self) -> None:
         import scripts.pipeline_cli.audit as audit_cli
@@ -7430,6 +7442,71 @@ class TestWorldAuditCLI(unittest.TestCase):
             "world_audit_failed",
         )
 
+    def test_render_failure_after_a_successful_scan_still_exits_five(
+        self,
+    ) -> None:
+        """#1093 review round 3, finding 2 — the same defect class as
+        `cmd_audit_retag_divergence`'s finding-5 fix: the previous shape
+        called `msgspec.convert`/the render+encode steps OUTSIDE the try,
+        so a defect there tracebacked out uncaught (Python's default exit
+        1), not the documented exit 5. Fail the RENDER step specifically,
+        after `report` is already computed, to prove the fix covers the
+        whole body, not just the audit call."""
+        import scripts.pipeline_cli.audit as audit_cli
+
+        db = FakePipelineDB()
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", return_value=FakeBeetsDB()),
+            patch.object(
+                audit_cli.msgspec,
+                "to_builtins",
+                side_effect=RuntimeError("render programmer defect"),
+            ),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_world(
+                db,
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        self.assertEqual(rc, 5)
+        self.assertEqual(
+            json.loads(output.getvalue())["error"],
+            "world_audit_failed",
+        )
+
+    def test_broken_pipe_during_render_exits_cleanly(self) -> None:
+        """#1093 review round 4, finding 8 — moving the render inside the
+        try (the fix above) made a plain, benign ``BrokenPipeError`` from a
+        downstream reader (e.g. ``| head``) closing early get caught by the
+        broad ``except Exception``, which then tried to print the error
+        JSON and raised a SECOND ``BrokenPipeError`` that nothing caught —
+        turning a benign `| head` into a traceback. A dedicated
+        ``except BrokenPipeError`` ahead of that generic handler must catch
+        it and return without attempting the doomed second write."""
+        import scripts.pipeline_cli.audit as audit_cli
+
+        db = FakePipelineDB()
+        with (
+            patch.object(audit_cli, "_open_beets", return_value=FakeBeetsDB()),
+            redirect_stdout(_BrokenPipeStdout()),
+        ):
+            rc = pipeline_cli.cmd_audit_world(
+                db,
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        self.assertEqual(rc, 0)
+
     def test_parser_exposes_nested_audit_world_command(self) -> None:
         from scripts.pipeline_cli.routes_meta import _build_parser
 
@@ -7439,6 +7516,391 @@ class TestWorldAuditCLI(unittest.TestCase):
         self.assertEqual(args.command, "audit")
         self.assertEqual(args.audit_command, "world")
         self.assertTrue(args.json)
+
+
+class TestRetagDivergenceAuditCLI(unittest.TestCase):
+    """`pipeline-cli audit retag-divergence` (#1093 item 1)."""
+
+    def test_clean_report_exits_zero(self) -> None:
+        import scripts.pipeline_cli.audit as audit_cli
+
+        beets = FakeBeetsDB()
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", return_value=beets),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["status"], "clean")
+        self.assertEqual(payload["albums"], [])
+
+    def test_incomplete_from_unreadable_file_exits_four(self) -> None:
+        """Drives the REAL default leaf reader — the seeded path does not
+        exist, so it fails closed to ``unreadable`` (never ``agrees``). An
+        unreadable-only finding is ``incomplete``, never a genuine
+        divergence — but ``incomplete`` is still NOT success: the world
+        blocked a complete answer, so it exits 4 (`.claude/rules/
+        code-quality.md` § CLI ⇄ API Surface Symmetry's "wrong state"
+        slot), not 0 (#1093 review round 4, finding 5 — an earlier version
+        of this test asserted exit 0 with the exact "a cron reads a silent
+        0 as clean" argument quoted against itself; that reasoning applies
+        to ``incomplete`` just as much as to ``beets_unavailable``)."""
+        import scripts.pipeline_cli.audit as audit_cli
+        from lib.beets_db import BeetsAlbumIdentityRow
+
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1,
+                mb_albumid="7aabf975-9a06-4b2e-854c-2c700380ebd5",
+                item_paths=("/nonexistent/library/Album/01.flac",),
+            ),
+        ])
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", return_value=beets),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 4)
+        self.assertEqual(payload["status"], "incomplete")
+        self.assertEqual(len(payload["albums"]), 1)
+        self.assertEqual(payload["albums"][0]["album_class"], "unreadable")
+
+    def test_divergence_found_exits_one(self) -> None:
+        """A genuine identity mismatch, driven through the REAL default
+        leaf reader over a real, taggable file (mirrors
+        ``TestRealRetagDivergenceScan``)."""
+        from pathlib import Path
+
+        from mediafile import MediaFile
+
+        import scripts.pipeline_cli.audit as audit_cli
+        from lib.beets_db import BeetsAlbumIdentityRow
+        from tests.test_beets_retag import MERGED, SURVIVOR, _make_real_mp3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            track_path = Path(tmpdir) / "01.mp3"
+            _make_real_mp3(track_path)
+            media = MediaFile(track_path)
+            media.mb_albumid = MERGED
+            media.save()
+
+            beets = FakeBeetsDB()
+            beets.set_album_mb_identities([
+                BeetsAlbumIdentityRow(
+                    album_id=1, mb_albumid=SURVIVOR,
+                    item_paths=(str(track_path),),
+                ),
+            ])
+            output = io.StringIO()
+            with (
+                patch.object(audit_cli, "_open_beets", return_value=beets),
+                redirect_stdout(output),
+            ):
+                rc = pipeline_cli.cmd_audit_retag_divergence(
+                    FakePipelineDB(),
+                    argparse.Namespace(
+                        beets_db="unused.db",
+                        beets_directory="/unused/library",
+                        json=True,
+                    ),
+                )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertEqual(payload["status"], "divergence_found")
+        self.assertEqual(len(payload["albums"]), 1)
+        self.assertEqual(payload["albums"][0]["album_class"], "diverges")
+
+    def test_expected_beets_unavailability_exits_five(self) -> None:
+        """#1093 review round 3, finding 1 — the audit never actually ran,
+        so exit 0 would let a cron read "no divergence" from a report that
+        answered nothing. `database is locked` is exactly the transient/
+        retryable class `.claude/rules/code-quality.md` maps to 5/503."""
+        import scripts.pipeline_cli.audit as audit_cli
+
+        failure = sqlite3.OperationalError("database is locked")
+        failure.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", side_effect=failure),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 5)
+        self.assertEqual(payload["status"], "beets_unavailable")
+        self.assertFalse(payload["complete"])
+
+    def test_unexpected_failure_remains_exit_five(self) -> None:
+        import scripts.pipeline_cli.audit as audit_cli
+
+        output = io.StringIO()
+        with (
+            patch.object(
+                audit_cli,
+                "_open_beets",
+                side_effect=RuntimeError("programmer defect"),
+            ),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        self.assertEqual(rc, 5)
+        self.assertEqual(
+            json.loads(output.getvalue())["error"],
+            "retag_divergence_audit_failed",
+        )
+
+    def test_render_failure_after_a_successful_scan_still_exits_five(
+        self,
+    ) -> None:
+        """#1093 review finding 5 — the previous shape called
+        ``msgspec.convert``/the render+encode steps OUTSIDE the try, so a
+        defect there tracebacked out uncaught (Python's default exit 1),
+        not the documented exit 5. Fail the RENDER step specifically,
+        after ``report`` is already computed, to prove the fix covers the
+        whole body, not just the scan call."""
+        import scripts.pipeline_cli.audit as audit_cli
+
+        beets = FakeBeetsDB()
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", return_value=beets),
+            patch.object(
+                audit_cli.msgspec,
+                "to_builtins",
+                side_effect=RuntimeError("render programmer defect"),
+            ),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        self.assertEqual(rc, 5)
+        self.assertEqual(
+            json.loads(output.getvalue())["error"],
+            "retag_divergence_audit_failed",
+        )
+
+    def test_broken_pipe_during_render_exits_cleanly(self) -> None:
+        """#1093 review round 4, finding 8 — same fix as
+        ``TestWorldAuditCLI``'s own test: a downstream reader (e.g.
+        ``| head``) closing early must not double-fault through the
+        error-JSON print."""
+        import scripts.pipeline_cli.audit as audit_cli
+
+        with (
+            patch.object(audit_cli, "_open_beets", return_value=FakeBeetsDB()),
+            redirect_stdout(_BrokenPipeStdout()),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        self.assertEqual(rc, 0)
+
+    def test_after_album_id_is_forwarded_to_the_scan(self) -> None:
+        """#1093 review round 4, finding 4 — the CLI's ``--after-album-id``
+        must reach the service, not just parse."""
+        import scripts.pipeline_cli.audit as audit_cli
+        from lib.beets_db import BeetsAlbumIdentityRow
+
+        release_id = "7aabf975-9a06-4b2e-854c-2c700380ebd5"
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=release_id, item_paths=("/a/01.mp3",),
+            ),
+            BeetsAlbumIdentityRow(
+                album_id=2, mb_albumid=release_id, item_paths=("/b/01.mp3",),
+            ),
+        ])
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", return_value=beets),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                    after_album_id=1,
+                ),
+            )
+
+        payload = json.loads(output.getvalue())
+        # Album 1 is filtered out by after_album_id=1 — only album 2 (a
+        # nonexistent path, so it fails closed to unreadable/incomplete;
+        # the leaf-reader outcome is not this test's point) is scanned.
+        self.assertEqual(rc, 4)
+        self.assertEqual(payload["status"], "incomplete")
+        self.assertEqual(payload["counts"]["albums_scanned"], 1)
+
+    def test_parser_exposes_nested_audit_retag_divergence_command(self) -> None:
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        args = parser.parse_args([
+            "audit", "retag-divergence", "--json", "--after-album-id", "7",
+        ])
+
+        self.assertEqual(args.command, "audit")
+        self.assertEqual(args.audit_command, "retag-divergence")
+        self.assertTrue(args.json)
+        self.assertEqual(args.after_album_id, 7)
+
+    def test_after_album_id_rejects_the_strict_grammar_at_the_parser(
+        self,
+    ) -> None:
+        """#1093 review round 6, finding 1 — the CLI half of the strict
+        cursor grammar (round 5, finding 5) was unpinned: reverting
+        ``--after-album-id``'s ``type=`` back to bare ``int`` survived
+        every existing suite, because nothing drove a malformed value
+        through the actual parser. ``"1_0"`` is the exact reproduction —
+        bare ``int()`` silently resolves it to ``10`` via underscore
+        digit-grouping; the strict grammar
+        (``lib.retag_divergence_audit.parse_after_album_id_cursor``) must
+        reject it at argparse's own boundary, matching the API's 400 on
+        the identical input (`tests/web/test_routes_retag_divergence_audit.py
+        ::test_after_album_id_underscore_grouping_is_a_400_not_silently_reinterpreted`)."""
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args([
+                "audit", "retag-divergence", "--after-album-id", "1_0",
+            ])
+
+
+class TestRealBrokenPipeHandling(unittest.TestCase):
+    """#1093 review round 5, finding 4 — the synthetic ``_BrokenPipeStdout``
+    fake above raises on EVERY write, which no real pipe does
+    (test-fidelity.md Rule C: the fake's trigger must be something a real
+    producer can actually produce). Empirically (this class's own
+    reproduction), stdout to a pipe is block-buffered enough that a single
+    ``print()`` of a modest JSON payload does NOT itself raise, even once
+    the reader has already closed with nothing read at all — the write
+    only surfaces as ``BrokenPipeError`` later, at Python's own automatic
+    interpreter-shutdown flush, OUTSIDE any ``except`` clause in this
+    module, printing "Exception ignored while flushing sys.stdout" and
+    exiting the whole process 120 regardless of any ``sys.exit(rc)``
+    already requested. A downstream reader that closes before consuming
+    anything (e.g. a consumer that crashes immediately, or ``| true``) is
+    exactly this shape. This class spawns a REAL child process, has it
+    print a real report to a REAL OS pipe, and closes the read end
+    without reading any bytes — checking the CHILD's own exit code."""
+
+    def _run_with_reader_that_closes_immediately(
+        self, child_script: str,
+    ) -> int:
+        import subprocess
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        child = subprocess.Popen(
+            [sys.executable, "-c", child_script],
+            stdout=subprocess.PIPE,
+            cwd=repo_root,
+        )
+        assert child.stdout is not None
+        # Read NOTHING, then close — the exact shape that forces the
+        # write to stay buffered inside Python (rather than reaching the
+        # OS during `print()` itself) and defers the failure to shutdown.
+        child.stdout.read(0)
+        child.stdout.close()
+        child.wait(timeout=15)
+        return child.returncode
+
+    def test_retag_divergence_broken_pipe_through_a_real_pipe_exits_cleanly(
+        self,
+    ) -> None:
+        """``cmd_audit_world`` shares the exact same
+        ``_handle_broken_pipe_and_exit_cleanly`` handler and the same
+        ``sys.stdout.flush()``-before-``except BrokenPipeError`` shape
+        (round 4, finding 8; round 5, finding 4) — its own coverage is the
+        synthetic-fake test in ``TestWorldAuditCLI`` above (proves the
+        catch-and-return-0 wiring) plus this real-pipe proof for the one
+        shared handler, reached through its sibling caller: both callers
+        route through the same function, so a real-pipe proof at either
+        call site is evidence for both."""
+        script = """
+import sys
+from lib.beets_db import BeetsAlbumIdentityRow
+from tests.fakes import FakeBeetsDB, FakePipelineDB
+from scripts.pipeline_cli.audit import cmd_audit_retag_divergence
+import argparse
+from unittest.mock import patch
+import scripts.pipeline_cli.audit as audit_cli
+
+beets = FakeBeetsDB()
+beets.set_album_mb_identities([
+    BeetsAlbumIdentityRow(
+        album_id=i, mb_albumid="7aabf975-9a06-4b2e-854c-2c700380ebd5",
+        item_paths=(f"/nonexistent/album-{i}/01.mp3",),
+    )
+    for i in range(1, 3)
+])
+with patch.object(audit_cli, "_open_beets", return_value=beets):
+    rc = cmd_audit_retag_divergence(
+        FakePipelineDB(),
+        argparse.Namespace(
+            beets_db="unused.db", beets_directory="/unused/library",
+            json=True, after_album_id=None,
+        ),
+    )
+sys.exit(rc)
+"""
+        returncode = self._run_with_reader_that_closes_immediately(script)
+        self.assertEqual(returncode, 0)
 
 
 if __name__ == "__main__":

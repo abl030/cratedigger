@@ -48,6 +48,7 @@ WEB_TEST_HARNESS_NEIGHBOURS = (
     "tests.web.test_routes_pipeline_dashboard",
     "tests.web.test_routes_pipeline_mutations",
     "tests.web.test_routes_release_identity",
+    "tests.web.test_routes_retag_divergence_audit",
     "tests.web.test_routes_search_plan",
     "tests.web.test_routes_triage",
     "tests.web.test_routes_world_audit",

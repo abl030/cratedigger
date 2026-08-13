@@ -151,7 +151,30 @@ load-bearing:
   `-W` stays; the mitigation is visibility, not a different flag. Every
   successful retag records the divergence in its outcome detail
   (`lib/beets_retag.py`) so an operator can find "DB identity moved, file
-  tags did not" in the audit trail rather than never knowing.
+  tags did not" in the audit trail for that ONE retag rather than never
+  knowing. For the COHORT — every album whose DB identity and file tags
+  currently disagree, not just the one this retag just moved —
+  `pipeline-cli audit retag-divergence` / `GET /api/audit/retag-divergence`
+  (`lib/retag_divergence_audit.py`, issue #1093 item 1) is the read-only
+  census: it reads every Beets album's own `mb_albumid` beside each item's
+  installed file tag, with a distinct bucket for this `-W` shape versus the
+  unrelated #570 Discogs neutralization shape (DB absent, file still
+  tagged). **`pipeline-cli` reports every album where they disagree in one
+  unbounded call; `GET /api/audit/retag-divergence` bounds each call to a
+  time budget well under the deployed vhost's reverse-proxy read timeout
+  and can therefore report only a PREFIX of the library per request — pass
+  `?after_album_id=N` (the prior response's `next_after_album_id`) to
+  resume. Chaining calls this way visits the same albums, in the same
+  order, that the CLI's one call does — but NO SINGLE response in that
+  chain ever reports `status="clean"` on its own, even the one that
+  reaches the end: a resumed call only ever vouches for the range it
+  itself scanned, never a prefix a cursor skipped. A caller that wants
+  the CLI's one-call "library-wide clean" verdict has to accumulate it
+  itself, by observing that every page in the chain found no
+  divergence.** It never writes to Beets, PostgreSQL, or the filesystem —
+  a reconciler is a separate, larger option nobody has built.
+  `docs/debugging-cli.md` § "Retag divergence audit scope" is the full
+  report-shape, status/exit-code, and containment-mechanism reference.
 - **One album, one selection mechanism, pinned to the exact row the guard
   resolved.** The `mb_albumid:=<old-id>` half is exact SQL-equality
   (Beets' `=` prefix), not a regex, so it can only name albums filed under

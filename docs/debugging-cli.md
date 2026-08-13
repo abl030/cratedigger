@@ -248,6 +248,13 @@ inside socket authorization, never credentials.
 ## Command capability surface
 
 - `pipeline-cli add` — Add a MusicBrainz or Discogs request.
+- `pipeline-cli audit retag-divergence` — Read-only census of albums whose
+  Beets DB `mb_albumid` moved but whose installed file tags did not (the
+  retag `-W` residual, #1093 item 1). Accepts `--after-album-id` to resume
+  a truncated scan. Exit 0 iff `status="clean"`; exit 1 iff
+  `"divergence_found"`; exit 4 iff `"incomplete"`; exit 5 iff
+  `"beets_unavailable"`. Full mapping and rationale: § "Retag divergence
+  audit scope" below.
 - `pipeline-cli audit world` — Read-only PipelineDB, Beets, evidence, and disk coherence audit.
 - `pipeline-cli ban-source` — Remove a server-resolved bad rip and requeue its request when appropriate.
 - `pipeline-cli beets-distance` — Measure a rejected download against an exact
@@ -469,6 +476,184 @@ notification.
 Authority: "A stable or shrinking known cohort should be reported as tracked
 debt rather than making an otherwise successful daily run fail." —
 <https://github.com/abl030/cratedigger/issues/910>
+
+## Retag divergence audit scope
+
+`pipeline-cli audit retag-divergence` and `GET /api/audit/retag-divergence`
+are thin adapters over the same read-only `lib/retag_divergence_audit.py`
+service and return the same report shape. It never changes PostgreSQL,
+Beets, or library files.
+
+The import-time MusicBrainz merge retag (`lib/beets_retag.py`) runs
+`beet modify -a -M -W -y`. `-W` is deliberate and stays: it keeps the retag
+to one `Album.store()` transaction instead of a partial per-file write race.
+The accepted cost is that a successful retag moves the Beets DB's
+`mb_albumid` without touching any installed file's tag — so after a
+successful retag whose subsequent import rejects, the DB names the survivor
+while every installed file still carries the merged-away id. This audit is
+the cohort-wide instrument for that residual (issue #1093 item 1): it reads
+every Beets album's own DB `mb_albumid` beside each item's installed file
+tag and reports every album where they disagree.
+
+**Path containment is LEXICAL, not symlink-resolving.**
+`lib/beets_db.py::BeetsDB.list_album_mb_identities` verifies every stored
+item path stays inside the configured `library_root` by path-STRING
+comparison (`os.path.abspath` + `os.path.commonpath`), covering both a
+relative and an already-absolute stored path — unlike
+`resolve_current_releases`, which only checks the relative case. This is a
+deliberate match to that pre-existing mechanism, not a stricter
+`os.path.realpath` check: a symlink INSIDE the library root that points
+outside it is CONTAINED by this test and gets opened; a library root that
+is itself a symlink refuses an absolute path naming the real target. A path
+that fails this lexical check (or cannot be resolved at all, including with
+no configured root) is never opened — it is reported `unreadable` with a
+fixed detail distinguishable from a genuine read/parse failure's exception
+text (`lib/retag_divergence_audit.py::REFUSED_OUTSIDE_LIBRARY_ROOT_DETAIL`).
+Live evidence for why this matters: one real album's 51 items were stored
+as absolute paths under the private `processing/albums/` tree, entirely
+outside the library root — the CLI (operator identity) and the API
+(service identity) have different read permissions there, so without
+containment the two "symmetric" surfaces could report differently for the
+same library.
+
+Per-item classification: `agrees` (not reported), `diverges` (the DB names
+an identity the file tag does not match, including a blank file tag — the
+`-W` residual shape), `file_tag_present_db_absent` (the DB has no
+`mb_albumid` at all but the file tag still carries one — the #570 Discogs
+neutralization shape, expected near-zero and never filtered), and
+`unreadable` (the file was never verified to agree — a genuine read
+failure or a refused out-of-root path; fail closed either way, never
+counted as agreeing). Per-album `album_class` is a DISPLAY aggregate over
+its items by fixed precedence — `unreadable` > `diverges` >
+`file_tag_present_db_absent` > `agrees` — plus `empty` for a real zero-item
+album row. Only non-agreeing albums are listed; full counts
+(`albums_scanned`, `items_scanned`, `items_refused`, `items_unreadable`,
+and one count per non-agreeing class) are always reported. `items_scanned`
+counts every item path considered — read AND refused; `items_refused` is
+the subset never opened at all; `items_unreadable` is the superset of
+`items_refused` that also includes genuine read/parse failures.
+
+**`status` is independent of the per-album display class.** An album whose
+display class reads `unreadable` (because unreadable outranks everything)
+can still contain a genuine `diverges` item, and the report's headline
+answer must not miss that — so `albums_diverging` and
+`albums_file_tag_present_db_absent` are independent presence counts ("this
+album contains at least one such item"), never gated by which class won
+that album's display precedence. `status` is `divergence_found` (at least
+one album contains a genuine `diverges` or `file_tag_present_db_absent`
+item — decided independent of precedence and of any unreadable/empty
+finding elsewhere, and takes priority over every condition below,
+including a resume cursor being set); `incomplete` (no genuine divergence
+anywhere, but this call could not vouch for the WHOLE library — an
+unreadable/refused/empty-only finding; the scan hit its time deadline
+before finishing (`complete=false`); OR this call started from a resume
+cursor, i.e. `after_album_id` was given on input — this is NOT "clean",
+whatever the scanned range itself looked like); or `clean`, which requires
+ALL THREE of: nothing listed, `complete=true`, AND `after_album_id is
+None` on input — the scan actually answered the whole-library question, on
+its own, without help from any other call (#1093 review round 5, finding
+1: a resumed call that completes cleanly over the range it scanned still
+cannot vouch for whatever a cursor skipped, so it is never allowed to
+report `clean`). `beets_unavailable` covers the Beets authority itself
+being unopenable or unqueryable.
+
+**The API route bounds ONLY its per-album read LOOP to
+`API_SCAN_DEADLINE_SECONDS`** (40s, `web/routes/retag_divergence_audit.py`)
+**— not the whole request, and the CLI is always the full, unbounded
+census.** `beets.list_album_mb_identities()` (one DB fetch before the loop
+starts; ~3.2s measured live) and the JSON encode of the result both run
+UNBOUNDED, outside this timer — the real measured route time for a 40.0s
+deadline was ~41.9-43.2s. A fully UNBOUNDED census over the live
+~93k-item library took ~196s, which is why the loop is bounded at all: the
+deployed vhost's reverse proxy has no configured `proxy_read_timeout`, so
+it falls back to nginx's 60s default and would 504 while the backend kept
+scanning past it. A bounded scan that runs out of loop time reports
+`complete=false` over exactly the albums it reached — the report SHAPE
+never changes, and `albums_scanned`/`items_scanned`/etc. describe only
+that reached prefix. `tests/web/test_routes_retag_divergence_audit.py::
+TestApiScanDeadlineConstant` pins that the deadline leaves REAL margin
+under nginx's default, not merely `> 0`.
+
+**`?after_album_id=N` (CLI: `--after-album-id`) resumes a truncated scan**
+— pass the prior response's `next_after_album_id` to continue the census
+past where it stopped, chaining calls until `next_after_album_id` comes
+back `null`/`None`. No SINGLE response in that chain — not even the one
+that reaches the end — is itself allowed to report `clean` (see `status`
+above); the CALLER accumulates the whole-library verdict across the whole
+chain instead: start at `after_album_id=None`, keep resuming with each
+report's `next_after_album_id` until it comes back `None`, and conclude
+"library-wide clean" only if EVERY page in that chain reported no
+divergence (#1093 review round 5, finding 1 — a single bounded response
+can only ever vouch for the range it itself scanned). The report echoes
+its own input cursor back as `after_album_id`, so a caller (or an
+auditor reading a stored response) can always tell which shape produced
+it. `next_after_album_id` also satisfies `complete == (next_after_album_id
+is None)` in every case, including a scan truncated before reaching even
+one album, AND a `beets_unavailable` report (round 5, finding 3; round 6,
+finding 2 — a caller resuming across a transient `SQLITE_BUSY`/
+`SQLITE_LOCKED` failure gets the same cursor back, not a bare `null` that
+reads as "done") — it is never left `null` while `complete` is `false`.
+
+`after_album_id` accepts only a plain nonnegative ASCII-digit string —
+deliberately narrower than Python's bare `int()`, which silently accepts
+a leading sign, underscore digit-grouping (`"1_0"` → `10`), surrounding
+whitespace, and non-ASCII digit characters. A cursor is a read-only
+replay value, not user arithmetic, so a malformed or reinterpreted cursor
+is refused (`400`/CLI argparse error) rather than silently resolved to a
+different album id than was typed
+(`lib/retag_divergence_audit.py::parse_after_album_id_cursor`, shared by
+both the CLI and the API — #1093 review round 5, finding 5).
+
+Machine-readable output has `status` (`clean`, `divergence_found`,
+`incomplete`, or `beets_unavailable`), `complete`, `counts`, `albums`
+(only the non-agreeing ones, each with every item's classification),
+`after_album_id` (echoes the cursor this call was given — `null` iff it
+started from the true beginning), and `next_after_album_id` (`null` iff
+`complete`; otherwise the cursor to resume from). **Exit/status-code
+mapping** follows `.claude/rules/code-quality.md` § CLI ⇄ API Surface
+Symmetry's convention table: `clean` → `0`/`200` (the audit ran and the
+cohort really is empty); `divergence_found` → `1`/`200` (a genuine finding,
+the one thing this instrument exists to surface); `incomplete` → `4`/`409`
+("wrong state" — the world blocked a complete answer, so a caller must
+never read this as "no divergence" the way a bare `0`/`200` would invite);
+`beets_unavailable` → `5`/`503` (transient/retryable — the audit never
+actually ran at all, so `0`/`200` there would let a cron or
+`&& echo "cohort empty"` read "no divergence" from a report that answered
+nothing). Only `clean` means "I answered the question and the cohort is
+empty" — every other status means either a real finding or an incomplete
+answer, and none of the three non-clean statuses may be silently read as
+success. **This deliberately diverges from `pipeline-cli audit world` /
+`GET /api/audit/world`, which exit `0`/`200` for their own analogous
+beets-unavailable bucket** — that sibling itself deviates from the same
+documented convention; changing an already-shipped command's exit-code
+contract is out of this issue's scope and is left as a follow-up (see
+post-ship reflection). An unexpected schema, decoder, invariant,
+programming, close, or serialization defect remains a transport failure:
+CLI exit 5 or HTTP 503. A downstream reader closing a CLI pipe early (e.g.
+`pipeline-cli audit retag-divergence | head`, or any consumer that exits
+before reading anything) exits 0, never 120. stdout to a pipe is
+block-buffered, not flushed per `print()` call, so a `BrokenPipeError` from
+an early-closing reader can surface two different ways depending on
+payload size: a large single write can raise it synchronously, DURING the
+`print()` call (already caught by an ordinary `except BrokenPipeError`);
+a small one can complete inside Python's own buffer with no exception at
+all, deferring the actual OS-level failure to Python's automatic
+interpreter-shutdown flush — which happens AFTER the function has already
+returned and OUTSIDE every `except` clause in it, printing "Exception
+ignored while flushing sys.stdout" and exiting the whole process 120
+regardless of any `sys.exit(rc)` already requested (#1093 review round 5,
+finding 4 — the round-4 handler assumed every real pipe surfaces the
+exception the way a synthetic always-raising test double does, which the
+small-payload case does not; verified end-to-end against a REAL OS pipe
+whose reader closes having read nothing, in
+`tests/test_pipeline_cli.py::TestRealBrokenPipeHandling`). Both callers
+force an explicit `sys.stdout.flush()` right after their render, inside
+their own `try`, so the failure surfaces THERE instead of at shutdown;
+once caught, the handler redirects stdout's file descriptor to
+`/dev/null` so the unavoidable final flush becomes a no-op instead of a
+second, uncaught `BrokenPipeError` — `cmd_audit_world` and
+`cmd_audit_retag_divergence` share the identical
+`_handle_broken_pipe_and_exit_cleanly` handler.
 
 ## Live-corpus render differential
 

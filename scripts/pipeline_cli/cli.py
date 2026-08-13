@@ -28,7 +28,7 @@ from scripts.pipeline_cli.api_mutations import (
     cmd_upgrade,
     cmd_wrong_match_converge,
 )
-from scripts.pipeline_cli.audit import cmd_audit_world
+from scripts.pipeline_cli.audit import cmd_audit_retag_divergence, cmd_audit_world
 from scripts.pipeline_cli.beets_distance import cmd_beets_distance
 from scripts.pipeline_cli.destructive import cmd_ban_source, cmd_library_delete
 from scripts.pipeline_cli.imports import (
@@ -197,6 +197,7 @@ def main(*, api_socket: str | None = None):
     }
     audit_commands = {
         "world": cmd_audit_world,
+        "retag-divergence": cmd_audit_retag_divergence,
     }
     try:
         if args.command == "search-plan":
