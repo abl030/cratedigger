@@ -556,8 +556,10 @@ its own input cursor back as `after_album_id`, so a caller (or an
 auditor reading a stored response) can always tell which shape produced
 it. `next_after_album_id` also satisfies `complete == (next_after_album_id
 is None)` in every case, including a scan truncated before reaching even
-one album — it is never left `null` while `complete` is `false` (round 5,
-finding 3).
+one album, AND a `beets_unavailable` report (round 5, finding 3; round 6,
+finding 2 — a caller resuming across a transient `SQLITE_BUSY`/
+`SQLITE_LOCKED` failure gets the same cursor back, not a bare `null` that
+reads as "done") — it is never left `null` while `complete` is `false`.
 
 `after_album_id` accepts only a plain nonnegative ASCII-digit string —
 deliberately narrower than Python's bare `int()`, which silently accepts

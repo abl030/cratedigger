@@ -346,19 +346,25 @@ class RetagDivergenceReport(msgspec.Struct, frozen=True):
     #: distinction is exactly what gates ``status == "clean"`` below
     #: (#1093 review round 5, finding 1).
     after_album_id: int | None = None
-    #: Populated iff ``complete`` is ``False`` (this scan was truncated by
-    #: ``deadline_seconds`` before reaching the end of its row set) — the
+    #: Populated iff ``complete`` is ``False`` — either the scan was
+    #: truncated by ``deadline_seconds`` before reaching the end of its
+    #: row set, OR the Beets authority itself was unavailable
+    #: (``status == "beets_unavailable"``; #1093 review round 6, finding
+    #: 2 — the two are otherwise indistinguishable to a caller running the
+    #: documented resume loop, and both must resume the same way) — the
     #: cursor to pass as ``after_album_id`` on the next call to resume
     #: exactly where this one stopped. INVARIANT:
-    #: ``complete == (next_after_album_id is None)`` — a truncated scan
-    #: NEVER reports ``None`` here, even when it made zero progress (see
-    #: :func:`scan_retag_divergence`'s own docstring for how that case is
-    #: represented; #1093 review round 5, finding 3 — the previous shape
-    #: could report ``next_after_album_id=None`` with ``complete=False``,
-    #: which a caller following the documented resume loop reads as "done"
-    #: while having scanned nothing). ``None`` when ``complete`` is
-    #: ``True`` — the scan reached the end of its (optionally
-    #: cursor-filtered) row set and there is nothing left to resume.
+    #: ``complete == (next_after_album_id is None)`` in EVERY case this
+    #: module returns, not only a truncated scan — never ``None`` while
+    #: ``complete`` is ``False``, even when zero progress was made (see
+    #: :func:`scan_retag_divergence`'s own docstring for how a
+    #: zero-progress scan represents this; #1093 review round 5, finding
+    #: 3 — the previous shape could report ``next_after_album_id=None``
+    #: with ``complete=False``, which a caller following the documented
+    #: resume loop reads as "done" while having scanned nothing).
+    #: ``None`` when ``complete`` is ``True`` — the scan reached the end
+    #: of its (optionally cursor-filtered) row set and there is nothing
+    #: left to resume.
     next_after_album_id: int | None = None
 
 
@@ -552,6 +558,19 @@ def _empty_counts() -> RetagDivergenceCounts:
 def _unavailable_report(
     category: str, *, after_album_id: int | None,
 ) -> RetagDivergenceReport:
+    """``complete=False`` here too — the field's own invariant
+    (``complete == (next_after_album_id is None)``) applies uniformly, not
+    only to a truncated scan. Without this, a caller running the
+    documented resume loop against a transiently unavailable Beets
+    authority (``SQLITE_BUSY``/``SQLITE_LOCKED``) reads
+    ``next_after_album_id=None`` as "done, nothing left to resume" on the
+    FIRST unavailable response — the identical "the loop reads it as done"
+    shape #1093 review round 5, finding 3 existed to remove, relocated to
+    this path (#1093 review round 6, finding 2). Carrying the caller's own
+    cursor through (or ``_LIBRARY_START_CURSOR`` when it was already
+    ``None``) lets a resumed walk continue past a transient failure
+    exactly like it continues past a truncated scan.
+    """
     return RetagDivergenceReport(
         status="beets_unavailable",
         complete=False,
@@ -559,6 +578,9 @@ def _unavailable_report(
         albums=(),
         unavailable_detail=f"current Beets authority unavailable ({category})",
         after_album_id=after_album_id,
+        next_after_album_id=(
+            after_album_id if after_album_id is not None else _LIBRARY_START_CURSOR
+        ),
     )
 
 

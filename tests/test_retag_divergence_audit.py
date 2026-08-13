@@ -942,6 +942,34 @@ class TestScanRetagDivergenceAvailability(unittest.TestCase):
         self.assertFalse(report.complete)
         self.assertEqual(beets.close_calls, 0)
 
+    def test_unavailable_report_carries_the_caller_cursor_through(self) -> None:
+        """#1093 review round 6, finding 2 — a caller running the
+        documented resume loop against a transiently unavailable Beets
+        authority (SQLITE_BUSY/SQLITE_LOCKED) must be able to keep
+        resuming, not read a bare ``next_after_album_id=None`` on the
+        first 503/exit-5 as "done, nothing left to resume". Covers both
+        the resumed (``after_album_id=41``) and from-the-start
+        (``after_album_id=None``) shapes."""
+        def unavailable_factory() -> FakeBeetsDB:
+            raise PermissionError("denied")
+
+        resumed = scan_retag_divergence_from_factory(
+            unavailable_factory, after_album_id=41,
+        )
+        self.assertEqual(resumed.status, "beets_unavailable")
+        self.assertFalse(resumed.complete)
+        self.assertEqual(resumed.after_album_id, 41)
+        self.assertEqual(resumed.next_after_album_id, 41)
+
+        from_start = scan_retag_divergence_from_factory(
+            unavailable_factory, after_album_id=None,
+        )
+        self.assertEqual(from_start.status, "beets_unavailable")
+        self.assertFalse(from_start.complete)
+        self.assertIsNone(from_start.after_album_id)
+        self.assertIsNotNone(from_start.next_after_album_id)
+        self.assertEqual(from_start.next_after_album_id, _LIBRARY_START_CURSOR)
+
 
 class TestRealRetagDivergenceScan(unittest.TestCase):
     """Real files, a real Beets SQLite DB, and the real ``mediafile``

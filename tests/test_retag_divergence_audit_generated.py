@@ -48,6 +48,12 @@ V5  A cursor-resumed chain (``TestChainedResumeProperties``) visits every
     classification — the resume mechanism itself neither skips nor
     repeats an album, and pagination changes nothing about what the
     census finds (#1093 review round 5, finding 2).
+V6  ``complete == (next_after_album_id is None)`` in EVERY report this
+    module can return, not only a truncated scan — a report reading
+    ``complete=False`` with ``next_after_album_id=None`` tells a caller
+    running the documented resume loop "done, nothing left to resume"
+    while actually meaning the world blocked a complete answer (#1093
+    review round 6, finding 2).
 
 #1093 review round 2, finding 1 (M2): ``ITEM_DESIGNS`` previously had no
 "the DB names an identity but the file tag is BLANK" design — exactly what
@@ -82,6 +88,23 @@ forbids_clean`` closes THAT gap separately, using ``after_album_id=0``
 (smaller than every real album id, so it filters out nothing — see
 ``_LIBRARY_START_CURSOR``) to isolate "a cursor is set at all" from
 "the cursor changed what was scanned".
+
+#1093 review round 6, finding 2: the round-5 ``next_after_album_id``
+invariant (V6) was pin-only when it shipped — ``_unavailable_report``
+left ``next_after_album_id`` at its ``None`` default while setting
+``complete=False``, and nothing patrolled that. Adding the V6 clause to
+``check_counts_are_internally_consistent`` alone did NOT close the gap:
+none of the properties above ever drive
+``scan_retag_divergence_from_factory``/``_from_borrowed_factory`` with a
+FAILING factory — every one of them calls ``scan_retag_divergence``
+directly against a real, never-raising ``FakeBeetsDB``, so
+``_unavailable_report`` is never reached by any generated world.
+``TestUnavailableReportProperties`` closes that gap by driving the real
+availability-mediation seam (a factory that raises a real recognized
+unavailability exception, generated over ``after_album_id``) — a planted
+mutant reverting ``_LIBRARY_START_CURSOR`` to ``None`` inside
+``_unavailable_report`` survived V1-V5's three properties outright and is
+killed only by this one.
 """
 
 from __future__ import annotations
@@ -103,6 +126,7 @@ from lib.retag_divergence_audit import (
     RetagDivergenceItemClass,
     RetagDivergenceReport,
     scan_retag_divergence,
+    scan_retag_divergence_from_factory,
 )
 from tests.fakes import FakeBeetsDB
 from tests.test_beets_retag import MERGED, SURVIVOR
@@ -221,6 +245,21 @@ def check_counts_are_internally_consistent(
             f"items_refused {counts.items_refused} exceeds "
             f"items_unreadable {counts.items_unreadable} — every refused "
             "path is classified unreadable, a subset relationship"
+        )
+    # INVARIANT (#1093 review round 5, finding 3; round 6, finding 2):
+    # ``complete == (next_after_album_id is None)`` in EVERY report this
+    # module returns, not only a truncated scan — a report claiming
+    # ``complete=False`` with ``next_after_album_id=None`` reads as "done,
+    # nothing left to resume" to a caller running the documented resume
+    # loop, while actually meaning the world blocked a complete answer.
+    # ``_unavailable_report`` is exactly the shape round 6 found this
+    # unpinned for: reverting ``_LIBRARY_START_CURSOR`` back to ``None``
+    # survived every property until this clause.
+    if report.complete != (report.next_after_album_id is None):
+        raise AssertionError(
+            f"complete={report.complete!r} but "
+            f"next_after_album_id={report.next_after_album_id!r} — "
+            "violates complete == (next_after_album_id is None)"
         )
 
 
@@ -616,6 +655,45 @@ class TestChainedResumeProperties(unittest.TestCase):
         )
 
 
+class TestUnavailableReportProperties(unittest.TestCase):
+    """#1093 review round 6, finding 2, Q2 proof. None of the three
+    properties above ever drives ``scan_retag_divergence_from_factory``
+    with a FAILING factory — every one of them calls ``scan_
+    retag_divergence`` directly against a real (never-raising)
+    ``FakeBeetsDB``. That means the new V3 cursor-carry-through clause in
+    ``check_counts_are_internally_consistent``, though it trips on demand
+    (see the known-bad self-test), was UNREACHABLE by any generated
+    world — planting the exact named mutant (reverting
+    ``_LIBRARY_START_CURSOR`` back to ``None`` in ``_unavailable_report``)
+    survived all three. This property drives the real availability-
+    mediation seam (a factory that raises a real, recognized
+    unavailability exception — the same shape
+    ``TestScanRetagDivergenceAvailability`` already exercises
+    deterministically) over a generated ``after_album_id``, closing the
+    gap."""
+
+    @settings(deadline=None)
+    @given(
+        after_album_id=st.one_of(
+            st.none(), st.integers(min_value=0, max_value=10_000),
+        ),
+    )
+    @example(after_album_id=None)
+    @example(after_album_id=41)
+    def test_unavailable_report_satisfies_the_cursor_invariant(
+        self, after_album_id: int | None,
+    ) -> None:
+        def unavailable_factory() -> FakeBeetsDB:
+            raise PermissionError("denied")
+
+        report = scan_retag_divergence_from_factory(
+            unavailable_factory, after_album_id=after_album_id,
+        )
+
+        self.assertEqual(report.status, "beets_unavailable")
+        check_counts_are_internally_consistent(report)
+
+
 def _make_item(
     item_class: RetagDivergenceItemClass, *, tag: str | None = "x",
 ) -> RetagDivergenceItem:
@@ -651,10 +729,12 @@ def _make_report(
     albums: tuple[RetagDivergenceAlbum, ...] = (),
     complete: bool = True,
     after_album_id: int | None = None,
+    next_after_album_id: int | None = None,
 ) -> RetagDivergenceReport:
     return RetagDivergenceReport(
         status=status, complete=complete, counts=counts, albums=albums,
         after_album_id=after_album_id,
+        next_after_album_id=next_after_album_id,
     )
 
 
@@ -814,6 +894,24 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             AssertionError, "items_refused .* exceeds items_unreadable",
+        ):
+            check_counts_are_internally_consistent(report)
+
+    def test_v3_incomplete_without_a_resume_cursor_is_rejected(self) -> None:
+        """#1093 review round 6, finding 2 — the exact defect shape:
+        ``complete=False`` with ``next_after_album_id`` left at its
+        ``None`` default (the previous ``_unavailable_report`` shape) must
+        be rejected, whatever the status. One unreadable album keeps every
+        EARLIER V3 clause satisfied so only this one can fire."""
+        report = self._report(
+            status="incomplete",
+            counts=RetagDivergenceCounts(1, 1, 0, 1, 0, 0, 1, 0),
+            albums=(self._album(album_class="unreadable"),),
+            complete=False,
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"complete=False but next_after_album_id=None — violates",
         ):
             check_counts_are_internally_consistent(report)
 

@@ -7798,6 +7798,28 @@ class TestRetagDivergenceAuditCLI(unittest.TestCase):
         self.assertTrue(args.json)
         self.assertEqual(args.after_album_id, 7)
 
+    def test_after_album_id_rejects_the_strict_grammar_at_the_parser(
+        self,
+    ) -> None:
+        """#1093 review round 6, finding 1 — the CLI half of the strict
+        cursor grammar (round 5, finding 5) was unpinned: reverting
+        ``--after-album-id``'s ``type=`` back to bare ``int`` survived
+        every existing suite, because nothing drove a malformed value
+        through the actual parser. ``"1_0"`` is the exact reproduction —
+        bare ``int()`` silently resolves it to ``10`` via underscore
+        digit-grouping; the strict grammar
+        (``lib.retag_divergence_audit.parse_after_album_id_cursor``) must
+        reject it at argparse's own boundary, matching the API's 400 on
+        the identical input (`tests/web/test_routes_retag_divergence_audit.py
+        ::test_after_album_id_underscore_grouping_is_a_400_not_silently_reinterpreted`)."""
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args([
+                "audit", "retag-divergence", "--after-album-id", "1_0",
+            ])
+
 
 class TestRealBrokenPipeHandling(unittest.TestCase):
     """#1093 review round 5, finding 4 — the synthetic ``_BrokenPipeStdout``
