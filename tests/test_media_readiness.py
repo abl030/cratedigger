@@ -9,6 +9,7 @@ from pathlib import Path
 
 from lib.media_readiness import (
     MediaReadinessError,
+    average_bitrate_kbps_from_frames,
     flac_total_samples_only_changed,
     inspect_media,
     media_facts_for_path,
@@ -166,3 +167,57 @@ class TestFlacReadinessPin(unittest.TestCase):
             facts = media_facts_for_path(str(path))
             self.assertEqual(facts.codec, "mp3")
             self.assertGreater(facts.sample_count, 0)
+
+
+class TestAverageBitrateDerivationPin(unittest.TestCase):
+    """A constant-bitrate stream must never read one kbps low (Koppel, dl 39947).
+
+    ``album_quality_evidence`` id 36856: ten genuinely 256 kbps tracks, one of
+    which derived 255 because the rate was computed through a float
+    ``duration`` that is not exactly representable. That single kbps broke
+    per-track bitrate uniformity, flipped ``is_cbr`` to False, routed the album
+    onto ``cfg.mp3_vbr`` (transparent >= 245) instead of ``cfg.mp3_cbr``
+    (transparent >= 320), and the album out-ranked and re-imported over itself.
+    """
+
+    # Track 04 of the live album, exactly as ffprobe reported it. The real
+    # quotient is an integer: 8517888 * 8 == 266.184 s * 256 kbps * 1000.
+    KOPPEL_TRACK_04 = (8_517_888, 12_776_832, 48_000)
+
+    def test_exactly_representable_rate_is_not_floored_one_low(self) -> None:
+        compressed_bytes, sample_count, sample_rate = self.KOPPEL_TRACK_04
+        # The defect: routing through float seconds loses the exact quotient.
+        self.assertEqual(
+            int((compressed_bytes * 8) / (sample_count / sample_rate) / 1000),
+            255,
+            "fixture no longer reproduces the float-truncation world",
+        )
+        self.assertEqual(
+            average_bitrate_kbps_from_frames(
+                compressed_bytes, sample_count, sample_rate,
+            ),
+            256,
+        )
+
+    def test_rate_is_rounded_to_nearest_not_truncated(self) -> None:
+        # 44100 Hz, 1152-sample frames: a real stream rarely lands on an exact
+        # integer. Nearest-integer is the honest report; flooring always biases
+        # a constant stream downward and can break uniformity on one track.
+        sample_rate, sample_count = 44_100, 44_100  # exactly 1 second
+        for exact_bits, expected in ((191_600, 192), (192_400, 192), (191_499, 191)):
+            with self.subTest(exact_bits=exact_bits):
+                self.assertEqual(
+                    average_bitrate_kbps_from_frames(
+                        exact_bits // 8, sample_count, sample_rate,
+                    ),
+                    expected,
+                )
+
+    def test_degenerate_inputs_withhold_a_rate(self) -> None:
+        for label, args in (
+            ("no samples", (1_000, 0, 44_100)),
+            ("no sample rate", (1_000, 44_100, 0)),
+            ("no audio bytes", (0, 44_100, 44_100)),
+        ):
+            with self.subTest(label):
+                self.assertIsNone(average_bitrate_kbps_from_frames(*args))

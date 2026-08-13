@@ -11,7 +11,11 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from lib.media_readiness import flac_total_samples_only_changed, prepare_media_readiness
+from lib.media_readiness import (
+    average_bitrate_kbps_from_frames,
+    flac_total_samples_only_changed,
+    prepare_media_readiness,
+)
 from tests.audio_fixtures import make_test_flac
 from tests.test_media_readiness import _streaminfo_span, _zero_flac_duration_metadata
 
@@ -95,3 +99,161 @@ class TestFlacMetadataMutationProperty(unittest.TestCase):
         forbidden = bytearray(allowed)
         forbidden[start + 13] ^= 0x10
         self.assertFalse(flac_total_samples_only_changed(before, bytes(forbidden)))
+
+
+# Track 04 of Koppel *Improvisationer for Klaver* exactly as ffprobe reported
+# it (evidence 36856): the real quotient is the integer 256, but the float
+# path yielded 255.99999999999997 and truncated to 255.
+_KOPPEL_TRACK_04 = {
+    "compressed_bytes": 8_517_888,
+    "sample_count": 12_776_832,
+    "sample_rate": 48_000,
+}
+
+
+def bitrate_derivation_violations(
+    *,
+    compressed_bytes: int,
+    sample_count: int,
+    sample_rate: int,
+    derived: int | None,
+) -> list[str]:
+    """Every way a derived average bitrate can misreport its own stream.
+
+    Accumulating rather than short-circuiting: each clause is evaluated on
+    every world, so an earlier violation can never mask a later one.
+    """
+    violations: list[str] = []
+    degenerate = compressed_bytes <= 0 or sample_count <= 0 or sample_rate <= 0
+    if degenerate:
+        if derived is not None:
+            violations.append(
+                f"degenerate stream invented a rate: got {derived}"
+            )
+        return violations
+    if derived is None:
+        violations.append("measurable stream withheld a rate")
+        return violations
+    numerator = compressed_bytes * 8 * sample_rate
+    denominator = sample_count * 1000
+    if numerator % denominator == 0:
+        exact = numerator // denominator
+        if derived != exact:
+            violations.append(
+                f"exact integer rate {exact} reported as {derived}"
+            )
+    nearest = (numerator + denominator // 2) // denominator
+    if derived != nearest:
+        violations.append(
+            f"rate {derived} is not the nearest integer {nearest}"
+        )
+    if derived < 0:
+        violations.append(f"negative rate {derived}")
+    return violations
+
+
+class TestAverageBitrateDerivationProperty(unittest.TestCase):
+    """A constant-bitrate stream must read as its own constant rate.
+
+    Patrols the world space around the Koppel pin in
+    ``tests/test_media_readiness.py`` — the float-truncation defect that
+    made one 256 kbps track of ten report 255, broke ``is_cbr`` uniformity
+    and re-imported an album over itself (dl 39947).
+    """
+
+    @settings(max_examples=250)
+    @given(
+        nominal_kbps=st.sampled_from((96, 128, 160, 192, 224, 256, 320)),
+        sample_rate=st.sampled_from((44_100, 48_000, 32_000, 22_050)),
+        seconds_milli=st.integers(min_value=1_000, max_value=900_000),
+    )
+    def test_exact_constant_streams_report_their_own_rate(
+        self, *, nominal_kbps: int, sample_rate: int, seconds_milli: int,
+    ) -> None:
+        # Build a stream whose true rate is EXACTLY nominal_kbps, then let the
+        # real production derivation read it back.
+        sample_count = max(1, (sample_rate * seconds_milli) // 1000)
+        numerator = nominal_kbps * 1000 * sample_count
+        if numerator % (8 * sample_rate):
+            return  # not an exact whole-byte stream; covered by the general clause
+        compressed_bytes = numerator // (8 * sample_rate)
+        derived = average_bitrate_kbps_from_frames(
+            compressed_bytes, sample_count, sample_rate,
+        )
+        self.assertEqual(
+            bitrate_derivation_violations(
+                compressed_bytes=compressed_bytes,
+                sample_count=sample_count,
+                sample_rate=sample_rate,
+                derived=derived,
+            ),
+            [],
+        )
+        self.assertEqual(derived, nominal_kbps)
+
+    @settings(max_examples=250)
+    @given(
+        compressed_bytes=st.integers(min_value=0, max_value=200_000_000),
+        sample_count=st.integers(min_value=0, max_value=200_000_000),
+        sample_rate=st.sampled_from((0, 8_000, 22_050, 32_000, 44_100, 48_000, 96_000)),
+    )
+    def test_arbitrary_streams_never_misreport(
+        self, *, compressed_bytes: int, sample_count: int, sample_rate: int,
+    ) -> None:
+        derived = average_bitrate_kbps_from_frames(
+            compressed_bytes, sample_count, sample_rate,
+        )
+        self.assertEqual(
+            bitrate_derivation_violations(
+                compressed_bytes=compressed_bytes,
+                sample_count=sample_count,
+                sample_rate=sample_rate,
+                derived=derived,
+            ),
+            [],
+        )
+
+
+class TestBitrateDerivationCheckerTripsOnViolations(unittest.TestCase):
+    """Known-bad self-test per CLAUSE — a guard that never fires proves nothing."""
+
+    def test_exact_integer_clause_trips(self) -> None:
+        # The live defect world: exact 256, reported 255.
+        self.assertIn(
+            "exact integer rate 256 reported as 255",
+            bitrate_derivation_violations(**_KOPPEL_TRACK_04, derived=255),
+        )
+
+    def test_nearest_integer_clause_trips(self) -> None:
+        # A non-exact stream reported one low. 44100 Hz, 1 s, 191.6 kbps.
+        found = bitrate_derivation_violations(
+            compressed_bytes=191_600 // 8, sample_count=44_100,
+            sample_rate=44_100, derived=191,
+        )
+        self.assertTrue(
+            any("is not the nearest integer 192" in v for v in found), found,
+        )
+
+    def test_withheld_rate_clause_trips(self) -> None:
+        self.assertIn(
+            "measurable stream withheld a rate",
+            bitrate_derivation_violations(**_KOPPEL_TRACK_04, derived=None),
+        )
+
+    def test_invented_rate_clause_trips(self) -> None:
+        self.assertIn(
+            "degenerate stream invented a rate: got 128",
+            bitrate_derivation_violations(
+                compressed_bytes=0, sample_count=44_100,
+                sample_rate=44_100, derived=128,
+            ),
+        )
+
+    def test_negative_rate_clause_trips(self) -> None:
+        found = bitrate_derivation_violations(**_KOPPEL_TRACK_04, derived=-1)
+        self.assertTrue(any("negative rate -1" in v for v in found), found)
+
+    def test_clean_world_has_no_violations(self) -> None:
+        self.assertEqual(
+            bitrate_derivation_violations(**_KOPPEL_TRACK_04, derived=256), [],
+        )

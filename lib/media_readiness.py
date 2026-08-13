@@ -386,6 +386,43 @@ def _repair_flac_total_samples(path: Path, sample_count: int) -> bool:
         os.close(fd)
 
 
+def average_bitrate_kbps_from_frames(
+    compressed_bytes: int,
+    sample_count: int,
+    sample_rate: int,
+) -> int | None:
+    """Nearest-integer kbps for a stream, derived without float error.
+
+    Deliberately does NOT route through ``duration_seconds``.
+    ``sample_count / sample_rate`` is a float, and for an ordinary sample
+    count it is not exactly representable — so a stream whose true rate is
+    an exact integer can come back a hair under it, and truncating floors
+    that to one kbps LOW. Live instance: Koppel ``Improvisationer for
+    Klaver`` track 04 (evidence 36856), where
+    ``8517888 * 8 == 266.184 s * 256 kbps * 1000`` exactly, yet the float
+    path yielded ``255.99999999999997`` and reported 255.
+
+    That single kbps is not cosmetic. Per-track bitrate uniformity is what
+    ``is_cbr`` is derived from, one odd track makes a constant-bitrate album
+    look variable, and MP3 then ranks through ``cfg.mp3_vbr``
+    (transparent >= 245) instead of ``cfg.mp3_cbr`` (transparent >= 320) —
+    a two-tier swing on identical audio.
+
+    The quotient is therefore evaluated as an exact integer ratio and
+    rounded half-up. Rounding rather than truncating is the second half:
+    a real stream rarely lands on an exact integer, and flooring biases
+    every such track downward.
+
+    Returns None when any input is non-positive — a rate cannot be derived
+    and the caller must not invent one.
+    """
+    if compressed_bytes <= 0 or sample_count <= 0 or sample_rate <= 0:
+        return None
+    numerator = compressed_bytes * 8 * sample_rate
+    denominator = sample_count * 1000
+    return (numerator + denominator // 2) // denominator
+
+
 def _facts_for_path(path: Path) -> MediaFileFacts:
     wire = _ffprobe_readiness(path)
     stream_index, codec, sample_rate, channels, bit_depth, container = _stream_facts(path, wire)
@@ -393,7 +430,9 @@ def _facts_for_path(path: Path) -> MediaFileFacts:
         path, wire, audio_stream_index=stream_index,
     )
     duration = sample_count / sample_rate
-    bitrate = int((compressed_bytes * 8) / duration / 1000) if duration > 0 else None
+    bitrate = average_bitrate_kbps_from_frames(
+        compressed_bytes, sample_count, sample_rate,
+    )
     return MediaFileFacts(
         path=str(path.resolve()), codec=codec,
         container=container,
