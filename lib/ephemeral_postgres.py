@@ -72,6 +72,12 @@ class EphemeralPostgres:
 
     @property
     def _server_options(self) -> tuple[str, ...]:
+        # This cluster is disposable: its data is destroyed at teardown (or
+        # on the next reboot if teardown never runs) and it is used by
+        # exactly one test worker process. Every setting below trades a
+        # production durability/scalability guarantee this world does not
+        # need for less RAM and less tmpfs — do NOT copy this list into a
+        # production or long-lived Postgres config.
         return (
             f"-k {self._socket_dir}",
             "-c listen_addresses=''",
@@ -80,6 +86,95 @@ class EphemeralPostgres:
             # instead of relying on the five-minute production default.
             "-c checkpoint_timeout=30s",
             "-c checkpoint_completion_target=0.1",
+            # 128MB (the stock default) is sized for a real workload's
+            # buffer pool; a throwaway schema exercised by one worker at a
+            # time never approaches it. This is the single biggest real-RAM
+            # lever available (issue #1131) — it does not touch tmpfs bytes,
+            # since shared_buffers is anonymous shared memory, not a file
+            # under the data directory.
+            "-c shared_buffers=16MB",
+            # No crash recovery is ever performed on this cluster — it is
+            # deleted outright on any failure (EphemeralPostgres._cleanup)
+            # rather than restarted against its data directory. Durability
+            # and torn-page protection exist to survive a crash; skipping
+            # them here is safe by construction, not merely acceptable.
+            "-c fsync=off",
+            "-c full_page_writes=off",
+            "-c synchronous_commit=off",
+            # wal_level=minimal cannot start with wal_senders > 0 — nothing
+            # here streams, replicates, or does PITR, so replica-level WAL
+            # (the default) buys this cluster nothing and minimal drops
+            # some replica-only record content for free. NOT a measured WAL
+            # *volume* win: minimal's well-known same-transaction
+            # create/truncate WAL-skip never triggers here — `PipelineDB`
+            # runs autocommit=True (lib/pipeline_db/_core.py) and the test
+            # helper's TRUNCATE is its own statement, so it commits before
+            # any test writes a row and every later INSERT is a different
+            # transaction. 100% of this PR's measured pg_wal reduction (see
+            # the PR body) is the min/max_wal_size ceiling change below, not
+            # this setting.
+            "-c wal_level=minimal",
+            "-c max_wal_senders=0",
+            # 2MB is the hard-enforced floor with 1MB WAL segments (initdb
+            # --wal-segsize=1 below); measured empirically (issue #1131) —
+            # postgres refuses to start below it. Pushed to the floor
+            # deliberately: sweeping the same 553-real-DB-test burst across
+            # 2MB/4MB/8MB/16MB/64MB ceilings measured zero wall-time
+            # difference (all landed within 13.1s-14.9s, no trend) while
+            # post-run pg_wal tracked the ceiling itself roughly 1:1 (~4MB
+            # at 4MB, ~8MB at 8MB, ~16MB at 16MB) — so every doubling costs
+            # real retained WAL and there is no knee to stop at short of the
+            # floor itself. The checkpoint churn this forces is CPU work
+            # against RAM, not disk I/O, and this cluster has nothing else
+            # to do with that CPU.
+            "-c min_wal_size=2MB",
+            "-c max_wal_size=8MB",
+            # checkpoint_warning stays at its default: it is the one in-band
+            # signal that would tell an operator this cluster's own
+            # min_wal_size/max_wal_size ceiling has been pushed too small
+            # for some future heavier workload, and silencing it in the
+            # same commit that ships that tiny ceiling would blind exactly
+            # the diagnostic needed to notice. log_checkpoints=off is kept:
+            # unlike the warning, its "checkpoint starting"/"checkpoint
+            # complete" LOG lines carry no diagnostic value (routine
+            # per-checkpoint telemetry, not a signal anything is wrong), and
+            # the much smaller max_wal_size above makes checkpoints frequent
+            # enough that logging every one is real (if modest) tmpfs-
+            # resident log growth for no offsetting benefit: measured on
+            # ONE 553-test module with checkpoint_warning genuinely live,
+            # log_checkpoints=off keeps pg.log ~17KB above the stock-config
+            # baseline instead of ~50KB (both on) — nowhere near a
+            # "meaningful slice" of the pg_wal saving, as an earlier draft
+            # of this comment overstated, but a real and free reduction.
+            "-c log_checkpoints=off",
+            # Autovacuum exists to reclaim space and update planner stats
+            # over a database's working lifetime. Nothing here has one:
+            # tests TRUNCATE between runs (reclaiming space immediately,
+            # unlike DELETE) and the whole cluster is destroyed in minutes.
+            "-c autovacuum=off",
+            # NOT one connection at a time: scripts/run_world_model_burst.py
+            # runs ONE coordinator-owned EphemeralPostgres (this same class)
+            # with up to IN_PROCESS_JOB_CAP=30 concurrent child processes,
+            # each holding a connection to its own cloned database on this
+            # cluster, plus transient createdb/dropdb maintenance
+            # connections for every clone create/drop. 50 clears that cap
+            # with real headroom instead of the canonical suite's own
+            # handful-of-threads ceiling; the PGPROC/lock-table cost of 50
+            # vs. the stock 100 is trivial next to the WAL/shared_buffers
+            # savings above.
+            "-c max_connections=50",
+        )
+
+    @property
+    def _initdb_args(self) -> tuple[str, ...]:
+        return (
+            "initdb", "-D", str(self._datadir), "--no-locale", "-E", "UTF8",
+            "-A", "trust",
+            # Disposable cluster (see _server_options): skip initdb's own
+            # fsync of the freshly written catalog files, and shrink the
+            # WAL segment size to its 1MB floor so pg_wal starts (and
+            # stays) far below the 16MB-per-segment default footprint.
+            "--no-sync", "--wal-segsize=1",
         )
 
     def _failure_detail(self, error: subprocess.CalledProcessError) -> str:
@@ -132,10 +227,7 @@ class EphemeralPostgres:
             # unattended gate.
             self._socket_tmpdir = Path(tempfile.mkdtemp(prefix="cdpg-", dir="/tmp"))
             subprocess.run(
-                [
-                    "initdb", "-D", str(self._datadir), "--no-locale", "-E", "UTF8",
-                    "-A", "trust",
-                ],
+                self._initdb_args,
                 capture_output=True,
                 check=True,
             )
