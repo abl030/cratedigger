@@ -114,6 +114,7 @@ WORLD_VIOLATION_BUCKETS: Mapping[str, WorldViolationBucket] = MappingProxyType({
     "evidence_link_without_album": "B",
     "current_evidence_missing": "B",
     "album_fingerprint_unavailable": "B",
+    "library_root_unavailable": "B",
     # C — Beets/library health.
     "album_empty": "C",
     "item_outside_album_folder": "C",
@@ -121,6 +122,8 @@ WORLD_VIOLATION_BUCKETS: Mapping[str, WorldViolationBucket] = MappingProxyType({
     "album_folder_missing": "C",
     "album_item_missing": "C",
     "beets_identity_missing": "C",
+    "album_folder_outside_library_root": "C",
+    "album_item_outside_library_root": "C",
 })
 
 
@@ -211,6 +214,77 @@ def check_library_filesystem(
                 detail=(
                     f"beets album {album.album_id} item "
                     f"{item_path!r} is absent"
+                ),
+                release_id=album.release_id,
+                album_ids=(album.album_id,),
+            ))
+    return tuple(violations)
+
+
+def check_library_root_containment(
+    albums: Sequence[LibraryAlbumSnapshot],
+    *,
+    library_root: str,
+) -> tuple[WorldViolation, ...]:
+    """Require every album folder and item path to live under the library root.
+
+    Issue #1089: a killed automation import can leave a Beets catalog row
+    committed while its items still point at the PROCESSING source path,
+    never the configured library root — a "ghost with live files" the night
+    it happens. ``check_library_filesystem`` alone cannot see this: its
+    ``album_item_missing``/``album_folder_missing`` codes only fire once
+    something ELSE later deletes those files (in the Frozen incident, four
+    days later, when the pipeline's own recovery cleanup removed the
+    processing tree). This checker fires immediately, from path location
+    alone, independent of whether the files still physically exist.
+
+    Issue #1089 review m7: an unconfigured (empty) ``library_root`` used to
+    report nothing — silently skipping every album's containment check
+    rather than false-positiving them all against an unknown root. That
+    reasoning conflated two different failures: "cannot evaluate this
+    album's containment" (correctly silent) is not "cannot evaluate ANY
+    album's containment because the configuration itself is missing" (a
+    real, nameable fact about THIS invocation, worth its own violation).
+    Bucket B, alongside ``current_beets_authority_unavailable`` — "we
+    cannot prove this" rather than bucket A's "this IS wrong" — because an
+    unset root is a caller-configuration gap, not evidence any album is
+    actually misplaced.
+    """
+
+    if not library_root:
+        return (WorldViolation(
+            code="library_root_unavailable",
+            detail=(
+                "library_root is empty/unset — album folder/item "
+                "containment cannot be evaluated for any album"
+            ),
+        ),)
+
+    violations: list[WorldViolation] = []
+    root = _normal_path(library_root)
+    root_prefix = root + os.sep
+    for album in albums:
+        folder = _normal_path(album.album_path)
+        if folder != root and not folder.startswith(root_prefix):
+            violations.append(WorldViolation(
+                code="album_folder_outside_library_root",
+                detail=(
+                    f"beets album {album.album_id} folder "
+                    f"{album.album_path!r} is outside library root "
+                    f"{library_root!r}"
+                ),
+                release_id=album.release_id,
+                album_ids=(album.album_id,),
+            ))
+        for item_path in album.item_paths:
+            item_folder = _normal_path(item_path)
+            if item_folder == root or item_folder.startswith(root_prefix):
+                continue
+            violations.append(WorldViolation(
+                code="album_item_outside_library_root",
+                detail=(
+                    f"beets album {album.album_id} item {item_path!r} "
+                    f"is outside library root {library_root!r}"
                 ),
                 release_id=album.release_id,
                 album_ids=(album.album_id,),
@@ -596,6 +670,7 @@ __all__ = [
     "check_evidence_disk_coherence",
     "check_folder_exclusivity",
     "check_library_filesystem",
+    "check_library_root_containment",
     "check_no_lossy_tier_widening",
     "check_proof_lock_terminality",
     "check_status_membership",

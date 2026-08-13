@@ -1,6 +1,7 @@
 """Tests for the shared import queue worker."""
 
 import copy
+import functools
 import json
 import os
 import shutil
@@ -21,6 +22,15 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
+from lib.automation_recovery_debris import (
+    RecoveryDebrisRemovalFn,
+    remove_recovery_debris,
+)
+from lib.beets_delete import (
+    BeetsDeleteCompleted,
+    BeetsDeleteOutcome,
+    BeetsDeleteRequest,
+)
 from lib.config import CratediggerConfig
 from lib.dispatch import (
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
@@ -57,6 +67,7 @@ from lib.import_queue import (
 )
 from lib.pipeline_db._core import OwnerSessionLost
 from lib.pipeline_db.cleanup_journal import CleanupJournalConflict
+from lib.pipeline_db.import_jobs import _default_force_action_copy_path
 from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
 from lib.processing_cleanup import ProcessingCleanupError
 from lib.quality import (
@@ -79,6 +90,10 @@ from tests.helpers import (
     make_ctx_with_fake_db,
     make_grab_list_entry,
     make_request_row,
+)
+from tests.test_automation_startup_recovery import (
+    _no_debris_removal,
+    _no_force_action_copy_path,
 )
 
 _HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
@@ -2312,7 +2327,11 @@ class TestImporterWorker(unittest.TestCase):
         )
         self.assertTrue(os.path.isdir(action_path))
 
-        recovered = importer.recover_abandoned_running_jobs(db)
+        recovered = importer.recover_abandoned_running_jobs(
+            db,
+            debris_removal_fn=_no_debris_removal,
+            force_action_copy_path_fn=_no_force_action_copy_path,
+        )
 
         self.assertEqual([item.id for item in recovered], [job.id])
         self.assertEqual(recovered[0].status, "failed")
@@ -2337,7 +2356,11 @@ class TestImporterWorker(unittest.TestCase):
             "lib.config.read_runtime_config",
             side_effect=RuntimeError("temporary config refusal"),
         ):
-            importer.recover_abandoned_running_jobs(db)
+            importer.recover_abandoned_running_jobs(
+                db,
+                debris_removal_fn=_no_debris_removal,
+                force_action_copy_path_fn=_no_force_action_copy_path,
+            )
 
         failed_cleanup_job = db.get_import_job(job.id)
         assert failed_cleanup_job is not None
@@ -2348,7 +2371,11 @@ class TestImporterWorker(unittest.TestCase):
         self.assertFalse(cleanup["removed"])
         self.assertTrue(os.path.isdir(action_path))
 
-        importer.recover_abandoned_running_jobs(db)
+        importer.recover_abandoned_running_jobs(
+            db,
+            debris_removal_fn=_no_debris_removal,
+            force_action_copy_path_fn=_no_force_action_copy_path,
+        )
 
         converged = db.get_import_job(job.id)
         assert converged is not None
@@ -2373,7 +2400,11 @@ class TestImporterWorker(unittest.TestCase):
             "merge_import_job_result",
             side_effect=RuntimeError("lost cleanup receipt"),
         ):
-            importer.recover_abandoned_running_jobs(db)
+            importer.recover_abandoned_running_jobs(
+                db,
+                debris_removal_fn=_no_debris_removal,
+                force_action_copy_path_fn=_no_force_action_copy_path,
+            )
 
         self.assertFalse(os.path.exists(action_path))
         unrecorded = db.get_import_job(job.id)
@@ -2383,7 +2414,11 @@ class TestImporterWorker(unittest.TestCase):
             unrecorded.result or {},
         )
 
-        importer.recover_abandoned_running_jobs(db)
+        importer.recover_abandoned_running_jobs(
+            db,
+            debris_removal_fn=_no_debris_removal,
+            force_action_copy_path_fn=_no_force_action_copy_path,
+        )
 
         converged = db.get_import_job(job.id)
         assert converged is not None
@@ -3474,8 +3509,15 @@ class TestImporterWorker(unittest.TestCase):
                 requeue_message: str,
                 recovery_message: str,
                 limit: int,
+                debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
+                force_action_copy_path_fn: Callable[
+                    [int], str,
+                ] = _default_force_action_copy_path,
             ) -> list[ImportJob]:
-                del requeue_message, recovery_message, limit
+                del (
+                    requeue_message, recovery_message, limit,
+                    debris_removal_fn, force_action_copy_path_fn,
+                )
                 return []
 
             def list_automation_import_jobs_for_startup_recovery(
@@ -8781,6 +8823,75 @@ def terminal_stage_canonical_dir(case: unittest.TestCase) -> str:
     return path
 
 
+class _FixedCandidateBeetsDB:
+    """Minimal in-memory ``SupportsRecoveryDebrisBeetsDB`` naming one album.
+
+    Deliberately identity-blind (issue #1089 B1's composition pin needs to
+    prove the SELF-HEAL PATH wires debris removal in, not re-prove
+    ``remove_recovery_debris``'s own confinement/identity logic — already
+    covered by ``tests/test_automation_recovery_debris.py`` and
+    ``tests/test_automation_recovery_debris_generated.py``).
+    """
+
+    library_db_path = "/fake/beets.db"
+    library_root = "/fake/library"
+
+    def __init__(self, *, album_id: int, item_paths: tuple[str, ...]) -> None:
+        self._album_id = album_id
+        self._item_paths = item_paths
+
+    def get_all_album_ids_for_release(self, release_id: str) -> list[int]:
+        del release_id
+        return [self._album_id]
+
+    def get_album_detail(self, album_id: int) -> dict[str, object] | None:
+        if album_id != self._album_id:
+            return None
+        return {"tracks": [{"path": p} for p in self._item_paths]}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+
+class _RecordingBeetsDeleteFn:
+    """Records every request the admitted delete lane would have received."""
+
+    def __init__(self) -> None:
+        self.requests: list[BeetsDeleteRequest] = []
+
+    def __call__(self, request: BeetsDeleteRequest) -> BeetsDeleteOutcome:
+        self.requests.append(request)
+        return BeetsDeleteCompleted(
+            album_id=request.album_id,
+            album_name="Frozen",
+            artist_name="Idina Menzel",
+            former_album_path=request.debris_confinement_root or "",
+            deleted_tracks=0,
+            deleted_artifacts=0,
+            preserved_paths=(),
+            metadata_only=True,
+        )
+
+
+def _fixed_candidate_debris_removal_fn(
+    *,
+    album_id: int,
+    item_paths: tuple[str, ...],
+    beets_delete_fn: _RecordingBeetsDeleteFn,
+) -> RecoveryDebrisRemovalFn:
+    """The REAL ``remove_recovery_debris``, bound to a fixed fast fixture."""
+    return functools.partial(
+        remove_recovery_debris,
+        beets_db_factory=lambda: _FixedCandidateBeetsDB(
+            album_id=album_id, item_paths=item_paths,
+        ),
+        beets_delete_fn=beets_delete_fn,
+    )
+
+
 class TestAutomationTerminalStageFaultRouting(unittest.TestCase):
     """Invariant 1 — the post-execution stage never kills the worker."""
 
@@ -9133,6 +9244,8 @@ class TestAutomationWorldFailureNeverParks(unittest.TestCase):
         claimed: ImportJob,
         lease: ExecutionLeaseSnapshot,
         execute_fn: Callable[..., DispatchOutcome],
+        *,
+        debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
     ) -> tuple[ImportJob | None, BaseException | None]:
         from scripts import importer
 
@@ -9149,6 +9262,7 @@ class TestAutomationWorldFailureNeverParks(unittest.TestCase):
                     execution_lease=lease,
                     cancellation_token=token,
                     owner_session_identity=owner_session_identity,
+                    debris_removal_fn=debris_removal_fn,
                 )
             except BaseException as exc:  # noqa: BLE001 - the policy under test
                 escaped = exc
@@ -9226,6 +9340,59 @@ class TestAutomationWorldFailureNeverParks(unittest.TestCase):
             label="beets_acknowledgement_ambiguous",
             diagnostic=ambiguous.message,
         )
+
+    def test_ambiguous_acknowledgement_removes_its_own_beets_debris(
+        self,
+    ) -> None:
+        """Issue #1089 B1 — the world the RCA actually reproduces: the
+        importer PARENT process survives (this self-heal composition IS
+        that survival path) while the beets CHILD died without
+        acknowledging. The committed-but-unmoved catalog row at the exact
+        launch source path is confirmed crash debris and removed here —
+        the SAME check the restart-based abandoned-owner sweep runs, wired
+        into the in-process self-heal path a killed child with a
+        surviving parent actually takes.
+        """
+        db, canonical, claimed, lease = self._launch(capture_completion=False)
+        ambiguous = _real_ambiguous_completion_outcome(
+            db, claimed, canonical, lease,
+        )
+
+        def execute(*_args: object, **_kwargs: object) -> DispatchOutcome:
+            return ambiguous
+
+        stub_delete = _RecordingBeetsDeleteFn()
+        debris_fn = _fixed_candidate_debris_removal_fn(
+            album_id=19823,
+            item_paths=(os.path.join(canonical, "01.flac"),),
+            beets_delete_fn=stub_delete,
+        )
+
+        updated, escaped = self._run(
+            db, claimed, lease, execute, debris_removal_fn=debris_fn,
+        )
+
+        self._assert_returned_to_search_pool(
+            db, claimed, updated, escaped,
+            label="beets_acknowledgement_ambiguous",
+            diagnostic=ambiguous.message,
+        )
+        # The debris album was actually removed via the admitted lane.
+        self.assertEqual(len(stub_delete.requests), 1)
+        self.assertEqual(stub_delete.requests[0].album_id, 19823)
+        # Recents evidence names the removed album.
+        latest = [row for row in db.download_logs if row.outcome == "failed"][-1]
+        message = latest.error_message or ""
+        self.assertIn("recovery debris removed", message)
+        self.assertIn("19823", message)
+        # Issue #1089 review MINOR-3: ``beets_detail`` must carry the SAME
+        # fully composed (post-debris) string as ``error_message`` — a
+        # prior version of this self-heal path patched only
+        # ``error_message`` after the fact, leaving ``beets_detail``
+        # permanently stale at the pre-debris text.
+        self.assertEqual(latest.beets_detail, message)
+        # Hard invariant: this path writes NO source_denylist rows.
+        self.assertEqual(db.denylist, [])
 
     def test_processor_without_a_terminal_outcome_reopens_the_search(
         self,

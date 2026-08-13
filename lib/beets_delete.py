@@ -3,8 +3,14 @@
 The web process may authorize a deletion, but it does not mutate Beets'
 SQLite database or unlink library files. This module is executed in the
 deployment-supplied Beets Python/config environment and uses Beets' own models and
-filesystem helpers.  The album row remains the retry manifest until every
-positively-owned artifact has been removed and verified absent.
+filesystem helpers. In the ordinary (Bad Rip / Replace / library-delete) mode
+the album row remains the retry manifest until every positively-owned
+artifact has been removed and verified absent. A second, metadata-only mode
+(``BeetsDeleteRequest.debris_confinement_root``, issue #1089) instead removes
+ONLY the Beets catalog row for an album provably still confined to a killed
+automation job's own launch source path — it never touches a file, since
+that debris never reached the library in the first place
+(``BeetsDeleteCompleted.metadata_only=True`` marks this mode's outcome).
 """
 
 from __future__ import annotations
@@ -31,6 +37,14 @@ class BeetsDeleteRequest(msgspec.Struct, frozen=True):
     expected_release_id: str
     library_db_path: str
     library_root: str
+    # Recovery-debris mode (issue #1089): when set, deletion is METADATA-ONLY
+    # (no file removal, no directory pruning — never violates "NEVER beet
+    # remove -d") and every item/art path must be confined under THIS path
+    # instead of the configured library root. A beets album whose files
+    # never moved out of a killed automation job's own processing source is
+    # not an installed library album, so the ordinary library-root
+    # confinement would always refuse it (correctly) as a path escape.
+    debris_confinement_root: str | None = None
 
 
 class BeetsDeleteCompleted(
@@ -43,6 +57,9 @@ class BeetsDeleteCompleted(
     deleted_tracks: int
     deleted_artifacts: int
     preserved_paths: tuple[str, ...]
+    # True only for the recovery-debris mode (``debris_confinement_root``):
+    # the catalog row was removed and NOT ONE file was touched.
+    metadata_only: bool = False
 
 
 BeetsDeleteFailureReason = Literal[
@@ -420,6 +437,101 @@ def _delete_manifest(
     )
 
 
+def _debris_metadata_removal(
+    lib: Any, album: Any, request: BeetsDeleteRequest,
+) -> BeetsDeleteOutcome:
+    """Remove ONLY the catalog row for confirmed recovery-side crash debris.
+
+    Never deletes a file — ``metadata_remove`` is the sole mutation. Item and
+    art paths are confined against ``debris_confinement_root`` (the
+    abandoned job's own launch source path) rather than the configured
+    library root, so a path that has already reached the library root — the
+    partially-moved world — fails closed as ``path_escape`` exactly like any
+    other confinement break, never as a false "confirmed debris".
+    """
+    assert request.debris_confinement_root is not None
+    # ``strict=False``, unlike ``execute_pinned_beets_delete``'s own
+    # ``Path(configured_root).resolve(strict=True)`` for the ordinary
+    # library-root flow: a resumed cleanup journal, or an earlier
+    # interrupted recovery attempt, may have already removed the launch
+    # source tree. This mode never reads the filesystem, only recorded
+    # catalog paths, so the folder's physical absence has no bearing on
+    # whether confinement holds.
+    root = Path(request.debris_confinement_root).resolve(strict=False)
+
+    item_paths: list[str] = []
+    for item in album.items():
+        confined = _confined_path(item.path, root)
+        if confined is None:
+            return BeetsDeleteFailed(
+                album_id=request.album_id,
+                reason="path_escape",
+                detail=(
+                    "recovery-debris item path is not confined to the "
+                    f"job's launch source: {_decode_path(item.path)}"
+                ),
+                album_still_present=True,
+            )
+        item_paths.append(str(confined))
+
+    if album.artpath:
+        confined_art = _confined_path(album.artpath, root)
+        if confined_art is None:
+            return BeetsDeleteFailed(
+                album_id=request.album_id,
+                reason="path_escape",
+                detail=(
+                    "recovery-debris art path is not confined to the "
+                    f"job's launch source: {_decode_path(album.artpath)}"
+                ),
+                album_still_present=True,
+            )
+
+    if not item_paths:
+        return BeetsDeleteFailed(
+            album_id=request.album_id,
+            reason="empty_manifest",
+            detail="album has no track path to confirm as crash debris",
+            album_still_present=True,
+        )
+
+    def metadata_present() -> bool:
+        if lib.get_album(request.album_id) is not None:
+            return True
+        found = next(
+            iter(_library_items(lib, f"album_id:{request.album_id}")), None,
+        )
+        return found is not None
+
+    try:
+        _remove_album_metadata_atomically(lib, album)
+    except Exception as exc:  # noqa: BLE001 -- Beets commits on exceptions
+        return BeetsDeleteFailed(
+            album_id=request.album_id,
+            reason="metadata_error",
+            detail=f"{type(exc).__name__}: {exc}",
+            album_still_present=metadata_present(),
+        )
+    if metadata_present():
+        return BeetsDeleteFailed(
+            album_id=request.album_id,
+            reason="postcondition_failed",
+            detail="Beets album row survived metadata removal",
+            album_still_present=True,
+        )
+
+    return BeetsDeleteCompleted(
+        album_id=request.album_id,
+        album_name=str(_album_field(album, "album") or ""),
+        artist_name=str(_album_field(album, "albumartist") or ""),
+        former_album_path=request.debris_confinement_root,
+        deleted_tracks=0,
+        deleted_artifacts=0,
+        preserved_paths=(),
+        metadata_only=True,
+    )
+
+
 def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutcome:
     """Delete one exact album using the active pinned Beets configuration."""
     from beets import config, library, plugins, util
@@ -494,6 +606,9 @@ def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutco
                 detail="Beets album identity changed before deletion",
                 album_still_present=True,
             )
+
+        if request.debris_confinement_root is not None:
+            return _debris_metadata_removal(lib, album, request)
 
         candidates: list[_OwnedPath] = []
         dirs: set[Path] = set()

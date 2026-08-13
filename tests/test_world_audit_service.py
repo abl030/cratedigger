@@ -505,6 +505,77 @@ class TestWorldAuditService(unittest.TestCase):
             report.temporal_invariants_not_auditable,
         )
 
+    def test_ghost_album_outside_library_root_is_reported(self) -> None:
+        """Issue #1089's own detection gap, closed: a beets catalog row
+        whose item still points at a processing source path — never moved
+        into the library — is caught the moment it exists, through the REAL
+        ``audit_world`` + real ``BeetsDB`` adapter chain, not just the pure
+        checker in isolation (the "agree by construction" rule)."""
+        with tempfile.TemporaryDirectory() as root:
+            library_root = os.path.join(root, "library")
+            os.makedirs(library_root)
+            db_path = os.path.join(root, "beets.db")
+            _create_beets_db(db_path)
+            ghost_path = os.path.join(
+                root, "processing", "albums", "8df204a3", "01.flac",
+            )
+            _insert_album(
+                db_path,
+                album_id=19823,
+                item_id=1,
+                item_path=ghost_path,
+                mb_release_id=RELEASE_A,
+            )
+
+            with BeetsDB(db_path, library_root=library_root) as beets:
+                report = audit_world(FakePipelineDB(), beets)
+
+        codes = {
+            member.code
+            for group in (report.groups.a, report.groups.b, report.groups.c)
+            for member in group.members
+        }
+        self.assertIn("album_folder_outside_library_root", codes)
+        self.assertIn("album_item_outside_library_root", codes)
+        self.assertEqual(report.counts.beets_albums, 1)
+
+    def test_ghost_album_is_reported_through_the_mediated_factory_wrapper(
+        self,
+    ) -> None:
+        """The same ghost-album world, but through ``audit_world_from_factory``
+        — proves ``_AvailabilityMediatedBeetsDB`` actually forwards
+        ``library_root`` rather than defaulting/dropping it, which the
+        direct-``audit_world`` test above cannot distinguish (an unforwarded
+        empty root would just make the new checker silently no-op)."""
+        with tempfile.TemporaryDirectory() as root:
+            library_root = os.path.join(root, "library")
+            os.makedirs(library_root)
+            db_path = os.path.join(root, "beets.db")
+            _create_beets_db(db_path)
+            ghost_path = os.path.join(
+                root, "processing", "albums", "8df204a3", "01.flac",
+            )
+            _insert_album(
+                db_path,
+                album_id=19823,
+                item_id=1,
+                item_path=ghost_path,
+                mb_release_id=RELEASE_A,
+            )
+
+            report = audit_world_from_factory(
+                FakePipelineDB(),
+                lambda: BeetsDB(db_path, library_root=library_root),
+            )
+
+        codes = {
+            member.code
+            for group in (report.groups.a, report.groups.b, report.groups.c)
+            for member in group.members
+        }
+        self.assertIn("album_folder_outside_library_root", codes)
+        self.assertIn("album_item_outside_library_root", codes)
+
     def test_known_bad_world_reports_membership_identity_and_authority(self) -> None:
         db = FakePipelineDB()
         db.seed_request(make_request_row(

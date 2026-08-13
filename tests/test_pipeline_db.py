@@ -2134,6 +2134,33 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual(retried.attempts, 2)
         self.assertEqual(retried.worker_id, "new-worker")
 
+    def test_default_force_action_copy_path_matches_the_real_derivation(
+        self,
+    ) -> None:
+        """Issue #1089 review MAJOR-1: ``recover_running_import_jobs``'s
+        production default for ``force_action_copy_path_fn`` must derive
+        the SAME path ``lib.import_preview.force_action_copy_path`` itself
+        computes from the currently configured runtime — not a hand-typed
+        approximation the two could silently drift from. Limit (review
+        round 3 item 6): ``read_runtime_config`` is patched away here, so
+        this proves the two callers agree on how to TURN a config into a
+        path, never that ``_default_force_action_copy_path`` resolves the
+        real config source correctly on its own."""
+        from unittest.mock import patch
+
+        from lib.config import CratediggerConfig
+        from lib.import_preview import force_action_copy_path
+        from lib.pipeline_db.import_jobs import _default_force_action_copy_path
+
+        cfg = CratediggerConfig(processing_dir="/tmp/cratedigger-processing")
+        with patch(
+            "lib.config.read_runtime_config", return_value=cfg,
+        ):
+            self.assertEqual(
+                _default_force_action_copy_path(4242),
+                force_action_copy_path(cfg, 4242),
+            )
+
     def test_import_claim_requires_preview_importable(self):
         from lib.import_queue import IMPORT_JOB_FORCE
 

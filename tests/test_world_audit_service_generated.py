@@ -1,8 +1,12 @@
-"""Generated resolver-outage contracts for the public world-audit seams."""
+"""Generated contracts for the public world-audit seams: resolver-outage
+handling, and (issue #1089 review n10) the real Beets/library-root
+containment adapter chain."""
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import tempfile
 import unittest
 from dataclasses import dataclass, replace
 from typing import Literal
@@ -11,15 +15,21 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
-from lib.beets_db import BeetsWorldAlbum, CurrentBeetsResolution
+from lib.beets_db import BeetsDB, BeetsWorldAlbum, CurrentBeetsResolution
 from lib.release_identity import ReleaseIdentity
 from lib.world_audit_service import (
     WorldAuditReport,
+    audit_world,
     audit_world_from_borrowed_factory,
     audit_world_from_factory,
 )
+from lib.world_invariants import (
+    LibraryAlbumSnapshot,
+    check_library_root_containment,
+)
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
+from tests.test_world_audit_service import _create_beets_db
 
 _RELEASE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 _EXPECTED_IDENTITY = ReleaseIdentity(
@@ -328,6 +338,148 @@ class TestWorldAuditResolverFailureGenerated(unittest.TestCase):
 
         with self.assertRaisesRegex(AssertionError, "availability failure escaped"):
             assert_resolver_failure_contract(world, known_bad)
+
+
+_PATH_SEGMENT = st.text(
+    alphabet=st.characters(
+        whitelist_categories=("Ll", "Lu", "Nd"),
+        whitelist_characters=("-", "_", " "),
+    ),
+    min_size=1,
+    max_size=16,
+).filter(lambda segment: segment.strip(" ") not in ("", ".", ".."))
+
+
+@dataclass(frozen=True)
+class _LibraryRootWorld:
+    folder_inside: bool
+    item1_inside: bool
+    folder_segment: str
+    item1_segment: str
+
+
+@st.composite
+def _library_root_worlds(draw: st.DrawFn) -> _LibraryRootWorld:
+    return _LibraryRootWorld(
+        folder_inside=draw(st.booleans()),
+        item1_inside=draw(st.booleans()),
+        folder_segment=draw(_PATH_SEGMENT),
+        item1_segment=draw(_PATH_SEGMENT),
+    )
+
+
+class TestWorldAuditLibraryRootContainmentGenerated(unittest.TestCase):
+    """Issue #1089 review n10.
+
+    ``tests/test_world_invariants_generated.py`` already patrols the pure
+    ``check_library_root_containment`` checker in isolation. Per the "agree
+    by construction" rule (V4 in ``tests/test_verdict_tiers_generated.py``),
+    a mutant at that pure-function adapter does not qualify the REAL
+    ``audit_world`` + real ``BeetsDB`` SQLite adapter chain the production
+    world-audit CLI/API actually drives — this property exercises that
+    chain directly, over the same two bucket-C clauses
+    (``album_folder_outside_library_root`` / ``album_item_outside_library_root``),
+    and asserts it classifies each generated world IDENTICALLY to the pure
+    checker fed the equivalent snapshot — the composition, not either half
+    alone, is what this property proves.
+    """
+
+    @given(world=_library_root_worlds())
+    @example(world=_LibraryRootWorld(
+        folder_inside=False, item1_inside=False,
+        folder_segment="frozen-ghost", item1_segment="frozen-ghost-2",
+    ))
+    @example(world=_LibraryRootWorld(
+        folder_inside=True, item1_inside=False,
+        folder_segment="partially-moved", item1_segment="escaped",
+    ))
+    @example(world=_LibraryRootWorld(
+        folder_inside=True, item1_inside=True,
+        folder_segment="installed", item1_segment="installed",
+    ))
+    def test_real_audit_agrees_with_the_pure_checker(
+        self,
+        world: _LibraryRootWorld,
+    ) -> None:
+        mb_release_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        with tempfile.TemporaryDirectory() as root:
+            library_root = os.path.join(root, "library")
+            os.makedirs(library_root)
+            outside_root = os.path.join(root, "processing", "albums")
+
+            folder_root = library_root if world.folder_inside else outside_root
+            item1_root = library_root if world.item1_inside else outside_root
+            item0_path = os.path.join(
+                folder_root, world.folder_segment, "01 Track.flac",
+            )
+            item1_path = os.path.join(
+                item1_root, world.item1_segment, "02 Track.flac",
+            )
+
+            db_path = os.path.join(root, "beets.db")
+            _create_beets_db(db_path)
+            _insert_two_item_album(
+                db_path,
+                album_id=1,
+                mb_release_id=mb_release_id,
+                item_paths=(item0_path, item1_path),
+            )
+
+            snapshot = LibraryAlbumSnapshot(
+                album_id=1,
+                release_id=mb_release_id,
+                album_path=os.path.dirname(item0_path),
+                item_paths=(item0_path, item1_path),
+            )
+            expected = {
+                violation.code
+                for violation in check_library_root_containment(
+                    (snapshot,), library_root=library_root,
+                )
+            }
+
+            with BeetsDB(db_path, library_root=library_root) as beets:
+                report = audit_world(FakePipelineDB(), beets)
+
+        actual = {
+            member.code
+            for group in (report.groups.a, report.groups.b, report.groups.c)
+            for member in group.members
+            if member.code in (
+                "album_folder_outside_library_root",
+                "album_item_outside_library_root",
+            )
+        }
+
+        self.assertEqual(actual, expected)
+
+
+def _insert_two_item_album(
+    db_path: str,
+    *,
+    album_id: int,
+    mb_release_id: str,
+    item_paths: tuple[str, str],
+) -> None:
+    """Local sibling of ``tests.test_world_audit_service._insert_album``:
+    that helper inserts exactly one item per album, which cannot represent
+    the partially-moved world (album folder inside the root, one item
+    already escaped it) this property needs."""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO albums (id, mb_albumid, discogs_albumid) VALUES (?, ?, NULL)",
+        (album_id, mb_release_id),
+    )
+    for index, item_path in enumerate(item_paths, start=1):
+        conn.execute(
+            "INSERT INTO items "
+            "(id, album_id, path, title, track, disc, length, format, "
+            "bitrate, samplerate, bitdepth) VALUES "
+            "(?, ?, ?, 'Track', ?, 1, 180.0, 'MP3', 256000, 44100, 16)",
+            (album_id * 100 + index, album_id, item_path, index),
+        )
+    conn.commit()
+    conn.close()
 
 
 if __name__ == "__main__":

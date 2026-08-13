@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import signal
 import socket
 import sys
 import time
@@ -13,11 +14,17 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, assert_never, runtime_checkable
 
+import msgspec
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from lib import transitions
+from lib.automation_recovery_debris import (
+    RecoveryDebrisRemovalFn,
+    remove_recovery_debris,
+)
 from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 from lib.config import (
     CratediggerConfig,
@@ -76,6 +83,7 @@ from lib.pipeline_db import (
 from lib.pipeline_db._core import OwnerSessionLost
 from lib.pipeline_db.import_jobs import (
     AUTOMATION_WORLD_FAILURE_AUDIT_PREFIX,
+    _default_force_action_copy_path,
     automation_completion_receipt,
 )
 from lib.pipeline_db.rows import AlbumRequestRow
@@ -129,6 +137,28 @@ class _CandidateScanCursor:
     offset: int = 0
 
 
+@dataclass
+class _GracefulShutdown:
+    """Signal-safe stop flag: SIGTERM sets it, the poll loop reads it.
+
+    Best-effort drain (issue #1089): a deploy switch's SIGTERM no longer has
+    to kill an in-flight import mid-flight. ``run_once`` never returns until
+    its own at-most-one claimed job reaches a terminal write, so simply not
+    calling it again once this flag is set already IS "let the in-flight job
+    finish, then stop claiming new work" — no special interruption of a
+    running job is needed or attempted. Past the unit's ``TimeoutStopSec``,
+    systemd still SIGKILLs exactly as before; the recovery-side crash-debris
+    removal in ``lib.automation_recovery_debris`` is that world's safety net,
+    not this one.
+    """
+
+    requested: bool = False
+
+    def request(self, signum: int, frame: object) -> None:
+        del signum, frame
+        self.requested = True
+
+
 def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
     return {
         "success": outcome.success,
@@ -170,6 +200,7 @@ class _AutomationRecoveryDB(Protocol):
         decision: ExecutionLivenessDecision,
         requeue_message: str,
         recovery_message: str,
+        debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
     ) -> ImportJob | None: ...
 
 
@@ -212,6 +243,10 @@ class _StartupRecoveryDB(
         requeue_message: str,
         recovery_message: str,
         limit: int = 50,
+        debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
+        force_action_copy_path_fn: Callable[
+            [int], str,
+        ] = _default_force_action_copy_path,
     ) -> list[ImportJob]: ...
 
 
@@ -1291,6 +1326,7 @@ def _self_heal_automation_world_failure(
     owner_session_identity: OwnerSessionIdentity,
     reason: str,
     result: dict[str, object],
+    debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
 ) -> ImportJob | None:
     """Surface one world failure as audit evidence and re-open the search.
 
@@ -1311,6 +1347,18 @@ def _self_heal_automation_world_failure(
     ``job`` must be the freshly re-read owner row: its launch fence, preview
     stage and captured completion receipt are the exact authority the terminal
     compare-and-set compares against.
+
+    Issue #1089 (B1): this is THE composition the RCA's own incident lived
+    in — a launched Beets child dying while THIS process stays alive (a
+    crash, an ambiguous acknowledgement, a missing completion receipt) is
+    exactly as exposed to a committed-but-unmoved catalog row as the
+    restart-based abandoned-owner sweep already covered
+    (``lib.automation_recovery_debris``). Before cleanup — while an explicit
+    checkpoint still proves this exact owner session live — the same
+    ``debris_removal_fn`` checks Beets for an album provably this job's own
+    crash debris and removes only its catalog row when proven; either
+    precondition unmet is surfaced, never removed, exactly like the
+    restart-side check.
 
     Raises :class:`AutomationOwnerFailStop` when this execution cannot author
     an owner-atomic terminal write. The row stays ``running`` under its
@@ -1337,6 +1385,37 @@ def _self_heal_automation_world_failure(
                 f"to self-heal ({reason})"
             )
         state = ActiveDownloadState.from_raw(raw_state)
+        # Re-verify this exact owner session immediately before the
+        # irreversible Beets mutation below (issue #1089 review n8) — the
+        # same live-session proof ``_complete_automation_processing_cleanup``
+        # itself re-checks via its own internal checkpoint, just pulled
+        # forward so the debris removal is never unfenced.
+        checkpoint_automation_owner(
+            db,
+            import_job_id=job.id,
+            execution_lease=execution_lease,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
+        )
+        debris_report = debris_removal_fn(
+            launch_release_id=job.beets_launch_release_id,
+            launch_source_path=job.beets_launch_source_path,
+        )
+        if debris_report.outcome != "no_launch":
+            detail = f"{detail}; recovery debris {debris_report.outcome}"
+            if debris_report.album_id is not None:
+                detail = f"{detail} (beets album {debris_report.album_id})"
+            if debris_report.detail:
+                detail = f"{detail}: {debris_report.detail}"
+        # Issue #1089 review MINOR-3: built ONCE, after the debris-outcome
+        # augmentation above, mirroring the restart-sweep sibling
+        # (``_fail_abandoned_automation_owner``) exactly — both
+        # ``TerminalDownloadAudit.beets_detail`` (via ``detail=``) and
+        # ``.error_message`` (via ``error_message=``) get the SAME fully
+        # composed string. Building this before the debris check and then
+        # patching only ``error_message`` afterward (the prior shape) left
+        # ``beets_detail`` permanently stale on any world that adds to
+        # ``detail`` post-construction.
         pending = _local_completion_terminal_outcome(
             reconstruct_grab_list_entry(row, state),
             state,
@@ -1364,6 +1443,9 @@ def _self_heal_automation_world_failure(
         completion_receipt = automation_completion_receipt(job)
         terminal_result = dict(result)
         terminal_result[AUTOMATION_WORLD_FAILURE_RESULT_KEY] = reason
+        terminal_result["recovery_debris_removal"] = msgspec.to_builtins(
+            debris_report,
+        )
         terminal = db.persist_import_terminal_outcome(
             replace(
                 pending,
@@ -1584,6 +1666,7 @@ def process_claimed_job(
     execution_lease: ExecutionLeaseSnapshot | None = None,
     cancellation_token: CancellationToken | None = None,
     owner_session_identity: OwnerSessionIdentity | None = None,
+    debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
 ) -> ImportJob | None:
     """Execute a claimed job and persist its terminal queue status.
 
@@ -1661,6 +1744,7 @@ def process_claimed_job(
                     owner_session_identity=owner_session_identity,
                     reason=crash,
                     result={"success": False, "message": crash},
+                    debris_removal_fn=debris_removal_fn,
                 )
             return db.requeue_import_job_for_preview(
                 job.id,
@@ -1715,6 +1799,7 @@ def process_claimed_job(
                     owner_session_identity=owner_session_identity,
                     reason=outcome.message,
                     result=result,
+                    debris_removal_fn=debris_removal_fn,
                 )
             db.requeue_import_job_for_preview(
                 job.id,
@@ -1740,6 +1825,7 @@ def process_claimed_job(
                 owner_session_identity=owner_session_identity,
                 reason=outcome.message,
                 result=result,
+                debris_removal_fn=debris_removal_fn,
             )
         if outcome.terminal_outcome is None:
             return _self_heal_automation_world_failure(
@@ -1753,6 +1839,7 @@ def process_claimed_job(
                     "outcome"
                 ),
                 result=result,
+                debris_removal_fn=debris_removal_fn,
             )
         # The owned-processor cleanup and the terminal persist are the last
         # stage of a Beets-mutating execution, and both raise: seven owner
@@ -1785,6 +1872,7 @@ def process_claimed_job(
                         "Automation completion receipt is missing or invalid"
                     ),
                     result=result,
+                    debris_removal_fn=debris_removal_fn,
                 )
             pending = replace(
                 outcome.terminal_outcome,
@@ -1822,6 +1910,7 @@ def process_claimed_job(
                 owner_session_identity=owner_session_identity,
                 reason=f"{type(exc).__name__}: {exc}",
                 result=result,
+                debris_removal_fn=debris_removal_fn,
             )
         _cleanup_committed_wrong_match_rejection(
             db,
@@ -2070,6 +2159,7 @@ def recover_abandoned_automation_owners(
     db: _AutomationRecoveryDB,
     *,
     liveness_probe: ExecutionLivenessProbe | None = None,
+    debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
 ) -> list[ImportJob]:
     """Re-probe every attached automation owner and recover the proven dead.
 
@@ -2080,6 +2170,10 @@ def recover_abandoned_automation_owners(
     job — is observed alive and left completely alone. The sweep is deliberately
     lane-agnostic: a dead owner is equally stuck whichever lane abandoned it,
     and the recovery write is owner-atomic under ``IMPORT(request_id)``.
+
+    ``debris_removal_fn`` (issue #1089) is forwarded, unchanged, to
+    ``db.recover_automation_import_job`` — production always uses the real
+    ``remove_recovery_debris`` default; tests inject a stub.
     """
     recovered: list[ImportJob] = []
     for job in db.list_automation_import_jobs_for_startup_recovery():
@@ -2101,6 +2195,7 @@ def recover_abandoned_automation_owners(
                 decision=decision,
                 requeue_message=RESTART_REQUEUE_MESSAGE,
                 recovery_message=RESTART_RECOVERY_MESSAGE,
+                debris_removal_fn=debris_removal_fn,
             )
         except Exception:
             # One unrecoverable owner must not abort the sweep or the worker's
@@ -2120,6 +2215,10 @@ def recover_abandoned_running_jobs(
     db: _StartupRecoveryDB,
     *,
     liveness_probe: ExecutionLivenessProbe | None = None,
+    debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
+    force_action_copy_path_fn: Callable[
+        [int], str,
+    ] = _default_force_action_copy_path,
 ) -> list[ImportJob]:
     """Recover only executions whose exact persisted lease is proven dead.
 
@@ -2127,6 +2226,16 @@ def recover_abandoned_running_jobs(
     ``running`` row without a liveness probe, which is sound exactly once,
     before this singleton worker has claimed anything. The automation half is
     the re-runnable sweep and is also called periodically from ``main``.
+
+    ``debris_removal_fn`` (issue #1089) is forwarded, unchanged, to BOTH
+    ``db.recover_running_import_jobs`` and (review MINOR-7)
+    ``recover_abandoned_automation_owners`` — a caller stubbing this one
+    seam stubs both sweeps, the exact trap ``_no_debris_removal`` exists to
+    prevent; production always uses the real ``remove_recovery_debris``
+    default, tests inject a stub. ``force_action_copy_path_fn`` (issue
+    #1089 review MAJOR-1) is forwarded, unchanged, to
+    ``db.recover_running_import_jobs`` only — it derives a force job's
+    debris-confinement root and has no automation-lane counterpart.
     """
     recovered: list[ImportJob] = []
     batch_size = 50
@@ -2135,6 +2244,8 @@ def recover_abandoned_running_jobs(
             requeue_message=RESTART_REQUEUE_MESSAGE,
             recovery_message=RESTART_RECOVERY_MESSAGE,
             limit=batch_size,
+            debris_removal_fn=debris_removal_fn,
+            force_action_copy_path_fn=force_action_copy_path_fn,
         )
         recovered.extend(batch)
         if len(batch) < batch_size:
@@ -2166,8 +2277,57 @@ def recover_abandoned_running_jobs(
     recovered.extend(recover_abandoned_automation_owners(
         db,
         liveness_probe=liveness_probe,
+        debris_removal_fn=debris_removal_fn,
     ))
     return recovered
+
+
+def _drain_import_queue(
+    db: PipelineDB,
+    *,
+    worker_id: str,
+    poll_interval: float,
+    once: bool,
+    shutdown: _GracefulShutdown,
+) -> None:
+    """The importer's steady-state poll loop, extracted for direct testing.
+
+    Checked once per iteration, before the next claim attempt — never
+    mid-``run_once()`` (see ``_GracefulShutdown``). ``once`` still returns
+    after at most one claimed job regardless of ``shutdown``, preserving
+    the existing ``--once`` contract untouched.
+    """
+    scan_cursor = _CandidateScanCursor()
+    next_reprobe_at = (
+        time.monotonic() + AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS
+    )
+    while True:
+        if shutdown.requested:
+            logger.info(
+                "SIGTERM received; no further import jobs will be claimed",
+            )
+            return
+        if time.monotonic() >= next_reprobe_at:
+            next_reprobe_at = (
+                time.monotonic()
+                + AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS
+            )
+            reprobed = recover_abandoned_automation_owners(db)
+            if reprobed:
+                logger.warning(
+                    "Liveness re-probe recovered %s abandoned "
+                    "automation owner(s) a restart would have stranded",
+                    len(reprobed),
+                )
+        job = run_once(
+            db,
+            worker_id=worker_id,
+            scan_cursor=scan_cursor,
+        )
+        if once:
+            return
+        if job is None:
+            time.sleep(poll_interval)
 
 
 def main() -> int:
@@ -2230,6 +2390,13 @@ def main() -> int:
 
     worker_id = args.worker_id or f"{socket.gethostname()}:{os.getpid()}"
     db = PipelineDB(args.dsn)
+    # Best-effort graceful drain (issue #1089): systemd's ordinary SIGTERM
+    # would otherwise terminate this process immediately, mid-job, exactly
+    # the world the recovery-side crash-debris removal exists to clean up
+    # after. A bounded ``TimeoutStopSec`` on the unit still SIGKILLs past
+    # this — that world is unaffected and remains covered by the same fix.
+    shutdown = _GracefulShutdown()
+    signal.signal(signal.SIGTERM, shutdown.request)
     try:
         # Keep the beets-mutating queue to one worker process. See
         # docs/advisory-locks.md for namespace rules.
@@ -2245,33 +2412,14 @@ def main() -> int:
                     len(recovered),
                 )
 
-            scan_cursor = _CandidateScanCursor()
-            next_reprobe_at = (
-                time.monotonic()
-                + AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS
+            _drain_import_queue(
+                db,
+                worker_id=worker_id,
+                poll_interval=args.poll_interval,
+                once=args.once,
+                shutdown=shutdown,
             )
-            while True:
-                if time.monotonic() >= next_reprobe_at:
-                    next_reprobe_at = (
-                        time.monotonic()
-                        + AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS
-                    )
-                    reprobed = recover_abandoned_automation_owners(db)
-                    if reprobed:
-                        logger.warning(
-                            "Liveness re-probe recovered %s abandoned "
-                            "automation owner(s) a restart would have stranded",
-                            len(reprobed),
-                        )
-                job = run_once(
-                    db,
-                    worker_id=worker_id,
-                    scan_cursor=scan_cursor,
-                )
-                if args.once:
-                    return 0
-                if job is None:
-                    time.sleep(args.poll_interval)
+            return 0
     finally:
         db.close()
 

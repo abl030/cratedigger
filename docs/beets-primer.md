@@ -74,12 +74,26 @@ is pure attribute assignment across the whole supported range — only when the
 cheap check finds neither attribute. The 19-leg `beetsStableCandidate` matrix
 is what caught this.
 
-Cratedigger has exactly three Beets mutation lanes:
+Cratedigger has three Beets mutation lanes:
 
 1. The serial importer worker drives the JSON harness for admitted imports and
    same-release duplicate replacement.
-2. An explicitly operator-authorized library deletion resolves one exact Beets
-   album primary key and drives the exact-album delete child.
+2. The exact-album delete child in `lib/beets_delete.py`, in either of two
+   modes:
+   - **Destructive, operator-authorized.** An explicitly operator-authorized
+     library deletion (Bad Rip, Replace, library-delete) resolves one exact
+     Beets album primary key and removes both its files and its catalog row.
+   - **Metadata-only, recovery-side (issue #1089).** After a killed
+     automation import's owning process is proven dead — whether by the
+     restart-based startup sweep, the in-process self-heal path, or a
+     force/YouTube job found still `running` at startup — recovery may
+     remove ONE Beets catalog row it can prove is that exact job's own
+     crash debris (`lib/automation_recovery_debris.py::remove_recovery_debris`),
+     via this SAME child's metadata-only mode
+     (`BeetsDeleteRequest.debris_confinement_root`): no file is ever
+     touched, because the debris being removed is — by construction — an
+     album whose files never reached the library. It never writes a
+     `source_denylist` row.
 3. The import-time MusicBrainz merge retag runs `beet modify -a -M -W -y`
    under a compound exact-match query — `id:=<album_id>` AND
    `mb_albumid:=<old-id>` — and a `mb_albumid=<new-id>` assignment
@@ -92,8 +106,12 @@ Cratedigger has exactly three Beets mutation lanes:
    so it silently retagged nothing on the common case. `beet modify` sets one
    field by query; it needs no candidate mapping and makes no network call.
 
-Lane 3 is deliberately the narrowest of the three, and every clause is
-load-bearing:
+Lane 3 is deliberately the narrowest of the three — narrower than Lane 1's
+full harness-driven import, and narrower than Lane 2's exact-album delete
+child in EITHER of its two modes (a whole album's files and catalog row in
+the destructive mode, a whole album's catalog row alone in the
+metadata-only mode) — Lane 3 mutates exactly one field on one album by
+query. Every clause is load-bearing:
 
 - **`-a` targets Albums, not Items.** `Album.try_sync(inherit=True)` (the
   default) fans every inheritable fixed attribute — `mb_albumid` is one — out
@@ -796,10 +814,14 @@ printf 'a\n' | beet import ...  # Blindly accepts ANY match without inspection.
                                 # Use the harness instead — it lets you verify MBID and distance.
 ```
 
-Cratedigger's explicit Bad Rip, Replace, and library-delete actions are the
-narrow exceptions: they resolve one current exact album primary key and route
-destructive removal through the admitted-runtime exact-delete child in
-`lib/beets_delete.py`. Selector-based `beet remove -d` is retired. The
+Cratedigger's explicit Bad Rip, Replace, library-delete, and recovery-side
+crash-debris-removal actions are the narrow exceptions: they resolve one
+current exact album primary key and route removal through the
+admitted-runtime exact-delete child in `lib/beets_delete.py`. Bad Rip,
+Replace, and library-delete route DESTRUCTIVE removal (files and catalog
+row); recovery-side crash-debris removal routes its own metadata-only mode
+instead (files are never touched — see below). Selector-based
+`beet remove -d` is retired. The
 effective Beets `clutter` list includes the exact derived filename
 `cratedigger.json`, allowing Beets to prune a directory whose managed audio
 and sidecar are all gone. Any file that does not match the configured clutter
@@ -816,7 +838,20 @@ checks. Before mutation, the harness also proves that its active `library:`
 and `directory:` resolve to the exact SQLite path and root used by the web/CLI
 preflight. Beets metadata is removed with `delete=False` only after every
 owned artifact is absent; album, item, and flexible-field rows share one outer
-transaction with explicit rollback on any exception.
+transaction with explicit rollback on any exception. This is the file-removing
+mode of the child, and its "removes and verifies exact item paths" claim
+applies to THIS mode only.
+
+Recovery-side crash-debris removal (`lib/automation_recovery_debris.py`,
+issue #1089) drives the SAME child in a second, metadata-only mode
+(`BeetsDeleteRequest.debris_confinement_root`) instead: it never touches a
+file. It removes ONLY the Beets catalog row for an album whose release
+identity matches a killed automation job's `beets_launch_release_id` AND
+whose every item path is confined under that job's own
+`beets_launch_source_path` — never the configured library root — because
+debris that never reached the library cannot be library-confined by
+definition. Any album failing either precondition is surfaced, never
+removed, and this mode writes no `source_denylist` row.
 
 The child commits that final metadata transaction before its JSON result can
 reach the parent, so a process exit or malformed/truncated acknowledgement is

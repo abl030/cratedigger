@@ -30,6 +30,7 @@ from lib.world_invariants import (
     check_evidence_disk_coherence,
     check_folder_exclusivity,
     check_library_filesystem,
+    check_library_root_containment,
     check_no_lossy_tier_widening,
     check_proof_lock_terminality,
     check_status_membership,
@@ -52,12 +53,15 @@ EXPECTED_WORLD_VIOLATION_BUCKETS = {
     "evidence_link_without_album": "B",
     "current_evidence_missing": "B",
     "album_fingerprint_unavailable": "B",
+    "library_root_unavailable": "B",
     "album_empty": "C",
     "item_outside_album_folder": "C",
     "folder_shared": "C",
     "album_folder_missing": "C",
     "album_item_missing": "C",
     "beets_identity_missing": "C",
+    "album_folder_outside_library_root": "C",
+    "album_item_outside_library_root": "C",
 }
 
 
@@ -454,6 +458,84 @@ class TestWorldInvariantCheckersTripOnKnownBad(unittest.TestCase):
             {v.code for v in violations},
             {"album_folder_missing", "album_item_missing"},
         )
+
+    def test_library_root_containment_trips_on_ghost_album_wholly_outside_root(
+        self,
+    ) -> None:
+        """The Frozen incident's exact shape (#1089): a committed album
+        whose folder AND items still point at the processing source path,
+        never the configured library root."""
+        violations = check_library_root_containment((LibraryAlbumSnapshot(
+            album_id=19823,
+            release_id="cbb51c9f-0000-0000-0000-000000000000",
+            album_path="/mnt/virtio/cratedigger/processing/albums/8df204a3",
+            item_paths=(
+                "/mnt/virtio/cratedigger/processing/albums/8df204a3/01.flac",
+            ),
+        ),), library_root="/mnt/virtio/Music/Beets")
+
+        self.assertEqual(
+            {v.code for v in violations},
+            {"album_folder_outside_library_root", "album_item_outside_library_root"},
+        )
+        folder_violation = next(
+            v for v in violations if v.code == "album_folder_outside_library_root"
+        )
+        self.assertIn("8df204a3", folder_violation.detail)
+        self.assertIn("/mnt/virtio/Music/Beets", folder_violation.detail)
+
+    def test_library_root_containment_trips_on_item_alone_when_folder_is_inside(
+        self,
+    ) -> None:
+        """Q1 for the item-level clause in isolation: the album folder is
+        already inside the root (the folder clause does NOT fire), but one
+        item's own path escapes it — the partially-moved world."""
+        violations = check_library_root_containment((LibraryAlbumSnapshot(
+            album_id=1,
+            release_id="release-a",
+            album_path="/mnt/virtio/Music/Beets/Artist/Album",
+            item_paths=(
+                "/mnt/virtio/Music/Beets/Artist/Album/01.flac",
+                "/mnt/virtio/cratedigger/processing/albums/ghost/02.flac",
+            ),
+        ),), library_root="/mnt/virtio/Music/Beets")
+
+        self.assertEqual(
+            {v.code for v in violations},
+            {"album_item_outside_library_root"},
+        )
+
+    def test_library_root_containment_does_not_trip_inside_the_root(self) -> None:
+        """Must-still-work: an ordinary installed album never trips."""
+        violations = check_library_root_containment((LibraryAlbumSnapshot(
+            album_id=1,
+            release_id="release-a",
+            album_path="/mnt/virtio/Music/Beets/Artist/Album",
+            item_paths=("/mnt/virtio/Music/Beets/Artist/Album/01.flac",),
+        ),), library_root="/mnt/virtio/Music/Beets")
+
+        self.assertEqual(violations, ())
+
+    def test_library_root_containment_fails_closed_when_root_is_unconfigured(
+        self,
+    ) -> None:
+        """Issue #1089 review m7: an empty root cannot evaluate ANY album's
+        containment, so it reports one named ``library_root_unavailable``
+        violation for the invocation rather than staying silent — silence
+        would let a real misconfiguration hide indefinitely behind a
+        world audit that always reports zero containment findings."""
+        violations = check_library_root_containment((LibraryAlbumSnapshot(
+            album_id=1,
+            release_id="release-a",
+            album_path="/mnt/virtio/cratedigger/processing/albums/ghost",
+            item_paths=(
+                "/mnt/virtio/cratedigger/processing/albums/ghost/01.flac",
+            ),
+        ),), library_root="")
+
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0].code, "library_root_unavailable")
+        self.assertEqual(world_violation_bucket(violations[0].code), "B")
 
     def test_replaced_checker_trips_on_thawed_audit_row(self) -> None:
         before = {"id": 41, "status": "replaced", "updated_at": "t0"}

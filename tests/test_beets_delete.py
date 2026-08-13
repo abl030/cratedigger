@@ -31,10 +31,16 @@ from lib.beets_delete import (
 RELEASE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
-class TestPinnedBeetsDelete(unittest.TestCase):
+class _PinnedBeetsFixture:
+    """Shared real pinned-Beets config/DB/root fixture (not a TestCase)."""
+
+    def _case(self) -> unittest.TestCase:
+        assert isinstance(self, unittest.TestCase)
+        return self
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
+        self._case().addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / "library"
         self.root.mkdir()
         self.db_path = Path(self.tmp.name) / "beets.db"
@@ -56,6 +62,8 @@ class TestPinnedBeetsDelete(unittest.TestCase):
             encoding="utf-8",
         )
 
+
+class TestPinnedBeetsDelete(_PinnedBeetsFixture, unittest.TestCase):
     def _seed(self, *, relative: bool = True) -> tuple[int, Path]:
         album_dir = self.root / "Artist" / "Album"
         album_dir.mkdir(parents=True)
@@ -260,6 +268,140 @@ class TestPinnedBeetsDelete(unittest.TestCase):
         _remove_album_metadata_atomically(lib, album)
         lib._close()
         self.assertEqual(counts(), (0, 0, 0, 0))
+
+
+class TestPinnedBeetsDeleteDebrisMode(_PinnedBeetsFixture, unittest.TestCase):
+    """Recovery-side crash-debris removal (issue #1089).
+
+    A killed automation import's Beets album still points at the job's
+    processing source path, never the configured library root — so this
+    mode confines against ``debris_confinement_root`` instead, and removes
+    ONLY the catalog row (never a file, per CLAUDE.md's ``NEVER beet remove
+    -d`` rule).
+    """
+
+    def _seed_debris(self) -> tuple[int, Path]:
+        source_dir = Path(self.tmp.name) / "processing" / "albums" / "8df204a3"
+        source_dir.mkdir(parents=True)
+        track = source_dir / "01 Track.flac"
+        track.write_bytes(b"audio")
+        lib = library.Library(str(self.db_path), str(self.root))
+        item = library.Item(
+            path=str(track),
+            album="Album",
+            albumartist="Artist",
+            artist="Artist",
+            title="Track",
+            mb_albumid=RELEASE,
+        )
+        album = lib.add_album([item])
+        album.store()
+        album_id_raw = album.id
+        self.assertIsNotNone(album_id_raw)
+        if album_id_raw is None:
+            raise AssertionError("persisted Beets album is missing its database id")
+        album_id = int(album_id_raw)
+        lib._close()
+        return album_id, source_dir
+
+    def _run_debris(self, album_id: int, *, confinement_root: str, expected_release_id: str = RELEASE):
+        with patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(self.runtime_config),
+        }):
+            return run_beets_delete(BeetsDeleteRequest(
+                album_id=album_id,
+                expected_release_id=expected_release_id,
+                library_db_path=str(self.db_path),
+                library_root=str(self.root),
+                debris_confinement_root=confinement_root,
+            ))
+
+    def test_debris_removal_deletes_catalog_row_only_no_files_touched(self) -> None:
+        album_id, source_dir = self._seed_debris()
+        track = source_dir / "01 Track.flac"
+
+        result = self._run_debris(album_id, confinement_root=str(source_dir))
+
+        self.assertIsInstance(result, BeetsDeleteCompleted)
+        assert isinstance(result, BeetsDeleteCompleted)
+        self.assertTrue(result.metadata_only)
+        self.assertEqual(result.deleted_tracks, 0)
+        self.assertEqual(result.deleted_artifacts, 0)
+        # Never deletes a file — CLAUDE.md critical rule 1: NEVER `beet
+        # remove -d`.
+        self.assertTrue(track.exists())
+        self.assertEqual(track.read_bytes(), b"audio")
+        with BeetsDB(str(self.db_path), library_root=str(self.root)) as beets:
+            self.assertIsNone(beets.get_album_detail(album_id))
+
+    def test_debris_removal_refuses_item_outside_confinement_root(self) -> None:
+        album_id, _source_dir = self._seed_debris()
+        other_source = Path(self.tmp.name) / "processing" / "albums" / "other"
+        other_source.mkdir(parents=True)
+
+        result = self._run_debris(album_id, confinement_root=str(other_source))
+
+        self.assertIsInstance(result, BeetsDeleteFailed)
+        assert isinstance(result, BeetsDeleteFailed)
+        self.assertEqual(result.reason, "path_escape")
+        self.assertTrue(result.album_still_present)
+        with BeetsDB(str(self.db_path), library_root=str(self.root)) as beets:
+            self.assertIsNotNone(beets.get_album_detail(album_id))
+
+    def test_debris_removal_refuses_item_already_reached_library_root(self) -> None:
+        """The partially-moved world: an item already reached the library root."""
+        album_id, source_dir = self._seed_debris()
+        moved_dir = self.root / "Artist" / "Album"
+        moved_dir.mkdir(parents=True)
+        moved = moved_dir / "01 Track.flac"
+        moved.write_bytes(b"audio")
+        lib = library.Library(str(self.db_path), str(self.root))
+        album = lib.get_album(album_id)
+        assert album is not None
+        for item in album.items():
+            item.path = os.fsencode(str(moved))
+            item.store()
+        lib._close()
+
+        result = self._run_debris(album_id, confinement_root=str(source_dir))
+
+        self.assertIsInstance(result, BeetsDeleteFailed)
+        assert isinstance(result, BeetsDeleteFailed)
+        self.assertEqual(result.reason, "path_escape")
+        self.assertTrue(moved.exists())
+        with BeetsDB(str(self.db_path), library_root=str(self.root)) as beets:
+            self.assertIsNotNone(beets.get_album_detail(album_id))
+
+    def test_debris_removal_still_checks_release_identity(self) -> None:
+        album_id, source_dir = self._seed_debris()
+
+        result = self._run_debris(
+            album_id,
+            confinement_root=str(source_dir),
+            expected_release_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        )
+
+        self.assertIsInstance(result, BeetsDeleteFailed)
+        assert isinstance(result, BeetsDeleteFailed)
+        self.assertEqual(result.reason, "release_mismatch")
+        with BeetsDB(str(self.db_path), library_root=str(self.root)) as beets:
+            self.assertIsNotNone(beets.get_album_detail(album_id))
+
+    def test_debris_removal_refuses_album_with_no_tracks(self) -> None:
+        """An album with zero items can never be confirmed debris."""
+        album_id, source_dir = self._seed_debris()
+        # Beets' own ``add_album([])`` refuses an empty item list, so the
+        # zero-item world is reached the same way a partially-cleaned-up
+        # album would: its items are gone but the album row remains.
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("DELETE FROM items WHERE album_id = ?", (album_id,))
+            conn.commit()
+
+        result = self._run_debris(album_id, confinement_root=str(source_dir))
+
+        self.assertIsInstance(result, BeetsDeleteFailed)
+        assert isinstance(result, BeetsDeleteFailed)
+        self.assertEqual(result.reason, "empty_manifest")
 
 
 class TestDeleteManifestOrdering(unittest.TestCase):

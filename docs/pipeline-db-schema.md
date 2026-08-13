@@ -460,7 +460,12 @@ Key fields:
   `beets_launch_snapshot_fingerprint` — the exact release/request/source
   authority atomically recorded immediately before the Beets subprocess may
   start. These are evidence for refusing an ambiguous replay, not evidence
-  that Beets did or did not finish.
+  that Beets did or did not finish. Issue #1089: when an abandoned owner is
+  recovered, `beets_launch_release_id`/`beets_launch_source_path` are also
+  the precondition pair `lib.automation_recovery_debris.remove_recovery_debris`
+  reads to find and remove a killed Beets child's own crash debris (a
+  committed catalog row whose items never left this exact source path) —
+  the same two columns, a second reader, no new write.
 - `preview_status TEXT` — async readiness/audit stage: `waiting`, `running`,
   `evidence_ready`, legacy `would_import`, `confident_reject`, `uncertain`,
   `measurement_failed`, or `error`. `evidence_ready` means candidate evidence

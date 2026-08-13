@@ -1,7 +1,7 @@
 """Import-queue + preview-queue lifecycle."""
 import logging
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
@@ -11,12 +11,18 @@ import psycopg2
 import psycopg2.extras
 
 from lib import transitions
+from lib.automation_recovery_debris import (
+    RecoveryDebrisRemovalFn,
+    RecoveryDebrisReport,
+    remove_recovery_debris,
+)
 from lib.import_execution import (
     ExecutionLeaseSnapshot,
     ExecutionLivenessDecision,
 )
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
+    IMPORT_JOB_FORCE,
     IMPORT_JOB_PREVIEW_WAITING,
     AutomationHandoffResult,
     ImportJob,
@@ -186,6 +192,27 @@ def _child_lease_values(
     if lease is None or lease.beets is None:
         return (None, None)
     return (lease.beets.pid, lease.beets.start_ticks)
+
+
+def _default_force_action_copy_path(job_id: int) -> str:
+    """Issue #1089 review MAJOR-1: the recovery-debris confinement root for
+    a force job, deterministic from the job row alone.
+
+    A force job's ``beets_launch_source_path`` records the operator's
+    ORIGINAL failed-download path — ``authorize_import_job_launch``'s own
+    force-branch precondition (``job.payload->>'failed_path' = %s``) reuses
+    that SAME value as its authorization identity check, so the column
+    cannot be repointed at the force-action copy the child actually imports
+    from without breaking every real force launch. The debris check
+    therefore derives its own confinement root here instead of trusting the
+    stored column, lazily importing to avoid a module-load-time dependency
+    on the harness/dispatch/config surface this pure DB-lifecycle module
+    otherwise has no reason to import.
+    """
+    from lib.config import read_runtime_config
+    from lib.import_preview import force_action_copy_path
+
+    return force_action_copy_path(read_runtime_config(), job_id)
 
 
 def _decision_proves_exact_lease_dead(
@@ -1293,12 +1320,42 @@ class _ImportJobsMixin(
         requeue_message: str,
         recovery_message: str,
         limit: int = 50,
+        debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
+        force_action_copy_path_fn: Callable[
+            [int], str,
+        ] = _default_force_action_copy_path,
     ) -> list[ImportJob]:
         """Requeue unlaunched jobs; terminalize launched jobs visibly.
 
         A launch-authorized job may already have reached Beets, so startup
         must never requeue it.  Its terminal command is the same atomic audit
         plus job-failure path used by in-frame force/YouTube executor errors.
+
+        Before that terminal write, ``debris_removal_fn`` (issue #1089)
+        applies the SAME observational Beets check as the automation lanes
+        (``lib.automation_recovery_debris``). For a YouTube job,
+        ``beets_launch_source_path`` already witnesses the real import
+        source (``authorize_import_job_launch``'s youtube branch checks
+        ``job.payload->>'staged_path'``, the same path Beets actually reads
+        from), so the debris check runs unchanged. For a FORCE job it does
+        NOT: the column records the operator's ORIGINAL failed-download
+        path, because ``authorize_import_job_launch``'s force branch reuses
+        that same value both to persist the column and to verify the
+        caller's claim against ``job.payload->>'failed_path'`` — the launch
+        would never authorize at all if a caller tried to pass the actual
+        import source (the force-action copy) instead. ``force_action_copy_path_fn``
+        (issue #1089 review MAJOR-1) derives the correct confinement root
+        for a force job deterministically from the job id, bypassing the
+        stored column's own launch-authorization semantics. Either way,
+        removal is metadata-only, never mutates a filesystem path, and
+        never writes a ``source_denylist`` row.
+
+        No owner checkpoint runs before this call, unlike the automation
+        lanes: this method is documented (see ``recover_abandoned_running_jobs``
+        in ``scripts/importer.py``) as sound to call exactly once, at worker
+        startup, before this singleton importer has claimed anything under
+        its own advisory lock — there is no other live execution of this
+        exact job that a checkpoint could still be racing.
         """
         cur = self._execute("""
             SELECT *
@@ -1316,6 +1373,59 @@ class _ImportJobsMixin(
                     "Automatic replay refused because Beets may have mutated "
                     "the library"
                 )
+                try:
+                    # Issue #1089 review round 3 item 4: the confinement-root
+                    # derivation moved inside this guard too —
+                    # ``force_action_copy_path_fn``'s production default
+                    # calls ``read_runtime_config()``, which can raise
+                    # exactly the unclassified-exception blast radius
+                    # (e.g. ``PermissionError``) this guard exists to stop,
+                    # even though nothing reachable today actually triggers
+                    # it (``enforce_beets_startup`` proves config readable
+                    # before this sweep ever runs).
+                    confinement_path = (
+                        force_action_copy_path_fn(job.id)
+                        if job.job_type == IMPORT_JOB_FORCE
+                        else job.beets_launch_source_path
+                    )
+                    debris_report = debris_removal_fn(
+                        launch_release_id=job.beets_launch_release_id,
+                        launch_source_path=confinement_path,
+                    )
+                except Exception as exc:  # noqa: BLE001 - #1089 review MAJOR-2
+                    # ``debris_removal_fn`` deliberately re-raises anything
+                    # ``lib.beets_db.beets_authority_availability_category``
+                    # cannot classify — SQLITE_CORRUPT/SQLITE_NOTADB, exactly
+                    # what a kill mid-write produces, are NOT in that
+                    # classifier's set. Unguarded, that escape propagates
+                    # through this startup sweep into ``main()`` and
+                    # crash-loops the WHOLE import queue under
+                    # ``Restart=on-failure`` — the same escape class the
+                    # #1122 review MEDIUM-4 guard already covers for
+                    # wrong-match cleanup in
+                    # ``scripts/importer.py::recover_abandoned_running_jobs``,
+                    # mirrored here. The row still terminalizes and the
+                    # sweep keeps moving (invariant 11); the raw exception
+                    # is recorded in the job's audit, never swallowed.
+                    debris_report = RecoveryDebrisReport(
+                        outcome="check_raised",
+                        detail=f"{type(exc).__name__}: {exc}",
+                    )
+                if debris_report.outcome != "no_launch":
+                    no_replay_reason = (
+                        f"{no_replay_reason}; recovery debris "
+                        f"{debris_report.outcome}"
+                    )
+                    if debris_report.album_id is not None:
+                        no_replay_reason = (
+                            f"{no_replay_reason} "
+                            f"(beets album {debris_report.album_id})"
+                        )
+                    if debris_report.detail:
+                        no_replay_reason = (
+                            f"{no_replay_reason}: {debris_report.detail}"
+                        )
+                recovery_debris_removal = msgspec.to_builtins(debris_report)
                 terminal = self.persist_import_terminal_outcome(
                     non_automation_failure_terminal_outcome(
                         job,
@@ -1324,6 +1434,7 @@ class _ImportJobsMixin(
                         result={
                             "success": False,
                             "recovery": "launch_authorized_no_replay",
+                            "recovery_debris_removal": recovery_debris_removal,
                         },
                     )
                 )
@@ -1359,6 +1470,7 @@ class _ImportJobsMixin(
         decision: ExecutionLivenessDecision,
         requeue_message: str,
         recovery_message: str,
+        debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
     ) -> ImportJob | None:
         """Recover one abandoned owner after exact persisted death proof.
 
@@ -1444,6 +1556,7 @@ class _ImportJobsMixin(
                 request_id=request_id,
                 expected_execution_lease=expected_execution_lease,
                 reason=recovery_message,
+                debris_removal_fn=debris_removal_fn,
             )
 
 
@@ -1554,6 +1667,7 @@ class _ImportJobsMixin(
         request_id: int,
         expected_execution_lease: ExecutionLeaseSnapshot | None,
         reason: str,
+        debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
     ) -> ImportJob | None:
         """Fail a dead owner into ``wanted`` without inventing cleanup proof.
 
@@ -1569,6 +1683,19 @@ class _ImportJobsMixin(
         consumes that matched journal, fails the job, and releases the request
         to ``wanted``. A receipt is never fabricated. Ownership/CAS conflicts
         still leave every database write rolled back for a later re-probe.
+
+        Before that filesystem cleanup runs, ``debris_removal_fn`` (issue
+        #1089) observationally checks Beets for an album that is provably
+        THIS job's own crash debris — its release identity equals
+        ``job.beets_launch_release_id`` AND every item path lies under
+        ``job.beets_launch_source_path`` — and removes ONLY its Beets
+        catalog row via the admitted exact-album delete lane when both hold.
+        It never mutates a filesystem path (see
+        ``lib.automation_recovery_debris``), so it composes safely
+        regardless of whether the cleanup below finds a fresh source tree, a
+        resumed journal, or an already-removed one, and it never writes a
+        ``source_denylist`` row — this whole call touches nothing but Beets.
+        Either precondition unmet is reported, never removed.
         """
         from lib.download import _local_completion_terminal_outcome
         from lib.download_reconstruction import reconstruct_grab_list_entry
@@ -1596,6 +1723,23 @@ class _ImportJobsMixin(
 
             def checkpoint() -> None:
                 self.require_automation_recovery_owner(cas)
+
+            # Re-verify this exact owner CAS immediately before the
+            # irreversible Beets mutation below (issue #1089 review n8) —
+            # the same proof ``complete_owner_processing_cleanup`` itself
+            # re-checks via this same ``checkpoint`` closure, just pulled
+            # forward so the debris removal is never unfenced.
+            checkpoint()
+            debris_report = debris_removal_fn(
+                launch_release_id=job.beets_launch_release_id,
+                launch_source_path=job.beets_launch_source_path,
+            )
+            if debris_report.outcome != "no_launch":
+                detail = f"{detail}; recovery debris {debris_report.outcome}"
+                if debris_report.album_id is not None:
+                    detail = f"{detail} (beets album {debris_report.album_id})"
+                if debris_report.detail:
+                    detail = f"{detail}: {debris_report.detail}"
 
             cleanup_refusal: CleanupJournalRefusalDisposition | None = None
             try:
@@ -1650,7 +1794,12 @@ class _ImportJobsMixin(
                 ).with_job(ImportJobTerminal(
                     status="failed",
                     error=detail,
-                    result={"automation_recovery_self_heal": reason},
+                    result={
+                        "automation_recovery_self_heal": reason,
+                        "recovery_debris_removal": msgspec.to_builtins(
+                            debris_report,
+                        ),
+                    },
                     message=detail,
                 ))
             )
