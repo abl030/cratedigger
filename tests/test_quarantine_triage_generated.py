@@ -60,6 +60,12 @@ def assert_quarantine_listing_invariant(
     assert actual_paths == sorted(
         expected_paths, key=lambda path: os.path.basename(path),
     ), "listed folders do not match the expected orphan set"
+    # Impossible-by-construction while the clause above passes: expected_paths
+    # is a set, so any real duplicate in actual_paths already fails the
+    # sorted-set-equality check first (#1122 review NEW-3) — kept as
+    # fail-closed legislation for a caller that never earns that guarantee,
+    # not because a generated or deterministic world can independently
+    # reach it; no self-test claims otherwise.
     assert len(actual_paths) == len(set(actual_paths)), \
         "a folder path was listed more than once"
     quarantine_roots = {
@@ -159,11 +165,15 @@ def _fixture_result(folders: list[QuarantineFolder]) -> QuarantineTriageResult:
 
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
-    """Per-clause proof (code-quality.md "Per-clause proof"): a minimal
-    world that trips EXACTLY one clause, with every earlier clause passing,
-    asserted by that clause's own message via ``assertRaisesRegex`` — never
-    a bare ``assertRaises(AssertionError)``, which cannot distinguish which
-    clause actually fired.
+    """Per-clause proof (code-quality.md "Per-clause proof") for every
+    clause a world can independently reach: a minimal world that trips
+    EXACTLY one clause, with every earlier clause passing, asserted by that
+    clause's own message via ``assertRaisesRegex`` — never a bare
+    ``assertRaises(AssertionError)``, which cannot distinguish which clause
+    actually fired. The no-duplicate-paths clause is the one exception: it
+    is unreachable independently of the mismatched-expected-set clause
+    above it (see that assert's own comment) and so has no self-test here —
+    it stays as fail-closed legislation, not because it was skipped.
     """
 
     def test_listing_checker_rejects_a_referenced_or_unexpected_folder(self) -> None:

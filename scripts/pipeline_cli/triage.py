@@ -42,6 +42,7 @@ from lib.triage_service import VALID_FILTER_FORMS as _TRIAGE_VALID_FILTER_FORMS_
 from lib.triage_service import VALID_FILTER_FORMS_TEXT as _TRIAGE_FILTER_FORMS_TEXT
 from scripts.pipeline_cli._format import _format_dt, _json_default, _truncate
 from scripts.pipeline_cli.api_mutations import (
+    TIMEOUT_QUARANTINE_SCAN_SECONDS,
     _ApiMutation,
     relay_rendered,
     render_api_error,
@@ -548,6 +549,7 @@ def cmd_triage_quarantine(
         _ApiMutation(path="/api/triage/quarantine", body={}, method="GET"),
         render=_render_quarantine,
         json_output=bool(getattr(args, "json", False)),
+        timeout_seconds=TIMEOUT_QUARANTINE_SCAN_SECONDS,
     )
 
 

@@ -457,6 +457,24 @@ class TestQuarantineTriageService(unittest.TestCase):
                 "runtime config read, not one each",
             )
 
+    def test_unreadable_runtime_config_fails_closed(self) -> None:
+        """#1122 review NEW-1: ``_read_runtime_config``'s own
+        ``except -> QuarantineScanError`` branch (hit when BOTH
+        ``download_dir`` and ``processing_dir`` default and the runtime
+        config itself cannot be read) had no direct coverage — the removed
+        CLI-level ``test_quarantine_main_maps_runtime_config_failure_and_closes_db``
+        exercised this indirectly through ``main()``, but nothing replaced
+        it at the service layer once quarantine stopped constructing a
+        ``PipelineDB`` in the CLI process at all.
+        """
+        with self.assertRaisesRegex(
+            QuarantineScanError, "runtime configuration",
+        ), patch(
+            "lib.config.read_runtime_config",
+            side_effect=PermissionError("runtime config unreadable"),
+        ):
+            list_unreferenced_quarantine_folders(FakePipelineDB())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,8 +3,12 @@
 ``lib.slskd_transfers``'s disk reaper protects ``failed_imports`` and
 ``wrong_matches`` under the slskd download dir forever (issue #571) — that
 reaper never walks the processing tree at all, so its two processing-side
-counterparts have no automated protection or cleanup whatsoever; nothing
-else ever revisits them, which is exactly why this service's operator-
+counterparts have no automated protection. Post-rejection cleanup
+(``lib.wrong_match_cleanup_service.cleanup_wrong_match``, reached from
+``lib.download_rejection`` and ``scripts.importer``) does automatically
+rmtree a delete-eligible REFERENCED folder there right after its own
+rejection — but no automated sweep ever revisits an UNREFERENCED folder in
+either processing-side root, which is exactly why this service's operator-
 facing sweep matters there. This service closes that lifecycle loop
 without making an irreversible decision: it compares the immediate album
 directories on disk with the currently visible Wrong Matches projection and

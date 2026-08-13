@@ -2038,12 +2038,16 @@ class TestMainExitCodes(unittest.TestCase):
     # quarantine" is not a reachable scenario any more. What they covered is
     # covered elsewhere now: PipelineDB is never constructed for quarantine
     # (``TestMainProtectedPathDispatch.test_main_routes_every_protected_path_command_without_a_db``,
-    # which now includes ``["triage", "quarantine"]``); the underlying
-    # route's own configuration/DB-failure mapping to 503 is pinned in
-    # ``tests/web/test_routes_triage.py`` (``test_quarantine_filesystem_failure_returns_503``,
-    # ``test_quarantine_db_acquisition_failure_returns_stable_503``); and the
-    # CLI's relay of that 503 to exit 5, in both JSON and human form, is
-    # pinned in ``TestCmdTriageQuarantine`` below.
+    # which now includes ``["triage", "quarantine"]``); the SERVICE's own
+    # runtime-config-read failure maps to ``QuarantineScanError`` in
+    # ``tests/test_quarantine_triage_service.py::test_unreadable_runtime_config_fails_closed``
+    # (#1122 review NEW-1); the ROUTE's generic ``QuarantineScanError`` -> 503
+    # mapping is pinned in ``tests/web/test_routes_triage.py``
+    # (``test_quarantine_filesystem_failure_returns_503``, exercised via a
+    # filesystem failure rather than a config failure, plus the separate DB
+    # acquisition failure in ``test_quarantine_db_acquisition_failure_returns_stable_503``);
+    # and the CLI's relay of any such 503 to exit 5, in both JSON and human
+    # form, is pinned in ``TestCmdTriageQuarantine`` below.
 
     def test_main_propagates_command_return_code(self):
         argv = [

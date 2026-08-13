@@ -1035,8 +1035,8 @@ being misreported as album folders or recursively expanded — a live
 `failed_imports/bad_files/` entry on the PROCESSING side (issue #1122 F3)
 proved the bucket is not download-dir-specific. `lib.fs_authority`'s
 `open_configured_quarantine_directory` separately enumerates a THIRD base,
-`beets_staging_dir` (`/mnt/virtio/Music/Incoming/**`), for single-path
-containment checks; this service does NOT scan that base — its legacy
+`<beets_staging_dir>/failed_imports/` and `<beets_staging_dir>/wrong_matches/`,
+for single-path containment checks; this service does NOT scan that base — its legacy
 quarantine folders predate the current rejection pipeline and have not been
 shown to fit this scan's DB-reference model uniformly. That is a known,
 stated gap, not an oversight.
@@ -1063,8 +1063,11 @@ Results are sorted by folder name and carry `name`, absolute `path`, and
 genuinely absent root is a valid empty state.
 `lib.slskd_transfers`'s disk reaper protects only the two download-dir-rooted
 roots forever (issue #571); the processing-side roots have no automated
-reaper at all — nothing else ever revisits them, which is exactly why this
-operator-facing sweep matters there.
+reaper at all. Post-rejection cleanup (`lib.wrong_match_cleanup_service.cleanup_wrong_match`)
+does automatically rmtree a delete-eligible REFERENCED folder there right
+after its own rejection — but no automated sweep ever revisits an
+UNREFERENCED folder in either processing-side root, which is exactly why
+this operator-facing sweep matters there.
 Configuration, DB, validation-envelope, directory-read, and mid-scan race
 errors fail the whole view as CLI exit `5` / HTTP `503`; partial state is never
 presented as an empty or trustworthy orphan list. Deletion remains an explicit
