@@ -25,6 +25,7 @@ import web.discogs
 import web.mb
 import web.routes.browse
 import web.server
+from lib.mb_canonical import configure_canonical_base, configured_canonical_base
 from scripts.web_dev_server import (
     DevConfig,
     DevHandler,
@@ -46,12 +47,22 @@ TEST_DSN = os.environ["TEST_DB_DSN"]
 
 
 def assert_metadata_wiring(config: DevConfig) -> None:
-    """Configured origins must be exact and missing values must not stay stale."""
+    """Configured origins must be exact and missing values must not stay stale.
+
+    #1089 NOTE-3 (review round 2): ``configure_live_db_metadata`` mutates a
+    THIRD process-global — ``lib.mb_canonical``'s configured base, wired
+    for the merge-rekey button (#1089 NOTE-10) — alongside the two mirror
+    origins this checker already asserted; it must agree with the SAME
+    ``mb_api`` origin, or a forgotten wiring degrades the button to
+    ``mirror_unavailable`` forever while looking configured everywhere
+    else.
+    """
     expected_mb = config.mb_api or urllib.parse.urljoin(
         f"{PUBLIC_MB_ORIGIN.rstrip('/')}/", "ws/2",
     )
     assert web.mb.MB_API_BASE == expected_mb
     assert web.discogs.DISCOGS_API_BASE == config.discogs_api
+    assert configured_canonical_base() == expected_mb
 
 
 def assert_missing_discogs_blocks(call_route: Callable[[], None]) -> None:
@@ -195,10 +206,14 @@ class TestLiveDbMetadataWiringGenerated(unittest.TestCase):
             web.mb.MB_API_BASE,
             web.discogs.DISCOGS_API_BASE,
         )
+        # #1089 NOTE-3 (review round 2): the third process-global
+        # configure_live_db_metadata now mutates.
+        self.saved_canonical_base = configured_canonical_base()
         self.saved_redis = cache._redis
 
     def tearDown(self) -> None:
         web.mb.MB_API_BASE, web.discogs.DISCOGS_API_BASE = self.saved
+        configure_canonical_base(self.saved_canonical_base)
         cache._redis = self.saved_redis
 
     @given(
@@ -264,6 +279,9 @@ class TestBrowseResolveWarmCacheGenerated(unittest.TestCase):
     def setUp(self) -> None:
         self.saved_base = web.discogs.DISCOGS_API_BASE
         self.saved_mb_base = web.mb.MB_API_BASE
+        # #1089 NOTE-3 (review round 2): the third process-global
+        # configure_live_db_metadata now mutates.
+        self.saved_canonical_base = configured_canonical_base()
         self.saved_redis = cache._redis
         configure_live_db_metadata(_config(mb_api=None, discogs_api=None))
         cache._redis = FakeRedis()
@@ -285,6 +303,7 @@ class TestBrowseResolveWarmCacheGenerated(unittest.TestCase):
         self.thread.join(timeout=2)
         web.discogs.DISCOGS_API_BASE = self.saved_base
         web.mb.MB_API_BASE = self.saved_mb_base
+        configure_canonical_base(self.saved_canonical_base)
         cache._redis = self.saved_redis
 
     @given(
@@ -454,9 +473,15 @@ class TestMetadataWiringCheckerKnownBad(unittest.TestCase):
             web.mb.MB_API_BASE,
             web.discogs.DISCOGS_API_BASE,
         )
+        # #1089 NOTE-3 (review round 2): the third process-global
+        # configure_live_db_metadata now mutates —
+        # test_missing_mb_uses_the_canonical_public_ws2_declaration below
+        # calls it directly.
+        self.saved_canonical_base = configured_canonical_base()
 
     def tearDown(self) -> None:
         web.mb.MB_API_BASE, web.discogs.DISCOGS_API_BASE = self.saved
+        configure_canonical_base(self.saved_canonical_base)
 
     def test_checker_rejects_swapped_origins(self) -> None:
         config = _config(

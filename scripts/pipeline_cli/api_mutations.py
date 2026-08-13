@@ -42,7 +42,10 @@ TIMEOUT_ENQUEUE_SECONDS = _TIMEOUT_SECONDS
 TIMEOUT_MIRROR_SECONDS = 300.0
 """Replace: several inline MB/Discogs mirror lookups (this deployment's
 mirror timeout is 15s per call), a Beets exact delete, Wrong Matches group
-cleanup, and staging cleanup — all before the response is written."""
+cleanup, and staging cleanup — all before the response is written.
+Also merge-rekey (#1089): one inline MusicBrainz merge-survivor lookup at
+the same 15s mirror timeout, plus Beets reads and PostgreSQL work — see
+``cmd_merge_rekey``."""
 
 TIMEOUT_SOURCE_DELETE_SECONDS = 300.0
 """One ``rmtree`` of a full album folder over virtiofs, behind an

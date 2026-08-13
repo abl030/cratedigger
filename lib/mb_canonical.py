@@ -260,13 +260,27 @@ def canonical_release_status(
         )
         return CanonicalReleaseUnavailable()
 
+    if not isinstance(payload, dict):
+        # Not even a JSON object — ``_fetch_json``'s real contract always
+        # returns the ``{"payload": ..., "redirected": ...}`` shape, so
+        # this can only happen via a malformed injected fetch (tests) or a
+        # genuinely broken mirror body. An unusable response shape is never
+        # read as MusicBrainz having answered "current" (#1089 MINOR-1) —
+        # it is exactly as much "no answer" as a raised exception is.
+        return CanonicalReleaseUnavailable()
     # Narrowing an already-decoded value: the shared graceful helper, never
     # a re-``convert`` (`.claude/rules/code-quality.md`).
     envelope = json_dict(payload)
-    if envelope.get("redirected") is not True:
-        # No observed redirect ⇒ MusicBrainz answered and names no successor,
-        # whatever the body says. This is "current", not "unavailable" — the
-        # lookup DID answer.
+    redirected = envelope.get("redirected")
+    if not isinstance(redirected, bool):
+        # A missing or wrong-typed "redirected" key is the same unusable
+        # shape as above — no genuine transport-level redirect fact was
+        # ever observed, so there is nothing to read as an answer.
+        return CanonicalReleaseUnavailable()
+    if redirected is not True:
+        # An explicit, well-formed ``False`` ⇒ MusicBrainz answered and
+        # names no successor, whatever the body says. This IS "current",
+        # not "unavailable" — the lookup DID answer.
         return CanonicalReleaseCurrent()
     canonical = normalize_release_id(json_dict(envelope.get("payload")).get("id"))
     if detect_release_source(canonical) != "musicbrainz":

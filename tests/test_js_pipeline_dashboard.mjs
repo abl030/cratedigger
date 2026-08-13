@@ -295,11 +295,11 @@ console.log('normalizeUnfindableBacklogSeries() maps due_backlog_at_start to a p
   }
 }
 
-console.log('renderDriftRow() renders the operator merge-rekey button (#1089)');
+console.log('renderDriftRow() renders the operator merge-rekey button for MB-sourced rows (#1089)');
 {
   const html = __test__.renderDriftRow({
     id: 8792, artist_name: 'Slipknot', album_title: 'Vol. 3: (The Subliminal Verses)',
-    status: 'imported',
+    status: 'imported', mb_release_id: 'd990b8af-0000-0000-0000-000000000000',
   });
   assertContains(html, '#8792 Slipknot', 'row names the request id and artist');
   assertContains(html, 'Vol. 3: (The Subliminal Verses)', 'row names the album title');
@@ -308,10 +308,26 @@ console.log('renderDriftRow() renders the operator merge-rekey button (#1089)');
   assertContains(html, 'Follow MB merge', 'button label rendered');
   assertContains(html, 'id="drift-note-8792"', 'inline refusal-note slot rendered for this request');
 }
+console.log('renderDriftRow() withholds the button for non-MB-sourced rows (#1089 MINOR-3)');
+{
+  // A Discogs-sourced (or otherwise non-MB) drift row still shows — the
+  // dashboard still surfaces the drift — but the merge-rekey action can
+  // never resolve a merge this arm has no redirect concept for.
+  const html = __test__.renderDriftRow({
+    id: 1870, artist_name: 'Some Artist', album_title: 'Some Album',
+    status: 'imported', mb_release_id: null, discogs_release_id: '1870',
+  });
+  assertContains(html, '#1870 Some Artist', 'row still names the request');
+  assertContains(html, 'metric-bad">imported', 'row still shows the drift status');
+  assertExcludes(html, 'window.mergeRekeyRequest', 'no merge-rekey button for a non-MB-sourced row');
+  assertExcludes(html, 'Follow MB merge', 'no button label for a non-MB-sourced row');
+  assertExcludes(html, 'drift-note-1870', 'no inline note slot without a button to write into');
+}
 console.log('renderDriftRow() escapes artist/album HTML');
 {
   const html = __test__.renderDriftRow({
     id: 1, artist_name: '<script>x</script>', album_title: 'A & B', status: 'imported',
+    mb_release_id: 'd990b8af-0000-0000-0000-000000000000',
   });
   assertExcludes(html, '<script>x</script>', 'artist name is escaped');
   assertContains(html, 'A &amp; B', 'album title is escaped');
@@ -321,8 +337,10 @@ console.log('renderDiskCoverageCard() composes one drift row per off-disk reques
   const html = __test__.renderDiskCoverageCard({
     counts: {on_disk_total: 9, active_total: 11, off_disk_by_status: {wanted: 1}},
     drift_rows: [
-      {id: 316, artist_name: 'Rebecca Black', album_title: 'Sing It', status: 'imported'},
-      {id: 8832, artist_name: 'Kim Petras', album_title: 'Detour', status: 'imported'},
+      {id: 316, artist_name: 'Rebecca Black', album_title: 'Sing It', status: 'imported',
+       mb_release_id: 'd990b8af-0000-0000-0000-000000000001'},
+      {id: 8832, artist_name: 'Kim Petras', album_title: 'Detour', status: 'imported',
+       mb_release_id: 'd990b8af-0000-0000-0000-000000000002'},
     ],
   });
   assertContains(html, 'Drift (imported, missing from beets)', 'drift metric label rendered');

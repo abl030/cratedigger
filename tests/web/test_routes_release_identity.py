@@ -873,6 +873,30 @@ class TestPipelineMergeRekeyContract(_FakeDbWebServerCase):
         )
         self.assertIn("error", data)
 
+    def test_merge_rekey_beets_open_failure_returns_503_not_500(self):
+        """#1089 MAJOR-1 (review round 2): the classified boundary must
+        cover OPENING the database, not just reads through an already-open
+        handle. ``s._beets_db()`` itself raises here — before
+        ``MergeRekeyService`` is even constructed, so
+        ``_patch_service`` (which patches ``rekey_request``) cannot model
+        this; the real seam is ``web.server._beets_db``, a real
+        ``sqlite3.OperationalError`` shaped exactly like
+        ``beets_authority_availability_category`` classifies (test-fidelity
+        Rule B). Before the fix this reached no classified branch at all
+        and 500'd with no ``outcome``.
+        """
+        import sqlite3
+
+        import web.server as srv
+
+        locked = sqlite3.OperationalError("unable to open database file")
+        locked.sqlite_errorcode = sqlite3.SQLITE_CANTOPEN
+        with patch.object(srv, "_beets_db", side_effect=locked):
+            status, data = self._post("/api/pipeline/42/merge-rekey", {})
+        self.assertEqual(status, 503)
+        self.assertIn("error", data)
+        self.assertNotIn("outcome", data)
+
     def test_merge_rekey_library_still_at_stored_returns_409(self):
         """#1089 MAJOR-3: Beets has not moved off the merged-away id yet."""
         with self._patch_service(
@@ -937,7 +961,6 @@ class TestPipelineMergeRekeyContract(_FakeDbWebServerCase):
         request's evidence lineage really follows the row (#1059/#1089).
         """
         from lib.mb_canonical import (
-            CanonicalReleaseRedirected,
             configure_canonical_base,
             configured_canonical_base,
         )
@@ -968,9 +991,17 @@ class TestPipelineMergeRekeyContract(_FakeDbWebServerCase):
         configure_canonical_base("http://fake-mirror/ws/2")
         with (
             patch.object(srv, "_beets_db", return_value=beets),
+            # The TRUE external edge (#1089 NOTE-2, review round 2) —
+            # canonical_release_status is ~50 lines of real decision logic,
+            # not a thin forwarder, so it is not allowlisted; this patches
+            # the raw fetch one hop below it instead, exactly mirroring
+            # the real ``{"payload": ..., "redirected": ...}`` envelope
+            # ``_fetch_json`` produces.
             patch(
-                "lib.mb_canonical.canonical_release_status",
-                return_value=CanonicalReleaseRedirected(self.SURVIVOR),
+                "lib.mb_canonical._fetch_json",
+                return_value={
+                    "payload": {"id": self.SURVIVOR}, "redirected": True,
+                },
             ),
         ):
             status, data = self._post("/api/pipeline/316/merge-rekey", {})

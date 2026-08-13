@@ -5,10 +5,15 @@ Split from web/routes/pipeline.py (#522); merge-rekey added by #1089.
 """
 
 import json
+import logging
 
 from pydantic import BaseModel, Field
 
 from lib import transitions
+from lib.beets_db import (
+    BEETS_AUTHORITY_UNAVAILABLE_MESSAGE as CURRENT_BEETS_UNAVAILABLE_MESSAGE,
+)
+from lib.beets_db import beets_authority_availability_category
 from lib.merge_rekey_service import (
     MERGE_REKEY_HTTP_STATUS,
     RESULT_REKEYED,
@@ -33,6 +38,8 @@ from web import mb as mb_api
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route
 from web.routes._server_access import _server
+
+logger = logging.getLogger(__name__)
 
 
 def _resolved_rg_applied_or_respond(
@@ -428,16 +435,26 @@ def post_pipeline_merge_rekey(
               request), ``library_not_at_survivor`` (Beets does not resolve
               exactly one album at the survivor), ``library_still_at_stored``
               (Beets still resolves an album at the merged-away id — retag
-              the library first), ``survivor_collision`` (a rival request or
-              a colliding evidence fingerprint already occupies the
-              survivor — operator must resolve it), or ``rekey_refused``
-              (the request changed underneath the write — retry re-derives)
+              the library first), ``evidence_fingerprint_mismatch`` (the
+              request links current evidence, and the survivor album's
+              freshly computed content fingerprint does not match it — the
+              survivor may be an unrelated, pipeline-untracked album that
+              happens to hold the merged MBID; the operator must decide),
+              ``survivor_collision`` (a rival request or a colliding
+              evidence fingerprint already occupies the survivor — operator
+              must resolve it), or ``rekey_refused`` (the request changed
+              underneath the write — retry re-derives)
       * 422 — ``not_merged`` (MusicBrainz answered and names no different
               survivor for the stored id; the #8792 refusal)
       * 503 — ``mirror_unavailable`` (no answer was obtained at all —
-              unconfigured, or the mirror is unreachable) or
-              ``beets_unavailable`` (the Beets SQLite authority is
-              transiently unreadable — locked, IO, or permission failure)
+              unconfigured, or the mirror is unreachable), the service's own
+              ``beets_unavailable`` outcome (a classified SQLite read
+              failure — locked, IO, or permission — DURING resolution,
+              carrying ``outcome`` in the payload), or a route-level bare
+              503 with no ``outcome`` field at all when OPENING the
+              database itself fails the same classification (this call —
+              ``s._beets_db()`` — sits BEFORE the service exists, so that
+              failure can never carry a service outcome)
       * 500 — any unknown outcome (safety net)
     """
     del body
@@ -448,7 +465,25 @@ def post_pipeline_merge_rekey(
         return
 
     s = _server()
-    beets = s._beets_db()
+    # Classified exactly like web/routes/pipeline.py's own boundary
+    # (~pipeline.py:373-388) — this call must be INSIDE the try, not before
+    # it: a locked/IO/permission failure opening the database is exactly
+    # the same retryable-503 world as one encountered later reading it, and
+    # a route that classifies only the later reads still 500s on an open
+    # failure with no outcome at all (#1089 MAJOR-1 review round 2).
+    try:
+        beets = s._beets_db()
+    except Exception as exc:
+        category = beets_authority_availability_category(exc)
+        if category is None and not isinstance(exc, OSError):
+            raise
+        logger.exception(
+            "current Beets authority unavailable opening the database "
+            "for request %s (%s)",
+            request_id, category or type(exc).__name__,
+        )
+        h._error(CURRENT_BEETS_UNAVAILABLE_MESSAGE, 503)
+        return
     if beets is None:
         h._error("Beets DB not available", 503)
         return

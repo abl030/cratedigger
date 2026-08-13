@@ -316,6 +316,36 @@ class TestCanonicalReleaseStatus(unittest.TestCase):
                 )
                 self.assertEqual(status, CanonicalReleaseUnavailable())
 
+    def test_malformed_top_level_envelopes_are_unavailable_not_current(
+        self,
+    ) -> None:
+        """#1089 MINOR-1 (review round 2): a top-level shape that isn't even
+        the ``{"payload":..., "redirected":...}`` contract is exactly as
+        much "no answer" as a raised exception — never a confirmed
+        "current" the operator merge-rekey action could act on.
+
+        Distinct from ``test_unusable_response_shapes_are_unavailable``
+        above, which probes a garbage/absent ``payload.id`` behind an
+        OBSERVED ``redirected: True`` — these probe the envelope itself:
+        not a dict at all, or a dict missing/mistyping the ``redirected``
+        key entirely.
+        """
+        envelopes: list[object] = [
+            None, [], "a bare string", {},
+            {"payload": {"id": SURVIVOR}},              # missing "redirected"
+            {"payload": {"id": SURVIVOR}, "redirected": "yes"},  # wrong type
+        ]
+        for envelope in envelopes:
+            with self.subTest(envelope=envelope):
+                fetch, _calls = _fetch_returning(envelope)
+                status = canonical_release_status(
+                    MERGED, ws2_base=BASE, fetch=fetch,
+                )
+                self.assertEqual(status, CanonicalReleaseUnavailable())
+                self.assertIsNone(
+                    canonical_release_id(MERGED, ws2_base=BASE, fetch=fetch),
+                )
+
     def test_canonical_release_id_agrees_with_the_tagged_variant(self) -> None:
         """``canonical_release_id`` is DEFINED IN TERMS OF the tagged
         function — this pins that relationship rather than assuming it."""

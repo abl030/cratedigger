@@ -7,7 +7,9 @@ exact named worlds; this property patrols the world space around them,
 driving the REAL production entry point — ``MergeRekeyService.rekey_request``
 — over generated combinations of request eligibility, in-flight import jobs,
 rival/collision state, Beets state at BOTH the survivor and the stored id,
-and the tagged mirror answer (answered-vs-silent, #1089 BLOCKING-1).
+the tagged mirror answer (answered-vs-silent, #1089 BLOCKING-1), and (#1089
+MAJOR-3, review round 2) whether the survivor album's REAL, freshly measured
+bytes match the request's linked current evidence.
 
 Invariant patrolled (module-level checkers so the known-bad self-tests below
 can call them directly):
@@ -17,24 +19,33 @@ O1  The operator rekey arm rekeys ONLY an ``imported``, MB-sourced, unowned
     ANSWERED (never a silent/unavailable mirror), Beets holding exactly one
     album at that survivor AND nothing at the stored id, no
     ``queued``/``running`` import job, no rival request already at the
-    survivor, and no colliding evidence fingerprint at the survivor. It
-    NEVER fires on ``processing`` / ``replaced`` / other non-``imported``
-    statuses, on an automation-owned row, or on a Discogs-sourced /
-    identity-less row — the service's own precondition refuses those before
-    any mirror or Beets call.
+    survivor, no colliding evidence fingerprint at the survivor, and — when
+    the request links current evidence — a survivor whose freshly measured
+    bytes match it. It NEVER fires on ``processing`` / ``replaced`` / other
+    non-``imported`` statuses, on an automation-owned row, or on a
+    Discogs-sourced / identity-less row — the service's own precondition
+    refuses those before any mirror or Beets call.
 O2  Every world that did not rekey left the row's ``mb_release_id`` and the
     request's evidence lineage exactly where they started.
 O3  A world whose request write refuses (an in-flight import job) OR whose
-    pre-check refuses (a rival request already at the survivor, or a
-    colliding evidence fingerprint) moves NEITHER the row NOR its evidence —
-    evidence only ever follows the row.
+    pre-check refuses (a rival request already at the survivor, a colliding
+    evidence fingerprint, or a survivor/evidence content mismatch) moves
+    NEITHER the row NOR its evidence — evidence only ever follows the row.
 O4  A rival request or a colliding evidence fingerprint at the survivor is
     reported as ``survivor_collision``, never folded into ``rekey_refused``
     (#1089 MAJOR-2) — the two outcomes are mutually exclusive causes.
+O5  A request with linked current evidence whose fingerprint does NOT match
+    the survivor's freshly measured bytes is refused
+    ``evidence_fingerprint_mismatch`` (#1089 MAJOR-3, review round 2) —
+    never silently rekeyed onto an unrelated, pipeline-untracked album that
+    happens to occupy the survivor MBID.
 """
 
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
 import unittest
 from collections.abc import Mapping
 
@@ -57,6 +68,7 @@ from lib.mb_canonical import (
     CanonicalReleaseUnavailable,
 )
 from lib.merge_rekey_service import (
+    RESULT_EVIDENCE_FINGERPRINT_MISMATCH,
     RESULT_LIBRARY_NOT_AT_SURVIVOR,
     RESULT_LIBRARY_STILL_AT_STORED,
     RESULT_MIRROR_UNAVAILABLE,
@@ -67,6 +79,7 @@ from lib.merge_rekey_service import (
     RESULT_WRONG_STATE,
     MergeRekeyService,
 )
+from lib.quality_evidence import AlbumQualityEvidenceFile
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     handoff_automation_owner,
@@ -79,6 +92,10 @@ SURVIVOR = "9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4"
 UNRELATED_MB = "11111111-2222-3333-4444-555555555555"
 REQUEST_ID = 8792
 RIVAL_REQUEST_ID = REQUEST_ID + 1
+#: The real, on-disk size the "matching" evidence-lineage world writes and
+#: describes identically; "mismatched" describes a different size than what
+#: is really on disk — the exact hazard #1089 MAJOR-3 patrols.
+_LINEAGE_FILE_SIZE = 20_480
 
 WORLD_KINDS = st.sampled_from([
     "eligible",
@@ -106,6 +123,15 @@ BEETS_SURVIVOR_KINDS = st.sampled_from(["unique", "missing", "ambiguous"])
 #: the legitimate "library already moved" world; ``present`` is the
 #: transplant hazard this dimension exists to patrol.
 STORED_ID_BEETS_KINDS = st.sampled_from(["missing", "present"])
+#: #1089 MAJOR-3 (review round 2): does the request link current evidence,
+#: and if so does its fingerprint match the survivor's REAL, freshly
+#: measured bytes? ``none`` — no linked evidence, nothing to protect.
+#: ``matching`` — a fresh import at the survivor whose evidence was captured
+#: from those exact bytes (must-still-work). ``mismatched`` — an unrelated,
+#: pipeline-untracked album occupies the survivor MBID; the evidence
+#: describes bytes nobody measured for it (the hazard this dimension exists
+#: to catch).
+EVIDENCE_LINEAGE_KINDS = st.sampled_from(["none", "matching", "mismatched"])
 
 
 def expected_outcome(
@@ -117,6 +143,7 @@ def expected_outcome(
     survivor_kind: str,
     beets_survivor_kind: str,
     stored_id_beets_kind: str,
+    evidence_lineage_kind: str,
 ) -> str:
     """The complete decision, derived independently of production (O1)."""
     if world_kind != "eligible":
@@ -129,6 +156,8 @@ def expected_outcome(
         return RESULT_LIBRARY_NOT_AT_SURVIVOR
     if stored_id_beets_kind != "missing":
         return RESULT_LIBRARY_STILL_AT_STORED
+    if evidence_lineage_kind == "mismatched":
+        return RESULT_EVIDENCE_FINGERPRINT_MISMATCH
     if rival_at_survivor or fingerprint_collision:
         return RESULT_SURVIVOR_COLLISION
     has_active_job = any(
@@ -208,13 +237,24 @@ def _build_world(
     survivor_kind: str,
     beets_survivor_kind: str,
     stored_id_beets_kind: str,
-) -> tuple[FakePipelineDB, FakeBeetsDB, RecordingCanonical, int | None]:
-    """Returns ``(db, beets, canonical, seeded_evidence_id)``.
+    evidence_lineage_kind: str,
+) -> tuple[
+    FakePipelineDB, FakeBeetsDB, RecordingCanonical, int | None, str | None,
+]:
+    """Returns ``(db, beets, canonical, seeded_evidence_id, lineage_tmp_dir)``.
 
     ``seeded_evidence_id`` is ``None`` for ``no_identity`` — a request with
     no release identity at all has nothing content-addressed evidence could
     be filed under, so O2/O3 (row and evidence move together) is vacuous for
     that world and the test skips the evidence half of the check.
+
+    ``lineage_tmp_dir`` is a REAL temporary directory (never ``None``) only
+    when ``evidence_lineage_kind != "none"`` AND the survivor is reachable
+    (``beets_survivor_kind == "unique" and stored_id_beets_kind ==
+    "missing"``) — the caller ``rmtree``s it after the example, since
+    ``MergeRekeyService._verify_survivor_evidence_lineage`` walks the REAL
+    filesystem (#1089 MAJOR-3, review round 2) and there is no seeded-state
+    substitute for that.
     """
     db = FakePipelineDB()
     identity_for_evidence: str | None = MERGED
@@ -280,6 +320,7 @@ def _build_world(
     }[survivor_kind]
     canonical = RecordingCanonical(survivor_answer)
 
+    lineage_tmp_dir: str | None = None
     if world_kind == "eligible" and survivor_kind == "different_mb":
         _seed_active_jobs(db, active_jobs)
         if rival_at_survivor:
@@ -302,7 +343,46 @@ def _build_world(
         # "missing" needs no seed — an unseeded release id already
         # resolves to CurrentBeetsMissing in FakeBeetsDB by default.
 
-    return db, beets, canonical, evidence_id
+        # #1089 MAJOR-3 (review round 2): only reachable once Beets shows
+        # a clean move — the same two conditions
+        # ``_verify_survivor_evidence_lineage`` itself is gated behind.
+        if (
+            evidence_lineage_kind != "none"
+            and beets_survivor_kind == "unique"
+            and stored_id_beets_kind == "missing"
+        ):
+            lineage_tmp_dir = tempfile.mkdtemp(
+                prefix="cratedigger-merge-rekey-lineage-",
+            )
+            real_path = os.path.join(lineage_tmp_dir, "01 Track.mp3")
+            with open(real_path, "wb") as handle:
+                handle.write(b"\x00" * _LINEAGE_FILE_SIZE)
+            beets.set_item_paths(SURVIVOR, [(19345, real_path)])
+            described_size = (
+                _LINEAGE_FILE_SIZE if evidence_lineage_kind == "matching"
+                else _LINEAGE_FILE_SIZE + 1
+            )
+            lineage_evidence = make_album_quality_evidence(
+                mb_release_id=SURVIVOR,
+                source_path=lineage_tmp_dir,
+                files=[AlbumQualityEvidenceFile(
+                    relative_path="01 Track.mp3",
+                    size_bytes=described_size,
+                    mtime_ns=1_700_000_000_000_000_000,
+                    extension="mp3", container="mp3", codec="mp3",
+                )],
+            )
+            db.upsert_album_quality_evidence(lineage_evidence)
+            lineage_stored = db.find_album_quality_evidence(
+                mb_release_id=SURVIVOR,
+                snapshot_fingerprint=lineage_evidence.snapshot_fingerprint,
+            )
+            assert lineage_stored is not None and lineage_stored.id is not None
+            assert db.set_request_current_evidence(
+                REQUEST_ID, lineage_stored.id,
+            )
+
+    return db, beets, canonical, evidence_id, lineage_tmp_dir
 
 
 def check_row_and_evidence_move_only_when_rekeyed(
@@ -376,6 +456,40 @@ def check_collision_and_refused_are_mutually_exclusive_causes(
         )
 
 
+def check_lineage_mismatch_never_folds_into_another_outcome(
+    *,
+    outcome: str,
+    evidence_lineage_kind: str,
+    lineage_witness_reachable: bool,
+) -> None:
+    """O5 — #1089 MAJOR-3 (review round 2): a mismatched linked-evidence
+    world must be reported as ``evidence_fingerprint_mismatch``, never
+    silently absorbed into ``rekeyed`` (the transplant itself) or any other
+    outcome name.
+
+    ``lineage_witness_reachable`` mirrors ``_build_world``'s OWN gate for
+    even constructing the lineage fixture (``world_kind == "eligible" and
+    survivor_kind == "different_mb" and beets_survivor_kind == "unique" and
+    stored_id_beets_kind == "missing"``): an earlier refusal
+    (``library_not_at_survivor`` / ``library_still_at_stored`` /
+    ``wrong_state`` / ``mirror_unavailable`` / ``not_merged``) legitimately
+    preempts the witness and is not a violation of this invariant.
+    """
+    if not lineage_witness_reachable:
+        return
+    if evidence_lineage_kind == "mismatched" and outcome != RESULT_EVIDENCE_FINGERPRINT_MISMATCH:
+        raise AssertionError(
+            f"a mismatched survivor/evidence lineage world reported "
+            f"{outcome!r} instead of evidence_fingerprint_mismatch"
+        )
+    if evidence_lineage_kind != "mismatched" and outcome == RESULT_EVIDENCE_FINGERPRINT_MISMATCH:
+        raise AssertionError(
+            f"outcome evidence_fingerprint_mismatch fired for a "
+            f"{evidence_lineage_kind!r} lineage world, which never "
+            "describes a real mismatch"
+        )
+
+
 class TestMergeRekeyServiceProperty(unittest.TestCase):
     @settings(deadline=None)
     @given(
@@ -395,18 +509,21 @@ class TestMergeRekeyServiceProperty(unittest.TestCase):
         survivor_kind=SURVIVOR_KINDS,
         beets_survivor_kind=BEETS_SURVIVOR_KINDS,
         stored_id_beets_kind=STORED_ID_BEETS_KINDS,
+        evidence_lineage_kind=EVIDENCE_LINEAGE_KINDS,
     )
     # The clean happy path.
     @example(
         world_kind="eligible", active_jobs=(), rival_at_survivor=False,
         fingerprint_collision=False, survivor_kind="different_mb",
         beets_survivor_kind="unique", stored_id_beets_kind="missing",
+        evidence_lineage_kind="none",
     )
     # The #8792 refusal — MusicBrainz ANSWERED, no redirect.
     @example(
         world_kind="eligible", active_jobs=(), rival_at_survivor=False,
         fingerprint_collision=False, survivor_kind="current_no_redirect",
         beets_survivor_kind="unique", stored_id_beets_kind="missing",
+        evidence_lineage_kind="none",
     )
     # #1089 BLOCKING-1: configured but down/silent — distinct from the
     # #8792 refusal above.
@@ -414,31 +531,35 @@ class TestMergeRekeyServiceProperty(unittest.TestCase):
         world_kind="eligible", active_jobs=(), rival_at_survivor=False,
         fingerprint_collision=False, survivor_kind="unavailable",
         beets_survivor_kind="unique", stored_id_beets_kind="missing",
+        evidence_lineage_kind="none",
     )
     # #1089 MAJOR-3: Beets has not moved yet — the transplant hazard.
     @example(
         world_kind="eligible", active_jobs=(), rival_at_survivor=False,
         fingerprint_collision=False, survivor_kind="different_mb",
         beets_survivor_kind="unique", stored_id_beets_kind="present",
+        evidence_lineage_kind="none",
     )
     # #1089 MAJOR-2: a rival request already at the survivor.
     @example(
         world_kind="eligible", active_jobs=(), rival_at_survivor=True,
         fingerprint_collision=False, survivor_kind="different_mb",
         beets_survivor_kind="unique", stored_id_beets_kind="missing",
+        evidence_lineage_kind="none",
     )
     # #1089 MAJOR-2: a colliding evidence fingerprint.
     @example(
         world_kind="eligible", active_jobs=(), rival_at_survivor=False,
         fingerprint_collision=True, survivor_kind="different_mb",
         beets_survivor_kind="unique", stored_id_beets_kind="missing",
+        evidence_lineage_kind="none",
     )
     # A queued force import blocks the write.
     @example(
         world_kind="eligible", active_jobs=((IMPORT_JOB_FORCE, "queued"),),
         rival_at_survivor=False, fingerprint_collision=False,
         survivor_kind="different_mb", beets_survivor_kind="unique",
-        stored_id_beets_kind="missing",
+        stored_id_beets_kind="missing", evidence_lineage_kind="none",
     )
     # An in-flight rescue blocks it too — no job_type filter.
     @example(
@@ -446,7 +567,7 @@ class TestMergeRekeyServiceProperty(unittest.TestCase):
         active_jobs=((IMPORT_JOB_YOUTUBE, "running"),),
         rival_at_survivor=False, fingerprint_collision=False,
         survivor_kind="different_mb", beets_survivor_kind="unique",
-        stored_id_beets_kind="missing",
+        stored_id_beets_kind="missing", evidence_lineage_kind="none",
     )
     # A terminal job never blocks (must-still-work).
     @example(
@@ -454,7 +575,23 @@ class TestMergeRekeyServiceProperty(unittest.TestCase):
         active_jobs=((IMPORT_JOB_FORCE, "completed"),),
         rival_at_survivor=False, fingerprint_collision=False,
         survivor_kind="different_mb", beets_survivor_kind="unique",
-        stored_id_beets_kind="missing",
+        stored_id_beets_kind="missing", evidence_lineage_kind="none",
+    )
+    # #1089 MAJOR-3 (review round 2) must-still-work: a fresh import at the
+    # survivor whose evidence was captured from those exact bytes passes.
+    @example(
+        world_kind="eligible", active_jobs=(), rival_at_survivor=False,
+        fingerprint_collision=False, survivor_kind="different_mb",
+        beets_survivor_kind="unique", stored_id_beets_kind="missing",
+        evidence_lineage_kind="matching",
+    )
+    # #1089 MAJOR-3 (review round 2): the exact hazard — an unrelated,
+    # pipeline-untracked album's bytes don't match the linked evidence.
+    @example(
+        world_kind="eligible", active_jobs=(), rival_at_survivor=False,
+        fingerprint_collision=False, survivor_kind="different_mb",
+        beets_survivor_kind="unique", stored_id_beets_kind="missing",
+        evidence_lineage_kind="mismatched",
     )
     def test_every_world_upholds_the_operator_rekey_invariants(
         self,
@@ -465,8 +602,9 @@ class TestMergeRekeyServiceProperty(unittest.TestCase):
         survivor_kind: str,
         beets_survivor_kind: str,
         stored_id_beets_kind: str,
+        evidence_lineage_kind: str,
     ) -> None:
-        db, beets, canonical, evidence_id = _build_world(
+        db, beets, canonical, evidence_id, lineage_tmp_dir = _build_world(
             world_kind=world_kind,
             active_jobs=active_jobs,
             rival_at_survivor=rival_at_survivor,
@@ -474,48 +612,64 @@ class TestMergeRekeyServiceProperty(unittest.TestCase):
             survivor_kind=survivor_kind,
             beets_survivor_kind=beets_survivor_kind,
             stored_id_beets_kind=stored_id_beets_kind,
+            evidence_lineage_kind=evidence_lineage_kind,
         )
-        row_before = dict(db.request(REQUEST_ID) or {})
-        service = MergeRekeyService(
-            db, beets, canonical_release_fn=canonical,
-        )
+        try:
+            row_before = dict(db.request(REQUEST_ID) or {})
+            service = MergeRekeyService(
+                db, beets, canonical_release_fn=canonical,
+            )
 
-        result = service.rekey_request(REQUEST_ID)
+            result = service.rekey_request(REQUEST_ID)
 
-        expected = expected_outcome(
-            world_kind=world_kind,
-            active_jobs=active_jobs,
-            rival_at_survivor=rival_at_survivor,
-            fingerprint_collision=fingerprint_collision,
-            survivor_kind=survivor_kind,
-            beets_survivor_kind=beets_survivor_kind,
-            stored_id_beets_kind=stored_id_beets_kind,
-        )
-        self.assertEqual(result.outcome, expected)
+            expected = expected_outcome(
+                world_kind=world_kind,
+                active_jobs=active_jobs,
+                rival_at_survivor=rival_at_survivor,
+                fingerprint_collision=fingerprint_collision,
+                survivor_kind=survivor_kind,
+                beets_survivor_kind=beets_survivor_kind,
+                stored_id_beets_kind=stored_id_beets_kind,
+                evidence_lineage_kind=evidence_lineage_kind,
+            )
+            self.assertEqual(result.outcome, expected)
 
-        row_after = db.request(REQUEST_ID)
-        evidence = (
-            db.load_album_quality_evidence_by_id(evidence_id)
-            if evidence_id is not None else None
-        )
-        check_row_and_evidence_move_only_when_rekeyed(
-            outcome=result.outcome,
-            row_before=row_before,
-            row_after=row_after,
-            evidence_release_after=(
-                evidence.mb_release_id if evidence is not None else None
-            ),
-            evidence_seeded=evidence_id is not None,
-        )
-        check_collision_and_refused_are_mutually_exclusive_causes(
-            outcome=result.outcome,
-            rival_at_survivor=rival_at_survivor,
-            fingerprint_collision=fingerprint_collision,
-            has_active_job=any(
-                status in ("queued", "running")
-                for _job_type, status in active_jobs
-            ),
-        )
+            row_after = db.request(REQUEST_ID)
+            evidence = (
+                db.load_album_quality_evidence_by_id(evidence_id)
+                if evidence_id is not None else None
+            )
+            check_row_and_evidence_move_only_when_rekeyed(
+                outcome=result.outcome,
+                row_before=row_before,
+                row_after=row_after,
+                evidence_release_after=(
+                    evidence.mb_release_id if evidence is not None else None
+                ),
+                evidence_seeded=evidence_id is not None,
+            )
+            check_collision_and_refused_are_mutually_exclusive_causes(
+                outcome=result.outcome,
+                rival_at_survivor=rival_at_survivor,
+                fingerprint_collision=fingerprint_collision,
+                has_active_job=any(
+                    status in ("queued", "running")
+                    for _job_type, status in active_jobs
+                ),
+            )
+            check_lineage_mismatch_never_folds_into_another_outcome(
+                outcome=result.outcome,
+                evidence_lineage_kind=evidence_lineage_kind,
+                lineage_witness_reachable=(
+                    world_kind == "eligible"
+                    and survivor_kind == "different_mb"
+                    and beets_survivor_kind == "unique"
+                    and stored_id_beets_kind == "missing"
+                ),
+            )
+        finally:
+            if lineage_tmp_dir is not None:
+                shutil.rmtree(lineage_tmp_dir, ignore_errors=True)
 
 
 class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
@@ -620,6 +774,54 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
             has_active_job=True,
         )
 
+    def test_a_mismatched_lineage_reported_as_rekeyed_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            "mismatched survivor/evidence lineage world reported",
+        ):
+            check_lineage_mismatch_never_folds_into_another_outcome(
+                outcome=RESULT_REKEYED, evidence_lineage_kind="mismatched",
+                lineage_witness_reachable=True,
+            )
+
+    def test_a_matching_lineage_reported_as_mismatch_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            "fired for a 'matching' lineage world",
+        ):
+            check_lineage_mismatch_never_folds_into_another_outcome(
+                outcome=RESULT_EVIDENCE_FINGERPRINT_MISMATCH,
+                evidence_lineage_kind="matching",
+                lineage_witness_reachable=True,
+            )
+
+    def test_an_unreachable_witness_never_trips_regardless_of_outcome(
+        self,
+    ) -> None:
+        """Must-still-work for the gate itself: an earlier refusal
+        (``library_still_at_stored`` here) legitimately preempts the
+        witness — this must NOT be read as a lineage-mismatch violation."""
+        check_lineage_mismatch_never_folds_into_another_outcome(
+            outcome=RESULT_LIBRARY_STILL_AT_STORED,
+            evidence_lineage_kind="mismatched",
+            lineage_witness_reachable=False,
+        )
+
+    def test_the_legitimate_lineage_outcomes_both_pass(self) -> None:
+        check_lineage_mismatch_never_folds_into_another_outcome(
+            outcome=RESULT_EVIDENCE_FINGERPRINT_MISMATCH,
+            evidence_lineage_kind="mismatched",
+            lineage_witness_reachable=True,
+        )
+        check_lineage_mismatch_never_folds_into_another_outcome(
+            outcome=RESULT_REKEYED, evidence_lineage_kind="matching",
+            lineage_witness_reachable=True,
+        )
+        check_lineage_mismatch_never_folds_into_another_outcome(
+            outcome=RESULT_REKEYED, evidence_lineage_kind="none",
+            lineage_witness_reachable=True,
+        )
+
     def test_the_expected_outcome_derivation_rejects_a_widened_term(self) -> None:
         """Known-bad for the derivation itself: each term is load-bearing."""
 
@@ -632,6 +834,7 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
             survivor_kind: str = "different_mb",
             beets_survivor_kind: str = "unique",
             stored_id_beets_kind: str = "missing",
+            evidence_lineage_kind: str = "none",
         ) -> str:
             """The fully-authorized baseline world, one term widened at a
             time — explicit keyword defaults, never ``**dict`` unpacking, so
@@ -645,6 +848,7 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
                 survivor_kind=survivor_kind,
                 beets_survivor_kind=beets_survivor_kind,
                 stored_id_beets_kind=stored_id_beets_kind,
+                evidence_lineage_kind=evidence_lineage_kind,
             )
 
         self.assertEqual(outcome(), RESULT_REKEYED)
@@ -671,6 +875,10 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
                 outcome(stored_id_beets_kind="present"),
             ),
             (
+                "mismatched evidence lineage",
+                outcome(evidence_lineage_kind="mismatched"),
+            ),
+            (
                 "a queued job is active",
                 outcome(active_jobs=((IMPORT_JOB_FORCE, "queued"),)),
             ),
@@ -687,13 +895,22 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
         for label, world_outcome in widened:
             with self.subTest(widened=label):
                 self.assertNotEqual(world_outcome, RESULT_REKEYED)
-        # And the two new #1089 outcomes are exactly which term fires.
+        # And the "matching" lineage kind must NEVER widen away from the
+        # happy path — the must-still-work half of the same guard.
+        self.assertEqual(
+            outcome(evidence_lineage_kind="matching"), RESULT_REKEYED,
+        )
+        # And the new #1089 outcomes are exactly which term fires.
         self.assertEqual(
             outcome(survivor_kind="unavailable"), RESULT_MIRROR_UNAVAILABLE,
         )
         self.assertEqual(
             outcome(stored_id_beets_kind="present"),
             RESULT_LIBRARY_STILL_AT_STORED,
+        )
+        self.assertEqual(
+            outcome(evidence_lineage_kind="mismatched"),
+            RESULT_EVIDENCE_FINGERPRINT_MISMATCH,
         )
         self.assertEqual(
             outcome(rival_at_survivor=True), RESULT_SURVIVOR_COLLISION,

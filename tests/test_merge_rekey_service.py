@@ -10,7 +10,9 @@ covers the real-PostgreSQL write this service's happy path,
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import tempfile
 import unittest
 
 from lib.beets_db import CurrentBeetsAmbiguous, CurrentBeetsMissing
@@ -23,6 +25,7 @@ from lib.mb_canonical import (
 )
 from lib.merge_rekey_service import (
     RESULT_BEETS_UNAVAILABLE,
+    RESULT_EVIDENCE_FINGERPRINT_MISMATCH,
     RESULT_LIBRARY_NOT_AT_SURVIVOR,
     RESULT_LIBRARY_STILL_AT_STORED,
     RESULT_MIRROR_UNAVAILABLE,
@@ -34,13 +37,30 @@ from lib.merge_rekey_service import (
     RESULT_WRONG_STATE,
     MergeRekeyService,
 )
+from lib.quality_evidence import AlbumQualityEvidenceFile
 from lib.release_identity import ReleaseIdentity
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import (
+    handoff_automation_owner,
+    make_album_quality_evidence,
+    make_request_row,
+)
 
 MERGED = "6b209cc5-62b0-4ef7-9336-c2dbd876301a"
 SURVIVOR = "9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4"
 REQUEST_ID = 8792
+
+
+def _write_real_audio_file(
+    directory: str, relative_path: str, size_bytes: int,
+) -> None:
+    """A real file on disk with an exact byte count — ``snapshot_audio_files``
+    walks the REAL filesystem, so the MAJOR-3 evidence-lineage witness can
+    only be exercised with real bytes, never a seeded fake shape."""
+    full_path = os.path.join(directory, relative_path)
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    with open(full_path, "wb") as handle:
+        handle.write(b"\x00" * size_bytes)
 
 
 def _locked_error() -> sqlite3.OperationalError:
@@ -416,8 +436,9 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
 
     def test_an_in_flight_import_job_makes_the_write_refuse(self) -> None:
         """The DB claim arm's own ``NOT EXISTS`` term, reached through the
-        service — a genuinely transient cause, unlike ``survivor_collision``
-        above."""
+        service — #1089 MINOR-4 (review round 2): a PRE-EXISTING queued
+        job is the MOST ORDINARY cause of this refusal — nothing raced,
+        and the message must say wait-for-drain, not retry."""
         db = self._db()
         db.enqueue_import_job(
             IMPORT_JOB_FORCE,
@@ -437,8 +458,50 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
 
         self.assertEqual(result.outcome, RESULT_REKEY_REFUSED)
         self.assertEqual(result.new_release_id, SURVIVOR)
+        assert result.error_message is not None
+        self.assertIn("queued or running import job", result.error_message)
+        self.assertIn("wait for the job to finish", result.error_message)
+        self.assertNotIn("— retry", result.error_message)
         row = db.request(REQUEST_ID)
         self.assertEqual(row["mb_release_id"], MERGED)
+
+    def test_a_genuine_race_with_no_active_job_says_retry(self) -> None:
+        """#1089 MINOR-4 (review round 2): the converse of the above — the
+        stored identity changed underneath the write (simulated by
+        mutating state from inside the write call itself, the only place
+        a synchronous fake can express a race) with NO import job
+        involved at all. This is the one case where retry genuinely can
+        succeed, so the message must keep saying so."""
+
+        class _RacingDB(FakePipelineDB):
+            def update_request_release_for_merge(self, request_id, **kwargs):
+                self._requests[request_id]["mb_release_id"] = (
+                    "cccccccc-cccc-cccc-cccc-cccccccccccc"
+                )
+                return super().update_request_release_for_merge(
+                    request_id, **kwargs,
+                )
+
+        db = _RacingDB()
+        db.seed_request(make_request_row(
+            id=REQUEST_ID, mb_release_id=MERGED, status="imported",
+            active_automation_import_job_id=None,
+            artist_name="Slipknot",
+            album_title="Vol. 3: (The Subliminal Verses)",
+        ))
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(SURVIVOR, [19345])
+        service, _canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
+
+        result = service.rekey_request(REQUEST_ID)
+
+        self.assertEqual(result.outcome, RESULT_REKEY_REFUSED)
+        assert result.error_message is not None
+        self.assertIn("— retry", result.error_message)
+        self.assertNotIn("wait for the job to finish", result.error_message)
+        self.assertNotIn("queued or running import job", result.error_message)
 
     def test_a_clean_world_rekeys(self) -> None:
         db = self._db()
@@ -461,6 +524,178 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
             db.update_request_release_for_merge_calls,
             [(REQUEST_ID, MERGED, SURVIVOR, None)],
         )
+
+    def test_no_linked_evidence_proceeds_without_the_witness(self) -> None:
+        """No ``current_evidence_id`` → there is no lineage to transplant,
+        so the write proceeds without ever touching the filesystem for a
+        fingerprint (#1089 MAJOR-3, review round 2)."""
+        db = self._db(current_evidence_id=None)
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(SURVIVOR, [19345])
+        service, _canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
+
+        result = service.rekey_request(REQUEST_ID)
+
+        self.assertEqual(result.outcome, RESULT_REKEYED)
+
+    def test_matching_evidence_lineage_rekeys(self) -> None:
+        """Must-still-work (#1089 MAJOR-3, review round 2): a fresh import
+        at the survivor whose evidence was captured from THOSE EXACT bytes
+        must PASS this witness — the live cohort shape the fix must not
+        break."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            _write_real_audio_file(tmp_dir, "01 Track.mp3", 4096)
+            files = [AlbumQualityEvidenceFile(
+                relative_path="01 Track.mp3", size_bytes=4096,
+                mtime_ns=1_700_000_000_000_000_000, extension="mp3",
+                container="mp3", codec="mp3",
+            )]
+            db = self._db()
+            evidence = make_album_quality_evidence(
+                mb_release_id=SURVIVOR, source_path=tmp_dir, files=files,
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=SURVIVOR,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            self.assertTrue(
+                db.set_request_current_evidence(REQUEST_ID, stored.id),
+            )
+            beets = FakeBeetsDB()
+            beets.set_album_ids_for_release(SURVIVOR, [19345])
+            beets.set_item_paths(
+                SURVIVOR, [(19345, os.path.join(tmp_dir, "01 Track.mp3"))],
+            )
+            service, _canonical = self._service(
+                db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+            )
+
+            result = service.rekey_request(REQUEST_ID)
+
+            self.assertEqual(result.outcome, RESULT_REKEYED)
+            row = db.request(REQUEST_ID)
+            self.assertEqual(row["mb_release_id"], SURVIVOR)
+
+    def test_mismatched_evidence_lineage_refuses_before_any_write(self) -> None:
+        """#1089 MAJOR-3 (review round 2): the exact hazard this witness
+        exists to catch — an unrelated, pipeline-untracked album occupies
+        the survivor MBID, so the evidence describes bytes that are NOT
+        what Beets actually holds there now. Never path equality: only the
+        content fingerprint, freshly computed."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            _write_real_audio_file(tmp_dir, "01 Track.mp3", 4096)
+            # The linked evidence describes a DIFFERENT size — bytes
+            # nobody measured for the album that is really at the
+            # survivor now.
+            files = [AlbumQualityEvidenceFile(
+                relative_path="01 Track.mp3", size_bytes=999999,
+                mtime_ns=1_700_000_000_000_000_000, extension="mp3",
+                container="mp3", codec="mp3",
+            )]
+            db = self._db()
+            evidence = make_album_quality_evidence(
+                mb_release_id=SURVIVOR, source_path=tmp_dir, files=files,
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=SURVIVOR,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            self.assertTrue(
+                db.set_request_current_evidence(REQUEST_ID, stored.id),
+            )
+            beets = FakeBeetsDB()
+            beets.set_album_ids_for_release(SURVIVOR, [19345])
+            beets.set_item_paths(
+                SURVIVOR, [(19345, os.path.join(tmp_dir, "01 Track.mp3"))],
+            )
+            service, _canonical = self._service(
+                db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+            )
+
+            result = service.rekey_request(REQUEST_ID)
+
+            self.assertEqual(
+                result.outcome, RESULT_EVIDENCE_FINGERPRINT_MISMATCH,
+            )
+            assert result.error_message is not None
+            self.assertIn("operator must decide", result.error_message)
+            row = db.request(REQUEST_ID)
+            self.assertEqual(row["mb_release_id"], MERGED)
+            self.assertEqual(db.update_request_release_for_merge_calls, [])
+
+    def test_a_deleted_linked_evidence_row_refuses(self) -> None:
+        """#1089 MAJOR-3 (review round 2): ``current_evidence_id`` points
+        at a row that no longer exists — there is nothing to verify
+        against, so this fails closed rather than silently proceeding."""
+        db = self._db(current_evidence_id=999_999_999)
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(SURVIVOR, [19345])
+        service, _canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
+
+        result = service.rekey_request(REQUEST_ID)
+
+        self.assertEqual(result.outcome, RESULT_EVIDENCE_FINGERPRINT_MISMATCH)
+        assert result.error_message is not None
+        self.assertIn("no longer exists", result.error_message)
+        row = db.request(REQUEST_ID)
+        self.assertEqual(row["mb_release_id"], MERGED)
+        self.assertEqual(db.update_request_release_for_merge_calls, [])
+
+    def test_an_uncomputable_survivor_fingerprint_refuses(self) -> None:
+        """#1089 MAJOR-3 (review round 2): a broken symlink makes
+        ``os.stat`` raise inside ``snapshot_audio_files`` — the
+        "uncomputable" half of the refusal, distinct from a clean
+        mismatch."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            os.symlink(
+                os.path.join(tmp_dir, "does-not-exist.mp3"),
+                os.path.join(tmp_dir, "01 Track.mp3"),
+            )
+            files = [AlbumQualityEvidenceFile(
+                relative_path="01 Track.mp3", size_bytes=4096,
+                mtime_ns=1_700_000_000_000_000_000, extension="mp3",
+                container="mp3", codec="mp3",
+            )]
+            db = self._db()
+            evidence = make_album_quality_evidence(
+                mb_release_id=SURVIVOR, source_path=tmp_dir, files=files,
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=SURVIVOR,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            self.assertTrue(
+                db.set_request_current_evidence(REQUEST_ID, stored.id),
+            )
+            beets = FakeBeetsDB()
+            beets.set_album_ids_for_release(SURVIVOR, [19345])
+            beets.set_item_paths(
+                SURVIVOR, [(19345, os.path.join(tmp_dir, "01 Track.mp3"))],
+            )
+            service, _canonical = self._service(
+                db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+            )
+
+            result = service.rekey_request(REQUEST_ID)
+
+            self.assertEqual(
+                result.outcome, RESULT_EVIDENCE_FINGERPRINT_MISMATCH,
+            )
+            assert result.error_message is not None
+            self.assertIn("could not read", result.error_message)
+            row = db.request(REQUEST_ID)
+            self.assertEqual(row["mb_release_id"], MERGED)
+            self.assertEqual(db.update_request_release_for_merge_calls, [])
 
     def test_the_default_seam_reads_the_process_wide_configuration(
         self,

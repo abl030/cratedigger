@@ -302,12 +302,23 @@ inside socket authorization, never credentials.
   `library_not_at_survivor` (409) unless Beets resolves exactly one album at
   the survivor first, and `library_still_at_stored` (409) unless Beets
   resolves NOTHING at the merged-away id — "the survivor is occupied" alone
-  does not witness the library actually moved. `survivor_collision` (409)
+  does not witness the library actually moved, nor that the album occupying
+  it is this request's own: when the request links current evidence, a
+  freshly computed content fingerprint of the survivor album must also match
+  that evidence row, or the request refuses `evidence_fingerprint_mismatch`
+  (409) — an unrelated, pipeline-untracked album can otherwise sit at the
+  merged MBID and the merge-rekey action would transplant this request's
+  proof onto bytes nobody measured for it. `survivor_collision` (409)
   when a rival request or a colliding evidence fingerprint already occupies
   the survivor (an operator must resolve it directly — retrying cannot
-  help); `rekey_refused` (409) is reserved for the genuinely transient
-  causes (an in-flight import job, or the request changing concurrently).
-  `beets_unavailable` (503) is a classified Beets SQLite authority failure.
+  help); `rekey_refused` (409) covers the write's own refusal, with two
+  differently-worded causes (#1089 MINOR-4, review round 2): a
+  PRE-EXISTING queued/running import job — the most ordinary cause, where
+  nothing raced and the message says wait for it to finish rather than
+  retry — or a genuine race (the request's own status/owner/identity
+  changed concurrently, or a rival took the survivor in the same instant),
+  where the message says retry. `beets_unavailable` (503) is a classified
+  Beets SQLite authority failure.
 - `pipeline-cli pipeline-delete` — Delete a pipeline request through its canonical web route.
 - `pipeline-cli quality` — Simulate quality decisions and replay current candidate evidence.
 - `pipeline-cli query` — Run one read-only SQL statement, or the explicit write escape hatch.

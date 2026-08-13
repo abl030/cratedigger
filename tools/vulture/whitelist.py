@@ -211,7 +211,7 @@ written_content_address_conflicts  # unused variable (scripts/decision_different
 observed_role  # unused variable (scripts/decision_differential.py:1216)
 canonical_spectral_generation  # unused variable (scripts/decision_differential.py:1230)
 coverage_schema_version  # unused variable (scripts/decision_differential.py:1243)
-_.sock  # unused attribute (scripts/pipeline_cli/api_mutations.py:133)
+_.sock  # unused attribute (scripts/pipeline_cli/api_mutations.py:136)
 parentTitle  # unused variable (scripts/plex_dupes_audit.py:33)
 addedAt  # unused variable (scripts/plex_dupes_audit.py:35)
 decode_manifest  # unused function (scripts/refresh_beets_compat_releases.py:111)

@@ -2011,11 +2011,17 @@ class _RequestsMixin(_PipelineDBBase):
             ``queued`` or ``running`` (any job type — an in-flight force
             import or YouTube rescue could otherwise have its identity moved
             out from under it mid-launch). The web dashboard's drift panel
-            surfaces exactly the rows this arm can act on: an ``imported``
-            request whose stored id MusicBrainz has since merged away, where
-            Beets already holds the survivor (the request→beets join is
-            healed by moving the LEDGER onto the identity Beets already
-            has — Beets itself is never mutated by this arm).
+            (#1089 MINOR-3, review round 2) surfaces every ``imported``
+            request Beets no longer resolves against, for ANY reason — a
+            MusicBrainz merge is only one of them, and the panel cannot know
+            ahead of a click whether Beets already holds the survivor — so
+            it is not "exactly the rows this arm can act on": the button
+            shows only for MB-sourced drift rows, and ``MergeRekeyService``
+            discovers eligibility at click time (survivor state, evidence
+            lineage, collisions) rather than the panel pre-filtering to it.
+            When this arm DOES apply, it heals the request→Beets join by
+            moving the LEDGER onto the identity Beets already has — Beets
+            itself is never mutated by this arm.
 
             Authority: "really we need to re-key mbid and beets don't we so
             they go away. we could surface these here and have a button

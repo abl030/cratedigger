@@ -694,7 +694,6 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
         Beets + mirror fixtures the other five don't, so it gets its own
         real-route round trip rather than folding into the five above."""
         from lib.mb_canonical import (
-            CanonicalReleaseRedirected,
             configure_canonical_base,
             configured_canonical_base,
         )
@@ -716,14 +715,21 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
         configure_canonical_base("http://fake-mirror/ws/2")
         with (
             patch.object(srv, "_beets_db", return_value=beets),
+            # The TRUE external edge (#1089 NOTE-2, review round 2). The
+            # service's default seam is the TAGGED resolver
+            # (production_tagged_canonical_release_fn), which calls
+            # canonical_release_status — NOT the collapsed
+            # canonical_release_id the import seam uses (#1089 BLOCKING-1)
+            # — but canonical_release_status is ~50 lines of real decision
+            # logic, not a thin forwarder, so it is not allowlisted; this
+            # patches the raw fetch one hop below it instead, exactly
+            # mirroring the real ``{"payload": ..., "redirected": ...}``
+            # envelope ``_fetch_json`` produces.
             patch(
-                # The service's default seam is the TAGGED resolver
-                # (production_tagged_canonical_release_fn), which calls
-                # canonical_release_status — NOT the collapsed
-                # canonical_release_id the import seam uses (#1089
-                # BLOCKING-1).
-                "lib.mb_canonical.canonical_release_status",
-                return_value=CanonicalReleaseRedirected(survivor),
+                "lib.mb_canonical._fetch_json",
+                return_value={
+                    "payload": {"id": survivor}, "redirected": True,
+                },
             ),
         ):
             code, body = self._call(
