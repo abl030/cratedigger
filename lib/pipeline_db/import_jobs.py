@@ -713,6 +713,53 @@ class _ImportJobsMixin(
         """)
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
+    def list_terminal_force_wrong_match_cleanup_jobs(self) -> list[ImportJob]:
+        """Return terminal force jobs whose wrong-match source receipt is missing.
+
+        A crash between the terminal commit (the job status write) and the
+        live success dismissal (``wrong_match_dismissal``) or failure
+        cleanup (``cleanup``) call leaves that receipt durably missing
+        (issue #1122). This sibling of
+        ``list_terminal_force_action_cleanup_jobs`` selects exactly those
+        rows so ``scripts/importer.py``'s startup sweep can replay the same
+        decision from durable state alone.
+
+        Two exclusions in the failure arm mirror the live path exactly,
+        because both leave a terminal ``failed`` row with no ``cleanup``
+        key by DESIGN, not by omission:
+
+        - ``code = 'requeue_failed'``: ``process_claimed_job`` never even
+          calls ``_cleanup_failed_force_import`` for this code — the
+          requeue UPDATE itself failed (a DB transient), not a verdict
+          about the candidate.
+        - ``deferred = true`` (e.g. release-lock contention —
+          ``lib/dispatch/core.py``'s ``"Another import is already in
+          progress"`` outcome): ``_cleanup_failed_force_import`` IS called
+          live, but its own first line (``if outcome.deferred: return
+          None``) skips the decision — the outcome never adjudicated the
+          candidate at all. Replay must reach that identical no-op, not
+          invent a decision the live path deliberately never made.
+
+        Treating a missing ``result`` as an empty object keeps a
+        historical NULL-result row eligible instead of silently excluded.
+        """
+        cur = self._execute("""
+            SELECT *
+            FROM import_jobs
+            WHERE job_type = 'force_import'
+              AND (
+                  (status = 'completed'
+                   AND NOT (COALESCE(result, '{}'::jsonb) ? 'wrong_match_dismissal'))
+                  OR
+                  (status = 'failed'
+                   AND NOT (COALESCE(result, '{}'::jsonb) ? 'cleanup')
+                   AND result ->> 'code' IS DISTINCT FROM 'requeue_failed'
+                   AND result ->> 'deferred' IS DISTINCT FROM 'true')
+              )
+            ORDER BY created_at ASC, id ASC
+        """)
+        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+
 
     def peek_import_job_candidates(
         self,

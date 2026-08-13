@@ -196,6 +196,23 @@ behavior load-bearing rather than incidental:
   force/quarantine directory is operator authority and audit evidence;
   cleanup of the raw source requires a distinct operator action, never a
   quality result.
+- **A crash between the terminal commit and this receipt is durably
+  retried, not lost** (issue #1122): `lib/pipeline_db/import_jobs.py::
+  list_terminal_force_wrong_match_cleanup_jobs` names any terminal force
+  job whose `result` lacks `wrong_match_dismissal` (success) or `cleanup`
+  (failure), and `scripts/importer.py::recover_abandoned_running_jobs`
+  replays `_dismiss_successful_force_import` /
+  `_cleanup_failed_force_import` for exactly those rows on every importer
+  startup — the SAME helper the live path calls, driven from the `result`
+  JSONB alone (never a live `DispatchOutcome`), so the delete/preserve
+  decision above is identical whether it ran live or was replayed. Two
+  failure-arm rows are excluded because the LIVE path never reaches a
+  cleanup decision for them either: `code = 'requeue_failed'` (the requeue
+  UPDATE itself failed, never even calls the cleanup helper) and
+  `deferred = true` (e.g. release-lock contention — the cleanup helper IS
+  called live but its own first line skips the decision). Replay must
+  reach that identical no-op, not invent a verdict the live path never
+  made.
 
 ## The `wrong_match_triage` audit block is reducer-only
 

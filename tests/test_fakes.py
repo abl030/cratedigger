@@ -5154,6 +5154,109 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertNotIn("failed_path", stored)
         self.assertEqual(stored["x"], 1)
 
+    def test_list_terminal_force_wrong_match_cleanup_jobs_mirrors_sql_predicate(
+        self,
+    ) -> None:
+        """Issue #1122: the fake must select the same rows the real SQL does.
+
+        Real-PG proof of the same predicate lives in
+        ``tests/test_pipeline_db.py`` — this pins the fake against an
+        identical scenario matrix so the two never silently drift
+        (test-fidelity.md's fake-vs-SQL predicate drift class).
+        """
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+
+        def _force_job(suffix: str):
+            return db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=1,
+                dedupe_key=f"force-wrong-match-predicate:{suffix}",
+                payload=force_import_payload(
+                    download_log_id=1,
+                    failed_path="/tmp/predicate-source",
+                ),
+            )
+
+        completed_missing = _force_job("completed-missing")
+        db.mark_import_job_completed(
+            completed_missing.id,
+            result={
+                "success": True, "message": "done", "deferred": False,
+                "code": None, "post_commit_wrong_match_scenario": None,
+            },
+            message="done",
+        )
+
+        completed_done = _force_job("completed-done")
+        db.mark_import_job_completed(
+            completed_done.id,
+            result={
+                "success": True,
+                "wrong_match_dismissal": {"success": True},
+            },
+            message="done",
+        )
+
+        failed_missing = _force_job("failed-missing")
+        db.mark_import_job_failed(
+            failed_missing.id,
+            error="beets rejected: audio_corrupt",
+            result={
+                "success": False, "message": "rejected", "deferred": False,
+                "code": None,
+                "post_commit_wrong_match_scenario": "audio_corrupt",
+            },
+            message="rejected",
+        )
+
+        failed_requeue = _force_job("failed-requeue")
+        db.mark_import_job_failed(
+            failed_requeue.id,
+            error="requeue failed",
+            result={
+                "success": False, "message": "requeue UPDATE failed",
+                "deferred": False, "code": "requeue_failed",
+            },
+            message="requeue UPDATE failed",
+        )
+
+        failed_done = _force_job("failed-done")
+        db.mark_import_job_failed(
+            failed_done.id,
+            error="beets rejected",
+            result={
+                "success": False,
+                "cleanup": {"outcome": "preserved_operator_force_source"},
+            },
+            message="rejected",
+        )
+
+        failed_deferred = _force_job("failed-deferred")
+        db.mark_import_job_failed(
+            failed_deferred.id,
+            error="Another import is already in progress",
+            result={
+                "success": False,
+                "message": "Another import is already in progress",
+                "deferred": True, "code": None,
+            },
+            message="Another import is already in progress",
+        )
+
+        selected = {
+            job.id
+            for job in db.list_terminal_force_wrong_match_cleanup_jobs()
+        }
+        self.assertIn(completed_missing.id, selected)
+        self.assertNotIn(completed_done.id, selected)
+        self.assertIn(failed_missing.id, selected)
+        self.assertNotIn(failed_requeue.id, selected)
+        self.assertNotIn(failed_done.id, selected)
+        self.assertNotIn(failed_deferred.id, selected)
+
     def test_search_log_history(self):
         db = FakePipelineDB()
         db.log_search(1, query="a b", outcome="found", result_count=10,

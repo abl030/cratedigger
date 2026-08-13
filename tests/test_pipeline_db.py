@@ -1378,6 +1378,128 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual(job.dedupe_key, dedupe)
         self.assertFalse(job.deduped)
 
+    def test_list_terminal_force_wrong_match_cleanup_jobs_selects_missing_receipts(
+        self,
+    ) -> None:
+        """Issue #1122: the predicate names exactly the rows missing a receipt.
+
+        Real-PG proof of the JSONB predicate in
+        ``list_terminal_force_wrong_match_cleanup_jobs`` — the ``?``
+        key-existence operator and ``IS DISTINCT FROM`` NULL handling are
+        exactly the class of behavior a fake cannot validate.
+        """
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+
+        def _force_job(suffix: str):
+            return self.db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=self.req_id,
+                dedupe_key=f"force-wrong-match-predicate:{suffix}",
+                payload=force_import_payload(
+                    download_log_id=1,
+                    failed_path="/tmp/predicate-source",
+                ),
+            )
+
+        # Completed, receipt missing -> included.
+        completed_missing = _force_job("completed-missing")
+        self.db.mark_import_job_completed(
+            completed_missing.id,
+            result={
+                "success": True, "message": "done", "deferred": False,
+                "code": None, "post_commit_wrong_match_scenario": None,
+            },
+            message="done",
+        )
+
+        # Completed, receipt already recorded -> excluded.
+        completed_done = _force_job("completed-done")
+        self.db.mark_import_job_completed(
+            completed_done.id,
+            result={
+                "success": True,
+                "wrong_match_dismissal": {"success": True},
+            },
+            message="done",
+        )
+
+        # Failed, receipt missing, ordinary code -> included.
+        failed_missing = _force_job("failed-missing")
+        self.db.mark_import_job_failed(
+            failed_missing.id,
+            error="beets rejected: audio_corrupt",
+            result={
+                "success": False, "message": "rejected", "deferred": False,
+                "code": None,
+                "post_commit_wrong_match_scenario": "audio_corrupt",
+            },
+            message="rejected",
+        )
+
+        # Failed, receipt missing, but ``requeue_failed`` — the live code
+        # never runs the wrong-match decision for this code -> excluded.
+        failed_requeue = _force_job("failed-requeue")
+        self.db.mark_import_job_failed(
+            failed_requeue.id,
+            error="requeue failed",
+            result={
+                "success": False, "message": "requeue UPDATE failed",
+                "deferred": False, "code": "requeue_failed",
+            },
+            message="requeue UPDATE failed",
+        )
+
+        # Failed, receipt already recorded -> excluded.
+        failed_done = _force_job("failed-done")
+        self.db.mark_import_job_failed(
+            failed_done.id,
+            error="beets rejected",
+            result={
+                "success": False,
+                "cleanup": {"outcome": "preserved_operator_force_source"},
+            },
+            message="rejected",
+        )
+
+        # Failed, receipt missing, but ``deferred`` — e.g. release-lock
+        # contention. The live cleanup helper IS called but its own first
+        # line skips the decision immediately, so no receipt ever lands;
+        # replay must not manufacture one -> excluded.
+        failed_deferred = _force_job("failed-deferred")
+        self.db.mark_import_job_failed(
+            failed_deferred.id,
+            error="Another import is already in progress",
+            result={
+                "success": False,
+                "message": "Another import is already in progress",
+                "deferred": True, "code": None,
+            },
+            message="Another import is already in progress",
+        )
+
+        # Failed with a genuinely NULL ``result`` column (pre-#1122 shape,
+        # or any writer that never populated it) -> still included: a
+        # missing receipt is a missing receipt.
+        failed_null_result = _force_job("failed-null-result")
+        self.db._execute(
+            "UPDATE import_jobs SET status = 'failed', result = NULL "
+            "WHERE id = %s",
+            (failed_null_result.id,),
+        )
+        self.db.conn.commit()
+
+        selected = {
+            job.id
+            for job in self.db.list_terminal_force_wrong_match_cleanup_jobs()
+        }
+        self.assertIn(completed_missing.id, selected)
+        self.assertNotIn(completed_done.id, selected)
+        self.assertNotIn(failed_deferred.id, selected)
+        self.assertIn(failed_missing.id, selected)
+        self.assertNotIn(failed_requeue.id, selected)
+        self.assertNotIn(failed_done.id, selected)
+        self.assertIn(failed_null_result.id, selected)
+
     def test_enqueue_youtube_import_is_allowed_by_pg_constraint(self):
         from lib.import_queue import (
             IMPORT_JOB_YOUTUBE,

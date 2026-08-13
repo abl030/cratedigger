@@ -1121,7 +1121,13 @@ below — see `lib.wrong_match_delete_service`).
    reverses the mid-July "dismiss but preserve" regression, which had
    stranded 64 of 90 wrong-match-sourced force imports as invisible disk
    folders (verified live 2026-08-12) by preserving on both outcomes. The
-   failed job and `download_log` audit rows always remain regardless.
+   failed job and `download_log` audit rows always remain regardless. A
+   crash between the terminal `completed`/`failed` write and this receipt
+   is durably retried, never lost (issue #1122): every importer startup
+   replays the same decision, from the persisted `result` JSONB alone, for
+   any terminal force job still missing its `wrong_match_dismissal` or
+   `cleanup` key — see `docs/rejection-routing.md` § "Force-import outcomes
+   (D7)" for the exact query and replay function names.
 
 ```bash
 pipeline_cli.py force-import <download_log_id>

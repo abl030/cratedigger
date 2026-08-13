@@ -94,6 +94,7 @@ from lib.terminal_outcomes import (
     PendingImportTerminalOutcome,
     non_automation_failure_terminal_outcome,
 )
+from lib.wrong_matches import WrongMatchSourceDB
 from lib.youtube_ingest_service import (
     YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES,
 )
@@ -134,6 +135,13 @@ def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
         "message": outcome.message,
         "deferred": outcome.deferred,
         "code": outcome.code,
+        # Durably records the decision ``_cleanup_failed_force_import`` (the
+        # failure lane) needs, so a startup replay can rebuild an equivalent
+        # ``DispatchOutcome`` from persisted state alone after a crash
+        # between the terminal commit and the live wrong-match cleanup call
+        # (issue #1122) — never from a live outcome the process may not
+        # still have.
+        "post_commit_wrong_match_scenario": outcome.post_commit_wrong_match_scenario,
     }
 
 
@@ -177,9 +185,23 @@ class _ForceActionCleanupDB(Protocol):
     ) -> ImportJob | None: ...
 
 
+class _ForceWrongMatchCleanupDB(_ForceActionCleanupDB, WrongMatchSourceDB, Protocol):
+    """Persistence surface for durable force wrong-match source receipts.
+
+    Sibling of ``_ForceActionCleanupDB`` for the OTHER terminal force
+    receipt (issue #1122): the original Wrong Matches source's row
+    consumption and folder deletion/preservation. Extends
+    ``WrongMatchSourceDB`` because the replay calls the exact same
+    ``_dismiss_successful_force_import`` / ``_cleanup_failed_force_import``
+    helpers the live path calls.
+    """
+
+    def list_terminal_force_wrong_match_cleanup_jobs(self) -> list[ImportJob]: ...
+
+
 class _StartupRecoveryDB(
     _AutomationRecoveryDB,
-    _ForceActionCleanupDB,
+    _ForceWrongMatchCleanupDB,
     Protocol,
 ):
     """Complete persistence surface used by the one-shot startup sweep."""
@@ -433,7 +455,7 @@ def _record_terminal_force_action_cleanup(
 
 
 def _cleanup_failed_force_import(
-    db: PipelineDB,
+    db: WrongMatchSourceDB,
     job: ImportJob,
     outcome: DispatchOutcome,
 ) -> dict[str, object] | None:
@@ -497,7 +519,7 @@ def _cleanup_failed_force_import(
 
 
 def _dismiss_successful_force_import(
-    db: PipelineDB,
+    db: WrongMatchSourceDB,
     job: ImportJob,
 ) -> dict[str, object] | None:
     """Consume a successfully imported source's Wrong Matches folder.
@@ -552,6 +574,79 @@ def _dismiss_successful_force_import(
             "failed_path_hint": failed_path_hint,
             "error": f"{type(exc).__name__}: {exc}",
         }
+
+
+def _replay_force_wrong_match_outcome(job: ImportJob) -> DispatchOutcome:
+    """Rebuild a minimal outcome from durable state, never a live one.
+
+    Startup replay (issue #1122) has no ``DispatchOutcome`` — the process
+    that produced it may be long gone. ``_cleanup_failed_force_import``
+    reads ``deferred``, the wrong-match ``post_commit_wrong_match_scenario``
+    decision, and ``code``/``message`` for audit text — every one of those
+    was durably persisted into ``result`` by ``_job_result`` at the SAME
+    terminal commit that wrote the job's ``failed`` status, so they are
+    read back here instead of invented.
+
+    ``deferred`` matters even at a terminal ``failed`` status: a force job
+    can reach ``failed`` with ``deferred=True`` (e.g. release-lock
+    contention — ``lib/dispatch/core.py``'s ``"Another import is already
+    in progress"`` outcome) — the live call still skips the wrong-match
+    decision via ``_cleanup_failed_force_import``'s own first line, and
+    replay must reach that identical no-op rather than invent a delete/
+    preserve verdict the live path never made. The startup query's own
+    predicate already excludes these rows from ever reaching this
+    function; reconstructing ``deferred`` here too is defense in depth,
+    not the only guard.
+    """
+    stored = job.result or {}
+    message = stored.get("message")
+    code = stored.get("code")
+    scenario = stored.get("post_commit_wrong_match_scenario")
+    return DispatchOutcome(
+        success=False,
+        message=message if isinstance(message, str) else "",
+        deferred=stored.get("deferred") is True,
+        code=code if isinstance(code, str) else None,
+        post_commit_wrong_match_scenario=(
+            scenario if isinstance(scenario, str) else None
+        ),
+    )
+
+
+def _record_terminal_force_wrong_match_cleanup(
+    db: _ForceWrongMatchCleanupDB,
+    job: ImportJob,
+) -> ImportJob | None:
+    """Replay the durable wrong-match source receipt for one terminal force job.
+
+    Sibling of ``_record_terminal_force_action_cleanup`` (issue #1122): a
+    crash between the terminal commit and the live
+    ``_dismiss_successful_force_import`` (success) /
+    ``_cleanup_failed_force_import`` (failure) call leaves that receipt
+    missing. This calls the SAME helper the live path calls — so the
+    delete/preserve policy is identical either way — over durably
+    persisted state alone, and is idempotent: retried every startup until
+    the receipt lands (CLAUDE.md invariant 11).
+    """
+    if job.status == "completed":
+        dismissal = _dismiss_successful_force_import(db, job)
+        key = "wrong_match_dismissal"
+    elif job.status == "failed":
+        dismissal = _cleanup_failed_force_import(
+            db, job, _replay_force_wrong_match_outcome(job),
+        )
+        key = "cleanup"
+    else:
+        return None
+    if dismissal is None:
+        return None
+    try:
+        return db.merge_import_job_result(job.id, {key: dismissal})
+    except Exception:
+        logger.exception(
+            "Failed to record wrong-match cleanup receipt for job %s", job.id,
+        )
+        return None
 
 
 def execute_import_job(
@@ -2019,6 +2114,8 @@ def recover_abandoned_running_jobs(
     # the job result; every missing/failed marker is retried on this startup.
     for job in db.list_terminal_force_action_cleanup_jobs():
         _record_terminal_force_action_cleanup(db, job, job)
+    for job in db.list_terminal_force_wrong_match_cleanup_jobs():
+        _record_terminal_force_wrong_match_cleanup(db, job)
     recovered.extend(recover_abandoned_automation_owners(
         db,
         liveness_probe=liveness_probe,

@@ -1557,6 +1557,32 @@ class FakePipelineDB:
         ))
         return [ImportJob.from_row(copy.deepcopy(row)) for row in rows]
 
+    def list_terminal_force_wrong_match_cleanup_jobs(self) -> list[ImportJob]:
+        from lib.dispatch import DISPATCH_CODE_REQUEUE_FAILED
+
+        rows = []
+        for row in self._import_jobs:
+            if row.get("job_type") != IMPORT_JOB_FORCE:
+                continue
+            status = row.get("status")
+            result = row.get("result")
+            result_dict = result if isinstance(result, dict) else {}
+            if (
+                status == "completed"
+                and "wrong_match_dismissal" not in result_dict
+            ) or (
+                status == "failed"
+                and "cleanup" not in result_dict
+                and result_dict.get("code") != DISPATCH_CODE_REQUEUE_FAILED
+                and result_dict.get("deferred") is not True
+            ):
+                rows.append(row)
+        rows.sort(key=lambda row: (
+            _as_datetime(row.get("created_at")),
+            int(row["id"]),
+        ))
+        return [ImportJob.from_row(copy.deepcopy(row)) for row in rows]
+
     def _import_job_candidate_rows(
         self,
         *,
