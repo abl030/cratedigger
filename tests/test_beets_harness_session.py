@@ -126,8 +126,12 @@ def write_fake_harness(
     Returns the harness path to hand to ``beets_validate``. The lines are
     emitted verbatim, so a caller can plant malformed JSON, blank lines, or
     nothing at all. A negative ``process_returncode`` makes the harness
-    terminate itself with that signal so ``Popen`` observes the real negative
-    return code.
+    signal itself, so ``Popen`` observes a real negative return code — but
+    ONLY for a signal no ancestor can be holding: ``SIG_IGN`` and the
+    blocked mask are both inherited across ``exec``, and a held signal
+    turns the requested death into an ordinary exit 0. Pass
+    ``-tests.test_import_one_stages.FAKE_HARNESS_FATAL_SIGNAL``, which
+    documents the whole trap, rather than picking a signal number.
     """
     stdout_file = os.path.join(directory, "harness_stdout.txt")
     stderr_file = os.path.join(directory, "harness_stderr.txt")

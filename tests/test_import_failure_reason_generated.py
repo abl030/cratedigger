@@ -9,8 +9,15 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - loads the active profile
-from harness.import_one import RunImportOutcome, _harness_failure_error
-from tests.test_import_one_stages import run_import_with_fake_harness
+from harness.import_one import (
+    RunImportOutcome,
+    _harness_failure_error,
+    _terminal_process_reason,
+)
+from tests.test_import_one_stages import (
+    FAKE_HARNESS_FATAL_SIGNAL,
+    run_import_with_fake_harness,
+)
 
 _DIAGNOSTIC_TEXT = st.text(
     alphabet=string.ascii_letters + string.digits + " .,:;_-",
@@ -27,9 +34,19 @@ _STDERR_LINE = st.one_of(
 )
 _PROCESS_RETURNCODE = st.one_of(
     st.integers(min_value=0, max_value=255),
-    # SIGINT/SIGQUIT can be inherited as ignored by a noninteractive shell;
-    # these signals reliably terminate the executable fake harness.
-    st.sampled_from([-1, -6, -9, -15]),
+    # Only an unignorable, unblockable signal makes the REQUESTED world the
+    # OBSERVED one: SIG_IGN and the blocked mask are both inherited across
+    # exec, so any other signal silently degrades to "exited 0" under an
+    # ancestor holding it. See FAKE_HARNESS_FATAL_SIGNAL for the full
+    # account; every other signal NUMBER is exercised process-free below.
+    st.just(-FAKE_HARNESS_FATAL_SIGNAL),
+)
+#: Signal numbers a real harness death can carry, plus the whole ordinary
+#: exit-status domain. Drives the pure producer, so nothing here needs a
+#: process to observe it.
+_OBSERVED_TERMINAL_STATUS = st.one_of(
+    st.integers(min_value=-64, max_value=-1),
+    st.integers(min_value=0, max_value=255),
 )
 
 
@@ -43,6 +60,26 @@ def assert_terminal_failure_has_a_human_reason(
     assert error != f"Harness returned rc={outcome.exit_code}", (
         f"terminal producer result had no observed reason: {outcome!r}"
     )
+
+
+def terminal_reason_violations(proc_rc: int, reason: str) -> list[str]:
+    """Every way a terminal-status reason can misdescribe what was observed.
+
+    Accumulating, not short-circuiting: a world that violates several
+    clauses reports all of them, so clause order can never mask one.
+    """
+    violations: list[str] = []
+    if not reason.strip():
+        violations.append("terminal reason was blank")
+    if str(abs(proc_rc)) not in reason:
+        violations.append("terminal reason omits the observed status number")
+    if f"-{abs(proc_rc)}" in reason:
+        violations.append("terminal reason rendered a negative number")
+    if proc_rc < 0 and "signal" not in reason:
+        violations.append("signal death was not named as a signal")
+    if proc_rc >= 0 and "signal" in reason:
+        violations.append("ordinary exit status was named as a signal")
+    return violations
 
 
 class TestRunImportFailureReasonProperties(unittest.TestCase):
@@ -78,16 +115,21 @@ class TestRunImportFailureReasonProperties(unittest.TestCase):
             )
         elif retained_lines:
             self.assertEqual(error, retained_lines[-1])
-        elif process_status < 0:
-            self.assertEqual(
-                error,
-                f"beets harness terminated by signal {-process_status}",
-            )
         else:
-            self.assertEqual(
-                error,
-                f"beets harness exited with status {process_status}",
-            )
+            self.assertEqual(error, _terminal_process_reason(process_status))
+
+    @settings(max_examples=200)
+    @given(proc_rc=_OBSERVED_TERMINAL_STATUS)
+    def test_every_observed_terminal_status_is_named_specifically(
+        self, proc_rc: int,
+    ) -> None:
+        reason = _terminal_process_reason(proc_rc)
+
+        self.assertEqual(terminal_reason_violations(proc_rc, reason), [])
+        # A signal death and an exit status sharing digits must never read
+        # the same: the sign is the whole diagnosis for an operator.
+        if proc_rc != 0:
+            self.assertNotEqual(reason, _terminal_process_reason(-proc_rc))
 
 
 class TestInvariantCheckerTripsOnKnownBad(unittest.TestCase):
@@ -96,6 +138,39 @@ class TestInvariantCheckerTripsOnKnownBad(unittest.TestCase):
         known_bad = RunImportOutcome(2, [])
         with self.assertRaises(AssertionError):
             assert_terminal_failure_has_a_human_reason(known_bad)
+
+    def test_blank_reason_is_rejected(self) -> None:
+        self.assertIn(
+            "terminal reason was blank",
+            terminal_reason_violations(9, "   "),
+        )
+
+    def test_omitted_status_number_is_rejected(self) -> None:
+        self.assertIn(
+            "terminal reason omits the observed status number",
+            terminal_reason_violations(23, "beets harness exited with status"),
+        )
+
+    def test_negative_rendering_is_rejected(self) -> None:
+        self.assertIn(
+            "terminal reason rendered a negative number",
+            terminal_reason_violations(
+                -9, "beets harness terminated by signal -9"),
+        )
+
+    def test_unnamed_signal_death_is_rejected(self) -> None:
+        self.assertIn(
+            "signal death was not named as a signal",
+            terminal_reason_violations(
+                -9, "beets harness exited with status 9"),
+        )
+
+    def test_status_named_as_a_signal_is_rejected(self) -> None:
+        self.assertIn(
+            "ordinary exit status was named as a signal",
+            terminal_reason_violations(
+                9, "beets harness terminated by signal 9"),
+        )
 
 
 if __name__ == "__main__":

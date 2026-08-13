@@ -628,6 +628,20 @@ V0_SPEC = ConversionSpec(
 )
 
 
+def _terminal_process_reason(proc_rc: int) -> str:
+    """Name the terminal status the harness process was OBSERVED to reach.
+
+    ``Popen.wait`` reports a signal death as the negated signal number, so
+    the sign is what distinguishes "the kernel killed it" from "it chose
+    this status". Pure and total, so the operator-facing wording can be
+    checked for any status without a real process: only the seam that
+    reaches it needs one.
+    """
+    if proc_rc < 0:
+        return f"beets harness terminated by signal {-proc_rc}"
+    return f"beets harness exited with status {proc_rc}"
+
+
 def _harness_failure_error(
     import_outcome: RunImportOutcome, rc: int,
 ) -> str:
@@ -1408,12 +1422,7 @@ def run_import(
             replaced_albums=replaced_albums,
             applied_distance=applied_distance,
             failure_reason=(
-                (
-                    f"beets harness terminated by signal {-proc_rc}"
-                    if proc_rc < 0
-                    else f"beets harness exited with status {proc_rc}"
-                )
-                if not beets_lines else None
+                _terminal_process_reason(proc_rc) if not beets_lines else None
             ),
         )
 
