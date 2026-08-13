@@ -6,6 +6,7 @@ takes data inputs and returns a StageResult without I/O.
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,54 @@ sys.path.insert(0, ROOT_DIR)
 from tests.audio_fixtures import make_test_flac
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.test_beets_harness_session import write_fake_harness
+
+#: The one signal a fake harness can be ASKED to die from and be sure it
+#: does. ``SIG_IGN`` dispositions and the blocked-signal mask are both
+#: inherited across ``fork``+``exec``, so an ancestor nobody in the test
+#: controls — ``nohup`` (SIGHUP), a non-interactive shell starting a
+#: background job (SIGINT/SIGQUIT), a launcher that blocks its own
+#: termination signals — silently turns a requested "terminated by signal
+#: N" world into a plain "exited 0" world. The harness then truthfully
+#: names the status it observed, and the test fails demanding wording for a
+#: death that never happened. SIGKILL and SIGSTOP are the only two signals
+#: POSIX forbids catching, blocking, or ignoring, and
+#: SIGKILL is the one that terminates. Signal-number RENDERING needs no
+#: process at all: generated signal and status worlds exercise it through
+#: the pure producer property in
+#: ``tests/test_import_failure_reason_generated.py``.
+FAKE_HARNESS_FATAL_SIGNAL: int = int(signal.SIGKILL)
+
+#: Catchable signals an ancestor can plausibly be holding when the suite
+#: runs. SIGCHLD is deliberately absent: ignoring it auto-reaps children
+#: and breaks ``Popen.wait`` in any parent, production included, so it
+#: would test the probe rather than the fixture.
+_ANCESTOR_HELD_SIGNALS = (
+    "SIGHUP", "SIGINT", "SIGQUIT", "SIGABRT",
+    "SIGTERM", "SIGUSR1", "SIGUSR2", "SIGALRM",
+)
+
+#: Drives the SHARED helper (never a re-spelled copy of it) from a parent
+#: that both ignores and blocks every signal above.
+_HOSTILE_ANCESTOR_PROBE = """\
+import signal
+import sys
+
+sys.path.insert(0, {root!r})
+
+held = [getattr(signal, name) for name in {held!r}]
+for signum in held:
+    signal.signal(signum, signal.SIG_IGN)
+signal.pthread_sigmask(signal.SIG_BLOCK, set(held))
+
+from tests.test_import_one_stages import (
+    FAKE_HARNESS_FATAL_SIGNAL,
+    run_import_with_fake_harness,
+)
+
+outcome = run_import_with_fake_harness(
+    process_status=-FAKE_HARNESS_FATAL_SIGNAL)
+print(outcome.failure_reason)
+"""
 
 
 def run_import_with_fake_harness(
@@ -242,16 +291,17 @@ class TestRunImportFailureReasons(unittest.TestCase):
     def test_signal_termination_names_the_observed_signal(self):
         from harness.import_one import _harness_failure_error
 
-        outcome = run_import_with_fake_harness(process_status=-15)
+        outcome = run_import_with_fake_harness(
+            process_status=-FAKE_HARNESS_FATAL_SIGNAL)
 
-        self.assertEqual(outcome.exit_code, 2)
-        self.assertEqual(
-            outcome.failure_reason,
-            "beets harness terminated by signal 15",
+        expected = (
+            f"beets harness terminated by signal {FAKE_HARNESS_FATAL_SIGNAL}"
         )
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertEqual(outcome.failure_reason, expected)
         self.assertEqual(
             _harness_failure_error(outcome, outcome.exit_code),
-            "beets harness terminated by signal 15",
+            expected,
         )
 
     def test_no_apply_reason_wins_over_incidental_stderr(self):
@@ -266,6 +316,39 @@ class TestRunImportFailureReasons(unittest.TestCase):
             _harness_failure_error(outcome, outcome.exit_code),
             "beets harness ended without applying requested release "
             "release-under-test",
+        )
+
+
+class TestFakeHarnessSignalWorld(unittest.TestCase):
+    """The fixture's signal world must not depend on who launched the suite."""
+
+    def test_requested_signal_reaches_the_harness_from_a_hostile_ancestor(self):
+        """Pins the environment-dependence a full-suite run found.
+
+        Reproduced under an ancestor holding SIGHUP (``nohup``'s exact
+        disposition): the fake harness' ``kill -1 $$`` became a no-op, the
+        shell exited 0, and the generated property's branch assertion
+        demanded signal wording for production's truthful "ended without
+        applying". Requesting a signal POSIX forbids ignoring or blocking
+        is what makes the requested world the observed one, from any
+        ancestry.
+        """
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _HOSTILE_ANCESTOR_PROBE.format(
+                    root=ROOT_DIR, held=_ANCESTOR_HELD_SIGNALS),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            completed.stdout.strip(),
+            f"beets harness terminated by signal {FAKE_HARNESS_FATAL_SIGNAL}",
         )
 
 

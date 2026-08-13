@@ -27,6 +27,7 @@ from scripts.run_fuzz_tests import (
 )
 from scripts.run_python_tests import (
     AUDITED_FRONTLOAD_MODULES,
+    HOTSPOT_ISOLATED_METHODS,
     HOTSPOT_SHARD_POLICIES,
     HYPOTHESIS_CASE_STATUSES,
     STRATEGY_SPACE_EXHAUSTED,
@@ -49,8 +50,10 @@ from scripts.run_python_tests import (
     assert_exact_schedule,
     assert_exact_target_coverage,
     assert_hypothesis_deadlines_disabled,
+    build_test_targets,
     complete_test_modules,
     discover_test_modules,
+    hotspot_targets,
     hypothesis_example_budgets,
     list_module_test_ids,
     recommended_worker_count,
@@ -504,16 +507,68 @@ class TestModuleScheduling(unittest.TestCase):
             AUDITED_FRONTLOAD_MODULES,
             frozenset({"tests.test_nix_module"}),
         )
+        # tests.test_nix_module is frontloaded but deliberately NOT
+        # method_batch-sharded (issue #1131 review round 2): its nix-eval
+        # tests are cost-grouped into two exception-memoizing cached
+        # helpers, which only pay off when every one of a group's
+        # consumers runs in the same worker process. A blind method_batch
+        # split could land more than one of the module's heavy nix-eval
+        # methods in one batch (up to 5, main's own scheme); a naive full
+        # unshard (this issue's own round 1) serializes every merged world
+        # onto one target instead (measured: main's own worst-case
+        # bin-packed batch is 61.6s, a full unshard is 118.3s).
+        # HOTSPOT_ISOLATED_METHODS below is the narrower fix: carve the
+        # single heaviest consumer into its own target, bundle everything
+        # else into one remainder target — floor level with main (not
+        # better), at most TWO concurrent heavy nix-eval subprocesses
+        # instead of up to five, which is what makes raising the suite's
+        # worker count affordable (main's own worker-count sweep shows
+        # this module's pole inflating hard with concurrency: 88.0s at 8
+        # workers, 122.7s at 12, 147.7s at 16, 152.3s at 20).
         self.assertEqual(
             HOTSPOT_SHARD_POLICIES,
             {
                 "tests.test_beets_destructive_configs_generated": "method_batch",
                 "tests.test_deploy_pin_generated": "method_batch",
                 "tests.test_deploy_pin_script": "method_batch",
-                "tests.test_nix_module": "method_batch",
                 "tests.test_pipeline_db": "class_batch",
             },
         )
+        self.assertEqual(
+            HOTSPOT_ISOLATED_METHODS,
+            {
+                "tests.test_nix_module": frozenset({
+                    (
+                        "tests.test_nix_module.TestWebAuthenticationModuleContract."
+                        "test_basic_and_insecure_mode_matrix_is_evaluated"
+                    ),
+                }),
+            },
+        )
+
+    def test_isolated_method_ids_are_real_discovered_tests(self) -> None:
+        """Dev-loop drift signal, not a suite-level guard: hotspot_targets'
+        own runtime check (an isolated ID missing from the real discovery
+        manifest) already fails the suite closed during scheduling, before
+        this test would ever run in a normal `scripts/test.sh` or
+        `run_tests.sh` invocation. This pin exists so a direct
+        `unittest tests.test_parallel_test_runner` run (or an isolated
+        rerun of just this test) also catches a renamed/removed isolated
+        test id quickly, without needing a full scheduling pass.
+        """
+        for module_name, isolated in HOTSPOT_ISOLATED_METHODS.items():
+            discovered = {
+                test.id()
+                for test in _iter_test_cases(
+                    unittest.defaultTestLoader.loadTestsFromName(module_name)
+                )
+            }
+            missing = isolated - discovered
+            self.assertEqual(
+                missing,
+                set(),
+                f"{module_name}: isolated test id(s) no longer exist: {missing}",
+            )
 
     def test_class_batching_is_exact_and_bounds_repeated_imports(self) -> None:
         module = TestModule("tests.test_hotspot", Path("/test_hotspot.py"), 90)
@@ -548,6 +603,113 @@ class TestModuleScheduling(unittest.TestCase):
             test_ids,
         )
 
+    def test_isolated_method_gets_its_own_target_and_bundles_the_remainder(
+        self,
+    ) -> None:
+        module = TestModule("tests.test_hotspot", Path("/test_hotspot.py"), 90)
+        test_ids = (
+            "tests.test_hotspot.TestCases.test_cheap_one",
+            "tests.test_hotspot.TestCases.test_cheap_two",
+            "tests.test_hotspot.TestCases.test_expensive",
+        )
+        isolated = frozenset({"tests.test_hotspot.TestCases.test_expensive"})
+
+        targets = hotspot_targets(
+            module, test_ids, granularity=None, isolated=isolated
+        )
+
+        assert_exact_target_coverage(module, test_ids, targets)
+        self.assertEqual(len(targets), 2)
+        isolated_target = next(
+            t for t in targets if t.expected_test_ids == (
+                "tests.test_hotspot.TestCases.test_expensive",
+            )
+        )
+        self.assertEqual(
+            isolated_target.test_name,
+            "tests.test_hotspot.TestCases.test_expensive",
+        )
+        self.assertEqual(
+            isolated_target.load_names,
+            ("tests.test_hotspot.TestCases.test_expensive",),
+        )
+        remainder_target = next(t for t in targets if t is not isolated_target)
+        self.assertEqual(
+            set(remainder_target.expected_test_ids),
+            {
+                "tests.test_hotspot.TestCases.test_cheap_one",
+                "tests.test_hotspot.TestCases.test_cheap_two",
+            },
+        )
+        self.assertEqual(remainder_target.load_names, remainder_target.expected_test_ids)
+
+    def test_isolation_composes_with_granularity_on_the_remainder(self) -> None:
+        module = TestModule("tests.test_hotspot", Path("/test_hotspot.py"), 90)
+        test_ids = (
+            "tests.test_hotspot.TestCases.test_cheap_one",
+            "tests.test_hotspot.TestCases.test_cheap_two",
+            "tests.test_hotspot.TestCases.test_expensive",
+        )
+        isolated = frozenset({"tests.test_hotspot.TestCases.test_expensive"})
+
+        targets = hotspot_targets(
+            module, test_ids, granularity="method", isolated=isolated
+        )
+
+        assert_exact_target_coverage(module, test_ids, targets)
+        self.assertEqual(len(targets), 3)
+        # A bare target COUNT can't distinguish this from isolation being
+        # disabled entirely: "method" granularity already puts every test
+        # in its own target, so 1 isolated + 2 method shards and 3 plain
+        # method shards both total 3 targets with the same expected_test_ids.
+        # The real discriminator is load_names: hotspot_targets sets it
+        # explicitly for the isolated singleton, while shard_test_ids's
+        # own plain (non-batch) branch leaves it empty (falls back to
+        # test_name at load time) — so under isolation-disabled, the
+        # target covering the "expensive" ID would have load_names == ().
+        isolated_target = next(
+            t for t in targets
+            if t.expected_test_ids == ("tests.test_hotspot.TestCases.test_expensive",)
+        )
+        self.assertEqual(isolated_target.load_names, isolated_target.expected_test_ids)
+        for other in targets:
+            if other is not isolated_target:
+                self.assertEqual(other.load_names, ())
+
+    def test_hotspot_targets_rejects_an_unknown_isolated_id(self) -> None:
+        """Known-bad self-test: an isolated ID that drifted out of the
+        discovered set must fail closed, never silently drop coverage.
+        """
+        module = TestModule("tests.test_hotspot", Path("/test_hotspot.py"), 90)
+        test_ids = ("tests.test_hotspot.TestCases.test_one",)
+        isolated = frozenset({"tests.test_hotspot.TestCases.test_renamed"})
+
+        with self.assertRaisesRegex(ValueError, "unknown isolated test id"):
+            hotspot_targets(module, test_ids, granularity=None, isolated=isolated)
+
+    def test_build_test_targets_applies_isolated_methods(self) -> None:
+        module = TestModule("tests.test_hotspot", Path("/test_hotspot.py"), 90)
+        test_ids = (
+            "tests.test_hotspot.TestCases.test_cheap",
+            "tests.test_hotspot.TestCases.test_expensive",
+        )
+        isolated = frozenset({"tests.test_hotspot.TestCases.test_expensive"})
+
+        targets = build_test_targets(
+            (module,),
+            {module.name: test_ids},
+            isolated_methods={module.name: isolated},
+        )
+
+        assert_exact_target_coverage(module, test_ids, targets)
+        self.assertEqual(
+            {target.test_name for target in targets},
+            {
+                "tests.test_hotspot.TestCases.test_expensive",
+                "tests.test_hotspot::remainder",
+            },
+        )
+
     def test_selected_module_keeps_the_canonical_hotspot_sharding(self) -> None:
         module = TestModule("tests.test_hotspot", Path("/test_hotspot.py"), 90)
         test_ids = (
@@ -563,6 +725,32 @@ class TestModuleScheduling(unittest.TestCase):
         )
 
         self.assertEqual(tuple(target.test_name for target in targets), test_ids)
+
+    def test_selected_module_applies_isolated_methods_with_no_shard_policy(
+        self,
+    ) -> None:
+        module = TestModule("tests.test_hotspot", Path("/test_hotspot.py"), 90)
+        test_ids = (
+            "tests.test_hotspot.TestCases.test_cheap",
+            "tests.test_hotspot.TestCases.test_expensive",
+        )
+        isolated = frozenset({"tests.test_hotspot.TestCases.test_expensive"})
+
+        targets = select_test_targets(
+            (module,),
+            (module.name,),
+            listed_test_ids={module.name: test_ids},
+            hotspot_policies={},
+            hotspot_isolated_methods={module.name: isolated},
+        )
+
+        self.assertEqual(
+            {target.test_name for target in targets},
+            {
+                "tests.test_hotspot.TestCases.test_expensive",
+                "tests.test_hotspot::remainder",
+            },
+        )
 
     def test_selected_method_runs_only_that_exact_unittest_name(self) -> None:
         module = TestModule("tests.test_alpha", Path("/test_alpha.py"), 10)
