@@ -503,13 +503,21 @@ class TestModuleScheduling(unittest.TestCase):
             AUDITED_FRONTLOAD_MODULES,
             frozenset({"tests.test_nix_module"}),
         )
+        # tests.test_nix_module is frontloaded but deliberately NOT
+        # method_batch-sharded (issue #1131): its nix-eval tests share one
+        # evaluated JSON blob behind a module-level functools.cache, which
+        # only pays off when every consumer stays in the same worker
+        # process. Splitting it across method-batch processes would defeat
+        # the cache and, at higher worker counts, run several multi-GB nix
+        # eval subprocesses concurrently — the exact contention that drove
+        # the shared test RAM root to 96%.
+        self.assertNotIn("tests.test_nix_module", HOTSPOT_SHARD_POLICIES)
         self.assertEqual(
             HOTSPOT_SHARD_POLICIES,
             {
                 "tests.test_beets_destructive_configs_generated": "method_batch",
                 "tests.test_deploy_pin_generated": "method_batch",
                 "tests.test_deploy_pin_script": "method_batch",
-                "tests.test_nix_module": "method_batch",
                 "tests.test_pipeline_db": "class_batch",
             },
         )

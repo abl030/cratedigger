@@ -66,11 +66,23 @@ WORLD_MODEL_MODULE = "tests.world_model.state_machine"
 # Method profiling showed the dominant Nix evaluation was otherwise admitted
 # late enough to become the deterministic suite's tail.
 AUDITED_FRONTLOAD_MODULES = frozenset({"tests.test_nix_module"})
+#: tests.test_nix_module (issue #1131) is NOT method_batch here on purpose.
+#: Its handful of expensive nix-eval tests share ONE evaluated JSON blob via
+#: a module-level ``functools.cache`` (``_shared_module_worlds`` in the test
+#: module) — that cache only pays off when every consumer runs in the same
+#: worker PROCESS. method_batch splits methods across separate processes by
+#: TEST COUNT, blind to cost: it could (and, measured, did) land more than
+#: one multi-second, multi-GB nix-eval method in the same batch, or run
+#: several of them concurrently at higher worker counts, which is what drove
+#: the shared test RAM root to 96%. Left unsharded, the module is one
+#: frontloaded target with at most one such subprocess live at a time;
+#: measured whole-module wall time (nix-shell warm, single process) dropped
+#: from a ~142.7s serial sum of six separate nix-eval subprocess calls to
+#: ~103.6s for one merged evaluation plus every other test in the module.
 HOTSPOT_SHARD_POLICIES = {
     "tests.test_beets_destructive_configs_generated": "method_batch",
     "tests.test_deploy_pin_generated": "method_batch",
     "tests.test_deploy_pin_script": "method_batch",
-    "tests.test_nix_module": "method_batch",
     "tests.test_pipeline_db": "class_batch",
 }
 HOTSPOT_CLASS_BATCHES = 8

@@ -26,6 +26,7 @@ failure depends on Nix option assertion evaluation.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import subprocess
@@ -129,20 +130,50 @@ class TestDecisionDifferentialWrapperContract(unittest.TestCase):
         self.assertIn("decisionDifferential", text[text.index("environment.systemPackages"):])
 
 
-class TestDefaultHeadlessComposition(unittest.TestCase):
-    """The exported module keeps the direct CLI usable without the web."""
+@functools.cache
+def _shared_module_worlds() -> dict[str, object]:
+    """One ``nix eval`` for every consumer that reads assertions/options only.
 
-    def test_exported_module_installs_cli_without_web_units_or_sockets(
-        self,
-    ) -> None:
-        expression = r'''
+    ``TestDefaultHeadlessComposition``, three of
+    ``TestWebAuthenticationModuleContract``'s nix-eval tests, and both of
+    ``TestExternalBeetsRuntimeCapability``'s nix-eval tests each used to pay
+    for an independent ``builtins.getFlake`` + ``import nixpkgs`` +
+    ``import ./nix/beets.nix`` preamble (measured: ~0.24s alone — cheap) and
+    then their own full NixOS module-tree evaluation per world (measured:
+    the real cost, ~1.3-2.3s per ``lib.nixosSystem`` call). Method-batch
+    sharding (issue #1131) balances by TEST COUNT, not cost, so it could land
+    several of these multi-second, multi-GB ``nix eval`` subprocesses in the
+    same batch by chance, or — at higher worker counts — run several of them
+    truly concurrently. That concurrency, not the redundant preamble, is what
+    drove the shared test RAM root to 96% utilization and made raising
+    worker count a regression instead of a speedup.
+
+    This merges every world these five tests need into ONE expression,
+    evaluated at most once per test PROCESS (``functools.cache``): every
+    world here only ever reads ``.config.assertions`` or plain option/service
+    values, never forces ``.system.build.toplevel``, so none of them can
+    raise or ``abort`` mid-evaluation and take the others down with it.
+    ``test_injected_basic_path_cannot_render_toplevel`` is the one nix-eval
+    test in this module that DOES force ``.system.build.toplevel``,
+    specifically to observe the hard assertion ``abort`` (non-zero exit,
+    stderr text) that path triggers — merging it here would let that one
+    deliberately-failing world abort the whole shared evaluation for every
+    other consumer, so it keeps its own independent ``nix eval`` call.
+
+    Callers index their own top-level key out of the returned dict; nothing
+    downstream of this helper changed shape or assertions.
+    """
+    expression = r'''
+      let
+        f = builtins.getFlake (toString ./.);
+        lib = f.inputs.nixpkgs.lib;
+        modulePkgs = import f.inputs.nixpkgs {
+          system = builtins.currentSystem;
+        };
+        beetsPackage = import ./nix/beets.nix { pkgs = modulePkgs; };
+      in {
+        headlessComposition =
           let
-            f = builtins.getFlake (toString ./.);
-            modulePkgs = import f.inputs.nixpkgs {
-              system = builtins.currentSystem;
-            };
-            beetsPackage = import ./nix/beets.nix { pkgs = modulePkgs; };
-            lib = f.inputs.nixpkgs.lib;
             system = lib.nixosSystem {
               system = builtins.currentSystem;
               modules = [
@@ -166,7 +197,7 @@ class TestDefaultHeadlessComposition(unittest.TestCase):
                 })
               ];
             };
-          in builtins.toJSON {
+          in {
             webEnabled = system.config.services.cratedigger.web.enable;
             systemPackages =
               map lib.getName system.config.environment.systemPackages;
@@ -178,36 +209,10 @@ class TestDefaultHeadlessComposition(unittest.TestCase):
               builtins.filter
                 (name: lib.hasPrefix "cratedigger" name)
                 (builtins.attrNames system.config.systemd.sockets);
-          }
-        '''
-        result = subprocess.run(
-            ["nix", "eval", "--raw", "--impure", "--expr", expression],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        composition = json.loads(result.stdout)
-        self.assertFalse(composition["webEnabled"])
-        self.assertIn("pipeline-cli", composition["systemPackages"])
-        self.assertIn("decision-differential", composition["systemPackages"])
-        self.assertFalse(composition["hasWebService"])
-        self.assertEqual(composition["cratediggerSockets"], [])
+          };
 
-
-class TestWebAuthenticationModuleContract(unittest.TestCase):
-    """The enabled web surface has one fail-closed module-owned perimeter."""
-
-    def test_basic_and_insecure_mode_matrix_is_evaluated(self) -> None:
-        expression = r'''
+        webAuthMatrix =
           let
-            f = builtins.getFlake (toString ./.);
-            lib = f.inputs.nixpkgs.lib;
-            modulePkgs = import f.inputs.nixpkgs {
-              system = builtins.currentSystem;
-            };
-            beetsPackage = import ./nix/beets.nix { pkgs = modulePkgs; };
             evaluate = extra:
               let
                 system = lib.nixosSystem {
@@ -583,17 +588,382 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
               };
               systemd.services.nginx.restartIfChanged = lib.mkForce false;
             };
-          }
-        '''
-        result = subprocess.run(
-            ["nix", "eval", "--impure", "--json", "--expr", expression],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        worlds = json.loads(result.stdout)
+          };
+
+        mergedGateway =
+          let
+            render = enableIPv6: basicAuthFile: externalAuth:
+              let
+                system = lib.nixosSystem {
+                  system = builtins.currentSystem;
+                  modules = [
+                    f.nixosModules.default
+                    ({ ... }: {
+                      networking.enableIPv6 = enableIPv6;
+                      services.cratedigger = {
+                        enable = true;
+                        src = ./.;
+                        user = "cratedigger";
+                        group = "cratedigger";
+                        slskd.apiKeyFile = "/run/secrets/slskd-key";
+                        slskd.downloadDir = "/srv/slskd";
+                        pipelineDb.createLocally = true;
+                        beets.runtime = {
+                          package = beetsPackage;
+                          configDir = "/etc/beets";
+                          expectedLibrary = "/srv/beets/beets-library.db";
+                          expectedDirectory = "/srv/music";
+                          expectedStateFile = "/var/lib/beets/state.pickle";
+                          expectedSecretInclude = "/run/secrets/beets.yaml";
+                        };
+                        web = ({
+                          enable = true;
+                          hostName = "music.example.test";
+                          enableInsecure =
+                            basicAuthFile == null && !externalAuth;
+                          inherit externalAuth;
+                        } // lib.optionalAttrs (basicAuthFile != null) {
+                          inherit basicAuthFile;
+                        });
+                      };
+                      services.nginx.virtualHosts.cratedigger-auth-gateway
+                        .locations."/merged-probe" = {
+                          proxyPass =
+                            "http://unix:/run/cratedigger-web/web.sock:";
+                          recommendedProxySettings = false;
+                        };
+                    })
+                  ];
+                };
+                gateway =
+                  system.config.services.nginx.virtualHosts.cratedigger-auth-gateway;
+                reject =
+                  system.config.services.nginx.virtualHosts.cratedigger-auth-reject;
+                socket = system.config.systemd.sockets.cratedigger-web;
+                webService =
+                  system.config.systemd.services.cratedigger-web;
+                nginxService = system.config.systemd.services.nginx;
+              in {
+                failures = map (assertion: assertion.message)
+                  (builtins.filter
+                    (assertion:
+                      !assertion.assertion
+                      && lib.hasPrefix
+                        "services.cratedigger.web"
+                        assertion.message)
+                    system.config.assertions);
+                listen = map (item: {
+                  inherit (item) addr port;
+                }) gateway.listen;
+                hostName = gateway.serverName;
+                gatewayExtra = gateway.extraConfig;
+                gatewayPolicy =
+                  system.config.environment.etc
+                    ."cratedigger/web-gateway-policy".text;
+                basicAuthFile = gateway.basicAuthFile;
+                rootBasicAuthFile = gateway.locations."/".basicAuthFile;
+                mergedBasicAuthFile =
+                  gateway.locations."/merged-probe".basicAuthFile;
+                proxyPass = gateway.locations."/".proxyPass;
+                healthProxy = gateway.locations."= /healthz".proxyPass;
+                healthExtra = gateway.locations."= /healthz".extraConfig;
+                rejectDefault = reject.default;
+                rejectConfig = reject.locations."/".extraConfig;
+                socketListen = socket.listenStreams;
+                socketGroup = socket.socketConfig.SocketGroup;
+                socketMode = socket.socketConfig.SocketMode;
+                webAfter = webService.after;
+                webRequires = webService.requires;
+                webGroups = webService.serviceConfig.SupplementaryGroups;
+                webUser = webService.serviceConfig.User;
+                webGroup = webService.serviceConfig.Group;
+                webStartPre = webService.serviceConfig.ExecStartPre;
+                nginxEnableReload =
+                  system.config.services.nginx.enableReload;
+                nginxRestartIfChanged = nginxService.restartIfChanged;
+                nginxAfter = nginxService.after;
+                nginxWants = nginxService.wants;
+                nginxRequires = nginxService.requires;
+                nginxUnit =
+                  system.config.systemd.units."nginx.service".text;
+                nginxGroups = nginxService.serviceConfig.SupplementaryGroups;
+                nginxUser = nginxService.serviceConfig.User;
+                nginxGroup = nginxService.serviceConfig.Group;
+                nginxUserGroups =
+                  system.config.users.users.${system.config.services.nginx.user}.extraGroups;
+                applicationUserGroups =
+                  system.config.users.users.cratedigger.extraGroups;
+                startPre = nginxService.serviceConfig.ExecStartPre;
+                reload = nginxService.serviceConfig.ExecReload;
+              };
+          in {
+            dualStack =
+              render true "/run/secrets/cratedigger.htpasswd" false;
+            ipv4Only =
+              render false "/run/secrets/cratedigger.htpasswd" false;
+            insecureRecovery = render false null false;
+            alternateBasic =
+              render false "/run/secrets/cratedigger-alternate.htpasswd" false;
+            externalMode = render false null true;
+          };
+
+        beetsCapability =
+          let
+            ambientPkgs = modulePkgs // {
+              python3 = modulePkgs.python311;
+              python3Packages = modulePkgs.python311Packages;
+            };
+            ambientBeetsPackage = import ./nix/beets.nix {
+              pkgs = ambientPkgs;
+            };
+            runtime = {
+              package = beetsPackage;
+              configDir = "/etc/beets";
+              expectedLibrary = "/srv/beets/beets-library.db";
+              expectedDirectory = "/srv/music";
+              expectedStateFile = "/var/lib/beets/state.pickle";
+              expectedSecretInclude = "/run/secrets/beets.yaml";
+              readinessUnits = [];
+            };
+            failures = candidate:
+              let system = lib.nixosSystem {
+                system = builtins.currentSystem;
+                modules = [
+                  f.nixosModules.default
+                  ({ ... }: {
+                    services.cratedigger = {
+                      enable = true;
+                      src = ./.;
+                      packageSet = modulePkgs;
+                      slskd.apiKeyFile = "/run/secrets/slskd-key";
+                      slskd.downloadDir = "/srv/slskd";
+                      pipelineDb.createLocally = true;
+                      beets.runtime = candidate;
+                      beets.validation = {
+                        stagingDir = "/srv/incoming";
+                        trackingFile = "/srv/incoming/tracking.jsonl";
+                      };
+                    };
+                  })
+                ];
+              }; in map (assertion: assertion.message)
+                (builtins.filter
+                  (assertion:
+                    !assertion.assertion
+                    && lib.hasPrefix
+                      "services.cratedigger.beets.runtime"
+                      assertion.message)
+                  system.config.assertions);
+            disabled = lib.nixosSystem {
+              system = builtins.currentSystem;
+              modules = [ f.nixosModules.default ];
+            };
+            identityFailures = user: group:
+              let system = lib.nixosSystem {
+                system = builtins.currentSystem;
+                modules = [
+                  f.nixosModules.default
+                  ({ ... }: {
+                    services.cratedigger = {
+                      enable = true;
+                      src = ./.;
+                      packageSet = modulePkgs;
+                      inherit user group;
+                      slskd.apiKeyFile = "/run/secrets/slskd-key";
+                      slskd.downloadDir = "/srv/slskd";
+                      pipelineDb.createLocally = true;
+                      beets.runtime = runtime;
+                      beets.validation = {
+                        stagingDir = "/srv/incoming";
+                        trackingFile = "/srv/incoming/tracking.jsonl";
+                      };
+                    };
+                  })
+                ];
+              }; in map (assertion: assertion.message)
+                (builtins.filter
+                  (assertion:
+                    !assertion.assertion
+                    && lib.hasPrefix "services.cratedigger"
+                      assertion.message)
+                  system.config.assertions);
+            defaultIdentity = let system = lib.nixosSystem {
+              system = builtins.currentSystem;
+              modules = [
+                f.nixosModules.default
+                ({ ... }: {
+                  services.cratedigger = {
+                    enable = true;
+                    src = ./.;
+                    packageSet = modulePkgs;
+                    slskd.apiKeyFile = "/run/secrets/slskd-key";
+                    slskd.downloadDir = "/srv/slskd";
+                    pipelineDb.createLocally = true;
+                    beets.runtime = runtime;
+                    beets.validation = {
+                      stagingDir = "/srv/incoming";
+                      trackingFile = "/srv/incoming/tracking.jsonl";
+                    };
+                  };
+                })
+              ];
+            }; in {
+              user = system.config.services.cratedigger.user;
+              group = system.config.services.cratedigger.group;
+              serviceUser = system.config.systemd.services.cratedigger.serviceConfig.User;
+              serviceGroup = system.config.systemd.services.cratedigger.serviceConfig.Group;
+            };
+          in {
+            valid = failures runtime;
+            missing = builtins.listToAttrs (map (field: {
+              name = field;
+              value = failures (builtins.removeAttrs runtime [ field ]);
+            }) [
+              "package" "configDir" "expectedLibrary" "expectedDirectory"
+              "expectedStateFile" "expectedSecretInclude"
+            ]);
+            incompatiblePackage = failures (runtime // {
+              package = beetsPackage // { pythonModule = null; };
+            });
+            ambientPackageMismatch = {
+              distinct =
+                ambientBeetsPackage.pythonModule != modulePkgs.python3;
+              failures = failures (runtime // {
+                package = ambientBeetsPackage;
+              });
+            };
+            invalidPaths = {
+              configDir = failures (runtime // { configDir = "etc/beets"; });
+              expectedLibrary = failures (runtime // {
+                expectedLibrary = "/srv/beets/../beets-library.db";
+              });
+              expectedDirectory = failures (runtime // {
+                expectedDirectory = "/srv//music";
+              });
+              expectedStateFile = failures (runtime // {
+                expectedStateFile = "var/lib/beets/state.pickle";
+              });
+              expectedSecretInclude = failures (runtime // {
+                expectedSecretInclude = "/run/secrets/./beets.yaml";
+              });
+            };
+            rootPaths = {
+              configDir = failures (runtime // { configDir = "/"; });
+              expectedDirectory = failures (runtime // {
+                expectedDirectory = "/";
+              });
+              expectedLibrary = failures (runtime // {
+                expectedLibrary = "/beets-library.db";
+              });
+            };
+            rootIdentity = identityFailures "root" "root";
+            numericIdentity = identityFailures "0" "0";
+            inherit defaultIdentity;
+            disabled = {
+              assertions = builtins.filter
+                (assertion:
+                  !assertion.assertion
+                  && lib.hasPrefix
+                    "services.cratedigger"
+                    assertion.message)
+                disabled.config.assertions;
+              services = builtins.filter
+                (name: lib.hasPrefix "cratedigger" name)
+                (builtins.attrNames disabled.config.systemd.services);
+            };
+          };
+
+        beetsReadiness =
+          let
+            system = lib.nixosSystem {
+              system = builtins.currentSystem;
+              modules = [
+                f.nixosModules.default
+                ({ ... }: {
+                  services.cratedigger = {
+                    enable = true;
+                    src = ./.;
+                    packageSet = modulePkgs;
+                    slskd.apiKeyFile = "/run/secrets/slskd-key";
+                    slskd.downloadDir = "/srv/slskd";
+                    pipelineDb.createLocally = true;
+                    web = {
+                      enable = true;
+                      hostName = "music.example.test";
+                      enableInsecure = true;
+                    };
+                    beets.runtime = {
+                      package = beetsPackage;
+                      configDir = "/etc/beets";
+                      expectedLibrary = "/srv/beets/beets-library.db";
+                      expectedDirectory = "/srv/music";
+                      expectedStateFile = "/var/lib/beets/state.pickle";
+                      expectedSecretInclude = "/run/secrets/beets.yaml";
+                      readinessUnits = [
+                        "beets-config-ready.service"
+                        "beets-secret-ready.service"
+                      ];
+                    };
+                    beets.validation = {
+                      stagingDir = "/srv/incoming";
+                      trackingFile = "/srv/incoming/tracking.jsonl";
+                    };
+                  };
+                })
+              ];
+            };
+            unit = name: let value = system.config.systemd.services.${name}; in {
+              after = value.after;
+              wants = value.wants;
+              requires = value.requires;
+              bindReadOnlyPaths = value.serviceConfig.BindReadOnlyPaths or [];
+              bindPaths = value.serviceConfig.BindPaths or [];
+              readWritePaths = value.serviceConfig.ReadWritePaths or [];
+            };
+          in {
+            main = unit "cratedigger";
+            importer = unit "cratedigger-importer";
+            preview = unit "cratedigger-import-preview-worker";
+            web = unit "cratedigger-web";
+          };
+      }
+    '''
+    result = subprocess.run(
+        ["nix", "eval", "--impure", "--json", "--expr", expression],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr)
+    value = json.loads(result.stdout)
+    if not isinstance(value, dict):
+        raise TypeError(value)
+    return value
+
+
+class TestDefaultHeadlessComposition(unittest.TestCase):
+    """The exported module keeps the direct CLI usable without the web."""
+
+    def test_exported_module_installs_cli_without_web_units_or_sockets(
+        self,
+    ) -> None:
+        composition = _shared_module_worlds()["headlessComposition"]
+        assert isinstance(composition, dict)
+        self.assertFalse(composition["webEnabled"])
+        self.assertIn("pipeline-cli", composition["systemPackages"])
+        self.assertIn("decision-differential", composition["systemPackages"])
+        self.assertFalse(composition["hasWebService"])
+        self.assertEqual(composition["cratediggerSockets"], [])
+
+
+class TestWebAuthenticationModuleContract(unittest.TestCase):
+    """The enabled web surface has one fail-closed module-owned perimeter."""
+
+    def test_basic_and_insecure_mode_matrix_is_evaluated(self) -> None:
+        worlds = _shared_module_worlds()["webAuthMatrix"]
+        assert isinstance(worlds, dict)
         self.assertTrue(
             any("exactly one" in message for message in worlds["missing"])
         )
@@ -814,138 +1184,8 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         self.assertIn("nginx-token-safe segments", result.stderr)
 
     def test_merged_basic_gateway_values_are_exact(self) -> None:
-        expression = r'''
-          let
-            f = builtins.getFlake (toString ./.);
-            lib = f.inputs.nixpkgs.lib;
-            modulePkgs = import f.inputs.nixpkgs {
-              system = builtins.currentSystem;
-            };
-            beetsPackage = import ./nix/beets.nix { pkgs = modulePkgs; };
-            render = enableIPv6: basicAuthFile: externalAuth:
-              let
-                system = lib.nixosSystem {
-                  system = builtins.currentSystem;
-                  modules = [
-                    f.nixosModules.default
-                    ({ ... }: {
-                      networking.enableIPv6 = enableIPv6;
-                      services.cratedigger = {
-                        enable = true;
-                        src = ./.;
-                        user = "cratedigger";
-                        group = "cratedigger";
-                        slskd.apiKeyFile = "/run/secrets/slskd-key";
-                        slskd.downloadDir = "/srv/slskd";
-                        pipelineDb.createLocally = true;
-                        beets.runtime = {
-                          package = beetsPackage;
-                          configDir = "/etc/beets";
-                          expectedLibrary = "/srv/beets/beets-library.db";
-                          expectedDirectory = "/srv/music";
-                          expectedStateFile = "/var/lib/beets/state.pickle";
-                          expectedSecretInclude = "/run/secrets/beets.yaml";
-                        };
-                        web = ({
-                          enable = true;
-                          hostName = "music.example.test";
-                          enableInsecure =
-                            basicAuthFile == null && !externalAuth;
-                          inherit externalAuth;
-                        } // lib.optionalAttrs (basicAuthFile != null) {
-                          inherit basicAuthFile;
-                        });
-                      };
-                      services.nginx.virtualHosts.cratedigger-auth-gateway
-                        .locations."/merged-probe" = {
-                          proxyPass =
-                            "http://unix:/run/cratedigger-web/web.sock:";
-                          recommendedProxySettings = false;
-                        };
-                    })
-                  ];
-                };
-                gateway =
-                  system.config.services.nginx.virtualHosts.cratedigger-auth-gateway;
-                reject =
-                  system.config.services.nginx.virtualHosts.cratedigger-auth-reject;
-                socket = system.config.systemd.sockets.cratedigger-web;
-                webService =
-                  system.config.systemd.services.cratedigger-web;
-                nginxService = system.config.systemd.services.nginx;
-              in {
-                failures = map (assertion: assertion.message)
-                  (builtins.filter
-                    (assertion:
-                      !assertion.assertion
-                      && lib.hasPrefix
-                        "services.cratedigger.web"
-                        assertion.message)
-                    system.config.assertions);
-                listen = map (item: {
-                  inherit (item) addr port;
-                }) gateway.listen;
-                hostName = gateway.serverName;
-                gatewayExtra = gateway.extraConfig;
-                gatewayPolicy =
-                  system.config.environment.etc
-                    ."cratedigger/web-gateway-policy".text;
-                basicAuthFile = gateway.basicAuthFile;
-                rootBasicAuthFile = gateway.locations."/".basicAuthFile;
-                mergedBasicAuthFile =
-                  gateway.locations."/merged-probe".basicAuthFile;
-                proxyPass = gateway.locations."/".proxyPass;
-                healthProxy = gateway.locations."= /healthz".proxyPass;
-                healthExtra = gateway.locations."= /healthz".extraConfig;
-                rejectDefault = reject.default;
-                rejectConfig = reject.locations."/".extraConfig;
-                socketListen = socket.listenStreams;
-                socketGroup = socket.socketConfig.SocketGroup;
-                socketMode = socket.socketConfig.SocketMode;
-                webAfter = webService.after;
-                webRequires = webService.requires;
-                webGroups = webService.serviceConfig.SupplementaryGroups;
-                webUser = webService.serviceConfig.User;
-                webGroup = webService.serviceConfig.Group;
-                webStartPre = webService.serviceConfig.ExecStartPre;
-                nginxEnableReload =
-                  system.config.services.nginx.enableReload;
-                nginxRestartIfChanged = nginxService.restartIfChanged;
-                nginxAfter = nginxService.after;
-                nginxWants = nginxService.wants;
-                nginxRequires = nginxService.requires;
-                nginxUnit =
-                  system.config.systemd.units."nginx.service".text;
-                nginxGroups = nginxService.serviceConfig.SupplementaryGroups;
-                nginxUser = nginxService.serviceConfig.User;
-                nginxGroup = nginxService.serviceConfig.Group;
-                nginxUserGroups =
-                  system.config.users.users.${system.config.services.nginx.user}.extraGroups;
-                applicationUserGroups =
-                  system.config.users.users.cratedigger.extraGroups;
-                startPre = nginxService.serviceConfig.ExecStartPre;
-                reload = nginxService.serviceConfig.ExecReload;
-              };
-          in {
-            dualStack =
-              render true "/run/secrets/cratedigger.htpasswd" false;
-            ipv4Only =
-              render false "/run/secrets/cratedigger.htpasswd" false;
-            insecureRecovery = render false null false;
-            alternateBasic =
-              render false "/run/secrets/cratedigger-alternate.htpasswd" false;
-            externalMode = render false null true;
-          }
-        '''
-        result = subprocess.run(
-            ["nix", "eval", "--impure", "--json", "--expr", expression],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        worlds = json.loads(result.stdout)
+        worlds = _shared_module_worlds()["mergedGateway"]
+        assert isinstance(worlds, dict)
         dual = worlds["dualStack"]
         ipv4 = worlds["ipv4Only"]
         insecure = worlds["insecureRecovery"]
@@ -1415,6 +1655,19 @@ class TestModuleVmPerformanceContract(unittest.TestCase):
         self.assertIn("virtualisation.useNixStoreImage = true;", text)
         self.assertIn("virtualisation.writableStore = true;", text)
 
+    def test_guest_declares_more_than_one_core(self) -> None:
+        """Issue #1131: an unset ``virtualisation.cores`` silently inherits
+        the qemu-vm module's guest default of 1, serializing PostgreSQL,
+        nginx, ~10 switch-to-configuration calls, and 2 reboots onto one
+        emulated core. Pin an explicit, deliberately-chosen core count so it
+        can't regress back to the implicit default unnoticed.
+        """
+        text = MODULE_VM_NIX.read_text(encoding="utf-8")
+        match = re.search(r"virtualisation\.cores\s*=\s*(\d+)\s*;", text)
+        self.assertIsNotNone(match, "virtualisation.cores must be set explicitly")
+        assert match is not None
+        self.assertGreater(int(match.group(1)), 1)
+
 
 class TestImporterServiceContract(unittest.TestCase):
     def test_importer_wrapper_and_service_are_defined(self) -> None:
@@ -1564,22 +1817,6 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
     )
 
     @staticmethod
-    def _nix_eval_json(expression: str) -> dict[str, object]:
-        result = subprocess.run(
-            ["nix", "eval", "--impure", "--json", "--expr", expression],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise AssertionError(result.stderr)
-        value = json.loads(result.stdout)
-        if not isinstance(value, dict):
-            raise TypeError(value)
-        return value
-
-    @staticmethod
     def _string_list(value: object) -> list[str]:
         if not isinstance(value, list):
             raise TypeError(value)
@@ -1589,178 +1826,8 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
         return strings
 
     def test_capability_assertions_cover_happy_missing_invalid_and_disabled(self) -> None:
-        worlds = self._nix_eval_json(r'''
-          let
-            f = builtins.getFlake (toString ./.);
-            lib = f.inputs.nixpkgs.lib;
-            modulePkgs = import f.inputs.nixpkgs {
-              system = builtins.currentSystem;
-            };
-            beetsPackage = import ./nix/beets.nix { pkgs = modulePkgs; };
-            ambientPkgs = modulePkgs // {
-              python3 = modulePkgs.python311;
-              python3Packages = modulePkgs.python311Packages;
-            };
-            ambientBeetsPackage = import ./nix/beets.nix {
-              pkgs = ambientPkgs;
-            };
-            runtime = {
-              package = beetsPackage;
-              configDir = "/etc/beets";
-              expectedLibrary = "/srv/beets/beets-library.db";
-              expectedDirectory = "/srv/music";
-              expectedStateFile = "/var/lib/beets/state.pickle";
-              expectedSecretInclude = "/run/secrets/beets.yaml";
-              readinessUnits = [];
-            };
-            failures = candidate:
-              let system = lib.nixosSystem {
-                system = builtins.currentSystem;
-                modules = [
-                  f.nixosModules.default
-                  ({ ... }: {
-                    services.cratedigger = {
-                      enable = true;
-                      src = ./.;
-                      packageSet = modulePkgs;
-                      slskd.apiKeyFile = "/run/secrets/slskd-key";
-                      slskd.downloadDir = "/srv/slskd";
-                      pipelineDb.createLocally = true;
-                      beets.runtime = candidate;
-                      beets.validation = {
-                        stagingDir = "/srv/incoming";
-                        trackingFile = "/srv/incoming/tracking.jsonl";
-                      };
-                    };
-                  })
-                ];
-              }; in map (assertion: assertion.message)
-                (builtins.filter
-                  (assertion:
-                    !assertion.assertion
-                    && lib.hasPrefix
-                      "services.cratedigger.beets.runtime"
-                      assertion.message)
-                  system.config.assertions);
-            disabled = lib.nixosSystem {
-              system = builtins.currentSystem;
-              modules = [ f.nixosModules.default ];
-            };
-            identityFailures = user: group:
-              let system = lib.nixosSystem {
-                system = builtins.currentSystem;
-                modules = [
-                  f.nixosModules.default
-                  ({ ... }: {
-                    services.cratedigger = {
-                      enable = true;
-                      src = ./.;
-                      packageSet = modulePkgs;
-                      inherit user group;
-                      slskd.apiKeyFile = "/run/secrets/slskd-key";
-                      slskd.downloadDir = "/srv/slskd";
-                      pipelineDb.createLocally = true;
-                      beets.runtime = runtime;
-                      beets.validation = {
-                        stagingDir = "/srv/incoming";
-                        trackingFile = "/srv/incoming/tracking.jsonl";
-                      };
-                    };
-                  })
-                ];
-              }; in map (assertion: assertion.message)
-                (builtins.filter
-                  (assertion:
-                    !assertion.assertion
-                    && lib.hasPrefix "services.cratedigger"
-                      assertion.message)
-                  system.config.assertions);
-            defaultIdentity = let system = lib.nixosSystem {
-              system = builtins.currentSystem;
-              modules = [
-                f.nixosModules.default
-                ({ ... }: {
-                  services.cratedigger = {
-                    enable = true;
-                    src = ./.;
-                    packageSet = modulePkgs;
-                    slskd.apiKeyFile = "/run/secrets/slskd-key";
-                    slskd.downloadDir = "/srv/slskd";
-                    pipelineDb.createLocally = true;
-                    beets.runtime = runtime;
-                    beets.validation = {
-                      stagingDir = "/srv/incoming";
-                      trackingFile = "/srv/incoming/tracking.jsonl";
-                    };
-                  };
-                })
-              ];
-            }; in {
-              user = system.config.services.cratedigger.user;
-              group = system.config.services.cratedigger.group;
-              serviceUser = system.config.systemd.services.cratedigger.serviceConfig.User;
-              serviceGroup = system.config.systemd.services.cratedigger.serviceConfig.Group;
-            };
-          in {
-            valid = failures runtime;
-            missing = builtins.listToAttrs (map (field: {
-              name = field;
-              value = failures (builtins.removeAttrs runtime [ field ]);
-            }) [
-              "package" "configDir" "expectedLibrary" "expectedDirectory"
-              "expectedStateFile" "expectedSecretInclude"
-            ]);
-            incompatiblePackage = failures (runtime // {
-              package = beetsPackage // { pythonModule = null; };
-            });
-            ambientPackageMismatch = {
-              distinct =
-                ambientBeetsPackage.pythonModule != modulePkgs.python3;
-              failures = failures (runtime // {
-                package = ambientBeetsPackage;
-              });
-            };
-            invalidPaths = {
-              configDir = failures (runtime // { configDir = "etc/beets"; });
-              expectedLibrary = failures (runtime // {
-                expectedLibrary = "/srv/beets/../beets-library.db";
-              });
-              expectedDirectory = failures (runtime // {
-                expectedDirectory = "/srv//music";
-              });
-              expectedStateFile = failures (runtime // {
-                expectedStateFile = "var/lib/beets/state.pickle";
-              });
-              expectedSecretInclude = failures (runtime // {
-                expectedSecretInclude = "/run/secrets/./beets.yaml";
-              });
-            };
-            rootPaths = {
-              configDir = failures (runtime // { configDir = "/"; });
-              expectedDirectory = failures (runtime // {
-                expectedDirectory = "/";
-              });
-              expectedLibrary = failures (runtime // {
-                expectedLibrary = "/beets-library.db";
-              });
-            };
-            rootIdentity = identityFailures "root" "root";
-            numericIdentity = identityFailures "0" "0";
-            inherit defaultIdentity;
-            disabled = {
-              assertions = builtins.filter
-                (assertion:
-                  !assertion.assertion
-                  && lib.hasPrefix
-                    "services.cratedigger"
-                    assertion.message)
-                disabled.config.assertions;
-              services = builtins.filter
-                (name: lib.hasPrefix "cratedigger" name)
-                (builtins.attrNames disabled.config.systemd.services);
-            };
-          }
-        ''')
+        worlds = _shared_module_worlds()["beetsCapability"]
+        assert isinstance(worlds, dict)
         self.assertEqual(worlds["valid"], [])
         missing = worlds["missing"]
         assert isinstance(missing, dict)
@@ -1841,66 +1908,8 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
         self.assertEqual(worlds["disabled"], {"assertions": [], "services": []})
 
     def test_readiness_and_role_state_capabilities_evaluate(self) -> None:
-        units = self._nix_eval_json(r'''
-          let
-            f = builtins.getFlake (toString ./.);
-            lib = f.inputs.nixpkgs.lib;
-            modulePkgs = import f.inputs.nixpkgs {
-              system = builtins.currentSystem;
-            };
-            beetsPackage = import ./nix/beets.nix { pkgs = modulePkgs; };
-            system = lib.nixosSystem {
-              system = builtins.currentSystem;
-              modules = [
-                f.nixosModules.default
-                ({ ... }: {
-                  services.cratedigger = {
-                    enable = true;
-                    src = ./.;
-                    packageSet = modulePkgs;
-                    slskd.apiKeyFile = "/run/secrets/slskd-key";
-                    slskd.downloadDir = "/srv/slskd";
-                    pipelineDb.createLocally = true;
-                    web = {
-                      enable = true;
-                      hostName = "music.example.test";
-                      enableInsecure = true;
-                    };
-                    beets.runtime = {
-                      package = beetsPackage;
-                      configDir = "/etc/beets";
-                      expectedLibrary = "/srv/beets/beets-library.db";
-                      expectedDirectory = "/srv/music";
-                      expectedStateFile = "/var/lib/beets/state.pickle";
-                      expectedSecretInclude = "/run/secrets/beets.yaml";
-                      readinessUnits = [
-                        "beets-config-ready.service"
-                        "beets-secret-ready.service"
-                      ];
-                    };
-                    beets.validation = {
-                      stagingDir = "/srv/incoming";
-                      trackingFile = "/srv/incoming/tracking.jsonl";
-                    };
-                  };
-                })
-              ];
-            };
-            unit = name: let value = system.config.systemd.services.${name}; in {
-              after = value.after;
-              wants = value.wants;
-              requires = value.requires;
-              bindReadOnlyPaths = value.serviceConfig.BindReadOnlyPaths or [];
-              bindPaths = value.serviceConfig.BindPaths or [];
-              readWritePaths = value.serviceConfig.ReadWritePaths or [];
-            };
-          in {
-            main = unit "cratedigger";
-            importer = unit "cratedigger-importer";
-            preview = unit "cratedigger-import-preview-worker";
-            web = unit "cratedigger-web";
-          }
-        ''')
+        units = _shared_module_worlds()["beetsReadiness"]
+        assert isinstance(units, dict)
         readiness = {
             "beets-config-ready.service",
             "beets-secret-ready.service",
