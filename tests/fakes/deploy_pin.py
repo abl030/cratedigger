@@ -8,32 +8,67 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-_FAKE_COMMAND = r'''#!/usr/bin/env python3
+_FAKE_COMMAND = r'''#!/usr/bin/env -S python3 -S
+# -S skips `site` import for faster startup: this shim must stay stdlib-only.
 import fcntl
 import json
 import os
-import shutil
-import signal
 import sys
 import time
-from pathlib import Path
 
-state_path = Path(os.environ["DEPLOY_PIN_FAKE_STATE"])
-state_lock = state_path.with_suffix(".lock").open("a+", encoding="utf-8")
+# SIGTERM's POSIX signal number, hardcoded to avoid importing `signal` on
+# every one of the ~28 subprocess spawns per script run (tests/fakes/deploy_pin.py
+# profiling, issue #1131): the `signal` module costs real per-process import
+# time and this fake never needs anything from it beyond this one constant.
+SIGTERM = 15
+
+state_path = os.environ["DEPLOY_PIN_FAKE_STATE"]
+lock_path = os.path.splitext(state_path)[0] + ".lock"
+state_lock = open(lock_path, "a+", encoding="utf-8")
 fcntl.flock(state_lock, fcntl.LOCK_EX)
-state = json.loads(state_path.read_text(encoding="utf-8"))
-command = Path(sys.argv[0]).name
+with open(state_path, encoding="utf-8") as _f:
+    state = json.loads(_f.read())
+command = os.path.basename(sys.argv[0])
 raw_args = sys.argv[1:]
 
 
 def save():
-    state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+    with open(state_path, "w", encoding="utf-8") as _f:
+        _f.write(json.dumps(state, sort_keys=True))
 
 
 def fail(message):
     print(message, file=sys.stderr)
     save()
     raise SystemExit(1)
+
+
+def rmtree(path):
+    """Best-effort recursive delete -- avoids importing `shutil` per call.
+    Matches shutil.rmtree(ignore_errors=True) for a real directory or a
+    missing path, the only two shapes this fake ever produces (it only
+    ever deletes a plain directory it itself created via os.makedirs()).
+    Diverges for a non-directory root: shutil's ignore_errors=True leaves
+    a file/symlink root untouched, this unlinks that one entry instead --
+    unreachable here, but not identical, so said plainly rather than
+    claimed away. It never follows a symlink out of the tree: a symlinked
+    child is unlinked, never descended into."""
+    if not os.path.isdir(path) or os.path.islink(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return
+    try:
+        entries = os.listdir(path)
+    except OSError:
+        return
+    for name in entries:
+        rmtree(os.path.join(path, name))
+    try:
+        os.rmdir(path)
+    except OSError:
+        pass
 
 
 def lock_payload(revision):
@@ -96,17 +131,16 @@ if command == "nix":
     state["events"].append(["nix", *raw_args])
     save()
     time.sleep(state.get("nix_delay_seconds", 0))
-    state = json.loads(state_path.read_text(encoding="utf-8"))
+    with open(state_path, encoding="utf-8") as _f:
+        state = json.loads(_f.read())
     if state.get("fault") == "nix":
         fail("fake nix update failed")
     if raw_args != ["flake", "update", "cratedigger-src"]:
         fail(f"unexpected nix argv: {raw_args!r}")
     if state["remote_move_on_nix"]:
         move_live_remote()
-    Path.cwd().joinpath("flake.lock").write_text(
-        lock_payload(os.environ["DEPLOY_PIN_FAKE_TARGET"]),
-        encoding="utf-8",
-    )
+    with open(os.path.join(os.getcwd(), "flake.lock"), "w", encoding="utf-8") as _f:
+        _f.write(lock_payload(os.environ["DEPLOY_PIN_FAKE_TARGET"]))
     save()
     raise SystemExit(0)
 
@@ -114,9 +148,9 @@ if command != "git":
     fail(f"unexpected fake command: {command}")
 
 args = list(raw_args)
-cwd = Path.cwd()
+cwd = os.getcwd()
 if args[:1] == ["-C"]:
-    cwd = Path(args[1])
+    cwd = args[1]
     args = args[2:]
 
 if args[:1] == ["fetch"]:
@@ -155,7 +189,7 @@ elif args[:3] == ["rev-parse", "--verify", "--quiet"]:
             and value in state["commits"]
         ):
             save()
-            os.kill(os.getppid(), signal.SIGTERM)
+            os.kill(os.getppid(), SIGTERM)
             time.sleep(0.1)
             raise SystemExit(143)
         print(value)
@@ -180,25 +214,24 @@ elif args[:2] == ["rev-parse", "--verify"]:
         and value in state["commits"]
     ):
         save()
-        os.kill(os.getppid(), signal.SIGTERM)
+        os.kill(os.getppid(), SIGTERM)
         time.sleep(0.1)
         raise SystemExit(143)
     print(value)
 elif args[:3] == ["worktree", "add", "--detach"]:
-    worktree = Path(args[3])
+    worktree = args[3]
     revision = args[4]
     commit = captured_object(revision)
     if commit is None:
         fail(f"worktree revision was not captured: {revision}")
     if state["remote_move_on_worktree_add"]:
         move_live_remote()
-    worktree.mkdir(parents=True)
-    worktree.joinpath("flake.lock").write_text(
-        lock_payload(commit["target"]), encoding="utf-8"
-    )
-    state["worktree"] = str(worktree)
+    os.makedirs(worktree)
+    with open(os.path.join(worktree, "flake.lock"), "w", encoding="utf-8") as _f:
+        _f.write(lock_payload(commit["target"]))
+    state["worktree"] = worktree
     state["worktree_base"] = revision
-    state["events"].append(["worktree-add", str(worktree), revision])
+    state["events"].append(["worktree-add", worktree, revision])
 elif args == ["status", "--porcelain"]:
     print(" M flake.lock")
 elif args == ["add", "flake.lock"]:
@@ -209,9 +242,8 @@ elif args[:2] == ["symbolic-ref", "HEAD"]:
 elif args[:2] == ["commit", "-m"]:
     state["commit_count"] += 1
     revision = f'{0xC000 + state["commit_count"]:040x}'
-    target = json.loads(cwd.joinpath("flake.lock").read_text(
-        encoding="utf-8"
-    ))["nodes"]["cratedigger-src"]["locked"]["rev"]
+    with open(os.path.join(cwd, "flake.lock"), encoding="utf-8") as _f:
+        target = json.loads(_f.read())["nodes"]["cratedigger-src"]["locked"]["rev"]
     state["commits"][revision] = {
         "parent": state["worktree_base"],
         "target": target,
@@ -239,7 +271,7 @@ elif args == ["rev-parse", "HEAD"]:
         "invalid_signature_signal_after_commit",
     }:
         save()
-        os.kill(os.getppid(), signal.SIGTERM)
+        os.kill(os.getppid(), SIGTERM)
         time.sleep(0.1)
         raise SystemExit(143)
     print(state["worktree_head"])
@@ -360,11 +392,11 @@ elif args[:1] == ["ls-remote"] and args[-1] == "refs/heads/master":
         move_live_remote()
     print(f'{state["remote_rev"]}\trefs/heads/master')
 elif args[:2] == ["worktree", "remove"]:
-    worktree = Path(args[-1])
-    state["events"].append(["worktree-remove", str(worktree)])
+    worktree = args[-1]
+    state["events"].append(["worktree-remove", worktree])
     if state.get("fault") == "cleanup":
         fail("fake worktree cleanup failed")
-    shutil.rmtree(worktree, ignore_errors=True)
+    rmtree(worktree)
     state["worktree"] = None
 else:
     fail(f"unexpected git argv in {cwd}: {args!r}")
