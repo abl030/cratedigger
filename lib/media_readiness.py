@@ -415,16 +415,14 @@ def average_bitrate_kbps_from_frames(
     ``8517888 * 8 == 266.184 s * 256 kbps * 1000`` exactly, yet the float
     path yielded ``255.99999999999997`` and reported 255.
 
-    That single kbps is not cosmetic. Per-track bitrate uniformity is what
-    the two decision-path ``is_cbr`` derivations read
-    (``harness/import_one.py`` for the candidate, ``lib.beets_db`` for the
-    installed copy; the preview lane instead reads mutagen's declared
-    ``bitrate_mode``). One odd track makes a constant-bitrate album look
-    variable, and MP3 then ranks through ``cfg.mp3_vbr``
-    (transparent >= 245) instead of ``cfg.mp3_cbr`` (transparent >= 320).
-    At 255 kbps that ladder swap alone is GOOD -> TRANSPARENT, two tiers;
-    on the live album it was enough to put the candidate's TRANSPARENT above
-    the installed copy's EXCELLENT and trigger the re-import.
+    That single kbps is not cosmetic. It is a rank-band boundary away from
+    changing an album's tier, and both sides of every comparison must derive
+    it identically or the same audio compares unequal — the Koppel row above
+    re-imported an album over itself for exactly that reason (dl 39947).
+    (It used to matter a second way: per-track bitrate uniformity fed an
+    ``is_cbr`` boolean that chose between two MP3 ladders 75 kbps apart, so
+    one odd track moved a whole album two tiers. Issue #1145 removed that
+    amplifier — there is one MP3 ladder now, and ``is_cbr`` steers no rank.)
 
     The quotient is therefore evaluated as an exact integer ratio and
     rounded half-up. Rounding rather than truncating is the second half:
@@ -443,6 +441,57 @@ def average_bitrate_kbps_from_frames(
     numerator = compressed_bytes * 8 * sample_rate
     denominator = sample_count * 1000
     return (numerator + denominator // 2) // denominator
+
+
+def mp3_encoder_settings(path: Path) -> str | None:
+    """Read one MP3's LAME-tag encoder settings, or ``None``.
+
+    ffprobe does not surface the LAME tag, so this is the one mutagen read in
+    this module. It is deliberately NOT a ``MediaFileFacts`` field: every
+    ``inspect_media`` caller would then pay an extra open per file for a fact
+    only the MP3 rank contract consumes.
+
+    Returns the raw string LAME wrote (``"-V 0"``, ``"-V 2 --vbr-new"``,
+    ``"-b 320"``, …), or ``None`` when the file has no LAME tag or cannot be
+    read at all. Parsing it is
+    ``lib.quality.encoder_contract.lame_vbr_level``'s job; an unreadable file
+    is indistinguishable from an untagged one here, and both withhold the
+    contract downstream.
+    """
+    try:
+        from mutagen.mp3 import MP3
+
+        settings = getattr(MP3(str(path)).info, "encoder_settings", None)
+    except Exception:
+        logger.debug("encoder settings unreadable for %s", path, exc_info=True)
+        return None
+    if not isinstance(settings, str) or not settings.strip():
+        return None
+    return settings
+
+
+def folder_mp3_encoder_settings(folder_path: str) -> list[str | None] | None:
+    """LAME settings for every MP3 in an all-MP3 folder, else ``None``.
+
+    ``None`` means "this folder cannot certify an album-wide MP3 contract":
+    it holds no audio, or it holds a non-MP3 audio file. Otherwise one entry
+    per MP3, in path order, each possibly ``None`` for a file with no readable
+    LAME tag — ``mp3_vbr_contract_format`` withholds on any of those.
+
+    Extension-based, matching ``_audio_paths``. A mislabelled file is not a
+    risk here: a non-MP3 named ``.mp3`` has no LAME tag, so mutagen returns
+    nothing and the album withholds its contract, which is the fail-closed
+    direction.
+    """
+    try:
+        paths = _audio_paths(folder_path)
+    except MediaReadinessError:
+        return None
+    if not paths:
+        return None
+    if any(path.suffix.lower() != ".mp3" for path in paths):
+        return None
+    return [mp3_encoder_settings(path) for path in paths]
 
 
 def _facts_for_path(path: Path) -> MediaFileFacts:

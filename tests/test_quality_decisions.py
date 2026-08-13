@@ -809,8 +809,12 @@ class TestGateRank(unittest.TestCase):
         cfg = QualityRankConfig.defaults()
         # Without clamp, label "mp3 320" → TRANSPARENT
         self.assertEqual(measurement_rank(m, cfg), QualityRank.TRANSPARENT)
-        # With clamp, spectral 128 against mp3_vbr.acceptable=130 → POOR
-        self.assertEqual(gate_rank(m, cfg), QualityRank.POOR)
+        # With clamp, spectral 128 against the one MP3 table (acceptable=128)
+        # → ACCEPTABLE. Pre-#1145 the clamp read the estimate through the more
+        # generous ``mp3_vbr`` table (acceptable=130) and landed on POOR; the
+        # class ladder these estimates come from is the 96/112/128/…/320 one,
+        # which is what ``cfg.mp3`` now holds.
+        self.assertEqual(gate_rank(m, cfg), QualityRank.ACCEPTABLE)
 
     def test_verified_lossless_ignores_stale_spectral_clamp(self):
         """Verified lossless is already source-proven; a stale pre-import
@@ -836,7 +840,7 @@ class TestGateRank(unittest.TestCase):
             format="mp3", avg_bitrate_kbps=140, is_cbr=False,
             spectral_bitrate_kbps=240)
         cfg = QualityRankConfig.defaults()
-        # measurement: 140 → ACCEPTABLE; spectral 240 → EXCELLENT (higher); no clamp
+        # measurement: 140 → ACCEPTABLE; spectral 240 → GOOD (higher); no clamp
         self.assertEqual(gate_rank(m, cfg), QualityRank.ACCEPTABLE)
 
     def test_afx_analord_regression(self):
@@ -853,7 +857,7 @@ class TestGateRank(unittest.TestCase):
             spectral_bitrate_kbps=160)
         cfg = QualityRankConfig.defaults()
         rank = gate_rank(m, cfg)
-        # Spectral 160 → mp3_vbr.acceptable=130, between acceptable/good → ACCEPTABLE
+        # Spectral 160 → cfg.mp3 acceptable=128, below good=192 → ACCEPTABLE
         self.assertEqual(rank, QualityRank.ACCEPTABLE)
         # And quality_gate_decision agrees
         self.assertEqual(quality_gate_decision(m, cfg), "requeue_upgrade")
@@ -1850,12 +1854,12 @@ class TestFullPipelineContract(unittest.TestCase):
 
         m = AudioQualityMeasurement(
             min_bitrate_kbps=200,
-            avg_bitrate_kbps=245,
-            median_bitrate_kbps=245,
+            avg_bitrate_kbps=320,
+            median_bitrate_kbps=320,
             format="MP3",
             is_cbr=False,
         )
-        # With `==` comparison the AVG policy picks avg=245 → TRANSPARENT.
+        # With `==` comparison the AVG policy picks avg=320 → TRANSPARENT.
         # With `is` comparison it would fall through to min=200 → GOOD.
         self.assertEqual(
             measurement_rank(m, foreign_cfg).name, "TRANSPARENT",
@@ -2713,8 +2717,8 @@ class TestResolveRejectionSearchOverride(unittest.TestCase):
     def setUp(self):
         self.cfg = QualityRankConfig.defaults()
         self.measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=self.cfg.mp3_cbr.transparent,
-            avg_bitrate_kbps=self.cfg.mp3_cbr.transparent,
+            min_bitrate_kbps=self.cfg.mp3.transparent,
+            avg_bitrate_kbps=self.cfg.mp3.transparent,
             format="MP3",
             is_cbr=True,
             spectral_grade="genuine",
@@ -3039,8 +3043,8 @@ class TestTransparentGenuineLossyRejectionBackfill(unittest.TestCase):
     def test_codec_general_positive_matrix(self):
         cfg = QualityRankConfig.defaults()
         cases = [
-            ("mp3 cbr 320", "MP3", cfg.mp3_cbr.transparent, True),
-            ("mp3 v0 measurement", "MP3", cfg.mp3_vbr.transparent, False),
+            ("mp3 cbr 320", "MP3", cfg.mp3.transparent, True),
+            ("mp3 v0 measurement", "mp3 v0", cfg.mp3.transparent, False),
             ("opus transparent", "Opus", cfg.opus.transparent, False),
             ("aac transparent", "AAC", cfg.aac.transparent, False),
             ("vorbis transparent", "Vorbis", cfg.vorbis.transparent, False),
@@ -3060,11 +3064,11 @@ class TestTransparentGenuineLossyRejectionBackfill(unittest.TestCase):
     def test_negative_matrix(self):
         cfg = QualityRankConfig.defaults()
         cases = [
-            ("excellent mp3", "MP3", cfg.mp3_cbr.excellent, True, True, "genuine", None),
-            ("transparent suspect", "MP3", cfg.mp3_cbr.transparent, True, True, "suspect", None),
-            ("transparent marginal", "MP3", cfg.mp3_cbr.transparent, True, True, "marginal", None),
-            ("failed audit", "MP3", cfg.mp3_cbr.transparent, True, True, None, "spectral failed"),
-            ("missing audit", "MP3", cfg.mp3_cbr.transparent, True, False, None, None),
+            ("excellent mp3", "MP3", cfg.mp3.excellent, True, True, "genuine", None),
+            ("transparent suspect", "MP3", cfg.mp3.transparent, True, True, "suspect", None),
+            ("transparent marginal", "MP3", cfg.mp3.transparent, True, True, "marginal", None),
+            ("failed audit", "MP3", cfg.mp3.transparent, True, True, None, "spectral failed"),
+            ("missing audit", "MP3", cfg.mp3.transparent, True, False, None, None),
             ("vorbis transparent suspect", "Vorbis", cfg.vorbis.transparent, False, True, "suspect", None),
             ("vorbis transparent likely transcode", "Vorbis", cfg.vorbis.transparent, False, True, "likely_transcode", None),
             ("wma transparent suspect", "WMA", cfg.wma.transparent, False, True, "suspect", None),
@@ -3087,8 +3091,8 @@ class TestTransparentGenuineLossyRejectionBackfill(unittest.TestCase):
 
         cfg = QualityRankConfig.defaults()
         measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=cfg.mp3_cbr.transparent,
-            avg_bitrate_kbps=cfg.mp3_cbr.transparent,
+            min_bitrate_kbps=cfg.mp3.transparent,
+            avg_bitrate_kbps=cfg.mp3.transparent,
             format="MP3",
             is_cbr=True,
             spectral_grade="genuine",
@@ -3156,118 +3160,141 @@ class TestQualityRank(unittest.TestCase):
     (the defaults are the contract).
     """
 
-    # (description, format_hint, bitrate_kbps, is_cbr, expected_rank)
+    # (description, format_hint, bitrate_kbps, expected_rank)
     CASES: ClassVar = [
         # --- Step 1: both None → UNKNOWN ---
-        ("None format + None bitrate",             None,            None, False, QualityRank.UNKNOWN),
+        ("None format + None bitrate",             None,            None, QualityRank.UNKNOWN),
 
         # --- Step 2: lossless family ---
-        ("FLAC label",                             "FLAC",          1000, False, QualityRank.LOSSLESS),
-        ("flac label lowercase",                   "flac",          1200, False, QualityRank.LOSSLESS),
-        ("lossless label",                         "lossless",      1100, False, QualityRank.LOSSLESS),
-        ("ALAC label",                             "ALAC",           900, False, QualityRank.LOSSLESS),
-        ("WAV label",                              "WAV",           1411, False, QualityRank.LOSSLESS),
-        ("flac with None bitrate",                 "flac",          None, False, QualityRank.LOSSLESS),
+        ("FLAC label",                             "FLAC",          1000, QualityRank.LOSSLESS),
+        ("flac label lowercase",                   "flac",          1200, QualityRank.LOSSLESS),
+        ("lossless label",                         "lossless",      1100, QualityRank.LOSSLESS),
+        ("ALAC label",                             "ALAC",           900, QualityRank.LOSSLESS),
+        ("WAV label",                              "WAV",           1411, QualityRank.LOSSLESS),
+        ("flac with None bitrate",                 "flac",          None, QualityRank.LOSSLESS),
 
         # --- Step 3: explicit MP3 VBR quality label ---
-        ("mp3 v0 lo-fi",                           "mp3 v0",         207, False, QualityRank.TRANSPARENT),
-        ("mp3 v0 dense",                           "mp3 v0",         260, False, QualityRank.TRANSPARENT),
-        ("mp3 v1 label",                           "mp3 v1",         220, False, QualityRank.EXCELLENT),
-        ("mp3 v2 label",                           "mp3 v2",         190, False, QualityRank.EXCELLENT),
-        ("mp3 v3 label",                           "mp3 v3",         170, False, QualityRank.GOOD),
-        ("mp3 v4 label",                           "mp3 v4",         155, False, QualityRank.GOOD),
-        ("mp3 v5 label",                           "mp3 v5",         130, False, QualityRank.ACCEPTABLE),
-        ("mp3 v9 label",                           "mp3 v9",          65, False, QualityRank.ACCEPTABLE),
+        ("mp3 v0 lo-fi",                           "mp3 v0",         207, QualityRank.TRANSPARENT),
+        ("mp3 v0 dense",                           "mp3 v0",         260, QualityRank.TRANSPARENT),
+        ("mp3 v1 label",                           "mp3 v1",         220, QualityRank.EXCELLENT),
+        ("mp3 v2 label",                           "mp3 v2",         190, QualityRank.EXCELLENT),
+        ("mp3 v3 label",                           "mp3 v3",         170, QualityRank.GOOD),
+        ("mp3 v4 label",                           "mp3 v4",         155, QualityRank.GOOD),
+        ("mp3 v5 label",                           "mp3 v5",         130, QualityRank.ACCEPTABLE),
+        ("mp3 v9 label",                           "mp3 v9",          65, QualityRank.ACCEPTABLE),
 
         # --- Step 4: explicit Opus bitrate label ---
-        ("opus 128 label",                         "opus 128",        95, False, QualityRank.TRANSPARENT),
-        ("opus 96 label",                          "opus 96",        100, False, QualityRank.EXCELLENT),
-        ("opus 64 label",                          "opus 64",        100, False, QualityRank.GOOD),
-        ("opus 48 label",                          "opus 48",        100, False, QualityRank.ACCEPTABLE),
-        ("opus 32 label",                          "opus 32",        100, False, QualityRank.POOR),
+        ("opus 128 label",                         "opus 128",        95, QualityRank.TRANSPARENT),
+        ("opus 96 label",                          "opus 96",        100, QualityRank.EXCELLENT),
+        ("opus 64 label",                          "opus 64",        100, QualityRank.GOOD),
+        ("opus 48 label",                          "opus 48",        100, QualityRank.ACCEPTABLE),
+        ("opus 32 label",                          "opus 32",        100, QualityRank.POOR),
 
         # --- Step 4: explicit MP3 CBR bitrate label (used for "mp3 320" style) ---
-        ("mp3 320 label",                          "mp3 320",        320, True,  QualityRank.TRANSPARENT),
-        ("mp3 256 label",                          "mp3 256",        256, True,  QualityRank.EXCELLENT),
-        ("mp3 192 label",                          "mp3 192",        192, True,  QualityRank.GOOD),
-        ("mp3 128 label",                          "mp3 128",        128, True,  QualityRank.ACCEPTABLE),
+        ("mp3 320 label",                          "mp3 320",        320, QualityRank.TRANSPARENT),
+        ("mp3 256 label",                          "mp3 256",        256, QualityRank.EXCELLENT),
+        ("mp3 192 label",                          "mp3 192",        192, QualityRank.GOOD),
+        ("mp3 128 label",                          "mp3 128",        128, QualityRank.ACCEPTABLE),
 
         # --- Step 4: explicit AAC bitrate label ---
-        ("aac 192 label",                          "aac 192",        192, False, QualityRank.TRANSPARENT),
-        ("aac 144 label",                          "aac 144",        144, False, QualityRank.EXCELLENT),
-        ("aac 112 label",                          "aac 112",        112, False, QualityRank.GOOD),
-        ("aac 80 label",                           "aac 80",          80, False, QualityRank.ACCEPTABLE),
+        ("aac 192 label",                          "aac 192",        192, QualityRank.TRANSPARENT),
+        ("aac 144 label",                          "aac 144",        144, QualityRank.EXCELLENT),
+        ("aac 112 label",                          "aac 112",        112, QualityRank.GOOD),
+        ("aac 80 label",                           "aac 80",          80, QualityRank.ACCEPTABLE),
         ("vorbis bitrate label ignores measurement",
-         f"vorbis {CFG.vorbis.transparent}", 1, False, QualityRank.TRANSPARENT),
+         f"vorbis {CFG.vorbis.transparent}", 1, QualityRank.TRANSPARENT),
         ("wma bitrate label ignores measurement",
-         f"wma {CFG.wma.transparent}", 1, False, QualityRank.TRANSPARENT),
+         f"wma {CFG.wma.transparent}", 1, QualityRank.TRANSPARENT),
 
         # --- Step 5: bare codec name + measured bitrate (beets items.format path) ---
-        # Default mp3_vbr bands: transparent=245, excellent=210, good=170, acceptable=130
-        ("MP3 VBR beets 260",                      "MP3",            260, False, QualityRank.TRANSPARENT),
-        ("MP3 VBR beets 245",                      "MP3",            245, False, QualityRank.TRANSPARENT),
-        ("MP3 VBR beets 220",                      "MP3",            220, False, QualityRank.EXCELLENT),
-        ("MP3 VBR beets 210",                      "MP3",            210, False, QualityRank.EXCELLENT),
-        ("MP3 VBR beets 180",                      "MP3",            180, False, QualityRank.GOOD),
-        ("MP3 VBR beets 170",                      "MP3",            170, False, QualityRank.GOOD),
-        ("MP3 VBR beets 140",                      "MP3",            140, False, QualityRank.ACCEPTABLE),
-        ("MP3 VBR beets 130",                      "MP3",            130, False, QualityRank.ACCEPTABLE),
-        ("MP3 VBR beets 100",                      "MP3",            100, False, QualityRank.POOR),
-        ("MP3 CBR beets 320",                      "MP3",            320, True,  QualityRank.TRANSPARENT),
-        ("MP3 CBR beets 256",                      "MP3",            256, True,  QualityRank.EXCELLENT),
-        ("MP3 CBR beets 192",                      "MP3",            192, True,  QualityRank.GOOD),
-        ("MP3 CBR beets 128",                      "MP3",            128, True,  QualityRank.ACCEPTABLE),
-        ("Opus beets 120",                         "Opus",           120, False, QualityRank.TRANSPARENT),
-        ("Opus beets 95",                          "Opus",            95, False, QualityRank.EXCELLENT),
-        ("Opus beets 70",                          "Opus",            70, False, QualityRank.GOOD),
-        ("Opus beets 50",                          "Opus",            50, False, QualityRank.ACCEPTABLE),
-        ("AAC beets 200",                          "AAC",            200, False, QualityRank.TRANSPARENT),
-        ("AAC beets 150",                          "AAC",            150, False, QualityRank.EXCELLENT),
-        ("AAC beets 120",                          "AAC",            120, False, QualityRank.GOOD),
+        # One MP3 table since #1145: transparent=320, excellent=256,
+        # good=192, acceptable=128. The pre-#1145 rows below the 320 edge
+        # are the ladder collapse in table form — 260 was TRANSPARENT under
+        # the VBR table and is EXCELLENT here, 245 was TRANSPARENT and is
+        # GOOD, and neither depends on an encoding mode any more.
+        ("MP3 beets 260",                          "MP3",            260, QualityRank.EXCELLENT),
+        ("MP3 beets 245",                          "MP3",            245, QualityRank.GOOD),
+        ("MP3 beets 220",                          "MP3",            220, QualityRank.GOOD),
+        ("MP3 beets 210",                          "MP3",            210, QualityRank.GOOD),
+        ("MP3 beets 180",                          "MP3",            180, QualityRank.ACCEPTABLE),
+        ("MP3 beets 170",                          "MP3",            170, QualityRank.ACCEPTABLE),
+        ("MP3 beets 140",                          "MP3",            140, QualityRank.ACCEPTABLE),
+        ("MP3 beets 130",                          "MP3",            130, QualityRank.ACCEPTABLE),
+        ("MP3 beets 100",                          "MP3",            100, QualityRank.POOR),
+        # MP3: exact and immediately below every configured band edge.
+        ("MP3 transparent edge", "MP3", CFG.mp3.transparent, QualityRank.TRANSPARENT),
+        ("MP3 below transparent", "MP3", CFG.mp3.transparent - 1, QualityRank.EXCELLENT),
+        ("MP3 excellent edge", "MP3", CFG.mp3.excellent, QualityRank.EXCELLENT),
+        ("MP3 below excellent", "MP3", CFG.mp3.excellent - 1, QualityRank.GOOD),
+        ("MP3 good edge", "MP3", CFG.mp3.good, QualityRank.GOOD),
+        ("MP3 below good", "MP3", CFG.mp3.good - 1, QualityRank.ACCEPTABLE),
+        ("MP3 acceptable edge", "MP3", CFG.mp3.acceptable, QualityRank.ACCEPTABLE),
+        ("MP3 below acceptable", "MP3", CFG.mp3.acceptable - 1, QualityRank.POOR),
+        ("Opus beets 120",                         "Opus",           120, QualityRank.TRANSPARENT),
+        ("Opus beets 95",                          "Opus",            95, QualityRank.EXCELLENT),
+        ("Opus beets 70",                          "Opus",            70, QualityRank.GOOD),
+        ("Opus beets 50",                          "Opus",            50, QualityRank.ACCEPTABLE),
+        ("AAC beets 200",                          "AAC",            200, QualityRank.TRANSPARENT),
+        ("AAC beets 150",                          "AAC",            150, QualityRank.EXCELLENT),
+        ("AAC beets 120",                          "AAC",            120, QualityRank.GOOD),
 
         # Vorbis: exact and immediately below every configured band edge.
-        ("Vorbis transparent edge", "Vorbis", CFG.vorbis.transparent, False, QualityRank.TRANSPARENT),
-        ("Vorbis below transparent", "Vorbis", CFG.vorbis.transparent - 1, False, QualityRank.EXCELLENT),
-        ("Vorbis excellent edge", "Vorbis", CFG.vorbis.excellent, False, QualityRank.EXCELLENT),
-        ("Vorbis below excellent", "Vorbis", CFG.vorbis.excellent - 1, False, QualityRank.GOOD),
-        ("Vorbis good edge", "Vorbis", CFG.vorbis.good, False, QualityRank.GOOD),
-        ("Vorbis below good", "Vorbis", CFG.vorbis.good - 1, False, QualityRank.ACCEPTABLE),
-        ("Vorbis acceptable edge", "Vorbis", CFG.vorbis.acceptable, False, QualityRank.ACCEPTABLE),
-        ("Vorbis below acceptable", "Vorbis", CFG.vorbis.acceptable - 1, False, QualityRank.POOR),
+        ("Vorbis transparent edge", "Vorbis", CFG.vorbis.transparent, QualityRank.TRANSPARENT),
+        ("Vorbis below transparent", "Vorbis", CFG.vorbis.transparent - 1, QualityRank.EXCELLENT),
+        ("Vorbis excellent edge", "Vorbis", CFG.vorbis.excellent, QualityRank.EXCELLENT),
+        ("Vorbis below excellent", "Vorbis", CFG.vorbis.excellent - 1, QualityRank.GOOD),
+        ("Vorbis good edge", "Vorbis", CFG.vorbis.good, QualityRank.GOOD),
+        ("Vorbis below good", "Vorbis", CFG.vorbis.good - 1, QualityRank.ACCEPTABLE),
+        ("Vorbis acceptable edge", "Vorbis", CFG.vorbis.acceptable, QualityRank.ACCEPTABLE),
+        ("Vorbis below acceptable", "Vorbis", CFG.vorbis.acceptable - 1, QualityRank.POOR),
 
         # WMA: exact and immediately below every configured band edge.
-        ("WMA transparent edge", "WMA", CFG.wma.transparent, False, QualityRank.TRANSPARENT),
-        ("WMA below transparent", "WMA", CFG.wma.transparent - 1, False, QualityRank.EXCELLENT),
-        ("WMA excellent edge", "WMA", CFG.wma.excellent, False, QualityRank.EXCELLENT),
-        ("WMA below excellent", "WMA", CFG.wma.excellent - 1, False, QualityRank.GOOD),
-        ("WMA good edge", "WMA", CFG.wma.good, False, QualityRank.GOOD),
-        ("WMA below good", "WMA", CFG.wma.good - 1, False, QualityRank.ACCEPTABLE),
-        ("WMA acceptable edge", "WMA", CFG.wma.acceptable, False, QualityRank.ACCEPTABLE),
-        ("WMA below acceptable", "WMA", CFG.wma.acceptable - 1, False, QualityRank.POOR),
+        ("WMA transparent edge", "WMA", CFG.wma.transparent, QualityRank.TRANSPARENT),
+        ("WMA below transparent", "WMA", CFG.wma.transparent - 1, QualityRank.EXCELLENT),
+        ("WMA excellent edge", "WMA", CFG.wma.excellent, QualityRank.EXCELLENT),
+        ("WMA below excellent", "WMA", CFG.wma.excellent - 1, QualityRank.GOOD),
+        ("WMA good edge", "WMA", CFG.wma.good, QualityRank.GOOD),
+        ("WMA below good", "WMA", CFG.wma.good - 1, QualityRank.ACCEPTABLE),
+        ("WMA acceptable edge", "WMA", CFG.wma.acceptable, QualityRank.ACCEPTABLE),
+        ("WMA below acceptable", "WMA", CFG.wma.acceptable - 1, QualityRank.POOR),
 
         # --- Step 6: unknown codec family ---
-        ("unknown codec",                          "musepack",       200, False, QualityRank.UNKNOWN),
-        ("unknown codec with bitrate label",       "musepack 192",  None, False, QualityRank.UNKNOWN),
-        ("unsupported WMA vbr-ish label",          "wma v0",         None, False, QualityRank.UNKNOWN),
-        ("empty string format",                    "",               200, False, QualityRank.UNKNOWN),
-        ("whitespace-only format",                 "   ",            200, False, QualityRank.UNKNOWN),
+        ("unknown codec",                          "musepack",       200, QualityRank.UNKNOWN),
+        ("unknown codec with bitrate label",       "musepack 192",  None, QualityRank.UNKNOWN),
+        ("unsupported WMA vbr-ish label",          "wma v0",         None, QualityRank.UNKNOWN),
+        ("empty string format",                    "",               200, QualityRank.UNKNOWN),
+        ("whitespace-only format",                 "   ",            200, QualityRank.UNKNOWN),
 
         # --- Edge: bare codec with None bitrate → UNKNOWN ---
-        ("bare MP3 no bitrate",                    "MP3",            None, False, QualityRank.UNKNOWN),
-        ("bare Opus no bitrate",                   "Opus",           None, False, QualityRank.UNKNOWN),
+        ("bare MP3 no bitrate",                    "MP3",            None, QualityRank.UNKNOWN),
+        ("bare Opus no bitrate",                   "Opus",           None, QualityRank.UNKNOWN),
     ]
 
     def test_quality_rank_table(self):
-        for desc, fmt, br, is_cbr, expected in self.CASES:
+        for desc, fmt, br, expected in self.CASES:
             with self.subTest(desc=desc):
                 self.assertEqual(
-                    quality_rank(fmt, br, is_cbr, CFG), expected,
-                    f"{desc}: quality_rank({fmt!r}, {br!r}, {is_cbr!r}) "
+                    quality_rank(fmt, br, CFG), expected,
+                    f"{desc}: quality_rank({fmt!r}, {br!r}) "
                     f"expected {expected!r}",
                 )
 
-    def test_vorbis_and_wma_ignore_cbr_inference(self):
-        for family, bands in (("Vorbis", CFG.vorbis), ("WMA", CFG.wma)):
+    def test_every_family_ignores_the_encoding_mode(self):
+        """#1145 invariant I1, at the boundary where the mode still exists.
+
+        ``quality_rank`` no longer takes ``is_cbr`` at all, so the deterministic
+        pin has to sit one level up at ``measurement_rank``, which reads
+        ``AudioQualityMeasurement.is_cbr``. MP3 is the family that used to
+        branch; the others are the must-still-work control. A mutant that
+        restores an ``is_cbr`` branch for ANY family dies here.
+        """
+        for family, bands in (
+            ("MP3", CFG.mp3),
+            ("Vorbis", CFG.vorbis),
+            ("WMA", CFG.wma),
+            ("Opus", CFG.opus),
+            ("AAC", CFG.aac),
+        ):
             for bitrate in (
                 bands.transparent, bands.transparent - 1,
                 bands.excellent, bands.excellent - 1,
@@ -3275,10 +3302,46 @@ class TestQualityRank(unittest.TestCase):
                 bands.acceptable, bands.acceptable - 1,
             ):
                 with self.subTest(family=family, bitrate=bitrate):
+                    def measurement(
+                        is_cbr: bool,
+                        family: str = family,
+                        bitrate: int = bitrate,
+                    ) -> AudioQualityMeasurement:
+                        return AudioQualityMeasurement(
+                            min_bitrate_kbps=bitrate,
+                            avg_bitrate_kbps=bitrate,
+                            median_bitrate_kbps=bitrate,
+                            format=family,
+                            is_cbr=is_cbr,
+                        )
                     self.assertEqual(
-                        quality_rank(family, bitrate, False, CFG),
-                        quality_rank(family, bitrate, True, CFG),
+                        measurement_rank(measurement(False), CFG),
+                        measurement_rank(measurement(True), CFG),
                     )
+
+    def test_mp3_ladder_collapse_moves_the_bare_measured_bands(self):
+        """The collapse itself: bare MP3 245 was TRANSPARENT, now GOOD.
+
+        Paired with the promotion pin below — together they are the whole
+        point of ordering scope A before scope B. This one would pass just as
+        well against the old ``mp3_cbr`` table, which is why it is not
+        sufficient on its own.
+        """
+        self.assertEqual(quality_rank("MP3", 245, CFG), QualityRank.GOOD)
+        self.assertEqual(quality_rank("MP3", 320, CFG), QualityRank.TRANSPARENT)
+
+    def test_proven_v0_contract_survives_the_collapse(self):
+        """Scope A rescues exactly the rows scope B would demote.
+
+        Same measured 245 kbps: bare it is GOOD, contract-bearing it is
+        TRANSPARENT. This is the two-tier gap the issue's ordering
+        requirement exists for.
+        """
+        self.assertEqual(quality_rank("mp3 v0", 245, CFG), QualityRank.TRANSPARENT)
+        self.assertEqual(
+            quality_rank("mp3 v0", 245, CFG),
+            CFG.mp3_vbr_levels[0],
+        )
 
     def test_cross_codec_band_parity(self):
         cases = [
@@ -3294,8 +3357,8 @@ class TestQualityRank(unittest.TestCase):
         for desc, left_fmt, left_br, right_fmt, right_br in cases:
             with self.subTest(desc=desc):
                 self.assertEqual(
-                    quality_rank(left_fmt, left_br, False, CFG),
-                    quality_rank(right_fmt, right_br, False, CFG),
+                    quality_rank(left_fmt, left_br, CFG),
+                    quality_rank(right_fmt, right_br, CFG),
                 )
 
 
@@ -3312,8 +3375,8 @@ class TestMeasurementRank(unittest.TestCase):
         m = AudioQualityMeasurement(
             min_bitrate_kbps=260, avg_bitrate_kbps=None, format="MP3")
         # Legacy measurement — AVG metric falls back to min.
-        # 260 is above default mp3_vbr.transparent=245 → TRANSPARENT.
-        self.assertEqual(measurement_rank(m, CFG), QualityRank.TRANSPARENT)
+        # 260 is above default cfg.mp3.excellent=256 → EXCELLENT.
+        self.assertEqual(measurement_rank(m, CFG), QualityRank.EXCELLENT)
 
     def test_min_metric_uses_min(self):
         cfg = QualityRankConfig(bitrate_metric=RankBitrateMetric.MIN)
@@ -3334,10 +3397,10 @@ class TestMeasurementRank(unittest.TestCase):
         # (description, min, avg, median, format, expected_rank)
         ("median wins over outlier-low min — Opus 130 album",
          60, 128, 130, "Opus", QualityRank.TRANSPARENT),
-        ("median wins over outlier-high avg — MP3 V0 album with one 320 hidden track",
-         200, 230, 215, "MP3", QualityRank.EXCELLENT),
+        ("median wins over outlier-high avg — MP3 album with one 320 hidden track",
+         200, 230, 215, "MP3", QualityRank.GOOD),
         ("median falls back to min when None",
-         260, 260, None, "MP3", QualityRank.TRANSPARENT),
+         260, 260, None, "MP3", QualityRank.EXCELLENT),
         ("median below acceptable → POOR",
          128, 128, 100, "MP3", QualityRank.POOR),
         ("median classifies bare Opus into GOOD band",
@@ -3368,8 +3431,8 @@ class TestMeasurementRank(unittest.TestCase):
         """Legacy measurements with only min populated still classify under MEDIAN."""
         cfg_median = QualityRankConfig(bitrate_metric=RankBitrateMetric.MEDIAN)
         m = AudioQualityMeasurement(min_bitrate_kbps=260, format="MP3")
-        # 260 ≥ default mp3_vbr.transparent=245 → TRANSPARENT
-        self.assertEqual(measurement_rank(m, cfg_median), QualityRank.TRANSPARENT)
+        # 260 ≥ default cfg.mp3.excellent=256 → EXCELLENT
+        self.assertEqual(measurement_rank(m, cfg_median), QualityRank.EXCELLENT)
 
 
 class TestCompareQuality(unittest.TestCase):
@@ -3510,35 +3573,6 @@ class TestCompareQuality(unittest.TestCase):
         # Under MIN: new=60 (POOR) vs existing=210 (EXCELLENT) → worse
         cfg_min = QualityRankConfig(bitrate_metric=RankBitrateMetric.MIN)
         self.assertEqual(compare_quality(new, existing, cfg_min).verdict, "worse")
-
-
-class TestClassifyWithCbrBands(unittest.TestCase):
-    """The CBR-band forcing is scoped to MP3 (issue #829 Phase 5 PR2b).
-
-    ``quality_rank`` only consults ``is_cbr`` for the MP3 family, and only
-    MP3's class ladder is calibrated to ``cfg.mp3_cbr``'s thresholds. The
-    restriction is inert against the shipped band config by construction —
-    which is exactly why it needs a pin at its own seam: no decision can
-    carry it.
-    """
-
-    def _classify(self, format_hint, *, bound):
-        from lib.quality.compare import _classify_with_cbr_bands
-        return _classify_with_cbr_bands(format_hint, spectral_bound=bound)
-
-    def test_only_mp3_is_forced(self):
-        for label in ("MP3", "mp3", "mp3 320"):
-            with self.subTest(format=label):
-                self.assertTrue(self._classify(label, bound=True))
-        for label in ("AAC", "Opus", "opus 128", "Vorbis", "WMA", "FLAC",
-                      "", "   ", None):
-            with self.subTest(format=label):
-                self.assertFalse(self._classify(label, bound=True))
-
-    def test_an_unbound_side_is_never_forced(self):
-        for label in ("MP3", "AAC", None):
-            with self.subTest(format=label):
-                self.assertFalse(self._classify(label, bound=False))
 
 
 class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
@@ -3752,9 +3786,15 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         a ``genuine`` album is the calibrated false positive: a minority
         track's natural rolloff on an album the verdict already cleared.
         With it withheld, the genuine album stands on its real avg 172
-        (``good``) while the candidate is bounded by its OWN class 160
-        (``acceptable``) — so the genuine copy is kept and the search
-        continues.
+        while the candidate is bounded by its OWN class 160 — so the genuine
+        copy is kept and the search continues.
+
+        Since #1145 both of those land in the single MP3 table's
+        ``acceptable`` band (128-191), where 172 used to be ``good`` on the
+        VBR table. The bound therefore ties instead of losing, and the
+        comparison reads ``equivalent`` rather than ``worse``. The DECIDED
+        outcome is unchanged and is what this test is really about: the
+        transcode still does not displace the genuine copy.
 
         The must-still-work direction is
         ``test_transcode_candidate_bounded_rank_strictly_better_still_imports``.
@@ -3779,9 +3819,11 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         )
 
         basis = compare_quality(new, existing, CFG)
-        self.assertEqual(basis.verdict, "worse")
+        self.assertEqual(basis.verdict, "equivalent")
         self.assertEqual(basis.branch, "spectral_candidate_bound")
         self.assertEqual(basis.new_value_kbps, 160)
+        # The consequence, not the intermediate verdict: the transcode is
+        # refused and the genuine copy stays installed.
         self.assertEqual(import_quality_decision(new, existing, cfg=CFG).decision,
                          "downgrade")
 
@@ -3895,25 +3937,22 @@ class TestQualityRankConfigFromIni(unittest.TestCase):
         self.assertEqual(cfg.opus.good, 64)
         self.assertEqual(cfg.opus.acceptable, 48)
         # And other codecs untouched
-        self.assertEqual(cfg.mp3_vbr, QualityRankConfig.defaults().mp3_vbr)
+        self.assertEqual(cfg.mp3, QualityRankConfig.defaults().mp3)
 
     def test_full_override(self):
         cfg = self._parse(
             "[Quality Ranks]\n"
             "bitrate_metric = min\n"
             "within_rank_tolerance_kbps = 10\n"
+            "mp3_vbr_spectral_gate_kbps = 199\n"
             "opus.transparent = 120\n"
             "opus.excellent = 100\n"
             "opus.good = 80\n"
             "opus.acceptable = 60\n"
-            "mp3_vbr.transparent = 220\n"
-            "mp3_vbr.excellent = 180\n"
-            "mp3_vbr.good = 140\n"
-            "mp3_vbr.acceptable = 100\n"
-            "mp3_cbr.transparent = 320\n"
-            "mp3_cbr.excellent = 250\n"
-            "mp3_cbr.good = 200\n"
-            "mp3_cbr.acceptable = 130\n"
+            "mp3.transparent = 320\n"
+            "mp3.excellent = 250\n"
+            "mp3.good = 200\n"
+            "mp3.acceptable = 130\n"
             "aac.transparent = 200\n"
             "aac.excellent = 150\n"
             "aac.good = 120\n"
@@ -3929,9 +3968,10 @@ class TestQualityRankConfigFromIni(unittest.TestCase):
         )
         self.assertEqual(cfg.bitrate_metric, RankBitrateMetric.MIN)
         self.assertEqual(cfg.within_rank_tolerance_kbps, 10)
+        self.assertEqual(cfg.mp3_vbr_spectral_gate_kbps, 199)
         self.assertEqual(cfg.opus.transparent, 120)
-        self.assertEqual(cfg.mp3_vbr.transparent, 220)
-        self.assertEqual(cfg.mp3_cbr.excellent, 250)
+        self.assertEqual(cfg.mp3.transparent, 320)
+        self.assertEqual(cfg.mp3.excellent, 250)
         self.assertEqual(cfg.aac.acceptable, 90)
         self.assertEqual(cfg.vorbis.excellent, 170)
         self.assertEqual(cfg.wma.acceptable, 129)
@@ -4149,7 +4189,8 @@ class TestQualityRankConfigRoundTrip(unittest.TestCase):
         payload = json.loads(QualityRankConfig.defaults().to_json())
         expected_keys = {
             "bitrate_metric", "within_rank_tolerance_kbps",
-            "opus", "mp3_vbr", "mp3_cbr", "aac", "vorbis", "wma",
+            "mp3_vbr_spectral_gate_kbps",
+            "opus", "mp3", "aac", "vorbis", "wma",
             "mp3_vbr_levels", "lossless_codecs", "mixed_format_precedence",
         }
         self.assertEqual(set(payload.keys()), expected_keys)
@@ -4264,22 +4305,21 @@ class TestQualityRankConfigDefaults(unittest.TestCase):
         self.assertEqual(CFG.opus.good, 64)
         self.assertEqual(CFG.opus.acceptable, 48)
 
-    def test_default_mp3_vbr_bands(self):
-        """Legacy QUALITY_MIN_BITRATE_KBPS=210 is preserved at ``excellent``
-        — see docs/quality-ranks.md and the
-        test_default_constant_matches_default_cfg_mp3_vbr_excellent pin."""
-        self.assertEqual(CFG.mp3_vbr.transparent, 245)
-        self.assertEqual(CFG.mp3_vbr.excellent, 210)
-        self.assertEqual(CFG.mp3_vbr.good, 170)
-        self.assertEqual(CFG.mp3_vbr.acceptable, 130)
+    def test_default_mp3_bands(self):
+        """One MP3 table (#1145). Unverifiable measured MP3 is only
+        transparent at 320 — we cannot prove a measured MP3 came from a
+        lossless source, and an inferred encoding mode is not proof.
+        A genuine VBR encode is promoted by ``mp3_vbr_levels`` instead."""
+        self.assertEqual(CFG.mp3.transparent, 320)
+        self.assertEqual(CFG.mp3.excellent, 256)
+        self.assertEqual(CFG.mp3.good, 192)
+        self.assertEqual(CFG.mp3.acceptable, 128)
 
-    def test_default_mp3_cbr_bands(self):
-        """Unverifiable CBR is only transparent at 320 — we can't prove
-        a CBR file came from lossless source."""
-        self.assertEqual(CFG.mp3_cbr.transparent, 320)
-        self.assertEqual(CFG.mp3_cbr.excellent, 256)
-        self.assertEqual(CFG.mp3_cbr.good, 192)
-        self.assertEqual(CFG.mp3_cbr.acceptable, 128)
+    def test_default_mp3_vbr_spectral_gate(self):
+        """The pre-import VBR scan threshold keeps 210 across the ladder
+        collapse. It used to be read off ``mp3_vbr.excellent``; reading it
+        off the surviving table would silently move it to 256."""
+        self.assertEqual(CFG.mp3_vbr_spectral_gate_kbps, 210)
 
     def test_default_aac_bands(self):
         """Hydrogenaudio consensus places the music quality ceiling at 192."""

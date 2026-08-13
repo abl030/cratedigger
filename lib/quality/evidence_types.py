@@ -15,6 +15,7 @@ from lib.quality.audio_validation import (
     legacy_unrecorded_audio_validation_report,
     validate_audio_validation_report,
 )
+from lib.quality.encoder_contract import mp3_vbr_contract_level
 
 V0_PROBE_LOSSLESS_SOURCE = "lossless_source_v0"
 V0_PROBE_NATIVE_LOSSY_RESEARCH = "native_lossy_research_v0"
@@ -135,9 +136,17 @@ class AudioQualityMeasurement(
         errors: list[str] = []
         if self.format is not None:
             label = self.format.strip()
-            if not label or len(label.split()) != 1:
+            # Same admission as ``AlbumQualityEvidence.storage_format``, and
+            # necessarily so — the two must be equal when both are set. A
+            # measured codec label, or an ``mp3 vN`` contract minted from a
+            # LAME ``-V`` header (issue #1145); never a projected target.
+            if not label or (
+                len(label.split()) != 1
+                and mp3_vbr_contract_level(label) is None
+            ):
                 errors.append(
-                    "measurement.format must be a bare measured codec label"
+                    "measurement.format must be a measured codec label, "
+                    "optionally an mp3 vN contract"
                 )
         if source and self.was_converted_from is not None:
             errors.append(
@@ -704,8 +713,21 @@ def cd_rip_proof_pair_validation_errors(
 #: fact about a source, and migration 021 §6b cross-walked those older rows
 #: onto whichever content-addressed evidence row their release already had —
 #: so a v1 row can belong to a sibling attempt entirely.
-#: ``lineage_version`` is constrained to 1, 3 or 4.
-SOURCE_SEMANTIC_LINEAGE_VERSIONS: tuple[int, ...] = (3, 4)
+#: ``lineage_version`` is constrained to 1, 3, 4 or 5.
+SOURCE_SEMANTIC_LINEAGE_VERSIONS: tuple[int, ...] = (3, 4, 5)
+
+#: The lineage every writer emits today. A row below it reports itself stale
+#: (``lib.quality_evidence.current_evidence_rebuild_reasons``) and is rebuilt
+#: from live Beets facts before it decides anything, which is how a policy
+#: change to *derivation* reaches existing rows without a backfill. Bumped to 5
+#: by issue #1145: v4 rows derived their MP3 rank format from an inferred
+#: encoding mode and two band tables; v5 derives it from one table plus a
+#: proven LAME ``-V`` contract. The two-axis fact vocabulary is unchanged
+#: between 4 and 5 — every ``lineage_version < 4`` merge predicate in
+#: ``lib.pipeline_db.evidence`` means "predates that vocabulary" and stays at
+#: 4 deliberately, because widening it would replace (not merge) the preserved
+#: spectral and V0 tuples on every v4 row's rebuild.
+CURRENT_EVIDENCE_LINEAGE_VERSION = 5
 
 
 def evidence_is_source_semantic(lineage_version: object) -> bool:
@@ -772,8 +794,12 @@ class AlbumQualityEvidence(
     # contract fact, not the downloaded source or materialized-output mode.
     target_is_cbr: bool | None = None
     # Migration 050 marks the interpretation of storage/target fields.
-    # Historical rows are v1/v3; every two-axis writer emits v4.
-    lineage_version: int = 4
+    # Historical rows are v1/v3; the two-axis vocabulary starts at v4.
+    # v5 (issue #1145) keeps that vocabulary exactly and re-derives the MP3
+    # rank format: the bump exists so every v4 row rebuilds through the
+    # collapsed ladder and the LAME ``-V`` contract instead of needing a
+    # backfill.
+    lineage_version: int = CURRENT_EVIDENCE_LINEAGE_VERSION
     v0_metric: AlbumQualityV0Metric | None = None
     # Preview-owned, content-snapshot-local idempotence marker. A failed or
     # empty on-disk V0 research probe is still an attempt; import/cleanup
@@ -887,11 +913,11 @@ class AlbumQualityEvidence(
             errors.append("mb_release_id must be a non-empty string")
         if not self.snapshot_fingerprint:
             errors.append("snapshot_fingerprint must be a non-empty string")
-        if self.lineage_version not in (1, 3, 4):
-            errors.append("lineage_version must be 1, 3, or 4")
+        if self.lineage_version not in (1, 3, 4, 5):
+            errors.append("lineage_version must be 1, 3, 4, or 5")
         if self.lineage_version >= 3:
             errors.extend(self.measurement.new_row_validation_errors(
-                two_axis=self.lineage_version == 4,
+                two_axis=self.lineage_version >= 4,
             ))
             if (self.target_format is None) != (self.target_is_cbr is None):
                 errors.append(
@@ -899,9 +925,19 @@ class AlbumQualityEvidence(
                 )
             if self.storage_format is not None:
                 storage_label = self.storage_format.strip()
-                if not storage_label or len(storage_label.split()) != 1:
+                # A measured codec label, or the one measured CONTRACT the
+                # pipeline can prove from bytes: ``mp3 vN`` minted from a LAME
+                # ``-V`` header (issue #1145). A projected target label such as
+                # ``"mp3 320"`` or ``"opus 128"`` is still refused — separating
+                # measured storage from projected target is what this check
+                # exists for, and lineage v1's ambiguity there is why it exists.
+                if not storage_label or (
+                    len(storage_label.split()) != 1
+                    and mp3_vbr_contract_level(storage_label) is None
+                ):
                     errors.append(
-                        "storage_format must be a bare measured codec label"
+                        "storage_format must be a measured codec label, "
+                        "optionally an mp3 vN contract"
                     )
                 measurement_label = (
                     self.measurement.format.strip().lower()
@@ -945,9 +981,9 @@ class AlbumQualityEvidence(
                     f"duplicate snapshot relative_path: {file.relative_path}"
                 )
             relative_paths.add(file.relative_path)
-        if self.lineage_version == 4 and self.v0_metric is not None:
+        if self.lineage_version >= 4 and self.v0_metric is not None:
             errors.extend(self.v0_metric.validation_errors())
-        if self.lineage_version == 4 and self.verified_lossless_proof is not None:
+        if self.lineage_version >= 4 and self.verified_lossless_proof is not None:
             errors.extend(self.verified_lossless_proof.validation_errors())
         if self.aac_lattice is not None:
             errors.extend(self.aac_lattice.validation_errors())

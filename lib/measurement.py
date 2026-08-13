@@ -626,7 +626,7 @@ def _needs_spectral_check(
         or at or below ``vbr_threshold_kbps``. Issue #93: a VBR MP3 at avg
         182kbps (well below genuine V0's ~240-260kbps range) was an obvious
         transcode that the old ``is_vbr``-only gate let through. The threshold
-        comes from ``cfg.quality_ranks.mp3_vbr.excellent``. This is a
+        comes from ``cfg.quality_ranks.mp3_vbr_spectral_gate_kbps``. This is a
         scan-selection policy only; the later transcode decision consumes the
         resulting spectral grade, not the bitrate threshold.
 
@@ -1032,7 +1032,7 @@ def measure_preimport_state(
             cd_rip_verification = None
 
     # --- Spectral gate ---
-    # Threshold: cfg.quality_ranks.mp3_vbr.excellent. This controls whether a
+    # Threshold: cfg.quality_ranks.mp3_vbr_spectral_gate_kbps. Controls whether a
     # VBR MP3 is scanned; it is not itself transcode-decision evidence.
     avg_bitrate_kbps = (avg_bitrate_bps // 1000) if avg_bitrate_bps else None
     download_spectral: SpectralMeasurement | None = None
@@ -1043,7 +1043,7 @@ def measure_preimport_state(
         download_filetype, download_is_vbr,
         lossless_candidate=lossless_candidate,
         avg_bitrate_kbps=avg_bitrate_kbps,
-        vbr_threshold_kbps=cfg.quality_ranks.mp3_vbr.excellent,
+        vbr_threshold_kbps=cfg.quality_ranks.mp3_vbr_spectral_gate_kbps,
     ):
         spectral_audit, existing_lookup = collect_release_attempt_spectral_audit(
             path,

@@ -300,15 +300,23 @@ class _EvidenceMixin(_PipelineDBBase):
                       FROM album_quality_evidence_files AS stored_file
                       WHERE stored_file.evidence_id = stored.id
                   )
+                  -- SPLIT_PART mirrors lib.quality.format_codec_token: these
+                  -- two labels can carry a quality contract ("mp3 v0", issue
+                  -- #1145) and the codec inside it is the fact being matched.
+                  -- Comparing whole labels would drop every contract-bearing
+                  -- row out of this CTE and replace the source spectral tuple
+                  -- it exists to preserve.
                   AND COALESCE(
-                      NULLIF(LOWER(BTRIM(stored.storage_format)), ''),
-                      NULLIF(LOWER(BTRIM(stored.format)), '')
+                      NULLIF(SPLIT_PART(LOWER(BTRIM(stored.storage_format)), ' ', 1), ''),
+                      NULLIF(SPLIT_PART(LOWER(BTRIM(stored.format)), ' ', 1), '')
                   ) IS NOT NULL
                   AND (
-                      NULLIF(LOWER(BTRIM(stored.storage_format)), '') IS NULL OR
-                      NULLIF(LOWER(BTRIM(stored.format)), '') IS NULL OR
-                      LOWER(BTRIM(stored.storage_format)) =
-                          LOWER(BTRIM(stored.format))
+                      NULLIF(SPLIT_PART(LOWER(BTRIM(stored.storage_format)), ' ', 1), '')
+                          IS NULL OR
+                      NULLIF(SPLIT_PART(LOWER(BTRIM(stored.format)), ' ', 1), '')
+                          IS NULL OR
+                      SPLIT_PART(LOWER(BTRIM(stored.storage_format)), ' ', 1) =
+                          SPLIT_PART(LOWER(BTRIM(stored.format)), ' ', 1)
                   )
                   AND EXISTS (
                       SELECT 1
@@ -321,8 +329,10 @@ class _EvidenceMixin(_PipelineDBBase):
                           WHERE stored_file.evidence_id = stored.id
                       )
                         AND pair.codec = COALESCE(
-                            NULLIF(LOWER(BTRIM(stored.storage_format)), ''),
-                            NULLIF(LOWER(BTRIM(stored.format)), '')
+                            NULLIF(SPLIT_PART(
+                                LOWER(BTRIM(stored.storage_format)), ' ', 1), ''),
+                            NULLIF(SPLIT_PART(
+                                LOWER(BTRIM(stored.format)), ' ', 1), '')
                         )
                   )
             ),

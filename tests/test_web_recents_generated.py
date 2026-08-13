@@ -1198,7 +1198,11 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         )),
         existing=st.sampled_from((
             ("opus", 141, 129),
-            ("mp3", 250, 230),
+            # 320, not the pre-#1145 250: the bypass only has something to
+            # bypass when the installed copy is not beaten outright, and one
+            # MP3 ladder puts 250 in ``good`` where the VBR table read it
+            # ``transparent``.
+            ("mp3", 320, 300),
             ("aac", 256, 240),
         )),
     )
@@ -1265,9 +1269,14 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             import_quality_decision,
         )
 
+        # The installed copy sits at the MP3 transparent floor so the pair is
+        # EQUIVALENT and the proof has something to bypass. Under the one MP3
+        # ladder (#1145) the old 248 reads ``good``, which the V0 contract
+        # beats outright — a "better" verdict needs no bypass and the world
+        # would stop exercising this branch.
         new = AudioQualityMeasurement(avg_bitrate_kbps=250, format="mp3 v0")
         existing = AudioQualityMeasurement(
-            min_bitrate_kbps=230, avg_bitrate_kbps=248, format="mp3")
+            min_bitrate_kbps=300, avg_bitrate_kbps=320, format="mp3")
         if not bypass:
             return msgspec.to_builtins(
                 compare_quality(new, existing, QualityRankConfig.defaults()))

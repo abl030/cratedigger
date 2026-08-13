@@ -489,7 +489,8 @@ class TestImportResultConstruction(unittest.TestCase):
                 format="opus 128",
             )
         )
-        with self.assertRaisesRegex(ValueError, "bare measured codec label"):
+        with self.assertRaisesRegex(
+                ValueError, "must be a measured codec label"):
             result.to_json()
 
     def test_source_measurement_rejects_output_lineage(self):

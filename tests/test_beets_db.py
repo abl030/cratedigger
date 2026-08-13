@@ -60,7 +60,8 @@ def _create_test_db(path: str) -> None:
             length REAL,
             format TEXT,
             samplerate INTEGER,
-            bitdepth INTEGER
+            bitdepth INTEGER,
+            encoder_settings TEXT
         );
     """)
     conn.close()
@@ -1053,7 +1054,8 @@ class TestReduceAlbumFormat(unittest.TestCase):
             "Alien Codec",
         )
         self.assertIn(
-            "measurement.format must be a bare measured codec label",
+            "measurement.format must be a measured codec label, "
+            "optionally an mp3 vN contract",
             AudioQualityMeasurement(format=reduced).new_row_validation_errors(),
         )
 
@@ -1084,6 +1086,26 @@ class TestGetMinBitrate(unittest.TestCase):
         ])
         with BeetsDB(self.db_path) as db:
             self.assertIsNone(db.get_min_bitrate("abc"))
+
+    def test_sub_kilobit_rate_rounds_like_every_other_reduction(self) -> None:
+        """Issue #1145 scope E: one reduction for one column.
+
+        245,600 bps is 245.6 kbps. ``album_info_from_current`` rounds it to
+        246 and the post-import quality gate writes that rounded value into
+        ``album_requests.min_bitrate``; the web requeue/upgrade routes write
+        the same column from here. Whole-kilobit fixtures cannot tell the two
+        reductions apart, which is exactly how the floored copy survived
+        #1144.
+        """
+        _insert_album(self.db_path, 1, "abc", [
+            (245_600, "/m/a/01.mp3"),
+            (300_000, "/m/a/02.mp3"),
+        ])
+        with BeetsDB(self.db_path) as db:
+            self.assertEqual(db.get_min_bitrate("abc"), 246)
+            info = db.get_album_info("abc", QualityRankConfig.defaults())
+        assert info is not None
+        self.assertEqual(info.min_bitrate_kbps, 246)
 
 
 from lib.quality import AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS

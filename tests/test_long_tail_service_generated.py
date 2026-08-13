@@ -124,7 +124,7 @@ def _resolution_world(
                     id=index * 100,
                     path=f"/music/album-{index}/01.mp3",
                     format="MP3",
-                    bitrate=256_000,
+                    bitrate=320_000,
                 ),),
                 selectors=(f"mb_albumid:{identity.release_id}",),
             )
@@ -171,6 +171,9 @@ def assert_current_resolution_banding(
         expected = (
             BAND_MISSING
             if isinstance(resolution, CurrentBeetsMissing)
+            # ``_resolution_world`` seeds every unique release at the MP3
+            # transparent floor (320 kbps under #1145's one ladder), so this
+            # property stays about resolution STATE, not about bitrate.
             else "transparent"
         )
         if outcome.get(identity.release_id) != expected:
@@ -330,10 +333,11 @@ class TestCurrentBeetsBandingGenerated(unittest.TestCase):
     ) -> None:
         cfg = QualityRankConfig.defaults()
         # Production's reduction, so the expectation cannot drift from the
-        # projection it is compared against. Behaviour-neutral today: no
-        # sum in this strategy's domain reaches a rank boundary where floor
-        # and round disagree — but the ladder is the only reason, and that
-        # is not a property this test should depend on.
+        # projection it is compared against. This warning came due: moving
+        # the MP3 band edges (#1145) put a rank boundary exactly where floor
+        # and round disagree, and ``_band_current_unique``'s own local
+        # float-truncate — the last unconverted copy — went red here. It now
+        # calls the same ``kbps_from_bps``.
         average_kbps = kbps_from_bps((mp3_bitrate + flac_bitrate) // 2)
         expected = compute_library_rank("MP3", average_kbps, cfg)
         bands: list[str] = []

@@ -53,6 +53,10 @@ pkgs.mkShell {
     testPythonEnv
     pkgs.sox                 # spectral analysis tests
     pkgs.ffmpeg              # ffprobe for bitrate measurement in quality tests
+    pkgs.lame                # the ONLY producer of a real LAME `-V` tag: ffmpeg's
+                             # libmp3lame writes a bare Xing header with no encoder
+                             # settings, so the MP3 VBR contract (issue #1145) has
+                             # no honest positive fixture without the real encoder
     pkgs.yt-dlp              # YouTube-rescue ingest worker invokes this binary;
                              # dev-shell tests resolve it via `shutil.which("yt-dlp")`
   ];

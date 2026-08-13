@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from enum import IntEnum, StrEnum
 from typing import Any, Self
 
+from lib.quality.encoder_contract import mp3_vbr_contract_level
 from lib.quality.evidence_types import (
     V0_PROBE_LOSSLESS_SOURCE,
     AudioQualityMeasurement,
@@ -133,28 +134,34 @@ class QualityRankConfig:
     - Opus ``transparent=112``: ``ffmpeg -b:a 128k`` unconstrained VBR averages
       120-135 kbps on typical music; 112 leaves headroom for sparse material.
       ``excellent=88`` matches Opus 96 quality (hydrogenaudio/Kamedo2 4.65/5).
-    - MP3 VBR ``transparent=210``: matches the legacy
-      ``QUALITY_MIN_BITRATE_KBPS`` constant; V2 averages ~190 → excellent at 170.
-    - MP3 CBR ``transparent=320``: unverifiable CBR is only transparent at 320.
+    - MP3 ``transparent=320``: one ladder for every measured MP3 (issue
+      #1145). Unverifiable measured MP3 is only transparent at 320; a genuine
+      VBR encode is promoted by its LAME ``-V`` contract through
+      ``mp3_vbr_levels``, never by an inferred encoding mode.
     - AAC ``transparent=192``: hydrogenaudio consensus ceiling for music.
     - Vorbis ``transparent=192``: conservative q6-region ceiling; one VBR table.
-    - WMA ``transparent=320``: conservative parity with the MP3-CBR table.
+    - WMA ``transparent=320``: conservative parity with the MP3 table.
     """
     # --- Policy ---
     bitrate_metric: RankBitrateMetric = RankBitrateMetric.AVG
     within_rank_tolerance_kbps: int = 5
 
+    # Scan-selection threshold for the pre-import MP3 spectral gate: a VBR MP3
+    # whose album average reaches this value is a plausible genuine V0 and is
+    # not scanned. This is NOT a rank band — it never classifies anything — and
+    # it kept its 210 value when the two MP3 band tables collapsed into one
+    # (issue #1145). It used to borrow ``mp3_vbr.excellent``, which is exactly
+    # why it needs its own name now: reading it off the surviving table would
+    # silently move the gate from 210 to 256.
+    mp3_vbr_spectral_gate_kbps: int = 210
+
     # --- Per-codec band tables ---
-    # Defaults are tuned to preserve the legacy 210 kbps gate threshold for
-    # bare-codec MP3 VBR measurements (old QUALITY_MIN_BITRATE_KBPS) while
-    # adding perceptual tiers above and below. Explicit labels like "mp3 v0"
-    # / "opus 128" bypass the band tables via the V-level / declared-bitrate
-    # resolution steps — those classify by contract.
+    # One table per codec family. Explicit labels like "mp3 v0" / "opus 128"
+    # bypass the band tables via the V-level / declared-bitrate resolution
+    # steps — those classify by contract.
     opus:    CodecRankBands = field(default_factory=lambda: CodecRankBands(
         transparent=112, excellent=88, good=64, acceptable=48))
-    mp3_vbr: CodecRankBands = field(default_factory=lambda: CodecRankBands(
-        transparent=245, excellent=210, good=170, acceptable=130))
-    mp3_cbr: CodecRankBands = field(default_factory=lambda: CodecRankBands(
+    mp3:     CodecRankBands = field(default_factory=lambda: CodecRankBands(
         transparent=320, excellent=256, good=192, acceptable=128))
     aac:     CodecRankBands = field(default_factory=lambda: CodecRankBands(
         transparent=192, excellent=144, good=112, acceptable=80))
@@ -212,8 +219,9 @@ class QualityRankConfig:
 
             bitrate_metric            = min | avg | median
             within_rank_tolerance_kbps = <int>
+            mp3_vbr_spectral_gate_kbps = <int>
             <codec>.<band>            = <int>
-              codecs: opus, mp3_vbr, mp3_cbr, aac, vorbis, wma
+              codecs: opus, mp3, aac, vorbis, wma
               bands:  transparent, excellent, good, acceptable
             mp3_vbr_levels            = <rank>,<rank>,... (exactly 10, V0..V9)
             lossless_codecs           = <codec>,<codec>,... (set, lowercased)
@@ -257,6 +265,13 @@ class QualityRankConfig:
             raise ValueError(
                 f"[{section}] within_rank_tolerance_kbps: must be >= 0, got {tolerance}")
 
+        spectral_gate = _get_int(
+            "mp3_vbr_spectral_gate_kbps", base.mp3_vbr_spectral_gate_kbps)
+        if spectral_gate < 0:
+            raise ValueError(
+                f"[{section}] mp3_vbr_spectral_gate_kbps: must be >= 0, "
+                f"got {spectral_gate}")
+
         # --- Codec bands ---
         def _get_bands(codec: str, default: CodecRankBands) -> CodecRankBands:
             return CodecRankBands(
@@ -268,8 +283,7 @@ class QualityRankConfig:
 
         try:
             opus = _get_bands("opus", base.opus)
-            mp3_vbr = _get_bands("mp3_vbr", base.mp3_vbr)
-            mp3_cbr = _get_bands("mp3_cbr", base.mp3_cbr)
+            mp3 = _get_bands("mp3", base.mp3)
             aac = _get_bands("aac", base.aac)
             vorbis = _get_bands("vorbis", base.vorbis)
             wma = _get_bands("wma", base.wma)
@@ -334,9 +348,9 @@ class QualityRankConfig:
         return cls(
             bitrate_metric=metric,
             within_rank_tolerance_kbps=tolerance,
+            mp3_vbr_spectral_gate_kbps=spectral_gate,
             opus=opus,
-            mp3_vbr=mp3_vbr,
-            mp3_cbr=mp3_cbr,
+            mp3=mp3,
             aac=aac,
             vorbis=vorbis,
             wma=wma,
@@ -354,9 +368,9 @@ class QualityRankConfig:
         payload: dict[str, Any] = {
             "bitrate_metric": self.bitrate_metric.value,
             "within_rank_tolerance_kbps": self.within_rank_tolerance_kbps,
+            "mp3_vbr_spectral_gate_kbps": self.mp3_vbr_spectral_gate_kbps,
             "opus": asdict(self.opus),
-            "mp3_vbr": asdict(self.mp3_vbr),
-            "mp3_cbr": asdict(self.mp3_cbr),
+            "mp3": asdict(self.mp3),
             "aac": asdict(self.aac),
             "vorbis": asdict(self.vorbis),
             "wma": asdict(self.wma),
@@ -385,9 +399,10 @@ class QualityRankConfig:
             return cls(
                 bitrate_metric=RankBitrateMetric(payload["bitrate_metric"]),
                 within_rank_tolerance_kbps=int(payload["within_rank_tolerance_kbps"]),
+                mp3_vbr_spectral_gate_kbps=int(
+                    payload["mp3_vbr_spectral_gate_kbps"]),
                 opus=CodecRankBands(**payload["opus"]),
-                mp3_vbr=CodecRankBands(**payload["mp3_vbr"]),
-                mp3_cbr=CodecRankBands(**payload["mp3_cbr"]),
+                mp3=CodecRankBands(**payload["mp3"]),
                 aac=CodecRankBands(**payload["aac"]),
                 vorbis=CodecRankBands(**payload["vorbis"]),
                 wma=CodecRankBands(**payload["wma"]),
@@ -410,30 +425,33 @@ _KNOWN_CODEC_FAMILIES: frozenset[str] = frozenset(
     })
 
 
-def _codec_family_of(format_hint: str | None) -> str:
-    """First token of format, lowercased — "opus 128" → "opus", "MP3" → "mp3"."""
+def format_codec_token(format_hint: str | None) -> str | None:
+    """First whitespace token of a format label, lowercased.
+
+    ``"opus 128"`` → ``"opus"``, ``"MP3"`` → ``"mp3"``, ``"mp3 v0"`` → ``"mp3"``.
+    ``None`` for a missing or blank label.
+
+    This is the *codec fact* inside a format label, with no opinion about
+    whether the rank model knows that codec — ``_codec_family_of`` adds that
+    opinion. Callers that compare a format label against a plain codec name
+    (a snapshot container, a Beets codec label, a lossy media-pair table) want
+    this one: a contract label like ``"mp3 v0"`` is still an MP3, and reducing
+    it here is what stops the contract from reading as an unknown codec.
+    """
     if format_hint is None:
-        return "unknown"
+        return None
     first = format_hint.strip().lower().split(None, 1)
     if not first or not first[0]:
-        return "unknown"
-    token = first[0]
-    if token in _KNOWN_CODEC_FAMILIES:
+        return None
+    return first[0]
+
+
+def _codec_family_of(format_hint: str | None) -> str:
+    """Rank-model codec family for a format label, or ``"unknown"``."""
+    token = format_codec_token(format_hint)
+    if token is not None and token in _KNOWN_CODEC_FAMILIES:
         return token
     return "unknown"
-
-
-def _parse_vbr_level(format_hint: str) -> int | None:
-    """Parse V-level from a label like "mp3 v0" / "mp3 v9". Returns None otherwise."""
-    parts = format_hint.strip().lower().split()
-    if len(parts) < 2 or parts[0] != "mp3":
-        return None
-    quality = parts[1]
-    if len(quality) >= 2 and quality[0] == "v" and quality[1:].isdigit():
-        level = int(quality[1:])
-        if 0 <= level <= 9:
-            return level
-    return None
 
 
 def _parse_bitrate_label(format_hint: str) -> int | None:
@@ -450,7 +468,6 @@ def _parse_bitrate_label(format_hint: str) -> int | None:
 def quality_rank(
     format_hint: str | None,
     bitrate_kbps: int | None,
-    is_cbr: bool,
     cfg: QualityRankConfig,
 ) -> QualityRank:
     """Classify a measurement into a QualityRank (pure, no I/O).
@@ -464,8 +481,6 @@ def quality_rank(
             selected this value per cfg.bitrate_metric — this function does
             NOT dispatch on the metric. Use measurement_rank() as the entry
             point for measurements.
-        is_cbr: True if all tracks share the same bitrate. Affects MP3 family
-            routing (VBR vs CBR bands).
         cfg: Rank bands and policy.
 
     Resolution order:
@@ -478,10 +493,15 @@ def quality_rank(
            contract — we converted to this target, so the declaration wins
            over any measured bitrate.
         5. Bare codec name ("MP3" / "Opus" / "AAC"): classify the measured
-           bitrate_kbps against the matching band table. "MP3" + is_cbr=True
-           → cfg.mp3_cbr, otherwise cfg.mp3_vbr. Opus, AAC, Vorbis, and WMA
-           always use their own single band table.
+           bitrate_kbps against the matching band table. Every family,
+           including MP3, has exactly one table (issue #1145).
         6. Unknown codec → UNKNOWN (never promote garbage).
+
+    No step reads an encoding mode. ``is_cbr`` used to select between two MP3
+    ladders 75 kbps apart, on a boolean derived from per-track bitrate
+    uniformity — not an encoder-mode detector, and absent entirely for 38% of
+    the library. A VBR encode is promoted above the single ladder only by a
+    proven ``-V`` contract at step 3 (``lib.quality.encoder_contract``).
     """
     if format_hint is None and bitrate_kbps is None:
         return QualityRank.UNKNOWN
@@ -494,7 +514,7 @@ def quality_rank(
 
     # Step 3 — explicit VBR V-level label
     if format_hint is not None:
-        vbr_level = _parse_vbr_level(format_hint)
+        vbr_level = mp3_vbr_contract_level(format_hint)
         if vbr_level is not None:
             return cfg.mp3_vbr_levels[vbr_level]
 
@@ -505,8 +525,7 @@ def quality_rank(
             if family == "opus":
                 return cfg.opus.rank_for(declared)
             if family == "mp3":
-                # A "mp3 320"-style label is by convention CBR.
-                return cfg.mp3_cbr.rank_for(declared)
+                return cfg.mp3.rank_for(declared)
             if family == "aac":
                 return cfg.aac.rank_for(declared)
             if family == "vorbis":
@@ -525,9 +544,7 @@ def quality_rank(
     if family == "wma":
         return cfg.wma.rank_for(bitrate_kbps)
     if family == "mp3":
-        if is_cbr:
-            return cfg.mp3_cbr.rank_for(bitrate_kbps)
-        return cfg.mp3_vbr.rank_for(bitrate_kbps)
+        return cfg.mp3.rank_for(bitrate_kbps)
 
     # Step 6 — unknown codec, refuse to promote
     return QualityRank.UNKNOWN
@@ -552,8 +569,7 @@ def measurement_rank(
     """
     bitrate, _metric = _selected_quality_bitrate_with_source(m, cfg, v0_probe)
     format_hint = target_contract.format if target_contract is not None else m.format
-    is_cbr = target_contract.is_cbr if target_contract is not None else m.is_cbr
-    return quality_rank(format_hint, bitrate, is_cbr, cfg)
+    return quality_rank(format_hint, bitrate, cfg)
 
 
 def _selected_quality_bitrate_with_source(
@@ -642,14 +658,16 @@ def gate_rank(
     Spectral clamp: when the current measurement carries a spectral estimate
     (set upstream only when the grade is suspect/likely_transcode — see
     ``_check_quality_gate_core()``), classify that estimate against the MP3
-    VBR band table and take the lower rank. This catches fake 320s and
-    legacy low-spectral transcodes.
+    band table and take the lower rank. This catches fake 320s and legacy
+    low-spectral transcodes. The MP3 spectral class ladder is drawn from the
+    same nominal kbps values as that table (96/112/128/160/192/224/256/320),
+    which is why it is the right table to read the estimate through.
     """
     rank = measurement_rank(current, cfg, target_contract=target_contract)
     if verified_lossless_proof:
         return rank
     if current.spectral_bitrate_kbps is not None:
         spectral_rank = quality_rank(
-            "mp3", current.spectral_bitrate_kbps, is_cbr=False, cfg=cfg)
+            "mp3", current.spectral_bitrate_kbps, cfg)
         rank = min(rank, spectral_rank)
     return rank

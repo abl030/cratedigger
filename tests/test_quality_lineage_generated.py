@@ -33,6 +33,7 @@ from lib.measurement import PreimportMeasurement
 from lib.media_readiness import kbps_from_bps
 from lib.pipeline_db.download_log import _DownloadLogMixin
 from lib.quality import (
+    CURRENT_EVIDENCE_LINEAGE_VERSION,
     IMPORT_RESULT_SENTINEL,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
@@ -48,6 +49,7 @@ from lib.quality import (
     gate_rank,
     legacy_unrecorded_audio_validation_report,
     measured_import_decision,
+    mp3_vbr_contract_format,
     parse_import_result,
     quality_gate_decision,
 )
@@ -237,11 +239,12 @@ def assert_failure_v1_refresh_phases(
     """Failure preparation refreshes identity before later enrichment."""
     if outcome != "ready":
         raise AssertionError("installed current evidence was not prepared")
-    if initial_lineage == 1 and prepared_lineage != 4:
+    if (initial_lineage == 1
+            and prepared_lineage != CURRENT_EVIDENCE_LINEAGE_VERSION):
         raise AssertionError("failure preparation retained ambiguous lineage")
     if refresh_status != "wanted":
         raise AssertionError("failure refresh ran before request became wanted")
-    if final_lineage != 4:
+    if final_lineage != CURRENT_EVIDENCE_LINEAGE_VERSION:
         raise AssertionError("post-failure refresh retained ambiguous lineage")
 
 
@@ -251,7 +254,8 @@ def assert_import_attempt_uses_v3_current_evidence(
     decision_lineage: int | None,
 ) -> None:
     """An actual import attempt may not decide from ambiguous v1 evidence."""
-    if initial_lineage == 1 and decision_lineage != 4:
+    if (initial_lineage == 1
+            and decision_lineage != CURRENT_EVIDENCE_LINEAGE_VERSION):
         raise AssertionError("import attempt retained ambiguous current lineage")
 
 
@@ -265,8 +269,9 @@ def assert_action_refresh_carries_only_source_facts(
     spectral_bitrate: int | None,
 ) -> None:
     """Lineage repair carries source facts and drops ambiguous on-disk facts."""
-    if decision_lineage != 4:
-        raise AssertionError("action did not rebuild current evidence as v4")
+    if decision_lineage != CURRENT_EVIDENCE_LINEAGE_VERSION:
+        raise AssertionError(
+            "action did not rebuild current evidence as the current lineage")
     if v0_subject != "source":
         raise AssertionError("action discarded lossless-source V0 evidence")
     if v0_provenance != "carried":
@@ -314,7 +319,7 @@ class TestQualityLineagePins(unittest.TestCase):
                 initial_lineage=1,
                 prepared_lineage=1,
                 refresh_status="wanted",
-                final_lineage=4,
+                final_lineage=CURRENT_EVIDENCE_LINEAGE_VERSION,
             )
 
     def test_import_attempt_checker_rejects_v1_decision_evidence(self):
@@ -327,7 +332,7 @@ class TestQualityLineagePins(unittest.TestCase):
     def test_action_refresh_checker_rejects_lost_lossless_source_v0(self):
         with self.assertRaisesRegex(AssertionError, "discarded"):
             assert_action_refresh_carries_only_source_facts(
-                decision_lineage=4,
+                decision_lineage=CURRENT_EVIDENCE_LINEAGE_VERSION,
                 v0_subject=None,
                 v0_provenance=None,
                 v0_average=None,
@@ -338,7 +343,7 @@ class TestQualityLineagePins(unittest.TestCase):
     def test_action_refresh_checker_rejects_legacy_spectral_carry(self):
         with self.assertRaisesRegex(AssertionError, "ambiguous legacy spectral"):
             assert_action_refresh_carries_only_source_facts(
-                decision_lineage=4,
+                decision_lineage=CURRENT_EVIDENCE_LINEAGE_VERSION,
                 v0_subject="source",
                 v0_provenance="carried",
                 v0_average=195,
@@ -1828,18 +1833,13 @@ class TestQualityLineageGenerated(unittest.TestCase):
         )
         self.assertEqual(with_research, baseline)
 
-    @given(
-        proxy_min=st.integers(min_value=1, max_value=500),
-        proxy_avg=st.integers(min_value=1, max_value=500),
-        target=st.sampled_from(["opus 128", "mp3 v0", "mp3 v2"]),
-    )
-    def test_new_wire_rows_reject_target_labelled_proxy_measurements(
-        self,
-        proxy_min: int,
-        proxy_avg: int,
-        target: str,
-    ) -> None:
-        planted_bad = ImportResult(
+    def _planted_target_proxy(
+        self, target: str, proxy_min: int, proxy_avg: int,
+    ) -> ImportResult:
+        """The historical defect: the V0 proxy's target label copied onto the
+        source measurement, so a lossless album describes itself as its own
+        conversion output."""
+        return ImportResult(
             source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=proxy_min,
                 avg_bitrate_kbps=proxy_avg,
@@ -1854,8 +1854,52 @@ class TestQualityLineageGenerated(unittest.TestCase):
                 TargetQualityContract.from_explicit_label(target)
             ),
         )
-        with self.assertRaisesRegex(ValueError, "bare measured codec label"):
-            planted_bad.to_json()
+
+    @given(
+        proxy_min=st.integers(min_value=1, max_value=500),
+        proxy_avg=st.integers(min_value=1, max_value=500),
+        target=st.sampled_from(["opus 128", "mp3 320", "aac 128"]),
+    )
+    def test_new_wire_rows_reject_declared_bitrate_proxy_measurements(
+        self,
+        proxy_min: int,
+        proxy_avg: int,
+        target: str,
+    ) -> None:
+        """A declared-bitrate target is refused by the measured-label clause:
+        no measured format carries a declared bitrate."""
+        with self.assertRaisesRegex(
+            ValueError, "must be a measured codec label"
+        ):
+            self._planted_target_proxy(
+                target, proxy_min, proxy_avg,
+            ).to_json()
+
+    @given(
+        proxy_min=st.integers(min_value=1, max_value=500),
+        proxy_avg=st.integers(min_value=1, max_value=500),
+        target=st.sampled_from(["mp3 v0", "mp3 v2"]),
+    )
+    def test_new_wire_rows_reject_v_level_proxy_measurements(
+        self,
+        proxy_min: int,
+        proxy_avg: int,
+        target: str,
+    ) -> None:
+        """A V-LEVEL target is refused by its own clause.
+
+        Issue #1145 made ``mp3 vN`` measurable, so the measured-label clause
+        above can no longer catch it and a second, narrower clause does: the
+        source measurement must not repeat the projected target. Each clause
+        asserts its own message — a shared regex would let one cover for the
+        other going inert.
+        """
+        with self.assertRaisesRegex(
+            ValueError, "must describe the downloaded source"
+        ):
+            self._planted_target_proxy(
+                target, proxy_min, proxy_avg,
+            ).to_json()
 
     @given(
         source_min=st.integers(min_value=300, max_value=5000),
@@ -1986,20 +2030,29 @@ class TestQualityLineageGenerated(unittest.TestCase):
 
     @given(
         explicit_label=st.sampled_from(
-            ["opus 128", "mp3 v0", "mp3 192", "aac 128"]
+            ["opus 128", "mp3 192", "aac 128"]
         ),
         bitrate=st.integers(min_value=1, max_value=500),
     )
-    def test_target_absence_never_allows_explicit_source_measurement(
+    def test_target_absence_never_allows_declared_bitrate_source_measurement(
         self, explicit_label: str, bitrate: int
     ) -> None:
+        """A DECLARED-BITRATE label still cannot describe a measured source.
+
+        ``mp3 v0`` deliberately left this sample set in issue #1145: it is now
+        a label the harness MEASURES, minted from the source files' own LAME
+        ``-V`` header, so with no target contract in play it is legitimate.
+        The must-still-work arm below is what keeps that carve-out honest —
+        without it, dropping ``mp3 v0`` from here would silently weaken the
+        guard instead of narrowing it.
+        """
         planted_bad = ImportResult(
             source_measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=bitrate,
                 format=explicit_label,
             )
         )
-        with self.assertRaisesRegex(ValueError, "bare measured codec label"):
+        with self.assertRaisesRegex(ValueError, "measured codec label"):
             planted_bad.to_json()
         built = evidence_from_import_result(
             mb_release_id="bad-target-absent",
@@ -2017,6 +2070,48 @@ class TestQualityLineageGenerated(unittest.TestCase):
             ],
         )
         self.assertEqual(built.status, "incomplete")
+
+    @given(
+        level=st.integers(min_value=0, max_value=9),
+        bitrate=st.integers(min_value=1, max_value=500),
+    )
+    def test_target_absence_admits_a_proven_mp3_vbr_contract(
+        self, level: int, bitrate: int
+    ) -> None:
+        """Must-still-work for #1145 scope A: a minted contract is measurable.
+
+        The label is produced by the real minter over an all-MP3 fileset that
+        unanimously reports the same LAME level, not typed by hand — a
+        hand-typed label would prove nothing about what production can emit
+        (test-fidelity Rule C).
+        """
+        contract = mp3_vbr_contract_format([f"-V {level}"] * 3)
+        assert contract is not None
+        result = ImportResult(
+            source_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=bitrate,
+                format=contract,
+            )
+        )
+        result.to_json()
+        built = evidence_from_import_result(
+            mb_release_id="proven-contract-target-absent",
+            source_path="/proven",
+            import_result=result,
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="01.mp3",
+                    size_bytes=1,
+                    mtime_ns=1,
+                    extension="mp3",
+                    container="mp3",
+                    codec="mp3",
+                )
+            ],
+        )
+        self.assertEqual(built.status, "ready")
+        assert built.evidence is not None
+        self.assertEqual(built.evidence.storage_format, contract)
 
     @given(source_codec=_BARE_CODEC_LABELS)
     @example(source_codec="FLAC")

@@ -2387,7 +2387,7 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         self.assertEqual(c.badge, "Upgraded")
         self.assertEqual(
             c.verdict,
-            "Upgrade: MP3 avg 196k (good) → avg 288k (transparent)")
+            "Upgrade: MP3 avg 196k (good) → avg 288k (excellent)")
 
     def test_upgrade_verdict_is_never_a_tautology(self):
         """I6: with a basis, the two sides of a better-verdict always differ
@@ -2679,7 +2679,7 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         c = classify_log_entry(entry)
         self.assertEqual(
             c.verdict,
-            "Upgrade: MP3 avg 196k (good) → avg 288k (transparent), "
+            "Upgrade: MP3 avg 196k (good) → avg 288k (excellent), "
             "from FLAC")
 
     def test_flac_conversion_with_minted_proof_keeps_both_suffixes(self):
@@ -2700,7 +2700,7 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         c = classify_log_entry(entry)
         self.assertEqual(
             c.verdict,
-            "Upgrade: MP3 avg 196k (good) → avg 288k (transparent), "
+            "Upgrade: MP3 avg 196k (good) → avg 288k (excellent), "
             "from FLAC, verified lossless")
 
     def test_classified_entry_carries_basis_for_payloads(self):

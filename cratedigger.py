@@ -93,7 +93,6 @@ def _warn_if_verified_lossless_target_below_transparent(
         target_rank = quality_rank(
             config.verified_lossless_target,
             bitrate_kbps=None,
-            is_cbr=False,
             cfg=config.quality_ranks,
         )
         if target_rank < QualityRank.TRANSPARENT:

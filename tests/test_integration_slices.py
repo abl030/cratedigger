@@ -804,6 +804,13 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
                         source.spectral_provenance if source else None
                     ),
                 ),
+                # Production always writes ``storage_format`` FROM the
+                # measurement's format (all four builders in
+                # ``lib/quality_evidence.py`` do), and the row validation
+                # requires them equal. A fixture that pinned the builder's
+                # "MP3" default while the measurement carried a proven
+                # ``mp3 v0`` contract would be an unbuildable row.
+                storage_format=beets_info.format,
                 verified_lossless_proof=ir.verified_lossless_proof,
             )
             claimed, execution_lease = _claim_dispatch_job(
@@ -965,7 +972,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         ir = make_import_result(decision="import", new_min_bitrate=245)
         beets_info = AlbumInfo(
             album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="MP3",
+            avg_bitrate_kbps=245, format="mp3 v0",
             is_cbr=False, album_path="/Beets/Test")
 
         # Stale non-None value proves the write actively NULLs the column
@@ -992,7 +999,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         ir = make_import_result(decision="import", new_min_bitrate=245)
         beets_info = AlbumInfo(
             album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="MP3",
+            avg_bitrate_kbps=245, format="mp3 v0",
             is_cbr=False, album_path="/Beets/Test")
 
         db = self._run_dispatch(ir, beets_info)
@@ -1131,12 +1138,12 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         """
         from lib.quality import QualityRankConfig, RankBitrateMetric
 
-        ir = make_import_result(decision="import", new_min_bitrate=60)
+        ir = make_import_result(decision="import", new_min_bitrate=128)
         beets_info = AlbumInfo(
             album_id=1, track_count=5,
-            min_bitrate_kbps=60,
-            avg_bitrate_kbps=171,
-            median_bitrate_kbps=245,
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=257,
+            median_bitrate_kbps=320,
             format="MP3", is_cbr=False, album_path="/Beets/Test")
 
         custom_cfg = CratediggerConfig(
@@ -1160,12 +1167,12 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         Pinning this proves the difference in the MEDIAN test really comes
         from the policy switch — not from a hidden change in dispatch flow.
         """
-        ir = make_import_result(decision="import", new_min_bitrate=60)
+        ir = make_import_result(decision="import", new_min_bitrate=128)
         beets_info = AlbumInfo(
             album_id=1, track_count=5,
-            min_bitrate_kbps=60,
-            avg_bitrate_kbps=171,
-            median_bitrate_kbps=245,
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=257,
+            median_bitrate_kbps=320,
             format="MP3", is_cbr=False, album_path="/Beets/Test")
 
         db = self._run_dispatch(ir, beets_info)
@@ -1188,7 +1195,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         ir = make_import_result(decision="import", new_min_bitrate=245)
         beets_info = AlbumInfo(
             album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="MP3",
+            avg_bitrate_kbps=245, format="mp3 v0",
             is_cbr=False, album_path="/Beets/Test")
 
         db = self._run_dispatch(
@@ -3187,7 +3194,7 @@ class TestReleaseLockContention(unittest.TestCase):
         ir = make_import_result(decision="import", new_min_bitrate=245)
         beets_info = AlbumInfo(
             album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="MP3",
+            avg_bitrate_kbps=245, format="mp3 v0",
             is_cbr=False, album_path="/Beets/Test")
         dl_info = DownloadInfo(username="user1")
 
@@ -3219,6 +3226,13 @@ class TestReleaseLockContention(unittest.TestCase):
                         source.spectral_provenance if source else None
                     ),
                 ),
+                # Production always writes ``storage_format`` FROM the
+                # measurement's format (all four builders in
+                # ``lib/quality_evidence.py`` do), and the row validation
+                # requires them equal. A fixture that pinned the builder's
+                # "MP3" default while the measurement carried a proven
+                # ``mp3 v0`` contract would be an unbuildable row.
+                storage_format=beets_info.format,
                 verified_lossless_proof=ir.verified_lossless_proof,
             )
             claimed, execution_lease = _claim_dispatch_job(

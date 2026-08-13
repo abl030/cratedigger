@@ -29,7 +29,7 @@ def _m(**kwargs) -> AudioQualityMeasurement:
     return AudioQualityMeasurement(**kwargs)
 
 
-CFG = QualityRankConfig.defaults()  # bitrate_metric=avg, mp3_vbr 245/210/170/130
+CFG = QualityRankConfig.defaults()  # bitrate_metric=avg, mp3 320/256/192/128
 
 
 class TestCompareQualityBasisBranches(unittest.TestCase):
@@ -51,7 +51,7 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
             _m(min_bitrate_kbps=194, avg_bitrate_kbps=288, format="MP3"),
             _m(min_bitrate_kbps=194, avg_bitrate_kbps=196, format="MP3"),
             {"verdict": "better", "branch": "rank",
-                 "new_rank": "transparent", "existing_rank": "good",
+                 "new_rank": "excellent", "existing_rank": "good",
                  "new_value_kbps": 288, "existing_value_kbps": 196,
                  "new_metric": "avg", "existing_metric": "avg",
                  "spectral_clamped": False},
@@ -61,7 +61,7 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
             _m(min_bitrate_kbps=194, avg_bitrate_kbps=196, format="MP3"),
             _m(min_bitrate_kbps=194, avg_bitrate_kbps=288, format="MP3"),
             {"verdict": "worse", "branch": "rank",
-                 "new_rank": "good", "existing_rank": "transparent",
+                 "new_rank": "good", "existing_rank": "excellent",
                  "new_value_kbps": 196, "existing_value_kbps": 288},
         ),
         (
@@ -74,18 +74,18 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
         (
             "cross-family same rank: opus transparent vs mp3 transparent",
             _m(avg_bitrate_kbps=120, format="opus"),
-            _m(avg_bitrate_kbps=250, format="MP3"),
+            _m(avg_bitrate_kbps=320, format="MP3"),
             {"verdict": "equivalent", "branch": "cross_family_same_rank",
                  "new_rank": "transparent", "existing_rank": "transparent"},
         ),
         (
             "explicit label is a contract: mp3 v0 vs bare MP3 transparent",
             _m(avg_bitrate_kbps=207, format="mp3 v0"),
-            _m(avg_bitrate_kbps=250, format="MP3"),
+            _m(avg_bitrate_kbps=320, format="MP3"),
             {"verdict": "equivalent", "branch": "label_contract_same_rank",
                  "new_rank": "transparent", "existing_rank": "transparent",
                  "new_metric": "contract", "new_value_kbps": None,
-                 "existing_metric": "avg", "existing_value_kbps": 250},
+                 "existing_metric": "avg", "existing_value_kbps": 320},
         ),
         (
             "Gas November 89: Opus target is a contract, not the V0 proxy min",
@@ -100,11 +100,11 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
         ),
         (
             "same-rank tiebreak better: raw metric delta beyond tolerance",
-            _m(avg_bitrate_kbps=260, format="MP3"),
-            _m(avg_bitrate_kbps=250, format="MP3"),
+            _m(avg_bitrate_kbps=300, format="MP3"),
+            _m(avg_bitrate_kbps=290, format="MP3"),
             {"verdict": "better", "branch": "metric_tiebreak",
-                 "new_rank": "transparent", "existing_rank": "transparent",
-                 "new_value_kbps": 260, "existing_value_kbps": 250,
+                 "new_rank": "excellent", "existing_rank": "excellent",
+                 "new_value_kbps": 300, "existing_value_kbps": 290,
                  "tolerance_kbps": 5},
         ),
         (
@@ -127,7 +127,7 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
             _m(avg_bitrate_kbps=180, format="MP3", spectral_grade="suspect"),
             _m(avg_bitrate_kbps=250, format="MP3", spectral_grade="genuine"),
             {"verdict": "worse", "branch": "transcode_rank_regression",
-                 "new_rank": "good", "existing_rank": "transparent",
+                 "new_rank": "acceptable", "existing_rank": "good",
                  "new_value_kbps": 180, "existing_value_kbps": 250},
         ),
         (
@@ -238,7 +238,7 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
             _m(min_bitrate_kbps=194, avg_bitrate_kbps=288, format="MP3"),
             _m(min_bitrate_kbps=194, format="MP3"),
             {"verdict": "better", "branch": "rank",
-                 "new_rank": "transparent", "existing_rank": "good",
+                 "new_rank": "excellent", "existing_rank": "good",
                  "new_value_kbps": 288, "existing_value_kbps": 194,
                  "new_metric": "avg", "existing_metric": "min"},
         ),

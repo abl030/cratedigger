@@ -127,7 +127,7 @@ def full_pipeline_decision(
     # VBR + avg bitrate for the preimport spectral gate trigger (issue #93).
     # ``is_vbr`` defaults to ``not is_cbr`` when omitted so legacy callers
     # retain current behavior. ``avg_bitrate`` gates VBR MP3 through spectral
-    # when below cfg.mp3_vbr.excellent — genuine V0 (~245kbps avg) skips,
+    # when below cfg.mp3_vbr_spectral_gate_kbps — genuine V0 (~245kbps) skips,
     # fake V0 (~180kbps avg) gets analyzed.
     is_vbr: bool | None = None,
     avg_bitrate: int | None = None,
@@ -398,7 +398,7 @@ def full_pipeline_decision(
         is_cbr=is_cbr,
         is_vbr=is_vbr,
         avg_bitrate_kbps=avg_bitrate,
-        vbr_threshold_kbps=cfg.mp3_vbr.excellent,
+        vbr_threshold_kbps=cfg.mp3_vbr_spectral_gate_kbps,
         codec_family=candidate_spectral.codec_family,
     )
     result["stage0_spectral_gate"] = gate

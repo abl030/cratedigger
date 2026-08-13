@@ -5,6 +5,7 @@ Pure move: every definition is AST-identical to the original.
 """
 
 
+from lib.quality.encoder_contract import mp3_vbr_contract_level
 from lib.quality.evidence_types import (
     SPECTRAL_TRANSCODE_GRADES,
     AudioQualityMeasurement,
@@ -17,7 +18,6 @@ from lib.quality.ranks import (
     QualityRankConfig,
     _codec_family_of,
     _parse_bitrate_label,
-    _parse_vbr_level,
     _selected_bitrate,
     _selected_bitrate_with_source,
     _selected_quality_bitrate_with_source,
@@ -31,37 +31,6 @@ from lib.quality.spectral_interpretation import (
     spectral_classes_comparable,
 )
 
-#: The one codec family whose class ladder is calibrated to
-#: ``QualityRankConfig.mp3_cbr``'s thresholds, and therefore the only family
-#: whose spectral-bound value may be classified with CBR bands regardless of
-#: the file's own encoding mode. See ``_shared_spectral_bitrates``.
-_CBR_CALIBRATED_RANK_FAMILY = "mp3"
-
-
-def _classify_with_cbr_bands(format_hint: str | None, *, spectral_bound: bool) -> bool:
-    """Whether a spectral-bound side must be ranked through the CBR bands.
-
-    Only MP3 routes on ``is_cbr`` at all (``quality_rank`` step 5: Opus,
-    AAC, Vorbis and WMA each have a single band table), and only MP3's
-    class ladder is calibrated to ``cfg.mp3_cbr``'s thresholds. Forcing CBR
-    for any other family was scoring an album on MP3-CBR bands purely
-    because a spectral number existed — the same class of error as the LAME
-    table itself (issue #829 Phase 5 PR2b).
-
-    Honest scope: against the SHIPPED band config this restriction is
-    provably inert, because every non-MP3 family already ignores ``is_cbr``
-    and only the two ladder families can be spectral-bound at all. It is
-    kept as a stated boundary rather than an implicit one, so that adding a
-    CBR/VBR split to another codec's bands (an ordinary config change)
-    cannot silently resurrect the defect. Pinned directly by
-    ``tests/test_quality_decisions.py::TestClassifyWithCbrBands`` — a
-    mutant widening it dies there, not at a decision, because there is no
-    decision left for it to move.
-    """
-    return spectral_bound and (
-        _codec_family_of(format_hint) == _CBR_CALIBRATED_RANK_FAMILY
-    )
-
 
 def _is_explicit_label(format_hint: str | None) -> bool:
     """True if format_hint carries an explicit quality contract (VBR or bitrate).
@@ -72,7 +41,7 @@ def _is_explicit_label(format_hint: str | None) -> bool:
     """
     if format_hint is None:
         return False
-    if _parse_vbr_level(format_hint) is not None:
+    if mp3_vbr_contract_level(format_hint) is not None:
         return True
     return _parse_bitrate_label(format_hint) is not None
 
@@ -221,18 +190,16 @@ def _shared_spectral_bitrates(
     existing_spectral_bound)`` — the two ``*_spectral_bound`` flags tell the
     caller which side's returned value IS the spectral class (clamp bound,
     ``class <= raw``) versus which is still the untouched raw metric (clamp
-    did not bind, ``class > raw``). This matters for rank classification
-    (issue #813 Finding 1): an MP3 class ladder is calibrated to
-    ``QualityRankConfig.mp3_cbr``'s thresholds (128=acceptable, 192=good,
-    256=excellent, 320=transparent), not ``mp3_vbr``'s more generous ones.
-    Classifying a spectral-bound value through a VBR-tagged side's own
-    ``is_cbr=False`` inflates its rank purely from table choice, not real
-    content. The caller only forces CBR bands when BOTH sides are bound
-    (symmetric) AND the side is MP3 (``_classify_with_cbr_bands``) —
-    forcing it on one bound side while an unbound side keeps its own
-    (possibly more generous VBR) table mixes a spectral-calibrated number
-    against a raw-metric number under two different band tables, which can
-    itself invert the ordering.
+    did not bind, ``class > raw``). Those flags still gate the same-rank
+    ``spectral_tiebreak`` (issue #813 Finding 1) — a like-for-like tiebreak
+    needs BOTH sides holding a class, not one class against one raw metric.
+
+    They no longer select a band table. The MP3 class ladder is drawn from
+    the nominal kbps values 96/112/128/160/192/224/256/320, which are exactly
+    ``QualityRankConfig.mp3``'s thresholds now that the VBR/CBR ladder split
+    is gone (issue #1145); there is no second, more generous MP3 table left
+    for a spectral-bound value to be inflated by, so the "force CBR bands
+    when both sides are bound" rule has nothing to force.
     """
     if not spectral_classes_comparable(new_spectral, existing_spectral).comparable:
         return None
@@ -533,10 +500,7 @@ def compare_quality(
             existing_spectral=existing_spectral,
         )
         if bounded_new_br is not None:
-            bound_new_rank = quality_rank(
-                new_format, bounded_new_br,
-                _classify_with_cbr_bands(new_format, spectral_bound=True), cfg,
-            )
+            bound_new_rank = quality_rank(new_format, bounded_new_br, cfg)
             bound_existing_rank = measurement_rank(existing, cfg)
             if bound_new_rank > bound_existing_rank:
                 bound_verdict = "better"
@@ -562,40 +526,13 @@ def compare_quality(
         both_spectral_bound = False
     else:
         clamped_new_br, clamped_existing_br, new_bound, existing_bound = shared
-        projected_is_cbr = (
-            new_target_contract.is_cbr
-            if new_target_contract is not None
-            else new.is_cbr
-        )
-        # A spectral-bound side's clamped value is its codec's class,
-        # calibrated to the CBR band thresholds regardless of that side's
-        # own encoding mode (see ``_shared_spectral_bitrates``'s docstring)
-        # — classify it with CBR bands. Two gates, both load-bearing.
-        # BOTH sides must be spectral-bound: forcing CBR on a bound side
-        # while an UNBOUND side keeps its own (possibly more generous VBR)
-        # bands mixes a spectral-calibrated number against a raw-metric
-        # number under two different band tables, which can itself invert
-        # the ordering. And the side must be MP3
-        # (``_classify_with_cbr_bands``): only MP3 routes on ``is_cbr`` at
-        # all, and only MP3's ladder is calibrated to ``cfg.mp3_cbr``
-        # (issue #829 Phase 5 PR2b). A side whose clamp did NOT bind still
-        # carries its own genuine raw metric, classified with its own
-        # encoding mode as before.
+        # ``both_spectral_bound`` survives the #1145 ladder collapse: it no
+        # longer picks a band table (there is one per family now), but it
+        # still gates the same-rank ``spectral_tiebreak`` below, which is only
+        # like-for-like when BOTH clamped values ARE spectral classes.
         both_spectral_bound = new_bound and existing_bound
-        new_rank = quality_rank(
-            new_format, clamped_new_br,
-            _classify_with_cbr_bands(
-                new_format, spectral_bound=both_spectral_bound,
-            ) or projected_is_cbr,
-            cfg,
-        )
-        existing_rank = quality_rank(
-            existing.format, clamped_existing_br,
-            _classify_with_cbr_bands(
-                existing.format, spectral_bound=both_spectral_bound,
-            ) or existing.is_cbr,
-            cfg,
-        )
+        new_rank = quality_rank(new_format, clamped_new_br, cfg)
+        existing_rank = quality_rank(existing.format, clamped_existing_br, cfg)
         rank_new_value, rank_existing_value = clamped_new_br, clamped_existing_br
         spectral_clamped = True
 

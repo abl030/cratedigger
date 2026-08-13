@@ -2999,6 +2999,9 @@ class TestCmdQuality(unittest.TestCase):
                         "current_spectral_bitrate"
                     ),
                 ),
+                # Production writes storage_format FROM the measurement's
+                # format; the row validation requires them equal.
+                storage_format=beets_info.format,
             )
             db.upsert_album_quality_evidence(current_evidence)
             persisted = db.find_album_quality_evidence(
@@ -3158,11 +3161,10 @@ class TestCmdQuality(unittest.TestCase):
         self.assertIn("(rank=EXCELLENT)", output)
         self.assertIn("is_cbr=True", output)
 
-    def test_quality_bare_mp3_vbr_transparent_needs_lossless_proof(self):
-        """Live request 8499: transparent genuine VBR narrows lossless-only."""
-        from lib.beets_db import AlbumInfo
+    def _vbr_request_row(self):
+        from tests.helpers import make_request_row as _make_request_row
 
-        request_row = make_request_row(
+        return _make_request_row(
             id=8499,
             status="imported",
             mb_release_id="mbid-vbr-control",
@@ -3173,26 +3175,57 @@ class TestCmdQuality(unittest.TestCase):
             verified_lossless=False,
             final_format="MP3",
         )
-        vbr_info = AlbumInfo(
+
+    @staticmethod
+    def _vbr_album_info(album_format: str):
+        from lib.beets_db import AlbumInfo
+
+        return AlbumInfo(
             album_id=8499,
             track_count=10,
             min_bitrate_kbps=319,
             avg_bitrate_kbps=319,
             median_bitrate_kbps=319,
-            format="MP3",
+            format=album_format,
             is_cbr=False,
             album_path="/Beets/VBR Artist/VBR Album",
         )
 
+    def test_quality_proven_v0_transparent_needs_lossless_proof(self):
+        """Live request 8499: transparent genuine VBR narrows lossless-only.
+
+        Its 319 kbps average reached TRANSPARENT on the retired VBR ladder.
+        Since #1145 the same album reaches it through the ``mp3 v0`` contract
+        ``album_info_from_current`` mints from its LAME header, which is what
+        the rebuilt current evidence for this release will carry. The
+        bare-label counterfactual below is the other half.
+        """
         output = self._run_quality(
-            request_row,
+            self._vbr_request_row(),
             runtime_target=None,
-            beets_info=vbr_info,
+            beets_info=self._vbr_album_info("mp3 v0"),
         )
 
         self.assertIn("Quality gate:  NEEDS LOSSLESS", output)
         self.assertIn("(rank=TRANSPARENT)", output)
         self.assertIn("is_cbr=False", output)
+
+    def test_quality_unproven_mp3_at_the_same_bitrate_needs_upgrade(self):
+        """The collapse's operator-visible consequence, on the same album.
+
+        Identical 319 kbps measurement, no LAME contract: one MP3 ladder puts
+        it in ``excellent`` and the gate asks for an upgrade instead of
+        narrowing to lossless. Pre-#1145 the unproven copy got the generous
+        VBR table and was indistinguishable from the proven one here.
+        """
+        output = self._run_quality(
+            self._vbr_request_row(),
+            runtime_target=None,
+            beets_info=self._vbr_album_info("MP3"),
+        )
+
+        self.assertIn("Quality gate:  NEEDS UPGRADE", output)
+        self.assertIn("(rank=EXCELLENT)", output)
 
     def test_backfill_uses_linked_current_evidence_not_request_scalar(self):
         from lib.beets_db import AlbumInfo

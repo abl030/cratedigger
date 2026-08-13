@@ -55,6 +55,7 @@ from lib.beets_db import AlbumInfo, BeetsDB, validate_beets_storage_pair
 from lib.config import CratediggerConfig, read_runtime_config
 from lib.media_readiness import (
     MediaReadinessError,
+    folder_mp3_encoder_settings,
     media_facts_for_path,
     normalize_media_metadata,
 )
@@ -105,6 +106,7 @@ from lib.quality import (
     evidence_decision_name,
     measured_import_decision,
     mint_verified_lossless_proof,
+    mp3_vbr_contract_format,
     native_codec_format_label,
     provisional_lossless_decision,
     transcode_detection,
@@ -800,8 +802,24 @@ def _detect_native_codec_family(folder: str) -> str:
 
 
 def _detect_source_format(folder: str) -> str:
-    """Return the bare codec actually present in the downloaded source."""
+    """Return the source's rank format label: a proven MP3 contract, else codec.
 
+    An all-MP3 source whose files unanimously carry the same explicit LAME
+    ``-V`` level is labelled ``"mp3 vN"``, which ``quality_rank`` resolves
+    through ``cfg.mp3_vbr_levels`` as a self-certifying contract (issue #1145
+    scope A). Every other source keeps the bare codec it always returned and
+    ranks on its measured bitrate through the single per-family band table.
+
+    The installed side mints the identical label from Beets'
+    ``items.encoder_settings`` (``lib.beets_db.album_info_from_current``), so
+    the same audio carries the same contract on both sides of a comparison —
+    without that symmetry the ladder collapse would rank a re-downloaded copy
+    of an installed album above itself.
+    """
+
+    contract = mp3_vbr_contract_format(folder_mp3_encoder_settings(folder))
+    if contract is not None:
+        return contract
     for root, _dirs, filenames in os.walk(folder):
         for fname in sorted(filenames):
             ext = os.path.splitext(fname)[1].lower()

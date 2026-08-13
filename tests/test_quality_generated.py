@@ -1513,7 +1513,9 @@ _LADDER_FORMATS = ("MP3", "Vorbis")
 #: the production config, exactly as ``full_pipeline_decision`` reads it
 #: (``.claude/rules/test-fidelity.md`` Rule C: the trigger comes from the
 #: producer, never a transcribed literal).
-_PREIMPORT_GATE_VBR_THRESHOLD = QualityRankConfig.defaults().mp3_vbr.excellent
+_PREIMPORT_GATE_VBR_THRESHOLD = (
+    QualityRankConfig.defaults().mp3_vbr_spectral_gate_kbps
+)
 
 
 def _lame_buckets_at_or_below(container: int) -> st.SearchStrategy[int]:
@@ -2026,16 +2028,22 @@ _FRESH_ALBUM = AlbumState(
     "generated_fresh_request", None, False, None, None, False, None)
 
 
+#: (min_bitrate, avg_bitrate, is_cbr, existing_format) — the two ways an
+#: installed MP3 reaches TRANSPARENT. Since issue #1145 the V0 shape gets
+#: there through its proven ``mp3 v0`` contract, not through a second band
+#: table: a bare measured 245 is GOOD, and the label is what production now
+#: mints for it from the LAME header. Both shapes are what
+#: ``album_info_from_current`` really produces for those albums.
 _TRANSPARENT_EXISTING_SHAPES = (
-    # (min_bitrate, avg_bitrate, is_cbr) — MP3 320 CBR and MP3 V0.
-    (320, 320, True),
-    (245, 245, False),
+    (320, 320, True, "MP3"),
+    (245, 245, False, "mp3 v0"),
 )
 
 
 @st.composite
 def transparent_mp3_albums(draw) -> AlbumState:
-    min_br, avg_br, is_cbr = draw(st.sampled_from(_TRANSPARENT_EXISTING_SHAPES))
+    min_br, avg_br, is_cbr, existing_format = draw(
+        st.sampled_from(_TRANSPARENT_EXISTING_SHAPES))
     return AlbumState(
         name="generated_transparent_mp3",
         min_bitrate=min_br,
@@ -2044,7 +2052,7 @@ def transparent_mp3_albums(draw) -> AlbumState:
         spectral_bitrate=None,
         verified_lossless=False,
         search_filetype_override=None,
-        existing_format="MP3",
+        existing_format=existing_format,
         avg_bitrate=avg_br,
     )
 
@@ -2700,7 +2708,7 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         assert_have_is_represented_by_its_own_class(
             existing_rank,
             quality_rank(
-                world.existing_format, class_kbps, True,
+                world.existing_format, class_kbps,
                 QualityRankConfig.defaults(),
             ).name.lower(),
             context=repr(world),

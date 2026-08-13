@@ -21,6 +21,7 @@ import msgspec
 from lib.beets_db import AlbumInfo
 from lib.measurement import PreimportMeasurement
 from lib.quality import (
+    CURRENT_EVIDENCE_LINEAGE_VERSION,
     AccurateRipBitMatch,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
@@ -792,6 +793,114 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertTrue(current_evidence_preserves_source_spectral(evidence))
         self.assertTrue(current_spectral_evidence_policy_usable(evidence))
 
+    def test_propagated_v0_contract_preserves_source_spectral_evidence(self):
+        """A FLAC -> V0 conversion whose library row carries its MP3 contract.
+
+        This is the exact row issue #1145 creates in bulk: the installed side
+        is one MP3 codec, and ``album_info_from_current`` labels it ``mp3 v0``
+        from the LAME headers Cratedigger's own conversion writes. Two
+        codec-fact comparisons sit downstream of that label — the propagation
+        authority check here, and ``current_evidence_preserves_source_spectral``
+        on the resulting row — and BOTH compared whole labels before this
+        issue. Either one reading ``"mp3 v0"`` as a different codec silently
+        drops the carried source spectral grade for every converted album.
+        """
+        v0_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, v0_root, ignore_errors=True)
+        for name in ("01.mp3", "02.mp3"):
+            with open(os.path.join(v0_root, name), "wb") as handle:
+                handle.write(name.encode())
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="mb-v0-contract"))
+        candidate = make_album_quality_evidence(
+            mb_release_id="mb-v0-contract",
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01.flac",
+                size_bytes=1,
+                mtime_ns=1,
+                extension="flac",
+                container="flac",
+                codec="flac",
+            )],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=850,
+                avg_bitrate_kbps=900,
+                median_bitrate_kbps=880,
+                format="FLAC",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=232,
+                spectral_subject="source",
+                spectral_provenance="measured",
+            ),
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+        )
+
+        result = propagate_candidate_evidence_to_current(
+            db,
+            request_id=42,
+            candidate_evidence=candidate,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=228,
+                avg_bitrate_kbps=245,
+                median_bitrate_kbps=240,
+                is_cbr=False,
+                album_path=v0_root,
+                # The minted contract, beside the bare canonical codec the
+                # projection keeps in ``formats_on_disk``.
+                format="mp3 v0",
+                formats_on_disk=frozenset({"mp3"}),
+            ),
+        )
+
+        self.assertEqual(result.status, "ready")
+        assert result.evidence is not None
+        evidence = result.evidence
+        self.assertEqual(evidence.storage_format, "mp3 v0")
+        self.assertEqual(evidence.measurement.was_converted_from, "flac")
+        # The propagation authority check admitted the album...
+        self.assertEqual(evidence.measurement.spectral_grade, "likely_transcode")
+        self.assertEqual(evidence.measurement.spectral_subject, "source")
+        # ...and the stored row still reads as an irreplaceable derivative.
+        self.assertTrue(current_evidence_preserves_source_spectral(evidence))
+        self.assertTrue(current_spectral_evidence_policy_usable(evidence))
+
+    def test_a_declared_bitrate_storage_format_is_still_refused(self):
+        """The row-level admission, isolated from the measurement's own clause.
+
+        ``measurement.format`` is left unset so only
+        ``AlbumQualityEvidence.storage_format``'s check can fire. A projected
+        target label must never become a stored measured format — that
+        separation is the whole reason lineage v1 exists — while the one
+        measurable contract must pass.
+        """
+        for label, expected in (
+            ("opus 128", False),
+            ("mp3 320", False),
+            ("mp3 v0", True),
+            ("MP3", True),
+        ):
+            with self.subTest(storage_format=label):
+                evidence = make_album_quality_evidence(
+                    measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=245,
+                        avg_bitrate_kbps=245,
+                        median_bitrate_kbps=245,
+                        format=None,
+                    ),
+                    storage_format=label,
+                )
+                errors = evidence.storage_validation_errors()
+                admitted = not any(
+                    "storage_format must be a measured codec label" in error
+                    for error in errors
+                )
+                self.assertEqual(admitted, expected, errors)
+
     def test_current_backfill_cannot_relink_replaced_request(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1110,7 +1219,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         )
 
         assert result.evidence is not None
-        self.assertEqual(result.evidence.lineage_version, 4)
+        self.assertEqual(result.evidence.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
         self.assertEqual(result.evidence.measurement.spectral_subject, "source")
         self.assertEqual(result.evidence.measurement.spectral_provenance, "carried")
         assert result.evidence.v0_metric is not None
@@ -1200,7 +1309,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
 
         self.assertTrue(result.available)
         assert result.evidence is not None
-        self.assertEqual(result.evidence.lineage_version, 4)
+        self.assertEqual(result.evidence.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
         self.assertEqual(result.evidence.measurement.spectral_subject, "source")
         self.assertEqual(result.evidence.measurement.spectral_provenance, "carried")
         assert result.evidence.v0_metric is not None
@@ -1270,7 +1379,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
 
                 self.assertTrue(result.available)
                 assert result.evidence is not None
-                self.assertEqual(result.evidence.lineage_version, 4)
+                self.assertEqual(result.evidence.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
                 self.assertIsNone(result.evidence.measurement.spectral_grade)
                 self.assertIsNone(result.evidence.measurement.spectral_subject)
                 self.assertIsNone(result.evidence.measurement.spectral_provenance)
@@ -1341,7 +1450,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
 
         self.assertTrue(result.available)
         assert result.evidence is not None
-        self.assertEqual(result.evidence.lineage_version, 4)
+        self.assertEqual(result.evidence.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
         m = result.evidence.measurement
         self.assertEqual(m.was_converted_from, "flac")
         self.assertEqual(m.spectral_grade, "likely_transcode")

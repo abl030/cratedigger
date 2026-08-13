@@ -25,20 +25,22 @@ band (`QualityRank`) and comparing bands first, bitrates second.
 
 ```
 LOSSLESS     100   FLAC, ALAC, WAV
-TRANSPARENT   60   MP3 V0, MP3 CBR 320, Opus 112+, AAC 192+, Vorbis 192+, WMA 320
-EXCELLENT     50   MP3 V1-V2, MP3 CBR 256, Opus 88+, AAC 144+, Vorbis 160+, WMA 256+
-GOOD          40   MP3 V3-V4, MP3 CBR 192, Opus 64+, AAC 112+, Vorbis 112+, WMA 192+
-ACCEPTABLE    30   MP3 V5-V9, MP3 CBR 128, Opus 48+, AAC 80+, Vorbis 96+, WMA 128+
+TRANSPARENT   60   MP3 V0, MP3 320, Opus 112+, AAC 192+, Vorbis 192+, WMA 320
+EXCELLENT     50   MP3 V1-V2, MP3 256+, Opus 88+, AAC 144+, Vorbis 160+, WMA 256+
+GOOD          40   MP3 V3-V4, MP3 192+, Opus 64+, AAC 112+, Vorbis 112+, WMA 192+
+ACCEPTABLE    30   MP3 V5-V9, MP3 128+, Opus 48+, AAC 80+, Vorbis 96+, WMA 128+
 POOR          20   below acceptable floor
 UNKNOWN        0   not enough info to classify
 ```
 
 Integer spacing leaves room for inserting new bands later. The rank is never
-persisted — it's always recomputed from `(format, bitrate, is_cbr)` + config.
+persisted — it's always recomputed from `(format, bitrate)` + config. Note the
+absent third input: `is_cbr` used to select between two MP3 ladders and no
+longer participates in any rank (issue #1145).
 
 ## Label vs bare-codec resolution
 
-`quality_rank(format_hint, bitrate_kbps, is_cbr, cfg)` resolves a measurement
+`quality_rank(format_hint, bitrate_kbps, cfg)` resolves a measurement
 through six steps, in order:
 
 1. Both `format_hint` and `bitrate_kbps` are `None` → `UNKNOWN`.
@@ -52,9 +54,15 @@ through six steps, in order:
    The label is a contract; the actual measured bitrate is ignored.
 5. Bare codec name (`"MP3"`, `"Opus"`, `"AAC"`, `"Vorbis"`, `"WMA"` from
    beets `items.format`) → classify the measured `bitrate_kbps` against the
-   band table. `"MP3"` with `is_cbr=True` uses `cfg.mp3_cbr`, otherwise
-   `cfg.mp3_vbr`. Vorbis and WMA each use one table regardless of `is_cbr`.
+   band table. Every family, MP3 included, has exactly one table.
 6. Unknown codec → `UNKNOWN`.
+
+**No step reads an encoding mode** (issue #1145). MP3 used to route to
+`cfg.mp3_cbr` or `cfg.mp3_vbr` on an `is_cbr` boolean derived from per-track
+bitrate uniformity — not an encoder-mode detector, absent entirely for 38% of
+the library, and worth a 75 kbps swing in the transparent floor. A VBR encode
+is promoted above the single measured ladder only through step 3, by a proven
+LAME `-V` contract.
 
 The **label path** (step 3-4) is what makes lo-fi V0 imports work without the
 old `verified_lossless` blanket bypass: a 207 kbps file with `format="mp3 v0"`
@@ -131,7 +139,7 @@ Spectral cliff detection continues to use `min` regardless of this setting —
 it cares about the worst track, not the typical one. `transcode_detection()`
 no longer reads any bitrate: absent or errored spectral analysis fails
 closed as a transcode verdict. The former spectral-fallback threshold
-derived from `cfg.mp3_vbr.excellent` (issue #66) is gone — missing or
+derived from the MP3 band table (issue #66) is gone — missing or
 errored evidence cannot be converted into a positive quality fact.
 
 `measurement_rank()` is the single dispatch point. Each metric reads its
@@ -202,29 +210,7 @@ spectral leg asserts nothing about an Opus album at any bitrate — audit-only,
 unconditional. Measured tables: `docs/research/spectral-opus.md` §
 "Measured — Phase 3/4 results".
 
-### MP3 VBR (LAME V0-V9 targets)
-
-| Band | Threshold (kbps) |
-|------|------------------|
-| transparent | 245 |
-| excellent | 210 |
-| good | 170 |
-| acceptable | 130 |
-
-The 210 threshold matches the legacy `QUALITY_MIN_BITRATE_KBPS=210` constant,
-so bare-codec MP3 VBR measurements from beets keep behaving as they did
-before the rank model. 245 adds a "V0 target" band above. The V0/V2/V4/etc.
-mapping via `mp3_vbr_levels` handles labeled conversions separately.
-
-`QUALITY_MIN_BITRATE_KBPS` is now defaults-only. Every numeric classification
-threshold (including this 210) lives in `QualityRankConfig` and can be retuned
-in the `[Quality Ranks]` section of `config.ini`. Ranks govern relative
-replacement and search narrowing; they are not an acceptance floor. One
-deliberate exception: the V0 trust override (avg ≥ 230 / min ≥ 200 in
-`lib/quality/decisions.py`) is hardcoded, not configurable — those two
-numbers guard the verified-lossless terminal stop.
-
-### MP3 CBR
+### MP3 (one ladder, all measured MP3)
 
 | Band | Threshold (kbps) |
 |------|------------------|
@@ -233,19 +219,42 @@ numbers guard the verified-lossless terminal stop.
 | good | 192 |
 | acceptable | 128 |
 
-Unverifiable CBR only reaches TRANSPARENT at 320 because the pipeline can't
-prove a CBR file came from lossless source. Spectral cliff detection may
-clamp it down further.
+One table for every measured MP3, whatever its encoding mode (issue #1145).
+Unverifiable MP3 only reaches TRANSPARENT at 320 because the pipeline cannot
+prove a measured MP3 came from a lossless source, and an inferred mode is not
+proof. Spectral cliff detection may clamp it down further.
 
-**A spectral-bound value classifies via this table only when BOTH sides are
-bound AND the side is MP3** (issue #829 Phase 5 PR2b — only MP3 routes on
-`is_cbr` at all, and only MP3 has a class ladder these thresholds share).
-The MP3 spectral class (`lib/spectral_check.py`'s `LAME_LOWPASS` table:
-96/112/128/160/192/224/256/320, or the detector-space ladder in
-`lib/quality/spectral_interpretation.py` when a raw `cliff_hz` was
-captured) is a *nominal kbps class* drawn from the same MP3 ladder these
-CBR thresholds are, not from the more generous MP3 VBR ones — so a class of
-192 lands in the `good` band arithmetically.
+Until #1145 there were two tables 75 kbps apart, selected by `is_cbr` — a
+boolean derived from per-track bitrate *uniformity*, which is not an encoder
+mode. Measured on the live DB at the time: 13,983 of 14,001 MP3 evidence rows
+carried a bare codec label, so that boolean decided ~99.9% of MP3 ranks; 567 of
+5,146 `is_cbr=False` rows had `median − min ≤ 2 kbps` (the CBR jitter shape);
+and sampling 400 library MP3s found `bitrate_mode` UNKNOWN on 153 of them.
+
+**A genuine VBR encode is promoted by proof, not by the table.** Cratedigger
+parses `-V N` out of the LAME header — `items.encoder_settings` on the
+installed side, the file's own tag on the candidate side — and mints an
+`mp3 vN` contract that resolves through `mp3_vbr_levels` (step 3), which is
+self-certifying. The mint is unanimous-or-nothing: one unlabelled or
+disagreeing file withholds the contract for the whole album, and only `-V N`
+plus the single documented alias `--alt-preset standard` (= V2) are mapped.
+Nothing is inferred from bitrate, uniformity, or `bitrate_mode`. Both sides of
+a comparison mint from the same rule, so identical audio carries an identical
+contract — without that symmetry the single ladder would rank a re-download of
+an installed album above itself. Owner: `lib/quality/encoder_contract.py`.
+
+**A spectral-bound value classifies via this table when the shared clamp
+binds.** The MP3 spectral class (`lib/spectral_check.py`'s `LAME_LOWPASS`
+table: 96/112/128/160/192/224/256/320, or the detector-space ladder in
+`lib/quality/spectral_interpretation.py` when a raw `cliff_hz` was captured)
+is a *nominal kbps class* drawn from the same MP3 ladder these thresholds are,
+so a class of 192 lands in the `good` band arithmetically. Before #1145 this
+paragraph had to say "only when BOTH sides are bound AND the side is MP3",
+because the other MP3 table was more generous and reading a class through it
+inflated the rank; with one table there is no second table to be inflated by,
+and `_classify_with_cbr_bands` is gone. `both_spectral_bound` survives — it
+still gates the same-rank `spectral_tiebreak`, which is only like-for-like
+when both clamped values ARE spectral classes (issue #813 Finding 1).
 
 **That is a statement about the class VALUES, not about accuracy** (issue
 #829 Phase 5 PR2c — this paragraph used to say a cliff-detected 192 "IS a
@@ -265,23 +274,26 @@ precisely: **Vorbis q0–q4 has its own invertible ladder**
 `LADDER_CODEC_FAMILIES` is `{mp3, vorbis}`), and its classes ARE
 decision-grade — a same-Vorbis pair is comparable and clamps. Those classes
 simply classify through the **Vorbis** band table further down this page,
-never this MP3-CBR one. So the accurate statement is "no other codec's
-class reaches *this* table", not "no other codec has a ladder". The two
-families that genuinely have none are AAC — whose cliff is a one-sided
-content *floor*, never a class — and Opus/HE-AAC, which assert nothing at
-all. See `docs/research/spectral-calibration-findings.md`. When
-`compare_quality`'s shared spectral clamp (`_shared_spectral_bitrates`)
-binds on BOTH sides (`spectral <= raw metric`, each side individually),
-both clamped values classify through this table regardless of either
-file's own `is_cbr` — a VBR-tagged file's spectral-bound clamp does NOT get
-the more generous VBR bands (issue #813 Finding 1's second sub-finding;
-`docs/quality-verification.md` § "Stage 1 / Stage 2 parity"). This is
-symmetric: forcing CBR bands on only one bound side while an unbound side
-keeps its own (possibly more generous VBR) table would mix a spectral-
-calibrated number against a raw-metric number under two different band
-tables, which can itself invert the ordering (a PR #827 review finding). A
-side whose clamp did NOT bind (raw is the tighter value) always classifies
-with its own encoding mode.
+never this MP3 one. So the accurate statement is "no other codec's class
+reaches *this* table", not "no other codec has a ladder". The two families
+that genuinely have none are AAC — whose cliff is a one-sided content
+*floor*, never a class — and Opus/HE-AAC, which assert nothing at all. See
+`docs/research/spectral-calibration-findings.md`.
+
+### Spectral scan selection — `mp3_vbr_spectral_gate_kbps`
+
+Default **210**. A VBR MP3 whose album average reaches this value is a
+plausible genuine V0 and skips the pre-import spectral scan; below it, the
+scan runs (issue #93 — a VBR MP3 at avg 182 kbps was an obvious transcode the
+old `is_vbr`-only gate let through). Scan selection only: it never classifies
+anything and the transcode decision consumes the resulting grade, not this
+number.
+
+It used to be read off `mp3_vbr.excellent`, which happened to be 210. That
+made it invisible collateral of any MP3 band retune, and the #1145 ladder
+collapse would have silently moved it to 256 — so it now has its own name and
+keeps its own value. `lib/quality/gates.py::spectral_gate_trigger` and
+`lib.measurement._needs_spectral_check` are the two readers.
 
 ### AAC
 
@@ -367,21 +379,17 @@ else stays at defaults).
 [Quality Ranks]
 bitrate_metric = avg
 within_rank_tolerance_kbps = 5
+mp3_vbr_spectral_gate_kbps = 210
 
 opus.transparent = 112
 opus.excellent = 88
 opus.good = 64
 opus.acceptable = 48
 
-mp3_vbr.transparent = 245
-mp3_vbr.excellent = 210
-mp3_vbr.good = 170
-mp3_vbr.acceptable = 130
-
-mp3_cbr.transparent = 320
-mp3_cbr.excellent = 256
-mp3_cbr.good = 192
-mp3_cbr.acceptable = 128
+mp3.transparent = 320
+mp3.excellent = 256
+mp3.good = 192
+mp3.acceptable = 128
 
 aac.transparent = 192
 aac.excellent = 144
@@ -413,7 +421,11 @@ issue #65 wires them through the INI parser.
 
 - **`mp3_vbr_levels`** — comma-separated list of exactly 10 rank names
   (V0..V9). Maps each LAME VBR V-level to a rank when the format hint is
-  an explicit `mp3 v0` / `mp3 v3` / etc. label. Defaults assume LAME's
+  an `mp3 v0` / `mp3 v3` / etc. contract — either one Cratedigger's own
+  conversion produced, or one minted from a file's LAME header (#1145).
+  Since the MP3 band tables collapsed into one, this table is the ONLY way a
+  measured MP3 rises above the single measured ladder, so retuning it is the
+  lever for "how much do I trust a `-V` claim". Defaults assume LAME's
   documented V-level quality contract:
   - V0 → TRANSPARENT, V1-V2 → EXCELLENT, V3-V4 → GOOD, V5-V9 → ACCEPTABLE.
   - Tighten if you don't trust LAME's claim that V2 is transparent.
@@ -497,14 +509,14 @@ All options live under `services.cratedigger.qualityRanks.*` and are declared by
 |---|---|---|---|
 | `bitrateMetric` | enum (`min`, `avg`, `median`) | `"avg"` | Which per-album bitrate statistic feeds rank classification. `avg` is robust to VBR per-track variance. `median` is outlier-resistant -- prefer when albums commonly have quiet intros/hidden tracks/skits that skew `avg`. `min` is legacy and penalizes legitimately-encoded lo-fi VBR. See `docs/quality-ranks.md` "When to prefer median". |
 | `withinRankToleranceKbps` | int | `5` | Same-rank equivalence window in kbps. Two bare-codec measurements in the same rank tier within this tolerance are "equivalent"; outside it, one is "better"/"worse". |
+| `mp3VbrSpectralGateKbps` | int | `210` | Album-average bitrate at or above which a VBR MP3 skips the pre-import spectral scan. Scan selection only, never a rank band. |
 
 **Per-codec band tables** (`bands.<codec>.{transparent,excellent,good,acceptable}`, all in kbps, used when the format hint is a bare codec string like `"MP3"` rather than an explicit label like `"mp3 v0"`):
 
 | Codec | transparent | excellent | good | acceptable | Notes |
 |---|---|---|---|---|---|
 | `bands.opus`   | 112 | 88  | 64  | 48  | Unconstrained Opus VBR averages 120-135 kbps typical / 95-150 kbps per track. 112 leaves headroom for sparse material; 88 matches Opus 96 hydrogenaudio quality. |
-| `bands.mp3Vbr` | 245 | 210 | 170 | 130 | V0 typically averages 220-260; V2 ~190 → `good=170`. Spectral evidence is authoritative; these bitrate bands classify measured quality but never substitute for a missing or failed spectral analysis. |
-| `bands.mp3Cbr` | 320 | 256 | 192 | 128 | Unverifiable CBR is only `transparent` at 320 because we can't prove a CBR file came from lossless source. Below that → requeue for a FLAC source to re-verify. |
+| `bands.mp3`    | 320 | 256 | 192 | 128 | One table for every measured MP3 (issue #1145). Unverifiable measured MP3 is only `transparent` at 320 because we can't prove it came from a lossless source, and an inferred encoding mode is not proof. A genuine VBR encode is promoted instead by its LAME `-V` contract through `mp3_vbr_levels`. Below that → requeue for a FLAC source to re-verify. |
 | `bands.aac`    | 192 | 144 | 112 | 80  | Hydrogenaudio consensus places the "no meaningful quality gain above here" ceiling for music at 192 kbps. |
 | `bands.vorbis` | 192 | 160 | 112 | 96  | Conservative q2/q3/q5/q6-region approximation. One table; `is_cbr` does not change routing. |
 | `bands.wma`    | 320 | 256 | 192 | 128 | Conservative WMA Standard table mirroring MP3 CBR. One table; `is_cbr` does not change routing. |
@@ -515,7 +527,7 @@ Leaving every option at its default produces exactly `QualityRankConfig.defaults
 
 Three fields are part of the rank model but are NOT surfaced as Nix options because they're rarely-if-ever retuned outside of development. They live on `QualityRankConfig` in `lib/quality/ranks.py`, are parseable from `[Quality Ranks]` as CSV (see #65), and default to sensible values. If you want to tune them, the cleanest path is editing the dataclass defaults and updating `TestQualityRankConfigDefaults` to pin the new values. Extending `nix/module.nix` to render them is a trivial follow-up if you find yourself retuning them often.
 
-- **`mp3_vbr_levels`** -- 10-tuple mapping LAME V-levels to ranks (V0..V9). The V-level is an **explicit label contract** -- when a download advertises `"mp3 v0"`, the rank model reads V0 from this tuple and bypasses `bands.mp3Vbr` entirely. This is why a 207 kbps lo-fi V0 still classifies as TRANSPARENT: the V0 label beats the 210 threshold.
+- **`mp3_vbr_levels`** -- 10-tuple mapping LAME V-levels to ranks (V0..V9). The V-level is a **proven contract** -- when a file's LAME header (or a Cratedigger conversion) says `"mp3 v0"`, the rank model reads V0 from this tuple and bypasses `bands.mp3` entirely. This is why a 207 kbps lo-fi V0 still classifies as TRANSPARENT. Since #1145 collapsed the two MP3 tables this is the only route above the measured ladder, so it is the lever for how far a `-V` claim is trusted.
 
   **Default ladder**: `V0=TRANSPARENT, V1-V2=EXCELLENT, V3-V4=GOOD, V5-V9=ACCEPTABLE`
 

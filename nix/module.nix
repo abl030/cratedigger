@@ -986,10 +986,10 @@
       [Quality Ranks]
       bitrate_metric = ${qr.bitrateMetric}
       within_rank_tolerance_kbps = ${toString qr.withinRankToleranceKbps}
+      mp3_vbr_spectral_gate_kbps = ${toString qr.mp3VbrSpectralGateKbps}
 
       ${bandSection "opus" qr.bands.opus}
-      ${bandSection "mp3_vbr" qr.bands.mp3Vbr}
-      ${bandSection "mp3_cbr" qr.bands.mp3Cbr}
+      ${bandSection "mp3" qr.bands.mp3}
       ${bandSection "aac" qr.bands.aac}
       ${bandSection "vorbis" qr.bands.vorbis}
       ${bandSection "wma" qr.bands.wma}
@@ -1866,6 +1866,16 @@ in {
         type = types.int;
         default = 5;
       };
+      mp3VbrSpectralGateKbps = mkOption {
+        type = types.int;
+        default = 210;
+        description = ''
+          Album-average bitrate (kbps) at or above which a VBR MP3 is treated
+          as a plausible genuine V0 and skips the pre-import spectral scan.
+          Scan selection only — never a rank band. Lower it to scan more
+          albums.
+        '';
+      };
       bands = {
         opus = mkCodecBands "Opus" {
           transparent = 112;
@@ -1873,13 +1883,7 @@ in {
           good = 64;
           acceptable = 48;
         };
-        mp3Vbr = mkCodecBands "MP3 VBR" {
-          transparent = 245;
-          excellent = 210;
-          good = 170;
-          acceptable = 130;
-        };
-        mp3Cbr = mkCodecBands "MP3 CBR" {
+        mp3 = mkCodecBands "MP3" {
           transparent = 320;
           excellent = 256;
           good = 192;

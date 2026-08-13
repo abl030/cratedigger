@@ -40,6 +40,7 @@ from lib.import_queue import (
 )
 from lib.pipeline_db._shared import ADVISORY_LOCK_NAMESPACE_IMPORT
 from lib.quality import (
+    CURRENT_EVIDENCE_LINEAGE_VERSION,
     DECISION_LOSSLESS_SOURCE_LOCKED,
     DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
     DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
@@ -274,7 +275,7 @@ def make_album_quality_evidence(
     storage_format: str | None = "MP3",
     target_format: str | None = None,
     target_is_cbr: bool | None = None,
-    lineage_version: int = 4,
+    lineage_version: int = CURRENT_EVIDENCE_LINEAGE_VERSION,
     on_disk_v0_research_attempted: bool = False,
     current_enrichment_required: bool = False,
     preserve_spectral_measurement_version: bool = False,
@@ -313,7 +314,7 @@ def make_album_quality_evidence(
             spectral_bitrate_kbps=None,
         )
     if (
-        lineage_version == 4
+        lineage_version >= 4
         and measurement.spectral_grade is not None
         and measurement.spectral_subject is None
     ):
@@ -323,7 +324,7 @@ def make_album_quality_evidence(
             spectral_provenance=EVIDENCE_PROVENANCE_MEASURED,
         )
     if (
-        lineage_version == 4
+        lineage_version >= 4
         and measurement.spectral_grade is not None
         and measurement.spectral_measurement_version is None
         and not preserve_spectral_measurement_version
@@ -1127,9 +1128,9 @@ def make_quality_rank_config(
     *,
     bitrate_metric: RankBitrateMetric | None = None,
     within_rank_tolerance_kbps: int | None = None,
+    mp3_vbr_spectral_gate_kbps: int | None = None,
     opus: CodecRankBands | None = None,
-    mp3_vbr: CodecRankBands | None = None,
-    mp3_cbr: CodecRankBands | None = None,
+    mp3: CodecRankBands | None = None,
     aac: CodecRankBands | None = None,
 ) -> QualityRankConfig:
     """Build a QualityRankConfig with test-friendly overrides.
@@ -1147,9 +1148,13 @@ def make_quality_rank_config(
             if within_rank_tolerance_kbps is not None
             else base.within_rank_tolerance_kbps
         ),
+        mp3_vbr_spectral_gate_kbps=(
+            mp3_vbr_spectral_gate_kbps
+            if mp3_vbr_spectral_gate_kbps is not None
+            else base.mp3_vbr_spectral_gate_kbps
+        ),
         opus=opus if opus is not None else base.opus,
-        mp3_vbr=mp3_vbr if mp3_vbr is not None else base.mp3_vbr,
-        mp3_cbr=mp3_cbr if mp3_cbr is not None else base.mp3_cbr,
+        mp3=mp3 if mp3 is not None else base.mp3,
         aac=aac if aac is not None else base.aac,
         mp3_vbr_levels=base.mp3_vbr_levels,
         lossless_codecs=base.lossless_codecs,

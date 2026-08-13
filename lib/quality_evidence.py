@@ -20,6 +20,7 @@ from lib.evidence_media_identity import (
     is_lossless_evidence_codec,
 )
 from lib.quality import (
+    CURRENT_EVIDENCE_LINEAGE_VERSION,
     EVIDENCE_PROVENANCE_CARRIED,
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
@@ -40,6 +41,7 @@ from lib.quality import (
     V0ProbeEvidence,
     VerifiedLosslessProof,
     candidate_preimport_reject_fact,
+    format_codec_token,
     legacy_unrecorded_audio_validation_report,
 )
 
@@ -366,10 +368,17 @@ def current_evidence_preserves_source_spectral(
     # containers are not (notably, .m4a can be AAC or ALAC). Treat missing or
     # conflicting labels as unresolved rather than preserving an old source
     # grade, then authorize their exact shared media pair.
+    #
+    # Reduced to the CODEC TOKEN because these two labels can carry a quality
+    # contract, not only a bare codec: ``"mp3 v0"`` names the same codec as
+    # ``"mp3"`` and must resolve to the same lossy media pair. 18 live rows
+    # already carry that spelling, so the whole-string comparison this
+    # replaces was withholding preservation from exactly the converted rows
+    # this function exists for; issue #1145 makes the spelling common.
     formats = {
-        label.strip().lower()
+        token
         for label in (evidence.storage_format, evidence.measurement.format)
-        if label is not None and label.strip()
+        if (token := format_codec_token(label)) is not None
     }
     return (
         len(containers) == 1
@@ -499,9 +508,10 @@ def current_evidence_rebuild_reasons(
 ) -> list[str]:
     """Return reasons a current-library snapshot must be measured again."""
     reasons = evidence.policy_incomplete_reasons()
-    if evidence.lineage_version != 4:
+    if evidence.lineage_version != CURRENT_EVIDENCE_LINEAGE_VERSION:
         reasons.append(
-            f"lineage_version {evidence.lineage_version} must be rebuilt as 4"
+            f"lineage_version {evidence.lineage_version} must be rebuilt as "
+            f"{CURRENT_EVIDENCE_LINEAGE_VERSION}"
         )
     measurement = evidence.measurement
     if (
@@ -946,7 +956,7 @@ def evidence_from_import_result(
         storage_format=audio_measurement.format,
         target_format=target_format,
         target_is_cbr=target_is_cbr,
-        lineage_version=4,
+        lineage_version=CURRENT_EVIDENCE_LINEAGE_VERSION,
         v0_metric=(
             neutral_v0_metric_from_probe(import_result.v0_probe)
         ),
@@ -1077,7 +1087,7 @@ def evidence_from_measurement(
         # absent instead of fabricating a bitrate mode.
         target_format=None,
         target_is_cbr=None,
-        lineage_version=4,
+        lineage_version=CURRENT_EVIDENCE_LINEAGE_VERSION,
         v0_metric=None,
         verified_lossless_proof=(
             measurement.cd_rip_verification.verified_lossless_proof()
@@ -1153,7 +1163,7 @@ def evidence_from_album_info(
         codec=files[0].codec,
         container=files[0].container,
         storage_format=measurement.format,
-        lineage_version=4,
+        lineage_version=CURRENT_EVIDENCE_LINEAGE_VERSION,
         v0_metric=None,
         verified_lossless_proof=proof,
         cd_rip_verification=carried_cd_rip,
@@ -1556,11 +1566,17 @@ def propagate_candidate_evidence_to_current(
     output_source_format = (
         measured_source_format if is_transcode else None
     )
-    reduced_format = album_info.format.strip().lower()
+    # ``album_info.format`` may be a proven MP3 contract (``"mp3 v0"``, issue
+    # #1145) while ``formats_on_disk`` always holds bare canonical codecs.
+    # Authority here is a question about the CODEC — "does one codec own this
+    # album" — so compare tokens; comparing the whole label would read every
+    # contract-bearing album as mixed and silently stop carrying its source
+    # spectral evidence.
+    reduced_format = format_codec_token(album_info.format) or ""
     album_formats = frozenset(
-        value.strip().lower()
+        token
         for value in album_info.formats_on_disk
-        if value.strip()
+        if (token := format_codec_token(value)) is not None
     )
     if not album_formats and reduced_format:
         album_formats = frozenset({reduced_format})
@@ -1647,7 +1663,7 @@ def propagate_candidate_evidence_to_current(
         container=library_container_from_files,
         storage_format=measurement.format,
         target_format=None,
-        lineage_version=4,
+        lineage_version=CURRENT_EVIDENCE_LINEAGE_VERSION,
         v0_metric=carried_v0,
         verified_lossless_proof=carried_proof,
         cd_rip_verification=carried_cd_rip,

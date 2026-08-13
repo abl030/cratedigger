@@ -18,6 +18,7 @@ from lib.beets_db import (
     CurrentBeetsUnique,
     _reduce_album_format,
 )
+from lib.media_readiness import kbps_from_bps
 from lib.quality import QualityRankConfig
 from lib.release_identity import ReleaseIdentity
 
@@ -86,8 +87,16 @@ def compute_library_rank(
     floor. Pure (moved from ``web/server.py``, which keeps a 2-arg wrapper
     supplying the cached cfg). Returns the lowercase rank name (``lossless`` /
     ``transparent`` / ``excellent`` / ``good`` / ``acceptable`` / ``poor`` /
-    ``unknown``). Treats MP3 as VBR — cratedigger only produces VBR-V0 MP3, and
-    the badge buckets barely care about the VBR/CBR distinction.
+    ``unknown``).
+
+    The badge reads the codec label Beets stores (``"MP3"``, ``"FLAC"``, …),
+    which is a bare codec, never a ``-V`` contract — Beets has no field for
+    one and this projection does no per-file header read. So an MP3 badge is
+    always the measured single-ladder band, which since issue #1145 is the
+    only MP3 ladder there is; before it, this call passed ``is_cbr=False`` and
+    got the more generous of two. A library MP3 that a decision would promote
+    on its LAME contract therefore bands one or two tiers below the rank the
+    importer computes for it.
     """
     if not format_str:
         return BAND_UNKNOWN
@@ -95,7 +104,7 @@ def compute_library_rank(
     if not fmt:
         return BAND_UNKNOWN
     from lib.quality import quality_rank
-    return quality_rank(fmt, bitrate_kbps, is_cbr=False, cfg=cfg).name.lower()
+    return quality_rank(fmt, bitrate_kbps, cfg=cfg).name.lower()
 
 
 def _band_current_unique(
@@ -112,8 +121,15 @@ def _band_current_unique(
         for item in current.items
         if item.bitrate is not None and item.bitrate > 0
     ]
+    # The one bps->kbps reduction (issue #1144's ``kbps_from_bps``), not a
+    # local float-divide-and-truncate. This was the last floored copy: the
+    # band a release shows must not sit a kbps below the rank the decision
+    # path computes from the same Beets rows. Its generated pin
+    # (``test_mixed_format_precedence_is_item_order_invariant``) already said
+    # the divergence was invisible only because no band edge fell where floor
+    # and round disagree — moving the MP3 edges in #1145 made one.
     average_kbps = (
-        int(sum(bitrates) / len(bitrates) / 1000)
+        kbps_from_bps(sum(bitrates) // len(bitrates))
         if bitrates else 0
     )
     return compute_library_rank(album_format, average_kbps, cfg)

@@ -177,9 +177,11 @@ class TestAverageBitrateDerivationPin(unittest.TestCase):
     ``album_quality_evidence`` id 36856: ten genuinely 256 kbps tracks, one of
     which derived 255 because the rate was computed through a float
     ``duration`` that is not exactly representable. That single kbps broke
-    per-track bitrate uniformity, flipped ``is_cbr`` to False, routed the album
-    onto ``cfg.mp3_vbr`` (transparent >= 245) instead of ``cfg.mp3_cbr``
-    (transparent >= 320), and the album out-ranked and re-imported over itself.
+    per-track bitrate uniformity, flipped ``is_cbr`` to False, and (before
+    issue #1145 collapsed the two MP3 ladders) routed the album onto the more
+    generous VBR table, so it out-ranked and re-imported over itself. The
+    ladder amplifier is gone; the reduction still has to be exact, because a
+    kbps is still a band edge away from changing a tier.
     """
 
     # Track 04 of the live album, exactly as ffprobe reported it. The real

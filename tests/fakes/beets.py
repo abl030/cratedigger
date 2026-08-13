@@ -23,6 +23,7 @@ from lib.beets_db import (
     album_info_from_current,
 )
 from lib.media_readiness import kbps_from_bps
+from lib.quality.encoder_contract import mp3_vbr_contract_level
 from lib.release_identity import (
     ReleaseIdentity,
     detect_release_source,
@@ -31,6 +32,29 @@ from lib.release_identity import (
 
 if TYPE_CHECKING:
     from lib.quality import QualityRankConfig
+
+
+def _item_codec_and_encoder_settings(
+    album_format: str,
+) -> tuple[str, str | None]:
+    """Split a requested ``AlbumInfo.format`` into per-item Beets facts.
+
+    Beets items never store a quality contract — they store a bare codec plus
+    the encoder's own ``encoder_settings`` string, and
+    ``album_info_from_current`` mints ``"mp3 vN"`` from the two (issue #1145).
+    A seed that wrote the contract straight into ``items.format`` would build
+    a world Beets cannot produce, so a requested contract is decomposed back
+    into the facts that really certify it.
+
+    The level is read with the production reader, and the settings string is
+    one the production ``lame_vbr_level`` parses — the round trip through
+    ``album_info_from_current`` in ``_assert_seed_projects_to`` is what proves
+    it, not this function's own arithmetic.
+    """
+    level = mp3_vbr_contract_level(album_format)
+    if level is None:
+        return album_format, None
+    return "MP3", f"-V {level}"
 
 
 class FakeBeetsDB:
@@ -169,6 +193,9 @@ class FakeBeetsDB:
     def set_album_info(self, mb_release_id: str, info: Any) -> None:
         if isinstance(info, AlbumInfo):
             bitrates = self._synthesize_bitrates(info)
+            item_format, encoder_settings = _item_codec_and_encoder_settings(
+                info.format,
+            )
             self._seed_current_items(
                 mb_release_id,
                 info.album_id,
@@ -181,8 +208,9 @@ class FakeBeetsDB:
                         title=f"Track {index + 1}",
                         track=index + 1,
                         disc=1,
-                        format=info.format,
+                        format=item_format,
                         bitrate=bitrate,
+                        encoder_settings=encoder_settings,
                     )
                     for index, bitrate in enumerate(bitrates)
                 ],
@@ -323,6 +351,7 @@ class FakeBeetsDB:
             projected.avg_bitrate_kbps,
             projected.median_bitrate_kbps,
             projected.is_cbr,
+            projected.format,
         )
         expected = (
             info.track_count,
@@ -330,6 +359,7 @@ class FakeBeetsDB:
             info.avg_bitrate_kbps or info.min_bitrate_kbps,
             info.median_bitrate_kbps or info.min_bitrate_kbps,
             info.is_cbr,
+            info.format,
         )
         assert actual == expected, (
             "seeded items do not reduce to the requested AlbumInfo: "
@@ -857,7 +887,11 @@ class FakeBeetsDB:
         """Mirror of ``BeetsDB.get_min_bitrate`` (kbps; None = no row).
 
         Production derives this value from the same joined item snapshot as
-        every other current-release lookup; the fake does the same.
+        every other current-release lookup; the fake does the same — and it
+        reduces bps through the production ``kbps_from_bps``, never a copy of
+        the arithmetic. #1144's convergence found three hand-copied
+        reductions in this file that all still floored after production
+        started rounding.
         """
         self.get_min_bitrate_calls.append(mb_release_id)
         if self._locate_queue and self._locate_queue[0].kind != "exact":
@@ -872,7 +906,7 @@ class FakeBeetsDB:
             item.bitrate for item in current.items
             if item.bitrate is not None and item.bitrate > 0
         ]
-        return int(min(bitrates) / 1000) if bitrates else None
+        return kbps_from_bps(min(bitrates)) if bitrates else None
 
     def _album_info_from_resolution(
         self,

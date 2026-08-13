@@ -1187,18 +1187,18 @@ both carry a `spectral_bitrate_kbps`):
    actually bound turns the branch into a stealth `metric_tiebreak` with no
    `±5kbps` tolerance whenever one (or neither) side is bound, since the
    "clamped" value on an unbound side is just its raw metric.
-2. **CBR/VBR band-table mismatch** (`rank` branch). An MP3 class ladder is
-   calibrated to `QualityRankConfig.mp3_cbr`'s thresholds
-   (128=acceptable, 192=good, 256=excellent, 320=transparent), not
-   `mp3_vbr`'s more generous ones. A side whose clamp is spectral-bound now
-   classifies via CBR bands regardless of that side's own `is_cbr` — but
-   **only when BOTH sides are bound** (another PR #827 review finding)
-   **and only for MP3** (issue #829 Phase 5 PR2b): forcing CBR on one bound
-   side while an unbound side keeps its own (possibly more generous VBR)
-   table mixes a spectral-calibrated number against a raw-metric number
-   under two different band tables, which can itself invert the ordering,
-   and only MP3 routes on `is_cbr` at all. A side whose clamp did NOT bind
-   (raw is the tighter value) always classifies with its own encoding mode.
+2. **CBR/VBR band-table mismatch** (`rank` branch) — **RESOLVED BY REMOVAL,
+   issue #1145.** An MP3 class ladder is drawn from the nominal kbps values
+   128/192/256/320, and the second, more generous MP3 band table those values
+   used to be measured against no longer exists: there is one
+   `QualityRankConfig.mp3` table and a spectral-bound value classifies
+   through it like everything else. `_classify_with_cbr_bands` and its "both
+   sides bound AND the side is MP3" gating are gone with it, along with
+   `quality_rank`'s `is_cbr` parameter.
+
+   `both_spectral_bound` itself survives, for finding 1 above only: the
+   same-rank `spectral_tiebreak` is like-for-like only when both clamped
+   values ARE spectral classes.
 
 #### The cross-codec domain (issue #829 Phase 5 PR2c)
 
