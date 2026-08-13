@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 _FAKE_COMMAND = r'''#!/usr/bin/env -S python3 -S
+# -S skips `site` import for faster startup: this shim must stay stdlib-only.
 import fcntl
 import json
 import os
@@ -43,9 +44,15 @@ def fail(message):
 
 
 def rmtree(path):
-    """Best-effort recursive delete, matching shutil.rmtree(ignore_errors=True)
-    for the plain worktree directories this fake ever creates (no symlinks,
-    no cross-device edge cases) -- avoids importing `shutil` per call."""
+    """Best-effort recursive delete -- avoids importing `shutil` per call.
+    Matches shutil.rmtree(ignore_errors=True) for a real directory or a
+    missing path, the only two shapes this fake ever produces (it only
+    ever deletes a plain directory it itself created via os.makedirs()).
+    Diverges for a non-directory root: shutil's ignore_errors=True leaves
+    a file/symlink root untouched, this unlinks that one entry instead --
+    unreachable here, but not identical, so said plainly rather than
+    claimed away. It never follows a symlink out of the tree: a symlinked
+    child is unlinked, never descended into."""
     if not os.path.isdir(path) or os.path.islink(path):
         try:
             os.remove(path)
