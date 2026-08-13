@@ -250,13 +250,15 @@ def _crash_cleanup_after_first_file(
     raise AssertionError("cleanup did not stop part-way")
 
 
-class _StartupRecoveryContract:
-    """One contract, run against the fake and real PostgreSQL alike.
+class _StartupRecoveryBuilders:
+    """World-builder helpers only — no ``test_*`` methods.
 
-    CLAUDE.md invariant 11 is the whole subject: a proven-dead owner either
-    becomes runnable again in its own lane, or its request goes back into the
-    search pool with audit evidence. Nothing rests anywhere only an operator
-    can reach.
+    Split from ``_StartupRecoveryContract`` (issue #1089) so a generated
+    property test can reuse the exact same owner/journal/debris-fixture
+    builders without also inheriting the contract's own deterministic
+    ``test_*`` methods, which need per-test ``setUp`` state a Hypothesis
+    ``@given`` example loop does not provide (``tests/test_automation_recovery_debris_generated.py``
+    builds fresh state per example instead).
     """
 
     db: FakePipelineDB | PipelineDB
@@ -521,6 +523,17 @@ class _StartupRecoveryContract:
         )
         # Retained counters give growing backoff instead of a hot loop.
         case.assertEqual(row["validation_attempts"], 1)
+
+
+class _StartupRecoveryContract(_StartupRecoveryBuilders):
+    """The deterministic contract, run against the fake and real PostgreSQL
+    alike.
+
+    CLAUDE.md invariant 11 is the whole subject: a proven-dead owner either
+    becomes runnable again in its own lane, or its request goes back into the
+    search pool with audit evidence. Nothing rests anywhere only an operator
+    can reach.
+    """
 
     # --- contract -------------------------------------------------------
 
