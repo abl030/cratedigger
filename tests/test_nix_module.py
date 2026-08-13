@@ -26,7 +26,6 @@ failure depends on Nix option assertion evaluation.
 
 from __future__ import annotations
 
-import functools
 import json
 import re
 import subprocess
@@ -130,38 +129,66 @@ class TestDecisionDifferentialWrapperContract(unittest.TestCase):
         self.assertIn("decisionDifferential", text[text.index("environment.systemPackages"):])
 
 
-@functools.cache
-def _shared_module_worlds() -> dict[str, object]:
-    """One ``nix eval`` for every consumer that reads assertions/options only.
+#: Issue #1131 review round 2: exception-memoizing cache for the two
+#: cost-grouped nix evaluations below, keyed by an arbitrary string tag.
+#: ``functools.cache`` does not memoize a raised exception — on a real
+#: module regression every consumer of a failing evaluation would
+#: independently re-pay the full ``nix eval`` just to report the same
+#: failure. Memoizing the exception too means a real regression costs one
+#: nix eval to detect, not one per consumer.
+_NIX_EVAL_CACHE: dict[str, dict[str, object] | BaseException] = {}
 
-    ``TestDefaultHeadlessComposition``, three of
-    ``TestWebAuthenticationModuleContract``'s nix-eval tests, and both of
-    ``TestExternalBeetsRuntimeCapability``'s nix-eval tests each used to pay
-    for an independent ``builtins.getFlake`` + ``import nixpkgs`` +
-    ``import ./nix/beets.nix`` preamble (measured: ~0.24s alone — cheap) and
-    then their own full NixOS module-tree evaluation per world (measured:
-    the real cost, ~1.3-2.3s per ``lib.nixosSystem`` call). Method-batch
-    sharding (issue #1131) balances by TEST COUNT, not cost, so it could land
-    several of these multi-second, multi-GB ``nix eval`` subprocesses in the
-    same batch by chance, or — at higher worker counts — run several of them
-    truly concurrently. That concurrency, not the redundant preamble, is what
-    drove the shared test RAM root to 96% utilization and made raising
-    worker count a regression instead of a speedup.
 
-    This merges every world these five tests need into ONE expression,
-    evaluated at most once per test PROCESS (``functools.cache``): every
-    world here only ever reads ``.config.assertions`` or plain option/service
-    values, never forces ``.system.build.toplevel``, so none of them can
-    raise or ``abort`` mid-evaluation and take the others down with it.
-    ``test_injected_basic_path_cannot_render_toplevel`` is the one nix-eval
-    test in this module that DOES force ``.system.build.toplevel``,
-    specifically to observe the hard assertion ``abort`` (non-zero exit,
-    stderr text) that path triggers — merging it here would let that one
-    deliberately-failing world abort the whole shared evaluation for every
-    other consumer, so it keeps its own independent ``nix eval`` call.
+def _cached_nix_eval_json(cache_key: str, expression: str) -> dict[str, object]:
+    """Run one ``nix eval --json`` at most once per process per cache key."""
+    cached = _NIX_EVAL_CACHE.get(cache_key)
+    if cached is not None:
+        if isinstance(cached, BaseException):
+            raise cached
+        return cached
+    try:
+        result = subprocess.run(
+            ["nix", "eval", "--impure", "--json", "--expr", expression],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise AssertionError(result.stderr)
+        value = json.loads(result.stdout)
+        if not isinstance(value, dict):
+            raise TypeError(value)
+    except BaseException as exc:
+        _NIX_EVAL_CACHE[cache_key] = exc
+        raise
+    _NIX_EVAL_CACHE[cache_key] = value
+    return value
 
-    Callers index their own top-level key out of the returned dict; nothing
-    downstream of this helper changed shape or assertions.
+
+def _shared_module_worlds_web_auth_matrix() -> dict[str, object]:
+    """The ``webAuthMatrix`` nix eval — this module's single heaviest world.
+
+    Issue #1131 review round 2: measured per-world costs are wildly uneven
+    (``headlessComposition`` 0.80s, ``beetsReadiness`` 3.46s,
+    ``mergedGateway`` 18.67s, ``beetsCapability`` 38.28s, ``webAuthMatrix``
+    65.44s — the pole). Merging every world into ONE evaluation and running
+    the whole module unsharded serializes ALL of that onto a single target
+    and pushes the module's critical-path contribution from main's own
+    61.6s (its worst `method_batch` bin-packing) to 118.3s — a regression,
+    not a fix; that full-unshard attempt is what round 1 of this review
+    reverted. Splitting the merge by cost and restoring a 2-target shard —
+    this world isolated, the other four bundled in
+    ``_shared_module_worlds_rest`` — keeps the floor level with main
+    (~65s vs ~61.6s) while still cutting total nix-eval CPU work (~100.8s
+    measured vs main's ~126.6s) by sharing this evaluation's own preamble
+    across its 39 internal worlds in one process.
+
+    See ``HOTSPOT_ISOLATED_METHODS`` in ``scripts/run_python_tests.py`` for
+    the scheduler half of this split: the whole point is defeated if this
+    function's sole consumer ever runs in a different worker process than
+    intended, so it is carved into its OWN singleton target rather than
+    left to generic count-balanced batching.
     """
     expression = r'''
       let
@@ -172,45 +199,6 @@ def _shared_module_worlds() -> dict[str, object]:
         };
         beetsPackage = import ./nix/beets.nix { pkgs = modulePkgs; };
       in {
-        headlessComposition =
-          let
-            system = lib.nixosSystem {
-              system = builtins.currentSystem;
-              modules = [
-                f.nixosModules.default
-                ({ ... }: {
-                  services.cratedigger = {
-                    enable = true;
-                    src = ./.;
-                    slskd.apiKeyFile = "/run/secrets/slskd-key";
-                    slskd.downloadDir = "/srv/slskd";
-                    pipelineDb.createLocally = true;
-                    beets.runtime = {
-                      package = beetsPackage;
-                      configDir = "/etc/beets";
-                      expectedLibrary = "/srv/beets/beets-library.db";
-                      expectedDirectory = "/srv/music";
-                      expectedStateFile = "/var/lib/beets/state.pickle";
-                      expectedSecretInclude = "/run/secrets/beets.yaml";
-                    };
-                  };
-                })
-              ];
-            };
-          in {
-            webEnabled = system.config.services.cratedigger.web.enable;
-            systemPackages =
-              map lib.getName system.config.environment.systemPackages;
-            hasWebService =
-              builtins.hasAttr
-                "cratedigger-web"
-                system.config.systemd.services;
-            cratediggerSockets =
-              builtins.filter
-                (name: lib.hasPrefix "cratedigger" name)
-                (builtins.attrNames system.config.systemd.sockets);
-          };
-
         webAuthMatrix =
           let
             evaluate = extra:
@@ -589,6 +577,83 @@ def _shared_module_worlds() -> dict[str, object]:
               systemd.services.nginx.restartIfChanged = lib.mkForce false;
             };
           };
+      }
+    '''
+    return _cached_nix_eval_json("web_auth_matrix", expression)
+
+
+def _shared_module_worlds_rest() -> dict[str, object]:
+    """The other four nix-eval worlds this module's tests still merge.
+
+    Issue #1131 review round 2: ``headlessComposition`` (0.80s),
+    ``mergedGateway`` (18.67s), ``beetsCapability`` (38.28s), and
+    ``beetsReadiness`` (3.46s) sum to ~61s — close enough to
+    ``webAuthMatrix``'s own 65.44s (see
+    ``_shared_module_worlds_web_auth_matrix``) that bundling them into one
+    target keeps the module's two-target floor level with main's own
+    worst-case bin-packed batch (61.6s), while still merging away the
+    redundant ``getFlake`` + ``import nixpkgs`` + ``import ./nix/beets.nix``
+    preamble each of these four used to pay independently. Every world here
+    only ever reads ``.config.assertions`` or plain option/service values,
+    never forces ``.system.build.toplevel``, so none of them can raise
+    mid-evaluation and take the others down with it.
+
+    ``test_injected_basic_path_cannot_render_toplevel`` DOES force
+    ``.system.build.toplevel`` to observe the resulting Nix assertion
+    failure — that failure is a catchable ``throw`` (``builtins.tryEval``
+    returns ``{"success": false}`` in ~5.1s measured), not an uncatchable
+    ``abort``, but ``tryEval`` discards the failure's message and the test
+    asserts on the EXACT stderr text (``"nginx-token-safe segments"``).
+    Merging it here would lose the one thing the test needs, so it keeps
+    its own independent ``nix eval`` call regardless of catchability.
+    """
+    expression = r'''
+      let
+        f = builtins.getFlake (toString ./.);
+        lib = f.inputs.nixpkgs.lib;
+        modulePkgs = import f.inputs.nixpkgs {
+          system = builtins.currentSystem;
+        };
+        beetsPackage = import ./nix/beets.nix { pkgs = modulePkgs; };
+      in {
+        headlessComposition =
+          let
+            system = lib.nixosSystem {
+              system = builtins.currentSystem;
+              modules = [
+                f.nixosModules.default
+                ({ ... }: {
+                  services.cratedigger = {
+                    enable = true;
+                    src = ./.;
+                    slskd.apiKeyFile = "/run/secrets/slskd-key";
+                    slskd.downloadDir = "/srv/slskd";
+                    pipelineDb.createLocally = true;
+                    beets.runtime = {
+                      package = beetsPackage;
+                      configDir = "/etc/beets";
+                      expectedLibrary = "/srv/beets/beets-library.db";
+                      expectedDirectory = "/srv/music";
+                      expectedStateFile = "/var/lib/beets/state.pickle";
+                      expectedSecretInclude = "/run/secrets/beets.yaml";
+                    };
+                  };
+                })
+              ];
+            };
+          in {
+            webEnabled = system.config.services.cratedigger.web.enable;
+            systemPackages =
+              map lib.getName system.config.environment.systemPackages;
+            hasWebService =
+              builtins.hasAttr
+                "cratedigger-web"
+                system.config.systemd.services;
+            cratediggerSockets =
+              builtins.filter
+                (name: lib.hasPrefix "cratedigger" name)
+                (builtins.attrNames system.config.systemd.sockets);
+          };
 
         mergedGateway =
           let
@@ -928,19 +993,7 @@ def _shared_module_worlds() -> dict[str, object]:
           };
       }
     '''
-    result = subprocess.run(
-        ["nix", "eval", "--impure", "--json", "--expr", expression],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise AssertionError(result.stderr)
-    value = json.loads(result.stdout)
-    if not isinstance(value, dict):
-        raise TypeError(value)
-    return value
+    return _cached_nix_eval_json("rest", expression)
 
 
 class TestDefaultHeadlessComposition(unittest.TestCase):
@@ -949,7 +1002,7 @@ class TestDefaultHeadlessComposition(unittest.TestCase):
     def test_exported_module_installs_cli_without_web_units_or_sockets(
         self,
     ) -> None:
-        composition = _shared_module_worlds()["headlessComposition"]
+        composition = _shared_module_worlds_rest()["headlessComposition"]
         assert isinstance(composition, dict)
         self.assertFalse(composition["webEnabled"])
         self.assertIn("pipeline-cli", composition["systemPackages"])
@@ -962,7 +1015,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
     """The enabled web surface has one fail-closed module-owned perimeter."""
 
     def test_basic_and_insecure_mode_matrix_is_evaluated(self) -> None:
-        worlds = _shared_module_worlds()["webAuthMatrix"]
+        worlds = _shared_module_worlds_web_auth_matrix()["webAuthMatrix"]
         assert isinstance(worlds, dict)
         self.assertTrue(
             any("exactly one" in message for message in worlds["missing"])
@@ -1184,7 +1237,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         self.assertIn("nginx-token-safe segments", result.stderr)
 
     def test_merged_basic_gateway_values_are_exact(self) -> None:
-        worlds = _shared_module_worlds()["mergedGateway"]
+        worlds = _shared_module_worlds_rest()["mergedGateway"]
         assert isinstance(worlds, dict)
         dual = worlds["dualStack"]
         ipv4 = worlds["ipv4Only"]
@@ -1655,18 +1708,24 @@ class TestModuleVmPerformanceContract(unittest.TestCase):
         self.assertIn("virtualisation.useNixStoreImage = true;", text)
         self.assertIn("virtualisation.writableStore = true;", text)
 
-    def test_guest_declares_more_than_one_core(self) -> None:
+    def test_guest_declares_the_verified_core_count(self) -> None:
         """Issue #1131: an unset ``virtualisation.cores`` silently inherits
         the qemu-vm module's guest default of 1, serializing PostgreSQL,
         nginx, ~10 switch-to-configuration calls, and 2 reboots onto one
-        emulated core. Pin an explicit, deliberately-chosen core count so it
-        can't regress back to the implicit default unnoticed.
+        emulated core. Pinned to the EXACT value that was actually run
+        through ``nix build .#checks.x86_64-linux.moduleVm`` under KVM
+        (4:33 wall vs 5:34 at the old default of 1) rather than a loose
+        ``> 1`` bound — a future edit to e.g. 2 cores would pass a `> 1`
+        check without ever being verified under the real VM check, and
+        raising guest cores is known to be able to surface latent timing
+        races (issue #1130's own precedent), so a value change here is a
+        deliberate, re-verified decision, not a silent drift.
         """
         text = MODULE_VM_NIX.read_text(encoding="utf-8")
         match = re.search(r"virtualisation\.cores\s*=\s*(\d+)\s*;", text)
         self.assertIsNotNone(match, "virtualisation.cores must be set explicitly")
         assert match is not None
-        self.assertGreater(int(match.group(1)), 1)
+        self.assertEqual(int(match.group(1)), 4)
 
 
 class TestImporterServiceContract(unittest.TestCase):
@@ -1826,7 +1885,7 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
         return strings
 
     def test_capability_assertions_cover_happy_missing_invalid_and_disabled(self) -> None:
-        worlds = _shared_module_worlds()["beetsCapability"]
+        worlds = _shared_module_worlds_rest()["beetsCapability"]
         assert isinstance(worlds, dict)
         self.assertEqual(worlds["valid"], [])
         missing = worlds["missing"]
@@ -1908,7 +1967,7 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
         self.assertEqual(worlds["disabled"], {"assertions": [], "services": []})
 
     def test_readiness_and_role_state_capabilities_evaluate(self) -> None:
-        units = _shared_module_worlds()["beetsReadiness"]
+        units = _shared_module_worlds_rest()["beetsReadiness"]
         assert isinstance(units, dict)
         readiness = {
             "beets-config-ready.service",

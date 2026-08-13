@@ -67,18 +67,19 @@ WORLD_MODEL_MODULE = "tests.world_model.state_machine"
 # late enough to become the deterministic suite's tail.
 AUDITED_FRONTLOAD_MODULES = frozenset({"tests.test_nix_module"})
 #: tests.test_nix_module (issue #1131) is NOT method_batch here on purpose.
-#: Its handful of expensive nix-eval tests share ONE evaluated JSON blob via
-#: a module-level ``functools.cache`` (``_shared_module_worlds`` in the test
-#: module) — that cache only pays off when every consumer runs in the same
+#: Its nix-eval tests are cost-grouped into two ``functools``-free,
+#: exception-memoizing cached helpers in the test module
+#: (``_shared_module_worlds_web_auth_matrix`` / ``_shared_module_worlds_rest``)
+#: — a cache only pays off when every one of its consumers runs in the same
 #: worker PROCESS. method_batch splits methods across separate processes by
-#: TEST COUNT, blind to cost: it could (and, measured, did) land more than
-#: one multi-second, multi-GB nix-eval method in the same batch, or run
-#: several of them concurrently at higher worker counts, which is what drove
-#: the shared test RAM root to 96%. Left unsharded, the module is one
-#: frontloaded target with at most one such subprocess live at a time;
-#: measured whole-module wall time (nix-shell warm, single process) dropped
-#: from a ~142.7s serial sum of six separate nix-eval subprocess calls to
-#: ~103.6s for one merged evaluation plus every other test in the module.
+#: TEST COUNT, blind to cost, and a naive full unshard (this issue's own
+#: round 1) serializes every merged world onto ONE target. Measured
+#: (round 2 review, quiet 30-core host): main's own method_batch worst case
+#: is 61.6s; a full unshard is 118.3s (+92%); this module's own
+#: HOTSPOT_ISOLATED_METHODS carve-out below restores a 2-target floor level
+#: with main (~65s) while still merging the redundant preamble each
+#: `nix eval` used to pay independently (total eval CPU 100.8s vs main's
+#: 126.6s).
 HOTSPOT_SHARD_POLICIES = {
     "tests.test_beets_destructive_configs_generated": "method_batch",
     "tests.test_deploy_pin_generated": "method_batch",
@@ -87,6 +88,24 @@ HOTSPOT_SHARD_POLICIES = {
 }
 HOTSPOT_CLASS_BATCHES = 8
 HOTSPOT_METHOD_BATCHES = 12
+#: Issue #1131 review round 2: exact test IDs that must run as their OWN
+#: singleton target, isolated from the rest of their module. Unlike
+#: HOTSPOT_SHARD_POLICIES (a generic, cost-BLIND split balanced by test
+#: count), this is a manually audited, cost-AWARE carve-out — the named
+#: test is this module's single most expensive nix-eval consumer, and its
+#: own cached helper (see ``_shared_module_worlds_web_auth_matrix`` in
+#: ``tests/test_nix_module.py``) is scoped so this target pays for exactly
+#: the nix eval it needs, never a bundled neighbour's. A module named here
+#: with no ``HOTSPOT_SHARD_POLICIES`` entry bundles every OTHER discovered
+#: test into one remainder target (see ``hotspot_targets``).
+HOTSPOT_ISOLATED_METHODS: Mapping[str, frozenset[str]] = {
+    "tests.test_nix_module": frozenset({
+        (
+            "tests.test_nix_module.TestWebAuthenticationModuleContract."
+            "test_basic_and_insecure_mode_matrix_is_evaluated"
+        ),
+    }),
+}
 
 #: Hypothesis' ``stopped-because`` reason when a strategy space ran out of
 #: distinct worlds before the example budget ran out
@@ -614,21 +633,76 @@ def assert_exact_target_coverage(
         raise ValueError(f"test target belongs to the wrong module: {module.name}")
 
 
+def hotspot_targets(
+    module: TestModule,
+    test_ids: Sequence[str],
+    *,
+    granularity: str | None,
+    isolated: frozenset[str] = frozenset(),
+) -> tuple[TestTarget, ...]:
+    """Carve ``isolated`` test IDs into singleton targets, then shard the rest.
+
+    Isolation (``HOTSPOT_ISOLATED_METHODS``) and ``method_batch``/
+    ``class_batch`` granularity (``HOTSPOT_SHARD_POLICIES``) are
+    orthogonal: an isolated ID always gets its own target, applied before
+    any batching of what remains. With no ``granularity``, the remainder
+    becomes one bundled target rather than one per remaining test — the
+    shape ``tests.test_nix_module`` uses (see its module docstring). An
+    isolated ID absent from the discovered set means the module was
+    refactored (a rename or removal) without updating this table, and
+    fails closed rather than silently dropping coverage.
+    """
+    unknown = isolated - set(test_ids)
+    if unknown:
+        raise ValueError(
+            f"unknown isolated test id(s) for {module.name}: {sorted(unknown)}"
+        )
+    isolated_targets = tuple(
+        TestTarget(module, test_id, (test_id,), load_names=(test_id,))
+        for test_id in sorted(isolated)
+    )
+    remainder = tuple(test_id for test_id in test_ids if test_id not in isolated)
+    if not remainder:
+        targets = isolated_targets
+    elif granularity is None:
+        targets = isolated_targets + (
+            TestTarget(
+                module,
+                f"{module.name}::remainder",
+                remainder,
+                load_names=remainder,
+            ),
+        )
+    else:
+        targets = isolated_targets + shard_test_ids(
+            module, remainder, granularity=granularity
+        )
+    assert_exact_target_coverage(module, test_ids, targets)
+    return targets
+
+
 def build_test_targets(
     schedule: Sequence[TestModule],
     listed_test_ids: Mapping[str, Sequence[str]],
+    *,
+    isolated_methods: Mapping[str, frozenset[str]] = HOTSPOT_ISOLATED_METHODS,
 ) -> tuple[TestTarget, ...]:
     """Expand only audited hotspots, leaving every other module isolated."""
     targets: list[TestTarget] = []
     for module in schedule:
         granularity = HOTSPOT_SHARD_POLICIES.get(module.name)
-        if granularity is None:
+        isolated = isolated_methods.get(module.name, frozenset())
+        if granularity is None and not isolated:
             targets.append(TestTarget(module, module.name))
             continue
         test_ids = listed_test_ids.get(module.name)
         if test_ids is None:
             raise ValueError(f"missing discovery manifest for hotspot {module.name}")
-        targets.extend(shard_test_ids(module, test_ids, granularity=granularity))
+        targets.extend(
+            hotspot_targets(
+                module, test_ids, granularity=granularity, isolated=isolated
+            )
+        )
     return tuple(targets)
 
 
@@ -638,6 +712,9 @@ def select_test_targets(
     *,
     listed_test_ids: Mapping[str, Sequence[str]] | None = None,
     hotspot_policies: Mapping[str, str] = HOTSPOT_SHARD_POLICIES,
+    hotspot_isolated_methods: Mapping[
+        str, frozenset[str]
+    ] = HOTSPOT_ISOLATED_METHODS,
 ) -> tuple[TestTarget, ...]:
     """Resolve unittest selectors while retaining canonical module isolation."""
     plan = tuple(selectors)
@@ -670,7 +747,8 @@ def select_test_targets(
     for module in selected_modules:
         if module.name in exact_modules:
             granularity = hotspot_policies.get(module.name)
-            if granularity is None:
+            isolated = hotspot_isolated_methods.get(module.name, frozenset())
+            if granularity is None and not isolated:
                 targets.append(TestTarget(module, module.name))
                 continue
             test_ids = manifests.get(module.name)
@@ -679,7 +757,9 @@ def select_test_targets(
                     f"missing discovery manifest for hotspot {module.name}"
                 )
             targets.extend(
-                shard_test_ids(module, test_ids, granularity=granularity)
+                hotspot_targets(
+                    module, test_ids, granularity=granularity, isolated=isolated
+                )
             )
             continue
         seen: set[str] = set()
@@ -1353,15 +1433,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"No Python tests found under {start}", file=sys.stderr)
         return 2
     modules = complete_test_modules(discovered, top)
+    hotspot_module_names = HOTSPOT_SHARD_POLICIES.keys() | HOTSPOT_ISOLATED_METHODS.keys()
     selected_hotspots = {
-        selector
-        for selector in args.test
-        if selector in HOTSPOT_SHARD_POLICIES
+        selector for selector in args.test if selector in hotspot_module_names
     }
     hotspot_names = (
         selected_hotspots
         if args.test
-        else HOTSPOT_SHARD_POLICIES.keys() & {module.name for module in modules}
+        else hotspot_module_names & {module.name for module in modules}
     )
     listed_test_ids = {
         module_name: list_module_test_ids(module_name, top)
@@ -1385,7 +1464,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"({os.cpu_count() or 1} host CPUs)"
     )
     sharded_target_count = sum(
-        target.module.name in HOTSPOT_SHARD_POLICIES for target in schedule
+        target.module.name in hotspot_module_names for target in schedule
     )
     print(
         f"Queue: {len(schedule)} targets "
