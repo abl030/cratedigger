@@ -403,11 +403,19 @@ mount review. In particular, a downstream writable `BindPaths` can reopen a
 target beyond the upstream list; private namespaces must use narrow per-unit
 binds and verify the effective mount behavior. With a private `/mnt`, expose
 broad shared-tree visibility using `BindReadOnlyPaths`, then add writable binds
-only for the unit-specific roots listed above. On doc2, the metadata gate used
-by web, importer, and import-preview-worker writes under
-`/run/cratedigger-metadata-gate`, so that exact directory must appear in those
-units' `ReadWritePaths`; the YouTube worker does not run the gate. This module
-does not grant generic `/run` write access. The issue remains open until this
+only for the unit-specific roots listed above. On doc2, all four sandboxed
+units -- web, importer, import-preview-worker, AND youtube-ingest -- run the
+metadata-gate `ExecCondition` start-check and declare
+`/var/lib/cratedigger-metadata-gate` in their `ReadWritePaths` (verified via
+`systemctl show <unit> -p ReadWritePaths -p ExecCondition`). That root is
+separate from `stateDir` and is not part of the upstream module's own
+writable-path derivation, so the downstream wrapper adds it explicitly rather
+than relying on a generic grant. Note this is a descriptive fact about what
+the units declare, not a proven causal necessity: the gate's own
+`ExecCondition=+...` runs `+`-prefixed (full privileges, bypassing
+`ReadWritePaths` and the rest of the sandbox), so this declaration is not
+established to be what permits the gate's own writes -- it has not been
+empirically tested by removing the entry. The issue remains open until this
 module change and the downstream mount/runtime-path configuration are merged,
 deployed, and verified on the live units.
 

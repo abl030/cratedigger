@@ -7981,6 +7981,119 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
         self.assertFalse(outcome.success)
         self.assertIn("request_id", outcome.message)
 
+    def test_wrong_status_guards_the_shared_auto_import_staging_root(self):
+        """Issue #1122 item 4 (widened, review round 2): the wrong-status
+        branch's ``staged_path`` (``payload.staged_path``) is a direct
+        child of the shared, externally provisioned auto-import staging
+        root (``lib.processing_paths.stage_to_ai_root(auto_import=True)``
+        of ``cfg.beets_staging_dir`` — the same root every other unit
+        stages into, per ``scripts/youtube_ingest_worker.py``'s
+        ``build_service``). Before this fix the returned
+        ``PostCommitCleanup`` carried no protected parent at all, so
+        ``_run_post_commit_cleanup``'s empty-parent prune (``lib.dispatch.
+        helpers._cleanup_staged_dir``) could ``rmdir`` that shared root the
+        moment this album's staged folder was its only child — the same
+        shape issue #1077 guarded at every other real caller of that
+        helper."""
+        from lib.processing_paths import stage_to_ai_root
+        from scripts import importer
+
+        with tempfile.TemporaryDirectory() as root:
+            cfg = CratediggerConfig(
+                beets_staging_dir=os.path.join(root, "Incoming"),
+            )
+            auto_import_root = stage_to_ai_root(
+                staging_dir=cfg.beets_staging_dir, auto_import=True,
+            )
+            staged_path = os.path.join(
+                auto_import_root, "Artist-Album-browse-request-42-log-21",
+            )
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42, status="imported", mb_release_id="mbid-yt-wrong-status",
+            ))
+            job = self._enqueue_youtube_job(
+                db, request_id=42, staged_path=staged_path, download_log_id=21,
+            )
+            self._mark_importable(db, job)
+            claimed = self._claim(db)
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+
+            outcome = importer.execute_youtube_import_job(
+                db,  # pyright: ignore[reportArgumentType]
+                claimed,
+                ctx=ctx,
+            )
+
+        self.assertFalse(outcome.success)
+        self.assertIn("YouTube import requires wanted/unsearchable", outcome.message)
+        cleanup = outcome.post_commit_cleanup
+        assert cleanup is not None
+        self.assertEqual(cleanup.staged_path, staged_path)
+        assert cleanup.staged_path_protected_parents is not None
+        self.assertIn(auto_import_root, cleanup.staged_path_protected_parents)
+
+    def test_wrong_status_post_commit_cleanup_never_removes_the_auto_import_root(
+        self,
+    ) -> None:
+        """Behavior twin of the seam test above: drives the real
+        ``scripts.importer._run_post_commit_cleanup`` (→ real
+        ``lib.dispatch.helpers._cleanup_staged_dir``) over the real
+        ``DispatchOutcome`` the wrong-status branch returns, with the
+        staged folder as the auto-import root's ONLY child — the exact
+        shape that makes the unguarded empty-parent prune remove the
+        shared, externally provisioned staging root out from under every
+        other in-flight request."""
+        from lib.processing_paths import stage_to_ai_root
+        from scripts import importer
+        from scripts.importer import _run_post_commit_cleanup
+
+        with tempfile.TemporaryDirectory() as root:
+            cfg = CratediggerConfig(
+                beets_staging_dir=os.path.join(root, "Incoming"),
+            )
+            auto_import_root = stage_to_ai_root(
+                staging_dir=cfg.beets_staging_dir, auto_import=True,
+            )
+            staged_path = os.path.join(
+                auto_import_root, "Artist-Album-browse-request-42-log-22",
+            )
+            os.makedirs(staged_path)
+            with open(os.path.join(staged_path, "01.opus"), "wb") as handle:
+                handle.write(b"audio")
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42, status="imported", mb_release_id="mbid-yt-wrong-status-2",
+            ))
+            job = self._enqueue_youtube_job(
+                db, request_id=42, staged_path=staged_path, download_log_id=22,
+            )
+            self._mark_importable(db, job)
+            claimed = self._claim(db)
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+
+            outcome = importer.execute_youtube_import_job(
+                db,  # pyright: ignore[reportArgumentType]
+                claimed,
+                ctx=ctx,
+            )
+            details = _run_post_commit_cleanup(outcome)
+
+            assert details is not None
+            staged_path_detail = details["staged_path"]
+            assert isinstance(staged_path_detail, dict)
+            self.assertTrue(staged_path_detail["success"])
+            self.assertFalse(os.path.exists(staged_path))
+            self.assertTrue(
+                os.path.isdir(auto_import_root),
+                "the shared auto-import staging root must survive even "
+                "though it is now empty — it is externally provisioned, "
+                "not a disposable per-artist directory",
+            )
+            self.assertEqual(os.listdir(auto_import_root), [])
+
     def test_malformed_payload_is_rejected_at_import_job_row_boundary(self):
         """Missing required YT fields never reach an importer consumer."""
         from lib.import_queue import ImportJob

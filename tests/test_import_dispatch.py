@@ -939,7 +939,9 @@ class TestCleanupStagedDir(unittest.TestCase):
             os.symlink(real_albums, symlinked_albums)
             dest_via_symlink = os.path.join(symlinked_albums, "Album")
 
-            _cleanup_staged_dir(dest_via_symlink, protected_parent=real_albums)
+            _cleanup_staged_dir(
+                dest_via_symlink, protected_parents=frozenset({real_albums}),
+            )
 
             self.assertFalse(os.path.exists(staged))
             self.assertTrue(
@@ -970,7 +972,7 @@ class TestRunPostCommitCleanupProtectedParent(unittest.TestCase):
     canonical album under that root could ``rmdir`` the shared,
     Nix-provisioned ``<processing_dir>/albums/`` root right out from under
     every other request. This proves the guard now travels end to end: the
-    plan carries ``staged_path_protected_parent``, and the real
+    plan carries ``staged_path_protected_parents``, and the real
     (unpatched) ``_cleanup_staged_dir`` honours it."""
 
     def test_post_commit_cleanup_never_removes_the_processing_albums_root(self):
@@ -992,7 +994,7 @@ class TestRunPostCommitCleanupProtectedParent(unittest.TestCase):
                 message="imported",
                 post_commit_cleanup=PostCommitCleanup(
                     staged_path=staged_path,
-                    staged_path_protected_parent=albums_root,
+                    staged_path_protected_parents=frozenset({albums_root}),
                 ),
             )
 
@@ -1605,6 +1607,10 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
 
     FOUR_FACT_DECISIONS: ClassVar = ["audio_corrupt", "bad_audio_hash", "nested_layout", "empty_fileset"]
 
+    TEST_BEETS_STAGING_DIR: ClassVar = (
+        "/tmp/cratedigger-caller-lifecycle-beets-staging"
+    )
+
     def _reject(
         self,
         *,
@@ -1620,8 +1626,17 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
         from lib.dispatch import _reject_import_from_evidence_decision
         from lib.dispatch.types import ImportAttemptResult
         from lib.import_queue import IMPORT_JOB_FORCE
+        from lib.processing_paths import protected_staging_roots
         from lib.quality import AudioQualityMeasurement, ImportResult
         from lib.terminal_outcomes import ImportJobTerminal
+
+        protected_roots = (
+            protected_staging_roots(
+                processing_dir=processing_dir,
+                beets_staging_dir=self.TEST_BEETS_STAGING_DIR,
+            )
+            if processing_dir is not None else None
+        )
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1669,7 +1684,7 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
                 source_path_cleanup_scenario=decision,
                 cooled_down_users=None,
                 import_job_id=import_job_id,
-                processing_dir=processing_dir,
+                protected_roots=protected_roots,
             )
             if capture_cleanup_call is not None and ext.cleanup.call_args is not None:
                 capture_cleanup_call["args"] = ext.cleanup.call_args.args
@@ -1773,21 +1788,27 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
         self.assertEqual(db.denylist, [])
         self.assertEqual(db.download_logs[-1].outcome, "rejected")
 
-    def test_processing_dir_threads_the_protected_parent_guard(self) -> None:
-        """Issue #1077, R3-3 (round-3 review): the synchronous cleanup
-        branch inside ``_reject_import_from_evidence_decision`` is one of
-        the two unguarded ``_cleanup_staged_dir`` call sites the reviewer
-        found — this one fires on every quality reject whose
-        ``staged_path`` is a canonical processing album. Proves the
-        function computes ``protected_parent`` from ``processing_dir`` and
-        actually passes it through to ``_cleanup_staged_dir`` — a seam
-        assertion on the SAME mocked cleanup call the shared ``_reject``
-        helper (and every other test in this class) already exercises, so
-        this reuses that call site's existing ``# type: ignore[arg-type]``
-        rather than adding a new one (tests/test_typing_ratchet.py's
-        escape-hatch ratchet is frozen, only-decrease). The real
-        (unpatched) ``_cleanup_staged_dir`` honouring this guard is proven
-        separately by ``TestCleanupStagedDir.
+    def test_processing_dir_threads_the_protected_parents_guard(self) -> None:
+        """Issue #1077, R3-3 (round-3 review; widened issue #1122, review
+        round 2): the synchronous cleanup branch inside
+        ``_reject_import_from_evidence_decision`` is one of the two
+        unguarded ``_cleanup_staged_dir`` call sites the reviewer found —
+        this one fires on every quality reject whose ``staged_path`` is a
+        canonical processing album (or, since a YouTube rescue imports in
+        place, the auto-import staging root). Proves the function threads
+        its caller-supplied ``protected_roots`` (issue #1122: the
+        derivation moved to the caller — ``lib.dispatch.core`` computes
+        ``protected_staging_roots(cfg.processing_dir,
+        cfg.beets_staging_dir)`` — so this function stays decoupled from
+        that naming and just passes the set through) all the way to
+        ``_cleanup_staged_dir`` — a seam assertion on the SAME mocked
+        cleanup call the shared ``_reject`` helper (and every other test
+        in this class) already exercises, so this reuses that call site's
+        existing ``# type: ignore[arg-type]`` rather than adding a new one
+        (tests/test_typing_ratchet.py's escape-hatch ratchet is frozen,
+        only-decrease). The real (unpatched) ``_cleanup_staged_dir``
+        honouring this guard is proven separately by
+        ``TestCleanupStagedDir.
         test_realpath_protects_a_protected_parent_reached_via_symlink``."""
         from lib.processing_paths import processing_albums_dir
 
@@ -1802,12 +1823,14 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
 
         kwargs = capture.get("kwargs")
         assert isinstance(kwargs, dict)
-        self.assertEqual(
-            kwargs.get("protected_parent"),
+        protected_parents = kwargs.get("protected_parents")
+        assert protected_parents is not None
+        self.assertIn(
             processing_albums_dir(processing_dir),
+            protected_parents,
         )
 
-    def test_no_processing_dir_passes_no_protected_parent(self) -> None:
+    def test_no_processing_dir_passes_no_protected_parents(self) -> None:
         """Must-still-work control: without a ``processing_dir`` (the
         non-canonical staged lane), the guard stays ``None`` rather than
         inventing a spurious protected root."""
@@ -1820,14 +1843,15 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
 
         kwargs = capture.get("kwargs")
         assert isinstance(kwargs, dict)
-        self.assertIsNone(kwargs.get("protected_parent"))
+        self.assertIsNone(kwargs.get("protected_parents"))
 
-    def test_deferred_plan_also_carries_the_protected_parent_guard(self) -> None:
-        """Issue #1077, R4-3 (round-4 review): the SYNC branch's guard
-        (``test_processing_dir_threads_the_protected_parent_guard`` above)
+    def test_deferred_plan_also_carries_the_protected_parents_guard(self) -> None:
+        """Issue #1077, R4-3 (round-4 review; widened issue #1122, review
+        round 2): the SYNC branch's guard
+        (``test_processing_dir_threads_the_protected_parents_guard`` above)
         does not prove the DEFERRED branch (``import_job_id is not None``)
         also carries it — ``PostCommitCleanup(staged_path=staged_path,
-        staged_path_protected_parent=protected_parent)`` is a second,
+        staged_path_protected_parents=protected_roots)`` is a second,
         independent assignment (``lib/dispatch/outcome_actions.py``) that
         could silently regress to dropping the field without either sync
         test noticing. Drives the ``pending=True`` (force job) path and
@@ -1847,9 +1871,10 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
 
         plan = capture.get("value")
         assert isinstance(plan, PostCommitCleanup)
-        self.assertEqual(
-            plan.staged_path_protected_parent,
+        assert plan.staged_path_protected_parents is not None
+        self.assertIn(
             processing_albums_dir(processing_dir),
+            plan.staged_path_protected_parents,
         )
 
 
@@ -2158,16 +2183,34 @@ class TestDispatchImport(unittest.TestCase):
         force=False,
         initial_status="downloading",
         queued=False,
+        cfg=None,
+        path_parent=None,
+        cleanup_tmpdir=True,
+        skip_finalize=False,
     ):
+        """``path_parent``/``cleanup_tmpdir``/``skip_finalize`` (issue
+        #1122 F2, review round 2): let a caller control where the staged
+        ``path`` directory lives (e.g. under a real auto-import staging
+        root), opt out of the default post-dispatch teardown so it can
+        drive real post-commit cleanup against the still-present directory
+        afterward, and opt out of ``finalize_claimed_dispatch`` -- whose
+        AUTOMATION branch owns its own journaled cleanup lane
+        (``_complete_automation_processing_cleanup``) that deletes the
+        staged directory through a completely different path before a
+        caller could ever reach ``_run_post_commit_cleanup``, per
+        ``TestRunPostCommitCleanupProtectedParent``'s own docstring. Every
+        existing caller keeps the original arbitrary-tmpdir,
+        always-cleaned-up, always-finalized behavior by construction (all
+        three default to the prior literal behavior)."""
         from lib.dispatch import dispatch_import_core
         if ir is self._SENTINEL:
             ir = make_import_result(decision="import")
 
-        cfg = _full_dispatch_config()
+        cfg = cfg or _full_dispatch_config()
         dl_info = DownloadInfo(filetype="mp3")
 
         mock_gate = RecordingQualityGate()
-        tmpdir = tempfile.mkdtemp()
+        tmpdir = tempfile.mkdtemp(dir=path_parent)
         try:
             with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
                 handle.write(b"fixture audio")
@@ -2232,15 +2275,13 @@ class TestDispatchImport(unittest.TestCase):
                         if execution_lease is not None else None
                     ),
                 )
-            if outcome.terminal_outcome is not None:
+            if not skip_finalize:
                 from tests.helpers import finalize_claimed_dispatch
 
                 finalize_claimed_dispatch(db, claimed, outcome)
-            else:
-                from tests.helpers import finalize_claimed_dispatch
-                finalize_claimed_dispatch(db, claimed, outcome)
         finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+            if cleanup_tmpdir:
+                shutil.rmtree(tmpdir, ignore_errors=True)
 
         return {
             "db": db,
@@ -2249,6 +2290,7 @@ class TestDispatchImport(unittest.TestCase):
             "mock_plex": ext.plex,
             "mock_jellyfin": ext.jellyfin,
             "mock_gate": mock_gate,
+            "tmpdir": tmpdir,
         }
 
     def test_operator_retained_import_decisions_record_policy_without_reopening(self):
@@ -2322,19 +2364,102 @@ class TestDispatchImport(unittest.TestCase):
         cleanup = r["outcome"].post_commit_cleanup
         assert cleanup is not None
         self.assertIsNotNone(cleanup.staged_path)
-        # Issue #1077, R4-1 (round-4 review): the SUCCESS-path plan must
-        # carry the same ``staged_path_protected_parent`` guard as the
-        # reject path's plan (R3-3) — before this fix a successful force
-        # job's ``staged_path`` (``<processing_dir>/albums/
-        # force-action-<id>``, a direct child of the shared albums root)
-        # reached ``_run_post_commit_cleanup`` completely unguarded.
-        from lib.processing_paths import processing_albums_dir
+        # Issue #1077, R4-1 (round-4 review; widened issue #1122 F2, review
+        # round 2): the SUCCESS-path plan must carry the same
+        # ``staged_path_protected_parents`` guard as the reject path's plan
+        # (R3-3) — before this fix a successful force job's ``staged_path``
+        # (``<processing_dir>/albums/force-action-<id>``, a direct child of
+        # the shared albums root) reached ``_run_post_commit_cleanup``
+        # completely unguarded, and after R4-1 it protected ONLY that root
+        # even though the same ``post_commit_staged_path = path`` assignment
+        # also covers a successful YouTube rescue's auto-import-root child
+        # (F2) — so the full set is asserted, not just the processing root.
+        from lib.processing_paths import protected_staging_roots
 
+        full_cfg = _full_dispatch_config()
         self.assertEqual(
-            cleanup.staged_path_protected_parent,
-            processing_albums_dir(_full_dispatch_config().processing_dir),
+            cleanup.staged_path_protected_parents,
+            protected_staging_roots(
+                processing_dir=full_cfg.processing_dir,
+                beets_staging_dir=full_cfg.beets_staging_dir,
+            ),
         )
         r["mock_gate"].assert_called_once()
+
+    def test_youtube_shaped_success_protects_the_auto_import_root(self):
+        """Issue #1122 F2 (review round 2): before this fix,
+        ``dispatch_import_core``'s success builder hardcoded
+        ``staged_path_protected_parents`` to ONLY
+        ``processing_albums_dir``, even though ``post_commit_staged_path =
+        path`` (~:1448) is set for EVERY successful cleanup-eligible lane —
+        including a YouTube rescue, whose ``path`` is a direct child of the
+        auto-import staging root (it imports in place, never materialized
+        under the canonical processing root). ``test_import_success`` above
+        proves the RETURNED set is correct in isolation; this test drives
+        the same real ``dispatch_import_core`` with a YT-SHAPED ``path``
+        (a direct child of a real auto-import root, its only child) through
+        a real successful import -- ``skip_finalize=True`` because
+        ``finalize_claimed_dispatch``'s AUTOMATION branch owns its own
+        journaled cleanup lane
+        (``_complete_automation_processing_cleanup``) that would delete
+        the staged directory through a completely different path before
+        this test could ever reach ``_run_post_commit_cleanup`` -- then
+        feeds the real returned outcome to the real
+        ``scripts.importer._run_post_commit_cleanup`` (-> real
+        ``_cleanup_staged_dir``) directly and proves the shared,
+        externally provisioned auto-import root survives even though the
+        staged folder was its only child."""
+        import dataclasses
+
+        from lib.processing_paths import stage_to_ai_root
+        from scripts.importer import _run_post_commit_cleanup
+
+        with tempfile.TemporaryDirectory() as world_root:
+            cfg = dataclasses.replace(
+                _full_dispatch_config(),
+                processing_dir=os.path.join(world_root, "processing"),
+                beets_staging_dir=os.path.join(world_root, "Incoming"),
+            )
+            auto_import_root = stage_to_ai_root(
+                staging_dir=cfg.beets_staging_dir, auto_import=True,
+            )
+            os.makedirs(auto_import_root)
+
+            imported_path = (
+                "/mnt/virtio/Music/Beets/Test Artist/2026 - Test Album"
+            )
+            ir = make_import_result(
+                decision="import", imported_path=imported_path)
+            r = self._dispatch(
+                ir,
+                cfg=cfg,
+                path_parent=auto_import_root,
+                cleanup_tmpdir=False,
+                skip_finalize=True,
+            )
+
+            self.assertTrue(r["outcome"].success)
+            self.assertTrue(
+                os.path.isdir(r["tmpdir"]),
+                "dispatch_import_core's success path never mutates the "
+                "filesystem synchronously -- cleanup is a deferred plan "
+                "the caller runs later",
+            )
+
+            details = _run_post_commit_cleanup(r["outcome"])
+
+            assert details is not None
+            staged_path_detail = details["staged_path"]
+            assert isinstance(staged_path_detail, dict)
+            self.assertTrue(staged_path_detail["success"])
+            self.assertFalse(os.path.exists(r["tmpdir"]))
+            self.assertTrue(
+                os.path.isdir(auto_import_root),
+                "the shared auto-import staging root must survive even "
+                "though it is now empty -- it is externally provisioned, "
+                "not a disposable per-artist directory",
+            )
+            self.assertEqual(os.listdir(auto_import_root), [])
 
     def test_import_with_bad_extensions_logs_error_and_persists_jsonb(self):
         from lib.quality import ImportResult

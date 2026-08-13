@@ -237,6 +237,45 @@ def stage_to_ai_root(
     return os.path.join(staging_dir, subdir)
 
 
+def protected_staging_roots(
+    *, processing_dir: str, beets_staging_dir: str,
+) -> frozenset[str]:
+    """Every filesystem root a staged-dir empty-parent prune must never
+    remove, however empty it looks (issue #1122, review round 2).
+
+    Two deploy-provisioned roots are shared across lanes and workers: the
+    canonical processing albums root (``processing_albums_dir``) and the
+    externally provisioned auto-import staging root
+    (``stage_to_ai_root(auto_import=True)``) the YouTube rescue worker and
+    every other auto-import unit stage into. A prune keyed on only one of
+    them silently falls through for the other lane's staged path -- the
+    exact shape that let a successful YouTube rescue's empty-parent prune
+    remove the shared auto-import root out from under every other in-flight
+    request (harness/import_one.py and lib/dispatch/core.py's post-commit
+    plan both had this gap before this fix).
+
+    ONE derivation owner: every caller of
+    ``lib.dispatch.helpers._cleanup_staged_dir`` and
+    ``harness.import_one._cleanup_staged_dir`` computes its protected set
+    through this function -- never a hand-built string or a single-root
+    special case -- so a future third shared root only needs to be added
+    here.
+
+    Residual: this guard stops a staged-dir prune from removing either
+    shared root outright, but does not address ownership drift if a root
+    is ever removed by some other path -- the auto-import root is
+    externally provisioned (not cratedigger-owned) on the live host, and
+    ``lib.youtube_ingest_service._default_stage_dir``'s
+    ``mkdir(parents=True, exist_ok=True)`` would silently recreate a
+    missing root owned by the cratedigger service identity on the next
+    rescue.
+    """
+    return frozenset({
+        processing_albums_dir(processing_dir),
+        stage_to_ai_root(staging_dir=beets_staging_dir, auto_import=True),
+    })
+
+
 def stage_to_ai_path(
     *,
     artist: str,

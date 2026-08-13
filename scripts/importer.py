@@ -254,14 +254,15 @@ def _run_post_commit_cleanup(
         try:
             from lib.dispatch.helpers import _cleanup_staged_dir
 
-            # Issue #1077, R3-3: this is the third real caller of
-            # ``_cleanup_staged_dir`` and the one furthest from ``cfg`` —
-            # the guard has to travel through the ``PostCommitCleanup``
-            # plan itself (``staged_path_protected_parent``) since this
-            # function only ever receives ``outcome: DispatchOutcome``.
+            # Issue #1077, R3-3 (widened issue #1122, review round 2):
+            # this is a real caller of ``_cleanup_staged_dir`` furthest
+            # from ``cfg`` — the guard has to travel through the
+            # ``PostCommitCleanup`` plan itself
+            # (``staged_path_protected_parents``) since this function only
+            # ever receives ``outcome: DispatchOutcome``.
             _cleanup_staged_dir(
                 plan.staged_path,
-                protected_parent=plan.staged_path_protected_parent,
+                protected_parents=plan.staged_path_protected_parents,
             )
             details["staged_path"] = {
                 "path": plan.staged_path,
@@ -1015,8 +1016,10 @@ def execute_youtube_import_job(
     the staged audio manifest, so the rejection paths inside
     ``_handle_rejected_result`` find no peers to denylist.
     """
+    from lib.config import read_runtime_config
     from lib.download_processing import process_completed_album
     from lib.download_reconstruction import reconstruct_grab_list_entry
+    from lib.processing_paths import protected_staging_roots
 
     request_id = job.request_id
     if request_id is None:
@@ -1031,6 +1034,29 @@ def execute_youtube_import_job(
         return DispatchOutcome(False, f"Album request {request_id} not found")
     status = str(row.get("status") or "")
     if status not in YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES:
+        # Issue #1122 item 4 (widened, review round 2): payload.staged_path
+        # is a direct child of the shared, externally provisioned
+        # auto-import staging root (the U6 worker's build_service stages
+        # every YT rescue there — see
+        # lib.youtube_ingest_service.YoutubeIngestService.staging_root and
+        # scripts/youtube_ingest_worker.py). Without this guard,
+        # _run_post_commit_cleanup's empty-parent prune
+        # (lib.dispatch.helpers._cleanup_staged_dir) could rmdir that
+        # shared root the moment this album's staged folder was its only
+        # child. Uses the same protected_staging_roots(...) derivation as
+        # every other _cleanup_staged_dir producer (lib/dispatch/core.py,
+        # lib/dispatch/outcome_actions.py, lib/download_rejection.py) and
+        # its harness/import_one.py twin — this producer only needs the
+        # auto-import root, but passing the shared set is the one obvious
+        # way rather than a narrower hand-built form. ctx is always None
+        # from the production caller at this point (the runtime context
+        # below is only built after this early return), so the config is
+        # resolved directly — mirroring the getattr(ctx, "cfg", None) or
+        # read_runtime_config() pattern used by the FORCE branch above.
+        # Ownership-drift residual (root deleted -> recreated
+        # cratedigger-owned by the next rescue): see
+        # lib.processing_paths.protected_staging_roots's docstring.
+        cfg = getattr(ctx, "cfg", None) or read_runtime_config()
         return DispatchOutcome(
             False,
             (
@@ -1039,6 +1065,10 @@ def execute_youtube_import_job(
             ),
             post_commit_cleanup=PostCommitCleanup(
                 staged_path=payload.staged_path,
+                staged_path_protected_parents=protected_staging_roots(
+                    processing_dir=cfg.processing_dir,
+                    beets_staging_dir=cfg.beets_staging_dir,
+                ),
             ),
         )
 

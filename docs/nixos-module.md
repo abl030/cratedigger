@@ -691,10 +691,20 @@ upstream module VM proves the generic module boundary without downstream
 writable binds.
 
 All service phases inherit the sandbox, including downstream `ExecCondition`
-and `ExecStartPre` commands. On doc2, the metadata gate used by web, importer,
-and import-preview-worker writes under `/run/cratedigger-metadata-gate`, so
-that exact directory must appear in those units' `ReadWritePaths`. The
-upstream module deliberately does not grant generic write access to `/run`.
+and `ExecStartPre` commands, unless `+`-prefixed (which runs with full
+privileges, bypassing the sandbox entirely -- see below). On doc2, all four
+sandboxed units -- web,
+importer, import-preview-worker, AND youtube-ingest -- run the metadata gate's
+`ExecCondition` start-check and declare `/var/lib/cratedigger-metadata-gate`
+in their `ReadWritePaths` (verified via `systemctl show <unit> -p
+ReadWritePaths -p ExecCondition`). This root is separate from `stateDir`
+(`/var/lib/cratedigger`) and is not part of the upstream module's own
+writable-path derivation in the table above, so the downstream wrapper adds it
+explicitly rather than relying on a generic grant. This is a descriptive fact
+about what the units declare, not a proven causal necessity: the gate's own
+`ExecCondition=+...` runs `+`-prefixed (full privileges, bypassing
+`ReadWritePaths` and the rest of the sandbox), so this declaration has not
+been shown to be what permits the gate's own writes.
 
 ## Sops + per-key secrets
 
