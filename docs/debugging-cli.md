@@ -410,9 +410,10 @@ inside socket authorization, never credentials.
 
 `pipeline-cli audit world` and `GET /api/audit/world` are thin adapters over
 the same read-only service and return the same report shape. The audit checks
-folder exclusivity, physical library files, imported-request membership,
-current evidence addressing, and source-denylist authority. It never changes
-PostgreSQL, Beets, or library files.
+folder exclusivity, physical library files, library-root containment,
+imported-request membership, current evidence addressing, and
+source-denylist authority. It never changes PostgreSQL, Beets, or library
+files.
 
 The report separately names temporal invariants it cannot establish from one
 current-state snapshot: whether a replaced row stayed frozen after supersede,
@@ -426,7 +427,7 @@ The public report groups every finding by the authority that owns it:
 |---|---|---|
 | A | Cratedigger integrity | `proof_lock_broken`, `lossy_tier_widened`, `denylist_without_authority`, `current_evidence_dangling`, `evidence_release_mismatch`, `evidence_capture_path_missing`, `request_identity_missing` |
 | B | Current-holdings projection health | `current_beets_missing`, `current_beets_ambiguous`, `current_beets_authority_unavailable`, `evidence_fingerprint_mismatch`, `evidence_link_without_album`, `current_evidence_missing`, `album_fingerprint_unavailable` |
-| C | Beets/library health | `album_empty`, `item_outside_album_folder`, `folder_shared`, `album_folder_missing`, `album_item_missing`, `beets_identity_missing` |
+| C | Beets/library health | `album_empty`, `item_outside_album_folder`, `folder_shared`, `album_folder_missing`, `album_item_missing`, `beets_identity_missing`, `album_folder_outside_library_root`, `album_item_outside_library_root` |
 
 Machine-readable output has `status` (`clean`, `observations_only`, or
 `integrity_failed`), `complete`, separate `counts.bucket_a|bucket_b|bucket_c`,

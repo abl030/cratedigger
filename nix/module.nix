@@ -2521,6 +2521,19 @@ in {
       # safely requeues only pre-launch work and stops ambiguous Beets work
       # for the operator; that's the right place to handle a mid-job kill,
       # not by leaving the worker dead.
+      #
+      # Issue #1089: the importer now catches this same ordinary deploy
+      # SIGTERM and stops claiming new jobs while letting its own in-flight
+      # job (beets child included) finish — a graceful drain, not a
+      # behavior change to the restart itself. ``TimeoutStopSec`` bounds
+      # how long systemd waits for that drain before it falls back to
+      # SIGKILL, same as before this existed. A large virtiofs import can
+      # still exceed this bound (the #1089 RCA's own 51-track box set ran
+      # 26 minutes) — that residual SIGKILL-mid-import world is NOT fixed
+      # here; it is exactly what recovery-side crash-debris removal
+      # (``lib.automation_recovery_debris``) now cleans up on the next
+      # startup/liveness-reprobe sweep, so a bounded wait here is
+      # deliberately preferred over an unbounded one.
       restartIfChanged = true;
       path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
       serviceConfig = (untrustedInputSandbox importerSandboxWritePaths) // {
@@ -2535,6 +2548,7 @@ in {
         WorkingDirectory = cfg.stateDir;
         Restart = "on-failure";
         RestartSec = 5;
+        TimeoutStopSec = "10min";
       };
     };
 

@@ -31,6 +31,7 @@ from lib.world_invariants import (
     check_evidence_disk_coherence,
     check_folder_exclusivity,
     check_library_filesystem,
+    check_library_root_containment,
     check_status_membership,
     derive_denylist_authorities,
     world_violation_bucket,
@@ -39,6 +40,7 @@ from lib.world_invariants import (
 AUDITED_INVARIANTS = (
     "folder_exclusivity",
     "library_filesystem",
+    "library_root_containment",
     "status_membership",
     "evidence_disk_coherence",
     "denylist_authority",
@@ -117,6 +119,18 @@ class WorldAuditPipelineDB(Protocol):
 
 @runtime_checkable
 class WorldAuditBeetsDB(Protocol):
+    # Issue #1089: the exact filesystem root every current Beets album's
+    # items are supposed to live under. Real ``BeetsDB``/``FakeBeetsDB``
+    # already carry this (both bound to it at construction) — a Protocol
+    # member, not a new ``audit_world`` parameter, so every existing
+    # caller of ``audit_world``/``audit_world_from_factory`` needs zero
+    # changes to keep working. Declared as a read-only property, not a
+    # plain attribute: real ``BeetsDB.library_root`` is ``@property``, and
+    # a plain mutable Protocol attribute is invariant — it would reject a
+    # read-only property as "incompatible" under strict Pyright.
+    @property
+    def library_root(self) -> str: ...
+
     def list_world_albums(self) -> list[BeetsWorldAlbum]: ...
 
     def resolve_current_releases(
@@ -151,6 +165,10 @@ class _AvailabilityMediatedBeetsDB:
 
     def __init__(self, beets: WorldAuditBeetsDB) -> None:
         self._beets = beets
+
+    @property
+    def library_root(self) -> str:
+        return self._beets.library_root
 
     def list_world_albums(self) -> list[BeetsWorldAlbum]:
         try:
@@ -407,6 +425,10 @@ def audit_world(
 
     violations.extend(check_folder_exclusivity(albums))
     violations.extend(check_library_filesystem(albums))
+    violations.extend(check_library_root_containment(
+        albums,
+        library_root=beets_db.library_root,
+    ))
     violations.extend(check_status_membership(
         memberships,
         resolutions_by_release_id,

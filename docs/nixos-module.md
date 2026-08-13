@@ -622,7 +622,17 @@ See [`examples/cratedigger.nix`](../examples/cratedigger.nix) for the full worke
 - `cratedigger-importer.service` — long-running serial beets import worker. It
   claims queued import jobs after async preview marks durable candidate
   evidence as `evidence_ready`; historical/raw `would_import` rows are
-  non-runnable display/audit data and are not claimable.
+  non-runnable display/audit data and are not claimable. `restartIfChanged =
+  true` (a deploy switch restarts it — see the 2026-05-16 incident recorded
+  in the unit's own Nix comment). Since issue #1089 it catches that ordinary
+  SIGTERM and drains gracefully: stops claiming new jobs and lets its
+  in-flight job (beets child included) finish before exiting, bounded by
+  `TimeoutStopSec = "10min"` before systemd falls back to SIGKILL. A large
+  virtiofs import can still exceed that bound (the #1089 RCA's own 51-track
+  box set ran 26 minutes) — recovery-side crash-debris removal
+  (`lib.automation_recovery_debris`) is that residual world's safety net,
+  cleaning up a killed child's committed-but-unmoved Beets catalog row on
+  the next startup/liveness-reprobe sweep.
 - `cratedigger-import-preview-worker.service` — long-running async preview
   worker enabled with `importer.enable`. It starts after DB migrations,
   defaults to two worker loops, and runs validation/spectral/measurement

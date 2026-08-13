@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import signal
 import socket
 import sys
 import time
@@ -18,6 +19,10 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from lib import transitions
+from lib.automation_recovery_debris import (
+    RecoveryDebrisRemovalFn,
+    remove_recovery_debris,
+)
 from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 from lib.config import (
     CratediggerConfig,
@@ -129,6 +134,28 @@ class _CandidateScanCursor:
     offset: int = 0
 
 
+@dataclass
+class _GracefulShutdown:
+    """Signal-safe stop flag: SIGTERM sets it, the poll loop reads it.
+
+    Best-effort drain (issue #1089): a deploy switch's SIGTERM no longer has
+    to kill an in-flight import mid-flight. ``run_once`` never returns until
+    its own at-most-one claimed job reaches a terminal write, so simply not
+    calling it again once this flag is set already IS "let the in-flight job
+    finish, then stop claiming new work" — no special interruption of a
+    running job is needed or attempted. Past the unit's ``TimeoutStopSec``,
+    systemd still SIGKILLs exactly as before; the recovery-side crash-debris
+    removal in ``lib.automation_recovery_debris`` is that world's safety net,
+    not this one.
+    """
+
+    requested: bool = False
+
+    def request(self, signum: int, frame: object) -> None:
+        del signum, frame
+        self.requested = True
+
+
 def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
     return {
         "success": outcome.success,
@@ -170,6 +197,7 @@ class _AutomationRecoveryDB(Protocol):
         decision: ExecutionLivenessDecision,
         requeue_message: str,
         recovery_message: str,
+        debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
     ) -> ImportJob | None: ...
 
 
@@ -2070,6 +2098,7 @@ def recover_abandoned_automation_owners(
     db: _AutomationRecoveryDB,
     *,
     liveness_probe: ExecutionLivenessProbe | None = None,
+    debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
 ) -> list[ImportJob]:
     """Re-probe every attached automation owner and recover the proven dead.
 
@@ -2080,6 +2109,10 @@ def recover_abandoned_automation_owners(
     job — is observed alive and left completely alone. The sweep is deliberately
     lane-agnostic: a dead owner is equally stuck whichever lane abandoned it,
     and the recovery write is owner-atomic under ``IMPORT(request_id)``.
+
+    ``debris_removal_fn`` (issue #1089) is forwarded, unchanged, to
+    ``db.recover_automation_import_job`` — production always uses the real
+    ``remove_recovery_debris`` default; tests inject a stub.
     """
     recovered: list[ImportJob] = []
     for job in db.list_automation_import_jobs_for_startup_recovery():
@@ -2101,6 +2134,7 @@ def recover_abandoned_automation_owners(
                 decision=decision,
                 requeue_message=RESTART_REQUEUE_MESSAGE,
                 recovery_message=RESTART_RECOVERY_MESSAGE,
+                debris_removal_fn=debris_removal_fn,
             )
         except Exception:
             # One unrecoverable owner must not abort the sweep or the worker's
@@ -2170,6 +2204,54 @@ def recover_abandoned_running_jobs(
     return recovered
 
 
+def _drain_import_queue(
+    db: PipelineDB,
+    *,
+    worker_id: str,
+    poll_interval: float,
+    once: bool,
+    shutdown: _GracefulShutdown,
+) -> None:
+    """The importer's steady-state poll loop, extracted for direct testing.
+
+    Checked once per iteration, before the next claim attempt — never
+    mid-``run_once()`` (see ``_GracefulShutdown``). ``once`` still returns
+    after at most one claimed job regardless of ``shutdown``, preserving
+    the existing ``--once`` contract untouched.
+    """
+    scan_cursor = _CandidateScanCursor()
+    next_reprobe_at = (
+        time.monotonic() + AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS
+    )
+    while True:
+        if shutdown.requested:
+            logger.info(
+                "SIGTERM received; no further import jobs will be claimed",
+            )
+            return
+        if time.monotonic() >= next_reprobe_at:
+            next_reprobe_at = (
+                time.monotonic()
+                + AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS
+            )
+            reprobed = recover_abandoned_automation_owners(db)
+            if reprobed:
+                logger.warning(
+                    "Liveness re-probe recovered %s abandoned "
+                    "automation owner(s) a restart would have stranded",
+                    len(reprobed),
+                )
+        job = run_once(
+            db,
+            worker_id=worker_id,
+            scan_cursor=scan_cursor,
+        )
+        if once:
+            return
+        if job is None:
+            time.sleep(poll_interval)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Drain the Cratedigger import queue",
@@ -2230,6 +2312,13 @@ def main() -> int:
 
     worker_id = args.worker_id or f"{socket.gethostname()}:{os.getpid()}"
     db = PipelineDB(args.dsn)
+    # Best-effort graceful drain (issue #1089): systemd's ordinary SIGTERM
+    # would otherwise terminate this process immediately, mid-job, exactly
+    # the world the recovery-side crash-debris removal exists to clean up
+    # after. A bounded ``TimeoutStopSec`` on the unit still SIGKILLs past
+    # this — that world is unaffected and remains covered by the same fix.
+    shutdown = _GracefulShutdown()
+    signal.signal(signal.SIGTERM, shutdown.request)
     try:
         # Keep the beets-mutating queue to one worker process. See
         # docs/advisory-locks.md for namespace rules.
@@ -2245,33 +2334,14 @@ def main() -> int:
                     len(recovered),
                 )
 
-            scan_cursor = _CandidateScanCursor()
-            next_reprobe_at = (
-                time.monotonic()
-                + AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS
+            _drain_import_queue(
+                db,
+                worker_id=worker_id,
+                poll_interval=args.poll_interval,
+                once=args.once,
+                shutdown=shutdown,
             )
-            while True:
-                if time.monotonic() >= next_reprobe_at:
-                    next_reprobe_at = (
-                        time.monotonic()
-                        + AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS
-                    )
-                    reprobed = recover_abandoned_automation_owners(db)
-                    if reprobed:
-                        logger.warning(
-                            "Liveness re-probe recovered %s abandoned "
-                            "automation owner(s) a restart would have stranded",
-                            len(reprobed),
-                        )
-                job = run_once(
-                    db,
-                    worker_id=worker_id,
-                    scan_cursor=scan_cursor,
-                )
-                if args.once:
-                    return 0
-                if job is None:
-                    time.sleep(args.poll_interval)
+            return 0
     finally:
         db.close()
 

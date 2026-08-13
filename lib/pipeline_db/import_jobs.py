@@ -11,6 +11,10 @@ import psycopg2
 import psycopg2.extras
 
 from lib import transitions
+from lib.automation_recovery_debris import (
+    RecoveryDebrisRemovalFn,
+    remove_recovery_debris,
+)
 from lib.import_execution import (
     ExecutionLeaseSnapshot,
     ExecutionLivenessDecision,
@@ -1359,6 +1363,7 @@ class _ImportJobsMixin(
         decision: ExecutionLivenessDecision,
         requeue_message: str,
         recovery_message: str,
+        debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
     ) -> ImportJob | None:
         """Recover one abandoned owner after exact persisted death proof.
 
@@ -1444,6 +1449,7 @@ class _ImportJobsMixin(
                 request_id=request_id,
                 expected_execution_lease=expected_execution_lease,
                 reason=recovery_message,
+                debris_removal_fn=debris_removal_fn,
             )
 
 
@@ -1554,6 +1560,7 @@ class _ImportJobsMixin(
         request_id: int,
         expected_execution_lease: ExecutionLeaseSnapshot | None,
         reason: str,
+        debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
     ) -> ImportJob | None:
         """Fail a dead owner into ``wanted`` without inventing cleanup proof.
 
@@ -1569,6 +1576,19 @@ class _ImportJobsMixin(
         consumes that matched journal, fails the job, and releases the request
         to ``wanted``. A receipt is never fabricated. Ownership/CAS conflicts
         still leave every database write rolled back for a later re-probe.
+
+        Before that filesystem cleanup runs, ``debris_removal_fn`` (issue
+        #1089) observationally checks Beets for an album that is provably
+        THIS job's own crash debris — its release identity equals
+        ``job.beets_launch_release_id`` AND every item path lies under
+        ``job.beets_launch_source_path`` — and removes ONLY its Beets
+        catalog row via the admitted exact-album delete lane when both hold.
+        It never mutates a filesystem path (see
+        ``lib.automation_recovery_debris``), so it composes safely
+        regardless of whether the cleanup below finds a fresh source tree, a
+        resumed journal, or an already-removed one, and it never writes a
+        ``source_denylist`` row — this whole call touches nothing but Beets.
+        Either precondition unmet is reported, never removed.
         """
         from lib.download import _local_completion_terminal_outcome
         from lib.download_reconstruction import reconstruct_grab_list_entry
@@ -1596,6 +1616,17 @@ class _ImportJobsMixin(
 
             def checkpoint() -> None:
                 self.require_automation_recovery_owner(cas)
+
+            debris_report = debris_removal_fn(
+                launch_release_id=job.beets_launch_release_id,
+                launch_source_path=job.beets_launch_source_path,
+            )
+            if debris_report.outcome != "no_launch":
+                detail = f"{detail}; recovery debris {debris_report.outcome}"
+                if debris_report.album_id is not None:
+                    detail = f"{detail} (beets album {debris_report.album_id})"
+                if debris_report.detail:
+                    detail = f"{detail}: {debris_report.detail}"
 
             cleanup_refusal: CleanupJournalRefusalDisposition | None = None
             try:
@@ -1650,7 +1681,12 @@ class _ImportJobsMixin(
                 ).with_job(ImportJobTerminal(
                     status="failed",
                     error=detail,
-                    result={"automation_recovery_self_heal": reason},
+                    result={
+                        "automation_recovery_self_heal": reason,
+                        "recovery_debris_removal": msgspec.to_builtins(
+                            debris_report,
+                        ),
+                    },
                     message=detail,
                 ))
             )

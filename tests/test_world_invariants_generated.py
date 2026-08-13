@@ -33,6 +33,7 @@ from lib.world_invariants import (
     check_evidence_disk_coherence,
     check_folder_exclusivity,
     check_library_filesystem,
+    check_library_root_containment,
     check_no_lossy_tier_widening,
     check_proof_lock_terminality,
     check_status_membership,
@@ -220,6 +221,101 @@ class TestWorldInvariantGenerated(unittest.TestCase):
 
         self.assertIn("album_folder_missing", {v.code for v in violations})
         self.assertIn("album_item_missing", {v.code for v in violations})
+
+    @given(release_id=_SEGMENT, outside_segment=_SEGMENT)
+    def test_any_album_wholly_outside_the_library_root_is_rejected(
+        self,
+        release_id: str,
+        outside_segment: str,
+    ) -> None:
+        """Issue #1089: a beets album whose folder AND items never reached
+        the library root (killed automation import crash debris) must
+        always be reported — a disjoint top-level tree can never overlap
+        the root regardless of the generated segment's content."""
+        root = "/library/Beets"
+        outside = os.path.join("/processing/albums", outside_segment)
+        violations = check_library_root_containment((LibraryAlbumSnapshot(
+            1,
+            release_id,
+            outside,
+            (os.path.join(outside, "01 Track.flac"),),
+        ),), library_root=root)
+
+        codes = {v.code for v in violations}
+        self.assertIn("album_folder_outside_library_root", codes)
+        self.assertIn("album_item_outside_library_root", codes)
+
+    @given(release_id=_SEGMENT, inside_segment=_SEGMENT)
+    def test_any_album_wholly_inside_the_library_root_is_accepted(
+        self,
+        release_id: str,
+        inside_segment: str,
+    ) -> None:
+        """Must-still-work: the false-positive direction. An ordinary
+        installed album, wherever it lives under the root, never trips."""
+        root = "/library/Beets"
+        inside = os.path.join(root, inside_segment)
+        violations = check_library_root_containment((LibraryAlbumSnapshot(
+            1,
+            release_id,
+            inside,
+            (os.path.join(inside, "01 Track.flac"),),
+        ),), library_root=root)
+
+        self.assertEqual(violations, ())
+
+    @given(
+        release_id=_SEGMENT,
+        inside_segment=_SEGMENT,
+        outside_segment=_SEGMENT,
+    )
+    def test_partially_moved_item_alone_is_rejected(
+        self,
+        release_id: str,
+        inside_segment: str,
+        outside_segment: str,
+    ) -> None:
+        """The partially-moved world: the album folder itself is under the
+        root, but one item already escaped it. Item-level clause fires
+        alone — the folder-level clause must not (Q1, isolated)."""
+        root = "/library/Beets"
+        inside = os.path.join(root, inside_segment)
+        outside = os.path.join("/processing/albums", outside_segment)
+        violations = check_library_root_containment((LibraryAlbumSnapshot(
+            1,
+            release_id,
+            inside,
+            (
+                os.path.join(inside, "01 Track.flac"),
+                os.path.join(outside, "02 Track.flac"),
+            ),
+        ),), library_root=root)
+
+        self.assertEqual(
+            {v.code for v in violations},
+            {"album_item_outside_library_root"},
+        )
+
+    @given(
+        release_id=_SEGMENT,
+        folder=_SEGMENT,
+    )
+    def test_library_root_containment_is_silent_without_a_configured_root(
+        self,
+        release_id: str,
+        folder: str,
+    ) -> None:
+        """Must-still-work: an unconfigured root can prove nothing, so it
+        reports nothing — never a false accusation on every album."""
+        outside = os.path.join("/processing/albums", folder)
+        violations = check_library_root_containment((LibraryAlbumSnapshot(
+            1,
+            release_id,
+            outside,
+            (os.path.join(outside, "01 Track.flac"),),
+        ),), library_root="")
+
+        self.assertEqual(violations, ())
 
     @given(
         release_id=_SEGMENT,

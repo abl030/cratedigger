@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shutil
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from typing import Literal
+from unittest.mock import patch
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
+from beets import library
 
 from lib import transitions
+from lib.automation_recovery_debris import (
+    RecoveryDebrisRemovalFn,
+    RecoveryDebrisReport,
+    remove_recovery_debris,
+)
+from lib.beets_db import BeetsDB
 from lib.import_execution import (
     ExecutionLeaseSnapshot,
     ExecutionLivenessDecision,
@@ -122,6 +132,23 @@ def _seed_unrelated_importable_jobs(
 
 def _no_checkpoint() -> None:
     """No owner can change under a single-threaded test."""
+
+
+def _no_debris_removal(
+    *,
+    launch_release_id: str | None,
+    launch_source_path: str | None,
+) -> RecoveryDebrisReport:
+    """Default ``debris_removal_fn`` for tests that aren't about #1089.
+
+    Every OTHER recovery-mechanics test in this module has no beets fixture
+    to check against, so it must not open the production default's real
+    ``BeetsDB()``. The dedicated debris-composition tests below inject the
+    real ``remove_recovery_debris`` explicitly, bound to a throwaway pinned
+    Beets fixture.
+    """
+    del launch_release_id, launch_source_path
+    return RecoveryDebrisReport(outcome="no_launch")
 
 
 def _tree_snapshot(root: str) -> tuple[tuple[str, str, bytes | None], ...]:
@@ -343,12 +370,87 @@ class _StartupRecoveryContract:
             ),
         )
 
+    # --- #1089 recovery-debris fixtures ---------------------------------
+
+    def _beets_fixture(self) -> tuple[Path, Path, Path]:
+        """One throwaway pinned-Beets config/db/library-root triple."""
+        tmp = tempfile.mkdtemp(prefix="startup-recovery-debris-")
+        self._case().addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        root = Path(tmp) / "library"
+        root.mkdir()
+        db_path = Path(tmp) / "beets.db"
+        config_dir = Path(tmp) / "config"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text(
+            f"directory: {root}\n"
+            f"library: {db_path}\n"
+            "plugins: []\n"
+            "clutter: []\n",
+            encoding="utf-8",
+        )
+        runtime_config = Path(tmp) / "config.ini"
+        runtime_config.write_text(
+            "[Beets]\n"
+            f"directory = {root}\n"
+            f"config_dir = {config_dir}\n"
+            f"python = {sys.executable}\n",
+            encoding="utf-8",
+        )
+        return db_path, root, runtime_config
+
+    def _seed_debris_album(
+        self,
+        db_path: Path,
+        root: Path,
+        *,
+        release_id: str,
+        source_dir: str,
+    ) -> int:
+        """Commit an album whose item still points at ``source_dir`` —
+        the exact shape a killed automation import leaves behind (issue
+        #1089): Beets committed the catalog row before any file moved."""
+        lib = library.Library(str(db_path), str(root))
+        track = Path(source_dir) / "01 - Track.mp3"
+        item = library.Item(
+            path=str(track),
+            album="Frozen",
+            albumartist="Idina Menzel",
+            artist="Idina Menzel",
+            title="Track",
+            mb_albumid=release_id,
+        )
+        album = lib.add_album([item])
+        album.store()
+        album_id_raw = album.id
+        assert album_id_raw is not None
+        album_id = int(album_id_raw)
+        lib._close()
+        return album_id
+
+    def _debris_removal_fn(
+        self,
+        db_path: Path,
+        root: Path,
+    ) -> RecoveryDebrisRemovalFn:
+        """The REAL ``remove_recovery_debris``, bound to a test fixture.
+
+        Only ``beets_db_factory`` is overridden (which real database to read)
+        — ``beets_delete_fn`` stays the production default, the real pinned
+        subprocess (``run_beets_delete``), reached via
+        ``CRATEDIGGER_RUNTIME_CONFIG`` at the call site.
+        """
+        return functools.partial(
+            remove_recovery_debris,
+            beets_db_factory=lambda: BeetsDB(str(db_path), library_root=str(root)),
+        )
 
     def _recover(
         self,
         job_id: int,
         lease: ExecutionLeaseSnapshot,
         decision: ExecutionLivenessDecision | None = None,
+        *,
+        debris_removal_fn: RecoveryDebrisRemovalFn = _no_debris_removal,
     ) -> ImportJob | None:
         return self.db.recover_automation_import_job(
             job_id,
@@ -356,6 +458,7 @@ class _StartupRecoveryContract:
             decision=decision or _dead(lease),
             requeue_message="safe to replay",
             recovery_message="importer restarted mid-import",
+            debris_removal_fn=debris_removal_fn,
         )
 
     def _mark_historical_recovery_required(self, job_id: int) -> None:
@@ -643,6 +746,157 @@ class _StartupRecoveryContract:
         case.assertEqual(row["status"], "processing")
         case.assertEqual(row["active_automation_import_job_id"], owner.id)
 
+    # --- #1089 recovery-side crash-debris removal -----------------------
+
+    def test_frozen_ghost_album_is_removed_alongside_source_tree_cleanup(
+        self,
+    ) -> None:
+        """RED reproduction of the #1089 RCA: real recovery + real beets
+        SQLite holding a committed album at the job's launch source path +
+        real journaled cleanup over a real tmp tree — the widest-boundary
+        composition the incident actually lived in.
+        """
+        case = self._case()
+        path = self._album_dir("frozen-ghost", "01 - Track.mp3")
+        owner, lease = self._launched_owner(path)
+        db_path, root, runtime_config = self._beets_fixture()
+        album_id = self._seed_debris_album(
+            db_path, root, release_id=self.mb_release_id, source_dir=path,
+        )
+
+        with patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(runtime_config),
+        }):
+            recovered = self._recover(
+                owner.id,
+                lease,
+                debris_removal_fn=self._debris_removal_fn(db_path, root),
+            )
+
+        assert recovered is not None
+        case.assertEqual(recovered.status, "failed")
+        self._assert_returned_to_search_pool(owner.id)
+        # The existing REMOVE_SOURCE cleanup still removed the tree.
+        case.assertFalse(os.path.exists(path))
+        # The new #1089 fix: the ghost beets album is gone too.
+        with BeetsDB(str(db_path), library_root=str(root)) as beets:
+            case.assertIsNone(beets.get_album_detail(album_id))
+        # Recents-visible evidence names the removed album.
+        latest = self._audit_rows()[0]
+        case.assertEqual(latest["outcome"], "failed")
+        case.assertIn("recovery debris removed", str(latest["error_message"]))
+        case.assertIn(str(album_id), str(latest["error_message"]))
+        # Hard invariant: this path writes NO source_denylist rows.
+        case.assertEqual(self.db.list_denylist_rows(), [])
+
+    def test_debris_removal_composes_with_a_resumed_cleanup_journal(
+        self,
+    ) -> None:
+        """A journal from an earlier interrupted recovery attempt is a REAL
+        world (issue #1089's ordering constraint) — debris removal never
+        touches the filesystem tree, so it must not disturb it."""
+        case = self._case()
+        path = self._album_dir("frozen-resumed", "01 - Track.mp3")
+        owner, lease = self._launched_owner(path)
+        self._journal(owner.id, path)
+        db_path, root, runtime_config = self._beets_fixture()
+        album_id = self._seed_debris_album(
+            db_path, root, release_id=self.mb_release_id, source_dir=path,
+        )
+
+        with patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(runtime_config),
+        }):
+            recovered = self._recover(
+                owner.id,
+                lease,
+                debris_removal_fn=self._debris_removal_fn(db_path, root),
+            )
+
+        assert recovered is not None
+        case.assertEqual(recovered.status, "failed")
+        case.assertFalse(os.path.exists(path))
+        with BeetsDB(str(db_path), library_root=str(root)) as beets:
+            case.assertIsNone(beets.get_album_detail(album_id))
+        case.assertEqual(self.db.list_denylist_rows(), [])
+
+    def test_partially_moved_item_under_library_root_is_surfaced_not_removed(
+        self,
+    ) -> None:
+        """Must-still-work: an item that already reached the library root
+        must never be removed as if it were confirmed crash debris."""
+        case = self._case()
+        path = self._album_dir("frozen-partial", "01 - Track.mp3")
+        owner, lease = self._launched_owner(path)
+        db_path, root, runtime_config = self._beets_fixture()
+        album_id = self._seed_debris_album(
+            db_path, root, release_id=self.mb_release_id, source_dir=path,
+        )
+        moved_dir = root / "Idina Menzel" / "Frozen"
+        moved_dir.mkdir(parents=True)
+        moved = moved_dir / "01 - Track.mp3"
+        moved.write_bytes(b"audio")
+        lib = library.Library(str(db_path), str(root))
+        album = lib.get_album(album_id)
+        assert album is not None
+        for item in album.items():
+            item.path = os.fsencode(str(moved))
+            item.store()
+        lib._close()
+
+        with patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(runtime_config),
+        }):
+            recovered = self._recover(
+                owner.id,
+                lease,
+                debris_removal_fn=self._debris_removal_fn(db_path, root),
+            )
+
+        assert recovered is not None
+        case.assertEqual(recovered.status, "failed")
+        # The source tree cleanup still runs — orthogonal to debris removal.
+        case.assertFalse(os.path.exists(path))
+        # But the album is NOT removed: it was never provably THIS job's
+        # debris (its item already reached the library root).
+        with BeetsDB(str(db_path), library_root=str(root)) as beets:
+            case.assertIsNotNone(beets.get_album_detail(album_id))
+        latest = self._audit_rows()[0]
+        case.assertIn("recovery debris not_confined", str(latest["error_message"]))
+        case.assertEqual(self.db.list_denylist_rows(), [])
+
+    def test_wrong_release_album_at_the_source_path_is_surfaced_not_removed(
+        self,
+    ) -> None:
+        """Must-still-work: an unrelated album sharing the source folder
+        (e.g. leftover from a stale reuse) must never be removed."""
+        case = self._case()
+        path = self._album_dir("frozen-wrong-release", "01 - Track.mp3")
+        owner, lease = self._launched_owner(path)
+        db_path, root, runtime_config = self._beets_fixture()
+        album_id = self._seed_debris_album(
+            db_path, root, release_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            source_dir=path,
+        )
+
+        with patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(runtime_config),
+        }):
+            recovered = self._recover(
+                owner.id,
+                lease,
+                debris_removal_fn=self._debris_removal_fn(db_path, root),
+            )
+
+        assert recovered is not None
+        case.assertEqual(recovered.status, "failed")
+        case.assertFalse(os.path.exists(path))
+        with BeetsDB(str(db_path), library_root=str(root)) as beets:
+            case.assertIsNotNone(beets.get_album_detail(album_id))
+        latest = self._audit_rows()[0]
+        case.assertIn("recovery debris not_found", str(latest["error_message"]))
+        case.assertEqual(self.db.list_denylist_rows(), [])
+
 
 class TestAutomationStartupRecoveryFake(
     _StartupRecoveryContract,
@@ -651,7 +905,11 @@ class TestAutomationStartupRecoveryFake(
     def setUp(self) -> None:
         self.db = FakePipelineDB()
         self.request_id = 42
-        self.mb_release_id = "startup-recovery-fake"
+        # A real MB UUID shape (issue #1089's debris tests parse this
+        # through ``lib.release_identity``, which every other test in this
+        # module never did) — the digits echo the RCA's own Frozen mbid
+        # (``cbb51c9f...``) for traceability.
+        self.mb_release_id = "cbb51c9f-1111-2222-3333-444444444444"
         self.db.seed_request(make_request_row(
             id=self.request_id,
             mb_release_id=self.mb_release_id,
@@ -667,7 +925,7 @@ class TestAutomationStartupRecoveryPostgres(
         self.db = PipelineDB(TEST_DSN)
         self.db._execute("TRUNCATE album_requests CASCADE")
         self.db.conn.commit()
-        self.mb_release_id = "startup-recovery-real"
+        self.mb_release_id = "cbb51c9f-5555-6666-7777-888888888888"
         self.request_id = self.db.add_request(
             "Startup Recovery",
             "Exact Owner",
