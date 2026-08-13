@@ -6,9 +6,12 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import IO
+from unittest.mock import patch
 
 from lib.media_readiness import (
     MediaReadinessError,
+    average_bitrate_kbps_from_frames,
     flac_total_samples_only_changed,
     inspect_media,
     media_facts_for_path,
@@ -166,3 +169,102 @@ class TestFlacReadinessPin(unittest.TestCase):
             facts = media_facts_for_path(str(path))
             self.assertEqual(facts.codec, "mp3")
             self.assertGreater(facts.sample_count, 0)
+
+
+class TestAverageBitrateDerivationPin(unittest.TestCase):
+    """A constant-bitrate stream must never read one kbps low (Koppel, dl 39947).
+
+    ``album_quality_evidence`` id 36856: ten genuinely 256 kbps tracks, one of
+    which derived 255 because the rate was computed through a float
+    ``duration`` that is not exactly representable. That single kbps broke
+    per-track bitrate uniformity, flipped ``is_cbr`` to False, routed the album
+    onto ``cfg.mp3_vbr`` (transparent >= 245) instead of ``cfg.mp3_cbr``
+    (transparent >= 320), and the album out-ranked and re-imported over itself.
+    """
+
+    # Track 04 of the live album, exactly as ffprobe reported it. The real
+    # quotient is an integer: 8517888 * 8 == 266.184 s * 256 kbps * 1000.
+    KOPPEL_TRACK_04 = (8_517_888, 12_776_832, 48_000)
+
+    def test_exactly_representable_rate_is_not_floored_one_low(self) -> None:
+        compressed_bytes, sample_count, sample_rate = self.KOPPEL_TRACK_04
+        # The defect: routing through float seconds loses the exact quotient.
+        self.assertEqual(
+            int((compressed_bytes * 8) / (sample_count / sample_rate) / 1000),
+            255,
+            "fixture no longer reproduces the float-truncation world",
+        )
+        self.assertEqual(
+            average_bitrate_kbps_from_frames(
+                compressed_bytes, sample_count, sample_rate,
+            ),
+            256,
+        )
+
+    def test_rate_is_rounded_to_nearest_not_truncated(self) -> None:
+        # A real stream rarely lands on an exact integer. Nearest-integer is
+        # the honest report; flooring always biases a constant stream downward
+        # and can break uniformity on a single track.
+        #
+        # Exactly one second at 44100 Hz, so kbps == bytes * 8 / 1000 and the
+        # cases below are the byte counts that bracket the 191.5 rounding
+        # boundary. Byte counts, not bit counts: the input is bytes, and a
+        # "bits" spelling that is not a multiple of eight would be a fixture
+        # that cannot exist.
+        sample_rate, sample_count = 44_100, 44_100
+        cases = (
+            (23_950, 192),  # 191.600 kbps -> up
+            (24_050, 192),  # 192.400 kbps -> down
+            (23_937, 191),  # 191.496 kbps -> down, just under the boundary
+            (23_938, 192),  # 191.504 kbps -> up, just over it
+        )
+        for compressed_bytes, expected in cases:
+            with self.subTest(compressed_bytes=compressed_bytes):
+                self.assertEqual(
+                    average_bitrate_kbps_from_frames(
+                        compressed_bytes, sample_count, sample_rate,
+                    ),
+                    expected,
+                )
+
+    def test_degenerate_inputs_withhold_a_rate(self) -> None:
+        for label, args in (
+            ("no samples", (1_000, 0, 44_100)),
+            ("no sample rate", (1_000, 44_100, 0)),
+            ("no audio bytes", (0, 44_100, 44_100)),
+        ):
+            with self.subTest(label):
+                self.assertIsNone(average_bitrate_kbps_from_frames(*args))
+
+    def test_the_reader_itself_reports_the_exact_rate(self) -> None:
+        """The fix has to reach the call site, not just the helper.
+
+        ``media_facts_for_path`` is what every consumer actually calls, and
+        it kept its own float derivation until this change. Only ffprobe
+        itself is replaced, at the subprocess leaf; its compact output is
+        then parsed, validated and reduced entirely by production code.
+        """
+        compressed_bytes, sample_count, sample_rate = self.KOPPEL_TRACK_04
+        probe_output = (
+            f"index=0|codec_type=audio|codec_name=mp3"
+            f"|sample_rate={sample_rate}|channels=2\n"
+            f"stream_index=0|nb_samples={sample_count}\n"
+            f"stream_index=0|size={compressed_bytes}\n"
+            f"format_name=mp3\n"
+        )
+
+        def fake_ffprobe(
+            argv: list[str], *, stdout: IO[str], **_kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            stdout.write(probe_output)
+            return subprocess.CompletedProcess(argv, 0)
+
+        with patch(
+            "lib.media_readiness.subprocess.run", side_effect=fake_ffprobe,
+        ):
+            facts = media_facts_for_path("/nonexistent/04 Koppel.mp3")
+
+        # Guards against a fixture that stopped reproducing the live world.
+        self.assertEqual(facts.sample_count, sample_count)
+        self.assertEqual(facts.compressed_audio_bytes, compressed_bytes)
+        self.assertEqual(facts.average_bitrate_kbps, 256)

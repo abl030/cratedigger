@@ -23,6 +23,7 @@ from lib.evidence_media_identity import (
     canonical_beets_codec,
     canonical_beets_format,
 )
+from lib.media_readiness import kbps_from_bps
 from lib.release_identity import (
     ConflictingReleaseIdentityError,
     ReleaseIdentity,
@@ -401,11 +402,17 @@ def album_info_from_current(
     return AlbumInfo(
         album_id=current.album_id,
         track_count=len(measured),
-        min_bitrate_kbps=int(min(numeric_bitrates) / 1000),
-        avg_bitrate_kbps=int(
-            sum(numeric_bitrates) / len(numeric_bitrates) / 1000
+        # Rounded, not floored — and by the SAME helper the frame-measured
+        # candidate side uses. Flooring here while the candidate rounds makes
+        # identical audio compare one kbps apart, which is the skew that
+        # re-imported an album over itself (dl 39947).
+        min_bitrate_kbps=kbps_from_bps(min(numeric_bitrates)),
+        avg_bitrate_kbps=kbps_from_bps(
+            sum(numeric_bitrates) // len(numeric_bitrates)
         ),
-        median_bitrate_kbps=int(statistics.median(numeric_bitrates) / 1000),
+        median_bitrate_kbps=kbps_from_bps(
+            int(statistics.median(numeric_bitrates))
+        ),
         is_cbr=len(set(numeric_bitrates)) == 1,
         album_path=current.album_path,
         format=_reduce_album_format(measured_formats, cfg),
@@ -959,11 +966,13 @@ class BeetsDB:
             result[release_id] = {
                 "beets_tracks": len(current.items),
                 "beets_format": ",".join(formats) if formats else None,
+                # Same shared reduction as get_album_info — these two
+                # projections of the same album must never disagree.
                 "beets_bitrate": (
-                    int(min(bitrates) / 1000) if bitrates else None
+                    kbps_from_bps(min(bitrates)) if bitrates else None
                 ),
                 "beets_avg_bitrate": (
-                    int(sum(bitrates) / len(bitrates) / 1000)
+                    kbps_from_bps(sum(bitrates) // len(bitrates))
                     if bitrates else None
                 ),
                 "beets_samplerate": min(samplerates) if samplerates else None,

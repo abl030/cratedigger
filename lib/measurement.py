@@ -623,12 +623,21 @@ def _needs_spectral_check(
         transcode-cliff case; unknown VBR is the conservative default
         (issue #39: resumed downloads without slskd metadata).
       - VBR MP3 → run only when ``avg_bitrate_kbps`` is unknown (conservative)
-        or below ``vbr_threshold_kbps``. Issue #93: a VBR MP3 at avg 182kbps
-        (well below genuine V0's ~240-260kbps range) was an obvious transcode
-        that the old ``is_vbr``-only gate let through. The threshold comes
-        from ``cfg.quality_ranks.mp3_vbr.excellent``. This is a scan-selection
-        policy only; the later transcode decision consumes the resulting
-        spectral grade, not the bitrate threshold.
+        or at or below ``vbr_threshold_kbps``. Issue #93: a VBR MP3 at avg
+        182kbps (well below genuine V0's ~240-260kbps range) was an obvious
+        transcode that the old ``is_vbr``-only gate let through. The threshold
+        comes from ``cfg.quality_ranks.mp3_vbr.excellent``. This is a
+        scan-selection policy only; the later transcode decision consumes the
+        resulting spectral grade, not the bitrate threshold.
+
+        The comparison is INCLUSIVE. ``average_bitrate_kbps_from_frames``
+        reports the nearest integer rather than the floor, so a per-track
+        rate can read up to one kbps higher than it used to and an album
+        whose true average sits just under the threshold can now land
+        exactly on it. Under a strict ``<`` that album would silently stop
+        being scanned, in the last kbps before the boundary — which is
+        precisely where a fake V0 is most likely to sit. Reading exactly
+        the threshold means "not yet proven above it", so we scan.
 
     This helper is pure: filesystem enumeration and any M4A codec probe happen
     once at the measurement boundary and arrive as ``lossless_candidate``.
@@ -645,7 +654,7 @@ def _needs_spectral_check(
         return True
     if avg_bitrate_kbps is None or vbr_threshold_kbps is None:
         return True
-    return avg_bitrate_kbps < vbr_threshold_kbps
+    return avg_bitrate_kbps <= vbr_threshold_kbps
 
 
 def _persist_spectral_state(

@@ -49,6 +49,7 @@ from lib.import_queue import (
     force_import_payload,
     youtube_import_payload,
 )
+from lib.media_readiness import kbps_from_bps
 from lib.quality import (
     ActiveDownloadState,
     AlbumQualityEvidence,
@@ -171,7 +172,13 @@ def preview_failure_worlds(draw: st.DrawFn) -> PreviewFailureWorld:
         ))),
         storage_format=draw(st.sampled_from(("MP3", "Opus", "FLAC"))),
         minimum=minimum,
-        average=int((minimum + median + maximum) / 3),
+        # Reduced by the production helper, not a test-side floor: these
+        # become whole-kilobit Beets items, and ``album_info_from_current``
+        # rounds half-up, so a floored average asks for an AlbumInfo those
+        # items cannot produce.
+        average=kbps_from_bps(
+            sum(value * 1000 for value in (minimum, median, maximum)) // 3
+        ),
         median=median,
         hook_fault=draw(st.sampled_from(("none", "prepare", "enrich"))),
     )

@@ -18,6 +18,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.beets_db import BeetsDB, open_beets_db
 from lib.config import CratediggerConfig
+from lib.media_readiness import (
+    average_bitrate_kbps_from_frames,
+    kbps_from_bps,
+)
 from lib.quality import AudioQualityMeasurement, QualityRankConfig
 from lib.release_identity import ConflictingReleaseIdentityError
 
@@ -783,7 +787,9 @@ class TestGetAlbumInfo(unittest.TestCase):
             info = db.get_album_info("def-456", self.cfg)
         assert info is not None
         self.assertEqual(info.min_bitrate_kbps, 238)
-        self.assertEqual(info.avg_bitrate_kbps, 244)  # (245+238+251)/3 = 244.66 → 244
+        # (245+238+251)/3 = 244.66 → 245 (nearest, not floored — the two
+        # sides of a comparison must reduce bps to kbps the same way).
+        self.assertEqual(info.avg_bitrate_kbps, 245)
         # Median of {238, 245, 251} = 245
         self.assertEqual(info.median_bitrate_kbps, 245)
         self.assertFalse(info.is_cbr)
@@ -904,7 +910,8 @@ class TestGetAlbumInfo(unittest.TestCase):
         assert info is not None
         self.assertEqual(info.format, "Opus")
         self.assertEqual(info.min_bitrate_kbps, 120)
-        self.assertEqual(info.avg_bitrate_kbps, 127)  # (128+120+135)/3 = 127.66 → 127
+        # (128+120+135)/3 = 127.66 -> 128 nearest, not 127 floored.
+        self.assertEqual(info.avg_bitrate_kbps, 128)
         self.assertFalse(info.is_cbr)
 
     def test_flac_album_format(self) -> None:
@@ -1232,11 +1239,14 @@ class TestCheckMbidsDetail(unittest.TestCase):
                 "request-6039", QualityRankConfig.defaults()
             )
 
+        # 2_310_000 / 8 == 288_750 bps -> 289 kbps nearest (was 288 floored).
+        # Both projections reduce through the same shared helper, so they
+        # can never disagree about the same album.
         self.assertEqual(detail["beets_bitrate"], 194)
-        self.assertEqual(detail["beets_avg_bitrate"], 288)
+        self.assertEqual(detail["beets_avg_bitrate"], 289)
         assert info is not None
         self.assertEqual(info.min_bitrate_kbps, 194)
-        self.assertEqual(info.avg_bitrate_kbps, 288)
+        self.assertEqual(info.avg_bitrate_kbps, 289)
         self.assertEqual(info.median_bitrate_kbps, 320)
 
     def test_missing_mbid_not_in_result(self) -> None:
@@ -2002,3 +2012,55 @@ class TestListAlbumMbIdentities(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBitrateReductionRoundsLikeTheCandidateSide(unittest.TestCase):
+    """Both sides of a quality comparison must reduce bps to kbps identically.
+
+    The installed copy is reduced from Beets' stored per-item rates here; the
+    candidate is measured frame-by-frame in ``lib.media_readiness``. When this
+    side floored and that side rounded, identical audio compared one kbps
+    apart — which is the skew that let dl 39947 "upgrade" an album over
+    itself. Both now call ``kbps_from_bps``.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db_path = os.path.join(self.tmp.name, "library.db")
+        _create_test_db(self.db_path)
+        self.cfg = QualityRankConfig.defaults()
+
+    def test_rates_are_rounded_not_floored(self) -> None:
+        # 105_892 bps floors to 105 and rounds to 106. The frame-measured
+        # candidate side reports 106 for the same stream.
+        _insert_album(self.db_path, 1, "round-me", [
+            (105_892, "/music/A/B/01.mp3"),
+            (105_892, "/music/A/B/02.mp3"),
+            (105_892, "/music/A/B/03.mp3"),
+        ])
+        with BeetsDB(self.db_path) as db:
+            info = db.get_album_info("round-me", self.cfg)
+        assert info is not None
+        self.assertEqual(info.min_bitrate_kbps, 106)
+        self.assertEqual(info.avg_bitrate_kbps, 106)
+        self.assertEqual(info.median_bitrate_kbps, 106)
+        self.assertEqual(
+            info.min_bitrate_kbps, kbps_from_bps(105_892),
+            "installed side must reduce through the shared helper",
+        )
+
+    def test_agrees_with_the_frame_measured_candidate_side(self) -> None:
+        # One stream, two producers: Beets' stored bps and a frame count for
+        # the same true rate. They must land on the same kbps.
+        sample_rate, seconds = 44_100, 100
+        for true_kbps in (128, 192, 256, 320):
+            with self.subTest(true_kbps=true_kbps):
+                sample_count = sample_rate * seconds
+                compressed_bytes = true_kbps * 1000 * seconds // 8
+                frame_side = average_bitrate_kbps_from_frames(
+                    compressed_bytes, sample_count, sample_rate,
+                )
+                beets_side = kbps_from_bps(true_kbps * 1000)
+                self.assertEqual(frame_side, beets_side)
+                self.assertEqual(frame_side, true_kbps)
