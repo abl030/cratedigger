@@ -196,11 +196,7 @@ function renderDiskCoverageCard(dc) {
   const drift = Array.isArray(dc.drift_rows) ? dc.drift_rows : [];
   const wantedOffDisk = (c.off_disk_by_status || {}).wanted || 0;
   const driftClass = drift.length > 0 ? 'metric-bad' : 'metric-good';
-  const driftRowsHtml = drift.map(r => `
-        <div class="metric-row">
-          <span>#${r.id} ${esc(r.artist_name || '?')} — ${esc(r.album_title || '?')}</span>
-          <strong class="metric-bad">${esc(r.status)}</strong>
-        </div>`).join('');
+  const driftRowsHtml = drift.map(r => renderDriftRow(r)).join('');
   return `
     <div class="dashboard-card">
       <div class="dashboard-card-title">Disk Coverage</div>
@@ -212,6 +208,54 @@ function renderDiskCoverageCard(dc) {
       </div>
     </div>
   `;
+}
+
+/**
+ * One Disk Coverage drift row: an `imported` request the dashboard cannot
+ * currently match against Beets. `drift_rows` carries every off-disk
+ * `imported` row regardless of cause or source (#1089 MINOR-3) — a
+ * MusicBrainz merge is only ONE reason a row can drift, so the "Follow MB
+ * merge" button renders only when `r.source === 'musicbrainz'` (#1089
+ * MAJOR-A, review round 3). This is NOT the same as `r.mb_release_id`
+ * being present: production Discogs rows duplicate the numeric id into
+ * BOTH `mb_release_id` and `discogs_release_id`
+ * (`ReleaseIdentity.from_strict_fields`'s own docstring), so a
+ * column-truthiness gate renders the button on every Discogs-sourced
+ * drift row too — `source` is derived server-side from the VALUE's shape
+ * (`lib/disk_coverage_service.py`, via `ReleaseIdentity.from_strict_fields`
+ * — the SAME strict, conflict-failing derivation
+ * `MergeRekeyService.rekey_request`'s own admission test uses, #1089 N4
+ * review round 4, so a row with a real MB UUID plus a conflicting numeric
+ * Discogs id shows no button either — the service would refuse it too),
+ * never from which column is non-null. A Discogs-sourced or otherwise
+ * non-MB drift row still shows, just without an action this arm can never
+ * resolve; a never-merged MB-sourced row KEEPS the button — clicking it
+ * and landing on `not_merged` (the #8792 Slipknot Vol. 3 shape) is
+ * designed UX, not a case to hide.
+ *
+ * The button rekeys the request's ledger onto the MusicBrainz merge survivor
+ * Beets already holds — request-ledger-only, never mutates Beets. The click
+ * handler (`mergeRekeyRequest`) lives in `pipeline.js`, which already owns
+ * `loadPipelineDashboard`; this module stays a one-way dependency
+ * (pipeline.js -> pipeline_dashboard.js, per the header comment) so it never
+ * imports back from there — the button is wired through the `window.*`
+ * binding in `main.js` instead, exactly like the "Refresh" button above.
+ * @param {any} r
+ * @returns {string}
+ */
+function renderDriftRow(r) {
+  const action = r.source === 'musicbrainz'
+    ? `
+        <div class="metric-row drift-row-action">
+          <button class="p-btn" onclick="window.mergeRekeyRequest(${r.id}, this)">Follow MB merge</button>
+          <span class="drift-row-note" id="drift-note-${r.id}"></span>
+        </div>`
+    : '';
+  return `
+        <div class="metric-row">
+          <span>#${r.id} ${esc(r.artist_name || '?')} — ${esc(r.album_title || '?')}</span>
+          <strong class="metric-bad">${esc(r.status)}</strong>
+        </div>${action}`;
 }
 
 function renderCoverageCard(coverage) {
@@ -712,6 +756,8 @@ export const __test__ = {
   normalizeWantedTrendSeries,
   renderDailyMatchRateChart,
   renderCoverageCard,
+  renderDiskCoverageCard,
+  renderDriftRow,
   renderHourlyMatchRateChart,
   renderMatchRateChart,
   renderPeerBrowseHeavyQueries,

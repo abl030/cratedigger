@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from tests.fakes import FakeBeetsDB
 from tests.helpers import handoff_automation_owner, make_request_row
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
@@ -730,6 +731,319 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         self.assertEqual(data["status"], "transient")
         self.assertIsNone(self.db.request(42)["mb_release_group_id"])
         self.assertEqual(self.db.update_request_fields_calls, [])
+
+
+class TestPipelineMergeRekeyContract(_FakeDbWebServerCase):
+    """Contract for ``POST /api/pipeline/<id>/merge-rekey`` (#1089).
+
+    Wraps ``MergeRekeyService.rekey_request`` — the CLI counterpart
+    (``pipeline-cli merge-rekey``) relays this same canonical route
+    (CD-QUAL-01 shape). See ``CLAUDE.md`` § "CLI ⇄ API surface symmetry".
+
+    Status-code mapping (``lib.merge_rekey_service.MERGE_REKEY_HTTP_STATUS``):
+      * 200 — rekeyed
+      * 404 — not_found
+      * 409 — wrong_state / library_not_at_survivor / library_still_at_stored
+              / survivor_collision / rekey_refused
+      * 422 — not_merged
+      * 503 — mirror_unavailable / beets_unavailable
+    """
+
+    MERGE_REKEY_REQUIRED_FIELDS: ClassVar = {
+        "outcome", "request_id", "old_release_id", "new_release_id",
+        "beets_album_id", "beets_checked_release_id", "beets_album_ids",
+        "rival_request_id", "colliding_fingerprints", "error_message",
+    }
+
+    MERGED = "6b209cc5-62b0-4ef7-9336-c2dbd876301a"
+    SURVIVOR = "9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4"
+
+    def _patch_service(self, **result_kwargs):
+        from unittest.mock import patch as _patch
+
+        from lib.merge_rekey_service import MergeRekeyResult
+        return _patch(
+            "lib.merge_rekey_service.MergeRekeyService.rekey_request",
+            return_value=MergeRekeyResult(**result_kwargs),
+        )
+
+    def test_merge_rekey_success_returns_200(self):
+        with self._patch_service(
+            outcome="rekeyed", request_id=316, old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR, beets_album_id=19345,
+        ):
+            status, data = self._post("/api/pipeline/316/merge-rekey", {})
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, self.MERGE_REKEY_REQUIRED_FIELDS,
+            "merge-rekey success response",
+        )
+        self.assertEqual(data["outcome"], "rekeyed")
+        self.assertEqual(data["new_release_id"], self.SURVIVOR)
+        self.assertEqual(data["beets_album_id"], 19345)
+        self.assertNotIn("error", data)
+
+    def test_merge_rekey_not_found_returns_404(self):
+        with self._patch_service(
+            outcome="not_found", request_id=9999,
+            error_message="request 9999 not found",
+        ):
+            status, data = self._post("/api/pipeline/9999/merge-rekey", {})
+        self.assertEqual(status, 404)
+        _assert_required_fields(
+            self, data, self.MERGE_REKEY_REQUIRED_FIELDS,
+            "merge-rekey not-found response",
+        )
+        self.assertEqual(data["error"], "request 9999 not found")
+
+    def test_merge_rekey_wrong_state_returns_409(self):
+        with self._patch_service(
+            outcome="wrong_state", request_id=42,
+            error_message="request 42 is not an owner-free imported "
+                           "MusicBrainz-sourced request",
+        ):
+            status, data = self._post("/api/pipeline/42/merge-rekey", {})
+        self.assertEqual(status, 409)
+        self.assertIn("error", data)
+
+    def test_merge_rekey_not_merged_returns_422(self):
+        """The #8792 refusal — Slipknot Vol. 3, no redirect, two albums."""
+        with self._patch_service(
+            outcome="not_merged", request_id=8792,
+            old_release_id="d990b8af-0000-0000-0000-000000000000",
+            new_release_id="d990b8af-0000-0000-0000-000000000000",
+            beets_checked_release_id="d990b8af-0000-0000-0000-000000000000",
+            beets_album_ids=(6612, 18672),
+            error_message="MusicBrainz names no merge survivor",
+        ):
+            status, data = self._post("/api/pipeline/8792/merge-rekey", {})
+        self.assertEqual(status, 422)
+        _assert_required_fields(
+            self, data, self.MERGE_REKEY_REQUIRED_FIELDS,
+            "merge-rekey not-merged response",
+        )
+        self.assertEqual(sorted(data["beets_album_ids"]), [6612, 18672])
+        self.assertIn("error", data)
+
+    def test_merge_rekey_library_not_at_survivor_returns_409(self):
+        with self._patch_service(
+            outcome="library_not_at_survivor", request_id=42,
+            new_release_id=self.SURVIVOR,
+            beets_checked_release_id=self.SURVIVOR,
+            error_message="Beets does not resolve exactly one album",
+        ):
+            status, data = self._post("/api/pipeline/42/merge-rekey", {})
+        self.assertEqual(status, 409)
+        self.assertIn("error", data)
+
+    def test_merge_rekey_refused_returns_409(self):
+        with self._patch_service(
+            outcome="rekey_refused", request_id=42,
+            new_release_id=self.SURVIVOR,
+            error_message="request 42 changed underneath the rekey",
+        ):
+            status, data = self._post("/api/pipeline/42/merge-rekey", {})
+        self.assertEqual(status, 409)
+        self.assertIn("error", data)
+
+    def test_merge_rekey_mirror_unavailable_returns_503(self):
+        with self._patch_service(
+            outcome="mirror_unavailable", request_id=42,
+            error_message="resolution not configured",
+        ):
+            status, data = self._post("/api/pipeline/42/merge-rekey", {})
+        self.assertEqual(status, 503)
+        _assert_required_fields(
+            self, data, self.MERGE_REKEY_REQUIRED_FIELDS,
+            "merge-rekey mirror-unavailable response",
+        )
+        self.assertIn("error", data)
+
+    def test_merge_rekey_beets_unavailable_returns_503(self):
+        """#1089 MINOR-5: a classified Beets SQLite authority failure."""
+        with self._patch_service(
+            outcome="beets_unavailable", request_id=42,
+            error_message="Current Beets authority is unavailable; retry later.",
+        ):
+            status, data = self._post("/api/pipeline/42/merge-rekey", {})
+        self.assertEqual(status, 503)
+        _assert_required_fields(
+            self, data, self.MERGE_REKEY_REQUIRED_FIELDS,
+            "merge-rekey beets-unavailable response",
+        )
+        self.assertIn("error", data)
+
+    def test_merge_rekey_beets_open_failure_returns_503_not_500(self):
+        """#1089 MAJOR-1 (review round 2): the classified boundary must
+        cover OPENING the database, not just reads through an already-open
+        handle. ``s._beets_db()`` itself raises here — before
+        ``MergeRekeyService`` is even constructed, so
+        ``_patch_service`` (which patches ``rekey_request``) cannot model
+        this; the real seam is ``web.server._beets_db``, a real
+        ``sqlite3.OperationalError`` shaped exactly like
+        ``beets_authority_availability_category`` classifies (test-fidelity
+        Rule B). Before the fix this reached no classified branch at all
+        and 500'd with no ``outcome``.
+        """
+        import sqlite3
+
+        import web.server as srv
+
+        locked = sqlite3.OperationalError("unable to open database file")
+        locked.sqlite_errorcode = sqlite3.SQLITE_CANTOPEN
+        with patch.object(srv, "_beets_db", side_effect=locked):
+            status, data = self._post("/api/pipeline/42/merge-rekey", {})
+        self.assertEqual(status, 503)
+        self.assertIn("error", data)
+        self.assertNotIn("outcome", data)
+
+    def test_merge_rekey_library_still_at_stored_returns_409(self):
+        """#1089 MAJOR-3: Beets has not moved off the merged-away id yet."""
+        with self._patch_service(
+            outcome="library_still_at_stored", request_id=42,
+            old_release_id=self.MERGED, new_release_id=self.SURVIVOR,
+            beets_checked_release_id=self.MERGED, beets_album_ids=(111,),
+            error_message="Beets still resolves an album at the merged-away id",
+        ):
+            status, data = self._post("/api/pipeline/42/merge-rekey", {})
+        self.assertEqual(status, 409)
+        _assert_required_fields(
+            self, data, self.MERGE_REKEY_REQUIRED_FIELDS,
+            "merge-rekey library-still-at-stored response",
+        )
+        self.assertEqual(data["beets_album_ids"], [111])
+        self.assertIn("error", data)
+
+    def test_merge_rekey_survivor_collision_returns_409(self):
+        """#1089 MAJOR-2: a rival request already occupies the survivor —
+        the response must name it, not just describe a bare refusal."""
+        with self._patch_service(
+            outcome="survivor_collision", request_id=42,
+            old_release_id=self.MERGED, new_release_id=self.SURVIVOR,
+            rival_request_id=777, colliding_fingerprints=("abc123",),
+            error_message="cannot rekey request 42 onto "
+                           f"{self.SURVIVOR}: request 777 already holds it",
+        ):
+            status, data = self._post("/api/pipeline/42/merge-rekey", {})
+        self.assertEqual(status, 409)
+        _assert_required_fields(
+            self, data, self.MERGE_REKEY_REQUIRED_FIELDS,
+            "merge-rekey survivor-collision response",
+        )
+        self.assertEqual(data["rival_request_id"], 777)
+        self.assertEqual(data["colliding_fingerprints"], ["abc123"])
+        self.assertIn("error", data)
+
+    def test_merge_rekey_http_status_covers_every_outcome_constant(self):
+        """#1089 NOTE-8: the guarded ``.get(..., 500)`` lookup exists
+        precisely because an outcome missing from the mapping must not
+        crash — but every real ``RESULT_*`` constant must still be
+        covered, so that safety net never actually fires in production."""
+        from lib import merge_rekey_service as svc
+
+        result_constants = {
+            getattr(svc, name)
+            for name in dir(svc)
+            if name.startswith("RESULT_")
+        }
+        self.assertEqual(
+            result_constants, set(svc.MERGE_REKEY_HTTP_STATUS),
+            "MERGE_REKEY_HTTP_STATUS is missing or has an extra outcome",
+        )
+
+    def test_merge_rekey_end_to_end_real_service_rekeys_and_moves_evidence(
+        self,
+    ):
+        """No service mock — the real ``MergeRekeyService`` over the fake
+        DB/Beets state the harness wires in, driven through the actual HTTP
+        route. Proves the route really constructs and calls the service
+        (rather than a shape a mock could paper over) and that the
+        request's evidence lineage really follows the row (#1059/#1089).
+
+        #1089 MAJOR-C (review round 3): the evidence-lineage witness is now
+        mandatory, so this happy path needs REAL, MATCHING bytes at the
+        survivor — not merely a Beets album-id seed and an unlinked
+        evidence row.
+        """
+        import tempfile
+
+        from lib.mb_canonical import (
+            configure_canonical_base,
+            configured_canonical_base,
+        )
+        from lib.quality import AlbumQualityEvidenceFile, AudioQualityMeasurement
+        from tests.helpers import make_album_quality_evidence
+
+        self.db.seed_request(make_request_row(
+            id=316, mb_release_id=self.MERGED, status="imported",
+            artist_name="Rebecca Black", album_title="Sing It",
+        ))
+
+        import web.server as srv
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            real_path = os.path.join(tmp_dir, "01 Track.flac")
+            with open(real_path, "wb") as handle:
+                handle.write(b"\x00" * 4096)
+            stored = make_album_quality_evidence(
+                mb_release_id=self.MERGED, source_path=tmp_dir,
+                files=[AlbumQualityEvidenceFile(
+                    relative_path="01 Track.flac", size_bytes=4096,
+                    mtime_ns=1_700_000_000_000_000_000,
+                    extension="flac", container="flac", codec="flac",
+                )],
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=900, avg_bitrate_kbps=950,
+                    median_bitrate_kbps=940, format="FLAC",
+                ),
+                codec="flac", container="flac", storage_format="FLAC",
+            )
+            self.db.upsert_album_quality_evidence(stored)
+            seeded = self.db.find_album_quality_evidence(
+                mb_release_id=self.MERGED,
+                snapshot_fingerprint=stored.snapshot_fingerprint,
+            )
+            assert seeded is not None and seeded.id is not None
+            self.assertTrue(
+                self.db.set_request_current_evidence(316, seeded.id),
+            )
+
+            beets = FakeBeetsDB()
+            beets.set_album_ids_for_release(self.SURVIVOR, [19345])
+            beets.set_item_paths(self.SURVIVOR, [(19345, real_path)])
+
+            previous_base = configured_canonical_base()
+            self.addCleanup(configure_canonical_base, previous_base)
+            configure_canonical_base("http://fake-mirror/ws/2")
+            with (
+                patch.object(srv, "_beets_db", return_value=beets),
+                # The TRUE external edge (#1089 NOTE-2, review round 2) —
+                # canonical_release_status is ~50 lines of real decision logic,
+                # not a thin forwarder, so it is not allowlisted; this patches
+                # the raw fetch one hop below it instead, exactly mirroring
+                # the real ``{"payload": ..., "redirected": ...}`` envelope
+                # ``_fetch_json`` produces.
+                patch(
+                    "lib.mb_canonical._fetch_json",
+                    return_value={
+                        "payload": {"id": self.SURVIVOR}, "redirected": True,
+                    },
+                ),
+            ):
+                status, data = self._post("/api/pipeline/316/merge-rekey", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["outcome"], "rekeyed")
+        self.assertEqual(data["new_release_id"], self.SURVIVOR)
+        self.assertEqual(data["beets_album_id"], 19345)
+        row = self.db.request(316)
+        self.assertEqual(row["mb_release_id"], self.SURVIVOR)
+        found = self.db.find_album_quality_evidence(
+            mb_release_id=self.SURVIVOR,
+            snapshot_fingerprint=stored.snapshot_fingerprint,
+        )
+        self.assertIsNotNone(found)
+
 
 if __name__ == "__main__":
     unittest.main()

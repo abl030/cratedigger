@@ -42,7 +42,13 @@ TIMEOUT_ENQUEUE_SECONDS = _TIMEOUT_SECONDS
 TIMEOUT_MIRROR_SECONDS = 300.0
 """Replace: several inline MB/Discogs mirror lookups (this deployment's
 mirror timeout is 15s per call), a Beets exact delete, Wrong Matches group
-cleanup, and staging cleanup — all before the response is written."""
+cleanup, and staging cleanup — all before the response is written.
+Also merge-rekey (#1089): one inline MusicBrainz merge-survivor lookup at
+the same 15s mirror timeout, plus Beets reads, PostgreSQL work, and — when
+the request links current evidence, which is now mandatory (#1089 MAJOR-C,
+review round 3) — a per-file walk of the survivor album over virtiofs to
+compute its fresh content fingerprint (the evidence-lineage witness) — see
+``cmd_merge_rekey``."""
 
 TIMEOUT_SOURCE_DELETE_SECONDS = 300.0
 """One ``rmtree`` of a full album folder over virtiofs, behind an
@@ -470,6 +476,29 @@ def cmd_resolve_rg(_db: object, args: argparse.Namespace) -> int:
     ))
 
 
+def cmd_merge_rekey(_db: object, args: argparse.Namespace) -> int:
+    """Thin HTTP adapter for ``POST /api/pipeline/<id>/merge-rekey`` (#1089).
+
+    The route is the one canonical execution path
+    (``MergeRekeyService.rekey_request``); every status this command's
+    outcomes can produce (``lib.merge_rekey_service.MERGE_REKEY_HTTP_STATUS``
+    — 200/404/409/422/503) already matches ``_exit_code``'s default
+    status→exit mapping, so no ``exit_overrides`` are needed.
+
+    Uses ``TIMEOUT_MIRROR_SECONDS``, not the 15s enqueue default: the route
+    itself performs an inline MusicBrainz merge-survivor lookup (this
+    deployment's own mirror timeout is 15s), Beets reads, PostgreSQL work,
+    and — for the now-mandatory evidence-lineage witness (#1089 MAJOR-C,
+    review round 3) — a per-file walk of the survivor album over virtiofs to
+    compute its fresh content fingerprint, all before it responds. The 15s
+    default would time out honest in-flight work and report a failure for a
+    mutation that may already have committed.
+    """
+    return _relay(args.api_endpoint, _ApiMutation(
+        path=f"/api/pipeline/{args.request_id}/merge-rekey", body={},
+    ), timeout_seconds=TIMEOUT_MIRROR_SECONDS)
+
+
 def add_api_mutation_subparsers(
     sub: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
@@ -493,3 +522,11 @@ def add_api_mutation_subparsers(
 
     resolve = sub.add_parser("resolve-rg", help="Resolve one request release-group via the web API")
     resolve.add_argument("request_id", type=int)
+
+    merge_rekey = sub.add_parser(
+        "merge-rekey",
+        help="Rekey an imported request onto the MusicBrainz merge "
+             "survivor Beets already holds, via the web API. "
+             "Request-ledger-only; never mutates Beets.",
+    )
+    merge_rekey.add_argument("request_id", type=int)

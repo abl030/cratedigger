@@ -142,6 +142,7 @@ class TestApiMutationCli(unittest.TestCase):
             "upgrade": api_mutations.cmd_upgrade,
             "wrong-match-converge": api_mutations.cmd_wrong_match_converge,
             "resolve-rg": api_mutations.cmd_resolve_rg,
+            "merge-rekey": api_mutations.cmd_merge_rekey,
         }
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -168,6 +169,9 @@ class TestApiMutationCli(unittest.TestCase):
             ("resolve-rg", {"api_endpoint": api_mutations.TcpApiEndpoint(
                 "http://api"), "request_id": 9},
              "/api/pipeline/9/resolve-rg", {}),
+            ("merge-rekey", {"api_endpoint": api_mutations.TcpApiEndpoint(
+                "http://api"), "request_id": 316},
+             "/api/pipeline/316/merge-rekey", {}),
         ]
         for command, values, path, body in cases:
             with self.subTest(command=command), patch(
@@ -301,6 +305,7 @@ class TestApiMutationCli(unittest.TestCase):
             ["upgrade", "release-2"],
             ["wrong-match-converge", "8", "150", "--apply"],
             ["resolve-rg", "9"],
+            ["merge-rekey", "316"],
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = os.path.join(temp_dir, "config.ini")
@@ -684,6 +689,87 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
         code, body = self._call(api_mutations.cmd_resolve_rg, request_id=105)
         self.assertEqual((code, body["status"]), (0, "resolved"))
 
+    def test_merge_rekey_reaches_the_real_route(self) -> None:
+        """A sixth adapter (#1089), tested standalone: its happy path needs
+        Beets + mirror fixtures the other five don't, so it gets its own
+        real-route round trip rather than folding into the five above."""
+        from lib.mb_canonical import (
+            configure_canonical_base,
+            configured_canonical_base,
+        )
+        from lib.quality import AlbumQualityEvidenceFile
+        from tests.fakes import FakeBeetsDB
+        from tests.helpers import make_album_quality_evidence
+
+        merged = "6b209cc5-62b0-4ef7-9336-c2dbd876301a"
+        survivor = "9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4"
+        self.db.seed_request(make_request_row(
+            id=316, mb_release_id=merged, status="imported",
+            artist_name="Rebecca Black", album_title="Sing It",
+        ))
+        import web.server as srv
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # #1089 MAJOR-C (review round 3): the evidence-lineage witness
+            # is now mandatory, so the happy path needs real, MATCHING
+            # bytes at the survivor — not merely a Beets album-id seed.
+            real_path = os.path.join(tmp_dir, "01 Track.mp3")
+            with open(real_path, "wb") as handle:
+                handle.write(b"\x00" * 4096)
+            evidence = make_album_quality_evidence(
+                mb_release_id=merged,
+                source_path=tmp_dir,
+                files=[AlbumQualityEvidenceFile(
+                    relative_path="01 Track.mp3", size_bytes=4096,
+                    mtime_ns=1_700_000_000_000_000_000,
+                    extension="mp3", container="mp3", codec="mp3",
+                )],
+            )
+            self.db.upsert_album_quality_evidence(evidence)
+            stored = self.db.find_album_quality_evidence(
+                mb_release_id=merged,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            self.assertTrue(
+                self.db.set_request_current_evidence(316, stored.id),
+            )
+
+            beets = FakeBeetsDB()
+            beets.set_album_ids_for_release(survivor, [19345])
+            beets.set_item_paths(survivor, [(19345, real_path)])
+
+            previous_base = configured_canonical_base()
+            self.addCleanup(configure_canonical_base, previous_base)
+            configure_canonical_base("http://fake-mirror/ws/2")
+            with (
+                patch.object(srv, "_beets_db", return_value=beets),
+                # The TRUE external edge (#1089 NOTE-2, review round 2). The
+                # service's default seam is the TAGGED resolver
+                # (production_tagged_canonical_release_fn), which calls
+                # canonical_release_status — NOT the collapsed
+                # canonical_release_id the import seam uses (#1089 BLOCKING-1)
+                # — but canonical_release_status is ~50 lines of real decision
+                # logic, not a thin forwarder, so it is not allowlisted; this
+                # patches the raw fetch one hop below it instead, exactly
+                # mirroring the real ``{"payload": ..., "redirected": ...}``
+                # envelope ``_fetch_json`` produces.
+                patch(
+                    "lib.mb_canonical._fetch_json",
+                    return_value={
+                        "payload": {"id": survivor}, "redirected": True,
+                    },
+                ),
+            ):
+                code, body = self._call(
+                    api_mutations.cmd_merge_rekey, request_id=316,
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(body["outcome"], "rekeyed")
+        self.assertEqual(body["new_release_id"], survivor)
+        self.assertEqual(self.db.request(316)["mb_release_id"], survivor)
+
     def test_pipeline_delete_round_trip_preserves_processing_owner(self) -> None:
         self._seed(106, "a0000000-0000-0000-0000-000000000006")
         owner = handoff_automation_owner(self.db, 106)
@@ -926,6 +1012,12 @@ class TestRoutedCommandDeadlines(unittest.TestCase):
                 lambda: pipeline_cli.cmd_replace(
                     None,
                     self._args(id=1, target_mb_release_id="x", json=True)),
+                api_mutations.TIMEOUT_MIRROR_SECONDS,
+            ),
+            (
+                "merge-rekey",
+                lambda: api_mutations.cmd_merge_rekey(
+                    None, self._args(request_id=1)),
                 api_mutations.TIMEOUT_MIRROR_SECONDS,
             ),
             (

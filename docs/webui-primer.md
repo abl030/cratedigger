@@ -256,6 +256,49 @@ depends on.
   request Queue subview was removed in #575 PR5: request state and actions live
   on Browse's unified artist/release rows, while diagnostic API/CLI routes
   remain available.
+- **Dashboard Disk Coverage drift panel — "Follow MB merge" button (#1089)** —
+  each `imported`-but-off-disk drift row (`imported` on the pipeline ledger,
+  but `BeetsDB.check_mbids` no longer resolves the stored id against the
+  current library — a MusicBrainz merge is only ONE of several possible
+  causes) shown for an MB-sourced row (`source === 'musicbrainz'`, a field
+  the dashboard route derives server-side from the VALUE's shape via
+  `ReleaseIdentity.from_strict_fields` — the SAME strict, conflict-failing
+  derivation `MergeRekeyService.rekey_request`'s own admission test uses
+  (#1089 N4, review round 4), so the gate never renders a button the
+  service would refuse — NEVER from `mb_release_id` column presence:
+  production Discogs rows duplicate the numeric id into BOTH
+  `mb_release_id` and `discogs_release_id`, so a column-truthiness gate
+  would render the button on every one of them; #1089 MAJOR-A, review
+  round 3 — Discogs-sourced drift rows still list, just with no action
+  this arm has a redirect concept for) gets a button that calls
+  `POST /api/pipeline/<id>/merge-rekey` (`MergeRekeyService.rekey_request`;
+  CLI counterpart `pipeline-cli merge-rekey`). Request-ledger-only — it
+  rekeys `album_requests` (and the request's evidence lineage) onto the
+  MusicBrainz survivor, and never mutates Beets. On success the row
+  disappears from the drift list on the next render. On refusal the row
+  shows the outcome inline: `not_merged` for a request MusicBrainz ANSWERED
+  was never actually merged — e.g. request #8792, Slipknot Vol. 3, which
+  resolves to two current Beets albums with no MusicBrainz redirect —
+  distinct from `mirror_unavailable`, which means no answer was obtained at
+  all (unconfigured, or the mirror is unreachable); a down mirror is never
+  read as "MusicBrainz confirms this was never merged". `wrong_state`,
+  `library_not_at_survivor`, `library_still_at_stored` (Beets has not moved
+  off the merged-away id yet — retag the library first),
+  `evidence_fingerprint_mismatch` (the survivor adoption could not be
+  witnessed against the request's linked current evidence — no linked
+  evidence at all, a dangling link, unreadable survivor files, a survivor
+  album with zero audio files (vanished or genuinely empty), or a genuine
+  content-fingerprint mismatch — an unrelated, pipeline-untracked album can
+  otherwise sit at the merged MBID and this action would proof-lock the
+  wrong bytes; the operator decides in every case),
+  `survivor_collision` (a rival request or a
+  colliding evidence fingerprint already occupies the survivor — the
+  operator must resolve it directly), `rekey_refused` (the write itself
+  refused — a pre-existing queued/running import job says wait for it to
+  finish, since nothing raced; any other cause is a genuine race and says
+  retry, #1089 MINOR-4, review round 2), or `beets_unavailable` (the Beets
+  SQLite authority is transiently unreadable) round out the refusal set.
+  Resolution happens only at click time, never during dashboard render.
 - **Wrong Matches tab** — the obsolete Complete-folder/manual-import page is gone;
   the tab now opens straight into Wrong Matches. Import actions queue work and
   poll `import_jobs`, so long beets imports do not block the web request.

@@ -443,6 +443,15 @@ _LEAF_SEAM_PATTERNS = [
     # MusicBrainz / Discogs API fetch helpers — HTTP boundary.
     re.compile(r"^scripts\.pipeline_cli\.album_requests\.fetch_mb_release$"),
     re.compile(r"^lib\.\w+\.fetch_mb_release$"),
+    # MusicBrainz merge-survivor resolver (#1089) — ``canonical_release_id``
+    # is one hop above the raw ``urllib.request`` fetch, same shape as
+    # ``fetch_mb_release`` above. ``canonical_release_status`` (the tagged
+    # variant, #1089 BLOCKING-1) is NOT allowlisted here — it is ~50 lines
+    # of real decision logic, not a thin forwarder (NOTE-2, review round 2)
+    # — tests that need to bypass the network patch the TRUE external edge
+    # below, ``_fetch_json``, instead.
+    re.compile(r"^lib\.mb_canonical\.canonical_release_id$"),
+    re.compile(r"^lib\.mb_canonical\._fetch_json$"),
 
     # scripts.pipeline_cli loaders — each is a thin wrapper around a
     # disk/SQLite read in lib.config or lib.beets_db. Split into

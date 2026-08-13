@@ -42,6 +42,60 @@ class TestDiskCoverageService(unittest.TestCase):
             [["mbid-on-disk", "mbid-missing", "12856590"]],
         )
 
+    def test_off_disk_rows_carry_the_real_exact_release_source(self) -> None:
+        """#1089 MAJOR-A (review round 3): ``source`` is derived from the
+        VALUE's shape, never column presence — production Discogs rows
+        duplicate the numeric id into BOTH ``mb_release_id`` and
+        ``discogs_release_id`` (``ReleaseIdentity.from_strict_fields``'s own
+        docstring), so a column-truthiness gate would misclassify every one
+        of them as MusicBrainz-sourced.
+
+        #1089 N4 (review round 4): the derivation is STRICT
+        (``from_strict_fields``), not the lenient ``from_fields`` — a row
+        with a real MB UUID PLUS a conflicting, different numeric Discogs
+        id must resolve to no source at all, exactly matching
+        ``MergeRekeyService.rekey_request``'s own admission test. The
+        lenient derivation would have picked ``mb_release_id`` and shown a
+        button the service refuses.
+        """
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="wanted",
+            mb_release_id="d990b8af-01db-46f1-a2cb-d9ca19f57e94",
+        ))
+        db.seed_request(make_request_row(
+            id=2, status="wanted",
+            # The real production shape: the numeric Discogs id duplicated
+            # into BOTH columns.
+            mb_release_id="12856590", discogs_release_id="12856590",
+        ))
+        db.seed_request(make_request_row(
+            id=3, status="wanted", mb_release_id=None,
+            discogs_release_id=None,
+        ))
+        db.seed_request(make_request_row(
+            id=4, status="wanted",
+            # A real MB UUID plus a CONFLICTING, different numeric Discogs
+            # id — the service's own from_strict_fields admission test
+            # fails this closed to None; the lenient from_fields would
+            # have picked mb_release_id and shown a button the service
+            # refuses (#1089 N4).
+            mb_release_id="e1000000-0000-0000-0000-000000000000",
+            discogs_release_id="99999999",
+        ))
+        beets = FakeBeetsDB()
+
+        result = disk_coverage(db, beets)
+
+        assert result.off_disk is not None
+        by_id = {row.id: row.source for row in result.off_disk}
+        self.assertEqual(by_id, {
+            1: "musicbrainz",
+            2: "discogs",
+            3: None,
+            4: None,
+        })
+
     def test_counts_only_suppresses_rows(self) -> None:
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, mb_release_id="missing"))

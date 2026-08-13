@@ -1,13 +1,24 @@
-"""Release-identity routes — resolve-rg lazy backfill and Replace.
+"""Release-identity routes — resolve-rg lazy backfill, Replace, and the
+operator merge-rekey action.
 
-Split from web/routes/pipeline.py (#522).
+Split from web/routes/pipeline.py (#522); merge-rekey added by #1089.
 """
 
 import json
+import logging
 
 from pydantic import BaseModel, Field
 
 from lib import transitions
+from lib.beets_db import (
+    BEETS_AUTHORITY_UNAVAILABLE_MESSAGE as CURRENT_BEETS_UNAVAILABLE_MESSAGE,
+)
+from lib.beets_db import beets_authority_availability_category
+from lib.merge_rekey_service import (
+    MERGE_REKEY_HTTP_STATUS,
+    RESULT_REKEYED,
+    MergeRekeyService,
+)
 from lib.pipeline_db import PipelineDB
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.replace_status import (
@@ -27,6 +38,8 @@ from web import mb as mb_api
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route
 from web.routes._server_access import _server
+
+logger = logging.getLogger(__name__)
 
 
 def _resolved_rg_applied_or_respond(
@@ -403,6 +416,113 @@ def post_pipeline_replace(
     h._error(f"Unknown replace outcome: {result.outcome}", 500)
 
 
+def post_pipeline_merge_rekey(
+    h: RouteHandler, body: dict[str, object], req_id_str: str,
+) -> None:
+    """``POST /api/pipeline/<id>/merge-rekey`` (#1089).
+
+    Operator action, surfaced from the dashboard's disk-coverage drift
+    panel: heal a request→Beets join after MusicBrainz merges the release an
+    ``imported`` request points at, by rekeying the LEDGER onto the survivor
+    Beets already holds. Request-ledger-only — never mutates Beets. No
+    request body. Wraps ``MergeRekeyService.rekey_request``, the one
+    canonical execution path shared with ``pipeline-cli merge-rekey``.
+
+    Status-code mapping (``lib.merge_rekey_service.MERGE_REKEY_HTTP_STATUS``):
+      * 200 — ``rekeyed``
+      * 404 — ``not_found``
+      * 409 — ``wrong_state`` (not an owner-free imported MB-sourced
+              request), ``library_not_at_survivor`` (Beets does not resolve
+              exactly one album at the survivor), ``library_still_at_stored``
+              (Beets still resolves an album at the merged-away id — retag
+              the library first), ``evidence_fingerprint_mismatch`` (the
+              survivor adoption could not be witnessed against the
+              request's linked current evidence — no linked evidence at
+              all, a linked evidence row that no longer exists, the
+              survivor album's files could not be read, the survivor album
+              walked cleanly but has zero audio files (vanished or
+              genuinely empty — not witnessable), or a freshly computed
+              content fingerprint that genuinely does not match; an
+              unrelated, pipeline-untracked album can otherwise sit at the
+              merged MBID, so the operator decides in every case),
+              ``survivor_collision`` (a rival request or a colliding
+              evidence fingerprint already occupies the survivor — operator
+              must resolve it), or ``rekey_refused`` (an in-flight
+              ``queued``/``running`` import job owns the request — wait for
+              it to drain; a bare compare-and-set race with no such job —
+              retry re-derives; see ``MergeRekeyService._rekey_refused_
+              message``, #1089 MINOR-4 review round 2, for the exact
+              wording split)
+      * 422 — ``not_merged`` (MusicBrainz answered and names no different
+              survivor for the stored id; the #8792 refusal)
+      * 503 — FOUR distinct shapes, only two of which carry a service
+              ``outcome``: the service's own ``mirror_unavailable`` (no
+              answer was obtained at all — unconfigured, or the mirror is
+              unreachable) and ``beets_unavailable`` (a classified SQLite
+              read failure — locked, IO, or permission — DURING
+              resolution) outcomes both carry ``outcome`` in the payload;
+              a route-level bare 503 with NO ``outcome`` field fires
+              either when OPENING the database itself raises that same
+              classified failure (this call — ``s._beets_db()`` — sits
+              BEFORE the service exists, so that failure can never carry a
+              service outcome), or when ``s._beets_db()`` returns ``None``
+              WITHOUT raising at all (``"Beets DB not available"`` — a
+              plain fallback, not a classified exception; #1089 MINOR-G
+              review round 3)
+      * 500 — any unknown outcome (safety net)
+    """
+    del body
+    try:
+        request_id = int(req_id_str)
+    except (TypeError, ValueError):
+        h._error("Invalid request id")
+        return
+
+    s = _server()
+    # Classified exactly like web/routes/pipeline.py's own boundary
+    # (~pipeline.py:373-388) — this call must be INSIDE the try, not before
+    # it: a locked/IO/permission failure opening the database is exactly
+    # the same retryable-503 world as one encountered later reading it, and
+    # a route that classifies only the later reads still 500s on an open
+    # failure with no outcome at all (#1089 MAJOR-1 review round 2).
+    try:
+        beets = s._beets_db()
+    except Exception as exc:
+        category = beets_authority_availability_category(exc)
+        if category is None and not isinstance(exc, OSError):
+            raise
+        logger.exception(
+            "current Beets authority unavailable opening the database "
+            "for request %s (%s)",
+            request_id, category or type(exc).__name__,
+        )
+        h._error(CURRENT_BEETS_UNAVAILABLE_MESSAGE, 503)
+        return
+    if beets is None:
+        h._error("Beets DB not available", 503)
+        return
+
+    service = MergeRekeyService(s._db(), beets)
+    result = service.rekey_request(request_id)
+
+    payload: dict[str, object] = {
+        "outcome": result.outcome,
+        "request_id": result.request_id,
+        "old_release_id": result.old_release_id,
+        "new_release_id": result.new_release_id,
+        "beets_album_id": result.beets_album_id,
+        "beets_checked_release_id": result.beets_checked_release_id,
+        "beets_album_ids": list(result.beets_album_ids),
+        "rival_request_id": result.rival_request_id,
+        "colliding_fingerprints": list(result.colliding_fingerprints),
+        "error_message": result.error_message,
+    }
+    status = MERGE_REKEY_HTTP_STATUS.get(result.outcome, 500)
+    if result.outcome != RESULT_REKEYED:
+        payload["error"] = result.error_message or "merge rekey refused"
+    h._json(payload, status=status)
+
+
 ROUTES: list[RouteRegistration] = [
     pattern_route(
         "POST", r"^/api/pipeline/(\d+)/replace$", post_pipeline_replace,
@@ -414,6 +534,13 @@ ROUTES: list[RouteRegistration] = [
     pattern_route(
         "POST", r"^/api/pipeline/(\d+)/resolve-rg$", post_pipeline_resolve_rg,
         "Lazy-backfill mb_release_group_id for a legacy request row.",
+        classified=True,
+    ),
+    pattern_route(
+        "POST", r"^/api/pipeline/(\d+)/merge-rekey$", post_pipeline_merge_rekey,
+        "Rekey an imported request's ledger onto the MusicBrainz merge "
+        "survivor Beets already holds. Request-ledger-only; never "
+        "mutates Beets.",
         classified=True,
     ),
 ]
