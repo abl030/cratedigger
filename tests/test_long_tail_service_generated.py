@@ -28,6 +28,7 @@ from lib.beets_db import (
     CurrentBeetsUnique,
 )
 from lib.long_tail_service import list_long_tail
+from lib.media_readiness import kbps_from_bps
 from lib.quality import QualityRankConfig
 from lib.release_identity import ReleaseIdentity
 from tests.fakes import FakePipelineDB
@@ -328,7 +329,12 @@ class TestCurrentBeetsBandingGenerated(unittest.TestCase):
         flac_bitrate: int,
     ) -> None:
         cfg = QualityRankConfig.defaults()
-        average_kbps = int((mp3_bitrate + flac_bitrate) / 2 / 1000)
+        # Production's reduction, so the expectation cannot drift from the
+        # projection it is compared against. Behaviour-neutral today: no
+        # sum in this strategy's domain reaches a rank boundary where floor
+        # and round disagree — but the ladder is the only reason, and that
+        # is not a property this test should depend on.
+        average_kbps = kbps_from_bps((mp3_bitrate + flac_bitrate) // 2)
         expected = compute_library_rank("MP3", average_kbps, cfg)
         bands: list[str] = []
         for flac_first in (True, False):

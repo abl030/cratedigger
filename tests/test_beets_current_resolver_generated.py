@@ -23,6 +23,7 @@ from lib.beets_db import (
     open_beets_db,
 )
 from lib.config import CratediggerConfig
+from lib.media_readiness import kbps_from_bps
 from lib.quality import QualityRankConfig
 from lib.release_identity import (
     ConflictingReleaseIdentityError,
@@ -312,7 +313,11 @@ class TestCurrentBeetsResolverGenerated(unittest.TestCase):
     ) -> None:
         values = sorted((first, second, third))
         minimum = values[0]
-        average = int(sum(values) / len(values))
+        # Reduced by the production helper, not a test-side floor: the fake
+        # seeds whole-kilobit items and ``album_info_from_current`` rounds
+        # half-up, so a floored average asks for an AlbumInfo those items
+        # cannot produce.
+        average = kbps_from_bps(sum(value * 1000 for value in values) // len(values))
         median = values[1]
         is_cbr = len(set(values)) == 1
         fake = FakeBeetsDB(library_root="/library")

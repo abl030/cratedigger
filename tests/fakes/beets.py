@@ -292,13 +292,27 @@ class FakeBeetsDB:
         that. Checking it with test-side arithmetic is how the promise came
         apart once already. Consumers read these aggregates through
         ``album_info_from_current``, so the round trip is the contract.
+
+        Resolution goes through the CLASS's resolver, never
+        ``self.resolve_current_release``. Tests legitimately replace that
+        attribute with a wrapper — ``_mock_beets_db`` in
+        ``tests/test_integration_slices.py`` wraps it in one that re-seeds
+        on every call — and a self-check that re-entered the wrapper would
+        recurse into the very seeding it is verifying. This check is about
+        the state this instance just wrote, so it reads that state directly.
         """
+        identity = _lookup_identity(mb_release_id)
         recorded = len(self.resolve_current_release_calls)
         try:
-            projected = self._project_album_info(mb_release_id)
+            resolution = (
+                FakeBeetsDB.resolve_current_release(self, identity)
+                if identity is not None
+                else None
+            )
         finally:
             # Seeding is not an observation; keep the recorder honest.
             del self.resolve_current_release_calls[recorded:]
+        projected = self._album_info_from_resolution(resolution)
         assert projected is not None, (
             f"seeded AlbumInfo for {mb_release_id} does not resolve to a "
             "unique current release"
@@ -860,18 +874,12 @@ class FakeBeetsDB:
         ]
         return int(min(bitrates) / 1000) if bitrates else None
 
-    def _project_album_info(
-        self, mb_release_id: str, cfg: QualityRankConfig | None = None,
+    def _album_info_from_resolution(
+        self,
+        resolution: CurrentBeetsResolution | None,
+        cfg: QualityRankConfig | None = None,
     ) -> AlbumInfo | None:
-        """Production's own projection over this fake's seeded items.
-
-        Not recorded: seeding verifies itself through here, and a seed is
-        not an observation the test asked for.
-        """
-        identity = _lookup_identity(mb_release_id)
-        if identity is None:
-            return None
-        resolution = self.resolve_current_release(identity)
+        """Production's own projection over one resolved snapshot."""
         if not isinstance(resolution, CurrentBeetsUnique):
             return None
         from lib.quality import QualityRankConfig
@@ -884,14 +892,21 @@ class FakeBeetsDB:
     def get_album_info(
         self, mb_release_id: str, _cfg: Any = None,
     ) -> Any:
-        # Delegates to the real projection instead of re-deriving the
+        # Projects through the real reducer instead of re-deriving the
         # aggregates. The hand-copied version floored bps->kbps while
         # production rounds, so this fake answered 48 kbps where the real
         # ``album_info_from_current`` answered 49 for the very same seeded
         # items — a divergence no test could see, because both sides of
         # every assertion were the copy.
         self.get_album_info_calls.append(mb_release_id)
-        return self._project_album_info(mb_release_id, _cfg)
+        identity = _lookup_identity(mb_release_id)
+        if identity is None:
+            return None
+        # Deliberately the instance attribute: a test that wrapped the
+        # resolver expects its wrapper on this read path.
+        return self._album_info_from_resolution(
+            self.resolve_current_release(identity), _cfg,
+        )
 
     def get_item_paths(self, mb_release_id: str) -> list[tuple[int, str]]:
         self.get_item_paths_calls.append(mb_release_id)
