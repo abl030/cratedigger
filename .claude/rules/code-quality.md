@@ -378,13 +378,26 @@ launching it as an unattended, contention-prone automation.
 
 It is NOT only interactive entries that differ: the var is
 an inherited process-environment setting, so a NESTED `nix-shell` a test
-spawns as its own subprocess (`tests/test_decision_corpus_export.py` does
-this) also inherits it from the enclosing suite and skips the same
-refusal — deliberately, since the enclosing `run_suite` already owns
-headroom enforcement for the whole run and a nested shell re-imposing its
-own would be redundant, not protective. Only a genuinely interactive
-`nix-shell` entry, started outside any suite run, never has this var set and
-keeps its entry guard.
+spawns as its own subprocess also inherits it from the enclosing suite and
+skips the same refusal — deliberately, since the enclosing `run_suite`
+already owns headroom enforcement for the whole run and a nested shell
+re-imposing its own would be redundant, not protective. (`tests/test_decision_corpus_export.py` used to be this case, nesting six such
+subprocesses per run to invoke a copied `scripts/decision_differential.py`
+against historical base-ref archives; issue #1131 removed the nesting
+entirely — `sys.executable` was already the enclosing shell's own
+interpreter with an identical `PYTHONPATH`, so re-entering `nix-shell` paid
+a full Nix evaluation per call for zero additional capability. The six
+calls now invoke `sys.executable` directly, so no test currently spawns a
+NESTED `nix-shell` — but this is not dead machinery: the top-level
+free-bytes skip itself is taken on EVERY suite run launched by
+`scripts/test.sh`, `scripts/run_final_gate.sh`, and
+`scripts/daily_flake_update.sh`, and is pinned by
+`tests/test_test_tmpfs.py::test_suite_owns_headroom_skips_only_the_free_bytes_refusal`.
+Only the nested-shell-inherits-the-var form has no current example — the
+mechanism remains in `scripts/test_tmpfs.sh` for the next test that
+legitimately needs to nest.) Only a genuinely interactive `nix-shell` entry,
+started outside any suite run, never has this var set and keeps its entry
+guard.
 
 Once admitted, `run_suite` best-effort reaps scratch directories nothing can
 still be writing (`reap_stale_check_bundles`, prefix set
