@@ -259,23 +259,54 @@ def _materialize_canonical_album(
     return db, ctx, album, staged_album
 
 
-def _stub_aac_lattice(_path: str) -> AacLatticeCapture:
-    """No-op stand-in for the real AAC-lattice frame-DSP.
+def _stub_aac_lattice(path: str) -> AacLatticeCapture:
+    """Fast per-track stand-in wired through the REAL per-album recording
+    loop, not a flat replacement of the whole capture.
+
+    ``measure_album_aac_lattice`` (``lib/aac_lattice.py``) exposes
+    ``analyze_fn`` as its own sanctioned kwarg-DI seam for exactly this —
+    its docstring: "lets the generated fault-isolation property drive this
+    real recording loop over a generated fault space without paying for
+    ffmpeg per example." Using it here keeps the real ``album_audio_files``
+    walk of the canonical directory, the real per-file recording loop, and
+    the real ``AacLatticeCapture.from_tracks`` aggregation inside the
+    composition — only ``analyze_track``'s expensive leg (subprocess ffmpeg
+    decode + MDCT/FFT, tens of seconds of CPU per track) is replaced by
+    ``_fixed_analysis``. That is higher fidelity than a flat empty capture:
+    every manifest this module builds has >=1 audio file, and production
+    always returns one scored row per file it finds — a flat
+    ``AacLatticeCapture()`` is the shape production only returns for an
+    album with NO audio files, which this module never builds.
 
     ``measure_and_persist_candidate_evidence`` defaults
     ``aac_lattice_measure_fn`` to the real ``measure_aac_lattice`` (issue
-    #829 PR-A), which decodes every candidate track via a subprocess and
-    runs MDCT/FFT analysis on it — tens of seconds of real CPU per call,
-    on manifests this module builds purely to exercise file *presence*,
-    never audio *content*. It is capture-only for every assertion this
-    module makes: manifest purity, action-file-handoff safety, and
-    rematerialize/dispatch outcomes all key on which files exist under
-    the canonical directory, never on ``AlbumQualityEvidence.aac_lattice``
-    — this is the same sanctioned kwarg-DI seam already used for
-    ``spectral_detail_analyzer`` below, injecting the well-formed "measured
-    nothing" capture instead of the expensive default.
+    #829 PR-A). No assertion in this module reads the resulting
+    ``AlbumQualityEvidence.aac_lattice`` VALUE — but it is not entirely off
+    the assertion path either: ``_write_preview_spectral_evidence_file``
+    folds ``AacLatticeCapture.validation_errors()`` into its own
+    ``storage_validation_errors()`` gate, so a MALFORMED capture would
+    break today's ``assert len(handoffs) == 1`` below. The accurate claim
+    is narrower than "capture-only": only the lattice's well-formedness is
+    load-bearing here, never its content. What this module genuinely never
+    exercises is the DECISION leg — ``full_pipeline_decision_from_evidence``
+    reads a candidate's lattice as a promotion gate
+    (``lib/quality/pipeline.py``), and production does carry a fresh
+    lattice into the quality-evidence action-file payload and on to
+    ``harness/import_one.py``'s ``aac_lattice_proof_leg`` — but what severs
+    that here is the PRE-EXISTING ``run_import_fn`` stub below
+    (``_capture_action_file_handoff``), not any preview/importer split.
     """
-    return AacLatticeCapture()
+    from lib.aac_lattice import AacLatticeAnalysis, measure_album_aac_lattice
+
+    def _fixed_analysis(_track_path: str) -> AacLatticeAnalysis:
+        """A fast, well-formed per-track score — same shape as a real
+        scored track (bounded offset, finite z/proba) — standing in for
+        ``analyze_track``'s real decode+DSP."""
+        return AacLatticeAnalysis(
+            offset=347, z=4.72, proba=0.5, sample_rate=44100, channels=2,
+        )
+
+    return measure_album_aac_lattice(path, analyze_fn=_fixed_analysis)
 
 
 def _stub_import_one_run() -> ImportOneRun:
@@ -317,8 +348,13 @@ def _run_owned_preview_action(
 ) -> tuple[ImportPreviewResult, PreviewActionFileHandoff]:
     """Drive the REAL preview fact-gathering (the #859 fire site) against a
     real owned canonical album. ``_write_preview_spectral_evidence_file``
-    runs unmocked — only the harness subprocess and the beets exact-release
-    lookup (both legitimate external-edge seams) are stubbed."""
+    runs unmocked. Every kwarg-DI seam passed to
+    ``measure_and_persist_candidate_evidence`` below stands in for a
+    legitimate external edge, never this module's own manifest-purity
+    logic: the harness subprocess (``run_import_fn``), the beets
+    exact-release lookup (``existing_spectral_resolver``), and both
+    spectral detectors (``spectral_detail_analyzer``,
+    ``aac_lattice_measure_fn``)."""
     run = _stub_import_one_run()
     handoffs: list[PreviewActionFileHandoff] = []
     if db.get_import_job(import_job_id) is None:
