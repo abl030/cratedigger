@@ -1344,6 +1344,9 @@ function renderEntryDetail(e, job, requestId) {
   if (e.failed_path) {
     html += `<div class="p-detail-row"><span class="p-detail-label">Path</span><span class="p-detail-value" style="font-size:0.8em;">${esc(e.failed_path)}</span></div>`;
   }
+  if (e.detail) {
+    html += `<div class="p-detail-row"><span class="p-detail-label">Detail</span><span class="p-detail-value" style="font-size:0.8em;">${esc(e.detail)}</span></div>`;
+  }
 
   if (c) {
     const ALL_FIELDS = ['tracks', 'album', 'artist', 'album_id', 'year', 'country', 'label', 'catalognum', 'media', 'mediums', 'albumdisambig', 'missing_tracks', 'unmatched_tracks'];
