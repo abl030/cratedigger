@@ -36,11 +36,18 @@ Per-item classification (:data:`RetagDivergenceItemClass`):
   assumed or filtered.
 - ``unreadable``: the file was never verified to agree. Two distinct causes
   share this class, distinguishable by ``detail``: a genuine read/parse
-  failure, and a stored path that resolved outside the configured library
-  root (refused before any read was attempted — #1093 review finding 7;
-  ``lib/beets_db.py::BeetsDB.list_album_mb_identities`` never hands this
-  module a path it has not verified contained). Fail closed either way: an
+  failure, and a stored path REFUSED by containment before any read was
+  attempted (#1093 review round 2, finding 7 — see
+  ``lib/beets_db.py::BeetsDB._contained_or_refused``; this module never
+  calls ``read_tag`` for a refused path). Fail closed either way: an
   unreadable file is never counted as agreeing, whatever the DB says.
+  Containment is a LEXICAL path-string check (``os.path.abspath`` +
+  ``os.path.commonpath``), not a symlink-resolving one — a symlink INSIDE
+  the library root that points outside it is CONTAINED (and gets opened);
+  a library root that is itself a symlink refuses an absolute path naming
+  the real target. This matches the pre-existing
+  ``BeetsDB.resolve_current_releases`` mechanism deliberately; see
+  :data:`REFUSED_OUTSIDE_LIBRARY_ROOT_DETAIL`.
 
 Per-album classification (:data:`RetagDivergenceAlbumClass`) aggregates its
 items by a fixed DISPLAY precedence — ``unreadable`` > ``diverges`` >
@@ -50,14 +57,15 @@ reachable zero-item album row (T7 in ``tests/test_beets_retag.py``). This is
 NOT what decides the report's ``status`` (see below) — an album a single
 unreadable file makes DISPLAY as ``unreadable`` might still contain a
 genuine ``diverges`` item, and the report's headline answer must not miss
-that (#1093 review findings 3 and 4). Only non-agreeing albums are listed;
-full counts are always reported regardless.
+that (#1093 review round 2, findings 3 and 4). Only non-agreeing albums are
+listed; full counts are always reported regardless.
 
 ``status`` answers "does this report contain a genuine identity mismatch",
-independent of unreadable/empty/excluded findings that merely mean the
+independent of unreadable/empty/refused findings that merely mean the
 census could not fully vouch for some albums:
 
-- ``clean``: nothing listed at all.
+- ``clean``: nothing listed at all — the scan actually answered the
+  question and the cohort is empty.
 - ``divergence_found``: at least one album contains an item classified
   ``diverges`` or ``file_tag_present_db_absent`` — a real identity
   disagreement. This is decided independent of precedence and of whatever
@@ -68,18 +76,27 @@ census could not fully vouch for some albums:
   fully vouch for the library — at least one album is listed solely for a
   non-divergence reason (unreadable, empty, or refused-path items), or the
   scan itself was time-bounded and stopped before finishing (``complete``
-  is ``False`` in that case; see ``deadline_seconds``).
+  is ``False`` in that case; see ``deadline_seconds``). This is NOT "clean"
+  — the world blocked a complete answer, so callers must not read it as
+  "no divergence" (#1093 review round 4, finding 5; see
+  ``scripts/pipeline_cli/audit.py``/``web/routes/retag_divergence_audit.py``
+  for the exit-code/status-code mapping this drives).
 - ``beets_unavailable``: the Beets authority itself could not be opened or
   queried.
 
-``deadline_seconds`` bounds a scan's wall-clock time (#1093 review finding
-2): the API route passes one so a single HTTP request can never outlive a
-reverse proxy's read timeout on the full ~93k-item live library (measured:
-an unbounded full census took ~196s; nginx's ``proxy_read_timeout`` default
-is 60s). ``pipeline-cli audit retag-divergence`` passes none — the CLI is
-always the full, unbounded census. A bounded scan that runs out of time
-reports ``complete=False`` over the albums it reached, exactly like an
+``deadline_seconds`` bounds ONLY the per-album item-read loop below — not
+the whole scan (#1093 review round 4, finding 3). ``beets.
+list_album_mb_identities()`` (one DB fetch before the loop starts; ~3.2s
+measured live) and the caller's JSON encode of the result both run
+UNBOUNDED, outside this timer. The API route passes a deadline so one HTTP
+request can never let the bounded LOOP outlive a reverse proxy's read
+timeout; ``pipeline-cli audit retag-divergence`` passes none — the CLI is
+always the full, unbounded census. A bounded scan that runs out of loop
+time reports ``complete=False`` over the albums it reached, exactly like an
 unavailable Beets authority; the report SHAPE never changes.
+``after_album_id``/``next_after_album_id`` let a bounded caller RESUME a
+truncated scan across multiple calls and eventually reach ``clean`` for
+the whole library — see :func:`scan_retag_divergence`.
 """
 
 from __future__ import annotations
@@ -120,10 +137,16 @@ _DIVERGENT_ITEM_CLASSES: frozenset[RetagDivergenceItemClass] = frozenset({
 })
 
 #: Fixed detail text for a path refused by containment — never a raised
-#: exception, since the file is never opened (#1093 review finding 7).
+#: exception, since the file is never opened (#1093 review round 2, finding
+#: 7). Describes a LEXICAL (path-string) containment check, not a
+#: symlink-resolving one — see the module docstring's ``unreadable`` bullet.
 REFUSED_OUTSIDE_LIBRARY_ROOT_DETAIL: Literal[
-    "refused: stored path resolves outside the configured library root"
-] = "refused: stored path resolves outside the configured library root"
+    "refused: stored path is not lexically contained within the configured "
+    "library root (path-string check; symlinks are not followed)"
+] = (
+    "refused: stored path is not lexically contained within the configured "
+    "library root (path-string check; symlinks are not followed)"
+)
 
 
 class TagReadOk(msgspec.Struct, frozen=True):
@@ -232,13 +255,20 @@ class RetagDivergenceAlbum(msgspec.Struct, frozen=True):
 
 class RetagDivergenceCounts(msgspec.Struct, frozen=True):
     albums_scanned: int
-    items_read: int
+    #: Every item path considered — read AND refused (#1093 review round 4,
+    #: finding 7a; was misleadingly named ``items_read`` while including
+    #: never-opened refused items).
+    items_scanned: int
+    #: Subset of ``items_scanned`` refused by containment and never opened.
+    items_refused: int
+    #: Subset of ``items_scanned`` classified ``unreadable`` — a superset
+    #: of ``items_refused`` (also includes genuine read/parse failures).
     items_unreadable: int
     #: Albums containing >=1 ``diverges`` item — an INDEPENDENT presence
     #: count, not gated by the album's DISPLAY precedence class (#1093
-    #: review finding 4: an album with both an unreadable item and a
-    #: diverging one must still count here, even though its display class
-    #: reads ``unreadable``).
+    #: review round 2, finding 4: an album with both an unreadable item and
+    #: a diverging one must still count here, even though its display
+    #: class reads ``unreadable``).
     albums_diverging: int
     #: Same independence as ``albums_diverging``, for
     #: ``file_tag_present_db_absent``.
@@ -257,6 +287,14 @@ class RetagDivergenceReport(msgspec.Struct, frozen=True):
     albums: tuple[RetagDivergenceAlbum, ...]
     #: Populated iff ``status == "beets_unavailable"``.
     unavailable_detail: str | None = None
+    #: Populated iff this scan was truncated by ``deadline_seconds``: the
+    #: last album id actually reached (or, if the deadline expired before
+    #: reaching even one album, the caller's own ``after_album_id``
+    #: unchanged — progress is never lost). Pass as ``after_album_id`` on
+    #: the next call to resume where this one stopped. ``None`` when the
+    #: scan reached the end of the (optionally cursor-filtered) row set —
+    #: nothing left to resume (#1093 review round 4, finding 4).
+    next_after_album_id: int | None = None
 
 
 def _build_album(
@@ -320,6 +358,7 @@ def scan_retag_divergence(
     read_tag: Callable[[str], str] = read_mb_albumid_tag,
     deadline_seconds: float | None = None,
     time_fn: Callable[[], float] = time.monotonic,
+    after_album_id: int | None = None,
 ) -> RetagDivergenceReport:
     """Census every Beets album's DB identity against its file tags.
 
@@ -328,14 +367,24 @@ def scan_retag_divergence(
     :func:`scan_retag_divergence_from_factory` /
     :func:`scan_retag_divergence_from_borrowed_factory` for that.
 
-    ``deadline_seconds=None`` (the CLI default) never truncates. A configured
-    deadline is checked once per album, before that album's items are read —
-    coarse-grained, but albums are small (rarely >20 items) so overshoot is
-    bounded. A truncated scan reports ``complete=False`` over exactly the
-    albums it reached; ``albums_scanned``/``items_read``/etc. describe only
-    that reached prefix, never the full row count.
+    ``deadline_seconds=None`` (the CLI default) never truncates. A
+    configured deadline bounds ONLY this function's per-album read loop —
+    see the module docstring — and is checked once per album, before that
+    album's items are read: coarse-grained, but albums are small (rarely
+    >20 items) so overshoot is bounded. A truncated scan reports
+    ``complete=False`` over exactly the albums it reached;
+    ``albums_scanned``/``items_scanned``/etc. describe only that reached
+    prefix, never the full row count.
+
+    ``after_album_id`` restricts the scan to albums with a strictly greater
+    id, letting a bounded caller resume a previous truncated scan (see
+    ``next_after_album_id`` on the returned report) — chaining calls until
+    ``next_after_album_id`` comes back ``None`` completes a genuine full
+    census across multiple bounded requests.
     """
     rows = sorted(beets.list_album_mb_identities(), key=lambda row: row.album_id)
+    if after_album_id is not None:
+        rows = [row for row in rows if row.album_id > after_album_id]
     deadline = None if deadline_seconds is None else time_fn() + deadline_seconds
 
     built: list[RetagDivergenceAlbum] = []
@@ -346,7 +395,13 @@ def scan_retag_divergence(
             break
         built.append(_build_album(row, read_tag=read_tag))
 
-    items_read = sum(album.item_count for album in built)
+    items_scanned = sum(album.item_count for album in built)
+    items_refused = sum(
+        1
+        for album in built
+        for item in album.items
+        if item.detail == REFUSED_OUTSIDE_LIBRARY_ROOT_DETAIL
+    )
     items_unreadable = sum(
         1
         for album in built
@@ -357,7 +412,8 @@ def scan_retag_divergence(
     has_divergence = any(_has_divergent_item(album.items) for album in albums)
     counts = RetagDivergenceCounts(
         albums_scanned=len(built),
-        items_read=items_read,
+        items_scanned=items_scanned,
+        items_refused=items_refused,
         items_unreadable=items_unreadable,
         albums_diverging=sum(
             1 for album in albums
@@ -378,16 +434,21 @@ def scan_retag_divergence(
         status = "incomplete"
     else:
         status = "clean"
+    if truncated:
+        next_after_album_id = built[-1].album_id if built else after_album_id
+    else:
+        next_after_album_id = None
     return RetagDivergenceReport(
         status=status,
         complete=not truncated,
         counts=counts,
         albums=albums,
+        next_after_album_id=next_after_album_id,
     )
 
 
 def _empty_counts() -> RetagDivergenceCounts:
-    return RetagDivergenceCounts(0, 0, 0, 0, 0, 0, 0)
+    return RetagDivergenceCounts(0, 0, 0, 0, 0, 0, 0, 0)
 
 
 def _unavailable_report(category: str) -> RetagDivergenceReport:
@@ -424,11 +485,13 @@ def _scan_with_mediated_beets(
     read_tag: Callable[[str], str],
     deadline_seconds: float | None,
     time_fn: Callable[[], float],
+    after_album_id: int | None,
 ) -> RetagDivergenceReport | _BeetsAuthorityUnavailable:
     try:
         return scan_retag_divergence(
             beets, read_tag=read_tag,
             deadline_seconds=deadline_seconds, time_fn=time_fn,
+            after_album_id=after_album_id,
         )
     except Exception as exc:
         category = beets_authority_availability_category(exc)
@@ -443,6 +506,7 @@ def scan_retag_divergence_from_factory(
     read_tag: Callable[[str], str] = read_mb_albumid_tag,
     deadline_seconds: float | None = None,
     time_fn: Callable[[], float] = time.monotonic,
+    after_album_id: int | None = None,
 ) -> RetagDivergenceReport:
     """Own Beets open/query/close; type only expected unavailability."""
     opened = _open_beets_authority(beets_factory)
@@ -452,6 +516,7 @@ def scan_retag_divergence_from_factory(
         result = _scan_with_mediated_beets(
             opened, read_tag=read_tag,
             deadline_seconds=deadline_seconds, time_fn=time_fn,
+            after_album_id=after_album_id,
         )
     if isinstance(result, RetagDivergenceReport):
         return result
@@ -464,6 +529,7 @@ def scan_retag_divergence_from_borrowed_factory(
     read_tag: Callable[[str], str] = read_mb_albumid_tag,
     deadline_seconds: float | None = None,
     time_fn: Callable[[], float] = time.monotonic,
+    after_album_id: int | None = None,
 ) -> RetagDivergenceReport:
     """Mediate a server-owned Beets handle without closing its lifecycle."""
     opened = _open_beets_authority(beets_factory)
@@ -472,6 +538,7 @@ def scan_retag_divergence_from_borrowed_factory(
     result = _scan_with_mediated_beets(
         opened, read_tag=read_tag,
         deadline_seconds=deadline_seconds, time_fn=time_fn,
+        after_album_id=after_album_id,
     )
     if isinstance(result, RetagDivergenceReport):
         return result

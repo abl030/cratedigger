@@ -29,6 +29,7 @@ class _AuditRetagDivergenceArgs(msgspec.Struct, frozen=True):
     beets_db: str | None = None
     beets_directory: str | None = None
     json: bool = False
+    after_album_id: int | None = None
 
 
 def _open_beets(path: str | None, library_root: str | None) -> BeetsDB:
@@ -86,7 +87,8 @@ def _render_retag_divergence_text(report: RetagDivergenceReport) -> None:
     print(
         "counts: "
         f"albums_scanned={counts.albums_scanned} "
-        f"items_read={counts.items_read} "
+        f"items_scanned={counts.items_scanned} "
+        f"items_refused={counts.items_refused} "
         f"items_unreadable={counts.items_unreadable} "
         f"albums_diverging={counts.albums_diverging} "
         f"albums_file_tag_present_db_absent="
@@ -97,6 +99,11 @@ def _render_retag_divergence_text(report: RetagDivergenceReport) -> None:
     print(f"complete: {'yes' if report.complete else 'no'}")
     if report.unavailable_detail:
         print(f"unavailable: {report.unavailable_detail}")
+    if report.next_after_album_id is not None:
+        print(
+            "truncated: resume with "
+            f"--after-album-id {report.next_after_album_id}"
+        )
     for album in report.albums:
         print(
             f"album {album.album_id} ({album.album_class}): "
@@ -118,20 +125,28 @@ def cmd_audit_retag_divergence(db: object, args: object) -> int:
     ``audit`` subcommand's dispatch dict is called with) is unused.
 
     Exit 1 iff ``status == "divergence_found"`` — a genuine identity
-    mismatch, the one thing this instrument exists to surface. Exit 5 iff
+    mismatch, the one thing this instrument exists to surface. Exit 4 iff
+    ``status == "incomplete"`` — the world blocked a complete answer
+    (unreadable/empty/refused-only findings, or a truncated deadline); this
+    is `.claude/rules/code-quality.md` § CLI ⇄ API Surface Symmetry's
+    `409`/`4` "wrong state" slot, not success — the same "cron reads a
+    silent 0 as clean" argument below applies here just as much as to
+    ``beets_unavailable`` (#1093 review round 4, finding 5; a prior
+    version of this function mapped ``incomplete`` to exit 0 with exactly
+    that flawed reasoning quoted against itself). Exit 5 iff
     ``status == "beets_unavailable"`` — the audit never actually ran, so
     exit 0 there would let a cron or `&& echo "cohort empty"` read "no
-    divergence" from a report that answered nothing; `SQLITE_BUSY`/
-    `SQLITE_LOCKED`/`SQLITE_CANTOPEN`, `PermissionError`, and
-    `FileNotFoundError` are exactly the transient/retryable class
-    `.claude/rules/code-quality.md` § CLI ⇄ API Surface Symmetry maps to
-    5/503 (#1093 review round 3, finding 1). ``clean`` and ``incomplete``
-    both exit 0 — an incomplete scan (unreadable/empty/refused-only
-    findings, or a truncated deadline) is not itself a finding, only a
-    genuine divergence is. NOTE: `cmd_audit_world` still exits 0 for its
-    own analogous beets-unavailable bucket — a pre-existing deviation from
-    the same documented convention, deliberately left alone here (see the
-    PR body / post-ship reflection) as an existing command's contract
+    divergence" from a report that answered nothing; the SQLite/filesystem
+    authority-unavailability class `lib/beets_db.py::
+    beets_authority_availability_category` recognizes (every code in
+    `_SQLITE_AUTHORITY_AVAILABILITY_CODES` — SQLITE_AUTH/BUSY/CANTOPEN/
+    IOERR/LOCKED/PERM — plus `PermissionError`/`FileNotFoundError`) is
+    exactly the transient/retryable class that table maps to 5/503 (#1093
+    review round 3, finding 1). Only ``clean`` exits 0 — the audit ran and
+    the cohort really is empty. NOTE: `cmd_audit_world` still exits 0 for
+    its own analogous beets-unavailable bucket — a pre-existing deviation
+    from the same documented convention, deliberately left alone here (see
+    the PR body / post-ship reflection) as an existing command's contract
     change outside this issue's scope.
 
     Exit 5 also covers an unexpected transport/decode/render defect — the
@@ -139,7 +154,10 @@ def cmd_audit_retag_divergence(db: object, args: object) -> int:
     `msgspec.convert`/serialization failure can't traceback out as an
     unmapped exit 1 (#1093 review round 2, finding 5; the previous shape
     left the argument decode and the render/json-encode steps outside the
-    try).
+    try). A `BrokenPipeError` from a downstream reader (e.g. `| head`)
+    closing early is caught SEPARATELY and never reaches that error path —
+    the error path's own `print` would fail identically on the same closed
+    pipe, doubling the fault (#1093 review round 4, finding 8).
     """
     del db
     try:
@@ -149,11 +167,17 @@ def cmd_audit_retag_divergence(db: object, args: object) -> int:
                 typed_args.beets_db,
                 typed_args.beets_directory,
             ),
+            after_album_id=typed_args.after_album_id,
         )
         if typed_args.json:
             print(json.dumps(msgspec.to_builtins(report), indent=2))
         else:
             _render_retag_divergence_text(report)
+    except BrokenPipeError:
+        # A downstream reader (e.g. `| head`) closed its end early. Not a
+        # program defect — never attempt the error-JSON print below, which
+        # would fail on the same closed pipe.
+        return 0
     except Exception as exc:  # noqa: BLE001 - transport boundary, not typed B
         print(json.dumps({
             "error": "retag_divergence_audit_failed",
@@ -162,6 +186,8 @@ def cmd_audit_retag_divergence(db: object, args: object) -> int:
         return 5
     if report.status == "divergence_found":
         return 1
+    if report.status == "incomplete":
+        return 4
     if report.status == "beets_unavailable":
         return 5
     return 0
@@ -176,6 +202,14 @@ def cmd_audit_world(db: WorldAuditPipelineDB, args: object) -> int:
     defect class as `cmd_audit_retag_divergence`'s finding-5 fix, in the
     same function family in the same file; the previous shape here left
     the argument decode and the render/json-encode steps outside the try).
+    A `BrokenPipeError` from a downstream reader (e.g. `| head`) closing
+    early is caught SEPARATELY and never reaches the error path below —
+    that path's own `print` would fail identically on the same closed
+    pipe, doubling the fault instead of exiting quietly (#1093 review
+    round 4, finding 8: moving the render inside the try for the fix above
+    made a plain uncaught `BrokenPipeError` — benign on its own — get
+    caught by the broad `except Exception`, which then tried to print the
+    error JSON and raised a SECOND `BrokenPipeError` that nothing caught).
     """
     try:
         typed_args = msgspec.convert(vars(args), type=_AuditWorldArgs)
@@ -190,6 +224,8 @@ def cmd_audit_world(db: WorldAuditPipelineDB, args: object) -> int:
             print(json.dumps(msgspec.to_builtins(report), indent=2))
         else:
             _render_text(report)
+    except BrokenPipeError:
+        return 0
     except Exception as exc:  # noqa: BLE001 - transport boundary, not typed B
         print(json.dumps({
             "error": "world_audit_failed",
@@ -220,6 +256,15 @@ def add_audit_subparser(
         ),
     )
     _add_beets_override_args(retag_divergence)
+    retag_divergence.add_argument(
+        "--after-album-id",
+        type=int,
+        default=None,
+        help=(
+            "Resume a previously truncated scan after this album id "
+            "(see next_after_album_id in a prior --json report)."
+        ),
+    )
 
 
 __all__ = [

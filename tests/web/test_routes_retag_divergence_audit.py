@@ -18,6 +18,9 @@ from tests.web._harness import _FakeDbWebServerCase
 
 class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
     def test_reports_an_incomplete_finding_for_an_unreadable_file(self) -> None:
+        """#1093 review round 4, finding 5 — 409, not 200: ``incomplete``
+        means the world blocked a complete answer, so a caller must never
+        read it as "no divergence" the way a plain 200 would suggest."""
         from web import server
 
         beets = FakeBeetsDB()
@@ -31,9 +34,7 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         with patch.object(server, "_beets_db", return_value=beets):
             status, payload = self._get("/api/audit/retag-divergence")
 
-        self.assertEqual(status, 200)
-        # An unreadable-only finding is "incomplete", never a genuine
-        # divergence (#1093 review finding 3).
+        self.assertEqual(status, 409)
         self.assertEqual(payload["status"], "incomplete")
         self.assertTrue(payload["complete"])
         self.assertEqual(payload["counts"]["albums_scanned"], 1)
@@ -127,12 +128,14 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         self.assertEqual(payload["status"], "beets_unavailable")
 
     def test_route_bounds_the_scan_with_a_positive_deadline(self) -> None:
-        """#1093 review finding 2 — the route must never launch an
-        unbounded scan: a measured full census took ~196s against the
+        """#1093 review round 2, finding 2 — the route must never launch
+        an unbounded scan: a measured full census took ~196s against the
         deployed vhost's inherited 60s nginx default. Seam test: the route
         wires SOME positive deadline into the shared service call; the
         deadline's own truncation behaviour is proven at the service level
-        (``tests/test_retag_divergence_audit.py::TestScanDeadline``)."""
+        (``tests/test_retag_divergence_audit.py::TestScanDeadline``), and
+        the deadline VALUE is pinned against the nginx default separately
+        (``TestApiScanDeadlineConstant`` below)."""
         from lib.retag_divergence_audit import (
             scan_retag_divergence_from_borrowed_factory as real_scan,
         )
@@ -162,6 +165,72 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         self.assertIsInstance(deadline, float)
         assert isinstance(deadline, float)
         self.assertGreater(deadline, 0.0)
+
+    def test_after_album_id_query_param_is_forwarded(self) -> None:
+        """#1093 review round 4, finding 4."""
+        from web import server
+
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1,
+                mb_albumid="7aabf975-9a06-4b2e-854c-2c700380ebd5",
+                item_paths=(),
+            ),
+            BeetsAlbumIdentityRow(
+                album_id=2,
+                mb_albumid="7aabf975-9a06-4b2e-854c-2c700380ebd5",
+                item_paths=(),
+            ),
+        ])
+        with patch.object(server, "_beets_db", return_value=beets):
+            status, payload = self._get(
+                "/api/audit/retag-divergence?after_album_id=1",
+            )
+
+        self.assertEqual(status, 409)  # album 2 alone: a real zero-item row
+        self.assertEqual(payload["counts"]["albums_scanned"], 1)
+        self.assertEqual(payload["albums"][0]["album_id"], 2)
+
+    def test_malformed_after_album_id_is_a_400(self) -> None:
+        from web import server
+
+        beets = FakeBeetsDB()
+        with patch.object(server, "_beets_db", return_value=beets):
+            status, payload = self._get(
+                "/api/audit/retag-divergence?after_album_id=not-an-int",
+            )
+
+        self.assertEqual(status, 400)
+        self.assertIn("after_album_id", payload.get("error", ""))
+
+
+class TestApiScanDeadlineConstant(unittest.TestCase):
+    """#1093 review round 4, finding 3 — a check that cannot fail: the only
+    prior test asserted ``deadline > 0``, so
+    ``API_SCAN_DEADLINE_SECONDS = 36000.0`` (10 hours) would have stayed
+    green. The deadline must leave REAL margin under nginx's default
+    ``proxy_read_timeout``, not merely be positive — and margin must cover
+    the UNBOUNDED overhead (the DB fetch before the loop, the JSON encode
+    after it) the deadline itself never bounds."""
+
+    def test_deadline_leaves_real_margin_under_the_reverse_proxy_default(
+        self,
+    ) -> None:
+        from web.routes.retag_divergence_audit import (
+            API_SCAN_DEADLINE_SECONDS,
+            NGINX_DEFAULT_PROXY_READ_TIMEOUT_SECONDS,
+        )
+
+        self.assertLess(
+            API_SCAN_DEADLINE_SECONDS, NGINX_DEFAULT_PROXY_READ_TIMEOUT_SECONDS,
+        )
+        # A meaningful margin, not merely "less than" — measured live
+        # unbounded overhead (DB fetch + JSON encode) was several seconds.
+        self.assertLessEqual(
+            API_SCAN_DEADLINE_SECONDS,
+            NGINX_DEFAULT_PROXY_READ_TIMEOUT_SECONDS - 15.0,
+        )
 
 
 if __name__ == "__main__":

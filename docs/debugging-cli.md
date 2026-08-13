@@ -245,9 +245,12 @@ inside socket authorization, never credentials.
 
 - `pipeline-cli add` — Add a MusicBrainz or Discogs request.
 - `pipeline-cli audit retag-divergence` — Read-only census of albums whose
-  Beets DB ``mb_albumid`` moved but whose installed file tags did not (the
-  retag ``-W`` residual, #1093 item 1). CLI exit 0 iff `status="clean"`;
-  `divergence_found` and `beets_unavailable` both exit 1.
+  Beets DB `mb_albumid` moved but whose installed file tags did not (the
+  retag `-W` residual, #1093 item 1). Accepts `--after-album-id` to resume
+  a truncated scan. Exit 0 iff `status="clean"`; exit 1 iff
+  `"divergence_found"`; exit 4 iff `"incomplete"`; exit 5 iff
+  `"beets_unavailable"`. Full mapping and rationale: § "Retag divergence
+  audit scope" below.
 - `pipeline-cli audit world` — Read-only PipelineDB, Beets, evidence, and disk coherence audit.
 - `pipeline-cli ban-source` — Remove a server-resolved bad rip and requeue its request when appropriate.
 - `pipeline-cli beets-distance` — Measure a rejected download against an exact
@@ -455,15 +458,20 @@ the cohort-wide instrument for that residual (issue #1093 item 1): it reads
 every Beets album's own DB `mb_albumid` beside each item's installed file
 tag and reports every album where they disagree.
 
-**Path containment.** `lib/beets_db.py::BeetsDB.list_album_mb_identities`
-verifies every stored item path resolves inside the configured
-`library_root` (`os.path.commonpath`, covering both a relative and an
-already-absolute stored path — unlike `resolve_current_releases`, which
-only checks the relative case). A path that escapes containment (or cannot
-be resolved at all, including with no configured root) is never opened —
-it is reported `unreadable` with a fixed
-`"refused: stored path resolves outside the configured library root"`
-detail, distinguishable from a genuine read/parse failure's exception text.
+**Path containment is LEXICAL, not symlink-resolving.**
+`lib/beets_db.py::BeetsDB.list_album_mb_identities` verifies every stored
+item path stays inside the configured `library_root` by path-STRING
+comparison (`os.path.abspath` + `os.path.commonpath`), covering both a
+relative and an already-absolute stored path — unlike
+`resolve_current_releases`, which only checks the relative case. This is a
+deliberate match to that pre-existing mechanism, not a stricter
+`os.path.realpath` check: a symlink INSIDE the library root that points
+outside it is CONTAINED by this test and gets opened; a library root that
+is itself a symlink refuses an absolute path naming the real target. A path
+that fails this lexical check (or cannot be resolved at all, including with
+no configured root) is never opened — it is reported `unreadable` with a
+fixed detail distinguishable from a genuine read/parse failure's exception
+text (`lib/retag_divergence_audit.py::REFUSED_OUTSIDE_LIBRARY_ROOT_DETAIL`).
 Live evidence for why this matters: one real album's 51 items were stored
 as absolute paths under the private `processing/albums/` tree, entirely
 outside the library root — the CLI (operator identity) and the API
@@ -482,8 +490,11 @@ counted as agreeing). Per-album `album_class` is a DISPLAY aggregate over
 its items by fixed precedence — `unreadable` > `diverges` >
 `file_tag_present_db_absent` > `agrees` — plus `empty` for a real zero-item
 album row. Only non-agreeing albums are listed; full counts
-(`albums_scanned`, `items_read`, `items_unreadable`, and one count per
-non-agreeing class) are always reported.
+(`albums_scanned`, `items_scanned`, `items_refused`, `items_unreadable`,
+and one count per non-agreeing class) are always reported. `items_scanned`
+counts every item path considered — read AND refused; `items_refused` is
+the subset never opened at all; `items_unreadable` is the superset of
+`items_refused` that also includes genuine read/parse failures.
 
 **`status` is independent of the per-album display class.** An album whose
 display class reads `unreadable` (because unreadable outranks everything)
@@ -491,43 +502,68 @@ can still contain a genuine `diverges` item, and the report's headline
 answer must not miss that — so `albums_diverging` and
 `albums_file_tag_present_db_absent` are independent presence counts ("this
 album contains at least one such item"), never gated by which class won
-that album's display precedence. `status` is `clean` (nothing listed),
+that album's display precedence. `status` is `clean` (nothing listed — the
+scan actually answered the question and the cohort is empty),
 `divergence_found` (at least one album contains a genuine `diverges` or
 `file_tag_present_db_absent` item — decided independent of precedence and
 of any unreadable/empty finding elsewhere), `incomplete` (no genuine
 divergence anywhere, but the census could not fully vouch for the library —
 an unreadable/refused/empty-only finding, or the scan hit its time
-deadline before finishing), or `beets_unavailable`.
+deadline before finishing — this is NOT "clean"), or `beets_unavailable`.
 
-**The API route bounds its scan to `API_SCAN_DEADLINE_SECONDS`** (40s,
-`web/routes/retag_divergence_audit.py`) **— the CLI is always the full,
-unbounded census.** A measured unbounded full census over the live
-~93k-item library took ~196s; the deployed vhost's reverse proxy has no
-configured `proxy_read_timeout`, so it falls back to nginx's 60s default
-and would 504 while the backend kept scanning. A bounded scan that runs out
-of time reports `complete=false` over exactly the albums it reached — the
-report SHAPE never changes, and `albums_scanned`/`items_read`/etc. describe
-only that reached prefix. Run the CLI for a full, unbounded census.
+**The API route bounds ONLY its per-album read LOOP to
+`API_SCAN_DEADLINE_SECONDS`** (40s, `web/routes/retag_divergence_audit.py`)
+**— not the whole request, and the CLI is always the full, unbounded
+census.** `beets.list_album_mb_identities()` (one DB fetch before the loop
+starts; ~3.2s measured live) and the JSON encode of the result both run
+UNBOUNDED, outside this timer — the real measured route time for a 40.0s
+deadline was ~41.9-43.2s. A fully UNBOUNDED census over the live
+~93k-item library took ~196s, which is why the loop is bounded at all: the
+deployed vhost's reverse proxy has no configured `proxy_read_timeout`, so
+it falls back to nginx's 60s default and would 504 while the backend kept
+scanning past it. A bounded scan that runs out of loop time reports
+`complete=false` over exactly the albums it reached — the report SHAPE
+never changes, and `albums_scanned`/`items_scanned`/etc. describe only
+that reached prefix. `tests/web/test_routes_retag_divergence_audit.py::
+TestApiScanDeadlineConstant` pins that the deadline leaves REAL margin
+under nginx's default, not merely `> 0`.
+
+**`?after_album_id=N` (CLI: `--after-album-id`) resumes a truncated scan**
+— pass the prior response's `next_after_album_id` to continue the census
+past where it stopped, chaining calls until `next_after_album_id` comes
+back `null`/`None`. This lets a bounded API caller assemble a genuine full
+census, and eventually a genuine `clean` verdict for the whole library,
+across multiple requests — a single bounded call can otherwise never
+prove the library-wide cohort is empty, only that its own reached prefix
+was.
 
 Machine-readable output has `status` (`clean`, `divergence_found`,
-`incomplete`, or `beets_unavailable`), `complete`, `counts`, and `albums`
-(only the non-agreeing ones, each with every item's classification).
-**Exit/status-code mapping:** `clean` and `incomplete` are `0`/`200` — an
-incomplete scan (unreadable/empty/refused-only findings, or a truncated
-deadline) is not itself a finding, only `divergence_found` is, so it alone
-maps to `1`/`200` — the one thing this instrument exists to surface.
-`beets_unavailable` maps to `5`/`503`: the audit never actually ran, so a
-`0`/`200` there would let a cron or `&& echo "cohort empty"` read "no
-divergence" from a report that answered nothing — `database is locked` /
-`PermissionError` / `FileNotFoundError` are exactly the transient/retryable
-class `.claude/rules/code-quality.md` § CLI ⇄ API Surface Symmetry maps to
-`5`/`503`. **This deliberately diverges from `pipeline-cli audit world` /
+`incomplete`, or `beets_unavailable`), `complete`, `counts`, `albums`
+(only the non-agreeing ones, each with every item's classification), and
+`next_after_album_id` (populated only when truncated). **Exit/status-code
+mapping** follows `.claude/rules/code-quality.md` § CLI ⇄ API Surface
+Symmetry's convention table: `clean` → `0`/`200` (the audit ran and the
+cohort really is empty); `divergence_found` → `1`/`200` (a genuine finding,
+the one thing this instrument exists to surface); `incomplete` → `4`/`409`
+("wrong state" — the world blocked a complete answer, so a caller must
+never read this as "no divergence" the way a bare `0`/`200` would invite);
+`beets_unavailable` → `5`/`503` (transient/retryable — the audit never
+actually ran at all, so `0`/`200` there would let a cron or
+`&& echo "cohort empty"` read "no divergence" from a report that answered
+nothing). Only `clean` means "I answered the question and the cohort is
+empty" — every other status means either a real finding or an incomplete
+answer, and none of the three non-clean statuses may be silently read as
+success. **This deliberately diverges from `pipeline-cli audit world` /
 `GET /api/audit/world`, which exit `0`/`200` for their own analogous
-beets-unavailable bucket** — that sibling itself deviates from the
+beets-unavailable bucket** — that sibling itself deviates from the same
 documented convention; changing an already-shipped command's exit-code
-contract is out of this issue's scope and is left as a follow-up. An
-unexpected schema, decoder, invariant, programming, close, or serialization
-defect remains a transport failure: CLI exit 5 or HTTP 503.
+contract is out of this issue's scope and is left as a follow-up (see
+post-ship reflection). An unexpected schema, decoder, invariant,
+programming, close, or serialization defect remains a transport failure:
+CLI exit 5 or HTTP 503. A downstream reader closing a CLI pipe early (e.g.
+`pipeline-cli audit retag-divergence | head`) exits 0 without attempting a
+second doomed write through the error path — `cmd_audit_world` shares the
+identical `BrokenPipeError` handling for the same reason.
 
 ## Live-corpus render differential
 

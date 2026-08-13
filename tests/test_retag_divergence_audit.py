@@ -33,8 +33,10 @@ from lib.beets_db import BeetsAlbumIdentityRow, BeetsDB
 from lib.beets_retag import RETAG_RETAGGED, retag_merged_album
 from lib.release_identity import ReleaseIdentity
 from lib.retag_divergence_audit import (
+    REFUSED_OUTSIDE_LIBRARY_ROOT_DETAIL,
     RetagDivergenceItem,
     RetagDivergenceItemClass,
+    RetagDivergenceReport,
     TagReadOk,
     TagReadUnreadable,
     album_class_from_items,
@@ -200,7 +202,7 @@ class TestScanRetagDivergence(unittest.TestCase):
         self.assertTrue(report.complete)
         self.assertEqual(report.albums, ())
         self.assertEqual(report.counts.albums_scanned, 1)
-        self.assertEqual(report.counts.items_read, 1)
+        self.assertEqual(report.counts.items_scanned, 1)
         self.assertEqual(report.counts.items_unreadable, 0)
 
     def test_diverging_album_is_listed_and_counted(self) -> None:
@@ -226,7 +228,7 @@ class TestScanRetagDivergence(unittest.TestCase):
         self.assertEqual(album.item_count, 2)
         self.assertEqual(report.counts.albums_diverging, 1)
         self.assertEqual(report.counts.albums_scanned, 1)
-        self.assertEqual(report.counts.items_read, 2)
+        self.assertEqual(report.counts.items_scanned, 2)
 
     def test_discogs_neutralization_shape_gets_its_own_bucket(self) -> None:
         beets = FakeBeetsDB()
@@ -413,7 +415,7 @@ class TestRefusedPathComposition(unittest.TestCase):
         item = album.items[0]
         self.assertEqual(item.item_class, "unreadable")
         self.assertIsNone(item.file_mb_albumid)
-        self.assertIn("outside the configured library root", item.detail or "")
+        self.assertEqual(item.detail, REFUSED_OUTSIDE_LIBRARY_ROOT_DETAIL)
         self.assertEqual(report.status, "incomplete")
 
 
@@ -493,6 +495,176 @@ class TestScanDeadline(unittest.TestCase):
 
         self.assertFalse(report.complete)
         self.assertEqual(report.status, "divergence_found")
+
+    def test_unbounded_scan_never_sets_next_after_album_id(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=("/a/01.mp3",),
+            ),
+        ])
+
+        report = scan_retag_divergence(
+            beets, read_tag=_read_tag_from_map({"/a/01.mp3": SURVIVOR}),
+        )
+
+        self.assertIsNone(report.next_after_album_id)
+
+    def test_truncated_scan_sets_next_after_album_id_to_last_reached(
+        self,
+    ) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=("/a/01.mp3",),
+            ),
+            BeetsAlbumIdentityRow(
+                album_id=2, mb_albumid=SURVIVOR, item_paths=("/b/01.mp3",),
+            ),
+        ])
+        calls = {"n": 0}
+
+        def time_fn() -> float:
+            calls["n"] += 1
+            return 0.0 if calls["n"] <= 2 else 100.0
+
+        report = scan_retag_divergence(
+            beets,
+            read_tag=_read_tag_from_map({"/a/01.mp3": SURVIVOR}),
+            deadline_seconds=1.0,
+            time_fn=time_fn,
+        )
+
+        self.assertEqual(report.next_after_album_id, 1)
+
+    def test_deadline_expiring_before_any_album_preserves_the_caller_cursor(
+        self,
+    ) -> None:
+        """The deadline is already past on the very first per-album check
+        — nothing is processed, so the cursor must not regress to ``None``
+        (which would incorrectly signal "nothing left to resume") or
+        advance. The first ``time_fn`` call establishes the deadline; the
+        second is the loop's first per-album check, made to read as
+        already-expired."""
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=5, mb_albumid=SURVIVOR, item_paths=("/a/01.mp3",),
+            ),
+        ])
+        calls = {"n": 0}
+
+        def time_fn() -> float:
+            calls["n"] += 1
+            return 0.0 if calls["n"] == 1 else 100.0
+
+        report = scan_retag_divergence(
+            beets,
+            read_tag=_read_tag_from_map({"/a/01.mp3": SURVIVOR}),
+            deadline_seconds=1.0,
+            time_fn=time_fn,
+            after_album_id=2,
+        )
+
+        self.assertFalse(report.complete)
+        self.assertEqual(report.counts.albums_scanned, 0)
+        self.assertEqual(report.next_after_album_id, 2)
+
+
+class TestCursorResume(unittest.TestCase):
+    """#1093 review round 4, finding 4 — a bounded caller can chain calls
+    to complete a genuine full census and eventually reach ``clean``."""
+
+    def test_after_album_id_filters_to_strictly_greater_ids(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=("/a/01.mp3",),
+            ),
+            BeetsAlbumIdentityRow(
+                album_id=2, mb_albumid=SURVIVOR, item_paths=("/b/01.mp3",),
+            ),
+            BeetsAlbumIdentityRow(
+                album_id=3, mb_albumid=SURVIVOR, item_paths=("/c/01.mp3",),
+            ),
+        ])
+
+        report = scan_retag_divergence(
+            beets,
+            read_tag=_read_tag_from_map({
+                "/a/01.mp3": SURVIVOR, "/b/01.mp3": SURVIVOR,
+                "/c/01.mp3": SURVIVOR,
+            }),
+            after_album_id=1,
+        )
+
+        self.assertEqual(report.counts.albums_scanned, 2)
+        self.assertTrue(report.complete)
+        self.assertIsNone(report.next_after_album_id)
+
+    def test_chaining_truncated_calls_reaches_a_genuine_full_census(
+        self,
+    ) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=("/a/01.mp3",),
+            ),
+            BeetsAlbumIdentityRow(
+                album_id=2, mb_albumid=SURVIVOR, item_paths=("/b/01.mp3",),
+            ),
+            BeetsAlbumIdentityRow(
+                album_id=3, mb_albumid=SURVIVOR, item_paths=("/c/01.mp3",),
+            ),
+        ])
+        read_tag = _read_tag_from_map({
+            "/a/01.mp3": SURVIVOR, "/b/01.mp3": SURVIVOR,
+            "/c/01.mp3": SURVIVOR,
+        })
+
+        def _one_album_budget_clock() -> Callable[[], float]:
+            """A FRESH clock per call (no state shared across calls in the
+            chain, so alignment can never drift): the first call
+            establishes the deadline, the second (first per-album check)
+            reads as still within budget, the third (second per-album
+            check, only reached if a second row remains) reads as
+            expired — exactly one album's worth of budget."""
+            calls = {"n": 0}
+
+            def time_fn() -> float:
+                calls["n"] += 1
+                return 0.0 if calls["n"] <= 2 else 100.0
+
+            return time_fn
+
+        after_album_id = None
+        seen_album_ids: list[int] = []
+        every_report_clean_or_incomplete = True
+        report: RetagDivergenceReport | None = None
+        for _ in range(5):  # generous bound — 3 albums, 1 per call
+            report = scan_retag_divergence(
+                beets, read_tag=read_tag,
+                deadline_seconds=1.0, time_fn=_one_album_budget_clock(),
+                after_album_id=after_album_id,
+            )
+            if report.status not in ("clean", "incomplete"):
+                every_report_clean_or_incomplete = False
+            seen_album_ids.extend(
+                a.album_id for a in report.albums
+            )  # none expected — every item agrees
+            if report.next_after_album_id is None:
+                break
+            after_album_id = report.next_after_album_id
+
+        assert report is not None, "the chain loop must run at least once"
+        self.assertTrue(every_report_clean_or_incomplete)
+        self.assertEqual(seen_album_ids, [])
+        # The final call in the chain reached the end with nothing left to
+        # resume AND found nothing wrong — a genuine "clean" census of the
+        # whole library, assembled from bounded calls.
+        self.assertEqual(report.status, "clean")
+        self.assertTrue(report.complete)
+        self.assertIsNone(report.next_after_album_id)
 
 
 class TestExactWResidualRegressionPin(unittest.TestCase):
@@ -700,7 +872,7 @@ class TestRealRetagDivergenceScan(unittest.TestCase):
                 report = scan_retag_divergence(beets)
 
         self.assertEqual(report.counts.albums_scanned, 4)
-        self.assertEqual(report.counts.items_read, 4)
+        self.assertEqual(report.counts.items_scanned, 4)
         self.assertEqual(report.counts.items_unreadable, 1)
         by_id = {album.album_id: album for album in report.albums}
         self.assertNotIn(1, by_id, "an agreeing album must never be listed")

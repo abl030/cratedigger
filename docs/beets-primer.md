@@ -152,12 +152,18 @@ load-bearing:
   `pipeline-cli audit retag-divergence` / `GET /api/audit/retag-divergence`
   (`lib/retag_divergence_audit.py`, issue #1093 item 1) is the read-only
   census: it reads every Beets album's own `mb_albumid` beside each item's
-  installed file tag and reports every album where they disagree, with a
-  distinct bucket for this `-W` shape versus the unrelated #570 Discogs
-  neutralization shape (DB absent, file still tagged). It never writes to
-  Beets, PostgreSQL, or the filesystem — a reconciler is a separate,
-  larger option nobody has built. `docs/debugging-cli.md` § "Retag
-  divergence audit scope" is the full report-shape reference.
+  installed file tag, with a distinct bucket for this `-W` shape versus the
+  unrelated #570 Discogs neutralization shape (DB absent, file still
+  tagged). **`pipeline-cli` reports every album where they disagree in one
+  unbounded call; `GET /api/audit/retag-divergence` bounds each call to a
+  time budget well under the deployed vhost's reverse-proxy read timeout
+  and can therefore report only a PREFIX of the library per request — pass
+  `?after_album_id=N` (the prior response's `next_after_album_id`) to
+  resume and, chaining calls, complete the same full census the CLI does
+  in one call.** It never writes to Beets, PostgreSQL, or the filesystem —
+  a reconciler is a separate, larger option nobody has built.
+  `docs/debugging-cli.md` § "Retag divergence audit scope" is the full
+  report-shape, status/exit-code, and containment-mechanism reference.
 - **One album.** The regex is anchored, so it can only name albums filed under
   exactly the merged-away release id.
 - **Only on `mbid_not_found`, only under an exact import claim**, and only
