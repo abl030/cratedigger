@@ -23,10 +23,15 @@ import unittest
 from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
+from unittest.mock import patch
 
+import yaml
+from beets import library as beets_library
 from mediafile import MediaFile
 
 from lib.beets_db import BeetsAlbumIdentityRow, BeetsDB
+from lib.beets_retag import RETAG_RETAGGED, retag_merged_album
+from lib.release_identity import ReleaseIdentity
 from lib.retag_divergence_audit import (
     RetagDivergenceItem,
     RetagDivergenceItemClass,
@@ -258,6 +263,10 @@ class TestScanRetagDivergence(unittest.TestCase):
         self.assertEqual(report.albums[0].album_class, "unreadable")
         self.assertEqual(report.counts.items_unreadable, 1)
         self.assertEqual(report.counts.albums_unreadable, 1)
+        # #1093 review finding 3 — an unreadable-only finding must never
+        # read as a genuine divergence.
+        self.assertEqual(report.status, "incomplete")
+        self.assertTrue(report.complete)
 
     def test_zero_item_album_is_empty_not_agrees(self) -> None:
         beets = FakeBeetsDB()
@@ -272,6 +281,7 @@ class TestScanRetagDivergence(unittest.TestCase):
         self.assertEqual(len(report.albums), 1)
         self.assertEqual(report.albums[0].album_class, "empty")
         self.assertEqual(report.counts.albums_empty, 1)
+        self.assertEqual(report.status, "incomplete")
 
     def test_albums_are_reported_sorted_by_id(self) -> None:
         beets = FakeBeetsDB()
@@ -292,6 +302,197 @@ class TestScanRetagDivergence(unittest.TestCase):
         )
 
         self.assertEqual([album.album_id for album in report.albums], [2, 9])
+
+
+class TestStatusIsIndependentOfDisplayPrecedence(unittest.TestCase):
+    """#1093 review findings 3 and 4.
+
+    ``status`` answers "is there a genuine identity mismatch"; the
+    per-album DISPLAY class (``album_class``) answers "what's the worst
+    single fact about this album". They must not be confused: an
+    unreadable-only report must never read as ``divergence_found`` (3), and
+    an album whose display class is ``unreadable`` (because unreadable
+    outranks everything) must still count toward ``albums_diverging`` when
+    it also contains a genuinely diverging item (4).
+    """
+
+    def test_unreadable_and_empty_only_report_is_incomplete_not_divergence(
+        self,
+    ) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=("/a/01.mp3",),
+            ),
+            BeetsAlbumIdentityRow(
+                album_id=2, mb_albumid=SURVIVOR, item_paths=(),
+            ),
+        ])
+
+        report = scan_retag_divergence(
+            beets, read_tag=_read_tag_from_map({"/a/01.mp3": OSError("boom")}),
+        )
+
+        self.assertEqual(report.status, "incomplete")
+        self.assertEqual(report.counts.albums_diverging, 0)
+        self.assertEqual(report.counts.albums_file_tag_present_db_absent, 0)
+
+    def test_unreadable_item_never_masks_a_divergence_elsewhere(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=("/a/01.mp3",),
+            ),
+            BeetsAlbumIdentityRow(
+                album_id=2, mb_albumid=SURVIVOR, item_paths=("/b/01.mp3",),
+            ),
+        ])
+
+        report = scan_retag_divergence(
+            beets, read_tag=_read_tag_from_map({
+                "/a/01.mp3": OSError("boom"), "/b/01.mp3": MERGED,
+            }),
+        )
+
+        self.assertEqual(report.status, "divergence_found")
+        self.assertEqual(report.counts.albums_diverging, 1)
+
+    def test_albums_diverging_counts_independent_of_display_precedence(
+        self,
+    ) -> None:
+        """The exact finding-4 shape: one album, one unreadable item (which
+        wins display precedence) AND one genuinely diverging item. The
+        album's display class reads ``unreadable``, but it must still be
+        counted in ``albums_diverging`` — never silently dropped to 0."""
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR,
+                item_paths=("/a/01.mp3", "/a/02.mp3"),
+            ),
+        ])
+
+        report = scan_retag_divergence(
+            beets, read_tag=_read_tag_from_map({
+                "/a/01.mp3": OSError("boom"), "/a/02.mp3": MERGED,
+            }),
+        )
+
+        self.assertEqual(len(report.albums), 1)
+        # Display class: unreadable outranks diverges.
+        self.assertEqual(report.albums[0].album_class, "unreadable")
+        # But the independent presence count still sees the divergence.
+        self.assertEqual(report.counts.albums_diverging, 1)
+        self.assertEqual(report.counts.albums_unreadable, 1)
+        self.assertEqual(report.status, "divergence_found")
+
+
+class TestRefusedPathComposition(unittest.TestCase):
+    """#1093 review finding 7 — a refused (out-of-root) path is reported
+    unreadable without ever calling ``read_tag``."""
+
+    def test_refused_path_never_reaches_read_tag(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=(),
+                refused_paths=("/outside/01.mp3",),
+            ),
+        ])
+
+        def read_tag(path: str) -> str:
+            raise AssertionError(
+                f"read_tag must never be called for a refused path: {path}"
+            )
+
+        report = scan_retag_divergence(beets, read_tag=read_tag)
+
+        self.assertEqual(len(report.albums), 1)
+        album = report.albums[0]
+        self.assertEqual(album.item_count, 1)
+        item = album.items[0]
+        self.assertEqual(item.item_class, "unreadable")
+        self.assertIsNone(item.file_mb_albumid)
+        self.assertIn("outside the configured library root", item.detail or "")
+        self.assertEqual(report.status, "incomplete")
+
+
+class TestScanDeadline(unittest.TestCase):
+    """#1093 review finding 2 — a bounded scan reports ``complete=False``
+    over the albums it actually reached, never a false full census."""
+
+    def test_deadline_truncates_and_marks_incomplete(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=("/a/01.mp3",),
+            ),
+            BeetsAlbumIdentityRow(
+                album_id=2, mb_albumid=SURVIVOR, item_paths=("/b/01.mp3",),
+            ),
+        ])
+        # A clock that reports "past deadline" starting on its SECOND call
+        # — the first call establishes the deadline, so exactly one album
+        # is processed before truncation.
+        calls = {"n": 0}
+
+        def time_fn() -> float:
+            calls["n"] += 1
+            return 0.0 if calls["n"] <= 2 else 100.0
+
+        report = scan_retag_divergence(
+            beets,
+            read_tag=_read_tag_from_map({"/a/01.mp3": SURVIVOR}),
+            deadline_seconds=1.0,
+            time_fn=time_fn,
+        )
+
+        self.assertFalse(report.complete)
+        self.assertEqual(report.counts.albums_scanned, 1)
+        self.assertEqual(report.status, "incomplete")
+
+    def test_no_deadline_never_truncates(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=("/a/01.mp3",),
+            ),
+        ])
+
+        report = scan_retag_divergence(
+            beets, read_tag=_read_tag_from_map({"/a/01.mp3": SURVIVOR}),
+        )
+
+        self.assertTrue(report.complete)
+        self.assertEqual(report.counts.albums_scanned, 1)
+
+    def test_a_divergence_found_before_the_deadline_still_reports(
+        self,
+    ) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=("/a/01.mp3",),
+            ),
+            BeetsAlbumIdentityRow(
+                album_id=2, mb_albumid=SURVIVOR, item_paths=("/b/01.mp3",),
+            ),
+        ])
+        calls = {"n": 0}
+
+        def time_fn() -> float:
+            calls["n"] += 1
+            return 0.0 if calls["n"] <= 2 else 100.0
+
+        report = scan_retag_divergence(
+            beets,
+            read_tag=_read_tag_from_map({"/a/01.mp3": MERGED}),
+            deadline_seconds=1.0,
+            time_fn=time_fn,
+        )
+
+        self.assertFalse(report.complete)
+        self.assertEqual(report.status, "divergence_found")
 
 
 class TestExactWResidualRegressionPin(unittest.TestCase):
@@ -508,6 +709,131 @@ class TestRealRetagDivergenceScan(unittest.TestCase):
         self.assertEqual(by_id[3].album_class, "file_tag_present_db_absent")
         self.assertEqual(by_id[4].album_class, "unreadable")
         self.assertIsNotNone(by_id[4].items[0].detail)
+
+
+def _seed_composed_retag_pin_world(base: Path) -> tuple[Path, Path]:
+    """A minimal real Beets library for the finding-8 composed pin
+    (#1093 review): the REAL retag primitive writing to the SAME real
+    library the REAL census then reads.
+
+    Deliberately self-contained rather than reusing
+    ``tests/test_beets_retag.py``'s seeding machinery — that file is owned
+    by the concurrent items-2-5 PR and under active rewrite; only its
+    stable, small ``_make_real_mp3`` leaf and its MERGED/SURVIVOR constants
+    are imported (per review guidance to keep any such coupling additive
+    and minimal). Two real, taggable tracks, both tagged MERGED on disk and
+    seeded into the DB at MERGED — a real ``-a -M -W -y`` retag then moves
+    the DB to SURVIVOR while ``-W`` leaves the file tags exactly as written.
+    """
+    root = base / "library"
+    root.mkdir()
+    config_dir = base / "beets-config"
+    config_dir.mkdir()
+
+    album_dir = root / "Composed Pin Artist" / "2005 - Composed Pin Album"
+    album_dir.mkdir(parents=True)
+    track_paths: list[Path] = []
+    for ordinal in (1, 2):
+        track_path = album_dir / f"{ordinal:02d} Track {ordinal}.mp3"
+        _make_real_mp3(track_path)
+        media = MediaFile(track_path)
+        media.mb_albumid = MERGED
+        media.save()
+        track_paths.append(track_path)
+
+    library_db = base / "library.db"
+    (config_dir / "config.yaml").write_text(
+        yaml.safe_dump({
+            "directory": str(root),
+            "library": str(library_db),
+            "plugins": "",
+            "import": {"move": True, "copy": False, "write": True},
+            "paths": {
+                "default": "$albumartist/$year - $album/$track $title",
+            },
+        }, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    items = [
+        beets_library.Item(
+            path=str(track_path),
+            title=f"Track {ordinal}",
+            artist="Composed Pin Artist",
+            album="Composed Pin Album",
+            albumartist="Composed Pin Artist",
+            track=ordinal,
+            disc=1,
+            year=2005,
+            mb_albumid=MERGED,
+            mb_trackid=f"{ordinal:08x}-2222-4222-8222-222222222222",
+        )
+        for ordinal, track_path in enumerate(track_paths, start=1)
+    ]
+    lib = beets_library.Library(str(library_db), str(root))
+    lib.add_album(items)
+    lib._close()
+
+    runtime_config = base / "config.ini"
+    beets_python = os.environ.get("CRATEDIGGER_BEETS_PYTHON", "")
+    if not beets_python:
+        raise AssertionError(
+            "CRATEDIGGER_BEETS_PYTHON is unset — run under nix-shell, which "
+            "supplies the admitted Beets interpreter"
+        )
+    runtime_config.write_text(
+        "[Beets]\n"
+        f"config_dir = {config_dir}\n"
+        f"python = {beets_python}\n",
+        encoding="utf-8",
+    )
+    return root, library_db
+
+
+class TestRealRetagThenRealCensus(unittest.TestCase):
+    """#1093 review finding 8 — compose the REAL retag primitive with the
+    REAL census over one real Beets library, not a hand-assembled world.
+
+    ``lib/beets_retag.py::retag_merged_album`` already exists precisely for
+    following a MusicBrainz merge; this proves its documented residual
+    (module docstring: "``-W`` left file tags on disk still naming
+    <merged-away id> until a successful import writes them") is exactly
+    what this census reports.
+    """
+
+    def test_a_real_retag_produces_a_reported_divergence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            root, library_db = _seed_composed_retag_pin_world(base)
+
+            old_identity = ReleaseIdentity(source="musicbrainz", release_id=MERGED)
+            new_identity = ReleaseIdentity(
+                source="musicbrainz", release_id=SURVIVOR,
+            )
+            with patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": str(base / "config.ini")},
+                clear=False,
+            ), BeetsDB(str(library_db), library_root=str(root)) as beets:
+                retag_result = retag_merged_album(
+                    beets, old_identity=old_identity, new_identity=new_identity,
+                )
+                self.assertEqual(
+                    retag_result.outcome, RETAG_RETAGGED,
+                    f"real retag did not land: {retag_result!r}",
+                )
+
+                report = scan_retag_divergence(beets)
+
+        self.assertEqual(report.status, "divergence_found")
+        self.assertEqual(len(report.albums), 1)
+        album = report.albums[0]
+        self.assertEqual(album.db_mb_albumid, SURVIVOR)
+        self.assertEqual(album.album_class, "diverges")
+        self.assertEqual(album.item_count, 2)
+        for item in album.items:
+            self.assertEqual(item.item_class, "diverges")
+            self.assertEqual(item.file_mb_albumid, MERGED)
 
 
 if __name__ == "__main__":

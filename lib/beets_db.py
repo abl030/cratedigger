@@ -1242,6 +1242,40 @@ class BeetsDB:
             ))
         return albums
 
+    def _contained_or_refused(self, raw_path: object) -> tuple[str, bool]:
+        """Resolve one stored item path and verify it stays inside
+        ``library_root``. Returns ``(path, refused)`` — ``refused=True``
+        means the path must never be opened.
+
+        Mirrors :meth:`resolve_current_releases`'s fail-closed
+        ``os.path.commonpath`` containment check (#1093 review finding 7),
+        but — unlike that method, which only verifies containment for a
+        RELATIVE stored path and passes an already-absolute one through
+        unchecked — this applies containment to BOTH shapes. A live beets
+        row can carry an absolute path under an unrelated tree (e.g. the
+        private ``processing/albums/`` root, #1093 review live evidence:
+        album 19823's 51 items), and this census must never attempt to
+        open a file the operator's own read permissions may not even cover
+        the same way another process's would (the two "symmetric" CLI/API
+        surfaces must report identically, not diverge on ambient
+        permissions).
+        """
+        decoded = self._decode_path(raw_path)
+        if not decoded or "\x00" in decoded:
+            return (decoded or "<unresolvable>", True)
+        if not self._library_root:
+            # No configured root: containment cannot be verified for
+            # either shape — fail closed rather than silently trust it.
+            return (decoded, True)
+        root = os.path.abspath(self._library_root)
+        candidate = (
+            os.path.abspath(decoded) if os.path.isabs(decoded)
+            else os.path.abspath(os.path.join(root, decoded))
+        )
+        if os.path.commonpath((root, candidate)) != root:
+            return (candidate, True)
+        return (candidate, False)
+
     def list_album_mb_identities(self) -> "list[BeetsAlbumIdentityRow]":
         """Return every Beets album's DB ``mb_albumid`` beside its item paths.
 
@@ -1252,6 +1286,12 @@ class BeetsDB:
         tag, and folding in ``discogs_albumid`` would misclassify a
         Discogs-sourced album's blank ``mb_albumid`` as anything other than
         "absent".
+
+        ``item_paths`` holds only paths verified contained under
+        ``library_root``; ``refused_paths`` holds every stored path that
+        failed containment (or could not be resolved at all) — the census
+        reports these as unreadable without ever opening them, rather than
+        silently dropping them (#1093 review finding 7).
         """
         rows = self._conn.execute(
             "SELECT a.id, a.mb_albumid, i.path "
@@ -1261,21 +1301,29 @@ class BeetsDB:
         ).fetchall()
         mb_albumid_by_album: dict[int, object] = {}
         paths_by_album: dict[int, list[str]] = {}
+        refused_by_album: dict[int, list[str]] = {}
         order: list[int] = []
         for raw_album_id, raw_mb_albumid, raw_path in rows:
             album_id = int(raw_album_id)
             if album_id not in mb_albumid_by_album:
                 mb_albumid_by_album[album_id] = raw_mb_albumid
                 paths_by_album[album_id] = []
+                refused_by_album[album_id] = []
                 order.append(album_id)
-            if raw_path is not None:
-                paths_by_album[album_id].append(self._resolve_path(raw_path))
+            if raw_path is None:
+                continue
+            resolved, refused = self._contained_or_refused(raw_path)
+            if refused:
+                refused_by_album[album_id].append(resolved)
+            else:
+                paths_by_album[album_id].append(resolved)
 
         return [
             BeetsAlbumIdentityRow(
                 album_id=album_id,
                 mb_albumid=normalize_release_id(mb_albumid_by_album[album_id]),
                 item_paths=tuple(paths_by_album[album_id]),
+                refused_paths=tuple(refused_by_album[album_id]),
             )
             for album_id in order
         ]
@@ -1330,8 +1378,14 @@ class BeetsAlbumIdentityRow:
     :class:`BeetsWorldAlbum` does. The retag ``-W`` divergence audit
     (#1093 item 1) needs exactly this: the DB identity a successful retag
     moved, compared against what each installed file's own tag still says.
+
+    ``item_paths`` holds only paths verified contained under
+    ``library_root``; ``refused_paths`` holds every stored path that failed
+    that containment check (or could not be resolved at all) — never opened,
+    reported as unreadable without a read attempt (#1093 review finding 7).
     """
 
     album_id: int
     mb_albumid: str
     item_paths: tuple[str, ...]
+    refused_paths: tuple[str, ...] = ()

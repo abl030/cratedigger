@@ -116,27 +116,40 @@ def cmd_audit_retag_divergence(db: object, args: object) -> int:
 
     Read-only over Beets alone — ``db`` (the pipeline DB connection every
     ``audit`` subcommand's dispatch dict is called with) is unused.
+
+    Exit 1 iff ``status == "divergence_found"`` — a genuine identity
+    mismatch, the one thing this instrument exists to surface. Every other
+    outcome (``clean``, ``incomplete``, ``beets_unavailable``) exits 0,
+    mirroring ``cmd_audit_world``'s own convention: an incomplete or
+    unavailable read is not itself a finding, and a cron alerting on exit 1
+    must never be paged for "database is locked" or a permission error as
+    though a divergence had appeared (#1093 review findings 3 and 6). Exit
+    5 covers ONLY an unexpected transport/decode/render defect — the whole
+    body below runs inside the try so a `msgspec.convert`/serialization
+    failure can't traceback out as an unmapped exit 1 (#1093 review
+    finding 5; the previous shape left the argument decode and the
+    render/json-encode steps outside the try).
     """
     del db
-    typed_args = msgspec.convert(vars(args), type=_AuditRetagDivergenceArgs)
     try:
+        typed_args = msgspec.convert(vars(args), type=_AuditRetagDivergenceArgs)
         report = scan_retag_divergence_from_factory(
             lambda: _open_beets(
                 typed_args.beets_db,
                 typed_args.beets_directory,
             ),
         )
+        if typed_args.json:
+            print(json.dumps(msgspec.to_builtins(report), indent=2))
+        else:
+            _render_retag_divergence_text(report)
     except Exception as exc:  # noqa: BLE001 - transport boundary, not typed B
         print(json.dumps({
             "error": "retag_divergence_audit_failed",
             "detail": str(exc),
         }))
         return 5
-    if typed_args.json:
-        print(json.dumps(msgspec.to_builtins(report), indent=2))
-    else:
-        _render_retag_divergence_text(report)
-    return 0 if report.status == "clean" else 1
+    return 1 if report.status == "divergence_found" else 0
 
 
 def cmd_audit_world(db: WorldAuditPipelineDB, args: object) -> int:

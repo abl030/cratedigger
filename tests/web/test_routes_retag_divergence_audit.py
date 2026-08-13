@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
+
+from mediafile import MediaFile
 
 from lib.beets_db import BeetsAlbumIdentityRow
 from tests.fakes import FakeBeetsDB
+from tests.test_beets_retag import MERGED, SURVIVOR, _make_real_mp3
 from tests.web._harness import _FakeDbWebServerCase
 
 
 class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
-    def test_reports_shared_service_payload(self) -> None:
+    def test_reports_an_incomplete_finding_for_an_unreadable_file(self) -> None:
         from web import server
 
         beets = FakeBeetsDB()
@@ -27,12 +32,39 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
             status, payload = self._get("/api/audit/retag-divergence")
 
         self.assertEqual(status, 200)
-        self.assertEqual(payload["status"], "divergence_found")
+        # An unreadable-only finding is "incomplete", never a genuine
+        # divergence (#1093 review finding 3).
+        self.assertEqual(payload["status"], "incomplete")
         self.assertTrue(payload["complete"])
         self.assertEqual(payload["counts"]["albums_scanned"], 1)
         self.assertEqual(len(payload["albums"]), 1)
         self.assertEqual(payload["albums"][0]["album_class"], "unreadable")
         self.assertEqual(beets.close_calls, 0)
+
+    def test_reports_a_genuine_divergence(self) -> None:
+        from web import server
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            track_path = Path(tmpdir) / "01.mp3"
+            _make_real_mp3(track_path)
+            media = MediaFile(track_path)
+            media.mb_albumid = MERGED
+            media.save()
+
+            beets = FakeBeetsDB()
+            beets.set_album_mb_identities([
+                BeetsAlbumIdentityRow(
+                    album_id=1, mb_albumid=SURVIVOR,
+                    item_paths=(str(track_path),),
+                ),
+            ])
+            with patch.object(server, "_beets_db", return_value=beets):
+                status, payload = self._get("/api/audit/retag-divergence")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "divergence_found")
+        self.assertEqual(len(payload["albums"]), 1)
+        self.assertEqual(payload["albums"][0]["album_class"], "diverges")
 
     def test_clean_report_lists_no_albums(self) -> None:
         from web import server
@@ -88,6 +120,43 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertFalse(payload["complete"])
         self.assertEqual(payload["status"], "beets_unavailable")
+
+    def test_route_bounds_the_scan_with_a_positive_deadline(self) -> None:
+        """#1093 review finding 2 — the route must never launch an
+        unbounded scan: a measured full census took ~196s against the
+        deployed vhost's inherited 60s nginx default. Seam test: the route
+        wires SOME positive deadline into the shared service call; the
+        deadline's own truncation behaviour is proven at the service level
+        (``tests/test_retag_divergence_audit.py::TestScanDeadline``)."""
+        from lib.retag_divergence_audit import (
+            scan_retag_divergence_from_borrowed_factory as real_scan,
+        )
+        from web import server
+        from web.routes import retag_divergence_audit as route_module
+
+        recorded: dict[str, object] = {}
+
+        def recording_scan(beets_factory, **kwargs):
+            recorded.update(kwargs)
+            return real_scan(beets_factory, **kwargs)
+
+        beets = FakeBeetsDB()
+        with (
+            patch.object(server, "_beets_db", return_value=beets),
+            patch.object(
+                route_module,
+                "scan_retag_divergence_from_borrowed_factory",
+                recording_scan,
+            ),
+        ):
+            status, _payload = self._get("/api/audit/retag-divergence")
+
+        self.assertEqual(status, 200)
+        self.assertIn("deadline_seconds", recorded)
+        deadline = recorded["deadline_seconds"]
+        self.assertIsInstance(deadline, float)
+        assert isinstance(deadline, float)
+        self.assertGreater(deadline, 0.0)
 
 
 if __name__ == "__main__":

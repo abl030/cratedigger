@@ -12,6 +12,17 @@ from web.routes._server_access import _server
 
 log = logging.getLogger(__name__)
 
+#: Wall-clock bound for one HTTP request's scan (#1093 review finding 2).
+#: A measured unbounded full census over the live ~93k-item library took
+#: ~196s; the deployed vhost's reverse proxy has no configured
+#: ``proxy_read_timeout``, so it falls back to nginx's 60s default and the
+#: backend would keep scanning past a 504 the client already gave up on.
+#: This value leaves real margin under that default. A bounded scan reports
+#: ``complete=False`` — the report SHAPE never changes; run
+#: ``pipeline-cli audit retag-divergence`` (no deadline) for the full,
+#: unbounded census.
+API_SCAN_DEADLINE_SECONDS = 40.0
+
 
 def get_retag_divergence_audit(h: RouteHandler, params: dict[str, list[str]]) -> None:
     del params
@@ -23,7 +34,9 @@ def get_retag_divergence_audit(h: RouteHandler, params: dict[str, list[str]]) ->
                 raise FileNotFoundError("Beets DB not configured")
             return beets
 
-        report = scan_retag_divergence_from_borrowed_factory(beets_factory)
+        report = scan_retag_divergence_from_borrowed_factory(
+            beets_factory, deadline_seconds=API_SCAN_DEADLINE_SECONDS,
+        )
         payload = msgspec.to_builtins(report)
     except Exception:
         log.exception("retag divergence audit failed unexpectedly")

@@ -7424,10 +7424,14 @@ class TestRetagDivergenceAuditCLI(unittest.TestCase):
         self.assertEqual(payload["status"], "clean")
         self.assertEqual(payload["albums"], [])
 
-    def test_divergence_found_exits_one(self) -> None:
+    def test_incomplete_from_unreadable_file_exits_zero(self) -> None:
         """Drives the REAL default leaf reader — the seeded path does not
-        exist, so it fails closed to ``unreadable`` (never ``agrees``),
-        which alone is enough to flip the CLI's exit code."""
+        exist, so it fails closed to ``unreadable`` (never ``agrees``). An
+        unreadable-only finding is ``incomplete``, never a genuine
+        divergence (#1093 review finding 3): it must exit 0, matching
+        ``cmd_audit_world``'s own beets-unavailable convention (finding 6)
+        — a permission error must never page a cron alerting on exit 1 as
+        though a divergence had appeared."""
         import scripts.pipeline_cli.audit as audit_cli
         from lib.beets_db import BeetsAlbumIdentityRow
 
@@ -7454,12 +7458,61 @@ class TestRetagDivergenceAuditCLI(unittest.TestCase):
             )
 
         payload = json.loads(output.getvalue())
-        self.assertEqual(rc, 1)
-        self.assertEqual(payload["status"], "divergence_found")
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["status"], "incomplete")
         self.assertEqual(len(payload["albums"]), 1)
         self.assertEqual(payload["albums"][0]["album_class"], "unreadable")
 
-    def test_expected_beets_unavailability_exits_one(self) -> None:
+    def test_divergence_found_exits_one(self) -> None:
+        """A genuine identity mismatch, driven through the REAL default
+        leaf reader over a real, taggable file (mirrors
+        ``TestRealRetagDivergenceScan``)."""
+        from pathlib import Path
+
+        from mediafile import MediaFile
+
+        import scripts.pipeline_cli.audit as audit_cli
+        from lib.beets_db import BeetsAlbumIdentityRow
+        from tests.test_beets_retag import MERGED, SURVIVOR, _make_real_mp3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            track_path = Path(tmpdir) / "01.mp3"
+            _make_real_mp3(track_path)
+            media = MediaFile(track_path)
+            media.mb_albumid = MERGED
+            media.save()
+
+            beets = FakeBeetsDB()
+            beets.set_album_mb_identities([
+                BeetsAlbumIdentityRow(
+                    album_id=1, mb_albumid=SURVIVOR,
+                    item_paths=(str(track_path),),
+                ),
+            ])
+            output = io.StringIO()
+            with (
+                patch.object(audit_cli, "_open_beets", return_value=beets),
+                redirect_stdout(output),
+            ):
+                rc = pipeline_cli.cmd_audit_retag_divergence(
+                    FakePipelineDB(),
+                    argparse.Namespace(
+                        beets_db="unused.db",
+                        beets_directory="/unused/library",
+                        json=True,
+                    ),
+                )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertEqual(payload["status"], "divergence_found")
+        self.assertEqual(len(payload["albums"]), 1)
+        self.assertEqual(payload["albums"][0]["album_class"], "diverges")
+
+    def test_expected_beets_unavailability_exits_zero(self) -> None:
+        """#1093 review finding 6 — matches ``cmd_audit_world``'s own
+        exit-0-for-beets-unavailable convention: a transient/unavailable
+        read is not itself a finding."""
         import scripts.pipeline_cli.audit as audit_cli
 
         failure = sqlite3.OperationalError("database is locked")
@@ -7479,7 +7532,7 @@ class TestRetagDivergenceAuditCLI(unittest.TestCase):
             )
 
         payload = json.loads(output.getvalue())
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, 0)
         self.assertEqual(payload["status"], "beets_unavailable")
         self.assertFalse(payload["complete"])
 
@@ -7492,6 +7545,43 @@ class TestRetagDivergenceAuditCLI(unittest.TestCase):
                 audit_cli,
                 "_open_beets",
                 side_effect=RuntimeError("programmer defect"),
+            ),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        self.assertEqual(rc, 5)
+        self.assertEqual(
+            json.loads(output.getvalue())["error"],
+            "retag_divergence_audit_failed",
+        )
+
+    def test_render_failure_after_a_successful_scan_still_exits_five(
+        self,
+    ) -> None:
+        """#1093 review finding 5 — the previous shape called
+        ``msgspec.convert``/the render+encode steps OUTSIDE the try, so a
+        defect there tracebacked out uncaught (Python's default exit 1),
+        not the documented exit 5. Fail the RENDER step specifically,
+        after ``report`` is already computed, to prove the fix covers the
+        whole body, not just the scan call."""
+        import scripts.pipeline_cli.audit as audit_cli
+
+        beets = FakeBeetsDB()
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", return_value=beets),
+            patch.object(
+                audit_cli.msgspec,
+                "to_builtins",
+                side_effect=RuntimeError("render programmer defect"),
             ),
             redirect_stdout(output),
         ):

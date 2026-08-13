@@ -2,7 +2,7 @@
 
 The pins in ``tests/test_retag_divergence_audit.py`` prove the exact
 branches; these properties drive the REAL ``scan_retag_divergence`` over
-combinations of (per-album DB identity × arbitrary item tag outcomes) and
+combinations of (per-album DB identity x arbitrary item tag outcomes) and
 patrol the world space around them.
 
 Why this surface earns a property: the census is the ONLY visibility this
@@ -18,18 +18,29 @@ V1  An item classified ``unreadable`` never carries a tag value; every
     other item always does. Fail-closed is a structural property of the
     report, not just the pure classifier.
 V2  Only a non-agreeing album ever appears in ``report.albums``.
-V3  The report's counts are internally consistent: the four per-class
-    album counts sum to exactly the listed albums, ``status`` is
-    ``"clean"`` iff no album is listed, and ``items_unreadable`` never
-    exceeds ``items_read``.
-V4  Every listed album's ``album_class`` equals the fixed precedence
-    derived from its own items (``album_class_from_items``) — the
-    aggregation never disagrees with itself.
-V5  The scan's counts and per-item classification honour exactly what the
+V3  The report's counts are internally consistent: ``albums_unreadable``
+    and ``albums_empty`` are mutually exclusive and both bounded by the
+    listed albums; ``albums_diverging`` and
+    ``albums_file_tag_present_db_absent`` are each independently bounded;
+    ``status == "divergence_found"`` iff at least one of those two
+    independent counts is nonzero; ``status == "clean"`` iff no album is
+    listed; ``items_unreadable`` never exceeds ``items_read``.
+V4  The scan's counts and per-item classification honour exactly what the
     world was constructed to be: every row is scanned, every item path is
-    read, a zero-item album is always listed ``"empty"``, an
-    all-agreeing album is never listed, and any other album's items
-    classify exactly as its construction intended.
+    read, a zero-item album is always listed ``"empty"``, an all-agreeing
+    album is never listed, any other album's items classify exactly as its
+    construction intended, AND the album's DISPLAY class
+    (``album_class``) matches a precedence judgment computed
+    INDEPENDENTLY of ``lib.retag_divergence_audit``'s own
+    ``album_class_from_items``/``_ALBUM_CLASS_PRECEDENCE`` — #1093 review
+    finding 1 (M1): the previous version of this check compared the report
+    against the SAME production function that built it, so a mutant
+    reordering the real precedence tuple still passed every test.
+
+#1093 review finding 1 (M2): ``ITEM_DESIGNS`` previously had no "the DB
+names an identity but the file tag is BLANK" design — exactly what a file
+``-W`` never wrote a tag to looks like — so a mutant collapsing that branch
+to "agrees" survived. ``blank`` below closes that gap.
 """
 
 from __future__ import annotations
@@ -50,7 +61,6 @@ from lib.retag_divergence_audit import (
     RetagDivergenceItem,
     RetagDivergenceItemClass,
     RetagDivergenceReport,
-    album_class_from_items,
     scan_retag_divergence,
 )
 from tests.fakes import FakeBeetsDB
@@ -98,41 +108,64 @@ def check_counts_are_internally_consistent(
     report: RetagDivergenceReport,
 ) -> None:
     """V3."""
-    bucket_total = (
-        report.counts.albums_diverging
-        + report.counts.albums_file_tag_present_db_absent
-        + report.counts.albums_unreadable
-        + report.counts.albums_empty
-    )
-    if bucket_total != len(report.albums):
+    counts = report.counts
+    if counts.albums_unreadable + counts.albums_empty > len(report.albums):
         raise AssertionError(
-            f"per-class album counts sum to {bucket_total} but "
-            f"{len(report.albums)} albums are actually listed"
+            f"albums_unreadable {counts.albums_unreadable} + albums_empty "
+            f"{counts.albums_empty} exceeds {len(report.albums)} listed "
+            "albums — these two display classes are mutually exclusive"
+        )
+    if counts.albums_diverging > len(report.albums):
+        raise AssertionError(
+            f"albums_diverging {counts.albums_diverging} exceeds "
+            f"{len(report.albums)} listed albums"
+        )
+    if counts.albums_file_tag_present_db_absent > len(report.albums):
+        raise AssertionError(
+            "albums_file_tag_present_db_absent "
+            f"{counts.albums_file_tag_present_db_absent} exceeds "
+            f"{len(report.albums)} listed albums"
+        )
+    has_independent_divergence = bool(
+        counts.albums_diverging or counts.albums_file_tag_present_db_absent,
+    )
+    if (report.status == "divergence_found") != has_independent_divergence:
+        raise AssertionError(
+            f"status {report.status!r} disagrees with the independent "
+            f"divergence counts (albums_diverging={counts.albums_diverging}, "
+            "albums_file_tag_present_db_absent="
+            f"{counts.albums_file_tag_present_db_absent})"
         )
     if (report.status == "clean") != (not report.albums):
         raise AssertionError(
             f"status {report.status!r} disagrees with listed albums "
             f"{[a.album_id for a in report.albums]!r}"
         )
-    if report.counts.items_unreadable > report.counts.items_read:
+    if counts.items_unreadable > counts.items_read:
         raise AssertionError(
-            f"items_unreadable {report.counts.items_unreadable} exceeds "
-            f"items_read {report.counts.items_read}"
+            f"items_unreadable {counts.items_unreadable} exceeds "
+            f"items_read {counts.items_read}"
         )
 
 
-def check_album_class_matches_item_precedence(
-    report: RetagDivergenceReport,
-) -> None:
-    """V4."""
-    for album in report.albums:
-        expected = album_class_from_items(album.items)
-        if album.album_class != expected:
-            raise AssertionError(
-                f"album {album.album_id} reports class "
-                f"{album.album_class!r} but its own items imply "
-                f"{expected!r}"
-            )
+#: Worst-first precedence, hand-written independently of
+#: ``lib.retag_divergence_audit._ALBUM_CLASS_PRECEDENCE`` — #1093 review
+#: finding 1 (M1). Deliberately duplicated rather than imported: importing
+#: the production tuple here would let a mutant that reorders it pass this
+#: check too, which is exactly the "agree by construction" shape the
+#: review rejected.
+def _expected_album_class_from_items(
+    expected_item_classes: Sequence[str],
+) -> str:
+    if not expected_item_classes:
+        return "empty"
+    if "unreadable" in expected_item_classes:
+        return "unreadable"
+    if "diverges" in expected_item_classes:
+        return "diverges"
+    if "file_tag_present_db_absent" in expected_item_classes:
+        return "file_tag_present_db_absent"
+    return "agrees"
 
 
 def check_world_construction_is_honored(
@@ -142,7 +175,7 @@ def check_world_construction_is_honored(
     total_rows: int,
     total_items: int,
 ) -> None:
-    """V5."""
+    """V4."""
     if report.counts.albums_scanned != total_rows:
         raise AssertionError(
             f"albums_scanned {report.counts.albums_scanned} does not "
@@ -157,7 +190,10 @@ def check_world_construction_is_honored(
         album.album_id: album for album in report.albums
     }
     for album_id, expected_classes in expectations.items():
-        if not expected_classes:
+        expected_album_class = _expected_album_class_from_items(
+            expected_classes,
+        )
+        if expected_album_class == "empty":
             album = listed.get(album_id)
             if album is None or album.album_class != "empty":
                 raise AssertionError(
@@ -165,7 +201,7 @@ def check_world_construction_is_honored(
                     "as the 'empty' class"
                 )
             continue
-        if all(cls == "agrees" for cls in expected_classes):
+        if expected_album_class == "agrees":
             if album_id in listed:
                 raise AssertionError(
                     f"album {album_id} was constructed to agree on every "
@@ -173,14 +209,24 @@ def check_world_construction_is_honored(
                     f"{listed[album_id].album_class!r}"
                 )
             continue
-        actual_classes = (
-            [item.item_class for item in listed[album_id].items]
-            if album_id in listed else []
-        )
+        album = listed.get(album_id)
+        if album is None:
+            raise AssertionError(
+                f"album {album_id} was constructed with a non-agreeing "
+                "item but never appears in the report"
+            )
+        actual_classes = [item.item_class for item in album.items]
         if actual_classes != expected_classes:
             raise AssertionError(
                 f"album {album_id} items classified {actual_classes!r}, "
                 f"expected {expected_classes!r} from its construction"
+            )
+        if album.album_class != expected_album_class:
+            raise AssertionError(
+                f"album {album_id} reports display class "
+                f"{album.album_class!r}, but its independently-judged "
+                f"precedence expects {expected_album_class!r} "
+                f"(items: {expected_classes!r})"
             )
 
 
@@ -192,9 +238,10 @@ def check_world_construction_is_honored(
 DB_STATES = st.sampled_from(["survivor", "merged", "absent"])
 
 #: What one installed file's tag looks like relative to its album's DB
-#: identity: written to match it, written to a DIFFERENT known identity, or
-#: unreadable outright.
-ITEM_DESIGNS = st.sampled_from(["match", "mismatch_known", "unreadable"])
+#: identity: written to match it, written to a DIFFERENT known identity,
+#: left BLANK (never written — the shape a real ``-W``-skipped file has),
+#: or unreadable outright.
+ITEM_DESIGNS = st.sampled_from(["match", "mismatch_known", "blank", "unreadable"])
 
 #: One album: its DB state, and 0-4 items built from those designs.
 ALBUM_STRATEGY = st.tuples(
@@ -216,7 +263,7 @@ def _build_world(
     dict[int, list[str]],
 ]:
     """Turn a generated world into scan inputs plus the expected per-item
-    classification for every non-agreeing album (see V5)."""
+    classification for every non-agreeing album (see V4)."""
     rows: list[BeetsAlbumIdentityRow] = []
     read_map: dict[str, str | Exception] = {}
     expectations: dict[int, list[str]] = {}
@@ -237,6 +284,12 @@ def _build_world(
                 read_map[path] = db_value
                 expected_classes.append("agrees")
                 continue
+            if design == "blank":
+                # The file's tag was never written — exactly what a real
+                # ``-W``-skipped write leaves behind on a fresh file.
+                read_map[path] = ""
+                expected_classes.append("diverges" if db_value else "agrees")
+                continue
             # mismatch_known: a DIFFERENT known-nonempty identity than the
             # album's own DB value, whatever that value is.
             other = MERGED if db_value != MERGED else SURVIVOR
@@ -254,7 +307,7 @@ def _build_world(
 
 
 class TestRetagDivergenceProperties(unittest.TestCase):
-    """V1-V5 over every world, driving the real ``scan_retag_divergence``."""
+    """V1-V4 over every world, driving the real ``scan_retag_divergence``."""
 
     @settings(deadline=None)
     @given(albums=WORLD_STRATEGY)
@@ -266,6 +319,11 @@ class TestRetagDivergenceProperties(unittest.TestCase):
     @example(albums=[("survivor", ["mismatch_known", "mismatch_known"])])
     @example(albums=[("absent", ["mismatch_known"])])
     @example(albums=[("survivor", ["unreadable"])])
+    # M1: unreadable outranking diverges in display precedence, over a
+    # world where BOTH are present on one album.
+    @example(albums=[("survivor", ["unreadable", "mismatch_known"])])
+    # M2: a blank (never-written) tag against a present DB identity.
+    @example(albums=[("survivor", ["blank"])])
     def test_every_world_upholds_the_census_invariants(
         self, albums: list[tuple[str, list[str]]],
     ) -> None:
@@ -279,7 +337,6 @@ class TestRetagDivergenceProperties(unittest.TestCase):
         check_fail_closed_unreadable_never_carries_a_tag(report)
         check_only_nonagreeing_albums_are_listed(report)
         check_counts_are_internally_consistent(report)
-        check_album_class_matches_item_precedence(report)
         check_world_construction_is_honored(
             report, expectations,
             total_rows=len(rows), total_items=total_items,
@@ -314,7 +371,9 @@ _EMPTY_COUNTS = RetagDivergenceCounts(0, 0, 0, 0, 0, 0, 0)
 
 def _make_report(
     *,
-    status: Literal["clean", "divergence_found", "beets_unavailable"] = "clean",
+    status: Literal[
+        "clean", "divergence_found", "incomplete", "beets_unavailable",
+    ] = "clean",
     counts: RetagDivergenceCounts = _EMPTY_COUNTS,
     albums: tuple[RetagDivergenceAlbum, ...] = (),
 ) -> RetagDivergenceReport:
@@ -369,22 +428,58 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             check_only_nonagreeing_albums_are_listed(report)
 
     # V3
-    def test_v3_bucket_sum_mismatch_is_rejected(self) -> None:
+    def test_v3_unreadable_plus_empty_exceeding_listed_is_rejected(self) -> None:
         report = self._report(
             status="divergence_found",
-            counts=RetagDivergenceCounts(1, 1, 0, 0, 0, 0, 0),
+            counts=RetagDivergenceCounts(1, 1, 1, 1, 0, 1, 1),
             albums=(self._album(),),
         )
         with self.assertRaisesRegex(
-            AssertionError, "per-class album counts sum to",
+            AssertionError, "albums_unreadable .* albums_empty .* exceeds",
+        ):
+            check_counts_are_internally_consistent(report)
+
+    def test_v3_albums_diverging_exceeding_listed_is_rejected(self) -> None:
+        report = self._report(
+            status="divergence_found",
+            counts=RetagDivergenceCounts(1, 1, 0, 2, 0, 0, 0),
+            albums=(self._album(),),
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "albums_diverging .* exceeds",
+        ):
+            check_counts_are_internally_consistent(report)
+
+    def test_v3_albums_absent_exceeding_listed_is_rejected(self) -> None:
+        report = self._report(
+            status="divergence_found",
+            counts=RetagDivergenceCounts(1, 1, 0, 0, 2, 0, 0),
+            albums=(self._album(album_class="file_tag_present_db_absent"),),
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "albums_file_tag_present_db_absent .* exceeds",
+        ):
+            check_counts_are_internally_consistent(report)
+
+    def test_v3_status_disagreeing_with_independent_counts_is_rejected(
+        self,
+    ) -> None:
+        # albums_diverging says "found", status says otherwise.
+        report = self._report(
+            status="incomplete",
+            counts=RetagDivergenceCounts(1, 1, 0, 1, 0, 0, 0),
+            albums=(self._album(),),
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "disagrees with the independent divergence counts",
         ):
             check_counts_are_internally_consistent(report)
 
     def test_v3_status_disagreeing_with_albums_is_rejected(self) -> None:
         report = self._report(
             status="clean",
-            counts=RetagDivergenceCounts(1, 1, 0, 1, 0, 0, 0),
-            albums=(self._album(),),
+            counts=RetagDivergenceCounts(1, 1, 0, 0, 0, 1, 0),
+            albums=(self._album(album_class="unreadable"),),
         )
         with self.assertRaisesRegex(
             AssertionError, "disagrees with listed albums",
@@ -403,22 +498,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             check_counts_are_internally_consistent(report)
 
     # V4
-    def test_v4_album_class_disagreeing_with_its_items_is_rejected(self) -> None:
-        report = self._report(
-            status="divergence_found",
-            counts=RetagDivergenceCounts(1, 1, 0, 0, 0, 1, 0),
-            albums=(self._album(
-                album_class="unreadable",
-                items=(self._item("diverges"),),
-            ),),
-        )
-        with self.assertRaisesRegex(
-            AssertionError, "its own items imply",
-        ):
-            check_album_class_matches_item_precedence(report)
-
-    # V5
-    def test_v5_albums_scanned_mismatch_is_rejected(self) -> None:
+    def test_v4_albums_scanned_mismatch_is_rejected(self) -> None:
         report = self._report()
         with self.assertRaisesRegex(
             AssertionError, "albums_scanned .* does not match",
@@ -427,7 +507,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 report, {}, total_rows=3, total_items=0,
             )
 
-    def test_v5_items_read_mismatch_is_rejected(self) -> None:
+    def test_v4_items_read_mismatch_is_rejected(self) -> None:
         report = self._report()
         with self.assertRaisesRegex(
             AssertionError, "items_read .* does not match",
@@ -436,7 +516,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 report, {}, total_rows=0, total_items=3,
             )
 
-    def test_v5_zero_item_album_not_listed_empty_is_rejected(self) -> None:
+    def test_v4_zero_item_album_not_listed_empty_is_rejected(self) -> None:
         report = self._report()
         with self.assertRaisesRegex(
             AssertionError, "not listed as the 'empty' class",
@@ -445,7 +525,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 report, {7: []}, total_rows=0, total_items=0,
             )
 
-    def test_v5_all_agreeing_album_incorrectly_listed_is_rejected(self) -> None:
+    def test_v4_all_agreeing_album_incorrectly_listed_is_rejected(self) -> None:
         report = self._report(
             status="divergence_found",
             counts=RetagDivergenceCounts(1, 1, 0, 1, 0, 0, 0),
@@ -458,7 +538,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 report, {7: ["agrees"]}, total_rows=1, total_items=1,
             )
 
-    def test_v5_item_classes_mismatch_is_rejected(self) -> None:
+    def test_v4_item_classes_mismatch_is_rejected(self) -> None:
         report = self._report(
             status="divergence_found",
             counts=RetagDivergenceCounts(1, 1, 0, 1, 0, 0, 0),
@@ -470,6 +550,32 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             check_world_construction_is_honored(
                 report, {7: ["file_tag_present_db_absent"]},
                 total_rows=1, total_items=1,
+            )
+
+    def test_v4_display_class_disagreeing_with_independent_precedence_is_rejected(
+        self,
+    ) -> None:
+        """#1093 review finding 1 (M1) — the exact regression this clause
+        exists to catch: an album whose items imply ``unreadable`` by
+        precedence, but whose reported ``album_class`` claims otherwise."""
+        report = self._report(
+            status="divergence_found",
+            counts=RetagDivergenceCounts(1, 2, 1, 1, 0, 0, 0),
+            albums=(self._album(
+                album_id=7,
+                album_class="diverges",  # WRONG — unreadable outranks it
+                items=(
+                    self._item("unreadable", tag=None),
+                    self._item("diverges"),
+                ),
+            ),),
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "independently-judged precedence expects",
+        ):
+            check_world_construction_is_honored(
+                report, {7: ["unreadable", "diverges"]},
+                total_rows=1, total_items=2,
             )
 
 

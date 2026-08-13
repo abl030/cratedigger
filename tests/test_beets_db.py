@@ -1927,6 +1927,77 @@ class TestListAlbumMbIdentities(unittest.TestCase):
             rows[2].mb_albumid, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
         )
         self.assertEqual(rows[2].item_paths, ())
+        # No row here escapes library_root — refused_paths stays empty.
+        for row in rows:
+            self.assertEqual(row.refused_paths, ())
+
+    def test_paths_outside_library_root_are_refused_not_opened(self) -> None:
+        """#1093 review finding 7 — containment applies to BOTH an
+        already-absolute stored path (the live shape: album 19823's 51
+        items under an unrelated ``processing/albums/`` tree) and a
+        relative path that escapes the root via ``..``."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            library_root = os.path.join(tmpdir, "library")
+            outside_root = os.path.join(tmpdir, "outside")
+            _create_test_db(db_path)
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "INSERT INTO albums (id, mb_albumid, discogs_albumid) "
+                "VALUES (1, 'cccccccc-cccc-cccc-cccc-cccccccccccc', 0)"
+            )
+            conn.execute(
+                "INSERT INTO items (id, album_id, path) VALUES (10, 1, ?)",
+                (os.path.join(outside_root, "01.mp3").encode(),),
+            )
+            conn.execute(
+                "INSERT INTO items (id, album_id, path) VALUES (11, 1, ?)",
+                (b"../outside/02.mp3",),
+            )
+            conn.execute(
+                "INSERT INTO items (id, album_id, path) "
+                "VALUES (12, 1, 'Artist/Album/03.mp3')",
+            )
+            conn.commit()
+            conn.close()
+
+            with BeetsDB(db_path, library_root=library_root) as db:
+                rows = db.list_album_mb_identities()
+
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        # Only the genuinely-contained item is returned as readable.
+        self.assertEqual(
+            row.item_paths,
+            (os.path.join(library_root, "Artist", "Album", "03.mp3"),),
+        )
+        # Both escapes are refused, never silently dropped.
+        self.assertEqual(len(row.refused_paths), 2)
+        self.assertTrue(
+            any(outside_root in p for p in row.refused_paths),
+            row.refused_paths,
+        )
+        self.assertTrue(
+            any("02.mp3" in p for p in row.refused_paths),
+            row.refused_paths,
+        )
+
+    def test_no_library_root_refuses_every_path(self) -> None:
+        """Containment cannot be verified with no configured root — fail
+        closed rather than silently trust an unresolvable path."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            _create_test_db(db_path)
+            _insert_album(
+                db_path, 1, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                [(320000, "Artist/Album/01.flac")],
+            )
+
+            with BeetsDB(db_path, library_root="") as db:
+                rows = db.list_album_mb_identities()
+
+        self.assertEqual(rows[0].item_paths, ())
+        self.assertEqual(len(rows[0].refused_paths), 1)
 
 
 if __name__ == "__main__":

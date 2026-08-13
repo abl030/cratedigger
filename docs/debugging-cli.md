@@ -455,26 +455,71 @@ the cohort-wide instrument for that residual (issue #1093 item 1): it reads
 every Beets album's own DB `mb_albumid` beside each item's installed file
 tag and reports every album where they disagree.
 
+**Path containment.** `lib/beets_db.py::BeetsDB.list_album_mb_identities`
+verifies every stored item path resolves inside the configured
+`library_root` (`os.path.commonpath`, covering both a relative and an
+already-absolute stored path — unlike `resolve_current_releases`, which
+only checks the relative case). A path that escapes containment (or cannot
+be resolved at all, including with no configured root) is never opened —
+it is reported `unreadable` with a fixed
+`"refused: stored path resolves outside the configured library root"`
+detail, distinguishable from a genuine read/parse failure's exception text.
+Live evidence for why this matters: one real album's 51 items were stored
+as absolute paths under the private `processing/albums/` tree, entirely
+outside the library root — the CLI (operator identity) and the API
+(service identity) have different read permissions there, so without
+containment the two "symmetric" surfaces could report differently for the
+same library.
+
 Per-item classification: `agrees` (not reported), `diverges` (the DB names
 an identity the file tag does not match, including a blank file tag — the
 `-W` residual shape), `file_tag_present_db_absent` (the DB has no
 `mb_albumid` at all but the file tag still carries one — the #570 Discogs
 neutralization shape, expected near-zero and never filtered), and
-`unreadable` (the file could not be read — fail closed, never counted as
-agreeing). Per-album classification aggregates its items by fixed
-precedence — `unreadable` > `diverges` > `file_tag_present_db_absent` >
-`agrees` — plus `empty` for a real zero-item album row. Only non-agreeing
-albums are listed; full counts (`albums_scanned`, `items_read`,
-`items_unreadable`, and one count per non-agreeing class) are always
-reported.
+`unreadable` (the file was never verified to agree — a genuine read
+failure or a refused out-of-root path; fail closed either way, never
+counted as agreeing). Per-album `album_class` is a DISPLAY aggregate over
+its items by fixed precedence — `unreadable` > `diverges` >
+`file_tag_present_db_absent` > `agrees` — plus `empty` for a real zero-item
+album row. Only non-agreeing albums are listed; full counts
+(`albums_scanned`, `items_read`, `items_unreadable`, and one count per
+non-agreeing class) are always reported.
 
-Machine-readable output has `status` (`clean`, `divergence_found`, or
-`beets_unavailable`), `complete`, `counts`, and `albums` (only the
-non-agreeing ones, each with every item's classification). The CLI exits 0
-iff `status="clean"` — both `divergence_found` and the expected-unavailable
-`beets_unavailable` exit 1, since neither is a clean report the operator
-can trust. An unexpected schema, decoder, invariant, programming, close, or
-serialization defect remains a transport failure: CLI exit 5 or HTTP 503.
+**`status` is independent of the per-album display class.** An album whose
+display class reads `unreadable` (because unreadable outranks everything)
+can still contain a genuine `diverges` item, and the report's headline
+answer must not miss that — so `albums_diverging` and
+`albums_file_tag_present_db_absent` are independent presence counts ("this
+album contains at least one such item"), never gated by which class won
+that album's display precedence. `status` is `clean` (nothing listed),
+`divergence_found` (at least one album contains a genuine `diverges` or
+`file_tag_present_db_absent` item — decided independent of precedence and
+of any unreadable/empty finding elsewhere), `incomplete` (no genuine
+divergence anywhere, but the census could not fully vouch for the library —
+an unreadable/refused/empty-only finding, or the scan hit its time
+deadline before finishing), or `beets_unavailable`.
+
+**The API route bounds its scan to `API_SCAN_DEADLINE_SECONDS`** (40s,
+`web/routes/retag_divergence_audit.py`) **— the CLI is always the full,
+unbounded census.** A measured unbounded full census over the live
+~93k-item library took ~196s; the deployed vhost's reverse proxy has no
+configured `proxy_read_timeout`, so it falls back to nginx's 60s default
+and would 504 while the backend kept scanning. A bounded scan that runs out
+of time reports `complete=false` over exactly the albums it reached — the
+report SHAPE never changes, and `albums_scanned`/`items_read`/etc. describe
+only that reached prefix. Run the CLI for a full, unbounded census.
+
+Machine-readable output has `status` (`clean`, `divergence_found`,
+`incomplete`, or `beets_unavailable`), `complete`, `counts`, and `albums`
+(only the non-agreeing ones, each with every item's classification). The
+CLI exits 1 iff `status="divergence_found"` — the one thing this
+instrument exists to surface; every other outcome (`clean`, `incomplete`,
+`beets_unavailable`) exits 0, mirroring `pipeline-cli audit world`'s own
+convention that an incomplete or unavailable read is not itself a finding,
+so a cron alerting on exit 1 is never paged for a transient permission
+error or a locked database as though a divergence had appeared. An
+unexpected schema, decoder, invariant, programming, close, or serialization
+defect remains a transport failure: CLI exit 5 or HTTP 503.
 
 ## Live-corpus render differential
 
