@@ -81,7 +81,7 @@ Cratedigger has exactly three Beets mutation lanes:
 2. An explicitly operator-authorized library deletion resolves one exact Beets
    album primary key and drives the exact-album delete child.
 3. The import-time MusicBrainz merge retag runs `beet modify -a -M -W -y`
-   under an anchored `mb_albumid::^<old-id>\Z` query and a `mb_albumid=<new-id>`
+   under an exact-match `mb_albumid:=<old-id>` query and a `mb_albumid=<new-id>`
    assignment (`lib/beets_retag.py`), from inside whichever importer lane
    holds the request's exact import claim — the automation processing owner,
    or a claimed force-import job (#1080). Issue #1087 replaced the original
@@ -147,8 +147,19 @@ load-bearing:
   successful retag records the divergence in its outcome detail
   (`lib/beets_retag.py`) so an operator can find "DB identity moved, file
   tags did not" in the audit trail rather than never knowing.
-- **One album.** The regex is anchored, so it can only name albums filed under
-  exactly the merged-away release id.
+- **One album, one selection mechanism.** The query is an exact SQL-equality
+  match (`mb_albumid:=<old-id>`, Beets' `=` prefix), not a regex, so it can
+  only name albums filed under exactly the merged-away release id — and it
+  selects with the SAME mechanism the post-retag guard
+  (`lib/beets_db.py::BeetsDB.resolve_current_releases`) already reads the
+  library back with, rather than two independently-correct mechanisms that
+  could silently disagree (#1093). Before #1093 this was an anchored regex
+  evaluated by Beets' SQLite `regexp()` UDF, which decodes a BLOB-stored
+  `mb_albumid` before matching; a value stored that way (only reachable via
+  a third-party raw-SQL writer, since Beets itself always writes `str`)
+  could match the regex while staying invisible to the guard's exact-equality
+  read. Live-verified against a real BLOB write: the retired regex form
+  matched it, the exact-match form and the guard both now report it absent.
 - **Only on `mbid_not_found`, only under an exact import claim**, and only
   when MusicBrainz observably redirects the stored id to a survivor Beets just
   offered as a candidate. Two claims qualify, and they are the two the

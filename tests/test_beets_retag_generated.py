@@ -1,4 +1,5 @@
-"""Generated properties for the one-album ``beet modify`` retag (#1059/#1087).
+"""Generated properties for the one-album ``beet modify`` retag
+(#1059/#1087/#1093).
 
 The pins in ``tests/test_beets_retag.py`` prove the exact branches; these
 properties patrol the world space around them, driving the REAL
@@ -30,21 +31,25 @@ G3  The query handed to ``modify`` always names the OLD identity and the
     wrong-album mutation at worst.
 G4  Both sides held never returns a ready outcome. Two installed albums that
     MusicBrainz now calls one release is the operator's decision.
+G5  (#1093 item 5) A ``failed`` detail claiming "the library did not move"
+    must never coincide with an old-side resolution that shows it DID move
+    (Missing or Ambiguous, not still Unique) — the exact self-contradiction
+    a real, reachable world (old missing, new ambiguous — a partial move)
+    could produce before this fix.
 
-``TestRealModifyRetagOverItemCountBoundaries`` below is NOT a fifth
-generated property, and does not claim to be. #1075 DID ship a
-real-subprocess test (``TestRealMbsyncMovesIdentityNotFiles``), so a real
-subprocess is not what was missing; its fixture modelled a
-RECORDING-PRESERVING merge, so the predecessor primitive's item-to-track
-mapping matched and the merge it cannot actually follow — a RELEASE-ONLY
-one — never ran. The lesson: a real subprocess is necessary, not
-sufficient; it must run over a world shaped like the failure. That class is
-composed with the T6/T7 deterministic pins over three hand-reasoned
-item-count equivalence classes (0 / 1 / 2) — see the class docstring for
-why that partition is honest as pins, not claimed as an independently
-certified generated domain. Every genuinely combinatorial property
-(cardinality × modify-result × post-state, G1–G4) still runs through
-Hypothesis via ``TestRetagProperties``.
+``TestRealModifyRetagOverItemCountBoundaries`` below is NOT a generated
+property, and does not claim to be. #1075 DID ship a real-subprocess test
+(``TestRealMbsyncMovesIdentityNotFiles``), so a real subprocess is not what
+was missing; its fixture modelled a RECORDING-PRESERVING merge, so the
+predecessor primitive's item-to-track mapping matched and the merge it
+cannot actually follow — a RELEASE-ONLY one — never ran. The lesson: a real
+subprocess is necessary, not sufficient; it must run over a world shaped
+like the failure. That class is composed with the T6/T7 deterministic pins
+over three hand-reasoned item-count equivalence classes (0 / 1 / 2) — see
+the class docstring for why that partition is honest as pins, not claimed
+as an independently certified generated domain. Every genuinely
+combinatorial property (cardinality × modify-result × post-state, G1–G5)
+still runs through Hypothesis via ``TestRetagProperties``.
 """
 
 from __future__ import annotations
@@ -186,7 +191,7 @@ def check_query_and_assignment_name_the_right_identity(
             )
         if query != retag_album_query(old_identity):
             raise AssertionError(
-                "modify query is not the anchored query for the old "
+                "modify query is not the exact-match query for the old "
                 f"identity {old_identity.release_id}: {query!r}"
             )
         if old_identity.release_id in assignment:
@@ -216,6 +221,31 @@ def check_both_held_is_never_ready(
             f"outcome {outcome!r} authorizes a rekey while the library holds "
             "BOTH sides of the merge; merging or deleting either album is an "
             "operator decision"
+        )
+
+
+def check_failure_detail_does_not_contradict_the_observed_move(
+    outcome: str,
+    detail: str,
+    *,
+    old_after: CurrentBeetsResolution,
+) -> None:
+    """G5 (#1093 item 5) — a failure detail claiming "the library did not
+    move" must never coincide with an old-side resolution that shows it DID
+    move. Only ``old_after`` still being ``CurrentBeetsUnique`` (unchanged)
+    makes "did not move" true; ``Missing`` or ``Ambiguous`` both mean the
+    old id is observably gone from where it was — a partial move (old
+    missing, new ambiguous across two albums) is the real, reachable world
+    that produced this contradiction before the fix."""
+    if outcome != RETAG_FAILED:
+        return
+    if "did not move" not in detail:
+        return
+    old_is_still_unique = isinstance(old_after, CurrentBeetsUnique)
+    if not old_is_still_unique:
+        raise AssertionError(
+            "detail claims the library did not move, but old_after is "
+            f"{type(old_after).__name__}, not CurrentBeetsUnique: {detail!r}"
         )
 
 
@@ -295,7 +325,7 @@ def _snapshot(
 
 
 class TestRetagProperties(unittest.TestCase):
-    """G1–G4 over every world, driving the real retag against the real fake."""
+    """G1–G5 over every world, driving the real retag against the real fake."""
 
     @settings(deadline=None)
     @given(
@@ -315,6 +345,13 @@ class TestRetagProperties(unittest.TestCase):
     )
     @example(
         old_ids=(7,), new_ids=(8,), modify_result="exit_0", post_state="moved",
+    )
+    # #1093 item 5 — the world that produced the self-contradictory
+    # "did not move" detail: a partial move where the old id genuinely
+    # moves away but the survivor lands ambiguous across two albums.
+    @example(
+        old_ids=(7,), new_ids=(), modify_result="exit_0",
+        post_state="moved_ambiguous",
     )
     def test_every_world_upholds_the_retag_invariants(
         self,
@@ -350,6 +387,9 @@ class TestRetagProperties(unittest.TestCase):
         )
         check_both_held_is_never_ready(
             result.outcome, old_before=old_before, new_before=new_before,
+        )
+        check_failure_detail_does_not_contradict_the_observed_move(
+            result.outcome, result.detail, old_after=old_after,
         )
         self.assertTrue(result.detail, "every outcome carries a diagnostic")
 
@@ -535,7 +575,13 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 old_identity=OLD, new_identity=NEW,
             )
 
-    def test_an_unanchored_query_is_rejected(self) -> None:
+    def test_a_query_using_a_different_mechanism_is_rejected(self) -> None:
+        """#1093 — the invariant this self-test proves ("the query can
+        only ever name albums filed under exactly the old id") is now
+        enforced through the exact-match mechanism, not a regex; this
+        world names the old id with the RETIRED unanchored regex prefix
+        (``:``, not ``:=``) instead of the exact-match query the module
+        actually emits, and the checker must still catch the mismatch."""
         with self.assertRaises(AssertionError):
             check_query_and_assignment_name_the_right_identity(
                 [(f"mb_albumid:{MERGED}", retag_assignment(NEW))],
@@ -556,6 +602,57 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 old_before=self._unique(OLD),
                 new_before=self._unique(NEW),
             )
+
+    def test_a_did_not_move_claim_while_the_old_id_is_missing_is_rejected(
+        self,
+    ) -> None:
+        """G5 (#1093 item 5) — the exact contradiction: the old id moved
+        away (Missing), so a detail claiming "did not move" is a lie."""
+        with self.assertRaisesRegex(
+            AssertionError, "old_after is CurrentBeetsMissing",
+        ):
+            check_failure_detail_does_not_contradict_the_observed_move(
+                RETAG_FAILED,
+                "beet modify exited 0, but the library did not move: "
+                f"{MERGED} is not held; {SURVIVOR} is ambiguous "
+                "(multiple_matches) across albums 7, 8",
+                old_after=self._missing(OLD),
+            )
+
+    def test_a_did_not_move_claim_while_the_old_id_is_ambiguous_is_rejected(
+        self,
+    ) -> None:
+        """The other non-Unique shape: the old id is now ambiguous, which
+        is equally not "did not move" (it changed FROM Unique)."""
+        with self.assertRaisesRegex(
+            AssertionError, "old_after is CurrentBeetsAmbiguous",
+        ):
+            check_failure_detail_does_not_contradict_the_observed_move(
+                RETAG_FAILED,
+                "beet modify exited 0, but the library did not move: "
+                f"{MERGED} is ambiguous (multiple_matches) across albums "
+                f"7, 8; {SURVIVOR} is not held",
+                old_after=self._ambiguous(OLD),
+            )
+
+    def test_a_did_not_move_claim_while_the_old_id_is_still_unique_passes(
+        self,
+    ) -> None:
+        """Must-still-work: the ONE world where "did not move" is true —
+        the checker must not reject a truthful detail."""
+        check_failure_detail_does_not_contradict_the_observed_move(
+            RETAG_FAILED,
+            "beet modify exited 0, but the library did not move: "
+            f"{MERGED} is uniquely held as album 7; {SURVIVOR} is not held",
+            old_after=self._unique(OLD),
+        )
+
+    def test_a_non_failed_outcome_is_not_checked(self) -> None:
+        """The clause only governs FAILED details — a retagged/ambiguous
+        outcome's detail is out of scope regardless of its wording."""
+        check_failure_detail_does_not_contradict_the_observed_move(
+            RETAG_RETAGGED, "the library did not move", old_after=self._missing(OLD),
+        )
 
     @staticmethod
     def _real_observation(
@@ -673,6 +770,12 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             RETAG_AMBIGUOUS,
             old_before=self._unique(OLD),
             new_before=self._unique(NEW),
+        )
+        check_failure_detail_does_not_contradict_the_observed_move(
+            RETAG_FAILED,
+            "beet modify exited 0, but the library did not move: "
+            f"{MERGED} is uniquely held as album 7; {SURVIVOR} is not held",
+            old_after=self._unique(OLD),
         )
 
 

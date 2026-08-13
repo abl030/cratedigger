@@ -1,14 +1,19 @@
-"""Deterministic pins for the one-album ``beet modify`` retag (#1059/#1087).
+"""Deterministic pins for the one-album ``beet modify`` retag
+(#1059/#1087/#1093).
 
 The invariants these pin — the generated siblings in
 ``tests/test_beets_retag_generated.py`` patrol the world space around them:
 
-T1  The query is ANCHORED to exactly one release id, and the assignment
-    names only the survivor. ``modify`` retags everything its query
-    matches, so an unanchored or substring query is the difference between
-    one album and part of the library. Query and assignment are classified
-    by CONTENT, not position (``modify_parse_args``), so argv order is
-    irrelevant — pinned directly.
+T1  The query selects EXACTLY one release id, by the same SQL-equality
+    mechanism the post-retag guard already reads with
+    (``mb_albumid:=<id>``, Beets' exact-match prefix — NOT the anchored
+    regex #1093 retired), and the assignment names only the survivor.
+    ``modify`` retags everything its query matches, so a query that selects
+    by a DIFFERENT mechanism than the guard reads with is the gap between
+    "the guard's belief" and "what actually got retagged". Query and
+    assignment are classified by CONTENT, not position
+    (``modify_parse_args``), so argv order is irrelevant — pinned directly
+    against the REAL parser, not string inspection (#1093 OWED #1).
 T2  A ready outcome (the caller may rekey) is returned only when the
     library is observably at the new id, or holds neither id.
 T3  **``modify``'s exit status is not evidence, in either direction.** A
@@ -82,8 +87,16 @@ from unittest.mock import patch
 
 import yaml
 from beets import library as beets_library
+from beets.dbcore.query import CollectionQuery, MatchQuery, RegexpQuery
+from beets.library.queries import parse_query_parts
+from beets.ui.commands.modify import modify_parse_args
 
-from lib.beets_db import BeetsDB, CurrentBeetsMissing, CurrentBeetsResolution
+from lib.beets_db import (
+    BeetsDB,
+    CurrentBeetsMissing,
+    CurrentBeetsResolution,
+    CurrentBeetsUnique,
+)
 from lib.beets_retag import (
     RETAG_ALREADY_CURRENT,
     RETAG_AMBIGUOUS,
@@ -94,13 +107,17 @@ from lib.beets_retag import (
     RETAG_TIMEOUT_SECONDS,
     BeetsRetagResult,
     ModifyRetagRun,
+    RetagModifyFn,
     retag_album_query,
     retag_assignment,
     retag_merged_album,
     run_beets_modify_retag,
 )
 from lib.release_identity import ReleaseIdentity
+from tests.beets_world import extract_consumer_beets_world_config
 from tests.fakes import FakeBeetsDB
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # The live merge probed on 2026-08-06 (request 316): the acquisition id that
 # MusicBrainz merged away, and the survivor it now redirects to.
@@ -215,37 +232,64 @@ class UnreadableAfterFirstSnapshotResolver:
         return self.inner.resolve_current_releases(identities)
 
 
-class TestRetagQueryAndAssignmentAreAnchored(unittest.TestCase):
-    """T1 — the query can only ever name albums filed under exactly one id;
-    the assignment can only ever carry the survivor's id."""
+class TestRetagQueryAndAssignmentSelectExactly(unittest.TestCase):
+    """T1 (#1093 item 2) — the query can only ever name the album filed
+    under exactly one id, using the SAME exact-match mechanism the
+    post-retag guard reads with; the assignment can only ever carry the
+    survivor's id. Verified against the REAL Beets query parser and
+    command-argument classifier — a source read is not evidence for a
+    load-bearing claim in this repo (OWED #1, `.claude/rules/test-fidelity.md`
+    Rule C)."""
 
     def test_query_shape(self) -> None:
+        self.assertEqual(retag_album_query(OLD), f"mb_albumid:={MERGED}")
+
+    def test_the_query_parses_to_an_exact_match_not_a_regex(self) -> None:
+        """Live-verified against the real Beets query parser
+        (``beets/library/queries.py::parse_query_parts``): ``mb_albumid:=<id>``
+        maps to ``dbcore.query.MatchQuery`` — exact SQL equality — never
+        ``RegexpQuery``. This is the mechanism fix at the heart of #1093
+        item 2: the post-retag guard (``lib/beets_db.py::BeetsDB.
+        resolve_current_releases``) already selects by exact SQL equality,
+        so the retag's own query must use the identical mechanism rather
+        than an independently-correct one that can disagree on a value the
+        guard cannot see (a BLOB-stored ``mb_albumid``, only reachable via
+        a third-party raw-SQL writer — see
+        ``TestExactMatchQueryConvergesWithTheGuard`` below)."""
+        query, _sort = parse_query_parts([retag_album_query(OLD)], beets_library.Album)
+        assert isinstance(query, CollectionQuery)  # narrow for pyright
+        match_queries = [
+            subquery for subquery in query.subqueries
+            if isinstance(subquery, MatchQuery)
+        ]
+        regexp_queries = [
+            subquery for subquery in query.subqueries
+            if isinstance(subquery, RegexpQuery)
+        ]
+        self.assertEqual(regexp_queries, [], "must not compile to a regex query")
+        self.assertEqual(len(match_queries), 1)
+        match_query = match_queries[0]
+        self.assertEqual(match_query.field_name, "mb_albumid")
+        self.assertEqual(match_query.pattern, MERGED)
         self.assertEqual(
-            retag_album_query(OLD),
-            f"mb_albumid::^{re.escape(MERGED)}\\Z",
+            match_query.clause(), ("albums.mb_albumid = ?", [MERGED]),
+            "must be plain SQL equality — the same shape "
+            "resolve_current_releases already reads with",
         )
 
-    def test_the_regex_matches_only_the_exact_release_id(self) -> None:
-        pattern = re.compile(retag_album_query(OLD).split("::", 1)[1])
-        self.assertTrue(pattern.search(MERGED))
-        for other in (
-            SURVIVOR,
-            MERGED[:-1],
-            MERGED + "0",
-            "x" + MERGED,
-            MERGED.replace("-", ""),
-            # #1087 review (F1): a bare trailing `$` also matches just
-            # before ONE trailing newline in non-MULTILINE Python regex,
-            # so an unrelated album whose stored id carries a stray
-            # newline would match too. `\Z` (not `$`) is why this case
-            # must stay rejected.
-            MERGED + "\n",
-        ):
-            with self.subTest(other=other):
-                self.assertIsNone(
-                    pattern.search(other),
-                    "an unanchored query would retag more than one album",
-                )
+        # The retired form, for contrast only — never a live code path
+        # anymore (`retag_album_query` cannot build this shape). Proves the
+        # two forms really do parse to different query classes, so the
+        # mechanism claim above is not merely asserted.
+        retired_query, _sort2 = parse_query_parts(
+            [f"mb_albumid::^{re.escape(MERGED)}\\Z"], beets_library.Album,
+        )
+        assert isinstance(retired_query, CollectionQuery)  # narrow for pyright
+        retired_regexp_queries = [
+            subquery for subquery in retired_query.subqueries
+            if isinstance(subquery, RegexpQuery)
+        ]
+        self.assertEqual(len(retired_regexp_queries), 1)
 
     def test_a_non_musicbrainz_identity_is_refused_for_the_query(self) -> None:
         with self.assertRaises(ValueError) as caught:
@@ -263,16 +307,251 @@ class TestRetagQueryAndAssignmentAreAnchored(unittest.TestCase):
     def test_query_and_assignment_are_classified_by_content_not_position(
         self,
     ) -> None:
-        """The mechanic that makes argv order irrelevant
-        (``modify_parse_args``): a token is an assignment iff it contains
-        ``=`` and the text before the first ``=`` contains no ``:``."""
+        """Live-verified against the REAL ``modify_parse_args``
+        (``beets/ui/commands/modify.py``): the query (containing BOTH ``:``
+        and ``=`` since #1093 — its colon always precedes its ``=``) is
+        always classified as a QUERY, and the assignment (``=`` with no
+        leading ``:``) is always classified as an ASSIGNMENT, for both
+        argv orderings."""
         query = retag_album_query(OLD)
         assignment = retag_assignment(NEW)
-        self.assertIn(":", query)
-        self.assertNotIn("=", query)
-        key, _, value = assignment.partition("=")
-        self.assertNotIn(":", key)
-        self.assertTrue(value)
+        for args in ([query, assignment], [assignment, query]):
+            with self.subTest(args=args):
+                parsed_query, mods, dels = modify_parse_args(args, is_album=True)
+                self.assertEqual(parsed_query, [query])
+                self.assertEqual(dels, [])
+                self.assertIn("mb_albumid", mods)
+                self.assertEqual(mods["mb_albumid"].value, SURVIVOR)
+
+
+def _seed_two_album_world(
+    base: Path, *, phantom_identity: str, phantom_as_blob: bool,
+) -> tuple[Path, Path, int, int]:
+    """Two real albums: a genuine target at MERGED (plain TEXT
+    ``mb_albumid``, written by Beets itself), and a second, otherwise
+    unrelated "phantom" whose ``mb_albumid`` a raw third-party write
+    overwrites to ``phantom_identity`` — as a genuine SQLite BLOB when
+    ``phantom_as_blob``, otherwise as plain TEXT (#1093 item 2). Only the
+    ALBUM row is touched: ``-a`` targets the ``albums`` table, so the
+    phantom's ITEM row is irrelevant to what ``modify -a`` can select.
+
+    Two callers use this: a same-string BLOB phantom (unreachable through
+    Beets itself — Beets always writes ``str`` — the shape a raw-SQL writer
+    could produce) and a same-PREFIX plain-TEXT decoy (``MERGED + "0"``,
+    which a substring/prefix-matching query would also select but exact
+    SQL equality cannot).
+    """
+    root = base / "library"
+    root.mkdir()
+    config_dir = base / "beets-config"
+    config_dir.mkdir()
+    library_db = base / "library.db"
+    (config_dir / "config.yaml").write_text(
+        yaml.safe_dump({
+            "directory": str(root),
+            "library": str(library_db),
+            "plugins": "",
+            "import": {"move": True, "copy": False, "write": True},
+            "paths": {"default": "$albumartist/$year - $album/$track $title"},
+        }, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    def make_item(artist: str, ident: str, track_id: str) -> beets_library.Item:
+        album_dir = root / artist / "1999 - Album"
+        album_dir.mkdir(parents=True)
+        track_path = album_dir / "01 Track.mp3"
+        track_path.write_bytes(b"fake audio")
+        return beets_library.Item(
+            path=str(track_path), title="Track", artist=artist, album="Album",
+            albumartist=artist, track=1, disc=1, year=1999,
+            mb_albumid=ident, mb_trackid=track_id,
+        )
+
+    lib = beets_library.Library(str(library_db), str(root))
+    target_album = lib.add_album([make_item(
+        "Target Artist", MERGED, "00000000-1111-4111-8111-111111111111",
+    )])
+    phantom_album = lib.add_album([make_item(
+        "Phantom Artist", MERGED, "00000001-1111-4111-8111-111111111111",
+    )])
+    if target_album.id is None or phantom_album.id is None:
+        raise AssertionError("seeded Beets album is missing its database id")
+    target_id, phantom_id = target_album.id, phantom_album.id
+    lib._close()
+
+    conn = sqlite3.connect(str(library_db))
+    stored_value: memoryview[int] | str = (
+        sqlite3.Binary(phantom_identity.encode("utf-8"))
+        if phantom_as_blob else phantom_identity
+    )
+    conn.execute(
+        "UPDATE albums SET mb_albumid = ? WHERE id = ?",
+        (stored_value, phantom_id),
+    )
+    conn.commit()
+    conn.close()
+
+    runtime_config = base / "config.ini"
+    beets_python = os.environ.get("CRATEDIGGER_BEETS_PYTHON", "")
+    if not beets_python:
+        raise AssertionError(
+            "CRATEDIGGER_BEETS_PYTHON is unset — run under nix-shell, which "
+            "supplies the admitted Beets interpreter"
+        )
+    runtime_config.write_text(
+        "[Beets]\n"
+        f"config_dir = {config_dir}\n"
+        f"python = {beets_python}\n",
+        encoding="utf-8",
+    )
+    return root, library_db, target_id, phantom_id
+
+
+class TestExactMatchQueryConvergesWithTheGuard(unittest.TestCase):
+    """#1093 item 2 — one selection mechanism, proven by composing the REAL
+    exact-match query, a REAL two-album library, and the REAL guard
+    (``lib.beets_db.BeetsDB``). Two divergence shapes, both real: a
+    BLOB-stored phantom (before this fix, the anchored regex — evaluated by
+    Beets' ``regexp()`` UDF, which decodes bytes — could see it while the
+    guard's exact SQL equality could not) and a same-PREFIX plain-TEXT
+    decoy (which a substring/prefix-matching query would also select).
+    This proves AGREEMENT, not merely coverage: both phantoms are now
+    invisible to BOTH sides, and a real ``beet modify`` run through the
+    composed production entry point touches only the album the guard
+    already counted.
+    """
+
+    def test_a_blob_stored_phantom_is_invisible_to_the_guard_and_the_query(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            root, library_db, target_id, phantom_id = _seed_two_album_world(
+                base, phantom_identity=MERGED, phantom_as_blob=True,
+            )
+
+            with patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": str(base / "config.ini")},
+                clear=False,
+            ), BeetsDB(str(library_db), library_root=str(root)) as beets:
+                guard_before = beets.resolve_current_release(OLD)
+                self.assertIsInstance(guard_before, CurrentBeetsUnique)
+                assert isinstance(guard_before, CurrentBeetsUnique)  # narrow for pyright
+                self.assertEqual(guard_before.album_id, target_id)
+
+                # The composed REAL retag: real guard, real captured
+                # `run_beets_modify_retag` default, real subprocess.
+                result = retag_merged_album(beets, old_identity=OLD, new_identity=NEW)
+
+            self.assertEqual(result.outcome, RETAG_RETAGGED)
+            self.assertIn(str(target_id), result.detail)
+
+            conn = sqlite3.connect(str(library_db))
+            target_row = conn.execute(
+                "SELECT mb_albumid, typeof(mb_albumid) FROM albums WHERE id = ?",
+                (target_id,),
+            ).fetchone()
+            phantom_row = conn.execute(
+                "SELECT mb_albumid, typeof(mb_albumid) FROM albums WHERE id = ?",
+                (phantom_id,),
+            ).fetchone()
+            conn.close()
+
+            self.assertEqual(target_row, (SURVIVOR, "text"))
+            self.assertEqual(
+                phantom_row, (MERGED.encode("utf-8"), "blob"),
+                "the phantom must stay untouched — the exact-match query must "
+                "not select it",
+            )
+
+    def test_the_retired_regex_form_would_have_matched_the_phantom_too(
+        self,
+    ) -> None:
+        """Historical evidence only (#1093 review; test-fidelity.md Rule
+        C) — not a live code path, since :func:`retag_album_query` no
+        longer knows how to build this shape. Runs the retired query
+        string directly as a real ``beet modify`` subprocess against the
+        SAME two-album world, proving the regex form's divergence from the
+        guard was real, not hypothetical: live-verified, it retagged BOTH
+        albums (``Modifying 2 albums.``)."""
+        from lib.util import beets_subprocess_env
+
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            _root, library_db, target_id, phantom_id = _seed_two_album_world(
+                base, phantom_identity=MERGED, phantom_as_blob=True,
+            )
+
+            with patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": str(base / "config.ini")},
+                clear=False,
+            ):
+                env = beets_subprocess_env()
+            retired_query = f"mb_albumid::^{re.escape(MERGED)}\\Z"
+            proc = sp.run(
+                [
+                    env["CRATEDIGGER_BEETS_PYTHON"], "-m", "beets", "modify",
+                    "-a", "-M", "-W", "-y", retired_query, f"mb_albumid={SURVIVOR}",
+                ],
+                capture_output=True, env=env, timeout=RETAG_TIMEOUT_SECONDS,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+            self.assertIn("Modifying 2 albums.", proc.stdout.decode())
+
+            conn = sqlite3.connect(str(library_db))
+            rows = conn.execute(
+                "SELECT id, mb_albumid FROM albums ORDER BY id",
+            ).fetchall()
+            conn.close()
+            moved_ids = {row[0] for row in rows if row[1] == SURVIVOR}
+            self.assertEqual(
+                moved_ids, {target_id, phantom_id},
+                "the retired regex form silently retagged the phantom too — "
+                "exactly the divergence #1093 fixed",
+            )
+
+    def test_the_query_selects_only_the_exact_target_not_a_same_prefix_decoy(
+        self,
+    ) -> None:
+        """The complementary case to the BLOB phantom above: a decoy whose
+        id is ``MERGED + "0"`` — a plain TEXT value, written the ordinary
+        way, that a substring/prefix-matching query would also select.
+        Exact SQL equality cannot: ``albums.mb_albumid = ?`` bound to
+        MERGED never matches a value one character longer."""
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            root, library_db, target_id, decoy_id = _seed_two_album_world(
+                base, phantom_identity=MERGED + "0", phantom_as_blob=False,
+            )
+
+            with patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": str(base / "config.ini")},
+                clear=False,
+            ), BeetsDB(str(library_db), library_root=str(root)) as beets:
+                result = retag_merged_album(beets, old_identity=OLD, new_identity=NEW)
+
+            self.assertEqual(result.outcome, RETAG_RETAGGED)
+
+            conn = sqlite3.connect(str(library_db))
+            target_row = conn.execute(
+                "SELECT mb_albumid FROM albums WHERE id = ?", (target_id,),
+            ).fetchone()
+            decoy_row = conn.execute(
+                "SELECT mb_albumid FROM albums WHERE id = ?", (decoy_id,),
+            ).fetchone()
+            conn.close()
+
+            self.assertEqual(target_row, (SURVIVOR,))
+            self.assertEqual(
+                decoy_row, (MERGED + "0",),
+                "the same-prefix decoy must stay untouched — the "
+                "exact-match query is not a prefix or substring match",
+            )
 
 
 class TestReadyOutcomes(unittest.TestCase):
@@ -440,6 +719,11 @@ class TestModifyExitStatusIsNotEvidence(unittest.TestCase):
         self.assertIn("TimeoutExpired", result.detail)
 
     def test_a_partial_move_that_leaves_the_new_side_ambiguous_fails(self) -> None:
+        """#1093 item 5 — this is the exact world that produced a
+        self-contradictory failure detail: the old id genuinely moved away
+        (``not held``), yet the pre-fix message unconditionally claimed
+        "the library did not move" regardless. The detail must tell the
+        truth about which side actually changed."""
         beets = library(old_album_ids=(7,))
 
         def half_move() -> None:
@@ -455,6 +739,16 @@ class TestModifyExitStatusIsNotEvidence(unittest.TestCase):
 
         self.assertEqual(result.outcome, RETAG_FAILED)
         self.assertNotIn(result.outcome, RETAG_READY_OUTCOMES)
+        self.assertNotIn(
+            "did not move", result.detail,
+            "the old id observably moved away (not_held) — claiming "
+            '"did not move" while that is true is self-contradictory',
+        )
+        self.assertIn("moved off", result.detail)
+        self.assertIn(MERGED, result.detail)
+        self.assertIn("ambiguous", result.detail)
+        self.assertIn("8", result.detail)
+        self.assertIn("9", result.detail)
 
 
 class TestBeetsAuthorityFailureIsNeverAbsence(unittest.TestCase):
@@ -608,6 +902,11 @@ SIDECAR_NAME = "cratedigger.json"
 INSTALLED_ARTIST = "Installed Artist"
 INSTALLED_ALBUM = "Installed Album"
 INSTALLED_YEAR = 1999
+#: The album directory name under the CURRENT production path template
+#: (``$albumartist/$year - $album/...``, no ``$mb_albumid``), which is why
+#: ``check_real_modify_retag_moved_every_identity``'s relocation/sidecar
+#: clauses default to it.
+INSTALLED_ALBUM_DIR_NAME = f"{INSTALLED_YEAR} - {INSTALLED_ALBUM}"
 
 #: The finite, CERTIFIED world space this module's generated sibling
 #: patrols: not a sample, but one representative of each equivalence class
@@ -636,7 +935,7 @@ ITEM_COUNTS: tuple[int, ...] = (0, 1, 2)
 
 
 def _installed_dir(root: Path) -> Path:
-    return root / INSTALLED_ARTIST / f"{INSTALLED_YEAR} - {INSTALLED_ALBUM}"
+    return root / INSTALLED_ARTIST / INSTALLED_ALBUM_DIR_NAME
 
 
 def _make_real_mp3(path: Path) -> None:
@@ -658,12 +957,16 @@ def _make_real_mp3(path: Path) -> None:
 
 def _seed_real_modify_world(
     base: Path, *, item_count: int, real_audio: bool = False,
+    plugins: tuple[str, ...] = (),
 ) -> tuple[Path, Path, int]:
     """Build one real Beets world: config, library DB, files.
 
     No plugin or metadata-source stub is needed here — unlike the
     ``mbsync`` primitive this replaces, ``beet modify`` never calls
-    MusicBrainz; it needs no candidate mapping at all.
+    MusicBrainz; it needs no candidate mapping at all. ``plugins`` defaults
+    to none loaded; passing the deployment list proves the primitive
+    behaves identically under the real plugin world, not merely that the
+    plugins load (#1093 item 3).
 
     ``item_count == 0`` builds the album row through one real seeded item,
     then deletes exactly that item's row (``with_album=False``, so the
@@ -704,18 +1007,26 @@ def _seed_real_modify_world(
     library_db = base / "library.db"
     # The production path format and clutter list: identity-only movement
     # (or its absence) is observable against the real rules, not a stub.
+    config: dict[str, object] = {
+        "directory": str(root),
+        "library": str(library_db),
+        "plugins": " ".join(plugins),
+        "clutter": ["*.jpg", SIDECAR_NAME],
+        "import": {"move": True, "copy": False, "write": True},
+        "paths": {
+            "default": "$albumartist/$year - $album/$track $title",
+        },
+    }
+    if "discogs" in plugins:
+        # Live-verified (#1093 item 3): without a token the discogs plugin
+        # fails to LOAD (`setup()` tries an interactive OAuth prompt and
+        # raises `UserError` on EOF) — non-fatal to `beet modify` itself
+        # (beets logs "error loading plugin discogs" and continues), but a
+        # bogus `user_token` avoids that noise and matches production,
+        # which always has a real token provisioned (CLAUDE.md § Secrets).
+        config["discogs"] = {"user_token": "test-token"}
     (config_dir / "config.yaml").write_text(
-        yaml.safe_dump({
-            "directory": str(root),
-            "library": str(library_db),
-            "plugins": "",
-            "clutter": ["*.jpg", SIDECAR_NAME],
-            "import": {"move": True, "copy": False, "write": True},
-            "paths": {
-                "default": "$albumartist/$year - $album/$track $title",
-            },
-        }, sort_keys=False),
-        encoding="utf-8",
+        yaml.safe_dump(config, sort_keys=False), encoding="utf-8",
     )
 
     items = [
@@ -826,6 +1137,38 @@ def _run_modify_without_nowrite_flag(
     )
 
 
+def _run_modify_without_nomove_flag(
+    query: str, assignment: str,
+) -> ModifyRetagRun:
+    """The item-4 mutant (#1093): the exact primitive minus ``-M``.
+
+    Run for real, against a real library whose path template makes
+    ``mb_albumid`` path-relevant — only under such a template is the
+    relocation this drops genuinely reachable; the CURRENT production
+    template makes it unfalsifiable (see
+    ``TestRealModifyRetagRelocationAndSidecarClausesAreReachable``).
+    """
+    from lib.util import beets_subprocess_env
+
+    env = beets_subprocess_env()
+    python = env["CRATEDIGGER_BEETS_PYTHON"]
+    proc = sp.run(
+        [
+            python, "-m", "beets", "modify",
+            "-a", "-W", "-y", query, assignment,
+        ],
+        capture_output=True,
+        timeout=RETAG_TIMEOUT_SECONDS,
+        env=env,
+        check=False,
+    )
+    return ModifyRetagRun(
+        returncode=proc.returncode,
+        stdout=proc.stdout.decode("utf-8", errors="replace"),
+        stderr=proc.stderr.decode("utf-8", errors="replace"),
+    )
+
+
 @dataclass(frozen=True)
 class RealModifyObservation:
     """Everything the real world looked like after one real retag."""
@@ -907,6 +1250,9 @@ def observe_real_modify_retag(
 
 def check_real_modify_retag_moved_every_identity(
     observation: RealModifyObservation,
+    *,
+    expected_artist: str = INSTALLED_ARTIST,
+    expected_album_dir_name: str = INSTALLED_ALBUM_DIR_NAME,
 ) -> None:
     """Criterion 3 (#1087) — the real primitive moves ``mb_albumid`` on the
     ALBUM row AND every ITEM row, touches no file's mtime, and touches
@@ -926,14 +1272,18 @@ def check_real_modify_retag_moved_every_identity(
     an id over a world shaped like the RELEASE-ONLY merge that actually
     occurs in production (T6).
 
-    The relocation loop below is honest about its own limit: ``-M`` is
-    belt-and-braces (see :data:`lib.beets_retag.RETAG_NOMOVE_FLAG`), not
-    something this fixture's path templates make reachable — ``mb_albumid``
-    names no path component, so a dropped ``-M`` mutant is NOT expected to
-    trip this check; only the argv-literal seam test
-    (``TestRunBeetsModifyRetagSeam``) pins ``-M``'s presence. What this loop
-    DOES patrol for real: that the retag never moves a file for any OTHER
-    reason on the current, real path configuration.
+    ``expected_artist``/``expected_album_dir_name`` default to the CURRENT
+    production path template's shape (``$albumartist/$year - $album/...``,
+    no ``$mb_albumid``), under which a dropped ``-M`` cannot relocate
+    anything — every T6/T7 caller below relies on that default and is
+    unaffected by this parameter's existence. Passing a different pair lets
+    :class:`TestRealModifyRetagRelocationAndSidecarClausesAreReachable`
+    reuse this SAME relocation/sidecar clause logic against a fixture world
+    whose path template DOES include ``$mb_albumid`` — where the relocation
+    and sidecar-prune clauses are genuinely reachable and killable by a real
+    ``-M``-dropped mutant, closing the #1093 item-4 gap: before this, both
+    clauses could never fail against ANY world this module's fixtures could
+    produce.
     """
     if observation.result.outcome != RETAG_RETAGGED:
         raise AssertionError(
@@ -969,8 +1319,8 @@ def check_real_modify_retag_moved_every_identity(
     for path in observation.item_paths:
         parent = Path(path).parent
         if (
-            parent.name != f"{INSTALLED_YEAR} - {INSTALLED_ALBUM}"
-            or parent.parent.name != INSTALLED_ARTIST
+            parent.name != expected_album_dir_name
+            or parent.parent.name != expected_artist
         ):
             raise AssertionError(
                 f"beet modify RELOCATED an installed file to {path!r}: the "
@@ -1099,6 +1449,294 @@ class TestRealModifyRetagMovesEveryIdentity(unittest.TestCase):
             "dropping -W left the real audio file untouched — the mutant "
             "was not killed by real behaviour",
         )
+
+
+# ---------------------------------------------------------------------------
+# #1093 item 4 — the relocation/sidecar clauses, made genuinely reachable
+# ---------------------------------------------------------------------------
+
+def _identity_relevant_album_dir(root: Path, release_id: str) -> Path:
+    """The album directory for the path template used by
+    :func:`_seed_identity_relevant_path_world`, which — unlike every other
+    fixture in this module — makes ``mb_albumid`` a path component."""
+    return root / INSTALLED_ARTIST / f"{INSTALLED_ALBUM_DIR_NAME} [{release_id}]"
+
+
+def _seed_identity_relevant_path_world(base: Path) -> tuple[Path, Path, int]:
+    """One real Beets world whose path template embeds ``$mb_albumid`` —
+    unlike every OTHER fixture in this module, where identity names no path
+    component, so a dropped ``-M`` cannot relocate anything and the
+    relocation/sidecar-prune clauses in
+    :func:`check_real_modify_retag_moved_every_identity` are permanently
+    unreachable by any world those fixtures can produce.
+
+    Live-verified (#1093 item 4): under THIS template, dropping ``-M``
+    genuinely moves the track file into the new-id-named directory, and the
+    vacated old directory's clutter sweep genuinely removes the sidecar
+    (``prune_dirs``) — turning both previously-unfalsifiable clauses into
+    ones a real mutant can kill.
+    """
+    root = base / "library"
+    root.mkdir()
+    config_dir = base / "beets-config"
+    config_dir.mkdir()
+    library_db = base / "library.db"
+
+    album_dir = _identity_relevant_album_dir(root, MERGED)
+    album_dir.mkdir(parents=True)
+    track_path = album_dir / "01 Installed 1.mp3"
+    track_path.write_bytes(b"installed audio")
+    (album_dir / SIDECAR_NAME).write_text(
+        '{"verified_lossless": true}', encoding="utf-8",
+    )
+
+    (config_dir / "config.yaml").write_text(
+        yaml.safe_dump({
+            "directory": str(root),
+            "library": str(library_db),
+            "plugins": "",
+            "clutter": ["*.jpg", SIDECAR_NAME],
+            "import": {"move": True, "copy": False, "write": True},
+            "paths": {
+                "default": (
+                    "$albumartist/$year - $album [$mb_albumid]/$track $title"
+                ),
+            },
+        }, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    item = beets_library.Item(
+        path=str(track_path), title="Installed 1", artist=INSTALLED_ARTIST,
+        album=INSTALLED_ALBUM, albumartist=INSTALLED_ARTIST, track=1, disc=1,
+        year=INSTALLED_YEAR, mb_albumid=MERGED,
+        mb_trackid="00000001-1111-4111-8111-111111111111",
+    )
+    lib = beets_library.Library(str(library_db), str(root))
+    album = lib.add_album([item])
+    if album.id is None:
+        raise AssertionError("seeded Beets album is missing its database id")
+    album_id = album.id
+    lib._close()
+
+    runtime_config = base / "config.ini"
+    beets_python = os.environ.get("CRATEDIGGER_BEETS_PYTHON", "")
+    if not beets_python:
+        raise AssertionError(
+            "CRATEDIGGER_BEETS_PYTHON is unset — run under nix-shell, which "
+            "supplies the admitted Beets interpreter"
+        )
+    runtime_config.write_text(
+        "[Beets]\n"
+        f"config_dir = {config_dir}\n"
+        f"python = {beets_python}\n",
+        encoding="utf-8",
+    )
+    return root, library_db, album_id
+
+
+def _observe_identity_relevant_path_retag(
+    *, run_modify: RetagModifyFn | None,
+) -> RealModifyObservation:
+    """Run one real retag against the identity-relevant-path world. Not
+    memoised (unlike :func:`observe_real_modify_retag`) — each caller below
+    needs its own fresh world, and there are only two of them."""
+    with tempfile.TemporaryDirectory() as raw:
+        base = Path(raw)
+        root, library_db, album_id = _seed_identity_relevant_path_world(base)
+        old_dir = _identity_relevant_album_dir(root, MERGED)
+        track_path = next(old_dir.glob("*.mp3"))
+        before_mtime_ns = track_path.stat().st_mtime_ns
+
+        with patch.dict(
+            os.environ,
+            {"CRATEDIGGER_RUNTIME_CONFIG": str(base / "config.ini")},
+            clear=False,
+        ), BeetsDB(str(library_db), library_root=str(root)) as beets:
+            if run_modify is None:
+                # No run_modify= — the captured production default.
+                result = retag_merged_album(
+                    beets, old_identity=OLD, new_identity=NEW,
+                )
+            else:
+                result = retag_merged_album(
+                    beets, old_identity=OLD, new_identity=NEW,
+                    run_modify=run_modify,
+                )
+
+        lib = beets_library.Library(str(library_db), str(root))
+        album = lib.get_album(album_id)
+        if album is None:
+            raise AssertionError("the seeded album vanished from the library")
+        items = list(album.items())
+        item_paths = tuple(os.fsdecode(item.path) for item in items)
+        after_mtime_ns = tuple(
+            Path(path).stat().st_mtime_ns for path in item_paths
+        )
+        current_dirs = {Path(path).parent for path in item_paths}
+        current_dir = next(iter(current_dirs)) if len(current_dirs) == 1 else None
+        entries = (
+            tuple(sorted(entry.name for entry in current_dir.iterdir()))
+            if current_dir is not None and current_dir.exists() else ()
+        )
+        lib._close()
+        return RealModifyObservation(
+            item_count=1,
+            variant="identity_relevant_path",
+            result=result,
+            album_mb_albumid=str(album.mb_albumid),
+            item_mb_albumids=tuple(str(item.mb_albumid) for item in items),
+            item_paths=item_paths,
+            installed_dir_entries=entries,
+            item_mtimes_before_ns=(before_mtime_ns,),
+            item_mtimes_after_ns=after_mtime_ns,
+        )
+
+
+class TestRealModifyRetagRelocationAndSidecarClausesAreReachable(
+    unittest.TestCase,
+):
+    """#1093 item 4 — ``check_real_modify_retag_moved_every_identity``'s
+    relocation and sidecar-prune clauses cannot fail against ANY world
+    ``_seed_real_modify_world`` can produce, because its path template
+    never makes ``mb_albumid`` path-relevant. Per
+    `.claude/rules/code-quality.md` § "the remedy for a survivor is to
+    widen the strategy, not delete the clause": this widens the fixture
+    world (:func:`_seed_identity_relevant_path_world`) rather than deleting
+    either clause, and plants the real ``-M``-dropped mutant to prove both
+    are now genuinely killable — closing the gap while ALSO empirically
+    proving :data:`lib.beets_retag.RETAG_NOMOVE_FLAG`'s own docstring claim
+    for the first time, rather than merely asserting it.
+    """
+
+    def test_the_production_primitive_never_relocates_even_when_identity_is_path_relevant(
+        self,
+    ) -> None:
+        """Must-still-work: with ``-M`` present (the real captured
+        default), the file stays exactly where it was — still named for
+        the MERGED id — even though the path template WOULD make the new
+        id a different directory."""
+        observation = _observe_identity_relevant_path_retag(run_modify=None)
+
+        self.assertEqual(observation.result.outcome, RETAG_RETAGGED)
+        check_real_modify_retag_moved_every_identity(
+            observation,
+            expected_artist=INSTALLED_ARTIST,
+            expected_album_dir_name=f"{INSTALLED_ALBUM_DIR_NAME} [{MERGED}]",
+        )
+
+    def test_dropping_nomove_relocates_the_file_for_real(self) -> None:
+        """The item-4 mutant kills the RELOCATION clause: told the file
+        should still be at the OLD (MERGED-named) directory, the checker
+        must catch that it moved to the NEW one."""
+        observation = _observe_identity_relevant_path_retag(
+            run_modify=_run_modify_without_nomove_flag,
+        )
+
+        self.assertEqual(observation.result.outcome, RETAG_RETAGGED)
+        with self.assertRaises(AssertionError) as caught:
+            check_real_modify_retag_moved_every_identity(
+                observation,
+                expected_artist=INSTALLED_ARTIST,
+                expected_album_dir_name=f"{INSTALLED_ALBUM_DIR_NAME} [{MERGED}]",
+            )
+        self.assertIn("RELOCATED", str(caught.exception))
+
+    def test_dropping_nomove_also_loses_the_sidecar_to_the_prune_sweep(
+        self,
+    ) -> None:
+        """The SAME mutant, isolating the SIDECAR clause independently
+        (per-clause proof, `docs/generated-testing.md` § "Per-clause
+        proof"): told the file's NEW (post-move) directory is the correct
+        one — so the relocation clause does not itself trip — the sidecar
+        clause still must catch that ``cratedigger.json`` did not follow
+        the move; only the tracked item file did."""
+        observation = _observe_identity_relevant_path_retag(
+            run_modify=_run_modify_without_nomove_flag,
+        )
+
+        self.assertEqual(observation.result.outcome, RETAG_RETAGGED)
+        with self.assertRaises(AssertionError) as caught:
+            check_real_modify_retag_moved_every_identity(
+                observation,
+                expected_artist=INSTALLED_ARTIST,
+                expected_album_dir_name=f"{INSTALLED_ALBUM_DIR_NAME} [{SURVIVOR}]",
+            )
+        self.assertIn("sidecar", str(caught.exception))
+
+
+# ---------------------------------------------------------------------------
+# #1093 item 3 — the real deployment plugin list, not plugins: ""
+# ---------------------------------------------------------------------------
+
+class TestRealModifyRetagWithDeploymentPlugins(unittest.TestCase):
+    """#1093 item 3 — every real-Beets fixture above runs with ``plugins:
+    ""``, while production loads the full deployment list
+    (``examples/cratedigger.nix``). #1087's review closed this gap BY HAND
+    — a reviewer read every deployed plugin's ``register_listener`` calls
+    and found none fire on ``modify -a -M -W -y`` — but the TESTS never
+    encoded that, so a future plugin gaining a ``write`` or
+    ``database_change`` listener would not be caught here.
+
+    Composes the REAL ``retag_merged_album``, a REAL ``beet modify``
+    subprocess, and a library configured with the REAL deployment plugin
+    list — derived from ``examples/cratedigger.nix`` via
+    ``tests.beets_world.extract_consumer_beets_world_config``, never
+    hand-typed, so a plugin added to or removed from the deployment config
+    is picked up automatically — proving the primitive's observable
+    behavior is unchanged: identity moves, no file relocates, the sidecar
+    survives, no file's mtime changes. Not merely that the plugins load.
+    """
+
+    def test_the_full_deployment_plugin_list_loads_and_behaves_identically(
+        self,
+    ) -> None:
+        deployment_plugins = extract_consumer_beets_world_config(
+            REPO_ROOT,
+        ).deployment_plugins
+
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            root, library_db, album_id = _seed_real_modify_world(
+                base, item_count=1, plugins=deployment_plugins,
+            )
+            track_files = _track_files(root)
+            item_mtimes_before_ns = tuple(
+                path.stat().st_mtime_ns for path in track_files
+            )
+            with patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": str(base / "config.ini")},
+                clear=False,
+            ), BeetsDB(str(library_db), library_root=str(root)) as beets:
+                result = retag_merged_album(
+                    beets, old_identity=OLD, new_identity=NEW,
+                )
+            item_mtimes_after_ns = tuple(
+                path.stat().st_mtime_ns for path in track_files
+            )
+
+            lib = beets_library.Library(str(library_db), str(root))
+            album = lib.get_album(album_id)
+            if album is None:
+                raise AssertionError("the seeded album vanished from the library")
+            items = list(album.items())
+            observation = RealModifyObservation(
+                item_count=1,
+                variant="deployment_plugins",
+                result=result,
+                album_mb_albumid=str(album.mb_albumid),
+                item_mb_albumids=tuple(str(item.mb_albumid) for item in items),
+                item_paths=tuple(os.fsdecode(item.path) for item in items),
+                installed_dir_entries=tuple(sorted(
+                    entry.name for entry in _installed_dir(root).iterdir()
+                )) if _installed_dir(root).exists() else (),
+                item_mtimes_before_ns=item_mtimes_before_ns,
+                item_mtimes_after_ns=item_mtimes_after_ns,
+            )
+            lib._close()
+
+        check_real_modify_retag_moved_every_identity(observation)
 
 
 if __name__ == "__main__":
