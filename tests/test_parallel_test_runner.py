@@ -453,9 +453,19 @@ class TestModuleScheduling(unittest.TestCase):
         self,
     ) -> None:
         self.assertEqual(recommended_worker_count(1), 1)
-        self.assertEqual(recommended_worker_count(8), 4)
-        self.assertEqual(recommended_worker_count(30), 12)
-        self.assertEqual(recommended_worker_count(64), 12)
+        self.assertEqual(recommended_worker_count(8), 6)
+        self.assertEqual(recommended_worker_count(16), 12)
+        self.assertEqual(recommended_worker_count(30), 22)
+        self.assertEqual(recommended_worker_count(64), 48)
+
+    def test_worker_policy_has_no_fixed_ceiling(self) -> None:
+        """Issue #1131: the prior flat DEFAULT_MAX_WORKERS=12 ceiling
+        predates issue #1111's admission control + headroom precondition
+        and this issue's own ephemeral-PostgreSQL RAM/tmpfs diet, both of
+        which make an unbounded proportional formula safe. A much larger
+        host must not be silently clamped back down to a small constant —
+        a known-bad mutant reintroducing ``min(12, ...)`` must fail this."""
+        self.assertEqual(recommended_worker_count(128), 96)
 
     def test_generated_first_schedule_is_exact_and_deterministic(self) -> None:
         modules = tuple(
