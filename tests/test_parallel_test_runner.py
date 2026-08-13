@@ -166,8 +166,8 @@ class TestWorkerCrashClassification(unittest.TestCase):
         configured 1 GiB startup floor (CRATEDIGGER_TEST_RAM_MIN_BYTES) —
         real exhaustion the suite would refuse to even start under — but
         was ABOVE the old internal _MIN_VALID_TEMP_HEADROOM_BYTES (64 MiB),
-        so it used to read as an ordinary worker failure. tests/test_
-        decision_corpus_export.py's now-removed nested nix-shell
+        so it used to read as an ordinary worker failure.
+        tests/test_decision_corpus_export.py's now-removed nested nix-shell
         subprocesses (issue #1131) used to genuinely fail in exactly this
         band mid-run.
         """

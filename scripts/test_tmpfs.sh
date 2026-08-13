@@ -79,12 +79,22 @@ setup_cratedigger_test_tmpfs() {
     # message instead of queueing on the lock (issue #1111 review M2) — this
     # setup still runs in full otherwise; only the free-bytes refusal defers.
     # This is inherited process environment, not an entry-time flag: a
-    # NESTED nix-shell a test spawns as its own subprocess (e.g.
-    # tests/test_decision_corpus_export.py) also inherits it from the
-    # enclosing suite and skips the same refusal — deliberately, since the
-    # enclosing run_suite() already owns headroom enforcement for the whole
-    # run. Only a genuinely interactive nix-shell entry, started outside any
-    # suite run, never has this set and keeps its own entry guard.
+    # NESTED nix-shell a test spawns as its own subprocess also inherits it
+    # from the enclosing suite and skips the same refusal — deliberately,
+    # since the enclosing run_suite() already owns headroom enforcement for
+    # the whole run. No test currently nests a nix-shell this way —
+    # tests/test_decision_corpus_export.py used to nest six such calls;
+    # issue #1131 removed the nesting since the already-active interpreter
+    # needed no re-entry. This is the SAME `if` check either way, so it is
+    # not dormant: it still runs, and skips, on every suite invocation
+    # started by scripts/test.sh, scripts/run_final_gate.sh, and
+    # scripts/daily_flake_update.sh, which all set this var before their
+    # own top-level nix-shell entry. Only the NESTED case — one shell
+    # spawning another as its own subprocess and inheriting the var that
+    # way — currently has no live example; nothing here needs to change
+    # for the next test that legitimately needs it. Only a genuinely
+    # interactive nix-shell entry, started outside any suite run, never has
+    # this set and keeps its own entry guard.
     if [[ "${CRATEDIGGER_SUITE_OWNS_HEADROOM:-}" != "1" ]]; then
         available_bytes="$(
             df -B1 --output=avail "$parent" | tail -n 1 | tr -d '[:space:]'
