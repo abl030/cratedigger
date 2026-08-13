@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
@@ -154,7 +155,16 @@ class SuiteRun:
 
 PhaseExecutor = Callable[[PhaseSpec, tuple[str, ...], Path], PhaseExecution]
 
-_active_process: subprocess.Popen[bytes] | None = None
+#: Every phase process currently running, keyed by a unique per-call token
+#: (issue #1131: a trailing "python" phase now runs concurrently with the
+#: phases before it, so more than one process can be active at once — the
+#: single module-level ``_active_process`` slot this replaces could only
+#: ever track the most recent one). Guarded by ``_active_processes_lock``;
+#: read by the suite's interrupt handler (always on the main thread — see
+#: ``_execute_suite``) to signal every currently-running phase process, and
+#: written by ``execute_phase`` from whichever thread is running that phase.
+_active_processes: dict[object, subprocess.Popen[bytes]] = {}
+_active_processes_lock = threading.Lock()
 
 
 def _utc_now() -> str:
@@ -714,9 +724,16 @@ def execute_phase(
     command: tuple[str, ...],
     log_path: Path,
 ) -> PhaseExecution:
-    """Run one command into its complete private phase log."""
-    global _active_process
+    """Run one command into its complete private phase log.
+
+    Safe to call from more than one thread at once (issue #1131): each
+    call registers its own child process under a fresh token in
+    ``_active_processes`` rather than a single shared slot, so the
+    suite's interrupt handler can signal every phase that is genuinely
+    running right now, not just the most recently started one.
+    """
     started = time.monotonic()
+    registry_token = object()
     try:
         with log_path.open("wb") as output:
             try:
@@ -734,10 +751,12 @@ def execute_phase(
                     elapsed_seconds=time.monotonic() - started,
                     infrastructure_error=detail,
                 )
-            _active_process = process
+            with _active_processes_lock:
+                _active_processes[registry_token] = process
             exit_code = process.wait()
     finally:
-        _active_process = None
+        with _active_processes_lock:
+            _active_processes.pop(registry_token, None)
         if log_path.exists():
             log_path.chmod(0o600)
     elapsed = time.monotonic() - started
@@ -1008,6 +1027,17 @@ def _execute_suite(
     Called only from inside ``acquire_suite_admission`` — the admission lock
     is held for this entire call, covering the whole run's tmpfs footprint,
     not just the preflight (issue #1111).
+
+    A trailing phase literally named "python" — the exact shape both
+    ``_default_phases()`` and ``scripts/run_targeted_tests.py::
+    targeted_phases()`` always produce — runs CONCURRENTLY with every
+    phase before it (issue #1131): the five cheap gates (js-syntax,
+    js-unit, pyright, ruff, vulture) total roughly 30s against a Python
+    phase running 150-190s, on an otherwise mostly-idle box for that
+    whole window. Any other phase shape — no phase named "python", or one
+    where it isn't last (every custom ``phases=`` list this module's own
+    contract tests below construct) — runs every phase strictly serially,
+    unchanged from before this issue.
     """
     bundle = _create_bundle(runtime)
     started_at = _utc_now()
@@ -1049,21 +1079,37 @@ def _execute_suite(
     def interrupt(signum: int, _frame: object) -> None:
         nonlocal interrupted_signal
         interrupted_signal = signum
-        process = _active_process
-        if process is not None and process.poll() is None:
-            try:
-                os.killpg(process.pid, signum)
-            except ProcessLookupError:
-                pass
+        # Issue #1131: up to two phases can be genuinely active at once (a
+        # trailing "python" phase plus whichever leading phase is running
+        # concurrently with it) — signal every currently-active process,
+        # not just a single most-recent one. Python only ever runs this
+        # handler on the main thread regardless of which thread's syscall
+        # the OS signal actually interrupted, so no lock is needed around
+        # `interrupted_signal` itself; `_active_processes` still needs one
+        # since phase threads add/remove their own entries concurrently.
+        with _active_processes_lock:
+            processes = tuple(_active_processes.values())
+        for process in processes:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signum)
+                except ProcessLookupError:
+                    pass
 
     for signum in handled_signals:
         signal.signal(signum, interrupt)
 
-    try:
-        for index, spec in enumerate(plan):
-            if interrupted_signal is not None:
-                break
-            phase_started = _utc_now()
+    # Every write to `summary` (a read-replace-publish) and every write to
+    # `output` is serialized through this one lock so a phase running in
+    # the leading-group thread can never publish over — or interleave
+    # terminal output with — one running concurrently in this thread.
+    publish_lock = threading.Lock()
+
+    def run_one_phase(index: int) -> None:
+        nonlocal summary
+        spec = plan[index]
+        phase_started = _utc_now()
+        with publish_lock:
             running_phase = msgspec.structs.replace(
                 summary.phases[index],
                 state="running",
@@ -1074,100 +1120,102 @@ def _execute_suite(
             output.write(f"=== {spec.name} ===\n")
             output.flush()
 
-            log_path = bundle / f"{spec.name}.log"
-            try:
-                execution = executor(spec, spec.command, log_path)
-            except Exception as exc:  # noqa: BLE001 - phase infrastructure boundary
-                detail = f"{type(exc).__name__}: {exc}"
-                if not log_path.exists():
-                    log_path.write_text(
-                        f"infrastructure failure: {detail}\n",
-                        encoding="utf-8",
-                    )
-                execution = PhaseExecution(
-                    exit_code=127,
-                    elapsed_seconds=0.0,
-                    infrastructure_error=detail,
+        log_path = bundle / f"{spec.name}.log"
+        try:
+            execution = executor(spec, spec.command, log_path)
+        except Exception as exc:  # noqa: BLE001 - phase infrastructure boundary
+            detail = f"{type(exc).__name__}: {exc}"
+            if not log_path.exists():
+                log_path.write_text(
+                    f"infrastructure failure: {detail}\n",
+                    encoding="utf-8",
                 )
-            if log_path.exists():
-                log_path.chmod(0o600)
-            phase_finished = _utc_now()
+            execution = PhaseExecution(
+                exit_code=127,
+                elapsed_seconds=0.0,
+                infrastructure_error=detail,
+            )
+        if log_path.exists():
+            log_path.chmod(0o600)
+        phase_finished = _utc_now()
 
-            if interrupted_signal is not None:
-                interrupted_failure = _indexed_failure(
-                    identity=spec.name,
-                    owner="",
-                    detail=f"interrupted by signal {interrupted_signal}",
-                    rerun_command=spec.rerun_command,
-                    log=log_path.name,
-                )
-                completed_phase = CheckPhase(
-                    name=spec.name,
-                    state="interrupted",
-                    command=spec.command,
-                    rerun_command=spec.rerun_command,
-                    log=log_path.name,
-                    started_at=phase_started,
-                    finished_at=phase_finished,
-                    elapsed_seconds=execution.elapsed_seconds,
-                    exit_code=128 + interrupted_signal,
-                    failures=(interrupted_failure,),
-                )
-                summary = _replace_phase(summary, index, completed_phase)
-                _publish_summary(bundle, summary)
-                break
-
-            parser_error: str | None = None
-            try:
-                failures, metrics = _parse_failures(spec, log_path)
-            except (OSError, ValueError, msgspec.DecodeError, msgspec.ValidationError) as exc:
-                parser_error = f"{type(exc).__name__}: {exc}"
-                failures = ()
-                metrics = CheckMetricsMarker()
-
-            infrastructure_error = execution.infrastructure_error or parser_error
-            if execution.exit_code == 0 and failures:
-                infrastructure_error = (
-                    "phase emitted failure markers but exited zero"
-                )
-            if execution.exit_code == 0 and infrastructure_error is None:
-                phase_state: PhaseState = "passed"
-            elif (
-                execution.exit_code in spec.failure_exit_codes
-                and infrastructure_error is None
-            ):
-                phase_state = "failed"
-            else:
-                phase_state = "infrastructure-failure"
-
-            if phase_state != "passed" and not failures:
-                detail = infrastructure_error or (
-                    f"phase failed with exit {execution.exit_code}"
-                )
-                failures = (
-                    _indexed_failure(
-                        identity=spec.name,
-                        owner="",
-                        detail=detail,
-                        rerun_command=spec.rerun_command,
-                        log=log_path.name,
-                    ),
-                )
+        if interrupted_signal is not None:
+            interrupted_failure = _indexed_failure(
+                identity=spec.name,
+                owner="",
+                detail=f"interrupted by signal {interrupted_signal}",
+                rerun_command=spec.rerun_command,
+                log=log_path.name,
+            )
             completed_phase = CheckPhase(
                 name=spec.name,
-                state=phase_state,
+                state="interrupted",
                 command=spec.command,
                 rerun_command=spec.rerun_command,
                 log=log_path.name,
                 started_at=phase_started,
                 finished_at=phase_finished,
                 elapsed_seconds=execution.elapsed_seconds,
-                exit_code=execution.exit_code,
-                failures=failures,
-                tests_run=metrics.tests_run,
-                targets_run=metrics.targets_run,
-                scheduled_targets=metrics.scheduled_targets,
+                exit_code=128 + interrupted_signal,
+                failures=(interrupted_failure,),
             )
+            with publish_lock:
+                summary = _replace_phase(summary, index, completed_phase)
+                _publish_summary(bundle, summary)
+            return
+
+        parser_error: str | None = None
+        try:
+            failures, metrics = _parse_failures(spec, log_path)
+        except (OSError, ValueError, msgspec.DecodeError, msgspec.ValidationError) as exc:
+            parser_error = f"{type(exc).__name__}: {exc}"
+            failures = ()
+            metrics = CheckMetricsMarker()
+
+        infrastructure_error = execution.infrastructure_error or parser_error
+        if execution.exit_code == 0 and failures:
+            infrastructure_error = (
+                "phase emitted failure markers but exited zero"
+            )
+        if execution.exit_code == 0 and infrastructure_error is None:
+            phase_state: PhaseState = "passed"
+        elif (
+            execution.exit_code in spec.failure_exit_codes
+            and infrastructure_error is None
+        ):
+            phase_state = "failed"
+        else:
+            phase_state = "infrastructure-failure"
+
+        if phase_state != "passed" and not failures:
+            detail = infrastructure_error or (
+                f"phase failed with exit {execution.exit_code}"
+            )
+            failures = (
+                _indexed_failure(
+                    identity=spec.name,
+                    owner="",
+                    detail=detail,
+                    rerun_command=spec.rerun_command,
+                    log=log_path.name,
+                ),
+            )
+        completed_phase = CheckPhase(
+            name=spec.name,
+            state=phase_state,
+            command=spec.command,
+            rerun_command=spec.rerun_command,
+            log=log_path.name,
+            started_at=phase_started,
+            finished_at=phase_finished,
+            elapsed_seconds=execution.elapsed_seconds,
+            exit_code=execution.exit_code,
+            failures=failures,
+            tests_run=metrics.tests_run,
+            targets_run=metrics.targets_run,
+            scheduled_targets=metrics.scheduled_targets,
+        )
+        with publish_lock:
             summary = _replace_phase(summary, index, completed_phase)
             _publish_summary(bundle, summary)
             output.write(
@@ -1175,7 +1223,38 @@ def _execute_suite(
                 f"({execution.elapsed_seconds:.1f}s, {len(failures)} failures)\n"
             )
             output.flush()
+
+    def run_phase_sequence(indices: tuple[int, ...]) -> None:
+        # Same "no new phase starts once interrupted" contract the
+        # original single serial loop enforced with its own `break` —
+        # applied independently to each of the (up to two) concurrently
+        # running phase groups, so an unstarted phase in EITHER group
+        # stays "not-run" rather than starting after an interrupt.
+        for index in indices:
+            if interrupted_signal is not None:
+                return
+            run_one_phase(index)
+
+    if len(plan) > 1 and plan[-1].name == "python":
+        leading_indices = tuple(range(len(plan) - 1))
+        remaining_indices = (len(plan) - 1,)
+    else:
+        leading_indices = ()
+        remaining_indices = tuple(range(len(plan)))
+
+    leading_thread: threading.Thread | None = None
+    try:
+        if leading_indices:
+            leading_thread = threading.Thread(
+                target=run_phase_sequence,
+                args=(leading_indices,),
+                name="cratedigger-check-leading-phases",
+            )
+            leading_thread.start()
+        run_phase_sequence(remaining_indices)
     finally:
+        if leading_thread is not None:
+            leading_thread.join()
         for signum, prior in prior_handlers.items():
             signal.signal(signum, prior)
 

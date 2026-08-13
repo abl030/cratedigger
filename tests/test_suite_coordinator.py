@@ -305,6 +305,133 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         self.assertIn("INTERRUPTED: signal 15", terminal)
         self.assertFalse((result.bundle / "must-not-run.log").exists())
 
+    def test_leading_phases_run_concurrently_with_a_trailing_python_phase(
+        self,
+    ) -> None:
+        """Issue #1131: every phase before a phase literally named "python"
+        (the shape both _default_phases() and targeted_phases() always
+        produce) must run CONCURRENTLY with it, not serially.
+
+        Proven with a bounded rendezvous rather than a timing measurement:
+        the leading "js-syntax" phase polls (up to 5s) for a marker file
+        only the "python" phase creates. Under strict serial scheduling
+        "python" would never even start until "js-syntax" finished, so the
+        marker could never appear in time and the leading phase would fail
+        closed after the full 5s wait — this is this test's own known-bad
+        self-test: reverting to serial scheduling turns this from a
+        near-instant pass into a ~5s failure, not a hang.
+        """
+        marker = self.runtime / "python-phase-started"
+        poll_script = (
+            "import pathlib, time, sys\n"
+            f"target = pathlib.Path({str(marker)!r})\n"
+            "deadline = time.monotonic() + 5.0\n"
+            "while not target.exists():\n"
+            "    if time.monotonic() > deadline:\n"
+            "        sys.exit(1)\n"
+            "    time.sleep(0.02)\n"
+        )
+        phases = (
+            PhaseSpec(
+                "js-syntax",
+                (sys.executable, "-c", poll_script),
+                "leading-check",
+                "generic",
+            ),
+            PhaseSpec(
+                "python",
+                (
+                    sys.executable,
+                    "-c",
+                    f"import pathlib; pathlib.Path({str(marker)!r}).touch()",
+                ),
+                "python3 scripts/run_python_tests.py",
+                "python",
+            ),
+        )
+
+        result, _terminal = self._run(phases)
+        summary = decode_summary(result.bundle / "summary.json")
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(summary.state, "passed")
+        self.assertEqual(
+            tuple(phase.state for phase in summary.phases),
+            ("passed", "passed"),
+        )
+
+    def test_sigterm_kills_every_concurrently_active_phase(self) -> None:
+        """Issue #1131 regression pin for the single-``_active_process``
+        shape ``execute_phase``/the interrupt handler replaced with a
+        registry: once a leading phase and a trailing "python" phase run
+        concurrently, SIGTERM must signal BOTH currently-running
+        processes, not only whichever most recently registered. A third
+        leading phase ("js-unit") that has not started yet when the
+        signal arrives must still stay "not-run" — the same "no new phase
+        starts after an interrupt" contract the single-group case already
+        had, now proven independently for the leading group's own thread.
+        """
+        leading_marker = self.runtime / "leading-phase-started"
+        js_unit_sentinel = self.runtime / "js-unit-ran"
+        phases = (
+            PhaseSpec(
+                "js-syntax",
+                (
+                    sys.executable,
+                    "-c",
+                    (
+                        "import pathlib, time\n"
+                        f"pathlib.Path({str(leading_marker)!r}).touch()\n"
+                        "time.sleep(30)\n"
+                    ),
+                ),
+                "leading-check",
+                "generic",
+            ),
+            PhaseSpec(
+                "js-unit",
+                (
+                    sys.executable,
+                    "-c",
+                    f"import pathlib; pathlib.Path({str(js_unit_sentinel)!r}).touch()",
+                ),
+                "js-unit-check",
+                "generic",
+            ),
+            PhaseSpec(
+                "python",
+                (
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os, pathlib, signal, time, sys\n"
+                        f"target = pathlib.Path({str(leading_marker)!r})\n"
+                        "deadline = time.monotonic() + 5.0\n"
+                        "while not target.exists():\n"
+                        "    if time.monotonic() > deadline:\n"
+                        "        sys.exit(1)\n"
+                        "    time.sleep(0.02)\n"
+                        "os.kill(os.getppid(), signal.SIGTERM)\n"
+                        "time.sleep(30)\n"
+                    ),
+                ),
+                "python3 scripts/run_python_tests.py",
+                "python",
+            ),
+        )
+
+        result, terminal = self._run(phases)
+        summary = decode_summary(result.bundle / "summary.json")
+
+        self.assertEqual(result.exit_code, 143)
+        self.assertEqual(summary.state, "interrupted")
+        self.assertEqual(
+            tuple(phase.state for phase in summary.phases),
+            ("interrupted", "not-run", "interrupted"),
+        )
+        self.assertIn("INTERRUPTED: signal 15", terminal)
+        self.assertFalse(js_unit_sentinel.exists())
+
     def test_summary_schema_rejects_wrong_wire_types(self) -> None:
         result, _terminal = self._run(
             (
