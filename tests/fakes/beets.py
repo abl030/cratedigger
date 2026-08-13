@@ -87,6 +87,7 @@ class FakeBeetsDB:
         self.locate_calls: list[str] = []
         self.get_min_bitrate_calls: list[str] = []
         self.resolve_current_release_calls: list[ReleaseIdentity] = []
+        self._resolve_current_release_errors: dict[str, Exception] = {}
         self._next_synthetic_album_id = 1_000_000
 
     # --- Seeding helpers ---
@@ -193,6 +194,16 @@ class FakeBeetsDB:
         self._item_paths[key] = list(paths)
         self._clear_presence_override(key)
         self._ensure_seeded_album(key)
+
+    def set_resolve_current_release_error(
+        self, release_id: str, error: Exception,
+    ) -> None:
+        """Force ``resolve_current_release(identity)`` to raise ``error``
+        for this exact ``release_id`` — models a Beets SQLite authority
+        failure (locked/IO/cant-open) for
+        ``MergeRekeyService._resolve_current_release`` (#1089 MINOR-5)."""
+        key = normalize_release_id(release_id)
+        self._resolve_current_release_errors[key] = error
 
     def set_release_identities(self, rows: list[dict[str, Any]]) -> None:
         self._release_identities = [copy.deepcopy(r) for r in rows]
@@ -620,6 +631,9 @@ class FakeBeetsDB:
         """State-respecting fake of the exact current-library resolver."""
 
         self.resolve_current_release_calls.append(identity)
+        error = self._resolve_current_release_errors.get(identity.release_id)
+        if error is not None:
+            raise error
         if self._album_exists.get(identity.release_id) is False:
             return CurrentBeetsMissing(identity=identity)
         ids = self._album_ids_lookup(identity.release_id)

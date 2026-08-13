@@ -27,6 +27,14 @@ R4  A returned survivor is always a MusicBrainz UUID. A Discogs numeric or
     a garbage token never escapes as a release identity.
 R5  Non-MusicBrainz identities and unconfigured processes never touch the
     network at all — inertness is observable, not merely intended.
+R6  (#1089 BLOCKING-1) The tagged ``canonical_release_status`` and the
+    collapsed ``canonical_release_id`` never disagree: redirected iff the
+    collapsed answer is that same survivor, otherwise the collapsed answer
+    is ``None``.
+R7  (#1089 BLOCKING-1) A fetch that raised or a mirror answering nothing
+    usable is NEVER ``CanonicalReleaseCurrent`` — the exact bug this
+    property exists to kill: a configured-but-down mirror must never be
+    read as "MusicBrainz confirms this request was never merged".
 """
 
 from __future__ import annotations
@@ -39,7 +47,14 @@ from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-from lib.mb_canonical import canonical_release_id
+from lib.mb_canonical import (
+    CanonicalReleaseAnswer,
+    CanonicalReleaseCurrent,
+    CanonicalReleaseRedirected,
+    CanonicalReleaseUnavailable,
+    canonical_release_id,
+    canonical_release_status,
+)
 from lib.release_identity import detect_release_source, normalize_release_id
 
 # The live merge probed on 2026-08-06 (request 316).
@@ -90,6 +105,43 @@ def check_no_fetch_attempted(calls: list[str]) -> None:
     if calls:
         raise AssertionError(
             f"a lookup that must be inert reached the network: {calls!r}"
+        )
+
+
+def check_tagged_status_agrees_with_collapsed_answer(
+    status: CanonicalReleaseAnswer, answer: str | None,
+) -> None:
+    """R6 — ``canonical_release_id`` is DEFINED IN TERMS OF the tagged
+    status; this is the composed relationship, not an assumption."""
+    if isinstance(status, CanonicalReleaseRedirected):
+        if answer != status.survivor:
+            raise AssertionError(
+                f"tagged status redirected to {status.survivor!r} but the "
+                f"collapsed resolver returned {answer!r}"
+            )
+        return
+    if answer is not None:
+        raise AssertionError(
+            f"collapsed resolver returned {answer!r} but the tagged status "
+            f"was {status!r} (not redirected)"
+        )
+
+
+def check_never_current_without_a_real_answer(
+    status: CanonicalReleaseAnswer, *, fetch_raised: bool,
+) -> None:
+    """R7 (#1089 BLOCKING-1) — a raised/silent fetch is NEVER "current".
+
+    The exact regression this checker exists to kill: an earlier
+    implementation classified a redirect whose body named no usable
+    MusicBrainz id as ``CanonicalReleaseCurrent`` — indistinguishable from
+    "MusicBrainz genuinely confirmed no merge" — when it is really an
+    unusable response shape (``CanonicalReleaseUnavailable``).
+    """
+    if fetch_raised and isinstance(status, CanonicalReleaseCurrent):
+        raise AssertionError(
+            "a fetch that raised was classified as CanonicalReleaseCurrent "
+            "— a down mirror must never read as a confirmed non-merge"
         )
 
 
@@ -189,6 +241,15 @@ class TestResolverProperties(unittest.TestCase):
         check_answer_is_a_musicbrainz_id(answer)
         self.assertEqual(len(calls), 1, "a configured MB lookup must fetch once")
 
+        # R6/R7 (#1089): the tagged sibling, same envelope, its own fetch —
+        # calling both through ONE shared fetch would double-count "fetched
+        # once" for each.
+        tagged_fetch, tagged_calls = _recording_fetch(envelope)
+        status = canonical_release_status(STORED, ws2_base=BASE, fetch=tagged_fetch)
+        check_tagged_status_agrees_with_collapsed_answer(status, answer)
+        check_never_current_without_a_real_answer(status, fetch_raised=False)
+        self.assertEqual(len(tagged_calls), 1)
+
     @settings(deadline=None)
     @given(exc=FETCH_EXCEPTIONS)
     def test_every_fetch_failure_is_fail_open(
@@ -206,6 +267,14 @@ class TestResolverProperties(unittest.TestCase):
 
         self.assertIsNone(answer)
         self.assertEqual(len(calls), 1)
+
+        # R7 (#1089 BLOCKING-1): a raised fetch is ALWAYS "unavailable",
+        # never a false "current" — the exact resolver-silence bug.
+        tagged_fetch, tagged_calls = _recording_fetch(None, raises=exc)
+        status = canonical_release_status(STORED, ws2_base=BASE, fetch=tagged_fetch)
+        self.assertEqual(status, CanonicalReleaseUnavailable())
+        check_never_current_without_a_real_answer(status, fetch_raised=True)
+        self.assertEqual(len(tagged_calls), 1)
 
     @settings(deadline=None)
     @given(
@@ -226,6 +295,15 @@ class TestResolverProperties(unittest.TestCase):
         self.assertIsNone(answer)
         check_no_fetch_attempted(calls)
 
+        tagged_fetch, tagged_calls = _recording_fetch(
+            {"payload": {"id": SURVIVOR}, "redirected": True},
+        )
+        status = canonical_release_status(
+            release_id, ws2_base=BASE, fetch=tagged_fetch,
+        )
+        self.assertEqual(status, CanonicalReleaseUnavailable())
+        check_no_fetch_attempted(tagged_calls)
+
     @settings(deadline=None)
     @given(base=st.sampled_from(["", "   ", "/", None]))
     def test_an_unconfigured_process_is_inert(self, base: str | None) -> None:
@@ -239,6 +317,15 @@ class TestResolverProperties(unittest.TestCase):
 
         self.assertIsNone(answer)
         check_no_fetch_attempted(calls)
+
+        tagged_fetch, tagged_calls = _recording_fetch(
+            {"payload": {"id": SURVIVOR}, "redirected": True},
+        )
+        status = canonical_release_status(
+            STORED, ws2_base=base or "", fetch=tagged_fetch,
+        )
+        self.assertEqual(status, CanonicalReleaseUnavailable())
+        check_no_fetch_attempted(tagged_calls)
 
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
@@ -276,6 +363,46 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         check_never_the_requested_id(SURVIVOR, STORED)
         check_answer_is_a_musicbrainz_id(SURVIVOR)
         check_no_fetch_attempted([])
+        check_tagged_status_agrees_with_collapsed_answer(
+            CanonicalReleaseRedirected(SURVIVOR), SURVIVOR,
+        )
+        check_tagged_status_agrees_with_collapsed_answer(
+            CanonicalReleaseCurrent(), None,
+        )
+        check_tagged_status_agrees_with_collapsed_answer(
+            CanonicalReleaseUnavailable(), None,
+        )
+        check_never_current_without_a_real_answer(
+            CanonicalReleaseUnavailable(), fetch_raised=True,
+        )
+        check_never_current_without_a_real_answer(
+            CanonicalReleaseCurrent(), fetch_raised=False,
+        )
+
+    def test_a_redirected_status_disagreeing_with_the_answer_is_rejected(
+        self,
+    ) -> None:
+        with self.assertRaises(AssertionError):
+            check_tagged_status_agrees_with_collapsed_answer(
+                CanonicalReleaseRedirected(SURVIVOR), STORED,
+            )
+
+    def test_a_collapsed_answer_with_no_redirected_status_is_rejected(
+        self,
+    ) -> None:
+        with self.assertRaises(AssertionError):
+            check_tagged_status_agrees_with_collapsed_answer(
+                CanonicalReleaseCurrent(), SURVIVOR,
+            )
+
+    def test_a_raised_fetch_classified_as_current_is_rejected(self) -> None:
+        """R7 (#1089) — the exact shipped bug, reverted and re-caught: an
+        earlier implementation returned ``CanonicalReleaseCurrent`` for a
+        redirect whose body named no usable MusicBrainz id."""
+        with self.assertRaises(AssertionError):
+            check_never_current_without_a_real_answer(
+                CanonicalReleaseCurrent(), fetch_raised=True,
+            )
 
 
 if __name__ == "__main__":

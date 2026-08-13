@@ -426,12 +426,19 @@ def post_pipeline_merge_rekey(
       * 404 — ``not_found``
       * 409 — ``wrong_state`` (not an owner-free imported MB-sourced
               request), ``library_not_at_survivor`` (Beets does not resolve
-              exactly one album at the survivor), or ``rekey_refused`` (the
-              request changed underneath the write — retry re-derives)
-      * 422 — ``not_merged`` (MusicBrainz names no different survivor for
-              the stored id; the #8792 refusal)
-      * 503 — ``mirror_unavailable`` (the canonical-release resolver is not
-              configured on this process)
+              exactly one album at the survivor), ``library_still_at_stored``
+              (Beets still resolves an album at the merged-away id — retag
+              the library first), ``survivor_collision`` (a rival request or
+              a colliding evidence fingerprint already occupies the
+              survivor — operator must resolve it), or ``rekey_refused``
+              (the request changed underneath the write — retry re-derives)
+      * 422 — ``not_merged`` (MusicBrainz answered and names no different
+              survivor for the stored id; the #8792 refusal)
+      * 503 — ``mirror_unavailable`` (no answer was obtained at all —
+              unconfigured, or the mirror is unreachable) or
+              ``beets_unavailable`` (the Beets SQLite authority is
+              transiently unreadable — locked, IO, or permission failure)
+      * 500 — any unknown outcome (safety net)
     """
     del body
     try:
@@ -457,9 +464,11 @@ def post_pipeline_merge_rekey(
         "beets_album_id": result.beets_album_id,
         "beets_checked_release_id": result.beets_checked_release_id,
         "beets_album_ids": list(result.beets_album_ids),
+        "rival_request_id": result.rival_request_id,
+        "colliding_fingerprints": list(result.colliding_fingerprints),
         "error_message": result.error_message,
     }
-    status = MERGE_REKEY_HTTP_STATUS[result.outcome]
+    status = MERGE_REKEY_HTTP_STATUS.get(result.outcome, 500)
     if result.outcome != RESULT_REKEYED:
         payload["error"] = result.error_message or "merge rekey refused"
     h._json(payload, status=status)

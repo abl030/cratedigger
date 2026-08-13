@@ -743,15 +743,16 @@ class TestPipelineMergeRekeyContract(_FakeDbWebServerCase):
     Status-code mapping (``lib.merge_rekey_service.MERGE_REKEY_HTTP_STATUS``):
       * 200 — rekeyed
       * 404 — not_found
-      * 409 — wrong_state / library_not_at_survivor / rekey_refused
+      * 409 — wrong_state / library_not_at_survivor / library_still_at_stored
+              / survivor_collision / rekey_refused
       * 422 — not_merged
-      * 503 — mirror_unavailable
+      * 503 — mirror_unavailable / beets_unavailable
     """
 
     MERGE_REKEY_REQUIRED_FIELDS: ClassVar = {
         "outcome", "request_id", "old_release_id", "new_release_id",
         "beets_album_id", "beets_checked_release_id", "beets_album_ids",
-        "error_message",
+        "rival_request_id", "colliding_fingerprints", "error_message",
     }
 
     MERGED = "6b209cc5-62b0-4ef7-9336-c2dbd876301a"
@@ -858,6 +859,74 @@ class TestPipelineMergeRekeyContract(_FakeDbWebServerCase):
         )
         self.assertIn("error", data)
 
+    def test_merge_rekey_beets_unavailable_returns_503(self):
+        """#1089 MINOR-5: a classified Beets SQLite authority failure."""
+        with self._patch_service(
+            outcome="beets_unavailable", request_id=42,
+            error_message="Current Beets authority is unavailable; retry later.",
+        ):
+            status, data = self._post("/api/pipeline/42/merge-rekey", {})
+        self.assertEqual(status, 503)
+        _assert_required_fields(
+            self, data, self.MERGE_REKEY_REQUIRED_FIELDS,
+            "merge-rekey beets-unavailable response",
+        )
+        self.assertIn("error", data)
+
+    def test_merge_rekey_library_still_at_stored_returns_409(self):
+        """#1089 MAJOR-3: Beets has not moved off the merged-away id yet."""
+        with self._patch_service(
+            outcome="library_still_at_stored", request_id=42,
+            old_release_id=self.MERGED, new_release_id=self.SURVIVOR,
+            beets_checked_release_id=self.MERGED, beets_album_ids=(111,),
+            error_message="Beets still resolves an album at the merged-away id",
+        ):
+            status, data = self._post("/api/pipeline/42/merge-rekey", {})
+        self.assertEqual(status, 409)
+        _assert_required_fields(
+            self, data, self.MERGE_REKEY_REQUIRED_FIELDS,
+            "merge-rekey library-still-at-stored response",
+        )
+        self.assertEqual(data["beets_album_ids"], [111])
+        self.assertIn("error", data)
+
+    def test_merge_rekey_survivor_collision_returns_409(self):
+        """#1089 MAJOR-2: a rival request already occupies the survivor —
+        the response must name it, not just describe a bare refusal."""
+        with self._patch_service(
+            outcome="survivor_collision", request_id=42,
+            old_release_id=self.MERGED, new_release_id=self.SURVIVOR,
+            rival_request_id=777, colliding_fingerprints=("abc123",),
+            error_message="cannot rekey request 42 onto "
+                           f"{self.SURVIVOR}: request 777 already holds it",
+        ):
+            status, data = self._post("/api/pipeline/42/merge-rekey", {})
+        self.assertEqual(status, 409)
+        _assert_required_fields(
+            self, data, self.MERGE_REKEY_REQUIRED_FIELDS,
+            "merge-rekey survivor-collision response",
+        )
+        self.assertEqual(data["rival_request_id"], 777)
+        self.assertEqual(data["colliding_fingerprints"], ["abc123"])
+        self.assertIn("error", data)
+
+    def test_merge_rekey_http_status_covers_every_outcome_constant(self):
+        """#1089 NOTE-8: the guarded ``.get(..., 500)`` lookup exists
+        precisely because an outcome missing from the mapping must not
+        crash — but every real ``RESULT_*`` constant must still be
+        covered, so that safety net never actually fires in production."""
+        from lib import merge_rekey_service as svc
+
+        result_constants = {
+            getattr(svc, name)
+            for name in dir(svc)
+            if name.startswith("RESULT_")
+        }
+        self.assertEqual(
+            result_constants, set(svc.MERGE_REKEY_HTTP_STATUS),
+            "MERGE_REKEY_HTTP_STATUS is missing or has an extra outcome",
+        )
+
     def test_merge_rekey_end_to_end_real_service_rekeys_and_moves_evidence(
         self,
     ):
@@ -868,6 +937,7 @@ class TestPipelineMergeRekeyContract(_FakeDbWebServerCase):
         request's evidence lineage really follows the row (#1059/#1089).
         """
         from lib.mb_canonical import (
+            CanonicalReleaseRedirected,
             configure_canonical_base,
             configured_canonical_base,
         )
@@ -899,8 +969,8 @@ class TestPipelineMergeRekeyContract(_FakeDbWebServerCase):
         with (
             patch.object(srv, "_beets_db", return_value=beets),
             patch(
-                "lib.mb_canonical.canonical_release_id",
-                return_value=self.SURVIVOR,
+                "lib.mb_canonical.canonical_release_status",
+                return_value=CanonicalReleaseRedirected(self.SURVIVOR),
             ),
         ):
             status, data = self._post("/api/pipeline/316/merge-rekey", {})

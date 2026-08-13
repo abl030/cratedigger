@@ -17580,6 +17580,95 @@ class TestMergeRekeyUnderOperatorClaim(unittest.TestCase):
                     self.MERGED,
                 )
 
+    def test_a_processing_status_refuses_and_writes_nothing(self) -> None:
+        """#1089 MINOR-7: the contract names ``processing`` explicitly as a
+        status the operator arm must refuse. A real owning automation job is
+        required — migration 066's owner-equivalence CHECK forbids a
+        ``processing`` row with no attached job, so a fake status string
+        alone would not be reachable in real PostgreSQL."""
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = db.add_request(
+            mb_release_id=self.MERGED,
+            artist_name="DICE",
+            album_title="Midnight Zoo (processing)",
+            source="request",
+        )
+        enqueued = "2026-08-13T00:00:00+00:00"
+        self.assertTrue(db.set_downloading(
+            request_id,
+            json.dumps({
+                "filetype": "flac",
+                "enqueued_at": enqueued,
+                "last_progress_at": enqueued,
+                "files": [],
+            }),
+            expected_status="wanted",
+        ))
+        handoff = db.handoff_automation_import(
+            request_id=request_id,
+            expected_enqueued_at=enqueued,
+            canonical_path="/processing/albums/dice-midnight-zoo",
+            message="MINOR-7 processing fixture",
+        )
+        self.assertTrue(handoff.committed)
+        evidence_id = self._seed_evidence_for(db, self.MERGED)
+
+        self.assertFalse(db.update_request_release_for_merge(
+            request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=None,
+        ))
+
+        row = db.get_request(request_id)
+        assert row is not None
+        self.assertEqual(row["status"], "processing")
+        self.assertEqual(row["mb_release_id"], self.MERGED)
+        self.assertEqual(
+            self._evidence_release_id_for(db, evidence_id), self.MERGED,
+        )
+
+    def test_a_replaced_status_refuses_and_writes_nothing(self) -> None:
+        """#1089 MINOR-7: the contract names ``replaced`` explicitly — a
+        frozen audit ancestor is never rekeyed, even though its
+        ``mb_release_id`` is otherwise untouched by supersession."""
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = db.add_request(
+            mb_release_id=self.MERGED,
+            artist_name="DICE",
+            album_title="Midnight Zoo (replaced)",
+            source="request",
+        )
+        evidence_id = self._seed_evidence_for(db, self.MERGED)
+        db.supersede_request_mbid(
+            request_id,
+            new_mb_release_id="d0000000-0000-0000-0000-000000000001",
+            new_mb_release_group_id=None,
+            new_mb_artist_id=None,
+            new_artist_name="DICE",
+            new_album_title="Midnight Zoo (successor pressing)",
+            new_year=None,
+            new_country=None,
+            new_tracks=[],
+        )
+
+        self.assertFalse(db.update_request_release_for_merge(
+            request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=None,
+        ))
+
+        row = db.get_request(request_id)
+        assert row is not None
+        self.assertEqual(row["status"], "replaced")
+        self.assertEqual(row["mb_release_id"], self.MERGED)
+        self.assertEqual(
+            self._evidence_release_id_for(db, evidence_id), self.MERGED,
+        )
+
     def _seed_evidence_for(self, db: "PipelineDB", release_id: str) -> int:
         evidence = make_album_quality_evidence(
             mb_release_id=release_id, source_path=f"/library/{release_id}",

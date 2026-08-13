@@ -471,10 +471,17 @@ def cmd_merge_rekey(_db: object, args: argparse.Namespace) -> int:
     outcomes can produce (``lib.merge_rekey_service.MERGE_REKEY_HTTP_STATUS``
     — 200/404/409/422/503) already matches ``_exit_code``'s default
     status→exit mapping, so no ``exit_overrides`` are needed.
+
+    Uses ``TIMEOUT_MIRROR_SECONDS``, not the 15s enqueue default: the route
+    itself performs an inline MusicBrainz merge-survivor lookup (this
+    deployment's own mirror timeout is 15s) plus Beets reads and PostgreSQL
+    work, all before it responds. The 15s default would time out honest
+    in-flight work and report a failure for a mutation that may already have
+    committed.
     """
     return _relay(args.api_endpoint, _ApiMutation(
         path=f"/api/pipeline/{args.request_id}/merge-rekey", body={},
-    ))
+    ), timeout_seconds=TIMEOUT_MIRROR_SECONDS)
 
 
 def add_api_mutation_subparsers(

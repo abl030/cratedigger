@@ -694,6 +694,7 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
         Beets + mirror fixtures the other five don't, so it gets its own
         real-route round trip rather than folding into the five above."""
         from lib.mb_canonical import (
+            CanonicalReleaseRedirected,
             configure_canonical_base,
             configured_canonical_base,
         )
@@ -716,7 +717,13 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
         with (
             patch.object(srv, "_beets_db", return_value=beets),
             patch(
-                "lib.mb_canonical.canonical_release_id", return_value=survivor,
+                # The service's default seam is the TAGGED resolver
+                # (production_tagged_canonical_release_fn), which calls
+                # canonical_release_status — NOT the collapsed
+                # canonical_release_id the import seam uses (#1089
+                # BLOCKING-1).
+                "lib.mb_canonical.canonical_release_status",
+                return_value=CanonicalReleaseRedirected(survivor),
             ),
         ):
             code, body = self._call(
@@ -970,6 +977,12 @@ class TestRoutedCommandDeadlines(unittest.TestCase):
                 lambda: pipeline_cli.cmd_replace(
                     None,
                     self._args(id=1, target_mb_release_id="x", json=True)),
+                api_mutations.TIMEOUT_MIRROR_SECONDS,
+            ),
+            (
+                "merge-rekey",
+                lambda: api_mutations.cmd_merge_rekey(
+                    None, self._args(request_id=1)),
                 api_mutations.TIMEOUT_MIRROR_SECONDS,
             ),
             (

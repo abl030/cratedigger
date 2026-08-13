@@ -445,8 +445,11 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^lib\.\w+\.fetch_mb_release$"),
     # MusicBrainz merge-survivor resolver (#1089) — one hop above the raw
     # ``urllib.request`` fetch (``_fetch_json``), same shape as
-    # ``fetch_mb_release`` above.
+    # ``fetch_mb_release`` above. ``canonical_release_status`` is the
+    # tagged variant of the same resolver (BLOCKING-1 review round) —
+    # same fetch boundary, same rationale.
     re.compile(r"^lib\.mb_canonical\.canonical_release_id$"),
+    re.compile(r"^lib\.mb_canonical\.canonical_release_status$"),
 
     # scripts.pipeline_cli loaders — each is a thin wrapper around a
     # disk/SQLite read in lib.config or lib.beets_db. Split into

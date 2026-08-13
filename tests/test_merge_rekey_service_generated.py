@@ -6,25 +6,31 @@ real-PostgreSQL transcript in
 exact named worlds; this property patrols the world space around them,
 driving the REAL production entry point — ``MergeRekeyService.rekey_request``
 — over generated combinations of request eligibility, in-flight import jobs,
-rival/collision state, and mirror/Beets answers.
+rival/collision state, Beets state at BOTH the survivor and the stored id,
+and the tagged mirror answer (answered-vs-silent, #1089 BLOCKING-1).
 
 Invariant patrolled (module-level checkers so the known-bad self-tests below
 can call them directly):
 
 O1  The operator rekey arm rekeys ONLY an ``imported``, MB-sourced, unowned
-    request with a legitimate different-MusicBrainz survivor, Beets holding
-    exactly one album at that survivor, and no ``queued``/``running`` import
-    job, no rival request already at the survivor, and no colliding evidence
-    fingerprint at the survivor. It NEVER fires on ``processing`` /
-    ``replaced`` / other non-``imported`` statuses, on an automation-owned
-    row, or on a Discogs-sourced / identity-less row — the service's own
-    precondition refuses those before any mirror or Beets call.
+    request with a legitimate different-MusicBrainz survivor MusicBrainz
+    ANSWERED (never a silent/unavailable mirror), Beets holding exactly one
+    album at that survivor AND nothing at the stored id, no
+    ``queued``/``running`` import job, no rival request already at the
+    survivor, and no colliding evidence fingerprint at the survivor. It
+    NEVER fires on ``processing`` / ``replaced`` / other non-``imported``
+    statuses, on an automation-owned row, or on a Discogs-sourced /
+    identity-less row — the service's own precondition refuses those before
+    any mirror or Beets call.
 O2  Every world that did not rekey left the row's ``mb_release_id`` and the
     request's evidence lineage exactly where they started.
-O3  A world whose request write refuses (an in-flight import job, a rival
-    request already at the survivor, or a colliding evidence fingerprint)
-    moves NEITHER the row NOR its evidence — evidence only ever follows the
-    row.
+O3  A world whose request write refuses (an in-flight import job) OR whose
+    pre-check refuses (a rival request already at the survivor, or a
+    colliding evidence fingerprint) moves NEITHER the row NOR its evidence —
+    evidence only ever follows the row.
+O4  A rival request or a colliding evidence fingerprint at the survivor is
+    reported as ``survivor_collision``, never folded into ``rekey_refused``
+    (#1089 MAJOR-2) — the two outcomes are mutually exclusive causes.
 """
 
 from __future__ import annotations
@@ -44,12 +50,20 @@ from lib.import_queue import (
     youtube_import_dedupe_key,
     youtube_import_payload,
 )
+from lib.mb_canonical import (
+    CanonicalReleaseAnswer,
+    CanonicalReleaseCurrent,
+    CanonicalReleaseRedirected,
+    CanonicalReleaseUnavailable,
+)
 from lib.merge_rekey_service import (
     RESULT_LIBRARY_NOT_AT_SURVIVOR,
+    RESULT_LIBRARY_STILL_AT_STORED,
     RESULT_MIRROR_UNAVAILABLE,
     RESULT_NOT_MERGED,
     RESULT_REKEY_REFUSED,
     RESULT_REKEYED,
+    RESULT_SURVIVOR_COLLISION,
     RESULT_WRONG_STATE,
     MergeRekeyService,
 )
@@ -78,10 +92,20 @@ WORLD_KINDS = st.sampled_from([
 ])
 JOB_TYPES = st.sampled_from([IMPORT_JOB_FORCE, IMPORT_JOB_YOUTUBE])
 JOB_STATUSES = st.sampled_from(["queued", "running", "completed", "failed"])
+#: ``different_mb`` — a legitimate redirect. ``current_no_redirect`` —
+#: MusicBrainz ANSWERED and names no different survivor (the #8792
+#: refusal). ``unavailable`` — no answer at all (#1089 BLOCKING-1's own
+#: dimension: answered-vs-silent). ``same_as_stored`` / ``non_mb`` — a
+#: redirect this seam's own defensive re-check must not trust.
 SURVIVOR_KINDS = st.sampled_from([
-    "different_mb", "none", "same_as_stored", "non_mb",
+    "different_mb", "current_no_redirect", "unavailable",
+    "same_as_stored", "non_mb",
 ])
 BEETS_SURVIVOR_KINDS = st.sampled_from(["unique", "missing", "ambiguous"])
+#: #1089 MAJOR-3: Beets state at the STORED (merged-away) id. ``missing`` is
+#: the legitimate "library already moved" world; ``present`` is the
+#: transplant hazard this dimension exists to patrol.
+STORED_ID_BEETS_KINDS = st.sampled_from(["missing", "present"])
 
 
 def expected_outcome(
@@ -90,33 +114,40 @@ def expected_outcome(
     active_jobs: tuple[tuple[str, str], ...],
     rival_at_survivor: bool,
     fingerprint_collision: bool,
-    mirror_configured: bool,
     survivor_kind: str,
     beets_survivor_kind: str,
+    stored_id_beets_kind: str,
 ) -> str:
     """The complete decision, derived independently of production (O1)."""
     if world_kind != "eligible":
         return RESULT_WRONG_STATE
-    if not mirror_configured:
+    if survivor_kind == "unavailable":
         return RESULT_MIRROR_UNAVAILABLE
     if survivor_kind != "different_mb":
         return RESULT_NOT_MERGED
     if beets_survivor_kind != "unique":
         return RESULT_LIBRARY_NOT_AT_SURVIVOR
+    if stored_id_beets_kind != "missing":
+        return RESULT_LIBRARY_STILL_AT_STORED
+    if rival_at_survivor or fingerprint_collision:
+        return RESULT_SURVIVOR_COLLISION
     has_active_job = any(
         status in ("queued", "running") for _job_type, status in active_jobs
     )
-    if has_active_job or rival_at_survivor or fingerprint_collision:
+    if has_active_job:
         return RESULT_REKEY_REFUSED
     return RESULT_REKEYED
 
 
 class RecordingCanonical:
-    def __init__(self, answer: str | None) -> None:
+    """Recording TAGGED merge-survivor lookup — see
+    :class:`lib.mb_canonical.CanonicalReleaseAnswer`."""
+
+    def __init__(self, answer: CanonicalReleaseAnswer) -> None:
         self._answer = answer
         self.calls: list[str] = []
 
-    def __call__(self, release_id: str) -> str | None:
+    def __call__(self, release_id: str) -> CanonicalReleaseAnswer:
         self.calls.append(release_id)
         return self._answer
 
@@ -176,6 +207,7 @@ def _build_world(
     fingerprint_collision: bool,
     survivor_kind: str,
     beets_survivor_kind: str,
+    stored_id_beets_kind: str,
 ) -> tuple[FakePipelineDB, FakeBeetsDB, RecordingCanonical, int | None]:
     """Returns ``(db, beets, canonical, seeded_evidence_id)``.
 
@@ -239,11 +271,12 @@ def _build_world(
         evidence_id = stored.id
 
     beets = FakeBeetsDB()
-    survivor_answer = {
-        "different_mb": SURVIVOR,
-        "none": None,
-        "same_as_stored": MERGED,
-        "non_mb": "1870",
+    survivor_answer: CanonicalReleaseAnswer = {
+        "different_mb": CanonicalReleaseRedirected(SURVIVOR),
+        "current_no_redirect": CanonicalReleaseCurrent(),
+        "unavailable": CanonicalReleaseUnavailable(),
+        "same_as_stored": CanonicalReleaseRedirected(MERGED),
+        "non_mb": CanonicalReleaseRedirected("1870"),
     }[survivor_kind]
     canonical = RecordingCanonical(survivor_answer)
 
@@ -264,6 +297,10 @@ def _build_world(
             "ambiguous": [19345, 19999],
         }[beets_survivor_kind]
         beets.set_album_ids_for_release(SURVIVOR, beets_ids)
+        if stored_id_beets_kind == "present":
+            beets.set_album_ids_for_release(MERGED, [111])
+        # "missing" needs no seed — an unseeded release id already
+        # resolves to CurrentBeetsMissing in FakeBeetsDB by default.
 
     return db, beets, canonical, evidence_id
 
@@ -313,6 +350,32 @@ def check_row_and_evidence_move_only_when_rekeyed(
             )
 
 
+def check_collision_and_refused_are_mutually_exclusive_causes(
+    *,
+    outcome: str,
+    rival_at_survivor: bool,
+    fingerprint_collision: bool,
+    has_active_job: bool,
+) -> None:
+    """O4 — #1089 MAJOR-2: a permanent collision must never be reported as
+    the transient ``rekey_refused``, and vice versa."""
+    if (rival_at_survivor or fingerprint_collision) and outcome == RESULT_REKEY_REFUSED:
+        raise AssertionError(
+            "a rival/fingerprint collision was reported as the transient "
+            "rekey_refused outcome instead of survivor_collision"
+        )
+    if (
+        has_active_job
+        and not rival_at_survivor
+        and not fingerprint_collision
+        and outcome == RESULT_SURVIVOR_COLLISION
+    ):
+        raise AssertionError(
+            "an in-flight import job with no collision was reported as "
+            "survivor_collision instead of the transient rekey_refused"
+        )
+
+
 class TestMergeRekeyServiceProperty(unittest.TestCase):
     @settings(deadline=None)
     @given(
@@ -329,44 +392,69 @@ class TestMergeRekeyServiceProperty(unittest.TestCase):
         ),
         rival_at_survivor=st.booleans(),
         fingerprint_collision=st.booleans(),
-        mirror_configured=st.booleans(),
         survivor_kind=SURVIVOR_KINDS,
         beets_survivor_kind=BEETS_SURVIVOR_KINDS,
+        stored_id_beets_kind=STORED_ID_BEETS_KINDS,
     )
     # The clean happy path.
     @example(
         world_kind="eligible", active_jobs=(), rival_at_survivor=False,
-        fingerprint_collision=False, mirror_configured=True,
-        survivor_kind="different_mb", beets_survivor_kind="unique",
+        fingerprint_collision=False, survivor_kind="different_mb",
+        beets_survivor_kind="unique", stored_id_beets_kind="missing",
     )
-    # The #8792 refusal.
+    # The #8792 refusal — MusicBrainz ANSWERED, no redirect.
     @example(
         world_kind="eligible", active_jobs=(), rival_at_survivor=False,
-        fingerprint_collision=False, mirror_configured=True,
-        survivor_kind="none", beets_survivor_kind="unique",
+        fingerprint_collision=False, survivor_kind="current_no_redirect",
+        beets_survivor_kind="unique", stored_id_beets_kind="missing",
+    )
+    # #1089 BLOCKING-1: configured but down/silent — distinct from the
+    # #8792 refusal above.
+    @example(
+        world_kind="eligible", active_jobs=(), rival_at_survivor=False,
+        fingerprint_collision=False, survivor_kind="unavailable",
+        beets_survivor_kind="unique", stored_id_beets_kind="missing",
+    )
+    # #1089 MAJOR-3: Beets has not moved yet — the transplant hazard.
+    @example(
+        world_kind="eligible", active_jobs=(), rival_at_survivor=False,
+        fingerprint_collision=False, survivor_kind="different_mb",
+        beets_survivor_kind="unique", stored_id_beets_kind="present",
+    )
+    # #1089 MAJOR-2: a rival request already at the survivor.
+    @example(
+        world_kind="eligible", active_jobs=(), rival_at_survivor=True,
+        fingerprint_collision=False, survivor_kind="different_mb",
+        beets_survivor_kind="unique", stored_id_beets_kind="missing",
+    )
+    # #1089 MAJOR-2: a colliding evidence fingerprint.
+    @example(
+        world_kind="eligible", active_jobs=(), rival_at_survivor=False,
+        fingerprint_collision=True, survivor_kind="different_mb",
+        beets_survivor_kind="unique", stored_id_beets_kind="missing",
     )
     # A queued force import blocks the write.
     @example(
         world_kind="eligible", active_jobs=((IMPORT_JOB_FORCE, "queued"),),
         rival_at_survivor=False, fingerprint_collision=False,
-        mirror_configured=True, survivor_kind="different_mb",
-        beets_survivor_kind="unique",
+        survivor_kind="different_mb", beets_survivor_kind="unique",
+        stored_id_beets_kind="missing",
     )
     # An in-flight rescue blocks it too — no job_type filter.
     @example(
         world_kind="eligible",
         active_jobs=((IMPORT_JOB_YOUTUBE, "running"),),
         rival_at_survivor=False, fingerprint_collision=False,
-        mirror_configured=True, survivor_kind="different_mb",
-        beets_survivor_kind="unique",
+        survivor_kind="different_mb", beets_survivor_kind="unique",
+        stored_id_beets_kind="missing",
     )
     # A terminal job never blocks (must-still-work).
     @example(
         world_kind="eligible",
         active_jobs=((IMPORT_JOB_FORCE, "completed"),),
         rival_at_survivor=False, fingerprint_collision=False,
-        mirror_configured=True, survivor_kind="different_mb",
-        beets_survivor_kind="unique",
+        survivor_kind="different_mb", beets_survivor_kind="unique",
+        stored_id_beets_kind="missing",
     )
     def test_every_world_upholds_the_operator_rekey_invariants(
         self,
@@ -374,9 +462,9 @@ class TestMergeRekeyServiceProperty(unittest.TestCase):
         active_jobs: tuple[tuple[str, str], ...],
         rival_at_survivor: bool,
         fingerprint_collision: bool,
-        mirror_configured: bool,
         survivor_kind: str,
         beets_survivor_kind: str,
+        stored_id_beets_kind: str,
     ) -> None:
         db, beets, canonical, evidence_id = _build_world(
             world_kind=world_kind,
@@ -385,13 +473,11 @@ class TestMergeRekeyServiceProperty(unittest.TestCase):
             fingerprint_collision=fingerprint_collision,
             survivor_kind=survivor_kind,
             beets_survivor_kind=beets_survivor_kind,
+            stored_id_beets_kind=stored_id_beets_kind,
         )
         row_before = dict(db.request(REQUEST_ID) or {})
         service = MergeRekeyService(
-            db,
-            beets,
-            canonical_release_fn=canonical,
-            is_mirror_configured_fn=lambda: mirror_configured,
+            db, beets, canonical_release_fn=canonical,
         )
 
         result = service.rekey_request(REQUEST_ID)
@@ -401,9 +487,9 @@ class TestMergeRekeyServiceProperty(unittest.TestCase):
             active_jobs=active_jobs,
             rival_at_survivor=rival_at_survivor,
             fingerprint_collision=fingerprint_collision,
-            mirror_configured=mirror_configured,
             survivor_kind=survivor_kind,
             beets_survivor_kind=beets_survivor_kind,
+            stored_id_beets_kind=stored_id_beets_kind,
         )
         self.assertEqual(result.outcome, expected)
 
@@ -421,10 +507,19 @@ class TestMergeRekeyServiceProperty(unittest.TestCase):
             ),
             evidence_seeded=evidence_id is not None,
         )
+        check_collision_and_refused_are_mutually_exclusive_causes(
+            outcome=result.outcome,
+            rival_at_survivor=rival_at_survivor,
+            fingerprint_collision=fingerprint_collision,
+            has_active_job=any(
+                status in ("queued", "running")
+                for _job_type, status in active_jobs
+            ),
+        )
 
 
 class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
-    """Known-bad self-tests for the one composite checker above."""
+    """Known-bad self-tests for the checkers above."""
 
     def test_a_rekeyed_outcome_with_an_unmoved_row_is_rejected(self) -> None:
         with self.assertRaisesRegex(AssertionError, "left mb_release_id unchanged"):
@@ -487,6 +582,44 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
             evidence_release_after=MERGED,
         )
 
+    def test_a_collision_reported_as_refused_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            "rival/fingerprint collision was reported as the transient",
+        ):
+            check_collision_and_refused_are_mutually_exclusive_causes(
+                outcome=RESULT_REKEY_REFUSED,
+                rival_at_survivor=True,
+                fingerprint_collision=False,
+                has_active_job=False,
+            )
+
+    def test_an_active_job_reported_as_collision_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            "in-flight import job with no collision was reported as",
+        ):
+            check_collision_and_refused_are_mutually_exclusive_causes(
+                outcome=RESULT_SURVIVOR_COLLISION,
+                rival_at_survivor=False,
+                fingerprint_collision=False,
+                has_active_job=True,
+            )
+
+    def test_the_legitimate_collision_and_refusal_both_pass(self) -> None:
+        check_collision_and_refused_are_mutually_exclusive_causes(
+            outcome=RESULT_SURVIVOR_COLLISION,
+            rival_at_survivor=True,
+            fingerprint_collision=False,
+            has_active_job=False,
+        )
+        check_collision_and_refused_are_mutually_exclusive_causes(
+            outcome=RESULT_REKEY_REFUSED,
+            rival_at_survivor=False,
+            fingerprint_collision=False,
+            has_active_job=True,
+        )
+
     def test_the_expected_outcome_derivation_rejects_a_widened_term(self) -> None:
         """Known-bad for the derivation itself: each term is load-bearing."""
 
@@ -496,9 +629,9 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
             active_jobs: tuple[tuple[str, str], ...] = (),
             rival_at_survivor: bool = False,
             fingerprint_collision: bool = False,
-            mirror_configured: bool = True,
             survivor_kind: str = "different_mb",
             beets_survivor_kind: str = "unique",
+            stored_id_beets_kind: str = "missing",
         ) -> str:
             """The fully-authorized baseline world, one term widened at a
             time — explicit keyword defaults, never ``**dict`` unpacking, so
@@ -509,17 +642,20 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
                 active_jobs=active_jobs,
                 rival_at_survivor=rival_at_survivor,
                 fingerprint_collision=fingerprint_collision,
-                mirror_configured=mirror_configured,
                 survivor_kind=survivor_kind,
                 beets_survivor_kind=beets_survivor_kind,
+                stored_id_beets_kind=stored_id_beets_kind,
             )
 
         self.assertEqual(outcome(), RESULT_REKEYED)
         widened: tuple[tuple[str, str], ...] = (
             ("non-eligible world", outcome(world_kind="wanted")),
             ("processing owned", outcome(world_kind="processing_owned")),
-            ("mirror unconfigured", outcome(mirror_configured=False)),
-            ("no redirect", outcome(survivor_kind="none")),
+            (
+                "mirror unavailable",
+                outcome(survivor_kind="unavailable"),
+            ),
+            ("no redirect", outcome(survivor_kind="current_no_redirect")),
             ("same as stored", outcome(survivor_kind="same_as_stored")),
             ("non-MB survivor", outcome(survivor_kind="non_mb")),
             (
@@ -529,6 +665,10 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
             (
                 "library ambiguous at the survivor",
                 outcome(beets_survivor_kind="ambiguous"),
+            ),
+            (
+                "library still at the stored id",
+                outcome(stored_id_beets_kind="present"),
             ),
             (
                 "a queued job is active",
@@ -547,7 +687,21 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
         for label, world_outcome in widened:
             with self.subTest(widened=label):
                 self.assertNotEqual(world_outcome, RESULT_REKEYED)
-        # And a terminal job must NOT be mistaken for an active one.
+        # And the two new #1089 outcomes are exactly which term fires.
+        self.assertEqual(
+            outcome(survivor_kind="unavailable"), RESULT_MIRROR_UNAVAILABLE,
+        )
+        self.assertEqual(
+            outcome(stored_id_beets_kind="present"),
+            RESULT_LIBRARY_STILL_AT_STORED,
+        )
+        self.assertEqual(
+            outcome(rival_at_survivor=True), RESULT_SURVIVOR_COLLISION,
+        )
+        self.assertEqual(
+            outcome(fingerprint_collision=True), RESULT_SURVIVOR_COLLISION,
+        )
+        # A terminal job must NOT be mistaken for an active one.
         self.assertEqual(
             outcome(active_jobs=((IMPORT_JOB_FORCE, "completed"),)),
             RESULT_REKEYED,

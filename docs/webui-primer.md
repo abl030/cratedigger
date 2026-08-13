@@ -266,12 +266,19 @@ depends on.
   mutates Beets; the precondition is that Beets already holds the survivor,
   which is exactly what makes the row drift in the first place. On success
   the row disappears from the drift list on the next render. On refusal the
-  row shows the outcome inline (`not_merged` for a request that was never
-  actually merged — e.g. request #8792, Slipknot Vol. 3, which resolves to
-  two current Beets albums with no MusicBrainz redirect; `wrong_state`,
-  `library_not_at_survivor`, `rekey_refused`, or `mirror_unavailable`
-  otherwise). Resolution happens only at click time, never during dashboard
-  render.
+  row shows the outcome inline: `not_merged` for a request MusicBrainz
+  ANSWERED was never actually merged — e.g. request #8792, Slipknot Vol. 3,
+  which resolves to two current Beets albums with no MusicBrainz redirect —
+  distinct from `mirror_unavailable`, which means no answer was obtained at
+  all (unconfigured, or the mirror is unreachable); a down mirror is never
+  read as "MusicBrainz confirms this was never merged". `wrong_state`,
+  `library_not_at_survivor`, `library_still_at_stored` (Beets has not moved
+  off the merged-away id yet — retag the library first), `survivor_collision`
+  (a rival request or a colliding evidence fingerprint already occupies the
+  survivor — the operator must resolve it directly), `rekey_refused` (a
+  genuinely transient conflict — retry), or `beets_unavailable` (the Beets
+  SQLite authority is transiently unreadable) round out the refusal set.
+  Resolution happens only at click time, never during dashboard render.
 - **Wrong Matches tab** — the obsolete Complete-folder/manual-import page is gone;
   the tab now opens straight into Wrong Matches. Import actions queue work and
   poll `import_jobs`, so long beets imports do not block the web request.

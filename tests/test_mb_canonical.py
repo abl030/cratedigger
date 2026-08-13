@@ -15,6 +15,12 @@ I7  A merge is proven by the observed 301, never by a response body field.
 I8  The ``{"payload": …, "redirected": …}`` envelope every other test hands
     to the seam is the envelope the REAL ``_fetch_json`` produces, and its
     ``redirected`` flag really is set by a real HTTP redirect.
+I9  ``canonical_release_status`` (#1089) keeps "MusicBrainz answered and
+    names no different id" (``CanonicalReleaseCurrent``) distinct from "no
+    answer was obtained at all" (``CanonicalReleaseUnavailable``) — every
+    world I3/I4/I6 collapse to ``None`` for ``canonical_release_id`` splits
+    into exactly one of those two tagged answers, and ``canonical_release_id``
+    itself is unchanged: it is defined in terms of the tagged function.
 
 The fetch seam is the external HTTP edge (leaf-seam mocking is sanctioned
 there). Per test-fidelity Rule B the failure fakes raise the exception
@@ -42,8 +48,12 @@ from typing import ClassVar
 
 from lib.mb_canonical import (
     _MAX_RESPONSE_BYTES,
+    CanonicalReleaseCurrent,
+    CanonicalReleaseRedirected,
+    CanonicalReleaseUnavailable,
     _fetch_json,
     canonical_release_id,
+    canonical_release_status,
 )
 
 # The live merge probed on 2026-08-06: request 316's frozen acquisition id
@@ -209,6 +219,119 @@ class TestInertWithoutConfiguredBase(unittest.TestCase):
                 self.assertEqual(calls, [], "unconfigured base must not fetch")
 
 
+class TestCanonicalReleaseStatus(unittest.TestCase):
+    """I9 — the tagged variant keeps "answered, current" apart from "no
+    answer at all", the distinction #1089's operator merge-rekey action
+    needs and ``canonical_release_id`` cannot give it.
+    """
+
+    def test_a_redirect_reports_the_survivor(self) -> None:
+        fetch, _calls = _fetch_returning(_redirected(SURVIVOR))
+        status = canonical_release_status(MERGED, ws2_base=BASE, fetch=fetch)
+        self.assertEqual(status, CanonicalReleaseRedirected(SURVIVOR))
+
+    def test_an_answered_current_id_is_current_not_unavailable(self) -> None:
+        """The #8792 world: MusicBrainz answered — genuinely not merged."""
+        fetch, _calls = _fetch_returning(_not_redirected(CURRENT))
+        status = canonical_release_status(CURRENT, ws2_base=BASE, fetch=fetch)
+        self.assertEqual(status, CanonicalReleaseCurrent())
+
+    def test_a_cosmetic_self_redirect_is_current(self) -> None:
+        fetch, _calls = _fetch_returning(_redirected(CURRENT.upper()))
+        status = canonical_release_status(CURRENT, ws2_base=BASE, fetch=fetch)
+        self.assertEqual(status, CanonicalReleaseCurrent())
+
+    def test_a_body_without_a_redirect_is_current(self) -> None:
+        fetch, _calls = _fetch_returning(_not_redirected(SURVIVOR))
+        status = canonical_release_status(MERGED, ws2_base=BASE, fetch=fetch)
+        self.assertEqual(status, CanonicalReleaseCurrent())
+
+    def test_a_non_musicbrainz_identity_is_unavailable_not_current(self) -> None:
+        """No adapter between MusicBrainz and Discogs — structurally cannot
+        answer, so this is "unavailable", never a false "current"."""
+        for release_id in ("1870", "0", "", "   ", "not-a-uuid"):
+            with self.subTest(release_id=release_id):
+                fetch, calls = _fetch_returning(_redirected(SURVIVOR))
+                status = canonical_release_status(
+                    release_id, ws2_base=BASE, fetch=fetch,
+                )
+                self.assertEqual(status, CanonicalReleaseUnavailable())
+                self.assertEqual(calls, [])
+
+    def test_an_unconfigured_base_is_unavailable(self) -> None:
+        for base in (None, ""):
+            with self.subTest(base=base):
+                fetch, calls = _fetch_returning(_redirected(SURVIVOR))
+                status = canonical_release_status(
+                    MERGED, ws2_base=base, fetch=fetch,
+                )
+                self.assertEqual(status, CanonicalReleaseUnavailable())
+                self.assertEqual(calls, [])
+
+    def test_http_errors_are_unavailable(self) -> None:
+        """BLOCKING-1 (#1089) — the exact bug: a configured-but-down mirror
+        must never read as ``CanonicalReleaseCurrent``."""
+        for code in (400, 404, 500, 503):
+            with self.subTest(code=code):
+                exc = urllib.error.HTTPError(
+                    url=f"{BASE}/release/{MERGED}", code=code, msg="boom",
+                    hdrs=None,  # pyright: ignore[reportArgumentType]
+                    fp=None,
+                )
+                fetch, _calls = _fetch_raising(exc)
+                status = canonical_release_status(
+                    MERGED, ws2_base=BASE, fetch=fetch,
+                )
+                self.assertEqual(status, CanonicalReleaseUnavailable())
+                self.assertNotEqual(status, CanonicalReleaseCurrent())
+
+    def test_transport_failures_are_unavailable(self) -> None:
+        failures: list[BaseException] = [
+            urllib.error.URLError("connection refused"),
+            TimeoutError("timed out"),
+            OSError("network unreachable"),
+            json.JSONDecodeError("bad", "", 0),
+            ValueError("nonsense"),
+        ]
+        for exc in failures:
+            with self.subTest(exc=type(exc).__name__):
+                fetch, _calls = _fetch_raising(exc)
+                status = canonical_release_status(
+                    MERGED, ws2_base=BASE, fetch=fetch,
+                )
+                self.assertEqual(status, CanonicalReleaseUnavailable())
+
+    def test_unusable_response_shapes_are_unavailable(self) -> None:
+        bodies: list[object] = [
+            {}, {"id": None}, {"id": 12345}, {"id": "not-a-uuid"},
+            {"id": ""}, [], "a string", None,
+        ]
+        for body in bodies:
+            with self.subTest(body=body):
+                fetch, _calls = _fetch_returning(
+                    {"payload": body, "redirected": True},
+                )
+                status = canonical_release_status(
+                    MERGED, ws2_base=BASE, fetch=fetch,
+                )
+                self.assertEqual(status, CanonicalReleaseUnavailable())
+
+    def test_canonical_release_id_agrees_with_the_tagged_variant(self) -> None:
+        """``canonical_release_id`` is DEFINED IN TERMS OF the tagged
+        function — this pins that relationship rather than assuming it."""
+        cases: list[tuple[object, str | None]] = [
+            (_redirected(SURVIVOR), SURVIVOR),
+            (_not_redirected(CURRENT), None),
+        ]
+        for payload, expected in cases:
+            with self.subTest(payload=payload):
+                fetch, _calls = _fetch_returning(payload)
+                self.assertEqual(
+                    canonical_release_id(MERGED, ws2_base=BASE, fetch=fetch),
+                    expected,
+                )
+
+
 #: The release id whose document is deliberately larger than the byte cap.
 OVERSIZED = "cafecafe-0000-4000-8000-cafecafecafe"
 #: A release whose WS/2 URL redirects to itself — a cosmetic redirect, the
@@ -331,6 +454,24 @@ class TestRealFetchProducesTheEnvelope(unittest.TestCase):
             self.assertIsNone(canonical_release_id(CURRENT, ws2_base=base))
             # I5/I4 fail-open still holds over a real socket.
             self.assertIsNone(canonical_release_id(OVERSIZED, ws2_base=base))
+
+    def test_the_uninjected_tagged_resolver_follows_a_real_merge(self) -> None:
+        """I9 — the tagged production path, no ``fetch`` argument, over a
+        real socket: redirected / current / unavailable, each for real."""
+        with _mirror() as base:
+            self.assertEqual(
+                canonical_release_status(MERGED, ws2_base=base),
+                CanonicalReleaseRedirected(SURVIVOR),
+            )
+            self.assertEqual(
+                canonical_release_status(CURRENT, ws2_base=base),
+                CanonicalReleaseCurrent(),
+            )
+            # A real oversized-body failure is "unavailable", never "current".
+            self.assertEqual(
+                canonical_release_status(OVERSIZED, ws2_base=base),
+                CanonicalReleaseUnavailable(),
+            )
 
     def test_a_cosmetic_redirect_to_the_same_id_declares_no_successor(
         self,

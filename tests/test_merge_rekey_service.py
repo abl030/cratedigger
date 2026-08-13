@@ -4,23 +4,33 @@
 behind both ``POST /api/pipeline/<id>/merge-rekey`` and
 ``pipeline-cli merge-rekey``. Every branch below is named by its
 ``RESULT_*`` outcome; ``tests/test_pipeline_db.py::TestMergeRekeyUnderOperatorClaim``
-covers the real-PostgreSQL write this service's happy path and
-``rekey_refused`` branch delegate to.
+covers the real-PostgreSQL write this service's happy path,
+``rekey_refused``, and ``survivor_collision`` branches delegate to.
 """
 
 from __future__ import annotations
 
+import sqlite3
 import unittest
 
 from lib.beets_db import CurrentBeetsAmbiguous, CurrentBeetsMissing
 from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+from lib.mb_canonical import (
+    CanonicalReleaseAnswer,
+    CanonicalReleaseCurrent,
+    CanonicalReleaseRedirected,
+    CanonicalReleaseUnavailable,
+)
 from lib.merge_rekey_service import (
+    RESULT_BEETS_UNAVAILABLE,
     RESULT_LIBRARY_NOT_AT_SURVIVOR,
+    RESULT_LIBRARY_STILL_AT_STORED,
     RESULT_MIRROR_UNAVAILABLE,
     RESULT_NOT_FOUND,
     RESULT_NOT_MERGED,
     RESULT_REKEY_REFUSED,
     RESULT_REKEYED,
+    RESULT_SURVIVOR_COLLISION,
     RESULT_WRONG_STATE,
     MergeRekeyService,
 )
@@ -33,16 +43,28 @@ SURVIVOR = "9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4"
 REQUEST_ID = 8792
 
 
-class RecordingCanonical:
-    """A recording merge-survivor lookup. Never a network call in tests."""
+def _locked_error() -> sqlite3.OperationalError:
+    """A real ``sqlite3`` exception shaped exactly like
+    ``beets_authority_availability_category`` classifies (test-fidelity
+    Rule B: never a synthetic stand-in)."""
+    error = sqlite3.OperationalError("database is locked")
+    error.sqlite_errorcode = sqlite3.SQLITE_LOCKED
+    return error
 
-    def __init__(self, survivor: str | None) -> None:
-        self.survivor = survivor
+
+class RecordingCanonical:
+    """A recording TAGGED merge-survivor lookup. Never a network call in
+    tests. Returns whichever :class:`CanonicalReleaseAnswer` the test
+    configures — see :func:`lib.mb_canonical.canonical_release_status` for
+    the production contract this stands in for."""
+
+    def __init__(self, answer: CanonicalReleaseAnswer) -> None:
+        self.answer = answer
         self.calls: list[str] = []
 
-    def __call__(self, release_id: str) -> str | None:
+    def __call__(self, release_id: str) -> CanonicalReleaseAnswer:
         self.calls.append(release_id)
-        return self.survivor
+        return self.answer
 
 
 class TestMergeRekeyServiceOutcomes(unittest.TestCase):
@@ -65,24 +87,20 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
         db: FakePipelineDB,
         beets: FakeBeetsDB,
         *,
-        survivor: str | None,
-        mirror_configured: bool = True,
+        answer: CanonicalReleaseAnswer,
     ) -> tuple[MergeRekeyService, RecordingCanonical]:
-        canonical = RecordingCanonical(survivor)
+        canonical = RecordingCanonical(answer)
         return (
-            MergeRekeyService(
-                db,
-                beets,
-                canonical_release_fn=canonical,
-                is_mirror_configured_fn=lambda: mirror_configured,
-            ),
+            MergeRekeyService(db, beets, canonical_release_fn=canonical),
             canonical,
         )
 
     def test_a_missing_request_is_not_found(self) -> None:
         db = FakePipelineDB()
         beets = FakeBeetsDB()
-        service, canonical = self._service(db, beets, survivor=SURVIVOR)
+        service, canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
 
         result = service.rekey_request(999)
 
@@ -96,7 +114,7 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
                 db = self._db(status=status)
                 beets = FakeBeetsDB()
                 service, canonical = self._service(
-                    db, beets, survivor=SURVIVOR,
+                    db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
                 )
 
                 result = service.rekey_request(REQUEST_ID)
@@ -125,7 +143,9 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
             canonical_path="/processing/albums/slipknot",
         )
         beets = FakeBeetsDB()
-        service, canonical = self._service(db, beets, survivor=SURVIVOR)
+        service, canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
 
         result = service.rekey_request(REQUEST_ID)
 
@@ -136,7 +156,9 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
         """Not MB-sourced — the resolver has no redirect concept for it."""
         db = self._db(mb_release_id="1870", discogs_release_id="1870")
         beets = FakeBeetsDB()
-        service, canonical = self._service(db, beets, survivor=SURVIVOR)
+        service, canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
 
         result = service.rekey_request(REQUEST_ID)
 
@@ -146,39 +168,66 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
     def test_a_request_with_no_release_identity_is_wrong_state(self) -> None:
         db = self._db(mb_release_id=None, discogs_release_id=None)
         beets = FakeBeetsDB()
-        service, canonical = self._service(db, beets, survivor=SURVIVOR)
+        service, canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
 
         result = service.rekey_request(REQUEST_ID)
 
         self.assertEqual(result.outcome, RESULT_WRONG_STATE)
+        self.assertIsNone(result.old_release_id)
         self.assertEqual(canonical.calls, [])
 
-    def test_an_unconfigured_mirror_is_mirror_unavailable(self) -> None:
-        """Checked BEFORE asking — the resolver is never even called."""
+    def test_wrong_state_reports_the_raw_stored_id_on_a_conflicting_identity(
+        self,
+    ) -> None:
+        """#1089 NOTE-11: a conflicting ``discogs_release_id`` makes
+        ``ReleaseIdentity.from_strict_fields`` return ``None`` — the
+        refusal must still name the raw stored ``mb_release_id`` rather
+        than reading as "no identity at all"."""
+        db = self._db(mb_release_id=MERGED, discogs_release_id="12345678")
+        beets = FakeBeetsDB()
+        service, canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
+
+        result = service.rekey_request(REQUEST_ID)
+
+        self.assertEqual(result.outcome, RESULT_WRONG_STATE)
+        self.assertEqual(result.old_release_id, MERGED)
+        self.assertEqual(canonical.calls, [])
+
+    def test_a_down_mirror_is_mirror_unavailable_not_not_merged(self) -> None:
+        """#1089 BLOCKING-1: a configured-but-unreachable mirror must
+        report ``mirror_unavailable`` (retryable), never ``not_merged`` — a
+        transport failure is not MusicBrainz answering "no redirect"."""
         db = self._db()
         beets = FakeBeetsDB()
         service, canonical = self._service(
-            db, beets, survivor=SURVIVOR, mirror_configured=False,
+            db, beets, answer=CanonicalReleaseUnavailable(),
         )
 
         result = service.rekey_request(REQUEST_ID)
 
         self.assertEqual(result.outcome, RESULT_MIRROR_UNAVAILABLE)
         self.assertEqual(result.old_release_id, MERGED)
-        self.assertEqual(canonical.calls, [])
+        # The tagged resolver WAS asked — unlike the retired
+        # is_mirror_configured_fn seam, this outcome is discovered by
+        # asking and being told "no answer", not by a pre-check that
+        # skips the call.
+        self.assertEqual(canonical.calls, [MERGED])
+        row = db.request(REQUEST_ID)
+        self.assertEqual(row["mb_release_id"], MERGED)
 
-    def test_an_unmerged_request_is_not_merged(self) -> None:
-        """The #8792 refusal: two current albums, MusicBrainz names no redirect.
-
-        ``canonical_release_fn`` returns ``None`` here — its real contract
-        (``lib/mb_canonical.py``) never hands back the stored id itself, even
-        when MusicBrainz still considers it current; every "no different
-        canonical" world collapses to ``None``.
-        """
+    def test_an_answered_no_redirect_is_not_merged(self) -> None:
+        """#1089 BLOCKING-1: the #8792 refusal — MusicBrainz ANSWERED and
+        names no different survivor. Distinct from a down mirror."""
         db = self._db()
         beets = FakeBeetsDB()
         beets.set_album_ids_for_release(MERGED, [6612, 18672])
-        service, canonical = self._service(db, beets, survivor=None)
+        service, canonical = self._service(
+            db, beets, answer=CanonicalReleaseCurrent(),
+        )
 
         result = service.rekey_request(REQUEST_ID)
 
@@ -192,11 +241,13 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
         self.assertEqual(row["mb_release_id"], MERGED)
 
     def test_a_resolver_that_hands_back_the_stored_id_is_not_merged(self) -> None:
-        """Defensive re-check (M3): never trust a same-id answer, even one
-        the real resolver's own contract forbids returning."""
+        """Defensive re-check: never trust a same-id redirect, even one the
+        real resolver's own contract forbids returning."""
         db = self._db()
         beets = FakeBeetsDB()
-        service, canonical = self._service(db, beets, survivor=MERGED)
+        service, canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(MERGED),
+        )
 
         result = service.rekey_request(REQUEST_ID)
 
@@ -209,7 +260,9 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
         """Defensive re-check: no adapter between MusicBrainz and Discogs."""
         db = self._db()
         beets = FakeBeetsDB()
-        service, canonical = self._service(db, beets, survivor="1870")
+        service, canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected("1870"),
+        )
 
         result = service.rekey_request(REQUEST_ID)
 
@@ -218,11 +271,31 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
         row = db.request(REQUEST_ID)
         self.assertEqual(row["mb_release_id"], MERGED)
 
+    def test_a_beets_failure_resolving_the_stored_id_is_beets_unavailable(
+        self,
+    ) -> None:
+        """MINOR-5, the ``not_merged`` path's own stored-id lookup."""
+        db = self._db()
+        beets = FakeBeetsDB()
+        beets.set_resolve_current_release_error(MERGED, _locked_error())
+        service, _canonical = self._service(
+            db, beets, answer=CanonicalReleaseCurrent(),
+        )
+
+        result = service.rekey_request(REQUEST_ID)
+
+        self.assertEqual(result.outcome, RESULT_BEETS_UNAVAILABLE)
+        self.assertIsNotNone(result.error_message)
+        row = db.request(REQUEST_ID)
+        self.assertEqual(row["mb_release_id"], MERGED)
+
     def test_beets_missing_the_survivor_is_library_not_at_survivor(self) -> None:
         db = self._db()
         beets = FakeBeetsDB()
         beets.set_album_ids_for_release(SURVIVOR, [])
-        service, canonical = self._service(db, beets, survivor=SURVIVOR)
+        service, canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
 
         result = service.rekey_request(REQUEST_ID)
 
@@ -240,7 +313,9 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
         db = self._db()
         beets = FakeBeetsDB()
         beets.set_album_ids_for_release(SURVIVOR, [19345, 19999])
-        service, _canonical = self._service(db, beets, survivor=SURVIVOR)
+        service, _canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
 
         result = service.rekey_request(REQUEST_ID)
 
@@ -249,8 +324,100 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
         row = db.request(REQUEST_ID)
         self.assertEqual(row["mb_release_id"], MERGED)
 
+    def test_a_beets_failure_resolving_the_survivor_is_beets_unavailable(
+        self,
+    ) -> None:
+        """MINOR-5, the survivor-must-be-unique lookup."""
+        db = self._db()
+        beets = FakeBeetsDB()
+        beets.set_resolve_current_release_error(SURVIVOR, _locked_error())
+        service, _canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
+
+        result = service.rekey_request(REQUEST_ID)
+
+        self.assertEqual(result.outcome, RESULT_BEETS_UNAVAILABLE)
+        self.assertIsNotNone(result.error_message)
+        row = db.request(REQUEST_ID)
+        self.assertEqual(row["mb_release_id"], MERGED)
+
+    def test_library_still_at_stored_refuses_before_any_write(self) -> None:
+        """#1089 MAJOR-3: "exactly one album at the survivor" alone does not
+        witness the library MOVED. Both ids resolve to real albums here —
+        an unrelated album occupies the survivor while the request's own
+        album still sits at the merged-away id — and the ledger must not
+        transplant its evidence lineage onto that unrelated album."""
+        db = self._db()
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(MERGED, [111])
+        beets.set_album_ids_for_release(SURVIVOR, [19345])
+        service, canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
+
+        result = service.rekey_request(REQUEST_ID)
+
+        self.assertEqual(result.outcome, RESULT_LIBRARY_STILL_AT_STORED)
+        self.assertEqual(result.old_release_id, MERGED)
+        self.assertEqual(result.new_release_id, SURVIVOR)
+        self.assertEqual(result.beets_checked_release_id, MERGED)
+        self.assertEqual(result.beets_album_ids, (111,))
+        self.assertEqual(canonical.calls, [MERGED])
+        row = db.request(REQUEST_ID)
+        self.assertEqual(row["mb_release_id"], MERGED)
+        self.assertEqual(db.update_request_release_for_merge_calls, [])
+
+    def test_a_beets_failure_resolving_the_still_at_stored_check_is_beets_unavailable(
+        self,
+    ) -> None:
+        """MINOR-5, MAJOR-3's own re-check of the stored id, reached only
+        once the survivor already resolved to exactly one album."""
+        db = self._db()
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(SURVIVOR, [19345])
+        beets.set_resolve_current_release_error(MERGED, _locked_error())
+        service, _canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
+
+        result = service.rekey_request(REQUEST_ID)
+
+        self.assertEqual(result.outcome, RESULT_BEETS_UNAVAILABLE)
+        self.assertIsNotNone(result.error_message)
+        row = db.request(REQUEST_ID)
+        self.assertEqual(row["mb_release_id"], MERGED)
+
+    def test_survivor_collision_blocks_before_any_write(self) -> None:
+        """#1089 MAJOR-2: a rival request already at the survivor persists
+        until an operator acts — this must not be folded into
+        ``rekey_refused`` (whose message tells the operator to just
+        retry, which cannot help a permanent collision), and the write
+        must never run."""
+        db = self._db()
+        db.seed_request(make_request_row(
+            id=REQUEST_ID + 1, mb_release_id=SURVIVOR, status="imported",
+        ))
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(SURVIVOR, [19345])
+        service, _canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
+
+        result = service.rekey_request(REQUEST_ID)
+
+        self.assertEqual(result.outcome, RESULT_SURVIVOR_COLLISION)
+        self.assertEqual(result.rival_request_id, REQUEST_ID + 1)
+        self.assertEqual(result.colliding_fingerprints, ())
+        self.assertIsNotNone(result.error_message)
+        row = db.request(REQUEST_ID)
+        self.assertEqual(row["mb_release_id"], MERGED)
+        self.assertEqual(db.update_request_release_for_merge_calls, [])
+
     def test_an_in_flight_import_job_makes_the_write_refuse(self) -> None:
-        """The DB claim arm's own ``NOT EXISTS`` term, reached through the service."""
+        """The DB claim arm's own ``NOT EXISTS`` term, reached through the
+        service — a genuinely transient cause, unlike ``survivor_collision``
+        above."""
         db = self._db()
         db.enqueue_import_job(
             IMPORT_JOB_FORCE,
@@ -262,7 +429,9 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
         )
         beets = FakeBeetsDB()
         beets.set_album_ids_for_release(SURVIVOR, [19345])
-        service, _canonical = self._service(db, beets, survivor=SURVIVOR)
+        service, _canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
 
         result = service.rekey_request(REQUEST_ID)
 
@@ -275,7 +444,9 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
         db = self._db()
         beets = FakeBeetsDB()
         beets.set_album_ids_for_release(SURVIVOR, [19345])
-        service, canonical = self._service(db, beets, survivor=SURVIVOR)
+        service, canonical = self._service(
+            db, beets, answer=CanonicalReleaseRedirected(SURVIVOR),
+        )
 
         result = service.rekey_request(REQUEST_ID)
 
@@ -291,16 +462,16 @@ class TestMergeRekeyServiceOutcomes(unittest.TestCase):
             [(REQUEST_ID, MERGED, SURVIVOR, None)],
         )
 
-    def test_the_default_seams_read_the_process_wide_configuration(
+    def test_the_default_seam_reads_the_process_wide_configuration(
         self,
     ) -> None:
-        """No injected kwargs → both seams read the shared process state.
+        """No injected kwarg → the seam reads shared process state.
 
         An unwired process (``configure_canonical_base(None)``, the startup
         default before ``configure_canonical_release_lookup`` runs) must
-        report ``mirror_unavailable``, not silently degrade to "no redirect"
-        — that distinction is exactly why ``is_mirror_configured_fn`` exists
-        as its own seam (see :data:`lib.merge_rekey_service.IsMirrorConfiguredFn`).
+        report ``mirror_unavailable`` — the tagged resolver's own
+        ``CanonicalReleaseUnavailable`` answer, not a silent "no redirect"
+        degrade.
         """
         from lib.mb_canonical import (
             configure_canonical_base,

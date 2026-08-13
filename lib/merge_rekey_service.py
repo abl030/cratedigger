@@ -36,32 +36,43 @@ this service directly.
 Outcome → exit code / HTTP status convention (matches
 ``lib/mbid_replace_service.py`` / ``lib/search_plan_service.py``):
 
-    rekeyed                  200 / 0
-    not_found                404 / 2
-    wrong_state               409 / 4
-    not_merged                422 / 3
-    library_not_at_survivor   409 / 4
-    rekey_refused              409 / 4
-    mirror_unavailable         503 / 5
+    rekeyed                   200 / 0
+    not_found                 404 / 2
+    wrong_state                409 / 4
+    not_merged                 422 / 3
+    library_not_at_survivor    409 / 4
+    library_still_at_stored    409 / 4
+    survivor_collision         409 / 4
+    rekey_refused               409 / 4
+    mirror_unavailable          503 / 5
+    beets_unavailable           503 / 5
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import msgspec
 
 from lib.beets_db import (
+    BEETS_AUTHORITY_UNAVAILABLE_MESSAGE,
     CurrentBeetsAmbiguous,
+    CurrentBeetsMissing,
     CurrentBeetsResolution,
     CurrentBeetsUnique,
+    beets_authority_availability_category,
 )
-from lib.mb_canonical import CanonicalReleaseFn, production_canonical_release_fn
+from lib.mb_canonical import (
+    CanonicalReleaseRedirected,
+    CanonicalReleaseUnavailable,
+    TaggedCanonicalReleaseFn,
+    production_tagged_canonical_release_fn,
+)
 from lib.release_identity import ReleaseIdentity
 
 if TYPE_CHECKING:
+    from lib.pipeline_db._shared import MergeRekeyCollision
     from lib.pipeline_db.rows import AlbumRequestRow
 
 logger = logging.getLogger(__name__)
@@ -70,23 +81,29 @@ RESULT_REKEYED = "rekeyed"
 RESULT_NOT_FOUND = "not_found"
 RESULT_WRONG_STATE = "wrong_state"
 RESULT_MIRROR_UNAVAILABLE = "mirror_unavailable"
+RESULT_BEETS_UNAVAILABLE = "beets_unavailable"
 RESULT_NOT_MERGED = "not_merged"
 RESULT_LIBRARY_NOT_AT_SURVIVOR = "library_not_at_survivor"
+RESULT_LIBRARY_STILL_AT_STORED = "library_still_at_stored"
+RESULT_SURVIVOR_COLLISION = "survivor_collision"
 RESULT_REKEY_REFUSED = "rekey_refused"
 
 #: The route's status mapping. The CLI needs no paired exit-code dict of its
 #: own: every status here already matches ``_exit_code``'s default
 #: status->exit mapping (200/0, 404/2, 422/3, 409/4, 503/5) in
 #: ``scripts/pipeline_cli/api_mutations.py``, so ``cmd_merge_rekey`` relays
-#: with no ``exit_overrides`` — see its docstring.
+#: with no ``exit_overrides``.
 MERGE_REKEY_HTTP_STATUS: dict[str, int] = {
     RESULT_REKEYED: 200,
     RESULT_NOT_FOUND: 404,
     RESULT_WRONG_STATE: 409,
     RESULT_NOT_MERGED: 422,
     RESULT_LIBRARY_NOT_AT_SURVIVOR: 409,
+    RESULT_LIBRARY_STILL_AT_STORED: 409,
+    RESULT_SURVIVOR_COLLISION: 409,
     RESULT_REKEY_REFUSED: 409,
     RESULT_MIRROR_UNAVAILABLE: 503,
+    RESULT_BEETS_UNAVAILABLE: 503,
 }
 
 
@@ -96,10 +113,14 @@ class MergeRekeyResult(msgspec.Struct, frozen=True):
     ``outcome`` is one of the ``RESULT_*`` constants above.
     ``beets_album_ids`` carries what Beets currently resolves at the id named
     by ``beets_checked_release_id`` — populated on ``not_merged`` (what the
-    stored id itself holds, the #8792 refusal) and on
+    stored id itself holds, the #8792 refusal), on
     ``library_not_at_survivor`` (what the survivor holds, when it is
-    anything other than exactly one album) — so the UI can explain the
-    refusal instead of a bare error string.
+    anything other than exactly one album), and on
+    ``library_still_at_stored`` (what the stored id still holds) — so the UI
+    can explain the refusal instead of a bare error string.
+    ``rival_request_id`` / ``colliding_fingerprints`` are populated only on
+    ``survivor_collision``, mirroring
+    ``lib.pipeline_db._shared.MergeRekeyCollision``.
     """
 
     outcome: str
@@ -109,6 +130,8 @@ class MergeRekeyResult(msgspec.Struct, frozen=True):
     beets_album_id: int | None = None
     beets_checked_release_id: str | None = None
     beets_album_ids: tuple[int, ...] = ()
+    rival_request_id: int | None = None
+    colliding_fingerprints: tuple[str, ...] = ()
     error_message: str | None = None
 
 
@@ -117,6 +140,14 @@ class MergeRekeyDB(Protocol):
     """The PipelineDB surface the operator merge-rekey action uses (#1089)."""
 
     def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
+
+    def merge_rekey_collision(
+        self,
+        request_id: int,
+        *,
+        old_release_id: str,
+        new_release_id: str,
+    ) -> MergeRekeyCollision: ...
 
     def update_request_release_for_merge(
         self,
@@ -140,26 +171,6 @@ class MergeRekeyBeetsDB(Protocol):
     ) -> CurrentBeetsResolution: ...
 
 
-#: Whether the shared canonical-release resolver is wired to a mirror at
-#: all. ``lib.mb_canonical.canonical_release_id`` is fail-open by contract
-#: (module docstring): "unconfigured", "transport failure", and "asked, no
-#: redirect known" are ALL collapsed into the same ``None`` return, on
-#: purpose, for the automation/force import seam that never needed to tell
-#: them apart. The operator route DOES need to: #8792 (Slipknot Vol. 3) is a
-#: real, live, correctly-unmerged request whose stored id genuinely has no
-#: redirect — that must read as ``not_merged`` (422, an operator-facing
-#: fact), never as ``mirror_unavailable`` (503, "come back once this is
-#: wired"). This is the ONE thing this seam checks that
-#: ``canonical_release_fn``'s return value alone cannot answer.
-IsMirrorConfiguredFn = Callable[[], bool]
-
-
-def _default_is_mirror_configured() -> bool:
-    from lib.mb_canonical import configured_canonical_base
-
-    return configured_canonical_base() is not None
-
-
 def _beets_album_ids(resolution: CurrentBeetsResolution) -> tuple[int, ...]:
     if isinstance(resolution, CurrentBeetsUnique):
         return (resolution.album_id,)
@@ -173,13 +184,10 @@ class MergeRekeyService:
 
     Construct one per call (or per logical caller); it is stateless beyond
     its dependencies. ``canonical_release_fn`` defaults to the process-wide
-    configured resolver (``lib.mb_canonical.production_canonical_release_fn``)
-    — inert until ``configure_canonical_release_lookup`` has run at process
-    startup (``web/server.py::main`` / ``scripts/importer.py::main``).
-    ``is_mirror_configured_fn`` defaults to checking
-    ``lib.mb_canonical.configured_canonical_base()`` directly — see
-    :data:`IsMirrorConfiguredFn` for why this is a second, separate seam
-    rather than inferred from ``canonical_release_fn``'s return value.
+    configured tagged resolver
+    (``lib.mb_canonical.production_tagged_canonical_release_fn``) — inert
+    until ``configure_canonical_release_lookup`` has run at process startup
+    (``web/server.py::main`` / ``scripts/importer.py::main``).
     """
 
     def __init__(
@@ -187,21 +195,41 @@ class MergeRekeyService:
         db: MergeRekeyDB,
         beets_db: MergeRekeyBeetsDB,
         *,
-        canonical_release_fn: CanonicalReleaseFn | None = None,
-        is_mirror_configured_fn: IsMirrorConfiguredFn | None = None,
+        canonical_release_fn: TaggedCanonicalReleaseFn | None = None,
     ) -> None:
         self.db = db
         self.beets_db = beets_db
         self.canonical_release_fn = (
             canonical_release_fn
             if canonical_release_fn is not None
-            else production_canonical_release_fn()
+            else production_tagged_canonical_release_fn()
         )
-        self.is_mirror_configured_fn = (
-            is_mirror_configured_fn
-            if is_mirror_configured_fn is not None
-            else _default_is_mirror_configured
-        )
+
+    def _resolve_current_release(
+        self, identity: ReleaseIdentity, *, request_id: int,
+    ) -> tuple[CurrentBeetsResolution | None, MergeRekeyResult | None]:
+        """Read current Beets state, classifying an authority failure into
+        ``beets_unavailable`` exactly like ``web/routes/pipeline.py``'s own
+        boundary: a locked/IO/cant-open SQLite read is retryable (503);
+        anything else is a real bug and re-raises. Returns
+        ``(resolution, None)`` on success or ``(None, failure_result)`` on a
+        classified failure.
+        """
+        try:
+            return self.beets_db.resolve_current_release(identity), None
+        except Exception as exc:
+            category = beets_authority_availability_category(exc)
+            if category is None and not isinstance(exc, OSError):
+                raise
+            logger.exception(
+                "current Beets authority unavailable for request %s (%s)",
+                request_id, category or type(exc).__name__,
+            )
+            return None, MergeRekeyResult(
+                outcome=RESULT_BEETS_UNAVAILABLE,
+                request_id=request_id,
+                error_message=BEETS_AUTHORITY_UNAVAILABLE_MESSAGE,
+            )
 
     def rekey_request(self, request_id: int) -> MergeRekeyResult:
         """Rekey ``request_id`` onto MusicBrainz's current survivor, or refuse.
@@ -211,27 +239,58 @@ class MergeRekeyService:
            no automation owner attached → else ``wrong_state``. This is the
            service's own precondition, checked BEFORE any network or Beets
            call — it never spends either on a row the write would refuse
-           for a reason this call can already see.
-        3. The resolver must be wired to a mirror at all
-           (``is_mirror_configured_fn``) → else ``mirror_unavailable``. This
-           is checked BEFORE asking, because the shared resolver's own
-           fail-open contract cannot distinguish "unconfigured" from "asked,
-           no redirect" in its return value alone (see
-           :data:`IsMirrorConfiguredFn`).
-        4. Resolve the stored id's current MusicBrainz survivor at click
-           time. No different survivor named (asked, no redirect known —
-           the #8792 refusal) → ``not_merged``: this request was never
-           merged away. Reports what Beets currently holds at the stored id
-           so the UI can explain.
-        5. Require Beets to resolve EXACTLY ONE album at the survivor
-           (enforces "the library must already be at the survivor before
-           this runs", and the #1059 Beets-moves-first ordering) → else
-           ``library_not_at_survivor``.
-        6. Write the operator claim arm of
+           for a reason this call can already see. The raw stored
+           ``mb_release_id`` is still reported even when identity resolution
+           itself failed (e.g. a conflicting Discogs field), so the payload
+           never reads as "no identity at all".
+        3. Resolve the stored id's current MusicBrainz survivor at click
+           time via the TAGGED resolver
+           (``lib.mb_canonical.canonical_release_status``), which keeps
+           "no answer obtained" distinct from "MusicBrainz answered, no
+           redirect" — the collapsed ``CanonicalReleaseFn`` the import seam
+           uses cannot make that distinction, and conflating them here would
+           read a down mirror as "MusicBrainz confirms this was never
+           merged" (#1089 BLOCKING-1).
+
+           * ``CanonicalReleaseUnavailable`` → ``mirror_unavailable``: no
+             answer was obtained at all (unconfigured or unreachable).
+           * ``CanonicalReleaseCurrent``, OR a ``CanonicalReleaseRedirected``
+             this call does not trust (survivor equal to the stored id, or
+             not itself a MusicBrainz identity — a defensive re-check on the
+             injected resolver, mirroring the #1059 seam's own
+             don't-trust-the-resolver-blindly precedent) → ``not_merged``:
+             MusicBrainz answered and this request was never merged away
+             (the #8792 Slipknot Vol. 3 refusal). Reports what Beets
+             currently holds at the stored id.
+        4. Require Beets to resolve EXACTLY ONE album at the survivor →
+           else ``library_not_at_survivor``.
+        5. Require Beets to resolve NOTHING at the stored (old) id →
+           else ``library_still_at_stored`` (#1089 MAJOR-3): "exactly one
+           album at the survivor" alone does not witness that the library
+           MOVED — an unrelated album could already occupy the survivor
+           while this request's own album still sits at the stored id, and
+           rekeying would transplant the evidence lineage onto that
+           unrelated album. This is the beets-first ordering (#1059)
+           enforced explicitly: Beets must already show a clean move —
+           survivor occupied, stored id empty — before the ledger follows.
+        6. Pre-check ``PipelineDB.merge_rekey_collision`` (#1089 MAJOR-2),
+           the same read the import-validation seam takes before its own
+           retag (``lib/download_validation.py``): a rival request already
+           at the survivor, or a colliding evidence fingerprint, both
+           persist until an operator acts → ``survivor_collision``,
+           carrying the rival request id / colliding fingerprints so the UI
+           can explain it. This keeps ``rekey_refused`` (below) reserved
+           for genuinely transient causes only.
+        7. Write the operator claim arm of
            ``update_request_release_for_merge`` (``expected_import_job_id
-           =None``). ``False`` → ``rekey_refused`` (the request changed
-           underneath this call — status, owner, identity, or an in-flight
-           import job; retry re-derives). ``True`` → ``rekeyed``.
+           =None``). ``False`` → ``rekey_refused``: something changed
+           underneath this call since step 6's read — an in-flight import
+           job appeared, this request's own status/owner/identity changed
+           concurrently, or (the narrow residual step 6 cannot close: no
+           lock is held between the pre-check and the write) a rival took
+           the survivor in that same window. Retry re-derives every one of
+           these — a renewed rival collision reports ``survivor_collision``
+           again on the very next click. ``True`` → ``rekeyed``.
         """
         row = self.db.get_request(request_id)
         if row is None:
@@ -252,11 +311,13 @@ class MergeRekeyService:
             or status != "imported"
             or owner is not None
         ):
+            raw_stored = row.get("mb_release_id")
             return MergeRekeyResult(
                 outcome=RESULT_WRONG_STATE,
                 request_id=request_id,
                 old_release_id=(
-                    identity.release_id if identity is not None else None
+                    identity.release_id if identity is not None
+                    else (str(raw_stored) if raw_stored is not None else None)
                 ),
                 error_message=(
                     f"request {request_id} is not an owner-free imported "
@@ -266,46 +327,46 @@ class MergeRekeyService:
                 ),
             )
         old_release_id = identity.release_id
+        old_identity = ReleaseIdentity(
+            source="musicbrainz", release_id=old_release_id,
+        )
 
-        if not self.is_mirror_configured_fn():
+        answer = self.canonical_release_fn(old_release_id)
+        if isinstance(answer, CanonicalReleaseUnavailable):
             return MergeRekeyResult(
                 outcome=RESULT_MIRROR_UNAVAILABLE,
                 request_id=request_id,
                 old_release_id=old_release_id,
                 error_message=(
-                    "MusicBrainz merge-survivor resolution is not "
-                    "configured on this process"
+                    "MusicBrainz merge-survivor resolution did not answer "
+                    f"for {old_release_id} (unconfigured, or the mirror is "
+                    "unreachable)"
                 ),
             )
 
-        # ``canonical_release_fn``'s contract (lib/mb_canonical.py) never
-        # returns the stored id itself — a cosmetic redirect that lands on
-        # the same id is ALSO reported as ``None`` ("no different canonical
-        # is known"). This seam re-checks rather than trusting that contract
-        # (M3 in tests/test_merge_rekey.py's #1059 seam: "the resolver's own
-        # contract already forbids returning the stored id... but this seam
-        # authorizes a rekey; it re-checks"): a survivor equal to the stored
-        # id, or one that is not itself a MusicBrainz identity, is folded
-        # into the same "no legitimate redirect" answer as a bare ``None`` —
-        # never passed on to the write, which would otherwise raise
-        # ``ValueError`` on a self-rekey.
-        raw_survivor = self.canonical_release_fn(old_release_id)
-        survivor_identity = (
-            ReleaseIdentity.from_id(raw_survivor) if raw_survivor else None
-        )
-        survivor = (
-            survivor_identity.release_id
-            if survivor_identity is not None
-            and survivor_identity.source == "musicbrainz"
-            and survivor_identity.release_id != old_release_id
-            else None
-        )
-        if not survivor:
-            stored_resolution = self.beets_db.resolve_current_release(
-                ReleaseIdentity(
-                    source="musicbrainz", release_id=old_release_id,
-                ),
+        # ``canonical_release_status``'s own contract already guarantees a
+        # ``CanonicalReleaseRedirected`` survivor is a different MusicBrainz
+        # id — but this seam re-checks rather than trusting an INJECTED
+        # resolver blindly (mirroring the #1059 seam's own precedent), since
+        # a misbehaving test double, not production, is the only way this
+        # branch is ever reached.
+        survivor: str | None = None
+        if isinstance(answer, CanonicalReleaseRedirected):
+            survivor_identity = ReleaseIdentity.from_id(answer.survivor)
+            if (
+                survivor_identity is not None
+                and survivor_identity.source == "musicbrainz"
+                and survivor_identity.release_id != old_release_id
+            ):
+                survivor = survivor_identity.release_id
+
+        if survivor is None:
+            stored_resolution, failure = self._resolve_current_release(
+                old_identity, request_id=request_id,
             )
+            if failure is not None:
+                return failure
+            assert stored_resolution is not None
             return MergeRekeyResult(
                 outcome=RESULT_NOT_MERGED,
                 request_id=request_id,
@@ -318,10 +379,16 @@ class MergeRekeyService:
                     f"{old_release_id}; this request has not been merged"
                 ),
             )
-
-        survivor_resolution = self.beets_db.resolve_current_release(
-            ReleaseIdentity(source="musicbrainz", release_id=survivor),
+        survivor_identity = ReleaseIdentity(
+            source="musicbrainz", release_id=survivor,
         )
+
+        survivor_resolution, failure = self._resolve_current_release(
+            survivor_identity, request_id=request_id,
+        )
+        if failure is not None:
+            return failure
+        assert survivor_resolution is not None
         if not isinstance(survivor_resolution, CurrentBeetsUnique):
             return MergeRekeyResult(
                 outcome=RESULT_LIBRARY_NOT_AT_SURVIVOR,
@@ -334,6 +401,45 @@ class MergeRekeyService:
                     f"Beets does not resolve exactly one album at survivor "
                     f"{survivor}; the library must already hold the "
                     "survivor before the ledger can follow it"
+                ),
+            )
+
+        stored_resolution, failure = self._resolve_current_release(
+            old_identity, request_id=request_id,
+        )
+        if failure is not None:
+            return failure
+        assert stored_resolution is not None
+        if not isinstance(stored_resolution, CurrentBeetsMissing):
+            return MergeRekeyResult(
+                outcome=RESULT_LIBRARY_STILL_AT_STORED,
+                request_id=request_id,
+                old_release_id=old_release_id,
+                new_release_id=survivor,
+                beets_checked_release_id=old_release_id,
+                beets_album_ids=_beets_album_ids(stored_resolution),
+                error_message=(
+                    f"Beets still resolves an album at the merged-away id "
+                    f"{old_release_id}; retag the library onto the "
+                    "survivor before the ledger can follow it"
+                ),
+            )
+
+        collision = self.db.merge_rekey_collision(
+            request_id, old_release_id=old_release_id, new_release_id=survivor,
+        )
+        if collision.blocked:
+            return MergeRekeyResult(
+                outcome=RESULT_SURVIVOR_COLLISION,
+                request_id=request_id,
+                old_release_id=old_release_id,
+                new_release_id=survivor,
+                beets_album_id=survivor_resolution.album_id,
+                rival_request_id=collision.rival_request_id,
+                colliding_fingerprints=collision.colliding_fingerprints,
+                error_message=(
+                    f"cannot rekey request {request_id} onto {survivor}: "
+                    f"{collision.detail()}"
                 ),
             )
 
@@ -351,9 +457,9 @@ class MergeRekeyService:
                 new_release_id=survivor,
                 beets_album_id=survivor_resolution.album_id,
                 error_message=(
-                    f"request {request_id} changed underneath the rekey "
-                    "(status, owner, identity, or an in-flight import job) "
-                    "— retry"
+                    f"request {request_id} changed underneath the rekey, "
+                    "or a rival request took the survivor in the same "
+                    "instant — retry"
                 ),
             )
         return MergeRekeyResult(
@@ -367,14 +473,16 @@ class MergeRekeyService:
 
 __all__ = [
     "MERGE_REKEY_HTTP_STATUS",
+    "RESULT_BEETS_UNAVAILABLE",
     "RESULT_LIBRARY_NOT_AT_SURVIVOR",
+    "RESULT_LIBRARY_STILL_AT_STORED",
     "RESULT_MIRROR_UNAVAILABLE",
     "RESULT_NOT_FOUND",
     "RESULT_NOT_MERGED",
     "RESULT_REKEYED",
     "RESULT_REKEY_REFUSED",
+    "RESULT_SURVIVOR_COLLISION",
     "RESULT_WRONG_STATE",
-    "IsMirrorConfiguredFn",
     "MergeRekeyBeetsDB",
     "MergeRekeyDB",
     "MergeRekeyResult",

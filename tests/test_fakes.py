@@ -6105,6 +6105,39 @@ class TestFakeBeetsDB(unittest.TestCase):
                 assert isinstance(poisoned, CurrentBeetsAmbiguous)
                 self.assertEqual(poisoned.reason, "invalid_path")
 
+    def test_resolve_current_release_error_mirrors_beets_authority_failure(
+        self,
+    ) -> None:
+        """#1089 MINOR-5 (test-fidelity Rule B): the fake must be able to
+        RAISE, not just return a shape, so ``MergeRekeyService``'s Beets-
+        authority classify-or-reraise boundary is exercised with a real
+        exception instance rather than a synthetic stand-in."""
+        import sqlite3
+
+        from lib.release_identity import ReleaseIdentity
+
+        identity = ReleaseIdentity(
+            source="musicbrainz",
+            release_id="11111111-1111-1111-1111-111111111111",
+        )
+        beets = FakeBeetsDB()
+        locked = sqlite3.OperationalError("database is locked")
+        locked.sqlite_errorcode = sqlite3.SQLITE_LOCKED
+        beets.set_resolve_current_release_error(identity.release_id, locked)
+
+        with self.assertRaises(sqlite3.OperationalError):
+            beets.resolve_current_release(identity)
+        self.assertEqual(beets.resolve_current_release_calls, [identity])
+
+        # A different release id is unaffected — the error is keyed, not
+        # global.
+        other = ReleaseIdentity(
+            source="musicbrainz",
+            release_id="22222222-2222-2222-2222-222222222222",
+        )
+        beets.set_album_ids_for_release(other.release_id, [])
+        beets.resolve_current_release(other)  # does not raise
+
     def test_discogs_alias_reseed_replaces_the_canonical_current_snapshot(
         self,
     ) -> None:

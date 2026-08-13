@@ -225,7 +225,7 @@ function renderDiskCoverageCard(dc) {
  */
 function renderDriftRow(r) {
   return `
-        <div class="metric-row drift-row" data-drift-row="${r.id}">
+        <div class="metric-row" data-drift-row="${r.id}">
           <span>#${r.id} ${esc(r.artist_name || '?')} — ${esc(r.album_title || '?')}</span>
           <strong class="metric-bad">${esc(r.status)}</strong>
         </div>
