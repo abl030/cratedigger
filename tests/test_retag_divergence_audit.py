@@ -33,6 +33,7 @@ from lib.beets_db import BeetsAlbumIdentityRow, BeetsDB
 from lib.beets_retag import RETAG_RETAGGED, retag_merged_album
 from lib.release_identity import ReleaseIdentity
 from lib.retag_divergence_audit import (
+    _LIBRARY_START_CURSOR,
     REFUSED_OUTSIDE_LIBRARY_ROOT_DETAIL,
     RetagDivergenceItem,
     RetagDivergenceItemClass,
@@ -41,6 +42,7 @@ from lib.retag_divergence_audit import (
     TagReadUnreadable,
     album_class_from_items,
     classify_retag_divergence_item,
+    parse_after_album_id_cursor,
     scan_retag_divergence,
     scan_retag_divergence_from_borrowed_factory,
     scan_retag_divergence_from_factory,
@@ -181,6 +183,49 @@ class TestAlbumClassFromItems(unittest.TestCase):
         for desc, items, expected in self.CASES:
             with self.subTest(desc=desc):
                 self.assertEqual(album_class_from_items(items), expected)
+
+
+class TestParseAfterAlbumIdCursor(unittest.TestCase):
+    """#1093 review round 5, finding 5 — the cursor grammar is strictly
+    ASCII digits only, deliberately narrower than Python's bare ``int()``,
+    which silently accepts a leading sign, underscore digit-grouping,
+    surrounding whitespace, and non-ASCII digit characters."""
+
+    VALID_CASES: ClassVar = [
+        ("single digit", "7", 7),
+        ("multiple digits", "12345", 12345),
+        ("leading zero", "007", 7),
+        ("zero", "0", 0),
+        ("large well-formed value", "99999999999999999999", 99999999999999999999),
+    ]
+
+    def test_accepts_plain_ascii_digit_strings(self) -> None:
+        for desc, text, expected in self.VALID_CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(parse_after_album_id_cursor(text), expected)
+
+    INVALID_CASES: ClassVar = [
+        ("empty string", ""),
+        ("surrounding whitespace", " 7 "),
+        ("leading plus sign", "+4"),
+        ("leading minus sign", "-4"),
+        ("underscore digit grouping", "1_0"),
+        ("decimal point", "3.5"),
+        ("non-ascii arabic-indic digit", "٤"),
+        ("trailing garbage", "7abc"),
+        ("leading garbage", "abc7"),
+        ("hex-looking value", "0x7"),
+    ]
+
+    def test_rejects_everything_python_int_would_silently_reinterpret(
+        self,
+    ) -> None:
+        # int() itself would happily accept several of these (e.g. " 7 ",
+        # "+4", "1_0") — proving the grammar is strictly narrower than the
+        # builtin, not merely different.
+        for desc, text in self.INVALID_CASES:
+            with self.subTest(desc=desc), self.assertRaises(ValueError):
+                parse_after_album_id_cursor(text)
 
 
 class TestScanRetagDivergence(unittest.TestCase):
@@ -570,10 +615,52 @@ class TestScanDeadline(unittest.TestCase):
         self.assertEqual(report.counts.albums_scanned, 0)
         self.assertEqual(report.next_after_album_id, 2)
 
+    def test_deadline_expiring_before_any_album_from_the_true_start_uses_the_sentinel_cursor(
+        self,
+    ) -> None:
+        """#1093 review round 5, finding 3 — the ``after_album_id=2``
+        variant above is not the only zero-progress shape: starting from
+        the TRUE beginning (``after_album_id=None``) and expiring before
+        even one album is read must ALSO report a real, non-``None``
+        resume cursor — the field's own invariant is
+        ``complete == (next_after_album_id is None)``, and this scan is
+        NOT complete. The previous shape reported ``next_after_album_id
+        =None`` here, which a caller following the documented resume loop
+        reads as "done, nothing left" while having scanned nothing at
+        all."""
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=5, mb_albumid=SURVIVOR, item_paths=("/a/01.mp3",),
+            ),
+        ])
+        calls = {"n": 0}
+
+        def time_fn() -> float:
+            calls["n"] += 1
+            return 0.0 if calls["n"] == 1 else 100.0
+
+        report = scan_retag_divergence(
+            beets,
+            read_tag=_read_tag_from_map({"/a/01.mp3": SURVIVOR}),
+            deadline_seconds=1.0,
+            time_fn=time_fn,
+            after_album_id=None,
+        )
+
+        self.assertFalse(report.complete)
+        self.assertEqual(report.counts.albums_scanned, 0)
+        self.assertIsNotNone(report.next_after_album_id)
+        self.assertEqual(report.next_after_album_id, _LIBRARY_START_CURSOR)
+
 
 class TestCursorResume(unittest.TestCase):
     """#1093 review round 4, finding 4 — a bounded caller can chain calls
-    to complete a genuine full census and eventually reach ``clean``."""
+    to complete a genuine full census; round 5, finding 1 — no SINGLE
+    response in that chain is ever allowed to claim ``clean`` for the
+    whole library on its own, since each only vouches for the range it
+    actually scanned. The caller accumulates the whole-library verdict
+    across the chain instead."""
 
     def test_after_album_id_filters_to_strictly_greater_ids(self) -> None:
         beets = FakeBeetsDB()
@@ -601,10 +688,49 @@ class TestCursorResume(unittest.TestCase):
         self.assertEqual(report.counts.albums_scanned, 2)
         self.assertTrue(report.complete)
         self.assertIsNone(report.next_after_album_id)
+        self.assertEqual(report.after_album_id, 1)
+        # A resumed call never claims "clean" on its own, even complete
+        # and divergence-free — it only vouches for the range it scanned,
+        # never the prefix the cursor skipped (#1093 review round 5,
+        # finding 1).
+        self.assertEqual(report.status, "incomplete")
+
+    def test_a_stale_cursor_covering_nothing_is_incomplete_not_clean(
+        self,
+    ) -> None:
+        """The exact N1 second reproduction: a stale or typo'd cursor
+        (e.g. copy-pasted from a much later ``next_after_album_id``, or a
+        library that has since shrunk) that filters out every row must
+        still report ``incomplete`` — not silently ``clean`` — because it
+        did not look at any of the prefix a real chain would have covered
+        first."""
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=("/a/01.mp3",),
+            ),
+        ])
+
+        report = scan_retag_divergence(
+            beets,
+            read_tag=_read_tag_from_map({"/a/01.mp3": SURVIVOR}),
+            after_album_id=99999,
+        )
+
+        self.assertEqual(report.counts.albums_scanned, 0)
+        self.assertTrue(report.complete)
+        self.assertIsNone(report.next_after_album_id)
+        self.assertEqual(report.status, "incomplete")
 
     def test_chaining_truncated_calls_reaches_a_genuine_full_census(
         self,
     ) -> None:
+        """Every page in the chain reports ``incomplete`` (never
+        ``clean``, per round 5 finding 1) — the CALLER is the one who
+        concludes "library-wide clean", by observing that the chain
+        started from ``after_album_id=None``, ran to
+        ``next_after_album_id is None``, and no page along the way ever
+        reported a genuine divergence."""
         beets = FakeBeetsDB()
         beets.set_album_mb_identities([
             BeetsAlbumIdentityRow(
@@ -639,7 +765,7 @@ class TestCursorResume(unittest.TestCase):
 
         after_album_id = None
         seen_album_ids: list[int] = []
-        every_report_clean_or_incomplete = True
+        any_page_diverged = False
         report: RetagDivergenceReport | None = None
         for _ in range(5):  # generous bound — 3 albums, 1 per call
             report = scan_retag_divergence(
@@ -647,8 +773,13 @@ class TestCursorResume(unittest.TestCase):
                 deadline_seconds=1.0, time_fn=_one_album_budget_clock(),
                 after_album_id=after_album_id,
             )
-            if report.status not in ("clean", "incomplete"):
-                every_report_clean_or_incomplete = False
+            # No single page's status is ever "clean" (round 5, finding
+            # 1) — every page in this scenario started from a cursor
+            # (even the very first, whose own INPUT was None but whose
+            # resumed successors are not) or was truncated.
+            self.assertNotEqual(report.status, "clean")
+            if report.status == "divergence_found":
+                any_page_diverged = True
             seen_album_ids.extend(
                 a.album_id for a in report.albums
             )  # none expected — every item agrees
@@ -657,12 +788,16 @@ class TestCursorResume(unittest.TestCase):
             after_album_id = report.next_after_album_id
 
         assert report is not None, "the chain loop must run at least once"
-        self.assertTrue(every_report_clean_or_incomplete)
+        self.assertFalse(any_page_diverged)
         self.assertEqual(seen_album_ids, [])
-        # The final call in the chain reached the end with nothing left to
-        # resume AND found nothing wrong — a genuine "clean" census of the
-        # whole library, assembled from bounded calls.
-        self.assertEqual(report.status, "clean")
+        # The final call in the chain reached the end of the (cursor-
+        # filtered) row set with nothing left to resume — but it is STILL
+        # "incomplete", not "clean", because its own after_album_id was
+        # not None (round 5, finding 1). The whole-library "clean"
+        # verdict is the CALLER's conclusion from the loop above, not
+        # anything a single response says.
+        self.assertEqual(report.status, "incomplete")
+        self.assertIsNotNone(report.after_album_id)
         self.assertTrue(report.complete)
         self.assertIsNone(report.next_after_album_id)
 

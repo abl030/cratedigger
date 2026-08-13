@@ -159,8 +159,14 @@ load-bearing:
   time budget well under the deployed vhost's reverse-proxy read timeout
   and can therefore report only a PREFIX of the library per request — pass
   `?after_album_id=N` (the prior response's `next_after_album_id`) to
-  resume and, chaining calls, complete the same full census the CLI does
-  in one call.** It never writes to Beets, PostgreSQL, or the filesystem —
+  resume. Chaining calls this way visits the same albums, in the same
+  order, that the CLI's one call does — but NO SINGLE response in that
+  chain ever reports `status="clean"` on its own, even the one that
+  reaches the end: a resumed call only ever vouches for the range it
+  itself scanned, never a prefix a cursor skipped. A caller that wants
+  the CLI's one-call "library-wide clean" verdict has to accumulate it
+  itself, by observing that every page in the chain found no
+  divergence.** It never writes to Beets, PostgreSQL, or the filesystem —
   a reconciler is a separate, larger option nobody has built.
   `docs/debugging-cli.md` § "Retag divergence audit scope" is the full
   report-shape, status/exit-code, and containment-mechanism reference.

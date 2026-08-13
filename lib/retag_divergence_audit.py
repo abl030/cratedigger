@@ -64,21 +64,29 @@ listed; full counts are always reported regardless.
 independent of unreadable/empty/refused findings that merely mean the
 census could not fully vouch for some albums:
 
-- ``clean``: nothing listed at all — the scan actually answered the
-  question and the cohort is empty.
+- ``clean``: nothing listed at all, this call started from the TRUE
+  beginning of the library (``after_album_id is None`` on input — see
+  below), AND it ran to completion (``complete`` is ``True``). Only a call
+  meeting all three conditions has actually answered the whole-library
+  question; a single response is never allowed to claim more than it
+  itself computed (#1093 review round 5, finding 1).
 - ``divergence_found``: at least one album contains an item classified
   ``diverges`` or ``file_tag_present_db_absent`` — a real identity
   disagreement. This is decided independent of precedence and of whatever
   ELSE is wrong with that album (or any other), so a permission error on
   one album's files can never mask a genuine divergence found elsewhere,
-  and can never manufacture one either.
-- ``incomplete``: no genuine divergence anywhere, but the scan could not
-  fully vouch for the library — at least one album is listed solely for a
-  non-divergence reason (unreadable, empty, or refused-path items), or the
+  and can never manufacture one either. Takes priority over every other
+  condition below, including a cursor being set.
+- ``incomplete``: no genuine divergence anywhere, but this call could not
+  vouch for the WHOLE library — at least one album is listed solely for a
+  non-divergence reason (unreadable, empty, or refused-path items); the
   scan itself was time-bounded and stopped before finishing (``complete``
-  is ``False`` in that case; see ``deadline_seconds``). This is NOT "clean"
-  — the world blocked a complete answer, so callers must not read it as
-  "no divergence" (#1093 review round 4, finding 5; see
+  is ``False`` in that case; see ``deadline_seconds``); OR this call
+  started from a resume cursor (``after_album_id is not None`` on input),
+  which means it never looked at whatever the cursor skipped, however
+  clean the range it DID scan turned out to be. This is NOT "clean" — the
+  world blocked a complete answer, so callers must not read it as "no
+  divergence" (#1093 review round 4, finding 5; round 5, finding 1; see
   ``scripts/pipeline_cli/audit.py``/``web/routes/retag_divergence_audit.py``
   for the exit-code/status-code mapping this drives).
 - ``beets_unavailable``: the Beets authority itself could not be opened or
@@ -94,14 +102,23 @@ timeout; ``pipeline-cli audit retag-divergence`` passes none — the CLI is
 always the full, unbounded census. A bounded scan that runs out of loop
 time reports ``complete=False`` over the albums it reached, exactly like an
 unavailable Beets authority; the report SHAPE never changes.
+
 ``after_album_id``/``next_after_album_id`` let a bounded caller RESUME a
-truncated scan across multiple calls and eventually reach ``clean`` for
-the whole library — see :func:`scan_retag_divergence`.
+truncated scan across multiple calls, but NO SINGLE call in that chain —
+not even the one that reaches the end — is itself allowed to report
+``clean``, because each one only ever vouches for the range it scanned
+(see ``status`` above). A caller that wants a genuine whole-library
+verdict must accumulate across the chain itself: start with
+``after_album_id=None``, keep resuming with each report's
+``next_after_album_id`` until it comes back ``None``, and conclude
+"library-wide clean" only if EVERY page in that chain reported no
+divergence — see :func:`scan_retag_divergence`.
 """
 
 from __future__ import annotations
 
 import importlib
+import re
 import time
 from collections.abc import Callable, Sequence
 from contextlib import closing
@@ -147,6 +164,41 @@ REFUSED_OUTSIDE_LIBRARY_ROOT_DETAIL: Literal[
     "refused: stored path is not lexically contained within the configured "
     "library root (path-string check; symlinks are not followed)"
 )
+
+#: Sentinel resume cursor meaning "before the first row" — used ONLY as an
+#: OUTPUT ``next_after_album_id`` when a scan truncates before processing
+#: even one album AND its own input ``after_album_id`` was ``None`` (#1093
+#: review round 5, finding 3). Beets' ``albums`` table is a SQLite
+#: ``INTEGER PRIMARY KEY`` (rowid alias); every real album id is >= 1, so
+#: ``row.album_id > 0`` is unfiltered — passing ``0`` back as
+#: ``after_album_id`` behaves identically to passing ``None``, while still
+#: being a real ``int`` that keeps the ``complete == (next_after_album_id
+#: is None)`` invariant true even when zero progress was made.
+_LIBRARY_START_CURSOR = 0
+
+#: Strict ASCII-digit resume-cursor grammar — deliberately narrower than
+#: Python's bare ``int()``, which silently accepts a leading sign,
+#: underscore digit-grouping, surrounding whitespace, and non-ASCII digit
+#: characters (``int("１_0")== 10``, ``int(" 7 ") == 7``). A cursor is a
+#: read-only replay value, not user arithmetic, so none of that leniency is
+#: wanted; a malformed or reinterpreted cursor should be REFUSED, not
+#: silently coerced to a different album id than the caller typed (#1093
+#: review round 5, finding 5). Shared by the CLI's ``--after-album-id`` and
+#: the API's ``?after_album_id=`` so both surfaces refuse the same inputs —
+#: CLI ⇄ API Surface Symmetry (`.claude/rules/code-quality.md`).
+_STRICT_ALBUM_ID_CURSOR_RE = re.compile(r"[0-9]+")
+
+
+def parse_after_album_id_cursor(text: str) -> int:
+    """Strictly parse an ``after_album_id`` resume-cursor string.
+
+    Raises :class:`ValueError` on anything but a plain, nonnegative,
+    ASCII-digit sequence — no sign, no underscore grouping, no surrounding
+    whitespace, no non-ASCII digit characters.
+    """
+    if not _STRICT_ALBUM_ID_CURSOR_RE.fullmatch(text):
+        raise ValueError(f"not a valid album id cursor: {text!r}")
+    return int(text)
 
 
 class TagReadOk(msgspec.Struct, frozen=True):
@@ -287,13 +339,26 @@ class RetagDivergenceReport(msgspec.Struct, frozen=True):
     albums: tuple[RetagDivergenceAlbum, ...]
     #: Populated iff ``status == "beets_unavailable"``.
     unavailable_detail: str | None = None
-    #: Populated iff this scan was truncated by ``deadline_seconds``: the
-    #: last album id actually reached (or, if the deadline expired before
-    #: reaching even one album, the caller's own ``after_album_id``
-    #: unchanged — progress is never lost). Pass as ``after_album_id`` on
-    #: the next call to resume where this one stopped. ``None`` when the
-    #: scan reached the end of the (optionally cursor-filtered) row set —
-    #: nothing left to resume (#1093 review round 4, finding 4).
+    #: Echoes the ``after_album_id`` this scan was called with — ``None``
+    #: iff this call started from the true beginning of the library. A
+    #: caller cannot tell "started from a cursor" from "started from the
+    #: beginning" any other way once the report is in hand, and that
+    #: distinction is exactly what gates ``status == "clean"`` below
+    #: (#1093 review round 5, finding 1).
+    after_album_id: int | None = None
+    #: Populated iff ``complete`` is ``False`` (this scan was truncated by
+    #: ``deadline_seconds`` before reaching the end of its row set) — the
+    #: cursor to pass as ``after_album_id`` on the next call to resume
+    #: exactly where this one stopped. INVARIANT:
+    #: ``complete == (next_after_album_id is None)`` — a truncated scan
+    #: NEVER reports ``None`` here, even when it made zero progress (see
+    #: :func:`scan_retag_divergence`'s own docstring for how that case is
+    #: represented; #1093 review round 5, finding 3 — the previous shape
+    #: could report ``next_after_album_id=None`` with ``complete=False``,
+    #: which a caller following the documented resume loop reads as "done"
+    #: while having scanned nothing). ``None`` when ``complete`` is
+    #: ``True`` — the scan reached the end of its (optionally
+    #: cursor-filtered) row set and there is nothing left to resume.
     next_after_album_id: int | None = None
 
 
@@ -378,9 +443,24 @@ def scan_retag_divergence(
 
     ``after_album_id`` restricts the scan to albums with a strictly greater
     id, letting a bounded caller resume a previous truncated scan (see
-    ``next_after_album_id`` on the returned report) — chaining calls until
-    ``next_after_album_id`` comes back ``None`` completes a genuine full
-    census across multiple bounded requests.
+    ``next_after_album_id`` on the returned report). Passing a non-``None``
+    ``after_album_id`` also forces ``status`` away from ``clean`` even on a
+    completed, divergence-free scan (#1093 review round 5, finding 1) — this
+    call cannot know whether the range the cursor skipped is clean, so it
+    reports ``incomplete`` instead of a whole-library verdict it did not
+    compute. Chaining calls (feed each report's ``next_after_album_id``
+    back in as the next call's ``after_album_id``, starting from ``None``,
+    until ``next_after_album_id`` comes back ``None``) still reconstructs a
+    genuine full census across multiple bounded requests — the CALLER
+    concludes "library-wide clean" by observing that every page in the
+    chain found no divergence, not by reading any single page's own
+    ``status``.
+
+    ``next_after_album_id`` satisfies ``complete == (next_after_album_id is
+    None)`` in every case, including a scan that truncates before reaching
+    even one album: it is never left ``None`` while ``complete`` is
+    ``False``, even when there is no real album id yet to report (see
+    ``_LIBRARY_START_CURSOR``).
     """
     rows = sorted(beets.list_album_mb_identities(), key=lambda row: row.album_id)
     if after_album_id is not None:
@@ -430,12 +510,29 @@ def scan_retag_divergence(
     )
     if has_divergence:
         status: RetagDivergenceStatus = "divergence_found"
-    elif albums or truncated:
+    elif albums or truncated or after_album_id is not None:
+        # A resumed call (``after_album_id is not None``) can never claim
+        # ``clean`` on its own, even when it completes: it only vouches
+        # for the SUFFIX of the library it actually scanned, never the
+        # prefix a cursor skipped. Only a call that both started from the
+        # true beginning AND ran to completion has actually answered the
+        # whole-library question (#1093 review round 5, finding 1).
         status = "incomplete"
     else:
         status = "clean"
     if truncated:
-        next_after_album_id = built[-1].album_id if built else after_album_id
+        if built:
+            next_after_album_id = built[-1].album_id
+        elif after_album_id is not None:
+            next_after_album_id = after_album_id
+        else:
+            # Truncated before reaching even one album, starting from the
+            # true beginning: there is no real album id to report, but
+            # ``next_after_album_id`` must still be non-``None`` here (see
+            # the field's own invariant) — ``_LIBRARY_START_CURSOR``
+            # resumes from the beginning exactly like ``None`` would have
+            # (#1093 review round 5, finding 3).
+            next_after_album_id = _LIBRARY_START_CURSOR
     else:
         next_after_album_id = None
     return RetagDivergenceReport(
@@ -443,6 +540,7 @@ def scan_retag_divergence(
         complete=not truncated,
         counts=counts,
         albums=albums,
+        after_album_id=after_album_id,
         next_after_album_id=next_after_album_id,
     )
 
@@ -451,13 +549,16 @@ def _empty_counts() -> RetagDivergenceCounts:
     return RetagDivergenceCounts(0, 0, 0, 0, 0, 0, 0, 0)
 
 
-def _unavailable_report(category: str) -> RetagDivergenceReport:
+def _unavailable_report(
+    category: str, *, after_album_id: int | None,
+) -> RetagDivergenceReport:
     return RetagDivergenceReport(
         status="beets_unavailable",
         complete=False,
         counts=_empty_counts(),
         albums=(),
         unavailable_detail=f"current Beets authority unavailable ({category})",
+        after_album_id=after_album_id,
     )
 
 
@@ -511,7 +612,7 @@ def scan_retag_divergence_from_factory(
     """Own Beets open/query/close; type only expected unavailability."""
     opened = _open_beets_authority(beets_factory)
     if isinstance(opened, _BeetsAuthorityUnavailable):
-        return _unavailable_report(opened.category)
+        return _unavailable_report(opened.category, after_album_id=after_album_id)
     with closing(opened):
         result = _scan_with_mediated_beets(
             opened, read_tag=read_tag,
@@ -520,7 +621,7 @@ def scan_retag_divergence_from_factory(
         )
     if isinstance(result, RetagDivergenceReport):
         return result
-    return _unavailable_report(result.category)
+    return _unavailable_report(result.category, after_album_id=after_album_id)
 
 
 def scan_retag_divergence_from_borrowed_factory(
@@ -534,7 +635,7 @@ def scan_retag_divergence_from_borrowed_factory(
     """Mediate a server-owned Beets handle without closing its lifecycle."""
     opened = _open_beets_authority(beets_factory)
     if isinstance(opened, _BeetsAuthorityUnavailable):
-        return _unavailable_report(opened.category)
+        return _unavailable_report(opened.category, after_album_id=after_album_id)
     result = _scan_with_mediated_beets(
         opened, read_tag=read_tag,
         deadline_seconds=deadline_seconds, time_fn=time_fn,
@@ -542,7 +643,7 @@ def scan_retag_divergence_from_borrowed_factory(
     )
     if isinstance(result, RetagDivergenceReport):
         return result
-    return _unavailable_report(result.category)
+    return _unavailable_report(result.category, after_album_id=after_album_id)
 
 
 __all__ = [
@@ -562,6 +663,7 @@ __all__ = [
     "TagReadUnreadable",
     "album_class_from_items",
     "classify_retag_divergence_item",
+    "parse_after_album_id_cursor",
     "read_mb_albumid_tag",
     "scan_retag_divergence",
     "scan_retag_divergence_from_borrowed_factory",

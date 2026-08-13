@@ -502,14 +502,23 @@ can still contain a genuine `diverges` item, and the report's headline
 answer must not miss that — so `albums_diverging` and
 `albums_file_tag_present_db_absent` are independent presence counts ("this
 album contains at least one such item"), never gated by which class won
-that album's display precedence. `status` is `clean` (nothing listed — the
-scan actually answered the question and the cohort is empty),
-`divergence_found` (at least one album contains a genuine `diverges` or
-`file_tag_present_db_absent` item — decided independent of precedence and
-of any unreadable/empty finding elsewhere), `incomplete` (no genuine
-divergence anywhere, but the census could not fully vouch for the library —
-an unreadable/refused/empty-only finding, or the scan hit its time
-deadline before finishing — this is NOT "clean"), or `beets_unavailable`.
+that album's display precedence. `status` is `divergence_found` (at least
+one album contains a genuine `diverges` or `file_tag_present_db_absent`
+item — decided independent of precedence and of any unreadable/empty
+finding elsewhere, and takes priority over every condition below,
+including a resume cursor being set); `incomplete` (no genuine divergence
+anywhere, but this call could not vouch for the WHOLE library — an
+unreadable/refused/empty-only finding; the scan hit its time deadline
+before finishing (`complete=false`); OR this call started from a resume
+cursor, i.e. `after_album_id` was given on input — this is NOT "clean",
+whatever the scanned range itself looked like); or `clean`, which requires
+ALL THREE of: nothing listed, `complete=true`, AND `after_album_id is
+None` on input — the scan actually answered the whole-library question, on
+its own, without help from any other call (#1093 review round 5, finding
+1: a resumed call that completes cleanly over the range it scanned still
+cannot vouch for whatever a cursor skipped, so it is never allowed to
+report `clean`). `beets_unavailable` covers the Beets authority itself
+being unopenable or unqueryable.
 
 **The API route bounds ONLY its per-album read LOOP to
 `API_SCAN_DEADLINE_SECONDS`** (40s, `web/routes/retag_divergence_audit.py`)
@@ -531,16 +540,37 @@ under nginx's default, not merely `> 0`.
 **`?after_album_id=N` (CLI: `--after-album-id`) resumes a truncated scan**
 — pass the prior response's `next_after_album_id` to continue the census
 past where it stopped, chaining calls until `next_after_album_id` comes
-back `null`/`None`. This lets a bounded API caller assemble a genuine full
-census, and eventually a genuine `clean` verdict for the whole library,
-across multiple requests — a single bounded call can otherwise never
-prove the library-wide cohort is empty, only that its own reached prefix
-was.
+back `null`/`None`. No SINGLE response in that chain — not even the one
+that reaches the end — is itself allowed to report `clean` (see `status`
+above); the CALLER accumulates the whole-library verdict across the whole
+chain instead: start at `after_album_id=None`, keep resuming with each
+report's `next_after_album_id` until it comes back `None`, and conclude
+"library-wide clean" only if EVERY page in that chain reported no
+divergence (#1093 review round 5, finding 1 — a single bounded response
+can only ever vouch for the range it itself scanned). The report echoes
+its own input cursor back as `after_album_id`, so a caller (or an
+auditor reading a stored response) can always tell which shape produced
+it. `next_after_album_id` also satisfies `complete == (next_after_album_id
+is None)` in every case, including a scan truncated before reaching even
+one album — it is never left `null` while `complete` is `false` (round 5,
+finding 3).
+
+`after_album_id` accepts only a plain nonnegative ASCII-digit string —
+deliberately narrower than Python's bare `int()`, which silently accepts
+a leading sign, underscore digit-grouping (`"1_0"` → `10`), surrounding
+whitespace, and non-ASCII digit characters. A cursor is a read-only
+replay value, not user arithmetic, so a malformed or reinterpreted cursor
+is refused (`400`/CLI argparse error) rather than silently resolved to a
+different album id than was typed
+(`lib/retag_divergence_audit.py::parse_after_album_id_cursor`, shared by
+both the CLI and the API — #1093 review round 5, finding 5).
 
 Machine-readable output has `status` (`clean`, `divergence_found`,
 `incomplete`, or `beets_unavailable`), `complete`, `counts`, `albums`
-(only the non-agreeing ones, each with every item's classification), and
-`next_after_album_id` (populated only when truncated). **Exit/status-code
+(only the non-agreeing ones, each with every item's classification),
+`after_album_id` (echoes the cursor this call was given — `null` iff it
+started from the true beginning), and `next_after_album_id` (`null` iff
+`complete`; otherwise the cursor to resume from). **Exit/status-code
 mapping** follows `.claude/rules/code-quality.md` § CLI ⇄ API Surface
 Symmetry's convention table: `clean` → `0`/`200` (the audit ran and the
 cohort really is empty); `divergence_found` → `1`/`200` (a genuine finding,
@@ -561,9 +591,30 @@ contract is out of this issue's scope and is left as a follow-up (see
 post-ship reflection). An unexpected schema, decoder, invariant,
 programming, close, or serialization defect remains a transport failure:
 CLI exit 5 or HTTP 503. A downstream reader closing a CLI pipe early (e.g.
-`pipeline-cli audit retag-divergence | head`) exits 0 without attempting a
-second doomed write through the error path — `cmd_audit_world` shares the
-identical `BrokenPipeError` handling for the same reason.
+`pipeline-cli audit retag-divergence | head`, or any consumer that exits
+before reading anything) exits 0, never 120. stdout to a pipe is
+block-buffered, not flushed per `print()` call, so a `BrokenPipeError` from
+an early-closing reader can surface two different ways depending on
+payload size: a large single write can raise it synchronously, DURING the
+`print()` call (already caught by an ordinary `except BrokenPipeError`);
+a small one can complete inside Python's own buffer with no exception at
+all, deferring the actual OS-level failure to Python's automatic
+interpreter-shutdown flush — which happens AFTER the function has already
+returned and OUTSIDE every `except` clause in it, printing "Exception
+ignored while flushing sys.stdout" and exiting the whole process 120
+regardless of any `sys.exit(rc)` already requested (#1093 review round 5,
+finding 4 — the round-4 handler assumed every real pipe surfaces the
+exception the way a synthetic always-raising test double does, which the
+small-payload case does not; verified end-to-end against a REAL OS pipe
+whose reader closes having read nothing, in
+`tests/test_pipeline_cli.py::TestRealBrokenPipeHandling`). Both callers
+force an explicit `sys.stdout.flush()` right after their render, inside
+their own `try`, so the failure surfaces THERE instead of at shutdown;
+once caught, the handler redirects stdout's file descriptor to
+`/dev/null` so the unavoidable final flush becomes a no-op instead of a
+second, uncaught `BrokenPipeError` — `cmd_audit_world` and
+`cmd_audit_retag_divergence` share the identical
+`_handle_broken_pipe_and_exit_cleanly` handler.
 
 ## Live-corpus render differential
 

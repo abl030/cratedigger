@@ -192,6 +192,40 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         self.assertEqual(payload["counts"]["albums_scanned"], 1)
         self.assertEqual(payload["albums"][0]["album_id"], 2)
 
+    def test_resumed_call_over_agreeing_content_is_409_not_200(self) -> None:
+        """#1093 review round 5, finding 1 — the exact API-level defect: a
+        resumed call (``?after_album_id=N``) that finds nothing wrong must
+        still be 409/``incomplete``, never 200/``clean``, because it only
+        vouches for the range it scanned, not the prefix the cursor
+        skipped. The chained walk in
+        ``tests/test_retag_divergence_audit.py::TestCursorResume`` proves
+        the deterministic invariant; this proves the SAME thing through
+        the real HTTP route and status-code mapping."""
+        from web import server
+
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1,
+                mb_albumid="7aabf975-9a06-4b2e-854c-2c700380ebd5",
+                item_paths=(),
+            ),
+        ])
+        with patch.object(server, "_beets_db", return_value=beets):
+            status, payload = self._get(
+                "/api/audit/retag-divergence?after_album_id=1",
+            )
+
+        # after_album_id=1 filters out the only album — nothing scanned,
+        # nothing listed, complete — yet still not "clean" (round 5,
+        # finding 1).
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["status"], "incomplete")
+        self.assertEqual(payload["counts"]["albums_scanned"], 0)
+        self.assertEqual(payload["albums"], [])
+        self.assertEqual(payload["after_album_id"], 1)
+        self.assertIsNone(payload["next_after_album_id"])
+
     def test_malformed_after_album_id_is_a_400(self) -> None:
         from web import server
 
@@ -199,6 +233,23 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         with patch.object(server, "_beets_db", return_value=beets):
             status, payload = self._get(
                 "/api/audit/retag-divergence?after_album_id=not-an-int",
+            )
+
+        self.assertEqual(status, 400)
+        self.assertIn("after_album_id", payload.get("error", ""))
+
+    def test_after_album_id_underscore_grouping_is_a_400_not_silently_reinterpreted(
+        self,
+    ) -> None:
+        """#1093 review round 5, finding 5 — Python's bare ``int()`` would
+        silently accept ``"1_0"`` as ``10``; the API must refuse it rather
+        than use a different cursor than the caller typed."""
+        from web import server
+
+        beets = FakeBeetsDB()
+        with patch.object(server, "_beets_db", return_value=beets):
+            status, payload = self._get(
+                "/api/audit/retag-divergence?after_album_id=1_0",
             )
 
         self.assertEqual(status, 400)

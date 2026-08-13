@@ -7756,5 +7756,87 @@ class TestRetagDivergenceAuditCLI(unittest.TestCase):
         self.assertEqual(args.after_album_id, 7)
 
 
+class TestRealBrokenPipeHandling(unittest.TestCase):
+    """#1093 review round 5, finding 4 — the synthetic ``_BrokenPipeStdout``
+    fake above raises on EVERY write, which no real pipe does
+    (test-fidelity.md Rule C: the fake's trigger must be something a real
+    producer can actually produce). Empirically (this class's own
+    reproduction), stdout to a pipe is block-buffered enough that a single
+    ``print()`` of a modest JSON payload does NOT itself raise, even once
+    the reader has already closed with nothing read at all — the write
+    only surfaces as ``BrokenPipeError`` later, at Python's own automatic
+    interpreter-shutdown flush, OUTSIDE any ``except`` clause in this
+    module, printing "Exception ignored while flushing sys.stdout" and
+    exiting the whole process 120 regardless of any ``sys.exit(rc)``
+    already requested. A downstream reader that closes before consuming
+    anything (e.g. a consumer that crashes immediately, or ``| true``) is
+    exactly this shape. This class spawns a REAL child process, has it
+    print a real report to a REAL OS pipe, and closes the read end
+    without reading any bytes — checking the CHILD's own exit code."""
+
+    def _run_with_reader_that_closes_immediately(
+        self, child_script: str,
+    ) -> int:
+        import subprocess
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        child = subprocess.Popen(
+            [sys.executable, "-c", child_script],
+            stdout=subprocess.PIPE,
+            cwd=repo_root,
+        )
+        assert child.stdout is not None
+        # Read NOTHING, then close — the exact shape that forces the
+        # write to stay buffered inside Python (rather than reaching the
+        # OS during `print()` itself) and defers the failure to shutdown.
+        child.stdout.read(0)
+        child.stdout.close()
+        child.wait(timeout=15)
+        return child.returncode
+
+    def test_retag_divergence_broken_pipe_through_a_real_pipe_exits_cleanly(
+        self,
+    ) -> None:
+        """``cmd_audit_world`` shares the exact same
+        ``_handle_broken_pipe_and_exit_cleanly`` handler and the same
+        ``sys.stdout.flush()``-before-``except BrokenPipeError`` shape
+        (round 4, finding 8; round 5, finding 4) — its own coverage is the
+        synthetic-fake test in ``TestWorldAuditCLI`` above (proves the
+        catch-and-return-0 wiring) plus this real-pipe proof for the one
+        shared handler, reached through its sibling caller: both callers
+        route through the same function, so a real-pipe proof at either
+        call site is evidence for both."""
+        script = """
+import sys
+from lib.beets_db import BeetsAlbumIdentityRow
+from tests.fakes import FakeBeetsDB, FakePipelineDB
+from scripts.pipeline_cli.audit import cmd_audit_retag_divergence
+import argparse
+from unittest.mock import patch
+import scripts.pipeline_cli.audit as audit_cli
+
+beets = FakeBeetsDB()
+beets.set_album_mb_identities([
+    BeetsAlbumIdentityRow(
+        album_id=i, mb_albumid="7aabf975-9a06-4b2e-854c-2c700380ebd5",
+        item_paths=(f"/nonexistent/album-{i}/01.mp3",),
+    )
+    for i in range(1, 3)
+])
+with patch.object(audit_cli, "_open_beets", return_value=beets):
+    rc = cmd_audit_retag_divergence(
+        FakePipelineDB(),
+        argparse.Namespace(
+            beets_db="unused.db", beets_directory="/unused/library",
+            json=True, after_album_id=None,
+        ),
+    )
+sys.exit(rc)
+"""
+        returncode = self._run_with_reader_that_closes_immediately(script)
+        self.assertEqual(returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
