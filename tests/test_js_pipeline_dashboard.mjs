@@ -300,6 +300,7 @@ console.log('renderDriftRow() renders the operator merge-rekey button for MB-sou
   const html = __test__.renderDriftRow({
     id: 8792, artist_name: 'Slipknot', album_title: 'Vol. 3: (The Subliminal Verses)',
     status: 'imported', mb_release_id: 'd990b8af-0000-0000-0000-000000000000',
+    discogs_release_id: null, source: 'musicbrainz',
   });
   assertContains(html, '#8792 Slipknot', 'row names the request id and artist');
   assertContains(html, 'Vol. 3: (The Subliminal Verses)', 'row names the album title');
@@ -308,14 +309,17 @@ console.log('renderDriftRow() renders the operator merge-rekey button for MB-sou
   assertContains(html, 'Follow MB merge', 'button label rendered');
   assertContains(html, 'id="drift-note-8792"', 'inline refusal-note slot rendered for this request');
 }
-console.log('renderDriftRow() withholds the button for non-MB-sourced rows (#1089 MINOR-3)');
+console.log('renderDriftRow() withholds the button for non-MB-sourced rows (#1089 MAJOR-A, review round 3)');
 {
-  // A Discogs-sourced (or otherwise non-MB) drift row still shows — the
-  // dashboard still surfaces the drift — but the merge-rekey action can
-  // never resolve a merge this arm has no redirect concept for.
+  // The REAL production shape (#1089 MAJOR-A): a Discogs-sourced row
+  // duplicates the numeric id into BOTH mb_release_id and
+  // discogs_release_id (ReleaseIdentity.from_strict_fields's own
+  // docstring) — mb_release_id truthiness alone would falsely gate the
+  // button on. The server-derived `source` field is the real gate.
   const html = __test__.renderDriftRow({
     id: 1870, artist_name: 'Some Artist', album_title: 'Some Album',
-    status: 'imported', mb_release_id: null, discogs_release_id: '1870',
+    status: 'imported', mb_release_id: '1870', discogs_release_id: '1870',
+    source: 'discogs',
   });
   assertContains(html, '#1870 Some Artist', 'row still names the request');
   assertContains(html, 'metric-bad">imported', 'row still shows the drift status');
@@ -327,7 +331,7 @@ console.log('renderDriftRow() escapes artist/album HTML');
 {
   const html = __test__.renderDriftRow({
     id: 1, artist_name: '<script>x</script>', album_title: 'A & B', status: 'imported',
-    mb_release_id: 'd990b8af-0000-0000-0000-000000000000',
+    mb_release_id: 'd990b8af-0000-0000-0000-000000000000', source: 'musicbrainz',
   });
   assertExcludes(html, '<script>x</script>', 'artist name is escaped');
   assertContains(html, 'A &amp; B', 'album title is escaped');
@@ -338,9 +342,9 @@ console.log('renderDiskCoverageCard() composes one drift row per off-disk reques
     counts: {on_disk_total: 9, active_total: 11, off_disk_by_status: {wanted: 1}},
     drift_rows: [
       {id: 316, artist_name: 'Rebecca Black', album_title: 'Sing It', status: 'imported',
-       mb_release_id: 'd990b8af-0000-0000-0000-000000000001'},
+       mb_release_id: 'd990b8af-0000-0000-0000-000000000001', source: 'musicbrainz'},
       {id: 8832, artist_name: 'Kim Petras', album_title: 'Detour', status: 'imported',
-       mb_release_id: 'd990b8af-0000-0000-0000-000000000002'},
+       mb_release_id: 'd990b8af-0000-0000-0000-000000000002', source: 'musicbrainz'},
     ],
   });
   assertContains(html, 'Drift (imported, missing from beets)', 'drift metric label rendered');

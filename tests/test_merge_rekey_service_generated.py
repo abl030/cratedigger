@@ -130,7 +130,9 @@ STORED_ID_BEETS_KINDS = st.sampled_from(["missing", "present"])
 #: from those exact bytes (must-still-work). ``mismatched`` — an unrelated,
 #: pipeline-untracked album occupies the survivor MBID; the evidence
 #: describes bytes nobody measured for it (the hazard this dimension exists
-#: to catch).
+#: to catch). ``none`` — no linked current evidence AT ALL: the witness is
+#: MANDATORY (#1089 MAJOR-C, review round 3), so this ALSO refuses — there
+#: is nothing to verify the untracked-album adoption hazard against.
 EVIDENCE_LINEAGE_KINDS = st.sampled_from(["none", "matching", "mismatched"])
 
 
@@ -156,7 +158,9 @@ def expected_outcome(
         return RESULT_LIBRARY_NOT_AT_SURVIVOR
     if stored_id_beets_kind != "missing":
         return RESULT_LIBRARY_STILL_AT_STORED
-    if evidence_lineage_kind == "mismatched":
+    # #1089 MAJOR-C (review round 3): the witness is mandatory — "none" and
+    # "mismatched" both refuse; only "matching" continues.
+    if evidence_lineage_kind != "matching":
         return RESULT_EVIDENCE_FINGERPRINT_MISMATCH
     if rival_at_survivor or fingerprint_collision:
         return RESULT_SURVIVOR_COLLISION
@@ -362,8 +366,12 @@ def _build_world(
                 _LINEAGE_FILE_SIZE if evidence_lineage_kind == "matching"
                 else _LINEAGE_FILE_SIZE + 1
             )
+            # #1089 MINOR-F (review round 3): linked evidence lives at the
+            # OLD id pre-rekey — content-addressed under the request's
+            # release id BEFORE the write, never the survivor. Seeding at
+            # SURVIVOR was a shape production cannot produce.
             lineage_evidence = make_album_quality_evidence(
-                mb_release_id=SURVIVOR,
+                mb_release_id=MERGED,
                 source_path=lineage_tmp_dir,
                 files=[AlbumQualityEvidenceFile(
                     relative_path="01 Track.mp3",
@@ -374,7 +382,7 @@ def _build_world(
             )
             db.upsert_album_quality_evidence(lineage_evidence)
             lineage_stored = db.find_album_quality_evidence(
-                mb_release_id=SURVIVOR,
+                mb_release_id=MERGED,
                 snapshot_fingerprint=lineage_evidence.snapshot_fingerprint,
             )
             assert lineage_stored is not None and lineage_stored.id is not None
@@ -462,10 +470,12 @@ def check_lineage_mismatch_never_folds_into_another_outcome(
     evidence_lineage_kind: str,
     lineage_witness_reachable: bool,
 ) -> None:
-    """O5 — #1089 MAJOR-3 (review round 2): a mismatched linked-evidence
-    world must be reported as ``evidence_fingerprint_mismatch``, never
-    silently absorbed into ``rekeyed`` (the transplant itself) or any other
-    outcome name.
+    """O5 — #1089 MAJOR-3 (review round 2) + MAJOR-C (review round 3): a
+    mismatched OR entirely absent linked-evidence world must be reported as
+    ``evidence_fingerprint_mismatch``, never silently absorbed into
+    ``rekeyed`` (the transplant itself) or any other outcome name. The
+    witness is mandatory (#1089 MAJOR-C) — only a ``matching`` lineage may
+    continue past it.
 
     ``lineage_witness_reachable`` mirrors ``_build_world``'s OWN gate for
     even constructing the lineage fixture (``world_kind == "eligible" and
@@ -477,16 +487,15 @@ def check_lineage_mismatch_never_folds_into_another_outcome(
     """
     if not lineage_witness_reachable:
         return
-    if evidence_lineage_kind == "mismatched" and outcome != RESULT_EVIDENCE_FINGERPRINT_MISMATCH:
+    if evidence_lineage_kind != "matching" and outcome != RESULT_EVIDENCE_FINGERPRINT_MISMATCH:
         raise AssertionError(
-            f"a mismatched survivor/evidence lineage world reported "
-            f"{outcome!r} instead of evidence_fingerprint_mismatch"
+            f"a '{evidence_lineage_kind}' survivor/evidence lineage world "
+            f"reported {outcome!r} instead of evidence_fingerprint_mismatch"
         )
-    if evidence_lineage_kind != "mismatched" and outcome == RESULT_EVIDENCE_FINGERPRINT_MISMATCH:
+    if evidence_lineage_kind == "matching" and outcome == RESULT_EVIDENCE_FINGERPRINT_MISMATCH:
         raise AssertionError(
-            f"outcome evidence_fingerprint_mismatch fired for a "
-            f"{evidence_lineage_kind!r} lineage world, which never "
-            "describes a real mismatch"
+            "outcome evidence_fingerprint_mismatch fired for a 'matching' "
+            "lineage world, which never describes a real mismatch"
         )
 
 
@@ -511,7 +520,10 @@ class TestMergeRekeyServiceProperty(unittest.TestCase):
         stored_id_beets_kind=STORED_ID_BEETS_KINDS,
         evidence_lineage_kind=EVIDENCE_LINEAGE_KINDS,
     )
-    # The clean happy path.
+    # #1089 MAJOR-C (review round 3): no linked evidence at all — the
+    # witness is mandatory, so this refuses (evidence_fingerprint_mismatch),
+    # NOT the happy path it used to be before round 3. The true happy path
+    # is the "matching" example below.
     @example(
         world_kind="eligible", active_jobs=(), rival_at_survivor=False,
         fingerprint_collision=False, survivor_kind="different_mb",
@@ -777,10 +789,22 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
     def test_a_mismatched_lineage_reported_as_rekeyed_is_rejected(self) -> None:
         with self.assertRaisesRegex(
             AssertionError,
-            "mismatched survivor/evidence lineage world reported",
+            "'mismatched' survivor/evidence lineage world reported",
         ):
             check_lineage_mismatch_never_folds_into_another_outcome(
                 outcome=RESULT_REKEYED, evidence_lineage_kind="mismatched",
+                lineage_witness_reachable=True,
+            )
+
+    def test_a_none_lineage_reported_as_rekeyed_is_rejected(self) -> None:
+        """#1089 MAJOR-C (review round 3): the witness is mandatory — no
+        linked evidence at all must ALSO refuse, never silently rekey."""
+        with self.assertRaisesRegex(
+            AssertionError,
+            "'none' survivor/evidence lineage world reported",
+        ):
+            check_lineage_mismatch_never_folds_into_another_outcome(
+                outcome=RESULT_REKEYED, evidence_lineage_kind="none",
                 lineage_witness_reachable=True,
             )
 
@@ -817,8 +841,12 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
             outcome=RESULT_REKEYED, evidence_lineage_kind="matching",
             lineage_witness_reachable=True,
         )
+        # #1089 MAJOR-C (review round 3): "none" is now ALSO a refusal —
+        # the legitimate pairing is (none, mismatch-outcome), never
+        # (none, rekeyed).
         check_lineage_mismatch_never_folds_into_another_outcome(
-            outcome=RESULT_REKEYED, evidence_lineage_kind="none",
+            outcome=RESULT_EVIDENCE_FINGERPRINT_MISMATCH,
+            evidence_lineage_kind="none",
             lineage_witness_reachable=True,
         )
 
@@ -834,12 +862,16 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
             survivor_kind: str = "different_mb",
             beets_survivor_kind: str = "unique",
             stored_id_beets_kind: str = "missing",
-            evidence_lineage_kind: str = "none",
+            evidence_lineage_kind: str = "matching",
         ) -> str:
             """The fully-authorized baseline world, one term widened at a
             time — explicit keyword defaults, never ``**dict`` unpacking, so
             each override stays statically typed against
-            ``expected_outcome``'s own signature."""
+            ``expected_outcome``'s own signature. The baseline lineage kind
+            is ``"matching"``, not ``"none"`` (#1089 MAJOR-C, review round
+            3): the witness is mandatory, so ``"none"`` is itself a widened,
+            non-authorized term now — see the "no linked evidence" case
+            below."""
             return expected_outcome(
                 world_kind=world_kind,
                 active_jobs=active_jobs,
@@ -879,6 +911,10 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
                 outcome(evidence_lineage_kind="mismatched"),
             ),
             (
+                "no linked evidence at all",
+                outcome(evidence_lineage_kind="none"),
+            ),
+            (
                 "a queued job is active",
                 outcome(active_jobs=((IMPORT_JOB_FORCE, "queued"),)),
             ),
@@ -910,6 +946,10 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
         )
         self.assertEqual(
             outcome(evidence_lineage_kind="mismatched"),
+            RESULT_EVIDENCE_FINGERPRINT_MISMATCH,
+        )
+        self.assertEqual(
+            outcome(evidence_lineage_kind="none"),
             RESULT_EVIDENCE_FINGERPRINT_MISMATCH,
         )
         self.assertEqual(

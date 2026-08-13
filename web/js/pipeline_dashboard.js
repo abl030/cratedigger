@@ -215,12 +215,19 @@ function renderDiskCoverageCard(dc) {
  * currently match against Beets. `drift_rows` carries every off-disk
  * `imported` row regardless of cause or source (#1089 MINOR-3) — a
  * MusicBrainz merge is only ONE reason a row can drift, so the "Follow MB
- * merge" button renders only for MB-sourced rows (`r.mb_release_id`
- * present). A Discogs-sourced or otherwise non-MB drift row still shows,
- * just without an action this arm can never resolve; a never-merged
- * MB-sourced row KEEPS the button — clicking it and landing on
- * `not_merged` (the #8792 Slipknot Vol. 3 shape) is designed UX, not a
- * case to hide.
+ * merge" button renders only when `r.source === 'musicbrainz'` (#1089
+ * MAJOR-A, review round 3). This is NOT the same as `r.mb_release_id`
+ * being present: production Discogs rows duplicate the numeric id into
+ * BOTH `mb_release_id` and `discogs_release_id`
+ * (`ReleaseIdentity.from_strict_fields`'s own docstring), so a
+ * column-truthiness gate renders the button on every Discogs-sourced
+ * drift row too — `source` is derived server-side from the VALUE's shape
+ * (`lib/disk_coverage_service.py`, via `ReleaseIdentity.from_fields`),
+ * never from which column is non-null. A Discogs-sourced or otherwise
+ * non-MB drift row still shows, just without an action this arm can never
+ * resolve; a never-merged MB-sourced row KEEPS the button — clicking it
+ * and landing on `not_merged` (the #8792 Slipknot Vol. 3 shape) is
+ * designed UX, not a case to hide.
  *
  * The button rekeys the request's ledger onto the MusicBrainz merge survivor
  * Beets already holds — request-ledger-only, never mutates Beets. The click
@@ -233,7 +240,7 @@ function renderDiskCoverageCard(dc) {
  * @returns {string}
  */
 function renderDriftRow(r) {
-  const action = r.mb_release_id
+  const action = r.source === 'musicbrainz'
     ? `
         <div class="metric-row drift-row-action">
           <button class="p-btn" onclick="window.mergeRekeyRequest(${r.id}, this)">Follow MB merge</button>

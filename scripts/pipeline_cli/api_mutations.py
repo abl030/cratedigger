@@ -44,7 +44,10 @@ TIMEOUT_MIRROR_SECONDS = 300.0
 mirror timeout is 15s per call), a Beets exact delete, Wrong Matches group
 cleanup, and staging cleanup — all before the response is written.
 Also merge-rekey (#1089): one inline MusicBrainz merge-survivor lookup at
-the same 15s mirror timeout, plus Beets reads and PostgreSQL work — see
+the same 15s mirror timeout, plus Beets reads, PostgreSQL work, and — when
+the request links current evidence, which is now mandatory (#1089 MAJOR-C,
+review round 3) — a per-file walk of the survivor album over virtiofs to
+compute its fresh content fingerprint (the evidence-lineage witness) — see
 ``cmd_merge_rekey``."""
 
 TIMEOUT_SOURCE_DELETE_SECONDS = 300.0
@@ -477,10 +480,12 @@ def cmd_merge_rekey(_db: object, args: argparse.Namespace) -> int:
 
     Uses ``TIMEOUT_MIRROR_SECONDS``, not the 15s enqueue default: the route
     itself performs an inline MusicBrainz merge-survivor lookup (this
-    deployment's own mirror timeout is 15s) plus Beets reads and PostgreSQL
-    work, all before it responds. The 15s default would time out honest
-    in-flight work and report a failure for a mutation that may already have
-    committed.
+    deployment's own mirror timeout is 15s), Beets reads, PostgreSQL work,
+    and — for the now-mandatory evidence-lineage witness (#1089 MAJOR-C,
+    review round 3) — a per-file walk of the survivor album over virtiofs to
+    compute its fresh content fingerprint, all before it responds. The 15s
+    default would time out honest in-flight work and report a failure for a
+    mutation that may already have committed.
     """
     return _relay(args.api_endpoint, _ApiMutation(
         path=f"/api/pipeline/{args.request_id}/merge-rekey", body={},

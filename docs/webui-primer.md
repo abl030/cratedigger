@@ -260,9 +260,14 @@ depends on.
   each `imported`-but-off-disk drift row (`imported` on the pipeline ledger,
   but `BeetsDB.check_mbids` no longer resolves the stored id against the
   current library — a MusicBrainz merge is only ONE of several possible
-  causes) shown for an MB-sourced row (`mb_release_id` present; #1089
-  MINOR-3, review round 2 — Discogs-sourced drift rows still list, just with
-  no action this arm has a redirect concept for) gets a button that calls
+  causes) shown for an MB-sourced row (`source === 'musicbrainz'`, a field
+  the dashboard route derives server-side from the VALUE's shape via
+  `ReleaseIdentity.from_fields` — NEVER from `mb_release_id` column
+  presence: production Discogs rows duplicate the numeric id into BOTH
+  `mb_release_id` and `discogs_release_id`, so a column-truthiness gate
+  would render the button on every one of them; #1089 MAJOR-A, review
+  round 3 — Discogs-sourced drift rows still list, just with no action
+  this arm has a redirect concept for) gets a button that calls
   `POST /api/pipeline/<id>/merge-rekey` (`MergeRekeyService.rekey_request`;
   CLI counterpart `pipeline-cli merge-rekey`). Request-ledger-only — it
   rekeys `album_requests` (and the request's evidence lineage) onto the

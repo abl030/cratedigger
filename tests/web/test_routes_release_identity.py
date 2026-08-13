@@ -959,52 +959,78 @@ class TestPipelineMergeRekeyContract(_FakeDbWebServerCase):
         route. Proves the route really constructs and calls the service
         (rather than a shape a mock could paper over) and that the
         request's evidence lineage really follows the row (#1059/#1089).
+
+        #1089 MAJOR-C (review round 3): the evidence-lineage witness is now
+        mandatory, so this happy path needs REAL, MATCHING bytes at the
+        survivor — not merely a Beets album-id seed and an unlinked
+        evidence row.
         """
+        import tempfile
+
         from lib.mb_canonical import (
             configure_canonical_base,
             configured_canonical_base,
         )
-        from lib.quality import AudioQualityMeasurement
+        from lib.quality import AlbumQualityEvidenceFile, AudioQualityMeasurement
         from tests.helpers import make_album_quality_evidence
 
         self.db.seed_request(make_request_row(
             id=316, mb_release_id=self.MERGED, status="imported",
             artist_name="Rebecca Black", album_title="Sing It",
         ))
-        stored = make_album_quality_evidence(
-            mb_release_id=self.MERGED, source_path="/library/rebecca-black",
-            measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=900, avg_bitrate_kbps=950,
-                median_bitrate_kbps=940, format="FLAC",
-            ),
-            codec="flac", container="flac", storage_format="FLAC",
-        )
-        self.db.upsert_album_quality_evidence(stored)
 
         import web.server as srv
 
-        beets = FakeBeetsDB()
-        beets.set_album_ids_for_release(self.SURVIVOR, [19345])
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            real_path = os.path.join(tmp_dir, "01 Track.flac")
+            with open(real_path, "wb") as handle:
+                handle.write(b"\x00" * 4096)
+            stored = make_album_quality_evidence(
+                mb_release_id=self.MERGED, source_path=tmp_dir,
+                files=[AlbumQualityEvidenceFile(
+                    relative_path="01 Track.flac", size_bytes=4096,
+                    mtime_ns=1_700_000_000_000_000_000,
+                    extension="flac", container="flac", codec="flac",
+                )],
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=900, avg_bitrate_kbps=950,
+                    median_bitrate_kbps=940, format="FLAC",
+                ),
+                codec="flac", container="flac", storage_format="FLAC",
+            )
+            self.db.upsert_album_quality_evidence(stored)
+            seeded = self.db.find_album_quality_evidence(
+                mb_release_id=self.MERGED,
+                snapshot_fingerprint=stored.snapshot_fingerprint,
+            )
+            assert seeded is not None and seeded.id is not None
+            self.assertTrue(
+                self.db.set_request_current_evidence(316, seeded.id),
+            )
 
-        previous_base = configured_canonical_base()
-        self.addCleanup(configure_canonical_base, previous_base)
-        configure_canonical_base("http://fake-mirror/ws/2")
-        with (
-            patch.object(srv, "_beets_db", return_value=beets),
-            # The TRUE external edge (#1089 NOTE-2, review round 2) —
-            # canonical_release_status is ~50 lines of real decision logic,
-            # not a thin forwarder, so it is not allowlisted; this patches
-            # the raw fetch one hop below it instead, exactly mirroring
-            # the real ``{"payload": ..., "redirected": ...}`` envelope
-            # ``_fetch_json`` produces.
-            patch(
-                "lib.mb_canonical._fetch_json",
-                return_value={
-                    "payload": {"id": self.SURVIVOR}, "redirected": True,
-                },
-            ),
-        ):
-            status, data = self._post("/api/pipeline/316/merge-rekey", {})
+            beets = FakeBeetsDB()
+            beets.set_album_ids_for_release(self.SURVIVOR, [19345])
+            beets.set_item_paths(self.SURVIVOR, [(19345, real_path)])
+
+            previous_base = configured_canonical_base()
+            self.addCleanup(configure_canonical_base, previous_base)
+            configure_canonical_base("http://fake-mirror/ws/2")
+            with (
+                patch.object(srv, "_beets_db", return_value=beets),
+                # The TRUE external edge (#1089 NOTE-2, review round 2) —
+                # canonical_release_status is ~50 lines of real decision logic,
+                # not a thin forwarder, so it is not allowlisted; this patches
+                # the raw fetch one hop below it instead, exactly mirroring
+                # the real ``{"payload": ..., "redirected": ...}`` envelope
+                # ``_fetch_json`` produces.
+                patch(
+                    "lib.mb_canonical._fetch_json",
+                    return_value={
+                        "payload": {"id": self.SURVIVOR}, "redirected": True,
+                    },
+                ),
+            ):
+                status, data = self._post("/api/pipeline/316/merge-rekey", {})
 
         self.assertEqual(status, 200)
         self.assertEqual(data["outcome"], "rekeyed")

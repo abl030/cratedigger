@@ -29,25 +29,29 @@ request-ledger-only refinement: "this is what I want for sure." (operator,
 https://github.com/abl030/cratedigger/issues/1089#issuecomment-5274933957
 
 **Known residual: ``mb_release_group_id`` can go stale on a cross-release-
-group merge (#1089 NOTE-4, review round 2).** This arm is the first rekey
-path where the request STAYS ``imported`` — #1059/#1080's own retag stays
-inside one import transaction, so a stale release-group id there is
-overwritten by the next lazy backfill anyway. Here the row can sit
-indefinitely with a ``mb_release_group_id`` naming the LOSING release's
-group even after the identity itself has moved on to the survivor, if that
-survivor belongs to a different release group. This is NOT silently fixed:
-the tagged resolver's fetch (``{base}/release/<id>?fmt=json``, no ``inc=``
-clause) never requests release-group data at all, so the survivor's
-release-group id is not a fact this lookup already has lying around —
-growing the fetch contract to request it would be new surface for one
-residual field, not a use of data already in hand. Left as a documented
-gap, and NOT self-healing: ``POST /api/pipeline/<id>/resolve-rg``
+group merge (#1089 NOTE-4 / MAJOR-B, review rounds 2-3).** This is a
+PRE-EXISTING residual shared by all three rekey arms — not unique to the
+operator arm. #1059/#1080's own retag/rekey (the automation lane while
+``processing``, and the #1080 force lane, which CAN run against a row
+already ``imported`` and returns it to ``imported``) can leave exactly the
+same stale ``mb_release_group_id`` naming the LOSING release's group after
+the identity itself has moved on to the survivor, if that survivor belongs
+to a different release group. Nothing self-heals it on ANY of the three
+arms: ``field_resolver_service.py::resolve_all`` writes
+``mb_release_group_id`` only when the existing value is ``None``
+(``existing_mb_release_group_id is None``), and
+``POST /api/pipeline/<id>/resolve-rg``
 (``web/routes/release_identity_routes.py::post_pipeline_resolve_rg``) is
-explicitly idempotent and returns an already-non-null
-``mb_release_group_id`` UNTOUCHED, so it can never correct a stale-but-
-present value either — only a direct operator write
-(``pipeline-cli query --write --confirm WRITE -``) can, if a stale group id
-is ever observed to matter in practice.
+explicitly idempotent and returns an already-non-null value UNTOUCHED — so
+neither the ordinary lazy backfill nor the operator's own manual resolve-rg
+tool can ever correct a stale-but-present group id. The tagged resolver's
+fetch (``{base}/release/<id>?fmt=json``, no ``inc=`` clause) never requests
+release-group data at all, so the survivor's release-group id is not a fact
+this lookup already has lying around either — growing the fetch contract to
+request it would be new surface for one residual field shared by all three
+arms, not a use of data already in hand. Left as a documented gap; only a
+direct operator write (``pipeline-cli query --write --confirm WRITE -``)
+can correct it, if a stale group id is ever observed to matter in practice.
 
 ``pipeline-cli merge-rekey`` and ``POST /api/pipeline/<id>/merge-rekey`` are
 thin adapters that wrap ``MergeRekeyService.rekey_request`` — the CLI relays
@@ -85,21 +89,17 @@ from lib.beets_db import (
     CurrentBeetsUnique,
     beets_authority_availability_category,
 )
-from lib.import_queue import ImportJob
 from lib.mb_canonical import (
     CanonicalReleaseRedirected,
     CanonicalReleaseUnavailable,
     TaggedCanonicalReleaseFn,
     production_tagged_canonical_release_fn,
 )
-from lib.quality_evidence import (
-    SnapshotAudioFilesError,
-    snapshot_audio_files,
-    snapshot_fingerprint,
-)
+from lib.quality_evidence import SnapshotAudioFilesError, fingerprint_album_path
 from lib.release_identity import ReleaseIdentity
 
 if TYPE_CHECKING:
+    from lib.import_queue import ImportJob
     from lib.pipeline_db._shared import MergeRekeyCollision
     from lib.pipeline_db.rows import AlbumRequestRow
     from lib.quality_evidence import AlbumQualityEvidence
@@ -289,12 +289,12 @@ class MergeRekeyService:
         request_id: int,
         old_release_id: str,
         survivor: str,
-        current_evidence_id: int,
+        current_evidence_id: int | None,
         survivor_resolution: CurrentBeetsUnique,
     ) -> MergeRekeyResult | None:
-        """#1089 MAJOR-3 (review round 2) — a request with linked CURRENT
-        evidence must witness that the survivor album's ACTUAL bytes are
-        the ones that evidence describes, not merely that Beets shows
+        """#1089 MAJOR-3 / MAJOR-C (review rounds 2-3) — a request must
+        witness that the survivor album's ACTUAL bytes are the ones its
+        linked current evidence describes, not merely that Beets shows
         exactly one album there and nothing at the stored id.
 
         "Stored empty + survivor unique" is ALSO satisfied when this
@@ -307,24 +307,62 @@ class MergeRekeyService:
         any verified-lossless proof — onto bytes nobody ever measured for
         this request: a proof lock protecting the wrong album.
 
+        **The witness is MANDATORY, not conditional on a linked row (#1089
+        MAJOR-C, review round 3).** An earlier version skipped this witness
+        entirely with no linked current evidence, reasoning "nothing to
+        transplant, nothing to protect" — false in both directions: the
+        write moves EVERY evidence row at the old id regardless of which
+        one (if any) ``current_evidence_id`` names, so there can be
+        evidence to transplant even with no linked row, and the
+        untracked-album adoption hazard above is completely unwitnessed
+        for that population. No linked current evidence therefore refuses
+        too — the request has no proof to check the adoption against, and
+        the operator decides. Live exposure at the time of the fix was
+        zero (0 of 7,224 imported rows lacked ``current_evidence_id``), so
+        this correction changes no measured live outcome; it forecloses a
+        real, if currently unobserved, gap.
+
         Deliberately NOT path equality: capture-time paths are history, and
         a legitimate retag+move breaks them (verbatim from
         ``lib.world_invariants.EvidenceDiskSnapshot``'s own docstring: "the
         content fingerprint resolved from fresh Beets authority, never path
-        equality with that historical snapshot"). The witness here is the
-        SAME fresh-Beets-authority content fingerprint the live-world audit
-        computes for its own ``evidence_fingerprint_mismatch`` invariant
-        (``lib.world_audit_service._fingerprint`` —
-        ``lib.quality_evidence.snapshot_audio_files`` /
-        ``snapshot_fingerprint``) — reused directly, never a second,
-        parallel fingerprint formula.
+        equality with that historical snapshot"). The witness here calls
+        ``lib.quality_evidence.fingerprint_album_path`` — the ONE canonical
+        composition of ``snapshot_audio_files`` + ``snapshot_fingerprint``
+        (#1089 NOTE-H, review round 3), which ``lib.world_audit_service``
+        calls for its own ``evidence_fingerprint_mismatch`` invariant too —
+        genuinely reused, never a second, textually-duplicated fingerprint
+        formula. It also returns ``None`` for a vanished or genuinely-empty
+        survivor directory (#1089 NOTE-I): an installed album with zero
+        audio files is not a witnessable survivor, so that world refuses
+        here rather than silently comparing against the empty-fileset
+        digest.
+
+        **Known limitation:** an out-of-band retag that WRITES tags (not
+        the sanctioned import-time retag, which is ``-W`` no-write and so
+        never trips this) changes file sizes and will fail this witness
+        closed. That refusal is operator-visible (``evidence_fingerprint_
+        mismatch``, an honest "verify me" message), not silent corruption;
+        the escape is manual operator reconciliation, same as any other
+        witness mismatch.
 
         Returns ``None`` when the survivor's freshly computed fingerprint
         equals the linked evidence row's ``snapshot_fingerprint`` — the
-        write may proceed. The caller skips this witness entirely when the
-        request has NO linked current evidence at all: with no lineage to
-        transplant, there is nothing here to protect.
+        write may proceed.
         """
+        if current_evidence_id is None:
+            return MergeRekeyResult(
+                outcome=RESULT_EVIDENCE_FINGERPRINT_MISMATCH,
+                request_id=request_id,
+                old_release_id=old_release_id,
+                new_release_id=survivor,
+                beets_album_id=survivor_resolution.album_id,
+                error_message=(
+                    f"request {request_id} has no current evidence lineage "
+                    "to witness the survivor adoption with; the operator "
+                    "decides"
+                ),
+            )
         evidence = self.db.load_album_quality_evidence_by_id(
             current_evidence_id,
         )
@@ -342,8 +380,8 @@ class MergeRekeyService:
                 ),
             )
         try:
-            actual_fingerprint = snapshot_fingerprint(
-                snapshot_audio_files(survivor_resolution.album_path),
+            actual_fingerprint = fingerprint_album_path(
+                survivor_resolution.album_path,
             )
         except SnapshotAudioFilesError as exc:
             logger.exception(
@@ -360,6 +398,31 @@ class MergeRekeyService:
                 error_message=(
                     "could not read the survivor album's files to verify "
                     f"them against request {request_id}'s evidence: {exc}"
+                ),
+            )
+        if actual_fingerprint is None:
+            # #1089 NOTE-I (review round 3): a vanished or genuinely-empty
+            # survivor album directory is not a witnessable survivor —
+            # fingerprint_album_path returns None for exactly this, never
+            # the empty-fileset digest. Silently accepting that digest
+            # would let a linked evidence row whose OWN recorded
+            # fingerprint happens to be that same degenerate value read as
+            # "matches" against an album that is actually gone.
+            logger.warning(
+                "the survivor album at %s (request %s) walked cleanly but "
+                "has zero audio files — not witnessable",
+                survivor_resolution.album_path, request_id,
+            )
+            return MergeRekeyResult(
+                outcome=RESULT_EVIDENCE_FINGERPRINT_MISMATCH,
+                request_id=request_id,
+                old_release_id=old_release_id,
+                new_release_id=survivor,
+                beets_album_id=survivor_resolution.album_id,
+                error_message=(
+                    f"the survivor album has no audio files to verify "
+                    f"against request {request_id}'s evidence; the "
+                    "operator must decide"
                 ),
             )
         if actual_fingerprint != evidence.snapshot_fingerprint:
@@ -456,19 +519,23 @@ class MergeRekeyService:
            survivor and none at the stored id — NOT that the album at the
            survivor is this request's own album (step 5.5 below closes
            that gap for the population it can affect).
-        5.5. When the request links CURRENT evidence
-           (``current_evidence_id`` non-null), require the survivor
-           album's FRESHLY computed content fingerprint to equal that
-           evidence row's ``snapshot_fingerprint`` → else
-           ``evidence_fingerprint_mismatch`` (#1089 MAJOR-3, review round
-           2): steps 4+5 alone are also satisfied when this request's own
-           album was deleted out of band and an unrelated,
-           pipeline-untracked album happens to occupy the survivor MBID —
-           adopting it would proof-lock the wrong album's bytes. See
+        5.5. MANDATORY (#1089 MAJOR-C, review round 3 — not conditional on
+           a linked row): require the survivor album's FRESHLY computed
+           content fingerprint to equal the request's linked current
+           evidence's ``snapshot_fingerprint`` → else
+           ``evidence_fingerprint_mismatch`` (#1089 MAJOR-3). Steps 4+5
+           alone are also satisfied when this request's own album was
+           deleted out of band and an unrelated, pipeline-untracked album
+           happens to occupy the survivor MBID — adopting it would
+           proof-lock the wrong album's bytes. No linked current evidence
+           (``current_evidence_id IS NULL``) ALSO refuses here: the write
+           moves EVERY evidence row at the old id regardless of which one
+           (if any) is linked, so "no linked row" is not "nothing to
+           transplant" — there is simply nothing to verify the adoption
+           against, and the operator decides. See
            :meth:`_verify_survivor_evidence_lineage` for the full
-           rationale and why this is never a path comparison. Skipped
-           entirely with no linked current evidence — there is no lineage
-           to transplant.
+           rationale, the live-exposure measurement, and why this is
+           never a path comparison.
         6. Pre-check ``PipelineDB.merge_rekey_collision`` (#1089 MAJOR-2),
            the same read the import-validation seam takes before its own
            retag (``lib/download_validation.py``): a rival request already
@@ -627,17 +694,19 @@ class MergeRekeyService:
                 ),
             )
 
-        current_evidence_id = row.get("current_evidence_id")
-        if current_evidence_id is not None:
-            lineage_failure = self._verify_survivor_evidence_lineage(
-                request_id=request_id,
-                old_release_id=old_release_id,
-                survivor=survivor,
-                current_evidence_id=current_evidence_id,
-                survivor_resolution=survivor_resolution,
-            )
-            if lineage_failure is not None:
-                return lineage_failure
+        # #1089 MAJOR-C (review round 3): the witness is MANDATORY,
+        # unconditional on whether a linked row exists — see
+        # _verify_survivor_evidence_lineage's own docstring for why "no
+        # linked evidence" is itself a refusal, not a skip.
+        lineage_failure = self._verify_survivor_evidence_lineage(
+            request_id=request_id,
+            old_release_id=old_release_id,
+            survivor=survivor,
+            current_evidence_id=row.get("current_evidence_id"),
+            survivor_resolution=survivor_resolution,
+        )
+        if lineage_failure is not None:
+            return lineage_failure
 
         collision = self.db.merge_rekey_collision(
             request_id, old_release_id=old_release_id, new_release_id=survivor,

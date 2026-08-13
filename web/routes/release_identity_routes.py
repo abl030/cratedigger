@@ -442,19 +442,28 @@ def post_pipeline_merge_rekey(
               happens to hold the merged MBID; the operator must decide),
               ``survivor_collision`` (a rival request or a colliding
               evidence fingerprint already occupies the survivor — operator
-              must resolve it), or ``rekey_refused`` (the request changed
-              underneath the write — retry re-derives)
+              must resolve it), or ``rekey_refused`` (an in-flight
+              ``queued``/``running`` import job owns the request — wait for
+              it to drain; a bare compare-and-set race with no such job —
+              retry re-derives; see ``MergeRekeyService._rekey_refused_
+              message``, #1089 MINOR-4 review round 2, for the exact
+              wording split)
       * 422 — ``not_merged`` (MusicBrainz answered and names no different
               survivor for the stored id; the #8792 refusal)
-      * 503 — ``mirror_unavailable`` (no answer was obtained at all —
-              unconfigured, or the mirror is unreachable), the service's own
-              ``beets_unavailable`` outcome (a classified SQLite read
-              failure — locked, IO, or permission — DURING resolution,
-              carrying ``outcome`` in the payload), or a route-level bare
-              503 with no ``outcome`` field at all when OPENING the
-              database itself fails the same classification (this call —
-              ``s._beets_db()`` — sits BEFORE the service exists, so that
-              failure can never carry a service outcome)
+      * 503 — FOUR distinct shapes, only two of which carry a service
+              ``outcome``: the service's own ``mirror_unavailable`` (no
+              answer was obtained at all — unconfigured, or the mirror is
+              unreachable) and ``beets_unavailable`` (a classified SQLite
+              read failure — locked, IO, or permission — DURING
+              resolution) outcomes both carry ``outcome`` in the payload;
+              a route-level bare 503 with NO ``outcome`` field fires
+              either when OPENING the database itself raises that same
+              classified failure (this call — ``s._beets_db()`` — sits
+              BEFORE the service exists, so that failure can never carry a
+              service outcome), or when ``s._beets_db()`` returns ``None``
+              WITHOUT raising at all (``"Beets DB not available"`` — a
+              plain fallback, not a classified exception; #1089 MINOR-G
+              review round 3)
       * 500 — any unknown outcome (safety net)
     """
     del body

@@ -42,6 +42,40 @@ class TestDiskCoverageService(unittest.TestCase):
             [["mbid-on-disk", "mbid-missing", "12856590"]],
         )
 
+    def test_off_disk_rows_carry_the_real_exact_release_source(self) -> None:
+        """#1089 MAJOR-A (review round 3): ``source`` is derived from the
+        VALUE's shape, never column presence — production Discogs rows
+        duplicate the numeric id into BOTH ``mb_release_id`` and
+        ``discogs_release_id`` (``ReleaseIdentity.from_strict_fields``'s own
+        docstring), so a column-truthiness gate would misclassify every one
+        of them as MusicBrainz-sourced."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="wanted",
+            mb_release_id="d990b8af-01db-46f1-a2cb-d9ca19f57e94",
+        ))
+        db.seed_request(make_request_row(
+            id=2, status="wanted",
+            # The real production shape: the numeric Discogs id duplicated
+            # into BOTH columns.
+            mb_release_id="12856590", discogs_release_id="12856590",
+        ))
+        db.seed_request(make_request_row(
+            id=3, status="wanted", mb_release_id=None,
+            discogs_release_id=None,
+        ))
+        beets = FakeBeetsDB()
+
+        result = disk_coverage(db, beets)
+
+        assert result.off_disk is not None
+        by_id = {row.id: row.source for row in result.off_disk}
+        self.assertEqual(by_id, {
+            1: "musicbrainz",
+            2: "discogs",
+            3: None,
+        })
+
     def test_counts_only_suppresses_rows(self) -> None:
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, mb_release_id="missing"))

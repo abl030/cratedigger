@@ -42,6 +42,8 @@ from lib.import_queue import (
     ImportJob,
     force_import_payload,
 )
+from lib.mb_canonical import CanonicalReleaseRedirected
+from lib.merge_rekey_service import RESULT_REKEYED, MergeRekeyService
 from lib.pipeline_db import (
     JELLYFIN_PIN_STATUSES,
     PLEX_PIN_STATUSES,
@@ -64,7 +66,7 @@ from lib.quality import (
     VerifiedLosslessProof,
     legacy_unrecorded_audio_validation_report,
 )
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
@@ -17550,6 +17552,68 @@ class TestMergeRekeyUnderOperatorClaim(unittest.TestCase):
         self.assertTrue(self._rekey())
 
         self.assertEqual(self._evidence_release_id(moving_id), self.SURVIVOR)
+
+    def test_the_full_service_witness_pass_composes_with_the_real_move(
+        self,
+    ) -> None:
+        """#1089 MINOR-F (review round 3): the deterministic/generated
+        ``tests.test_merge_rekey_service`` suites cover this composition
+        against ``FakePipelineDB``; this is the REAL-PostgreSQL leg —
+        driving the actual ``MergeRekeyService.rekey_request`` (mandatory
+        witness, #1089 MAJOR-C, included) against this class's real ``db``,
+        with a real on-disk survivor album whose bytes match the request's
+        linked current evidence exactly. Proves the witness-pass path and
+        the row+evidence move compose against real PostgreSQL, not only the
+        fake.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            real_path = os.path.join(tmp_dir, "01 Track.flac")
+            with open(real_path, "wb") as handle:
+                handle.write(b"\x00" * 4242)
+            evidence = make_album_quality_evidence(
+                mb_release_id=self.MERGED,
+                source_path=tmp_dir,
+                files=[AlbumQualityEvidenceFile(
+                    relative_path="01 Track.flac",
+                    size_bytes=4242,
+                    mtime_ns=1_700_000_000_000_000_000,
+                    extension="flac",
+                    container="flac",
+                    codec="flac",
+                )],
+            )
+            self.db.upsert_album_quality_evidence(evidence)
+            stored = self.db.find_album_quality_evidence(
+                mb_release_id=self.MERGED,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            self.assertTrue(
+                self.db.set_request_current_evidence(
+                    self.request_id, stored.id,
+                ),
+            )
+
+            beets = FakeBeetsDB()
+            beets.set_album_ids_for_release(self.SURVIVOR, [19345])
+            beets.set_item_paths(self.SURVIVOR, [(19345, real_path)])
+            service = MergeRekeyService(
+                self.db,
+                beets,
+                canonical_release_fn=(
+                    lambda _release_id: CanonicalReleaseRedirected(
+                        self.SURVIVOR,
+                    )
+                ),
+            )
+
+            result = service.rekey_request(self.request_id)
+
+            self.assertEqual(result.outcome, RESULT_REKEYED)
+            self.assertEqual(self._stored_release_id(), self.SURVIVOR)
+            self.assertEqual(
+                self._evidence_release_id(stored.id), self.SURVIVOR,
+            )
 
     def test_a_non_imported_status_refuses_and_writes_nothing(self) -> None:
         for status in ("wanted", "downloading", "unsearchable"):

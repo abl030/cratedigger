@@ -697,6 +697,9 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
             configure_canonical_base,
             configured_canonical_base,
         )
+        from lib.quality import AlbumQualityEvidenceFile
+        from tests.fakes import FakeBeetsDB
+        from tests.helpers import make_album_quality_evidence
 
         merged = "6b209cc5-62b0-4ef7-9336-c2dbd876301a"
         survivor = "9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4"
@@ -705,36 +708,62 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
             artist_name="Rebecca Black", album_title="Sing It",
         ))
         import web.server as srv
-        from tests.fakes import FakeBeetsDB
 
-        beets = FakeBeetsDB()
-        beets.set_album_ids_for_release(survivor, [19345])
-
-        previous_base = configured_canonical_base()
-        self.addCleanup(configure_canonical_base, previous_base)
-        configure_canonical_base("http://fake-mirror/ws/2")
-        with (
-            patch.object(srv, "_beets_db", return_value=beets),
-            # The TRUE external edge (#1089 NOTE-2, review round 2). The
-            # service's default seam is the TAGGED resolver
-            # (production_tagged_canonical_release_fn), which calls
-            # canonical_release_status — NOT the collapsed
-            # canonical_release_id the import seam uses (#1089 BLOCKING-1)
-            # — but canonical_release_status is ~50 lines of real decision
-            # logic, not a thin forwarder, so it is not allowlisted; this
-            # patches the raw fetch one hop below it instead, exactly
-            # mirroring the real ``{"payload": ..., "redirected": ...}``
-            # envelope ``_fetch_json`` produces.
-            patch(
-                "lib.mb_canonical._fetch_json",
-                return_value={
-                    "payload": {"id": survivor}, "redirected": True,
-                },
-            ),
-        ):
-            code, body = self._call(
-                api_mutations.cmd_merge_rekey, request_id=316,
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # #1089 MAJOR-C (review round 3): the evidence-lineage witness
+            # is now mandatory, so the happy path needs real, MATCHING
+            # bytes at the survivor — not merely a Beets album-id seed.
+            real_path = os.path.join(tmp_dir, "01 Track.mp3")
+            with open(real_path, "wb") as handle:
+                handle.write(b"\x00" * 4096)
+            evidence = make_album_quality_evidence(
+                mb_release_id=merged,
+                source_path=tmp_dir,
+                files=[AlbumQualityEvidenceFile(
+                    relative_path="01 Track.mp3", size_bytes=4096,
+                    mtime_ns=1_700_000_000_000_000_000,
+                    extension="mp3", container="mp3", codec="mp3",
+                )],
             )
+            self.db.upsert_album_quality_evidence(evidence)
+            stored = self.db.find_album_quality_evidence(
+                mb_release_id=merged,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            self.assertTrue(
+                self.db.set_request_current_evidence(316, stored.id),
+            )
+
+            beets = FakeBeetsDB()
+            beets.set_album_ids_for_release(survivor, [19345])
+            beets.set_item_paths(survivor, [(19345, real_path)])
+
+            previous_base = configured_canonical_base()
+            self.addCleanup(configure_canonical_base, previous_base)
+            configure_canonical_base("http://fake-mirror/ws/2")
+            with (
+                patch.object(srv, "_beets_db", return_value=beets),
+                # The TRUE external edge (#1089 NOTE-2, review round 2). The
+                # service's default seam is the TAGGED resolver
+                # (production_tagged_canonical_release_fn), which calls
+                # canonical_release_status — NOT the collapsed
+                # canonical_release_id the import seam uses (#1089 BLOCKING-1)
+                # — but canonical_release_status is ~50 lines of real decision
+                # logic, not a thin forwarder, so it is not allowlisted; this
+                # patches the raw fetch one hop below it instead, exactly
+                # mirroring the real ``{"payload": ..., "redirected": ...}``
+                # envelope ``_fetch_json`` produces.
+                patch(
+                    "lib.mb_canonical._fetch_json",
+                    return_value={
+                        "payload": {"id": survivor}, "redirected": True,
+                    },
+                ),
+            ):
+                code, body = self._call(
+                    api_mutations.cmd_merge_rekey, request_id=316,
+                )
 
         self.assertEqual(code, 0)
         self.assertEqual(body["outcome"], "rekeyed")
