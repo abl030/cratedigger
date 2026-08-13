@@ -17,6 +17,7 @@ from lib.banding import (
     current_library_bitrate,
 )
 from lib.beets_db import BeetsDB
+from lib.media_readiness import kbps_from_bps
 from lib.quality import QualityRankConfig
 from tests.test_beets_db import _create_test_db, _insert_album
 
@@ -29,9 +30,18 @@ def assert_positive_track_average_projection(
     rank: str,
 ) -> None:
     """Current projection and rank must use the positive-track average."""
+    # This checker legislates WHICH tracks the projection selects — positive
+    # ones, averaged rather than collapsed to the minimum. The bps->kbps
+    # reduction itself is a separate contract owned by ``kbps_from_bps`` and
+    # pinned in tests/test_beets_db.py; reusing it here keeps this property
+    # about selection instead of silently re-pinning a rounding mode.
+    # Sharing the reduction costs no detection power in either direction:
+    # the min-selected known-bad self-test below still trips, and planting
+    # a floored reduction in production's own check_mbids_detail is still
+    # killed by this property.
     positive = [value for value in bitrates_bps if value > 0]
-    expected_min = min(positive) // 1000
-    expected_avg = int((sum(positive) / len(positive)) / 1000)
+    expected_min = kbps_from_bps(min(positive))
+    expected_avg = kbps_from_bps(sum(positive) // len(positive))
     assert detail["beets_bitrate"] == expected_min
     assert detail["beets_avg_bitrate"] == expected_avg
     assert selected_kbps == expected_avg

@@ -7,7 +7,7 @@ import os
 import statistics
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from lib.beets_db import (
     AlbumInfo,
@@ -20,13 +20,17 @@ from lib.beets_db import (
     CurrentBeetsUnique,
     ReleaseLocation,
     _lookup_identity,
-    _reduce_album_format,
+    album_info_from_current,
 )
+from lib.media_readiness import kbps_from_bps
 from lib.release_identity import (
     ReleaseIdentity,
     detect_release_source,
     normalize_release_id,
 )
+
+if TYPE_CHECKING:
+    from lib.quality import QualityRankConfig
 
 
 class FakeBeetsDB:
@@ -183,6 +187,7 @@ class FakeBeetsDB:
                     for index, bitrate in enumerate(bitrates)
                 ],
             )
+            self._assert_seed_projects_to(mb_release_id, info)
         elif info is None:
             key = normalize_release_id(mb_release_id)
             self._album_ids_for_release[key] = []
@@ -277,9 +282,76 @@ class FakeBeetsDB:
             )],
         )
 
+    def _assert_seed_projects_to(
+        self, mb_release_id: str, info: AlbumInfo,
+    ) -> None:
+        """Prove the seeded items really project back to ``info``.
+
+        ``_synthesize_bitrates`` promises a world whose PRODUCTION reduction
+        is the requested ``AlbumInfo``; only the real reducer can settle
+        that. Checking it with test-side arithmetic is how the promise came
+        apart once already. Consumers read these aggregates through
+        ``album_info_from_current``, so the round trip is the contract.
+
+        Resolution goes through the CLASS's resolver, never
+        ``self.resolve_current_release``. Tests legitimately replace that
+        attribute with a wrapper — ``_mock_beets_db`` in
+        ``tests/test_integration_slices.py`` wraps it in one that re-seeds
+        on every call — and a self-check that re-entered the wrapper would
+        recurse into the very seeding it is verifying. This check is about
+        the state this instance just wrote, so it reads that state directly.
+        """
+        identity = _lookup_identity(mb_release_id)
+        recorded = len(self.resolve_current_release_calls)
+        try:
+            resolution = (
+                FakeBeetsDB.resolve_current_release(self, identity)
+                if identity is not None
+                else None
+            )
+        finally:
+            # Seeding is not an observation; keep the recorder honest.
+            del self.resolve_current_release_calls[recorded:]
+        projected = self._album_info_from_resolution(resolution)
+        assert projected is not None, (
+            f"seeded AlbumInfo for {mb_release_id} does not resolve to a "
+            "unique current release"
+        )
+        actual = (
+            projected.track_count,
+            projected.min_bitrate_kbps,
+            projected.avg_bitrate_kbps,
+            projected.median_bitrate_kbps,
+            projected.is_cbr,
+        )
+        expected = (
+            info.track_count,
+            info.min_bitrate_kbps,
+            info.avg_bitrate_kbps or info.min_bitrate_kbps,
+            info.median_bitrate_kbps or info.min_bitrate_kbps,
+            info.is_cbr,
+        )
+        assert actual == expected, (
+            "seeded items do not reduce to the requested AlbumInfo: "
+            f"production projects {actual}, test asked for {expected}"
+        )
+
     @staticmethod
     def _synthesize_bitrates(info: AlbumInfo) -> list[int]:
-        """Construct per-item facts whose production reduction is ``info``."""
+        """Construct per-item facts whose production reduction is ``info``.
+
+        Every window and every check below reduces through the production
+        helper ``kbps_from_bps``. Re-deriving the reduction here is what let
+        this fake drift: it targeted and verified a FLOORED window while
+        ``album_info_from_current`` rounds half-up, so it happily built an
+        album it claimed averaged 48 kbps that the real projection read as
+        49. The usable mean therefore runs to ``average * 1000 + 499``, not
+        to the floor band's ``average * 1000 + 999``.
+
+        Its reach is narrower than production's: min and median are emitted
+        as whole kilobits, so aggregates only sub-kilobit rates can produce
+        are refused as "not jointly expressible" rather than mis-built.
+        """
 
         count = info.track_count
         assert count > 0, "AlbumInfo with no items is not production-expressible"
@@ -287,6 +359,9 @@ class FakeBeetsDB:
         average = info.avg_bitrate_kbps or minimum
         median = info.median_bitrate_kbps or minimum
         assert minimum <= median, "minimum bitrate cannot exceed median"
+        # Highest per-item mean (bps) that still reduces to ``average`` kbps:
+        # kbps_from_bps(average * 1000 + 499) == average, +500 rounds up.
+        max_mean_bps = average * 1000 + 499
         if count == 1:
             values = [minimum * 1000]
             assert average == minimum and median == minimum, (
@@ -298,7 +373,9 @@ class FakeBeetsDB:
             )
             low = minimum * 1000
             target_total = max(2 * average * 1000, low * 2)
-            assert target_total <= 2 * (average + 1) * 1000 - 1
+            assert target_total <= 2 * max_mean_bps + 1, (
+                "AlbumInfo min/avg/median are not jointly expressible"
+            )
             values = [low, target_total - low]
         else:
             low_count = (count - 1) // 2
@@ -309,7 +386,8 @@ class FakeBeetsDB:
                 + [median * 1000] * middle_count
             )
             target_min = count * average * 1000
-            target_max = count * (average + 1) * 1000 - 1
+            # sum // count <= max_mean_bps  <=>  sum <= count*max + count-1.
+            target_max = count * max_mean_bps + (count - 1)
             target_total = max(
                 target_min,
                 sum(fixed) + high_count * median * 1000,
@@ -324,9 +402,9 @@ class FakeBeetsDB:
             values = fixed + highs
         if not info.is_cbr and len(values) > 1 and len(set(values)) == 1:
             values[-1] += 1
-        assert int(min(values) / 1000) == minimum
-        assert int(sum(values) / len(values) / 1000) == average
-        assert int(statistics.median(values) / 1000) == median
+        assert kbps_from_bps(min(values)) == minimum
+        assert kbps_from_bps(sum(values) // len(values)) == average
+        assert kbps_from_bps(int(statistics.median(values))) == median
         assert (len(set(values)) == 1) == info.is_cbr, (
             "AlbumInfo is_cbr disagrees with its per-item bitrates"
         )
@@ -465,11 +543,15 @@ class FakeBeetsDB:
             result[identity.release_id] = {
                 "beets_tracks": len(current.items),
                 "beets_format": ",".join(formats) if formats else None,
+                # Same shared reduction production's check_mbids_detail
+                # uses; a floored copy here would let the two projections
+                # of one album disagree in the fake while agreeing in
+                # production.
                 "beets_bitrate": (
-                    int(min(bitrates) / 1000) if bitrates else None
+                    kbps_from_bps(min(bitrates)) if bitrates else None
                 ),
                 "beets_avg_bitrate": (
-                    int(sum(bitrates) / len(bitrates) / 1000)
+                    kbps_from_bps(sum(bitrates) // len(bitrates))
                     if bitrates else None
                 ),
                 "beets_samplerate": min(samplerates) if samplerates else None,
@@ -792,39 +874,38 @@ class FakeBeetsDB:
         ]
         return int(min(bitrates) / 1000) if bitrates else None
 
+    def _album_info_from_resolution(
+        self,
+        resolution: CurrentBeetsResolution | None,
+        cfg: QualityRankConfig | None = None,
+    ) -> AlbumInfo | None:
+        """Production's own projection over one resolved snapshot."""
+        if not isinstance(resolution, CurrentBeetsUnique):
+            return None
+        from lib.quality import QualityRankConfig
+
+        return album_info_from_current(
+            resolution,
+            cfg if cfg is not None else QualityRankConfig.defaults(),
+        )
+
     def get_album_info(
         self, mb_release_id: str, _cfg: Any = None,
     ) -> Any:
+        # Projects through the real reducer instead of re-deriving the
+        # aggregates. The hand-copied version floored bps->kbps while
+        # production rounds, so this fake answered 48 kbps where the real
+        # ``album_info_from_current`` answered 49 for the very same seeded
+        # items — a divergence no test could see, because both sides of
+        # every assertion were the copy.
         self.get_album_info_calls.append(mb_release_id)
         identity = _lookup_identity(mb_release_id)
         if identity is None:
             return None
-        resolution = self.resolve_current_release(identity)
-        if not isinstance(resolution, CurrentBeetsUnique):
-            return None
-        measured = [
-            (item, bitrate)
-            for item in resolution.items
-            if (bitrate := item.bitrate) is not None and bitrate > 0
-        ]
-        if not measured:
-            return None
-        bitrates = [bitrate for _item, bitrate in measured]
-        from lib.quality import QualityRankConfig
-
-        cfg = _cfg if _cfg is not None else QualityRankConfig.defaults()
-        return AlbumInfo(
-            album_id=resolution.album_id,
-            track_count=len(measured),
-            min_bitrate_kbps=int(min(bitrates) / 1000),
-            avg_bitrate_kbps=int(sum(bitrates) / len(bitrates) / 1000),
-            median_bitrate_kbps=int(statistics.median(bitrates) / 1000),
-            is_cbr=len(set(bitrates)) == 1,
-            album_path=resolution.album_path,
-            format=_reduce_album_format(
-                {item.format for item, _bitrate in measured if item.format},
-                cfg,
-            ),
+        # Deliberately the instance attribute: a test that wrapped the
+        # resolver expects its wrapper on this read path.
+        return self._album_info_from_resolution(
+            self.resolve_current_release(identity), _cfg,
         )
 
     def get_item_paths(self, mb_release_id: str) -> list[tuple[int, str]]:
