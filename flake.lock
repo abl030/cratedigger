@@ -3,11 +3,11 @@
     "beets-tip": {
       "flake": false,
       "locked": {
-        "lastModified": 1786405466,
-        "narHash": "sha256-8hSfKEuQvuapdPR9vfVPTbuzcWUsLjRLVCHy6zMtRvo=",
+        "lastModified": 1786613357,
+        "narHash": "sha256-XSGiBBSM28nCvnUbFnavOprSYgeb20WDCFc+lAJEp4U=",
         "owner": "beetbox",
         "repo": "beets",
-        "rev": "dc1709e14849adfec7208c53196dc2b01b5f3fd9",
+        "rev": "1cb3af87e2df14e059bc429ff9479b9c4b02591e",
         "type": "github"
       },
       "original": {
