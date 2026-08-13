@@ -75,11 +75,15 @@ from web.routes._server_access import _server
 def get_triage_quarantine(
     h: RouteHandler, params: dict[str, list[str]],
 ) -> None:
-    """Return unreferenced immediate folders from both quarantine roots.
+    """Return unreferenced immediate folders from every quarantine root.
 
-    Mirrors ``pipeline-cli triage quarantine``. A complete scan returns 200;
-    any configuration, DB, decode, or filesystem uncertainty returns 503
-    rather than a misleading partial/empty list.
+    The canonical execution authority for both this route and
+    ``pipeline-cli triage quarantine`` (issue #1122 F1 relays the CLI
+    through here rather than scanning directly, since the processing tree
+    is a private ``0700 cratedigger:users`` directory the invoking operator
+    cannot traverse). A complete scan returns 200; any configuration, DB,
+    decode, or filesystem uncertainty returns 503 rather than a misleading
+    partial/empty list.
     """
     from lib.quarantine_triage_service import (
         QuarantineScanError,
@@ -295,9 +299,12 @@ ROUTES: list[RouteRegistration] = [
     route(
         "GET", "/api/triage/quarantine", get_triage_quarantine,
         "Read-only quarantine lifecycle view — unreferenced immediate "
-        "failed_imports and wrong_matches album folders with no visible "
-        "Wrong Matches reference; excludes code-owned bad_files and "
-        "untracked_audio buckets from failed_imports.",
+        "failed_imports/wrong_matches album folders (under both the slskd "
+        "download dir and the processing tree) with no visible Wrong "
+        "Matches reference; excludes the code-owned bad_files and "
+        "untracked_audio buckets from both failed_imports roots. Also the "
+        "canonical execution authority pipeline-cli triage quarantine "
+        "relays to (issue #1122 F1).",
         classified=True,
     ),
     route(

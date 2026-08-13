@@ -1006,34 +1006,68 @@ classified there once rather than copied into each adapter, and
 scenario a producer spells but nobody classified. Full routing table,
 producer-by-producer: `docs/rejection-routing.md`.
 
-The quarantine lifecycle view surfaces unreferenced album folders in both
-protected roots. It also continues to account for legacy Wrong Matches rows
-whose persisted path points into `failed_imports/`:
+The quarantine lifecycle view surfaces unreferenced album folders across
+every scanned root. `pipeline-cli triage quarantine` is a thin adapter over
+`GET /api/triage/quarantine` (issue #1122 F1) — the route is the ONE
+execution authority for both surfaces, because the processing tree it reads
+is a private `0700 cratedigger:users` directory only the web service
+identity can traverse; run directly in the operator's own CLI process the
+scan raised `EACCES` and killed the whole view (the same #1063 shape that
+already moved `force-import`, `replace`, and their cohort onto the
+permissioned Unix socket):
 
 ```bash
 pipeline-cli triage quarantine --json
 curl https://music.ablz.au/api/triage/quarantine
 ```
 
-Both read-only adapters wrap the same service. It scans only immediate real
-directories under the configured `<slskd_download_dir>/failed_imports/` and
-`<slskd_download_dir>/wrong_matches/`; it does not recurse, follow symlinks,
-delete, or infer ownership. The code-owned `bad_files/` and `untracked_audio/`
-category roots are excluded from `failed_imports/` rather than misreported as
-album folders or recursively expanded. A visible Wrong Matches row protects
-its immediate album root in either quarantine whether its persisted
+`lib.quarantine_triage_service.list_unreferenced_quarantine_folders` scans
+only immediate real directories under exactly four roots, two bases times
+two markers: `<slskd_download_dir>/failed_imports/` and
+`<slskd_download_dir>/wrong_matches/` (no current writer targets the
+former any more — that cohort predates issue #1077 — but it can still hold
+legacy folders), plus `<processing_dir>/albums/failed_imports/` and
+`<processing_dir>/albums/wrong_matches/`, where every CURRENT kept
+rejection actually lands (issue #1077; `lib.import_manifest._allocate_target`
+always targets `wrong_matches/` now). Both `failed_imports/` roots exclude
+the same code-owned `bad_files/`/`untracked_audio/` category buckets from
+being misreported as album folders or recursively expanded — a live
+`failed_imports/bad_files/` entry on the PROCESSING side (issue #1122 F3)
+proved the bucket is not download-dir-specific. `lib.fs_authority`'s
+`open_configured_quarantine_directory` separately enumerates a THIRD base,
+`<beets_staging_dir>/failed_imports/` and `<beets_staging_dir>/wrong_matches/`,
+for single-path containment checks; this service does NOT scan that base — its legacy
+quarantine folders predate the current rejection pipeline and have not been
+shown to fit this scan's DB-reference model uniformly. That is a known,
+stated gap, not an oversight.
+
+A visible Wrong Matches row protects its immediate album root in whichever
+of the four quarantine roots it lives under, whether its persisted
 `failed_path` is relative (`failed_imports/Artist - Album`), absolute, or a
-descendant of that album root. References outside both configured quarantine
-roots do not claim local folders. A `status='replaced'` parent is frozen audit
-history and is excluded by the shared default Wrong Matches visibility rule,
-so its reference does not hide a quarantine folder. The explicit
-`/api/wrong-matches?include_replaced=true` history view still surfaces those
-rows without changing lifecycle triage.
+descendant of that album root — except that a RELATIVE reference can only
+ever reach the two download-dir-rooted roots, since relative resolution
+always joins the single configured slskd download dir; the processing-side
+roots are a wholly separate tree, so processing-sourced rejections always
+persist an ABSOLUTE `failed_path` in the first place. References outside
+every configured quarantine root do not claim local folders. A
+`status='replaced'` parent is frozen audit history and is excluded by the
+shared default Wrong Matches visibility rule, so its reference does not hide
+a quarantine folder. The explicit
+`/api/wrong-matches?include_replaced=true` history view still surfaces
+those rows without changing lifecycle triage.
 
 Results are sorted by folder name and carry `name`, absolute `path`, and
-`mtime_ns`; the JSON envelope reports both `quarantine_root` (the legacy
-`failed_imports/` field) and `wrong_matches_root`. A genuinely absent root is a
-valid empty state.
+`mtime_ns`; the JSON envelope reports `quarantine_root` (the legacy
+`failed_imports/` field), `wrong_matches_root`,
+`processing_failed_imports_root`, and `processing_wrong_matches_root`. A
+genuinely absent root is a valid empty state.
+`lib.slskd_transfers`'s disk reaper protects only the two download-dir-rooted
+roots forever (issue #571); the processing-side roots have no automated
+reaper at all. Post-rejection cleanup (`lib.wrong_match_cleanup_service.cleanup_wrong_match`)
+does automatically rmtree a delete-eligible REFERENCED folder there right
+after its own rejection — but no automated sweep ever revisits an
+UNREFERENCED folder in either processing-side root, which is exactly why
+this operator-facing sweep matters there.
 Configuration, DB, validation-envelope, directory-read, and mid-scan race
 errors fail the whole view as CLI exit `5` / HTTP `503`; partial state is never
 presented as an empty or trustworthy orphan list. Deletion remains an explicit
