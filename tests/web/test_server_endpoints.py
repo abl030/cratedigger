@@ -34,7 +34,7 @@ from tests.web._harness import _FakeDbWebServerCase
 from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
 
 CANONICAL_ORIGIN = "https://music.ablz.au"
-INSECURE_AUTH_WARNING = (
+INSECURE_AUTH_WARNING_COPY = (
     b"Authentication is disabled for this Cratedigger instance."
 )
 INSECURE_FOOTER_START = b"<!-- CRATEDIGGER_INSECURE_FOOTER_START -->"
@@ -131,7 +131,7 @@ def assert_clean_generic_failure(
 
 def assert_insecure_footer_contract(body: bytes) -> None:
     """Assert the static insecure notice remains semantic and unobtrusive."""
-    if body.count(INSECURE_AUTH_WARNING) != 1:
+    if body.count(INSECURE_AUTH_WARNING_COPY) != 1:
         raise AssertionError("insecure warning copy must occur exactly once")
     if len(re.findall(rb"<footer(?:\s|>)", body)) != 1:
         raise AssertionError("insecure warning must use exactly one native footer")
@@ -346,7 +346,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             secure,
             insecure[:footer_start] + insecure[footer_end:],
         )
-        self.assertNotIn(INSECURE_AUTH_WARNING, secure)
+        self.assertNotIn(INSECURE_AUTH_WARNING_COPY, secure)
         self.assertNotIn(b'<footer class="insecure-auth-footer"', secure)
 
     def test_insecure_index_has_one_static_semantic_footer(self) -> None:
@@ -364,7 +364,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             INDEX_TEMPLATE.read_bytes(), insecure=insecure,
         )
 
-        self.assertEqual(body.count(INSECURE_AUTH_WARNING), int(insecure))
+        self.assertEqual(body.count(INSECURE_AUTH_WARNING_COPY), int(insecure))
         self.assertEqual(
             body.count(b'<footer class="insecure-auth-footer"'),
             int(insecure),
@@ -389,7 +389,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             web_server.configure_insecure_mode(previous_insecure)
 
         self.assertFalse(web_server.insecure_mode)
-        self.assertNotIn(INSECURE_AUTH_WARNING, body)
+        self.assertNotIn(INSECURE_AUTH_WARNING_COPY, body)
         self.assertNotIn(b'<footer class="insecure-auth-footer"', body)
         self.assertEqual(len(captured.records), 1)
         self.assertEqual(captured.records[0].levelname, "INFO")
@@ -425,8 +425,8 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         ):
             assert_insecure_footer_contract(
                 body.replace(
-                    INSECURE_AUTH_WARNING,
-                    INSECURE_AUTH_WARNING * 2,
+                    INSECURE_AUTH_WARNING_COPY,
+                    INSECURE_AUTH_WARNING_COPY * 2,
                 )
             )
 
@@ -514,7 +514,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         self.assertEqual(len(captured.records), 1)
         self.assertEqual(captured.records[0].levelno, logging.CRITICAL)
         self.assertIn(
-            INSECURE_AUTH_WARNING.decode(),
+            INSECURE_AUTH_WARNING_COPY.decode(),
             captured.records[0].getMessage(),
         )
 
@@ -544,7 +544,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         self.assertEqual(len(captured.records), 1)
         self.assertEqual(captured.records[0].levelno, logging.CRITICAL)
         self.assertIn(
-            INSECURE_AUTH_WARNING.decode(),
+            INSECURE_AUTH_WARNING_COPY.decode(),
             captured.records[0].getMessage(),
         )
         assert_insecure_footer_contract(insecure)
@@ -553,7 +553,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             web_server.configure_insecure_mode(False)
             secure = self._current_index_bytes()
 
-        self.assertNotIn(INSECURE_AUTH_WARNING, secure)
+        self.assertNotIn(INSECURE_AUTH_WARNING_COPY, secure)
         self.assertNotIn(b'<footer class="insecure-auth-footer"', secure)
 
     def test_pipeline_log_returns_entries(self):
