@@ -37,7 +37,7 @@ already ``imported`` and returns it to ``imported``) can leave exactly the
 same stale ``mb_release_group_id`` naming the LOSING release's group after
 the identity itself has moved on to the survivor, if that survivor belongs
 to a different release group. Nothing self-heals it on ANY of the three
-arms: ``field_resolver_service.py::resolve_all`` writes
+arms: ``field_resolver_service.py::apply_resolve_all_result`` writes
 ``mb_release_group_id`` only when the existing value is ``None``
 (``existing_mb_release_group_id is None``), and
 ``POST /api/pipeline/<id>/resolve-rg``
@@ -115,8 +115,16 @@ RESULT_NOT_MERGED = "not_merged"
 RESULT_LIBRARY_NOT_AT_SURVIVOR = "library_not_at_survivor"
 RESULT_LIBRARY_STILL_AT_STORED = "library_still_at_stored"
 #: Named after ``lib.world_invariants``'s own ``evidence_fingerprint_mismatch``
-#: code — the same live-world-audit vocabulary, deliberately, since this is
-#: the same fact checked the same way (#1089 MAJOR-3, review round 2).
+#: code, but NOT because the two check "the same fact the same way" — the
+#: audit uses four separate codes (``evidence_link_without_album``,
+#: ``current_evidence_missing``, ``current_evidence_dangling``,
+#: ``evidence_fingerprint_mismatch``) for the distinct facts this ONE
+#: operator-facing outcome collapses (no linked evidence, a dangling link,
+#: an unwitnessable survivor, a genuine mismatch). The honest rationale is
+#: narrower: one outcome per OPERATOR DECISION, not one outcome per
+#: underlying fact — every one of these worlds asks the operator to look
+#: and decide, so they share a single actionable name here (#1089 MAJOR-3,
+#: review round 2; corrected #1089 m3, review round 4).
 RESULT_EVIDENCE_FINGERPRINT_MISMATCH = "evidence_fingerprint_mismatch"
 RESULT_SURVIVOR_COLLISION = "survivor_collision"
 RESULT_REKEY_REFUSED = "rekey_refused"

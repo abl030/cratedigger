@@ -436,10 +436,15 @@ def post_pipeline_merge_rekey(
               exactly one album at the survivor), ``library_still_at_stored``
               (Beets still resolves an album at the merged-away id — retag
               the library first), ``evidence_fingerprint_mismatch`` (the
-              request links current evidence, and the survivor album's
-              freshly computed content fingerprint does not match it — the
-              survivor may be an unrelated, pipeline-untracked album that
-              happens to hold the merged MBID; the operator must decide),
+              survivor adoption could not be witnessed against the
+              request's linked current evidence — no linked evidence at
+              all, a linked evidence row that no longer exists, the
+              survivor album's files could not be read, the survivor album
+              walked cleanly but has zero audio files (vanished or
+              genuinely empty — not witnessable), or a freshly computed
+              content fingerprint that genuinely does not match; an
+              unrelated, pipeline-untracked album can otherwise sit at the
+              merged MBID, so the operator decides in every case),
               ``survivor_collision`` (a rival request or a colliding
               evidence fingerprint already occupies the survivor — operator
               must resolve it), or ``rekey_refused`` (an in-flight

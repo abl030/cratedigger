@@ -25,12 +25,18 @@ class DiskCoverageRow(msgspec.Struct, kw_only=True):
     discogs_release_id: str | None
     #: The row's real exact-release source ("musicbrainz" / "discogs"), or
     #: ``None`` if it names no valid identity at all. Derived from the
-    #: VALUE's shape via ``ReleaseIdentity.from_fields`` (#1089 MAJOR-A,
-    #: review round 3) — NEVER from which column is non-null: production
-    #: Discogs rows duplicate the numeric id into BOTH ``mb_release_id``
-    #: and ``discogs_release_id`` (see ``ReleaseIdentity.from_strict_fields``'s
-    #: own docstring), so ``mb_release_id`` truthiness alone falsely reads
-    #: every Discogs-sourced drift row as MB-sourced.
+    #: VALUE's shape via ``ReleaseIdentity.from_strict_fields`` (#1089
+    #: MAJOR-A, review round 3; N4, review round 4) — NEVER from which
+    #: column is non-null: production Discogs rows duplicate the numeric id
+    #: into BOTH ``mb_release_id`` and ``discogs_release_id`` (see
+    #: ``ReleaseIdentity.from_strict_fields``'s own docstring), so
+    #: ``mb_release_id`` truthiness alone falsely reads every Discogs-
+    #: sourced drift row as MB-sourced. STRICT, not the lenient
+    #: ``from_fields``: this must match ``MergeRekeyService.rekey_request``'s
+    #: own admission test exactly, or a row with a real MB UUID plus a
+    #: conflicting numeric Discogs id would render a button the service
+    #: refuses (``from_fields`` picks ``mb_release_id`` without checking
+    #: for a conflict; ``from_strict_fields`` fails closed to ``None``).
     source: str | None
 
 
@@ -77,7 +83,7 @@ def _release_ids_for_beets_album(row: dict[str, Any]) -> set[str]:
 
 
 def _request_row(row: Mapping[str, Any]) -> DiskCoverageRow:
-    identity = ReleaseIdentity.from_fields(
+    identity = ReleaseIdentity.from_strict_fields(
         row.get("mb_release_id"), row.get("discogs_release_id"),
     )
     return DiskCoverageRow(

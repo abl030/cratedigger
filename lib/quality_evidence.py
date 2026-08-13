@@ -656,14 +656,15 @@ def fingerprint_album_path(album_path: str) -> str | None:
     ``None`` when nothing is there to witness (#1089 NOTE-H / NOTE-I,
     review round 3).
 
-    The ONE canonical composition of the two primitives above
-    (``snapshot_audio_files`` + ``snapshot_fingerprint``) — every caller
-    that needs "the current content fingerprint of this installed album"
-    uses THIS function rather than re-deriving the same two-call sequence
-    independently, which is how ``lib.merge_rekey_service`` and
-    ``lib.world_audit_service`` ended up with two textually-identical
-    copies of the same formula before this extraction (CLAUDE.md's "No
-    Parallel Code Paths").
+    The composition of the two primitives above (``snapshot_audio_files`` +
+    ``snapshot_fingerprint``) shared by ``lib.merge_rekey_service`` and
+    ``lib.world_audit_service``, which had two textually-identical copies
+    of the same formula before this extraction (CLAUDE.md's "No Parallel
+    Code Paths"). NOT yet universal: ``lib.sidecar_service`` and
+    ``lib.import_preview`` still re-derive the same two-call sequence
+    independently for their own quality-critical paths — deliberately out
+    of scope for this extraction (#1089 m2, review round 4), tracked as a
+    follow-up consolidation rather than folded in here.
 
     Deliberately DIFFERENT from ``snapshot_fingerprint([])``'s own
     contract: that primitive treats the empty list as a well-defined,

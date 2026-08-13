@@ -222,7 +222,11 @@ function renderDiskCoverageCard(dc) {
  * (`ReleaseIdentity.from_strict_fields`'s own docstring), so a
  * column-truthiness gate renders the button on every Discogs-sourced
  * drift row too — `source` is derived server-side from the VALUE's shape
- * (`lib/disk_coverage_service.py`, via `ReleaseIdentity.from_fields`),
+ * (`lib/disk_coverage_service.py`, via `ReleaseIdentity.from_strict_fields`
+ * — the SAME strict, conflict-failing derivation
+ * `MergeRekeyService.rekey_request`'s own admission test uses, #1089 N4
+ * review round 4, so a row with a real MB UUID plus a conflicting numeric
+ * Discogs id shows no button either — the service would refuse it too),
  * never from which column is non-null. A Discogs-sourced or otherwise
  * non-MB drift row still shows, just without an action this arm can never
  * resolve; a never-merged MB-sourced row KEEPS the button — clicking it

@@ -19,9 +19,11 @@ O1  The operator rekey arm rekeys ONLY an ``imported``, MB-sourced, unowned
     ANSWERED (never a silent/unavailable mirror), Beets holding exactly one
     album at that survivor AND nothing at the stored id, no
     ``queued``/``running`` import job, no rival request already at the
-    survivor, no colliding evidence fingerprint at the survivor, and — when
-    the request links current evidence — a survivor whose freshly measured
-    bytes match it. It NEVER fires on ``processing`` / ``replaced`` / other
+    survivor, no colliding evidence fingerprint at the survivor, and a
+    survivor whose freshly measured bytes match the request's linked
+    current evidence — MANDATORY, not conditional on a linked row existing
+    (#1089 MAJOR-C, review round 3): a request with no linked evidence at
+    all refuses too. It NEVER fires on ``processing`` / ``replaced`` / other
     non-``imported`` statuses, on an automation-owned row, or on a
     Discogs-sourced / identity-less row — the service's own precondition
     refuses those before any mirror or Beets call.
@@ -34,11 +36,12 @@ O3  A world whose request write refuses (an in-flight import job) OR whose
 O4  A rival request or a colliding evidence fingerprint at the survivor is
     reported as ``survivor_collision``, never folded into ``rekey_refused``
     (#1089 MAJOR-2) — the two outcomes are mutually exclusive causes.
-O5  A request with linked current evidence whose fingerprint does NOT match
-    the survivor's freshly measured bytes is refused
-    ``evidence_fingerprint_mismatch`` (#1089 MAJOR-3, review round 2) —
-    never silently rekeyed onto an unrelated, pipeline-untracked album that
-    happens to occupy the survivor MBID.
+O5  A request whose evidence-lineage witness does not pass — no linked
+    current evidence at all, or linked evidence whose fingerprint does NOT
+    match the survivor's freshly measured bytes — is refused
+    ``evidence_fingerprint_mismatch`` (#1089 MAJOR-3, review round 2;
+    MAJOR-C, review round 3) — never silently rekeyed onto an unrelated,
+    pipeline-untracked album that happens to occupy the survivor MBID.
 """
 
 from __future__ import annotations

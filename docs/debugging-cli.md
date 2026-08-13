@@ -303,12 +303,17 @@ inside socket authorization, never credentials.
   the survivor first, and `library_still_at_stored` (409) unless Beets
   resolves NOTHING at the merged-away id — "the survivor is occupied" alone
   does not witness the library actually moved, nor that the album occupying
-  it is this request's own: when the request links current evidence, a
-  freshly computed content fingerprint of the survivor album must also match
-  that evidence row, or the request refuses `evidence_fingerprint_mismatch`
-  (409) — an unrelated, pipeline-untracked album can otherwise sit at the
-  merged MBID and the merge-rekey action would transplant this request's
-  proof onto bytes nobody measured for it. `survivor_collision` (409)
+  it is this request's own: the survivor adoption must be witnessed against
+  the request's linked current evidence, or the request refuses
+  `evidence_fingerprint_mismatch` (409) — no linked evidence at all, a
+  linked evidence row that no longer exists, unreadable survivor files, a
+  survivor album that walked cleanly but has zero audio files (vanished or
+  genuinely empty — not witnessable), or a freshly computed content
+  fingerprint that genuinely does not match all produce this outcome; an
+  unrelated, pipeline-untracked album can otherwise sit at the merged MBID
+  and the merge-rekey action would transplant this request's proof onto
+  bytes nobody measured for it, so the operator decides in every case.
+  `survivor_collision` (409)
   when a rival request or a colliding evidence fingerprint already occupies
   the survivor (an operator must resolve it directly — retrying cannot
   help); `rekey_refused` (409) covers the write's own refusal, with two

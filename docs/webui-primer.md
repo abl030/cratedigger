@@ -262,8 +262,11 @@ depends on.
   current library — a MusicBrainz merge is only ONE of several possible
   causes) shown for an MB-sourced row (`source === 'musicbrainz'`, a field
   the dashboard route derives server-side from the VALUE's shape via
-  `ReleaseIdentity.from_fields` — NEVER from `mb_release_id` column
-  presence: production Discogs rows duplicate the numeric id into BOTH
+  `ReleaseIdentity.from_strict_fields` — the SAME strict, conflict-failing
+  derivation `MergeRekeyService.rekey_request`'s own admission test uses
+  (#1089 N4, review round 4), so the gate never renders a button the
+  service would refuse — NEVER from `mb_release_id` column presence:
+  production Discogs rows duplicate the numeric id into BOTH
   `mb_release_id` and `discogs_release_id`, so a column-truthiness gate
   would render the button on every one of them; #1089 MAJOR-A, review
   round 3 — Discogs-sourced drift rows still list, just with no action
@@ -281,11 +284,14 @@ depends on.
   read as "MusicBrainz confirms this was never merged". `wrong_state`,
   `library_not_at_survivor`, `library_still_at_stored` (Beets has not moved
   off the merged-away id yet — retag the library first),
-  `evidence_fingerprint_mismatch` (the request links current evidence, and
-  the survivor album's freshly computed content fingerprint does not match
-  it — an unrelated, pipeline-untracked album can otherwise sit at the
-  merged MBID and this action would proof-lock the wrong bytes; the
-  operator must decide), `survivor_collision` (a rival request or a
+  `evidence_fingerprint_mismatch` (the survivor adoption could not be
+  witnessed against the request's linked current evidence — no linked
+  evidence at all, a dangling link, unreadable survivor files, a survivor
+  album with zero audio files (vanished or genuinely empty), or a genuine
+  content-fingerprint mismatch — an unrelated, pipeline-untracked album can
+  otherwise sit at the merged MBID and this action would proof-lock the
+  wrong bytes; the operator decides in every case),
+  `survivor_collision` (a rival request or a
   colliding evidence fingerprint already occupies the survivor — the
   operator must resolve it directly), `rekey_refused` (the write itself
   refused — a pre-existing queued/running import job says wait for it to

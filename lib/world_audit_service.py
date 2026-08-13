@@ -345,7 +345,14 @@ def audit_world(
                 # cache keyed on "value is None means uncached" would
                 # recompute that album's walk on every hit instead of
                 # caching the negative result. Membership, not value,
-                # decides cache presence.
+                # decides cache presence. This is not ONLY a caching fix:
+                # it also makes one edge stricter than before — an
+                # evidence row whose recorded snapshot_fingerprint happens
+                # to equal the empty-list digest, checked against a now-
+                # empty album, used to read as coherent (both sides the
+                # same digest string) and now reports
+                # evidence_fingerprint_mismatch (a real string vs None),
+                # which is the correct call: the album is actually gone.
                 if current.album_id in fingerprint_cache:
                     actual_fingerprint = fingerprint_cache[current.album_id]
                 else:
