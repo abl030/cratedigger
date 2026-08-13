@@ -33,10 +33,19 @@ Beets catalog row (``album.remove(delete=False)``), confined to the launch
 source path rather than the configured library root, because crash debris
 is — by construction — an album whose files never reached the library. The
 automation lane's processing source tree itself is left for the existing
-journaled cleanup (``lib.processing_cleanup``) to remove; its two callers
-(below) both run this check BEFORE that cleanup, never after, so it composes
-safely whether the cleanup that follows finds a fresh source tree, a resumed
-journal from an earlier interrupted attempt, or an already-removed one.
+journaled cleanup (``lib.processing_cleanup``) to remove. Issue #1089
+review MINOR-6: this composes safely regardless of that cleanup's own
+ordering — a prior round claimed both automation callers always run this
+check BEFORE that cleanup, which is false for
+``_self_heal_automation_world_failure`` entered from
+``scripts/importer.py::process_claimed_job``'s terminal-stage ``except``
+(``_complete_automation_processing_cleanup`` already ran once, successfully
+or not, before that self-heal call). The TRUE reason it is safe either way:
+confinement here is purely lexical (``Path(launch_source_path).resolve(strict=False)``
+plus string-prefix comparison against each recorded item path) and never
+touches the filesystem, so it composes identically whether the cleanup that
+follows — or already ran — finds a fresh source tree, a resumed journal from
+an earlier interrupted attempt, or an already-removed one.
 
 Issue #1089 review round 1 (B1) widened the exposure this module covers: a
 killed automation import is not only the restart-based "owner process
@@ -45,15 +54,15 @@ SAME committed-but-unmoved catalog row is left behind whenever a launched
 Beets child dies while the owning process stays alive — a crash, an
 ambiguous acknowledgement, a missing completion receipt — which the
 in-process self-heal path (``scripts/importer.py::_self_heal_automation_world_failure``)
-now also checks — before the SAME ``lib.processing_cleanup`` journaled
-mechanism (``_complete_automation_processing_cleanup``) — and a
-launch-authorized force/YouTube job found still ``running`` at startup
-(``PipelineDB.recover_running_import_jobs``), which checks it too, before
-THAT lane's own, DIFFERENT cleanup mechanism
-(``scripts/importer.py``'s ``force_action_cleanup``, not
-``lib.processing_cleanup`` — the force/YouTube lane has no processing
-journal to resume). All three call sites share this one function and its
-one precondition pair; none of them mutates a filesystem path either.
+now also checks, and a launch-authorized force/YouTube job found still
+``running`` at startup (``PipelineDB.recover_running_import_jobs``), which
+checks it too — that lane's own cleanup is a DIFFERENT mechanism entirely
+(``scripts/importer.py::_record_terminal_force_action_cleanup``, keyed off
+the ``force_action_cleanup`` JSONB result field it writes — not a function
+name — never ``lib.processing_cleanup``, since the force/YouTube lane has
+no processing journal to resume). All three call sites share this one
+function and its one precondition pair; none of them mutates a filesystem
+path either.
 """
 
 from __future__ import annotations
@@ -101,21 +110,32 @@ RecoveryDebrisOutcomeKind = Literal[
     # the same classifier the world audit uses). Never a reason to remove
     # anything: recovery proceeds and the request returns to ``wanted`` in
     # every case, per invariant 11 — a transient Beets outage must never
-    # park an otherwise-recoverable world. Issue #1089 review M3: this
-    # check itself is NOT retried against the SAME job. All three
-    # producers (`recover_abandoned_automation_owners`,
-    # `_self_heal_automation_world_failure`, `recover_running_import_jobs`)
-    # terminalize their exact job in the SAME transaction regardless of the
-    # debris outcome — the first two clear the request's owner pointer
+    # park an otherwise-recoverable world. Issue #1089 review MINOR-4
+    # (correcting an M3-round overclaim): once a job's owner successfully
+    # TERMINALIZES, none of the three producers
+    # (`recover_abandoned_automation_owners`, `_self_heal_automation_world_failure`,
+    # `recover_running_import_jobs`) ever reaches that exact job again — the
+    # first two clear the request's owner pointer
     # (`active_automation_import_job_id`) a fresh automation launch would
     # need a NEW job id to re-acquire; the third marks the launch-authorized
-    # force/YouTube job terminally `failed` with no replay path at all. None
-    # of the three ever re-checks the SAME job a second time. A ghost this
-    # one shot could not rule out stays unproven; the bucket-C
+    # force/YouTube job terminally `failed` with no replay path at all. But
+    # the check CAN legitimately run more than once on the SAME job before
+    # that: `_fail_abandoned_automation_owner`'s own terminal write can lose
+    # a concurrency race (`AutomationRecoveryEvidenceChanged`,
+    # `CleanupJournalConflict`, `ImportJobTerminalConflict`) AFTER the
+    # debris check already ran — the job is then explicitly left attached
+    # "for the next liveness re-probe" (the restart sweep is documented as
+    # safe to run repeatedly against a live fleet), which re-drives this
+    # exact check on this exact job. That is safe BY CONSTRUCTION, not by
+    # luck: `remove_recovery_debris` is a pure read-then-conditionally-write
+    # operation, so a re-check of an already-removed album correctly finds
+    # `not_found` and does nothing, never a double-delete. A ghost this
+    # check could not rule out (this outcome, or a genuine terminalization
+    # without a further retry) stays unproven; the bucket-C
     # library-root-containment invariant
     # (`lib.world_invariants.check_library_root_containment`) is the
     # designed backstop that surfaces it on the very next world audit,
-    # independent of whether this recovery ever gets a second attempt.
+    # independent of whether this recovery ever gets a further attempt.
     "beets_unavailable",
 ]
 
@@ -123,9 +143,21 @@ RecoveryDebrisOutcomeKind = Literal[
 class RecoveryDebrisReport(msgspec.Struct, frozen=True):
     """One typed audit record of a recovery-side debris-removal attempt.
 
-    Attached to the failed automation job's ``result`` JSONB and folded into
-    its ``download_log`` detail so the outcome — removed or surfaced — is
-    always Recents-visible evidence, never a silent decision.
+    Attached to the failed job's ``result`` JSONB by all three producers.
+    Issue #1089 review MINOR-3: the two automation-owner producers (the
+    restart sweep, ``_fail_abandoned_automation_owner``, and the in-process
+    self-heal path, ``scripts/importer.py::_self_heal_automation_world_failure``)
+    additionally fold the outcome into a freshly built ``download_log``
+    row's ``beets_detail`` AND ``error_message`` (both, via
+    ``lib.download._local_completion_terminal_outcome`` — the same fully
+    composed detail string for each, built once, after this outcome is
+    known). The force/YouTube lane's own producer
+    (``PipelineDB.recover_running_import_jobs``) instead LINKS to its job's
+    EXISTING ``download_log`` row (``source_download_log_id``) and folds
+    the outcome into that row's ``error_message`` alone — it never owned a
+    ``beets_detail`` write to begin with, so there is nothing to fold there.
+    Either way the outcome is always Recents-visible evidence, never a
+    silent decision.
     """
 
     outcome: RecoveryDebrisOutcomeKind

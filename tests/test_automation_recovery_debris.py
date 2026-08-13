@@ -137,8 +137,10 @@ class TestRemoveRecoveryDebris(unittest.TestCase):
         self.assertEqual(report.album_id, 19823)
         self.assertCountEqual(report.item_paths, (f"{SOURCE}/01.flac", f"{SOURCE}/02.flac"))
         # Issue #1089 review m6: propagated straight from the admitted
-        # delete lane's own outcome, not hardcoded — proven below by a
-        # planted mutant on the propagation, not merely asserted here.
+        # delete lane's own outcome, not hardcoded — the sibling test
+        # below (``test_removed_metadata_only_is_propagated_not_hardcoded``)
+        # feeds the OPPOSITE stub value and asserts the report reflects
+        # THAT instead, which a hardcoded ``True`` could not pass.
         self.assertTrue(report.metadata_only)
         self.assertEqual(len(stub.requests), 1)
         request = stub.requests[0]

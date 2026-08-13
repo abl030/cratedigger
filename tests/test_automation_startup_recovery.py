@@ -6,6 +6,7 @@ import functools
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -110,6 +111,15 @@ def _unprovable(
     )
 
 
+class _DeadProbe:
+    """Every persisted lease belongs to a boot that has already ended."""
+
+    def observe(
+        self, lease: ExecutionLeaseSnapshot,
+    ) -> ExecutionLivenessEvidence:
+        return _evidence(lease)
+
+
 def _seed_unrelated_importable_jobs(
     db: FakePipelineDB | PipelineDB,
     *,
@@ -154,6 +164,23 @@ def _no_debris_removal(
     """
     del launch_release_id, launch_source_path
     return RecoveryDebrisReport(outcome="no_launch")
+
+
+def _no_force_action_copy_path(job_id: int) -> str:
+    """Default ``force_action_copy_path_fn`` for tests that aren't about
+    #1089 review MAJOR-1.
+
+    The production default (``_default_force_action_copy_path``) reads
+    ``read_runtime_config()`` — a real config read every OTHER
+    force-lane recovery test in this module (and its siblings in
+    ``tests/test_import_queue.py`` / ``tests/test_import_operation_fence.py``)
+    has no reason to trigger, and some deliberately patch
+    ``lib.config.read_runtime_config`` to fail for an UNRELATED scenario.
+    Paired with ``_no_debris_removal`` (whose stub never inspects its own
+    ``launch_source_path`` argument), the exact value returned here is
+    never observed.
+    """
+    return f"/unused-force-action-copy-path/{job_id}"
 
 
 def _tree_snapshot(root: str) -> tuple[tuple[str, str, bytes | None], ...]:
@@ -1004,21 +1031,38 @@ class _StartupRecoveryContract(_StartupRecoveryBuilders):
     def test_force_launched_job_removes_its_own_beets_debris_at_startup(
         self,
     ) -> None:
-        """Issue #1089 review m5: the startup-only force/YouTube sweep
-        (``recover_running_import_jobs``) shares the exact same
-        ``beets_launch_release_id``/``beets_launch_source_path`` pair the
-        automation lane checks — ``authorize_import_job_launch`` sets both
-        columns identically regardless of job type — so a killed force or
-        YouTube child can leave behind the SAME committed-but-unmoved crash
-        debris. Real recovery + real beets SQLite, mirroring the automation
-        composition pin above but through the force lane's own entry point.
+        """Issue #1089 review MAJOR-1/m5.
+
+        A force job's ``beets_launch_source_path`` records the operator's
+        ORIGINAL failed-download path — ``authorize_import_job_launch``'s
+        force branch reuses that SAME value both to persist the column and
+        to verify the caller's claim against ``job.payload->>'failed_path'``,
+        so it can never be repointed at the force-action copy Beets
+        actually imports from (a launch authorized at any other path is
+        refused outright). The startup sweep
+        (``recover_running_import_jobs``) therefore derives the confinement
+        root via ``force_action_copy_path_fn`` instead of trusting the
+        stored column. This fixture is deliberately production-shaped: the
+        original failed path (``_force_launched_job``'s argument, matching
+        ``job.payload.failed_path`` AND ``beets_launch_source_path``) and
+        the action-copy path (where the debris album's items really live)
+        are two DISTINCT directories, exactly like the real force dispatch
+        flow (``lib/dispatch/entry_points.py`` ->
+        ``lib/dispatch/core.py::dispatch_import_core``) produces — never
+        the same path, which is the Rule-C-violating shape a prior version
+        of this pin used and which could never fail even with the
+        confinement-root defect live.
         """
         case = self._case()
-        path = self._album_dir("frozen-force-ghost", "01 - Track.mp3")
-        job = self._force_launched_job(path)
+        original_failed_path = self._album_dir("frozen-force-original")
+        action_copy_path = self._album_dir(
+            "frozen-force-action-copy", "01 - Track.mp3",
+        )
+        job = self._force_launched_job(original_failed_path)
         db_path, root, runtime_config = self._beets_fixture()
         album_id = self._seed_debris_album(
-            db_path, root, release_id=self.mb_release_id, source_dir=path,
+            db_path, root, release_id=self.mb_release_id,
+            source_dir=action_copy_path,
         )
 
         with patch.dict(os.environ, {
@@ -1028,6 +1072,7 @@ class _StartupRecoveryContract(_StartupRecoveryBuilders):
                 requeue_message="safe to replay",
                 recovery_message="importer restarted mid-import",
                 debris_removal_fn=self._debris_removal_fn(db_path, root),
+                force_action_copy_path_fn=lambda _job_id: action_copy_path,
             )
 
         case.assertEqual([item.id for item in recovered], [job.id])
@@ -1038,6 +1083,125 @@ class _StartupRecoveryContract(_StartupRecoveryBuilders):
         case.assertIn("recovery debris removed", message)
         case.assertIn(str(album_id), message)
         case.assertEqual(self.db.list_denylist_rows(), [])
+
+    def test_force_launched_job_ignores_the_stale_original_path(
+        self,
+    ) -> None:
+        """Must-still-work companion to the pin above: if confinement were
+        (wrongly) checked against the recorded ``beets_launch_source_path``
+        (the original failed path) instead of the derived action-copy
+        path, this exact debris would be reported ``not_confined`` and
+        left in place — proving the derivation in the pin above is load-
+        bearing, not incidental to how the fixture happens to be built.
+        """
+        case = self._case()
+        original_failed_path = self._album_dir("frozen-force-original-2")
+        action_copy_path = self._album_dir(
+            "frozen-force-action-copy-2", "01 - Track.mp3",
+        )
+        self._force_launched_job(original_failed_path)
+        db_path, root, runtime_config = self._beets_fixture()
+        album_id = self._seed_debris_album(
+            db_path, root, release_id=self.mb_release_id,
+            source_dir=action_copy_path,
+        )
+
+        with patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(runtime_config),
+        }):
+            recovered = self.db.recover_running_import_jobs(
+                requeue_message="safe to replay",
+                recovery_message="importer restarted mid-import",
+                debris_removal_fn=self._debris_removal_fn(db_path, root),
+                # The wrong (pre-MAJOR-1-fix) confinement root: the stored
+                # launch-source-path column itself.
+                force_action_copy_path_fn=lambda _job_id: original_failed_path,
+            )
+
+        case.assertEqual(len(recovered), 1)
+        with BeetsDB(str(db_path), library_root=str(root)) as beets:
+            case.assertIsNotNone(beets.get_album_detail(album_id))
+        message = str(recovered[0].message)
+        case.assertIn("recovery debris not_confined", message)
+
+    def test_unclassified_debris_check_exception_still_terminalizes_the_job(
+        self,
+    ) -> None:
+        """Issue #1089 review MAJOR-2.
+
+        ``remove_recovery_debris`` deliberately RE-RAISES anything
+        ``lib.beets_db.beets_authority_availability_category`` cannot
+        classify — SQLITE_CORRUPT/SQLITE_NOTADB (exactly what a kill
+        mid-write produces) are not in that classifier's set. Unguarded,
+        that escape would propagate through this startup sweep into
+        ``main()`` and crash-loop the WHOLE import queue under
+        ``Restart=on-failure``. The sweep must instead catch it, surface it
+        in the job's own audit record, terminalize the job, and keep
+        moving — the SAME invariant-11 contract every other debris outcome
+        already gets.
+        """
+        case = self._case()
+        path = self._album_dir("frozen-force-corrupt-db")
+        job = self._force_launched_job(path)
+
+        def raises_unclassified(
+            *, launch_release_id: str | None, launch_source_path: str | None,
+        ) -> RecoveryDebrisReport:
+            del launch_release_id, launch_source_path
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        recovered = self.db.recover_running_import_jobs(
+            requeue_message="safe to replay",
+            recovery_message="importer restarted mid-import",
+            debris_removal_fn=raises_unclassified,
+            force_action_copy_path_fn=lambda _job_id: path,
+        )
+
+        case.assertEqual([item.id for item in recovered], [job.id])
+        case.assertEqual(recovered[0].status, "failed")
+        message = str(recovered[0].message)
+        case.assertIn("recovery debris check raised", message)
+        case.assertIn("DatabaseError", message)
+        case.assertIn(
+            "database disk image is malformed", message,
+        )
+
+    def test_recover_abandoned_running_jobs_forwards_debris_removal_fn_to_both_sweeps(
+        self,
+    ) -> None:
+        """Issue #1089 review MINOR-7: ``recover_abandoned_running_jobs``
+        must forward ``debris_removal_fn`` to BOTH sweeps it drives — the
+        force/YouTube sweep (``db.recover_running_import_jobs``) AND the
+        automation sweep (``recover_abandoned_automation_owners``). A
+        caller stubbing this one seam (``_no_debris_removal``, used
+        throughout this module's OTHER tests to avoid opening a real
+        ``BeetsDB()``) must stub both, or the automation sweep silently
+        falls back to the real production default underneath a caller who
+        believed the seam was fully stubbed.
+        """
+        from scripts import importer
+
+        case = self._case()
+        path = self._album_dir("frozen-forward-both-sweeps", "01 - Track.mp3")
+        owner, _lease = self._launched_owner(path)
+
+        calls: list[str | None] = []
+
+        def recording(
+            *, launch_release_id: str | None, launch_source_path: str | None,
+        ) -> RecoveryDebrisReport:
+            del launch_source_path
+            calls.append(launch_release_id)
+            return RecoveryDebrisReport(outcome="no_launch")
+
+        recovered = importer.recover_abandoned_running_jobs(
+            self.db,
+            liveness_probe=_DeadProbe(),
+            debris_removal_fn=recording,
+        )
+
+        case.assertIn(owner.id, [item.id for item in recovered])
+        case.assertIn(self.mb_release_id, calls)
 
 
 class TestAutomationStartupRecoveryFake(

@@ -83,6 +83,7 @@ from lib.pipeline_db import (
 from lib.pipeline_db._core import OwnerSessionLost
 from lib.pipeline_db.import_jobs import (
     AUTOMATION_WORLD_FAILURE_AUDIT_PREFIX,
+    _default_force_action_copy_path,
     automation_completion_receipt,
 )
 from lib.pipeline_db.rows import AlbumRequestRow
@@ -243,6 +244,9 @@ class _StartupRecoveryDB(
         recovery_message: str,
         limit: int = 50,
         debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
+        force_action_copy_path_fn: Callable[
+            [int], str,
+        ] = _default_force_action_copy_path,
     ) -> list[ImportJob]: ...
 
 
@@ -1381,19 +1385,6 @@ def _self_heal_automation_world_failure(
                 f"to self-heal ({reason})"
             )
         state = ActiveDownloadState.from_raw(raw_state)
-        pending = _local_completion_terminal_outcome(
-            reconstruct_grab_list_entry(row, state),
-            state,
-            request_id=request_id,
-            import_job_id=job.id,
-            transition=transitions.RequestTransition.to_wanted(
-                from_status="processing",
-                attempt_type="validation",
-            ),
-            outcome="failed",
-            detail=detail,
-            error_message=detail,
-        )
         # Re-verify this exact owner session immediately before the
         # irreversible Beets mutation below (issue #1089 review n8) — the
         # same live-session proof ``_complete_automation_processing_cleanup``
@@ -1416,9 +1407,28 @@ def _self_heal_automation_world_failure(
                 detail = f"{detail} (beets album {debris_report.album_id})"
             if debris_report.detail:
                 detail = f"{detail}: {debris_report.detail}"
-            pending = replace(pending, audit=replace(
-                pending.audit, error_message=detail,
-            ))
+        # Issue #1089 review MINOR-3: built ONCE, after the debris-outcome
+        # augmentation above, mirroring the restart-sweep sibling
+        # (``_fail_abandoned_automation_owner``) exactly — both
+        # ``TerminalDownloadAudit.beets_detail`` (via ``detail=``) and
+        # ``.error_message`` (via ``error_message=``) get the SAME fully
+        # composed string. Building this before the debris check and then
+        # patching only ``error_message`` afterward (the prior shape) left
+        # ``beets_detail`` permanently stale on any world that adds to
+        # ``detail`` post-construction.
+        pending = _local_completion_terminal_outcome(
+            reconstruct_grab_list_entry(row, state),
+            state,
+            request_id=request_id,
+            import_job_id=job.id,
+            transition=transitions.RequestTransition.to_wanted(
+                from_status="processing",
+                attempt_type="validation",
+            ),
+            outcome="failed",
+            detail=detail,
+            error_message=detail,
+        )
         # Cleanup runs first and while the job is still the running owner: its
         # checkpoint heartbeats a 'running' row, and the terminal bundle
         # consumes the receipt it produces.
@@ -2206,6 +2216,9 @@ def recover_abandoned_running_jobs(
     *,
     liveness_probe: ExecutionLivenessProbe | None = None,
     debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
+    force_action_copy_path_fn: Callable[
+        [int], str,
+    ] = _default_force_action_copy_path,
 ) -> list[ImportJob]:
     """Recover only executions whose exact persisted lease is proven dead.
 
@@ -2214,9 +2227,15 @@ def recover_abandoned_running_jobs(
     before this singleton worker has claimed anything. The automation half is
     the re-runnable sweep and is also called periodically from ``main``.
 
-    ``debris_removal_fn`` (issue #1089) is forwarded, unchanged, to
-    ``db.recover_running_import_jobs`` — production always uses the real
-    ``remove_recovery_debris`` default; tests inject a stub.
+    ``debris_removal_fn`` (issue #1089) is forwarded, unchanged, to BOTH
+    ``db.recover_running_import_jobs`` and (review MINOR-7)
+    ``recover_abandoned_automation_owners`` — a caller stubbing this one
+    seam stubs both sweeps, the exact trap ``_no_debris_removal`` exists to
+    prevent; production always uses the real ``remove_recovery_debris``
+    default, tests inject a stub. ``force_action_copy_path_fn`` (issue
+    #1089 review MAJOR-1) is forwarded, unchanged, to
+    ``db.recover_running_import_jobs`` only — it derives a force job's
+    debris-confinement root and has no automation-lane counterpart.
     """
     recovered: list[ImportJob] = []
     batch_size = 50
@@ -2226,6 +2245,7 @@ def recover_abandoned_running_jobs(
             recovery_message=RESTART_RECOVERY_MESSAGE,
             limit=batch_size,
             debris_removal_fn=debris_removal_fn,
+            force_action_copy_path_fn=force_action_copy_path_fn,
         )
         recovered.extend(batch)
         if len(batch) < batch_size:
@@ -2257,6 +2277,7 @@ def recover_abandoned_running_jobs(
     recovered.extend(recover_abandoned_automation_owners(
         db,
         liveness_probe=liveness_probe,
+        debris_removal_fn=debris_removal_fn,
     ))
     return recovered
 

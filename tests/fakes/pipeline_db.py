@@ -141,6 +141,7 @@ from lib.pipeline_db._shared import (
 from lib.pipeline_db.import_jobs import (
     AutomationRecoveryCAS,
     AutomationRecoveryEvidenceChanged,
+    _default_force_action_copy_path,
     _recovery_owner_matches,
 )
 from lib.pipeline_db.rows import ArtistRequestRow
@@ -2133,12 +2134,21 @@ class FakePipelineDB:
         recovery_message: str,
         limit: int = 50,
         debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
+        force_action_copy_path_fn: Callable[
+            [int], str,
+        ] = _default_force_action_copy_path,
     ) -> list[ImportJob]:
         """Fake mirror of PipelineDB.recover_running_import_jobs.
 
         ``debris_removal_fn`` (issue #1089) mirrors the real method exactly:
-        production default unless a test injects a stub — the force/YouTube
-        launch fields are the same columns the automation lane checks.
+        production default unless a test injects a stub. Issue #1089 review
+        MAJOR-1/MAJOR-2: a force job's confinement root is derived via
+        ``force_action_copy_path_fn``, never the stored
+        ``beets_launch_source_path`` (which records the operator's ORIGINAL
+        failed path, not the force-action copy Beets actually imports
+        from); an unclassified exception from ``debris_removal_fn`` is
+        caught and surfaced in the job's audit record rather than
+        propagating and crash-looping the whole importer.
         """
         from lib.terminal_outcomes import non_automation_failure_terminal_outcome
 
@@ -2158,24 +2168,45 @@ class FakePipelineDB:
                     "the library"
                 )
                 job = ImportJob.from_row(copy.deepcopy(row))
-                debris_report = debris_removal_fn(
-                    launch_release_id=job.beets_launch_release_id,
-                    launch_source_path=job.beets_launch_source_path,
+                confinement_path = (
+                    force_action_copy_path_fn(job.id)
+                    if job.job_type == IMPORT_JOB_FORCE
+                    else job.beets_launch_source_path
                 )
-                if debris_report.outcome != "no_launch":
-                    no_replay_reason = (
-                        f"{no_replay_reason}; recovery debris "
-                        f"{debris_report.outcome}"
+                recovery_debris_removal: dict[str, object]
+                try:
+                    debris_report = debris_removal_fn(
+                        launch_release_id=job.beets_launch_release_id,
+                        launch_source_path=confinement_path,
                     )
-                    if debris_report.album_id is not None:
+                except Exception as exc:  # noqa: BLE001 - #1089 review MAJOR-2
+                    detail = f"{type(exc).__name__}: {exc}"
+                    no_replay_reason = (
+                        f"{no_replay_reason}; recovery debris check raised: "
+                        f"{detail}"
+                    )
+                    recovery_debris_removal = {
+                        "outcome": "check_raised",
+                        "detail": detail,
+                    }
+                else:
+                    if debris_report.outcome != "no_launch":
                         no_replay_reason = (
-                            f"{no_replay_reason} "
-                            f"(beets album {debris_report.album_id})"
+                            f"{no_replay_reason}; recovery debris "
+                            f"{debris_report.outcome}"
                         )
-                    if debris_report.detail:
-                        no_replay_reason = (
-                            f"{no_replay_reason}: {debris_report.detail}"
-                        )
+                        if debris_report.album_id is not None:
+                            no_replay_reason = (
+                                f"{no_replay_reason} "
+                                f"(beets album {debris_report.album_id})"
+                            )
+                        if debris_report.detail:
+                            no_replay_reason = (
+                                f"{no_replay_reason}: {debris_report.detail}"
+                            )
+                    recovery_debris_removal = msgspec.to_builtins(
+                        debris_report,
+                    )
                 terminal = self.persist_import_terminal_outcome(
                     non_automation_failure_terminal_outcome(
                         job,
@@ -2184,9 +2215,7 @@ class FakePipelineDB:
                         result={
                             "success": False,
                             "recovery": "launch_authorized_no_replay",
-                            "recovery_debris_removal": msgspec.to_builtins(
-                                debris_report,
-                            ),
+                            "recovery_debris_removal": recovery_debris_removal,
                         },
                     )
                 )

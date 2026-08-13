@@ -67,6 +67,7 @@ from lib.import_queue import (
 )
 from lib.pipeline_db._core import OwnerSessionLost
 from lib.pipeline_db.cleanup_journal import CleanupJournalConflict
+from lib.pipeline_db.import_jobs import _default_force_action_copy_path
 from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
 from lib.processing_cleanup import ProcessingCleanupError
 from lib.quality import (
@@ -90,7 +91,10 @@ from tests.helpers import (
     make_grab_list_entry,
     make_request_row,
 )
-from tests.test_automation_startup_recovery import _no_debris_removal
+from tests.test_automation_startup_recovery import (
+    _no_debris_removal,
+    _no_force_action_copy_path,
+)
 
 _HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
 _HERMETIC_BEETS_PAIR: tuple[str, str] | None = None
@@ -2324,7 +2328,9 @@ class TestImporterWorker(unittest.TestCase):
         self.assertTrue(os.path.isdir(action_path))
 
         recovered = importer.recover_abandoned_running_jobs(
-            db, debris_removal_fn=_no_debris_removal,
+            db,
+            debris_removal_fn=_no_debris_removal,
+            force_action_copy_path_fn=_no_force_action_copy_path,
         )
 
         self.assertEqual([item.id for item in recovered], [job.id])
@@ -2351,7 +2357,9 @@ class TestImporterWorker(unittest.TestCase):
             side_effect=RuntimeError("temporary config refusal"),
         ):
             importer.recover_abandoned_running_jobs(
-                db, debris_removal_fn=_no_debris_removal,
+                db,
+                debris_removal_fn=_no_debris_removal,
+                force_action_copy_path_fn=_no_force_action_copy_path,
             )
 
         failed_cleanup_job = db.get_import_job(job.id)
@@ -2364,7 +2372,9 @@ class TestImporterWorker(unittest.TestCase):
         self.assertTrue(os.path.isdir(action_path))
 
         importer.recover_abandoned_running_jobs(
-            db, debris_removal_fn=_no_debris_removal,
+            db,
+            debris_removal_fn=_no_debris_removal,
+            force_action_copy_path_fn=_no_force_action_copy_path,
         )
 
         converged = db.get_import_job(job.id)
@@ -2391,7 +2401,9 @@ class TestImporterWorker(unittest.TestCase):
             side_effect=RuntimeError("lost cleanup receipt"),
         ):
             importer.recover_abandoned_running_jobs(
-                db, debris_removal_fn=_no_debris_removal,
+                db,
+                debris_removal_fn=_no_debris_removal,
+                force_action_copy_path_fn=_no_force_action_copy_path,
             )
 
         self.assertFalse(os.path.exists(action_path))
@@ -2403,7 +2415,9 @@ class TestImporterWorker(unittest.TestCase):
         )
 
         importer.recover_abandoned_running_jobs(
-            db, debris_removal_fn=_no_debris_removal,
+            db,
+            debris_removal_fn=_no_debris_removal,
+            force_action_copy_path_fn=_no_force_action_copy_path,
         )
 
         converged = db.get_import_job(job.id)
@@ -3496,8 +3510,14 @@ class TestImporterWorker(unittest.TestCase):
                 recovery_message: str,
                 limit: int,
                 debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
+                force_action_copy_path_fn: Callable[
+                    [int], str,
+                ] = _default_force_action_copy_path,
             ) -> list[ImportJob]:
-                del requeue_message, recovery_message, limit, debris_removal_fn
+                del (
+                    requeue_message, recovery_message, limit,
+                    debris_removal_fn, force_action_copy_path_fn,
+                )
                 return []
 
             def list_automation_import_jobs_for_startup_recovery(
@@ -9365,6 +9385,12 @@ class TestAutomationWorldFailureNeverParks(unittest.TestCase):
         message = latest.error_message or ""
         self.assertIn("recovery debris removed", message)
         self.assertIn("19823", message)
+        # Issue #1089 review MINOR-3: ``beets_detail`` must carry the SAME
+        # fully composed (post-debris) string as ``error_message`` — a
+        # prior version of this self-heal path patched only
+        # ``error_message`` after the fact, leaving ``beets_detail``
+        # permanently stale at the pre-debris text.
+        self.assertEqual(latest.beets_detail, message)
         # Hard invariant: this path writes NO source_denylist rows.
         self.assertEqual(db.denylist, [])
 
