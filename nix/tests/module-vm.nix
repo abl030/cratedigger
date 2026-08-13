@@ -1055,6 +1055,11 @@ pkgs.testers.nixosTest {
     # default tmpfs-backed writable overlay because the test queries closures
     # with nix-store, which maintains store bookkeeping while it runs.
     virtualisation.memorySize = 2048;
+    # The guest core count has no explicit default in this file, so it was
+    # silently inheriting the qemu-vm module's default of 1 (issue #1131) —
+    # serializing PostgreSQL, nginx, ~10 switch-to-configuration calls, and 2
+    # reboots onto one emulated core. Give it real parallelism.
+    virtualisation.cores = 4;
     virtualisation.useNixStoreImage = true;
     virtualisation.writableStore = true;
   };
