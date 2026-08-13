@@ -1024,22 +1024,29 @@ A strategy that names an OS-level world must be able to CREATE that world
 from any ancestry, or the property is asserting against a world the run did
 not actually produce. Signal delivery is the sharp edge: `SIG_IGN`
 dispositions and the blocked-signal mask are both inherited across
-`fork`+`exec`, and CPython's `subprocess` clears neither, so an ancestor
-nobody in the test controls decides whether a requested signal lands —
+`fork`+`exec`, and CPython's `subprocess` clears only the signals CPython
+itself ignores at startup (`restore_signals` — SIGPIPE and SIGXFSZ on
+Linux, measured as a dying child; SIGHUP and SIGTERM ignored by the parent
+still yield rc 0), never the mask and never the signals in play here — so
+an ancestor nobody in the test controls decides whether a requested signal
+lands:
 `nohup` holds SIGHUP, a non-interactive shell starting a background job
 holds SIGINT/SIGQUIT, a supervisor may hold SIGTERM. SIGKILL and SIGSTOP
 are the only two signals POSIX forbids catching, blocking, or ignoring.
 
 The failure shape is nasty because it accuses the wrong side: the fixture's
-`kill -1 $$` silently no-ops, the child exits 0, production truthfully
-reports the status it observed, and the property reads that truth as a lost
-reason — reproducing only under whichever launcher happened to hold the
-signal, which is why it survived as a full-suite-only red. Ask for the
-guaranteed world (`FAKE_HARNESS_FATAL_SIGNAL` in
-`tests/test_import_one_stages.py`), pin the guarantee with a deterministic
-test that drives the shared fixture from a parent ignoring AND blocking
-every catchable signal, and cover the remaining numbers through the pure
-producer, where no ancestry can intervene. The same question is worth
-asking of any generated world an ancestor can veto: inherited umask and
-resource limits, a `CAP_*` the sandbox drops, a filesystem that silently
-lacks the feature under test.
+`kill -1 $$` silently no-ops, the child exits 0, production truthfully names
+the status it observed — the clean-exit "never applied the release" gap —
+and the property's branch assertion demands the signal wording instead. Note
+which assertion fires. The reason was not lost, so the rc-only-fallback
+checker PASSES; what fails is the branch-specific `assertEqual`, and a
+debugger who starts at the checker starts in the wrong place. It reproduces
+only under whichever launcher happened to hold the signal, which is why it
+survived as a full-suite-only red. Ask for the guaranteed world
+(`FAKE_HARNESS_FATAL_SIGNAL` in `tests/test_import_one_stages.py`), pin the
+guarantee with a deterministic test that drives the shared fixture from a
+parent ignoring AND blocking every signal an ancestor plausibly holds, and
+cover the remaining numbers through the pure producer, where no ancestry can
+intervene. The same question is worth asking of any generated world an
+ancestor can veto: inherited umask and resource limits, a `CAP_*` the
+sandbox drops, a filesystem that silently lacks the feature under test.

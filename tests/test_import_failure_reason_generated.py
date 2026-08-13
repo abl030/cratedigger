@@ -116,6 +116,12 @@ class TestRunImportFailureReasonProperties(unittest.TestCase):
         elif retained_lines:
             self.assertEqual(error, retained_lines[-1])
         else:
+            # ROUTING, not wording: this proves run_import reaches the
+            # producer at all. Comparing production against the producer
+            # that generates it is a tautology about the sentence itself,
+            # so the operator-facing wording stays pinned by the
+            # hand-typed literals in TestRunImportFailureReasons — do not
+            # "simplify" those into producer calls.
             self.assertEqual(error, _terminal_process_reason(process_status))
 
     @settings(max_examples=200)

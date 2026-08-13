@@ -35,9 +35,9 @@ from tests.test_beets_harness_session import write_fake_harness
 #: background job (SIGINT/SIGQUIT), a launcher that blocks its own
 #: termination signals — silently turns a requested "terminated by signal
 #: N" world into a plain "exited 0" world. The harness then truthfully
-#: reports the status it observed and the test accuses production of
-#: losing a reason no process ever produced. SIGKILL and SIGSTOP are the
-#: only two signals POSIX forbids catching, blocking, or ignoring, and
+#: names the status it observed, and the test fails demanding wording for a
+#: death that never happened. SIGKILL and SIGSTOP are the only two signals
+#: POSIX forbids catching, blocking, or ignoring, and
 #: SIGKILL is the one that terminates. Signal-number RENDERING needs no
 #: process at all: generated signal and status worlds exercise it through
 #: the pure producer property in
@@ -327,10 +327,11 @@ class TestFakeHarnessSignalWorld(unittest.TestCase):
 
         Reproduced under an ancestor holding SIGHUP (``nohup``'s exact
         disposition): the fake harness' ``kill -1 $$`` became a no-op, the
-        shell exited 0, and the generated property read production's
-        truthful "ended without applying" as a lost reason. Requesting a
-        signal POSIX forbids ignoring or blocking is what makes the
-        requested world the observed one, from any ancestry.
+        shell exited 0, and the generated property's branch assertion
+        demanded signal wording for production's truthful "ended without
+        applying". Requesting a signal POSIX forbids ignoring or blocking
+        is what makes the requested world the observed one, from any
+        ancestry.
         """
         completed = subprocess.run(
             [
