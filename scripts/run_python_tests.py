@@ -41,6 +41,7 @@ from scripts.run_test_suite import (
     CheckFailureMarker,
     CheckMetricsMarker,
     _default_min_headroom_bytes,
+    recommended_worker_count,
 )
 
 ExcInfo = (
@@ -48,7 +49,6 @@ ExcInfo = (
     | tuple[None, None, None]
 )
 
-DEFAULT_MAX_WORKERS = 12
 DEFAULT_DURATIONS = 15
 _FAILURE_MARKER = "=" * 70
 _SCHEMA_READY_ENV = "CRATEDIGGER_TEST_SCHEMA_READY"
@@ -1400,13 +1400,6 @@ def _parse_nonnegative_int(value: str) -> int:
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be at least 0")
     return parsed
-
-
-def recommended_worker_count(cpu_count: int) -> int:
-    """Use half the host up to the measured point of diminishing returns."""
-    if cpu_count < 1:
-        raise ValueError("cpu_count must be at least 1")
-    return min(DEFAULT_MAX_WORKERS, max(1, cpu_count // 2))
 
 
 def _default_worker_count() -> int:

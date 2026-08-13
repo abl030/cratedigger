@@ -14,12 +14,16 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import msgspec
 
 from scripts.run_python_tests import TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
 from scripts.run_targeted_tests import targeted_phases
 from scripts.run_test_suite import (
+    _HEADROOM_BASE_BYTES,
+    _HEADROOM_PER_WORKER_BYTES,
+    DEFAULT_MIN_HEADROOM_BYTES,
     FAILURE_MARKER_PREFIX,
     TEST_RAM_ROOT_EXHAUSTED,
     CheckFailureMarker,
@@ -27,6 +31,7 @@ from scripts.run_test_suite import (
     PhaseSpec,
     RamRootExhaustedError,
     SuiteAdmissionTimeout,
+    _active_processes_lock,
     _check_suite_headroom,
     _default_min_headroom_bytes,
     _default_phases,
@@ -118,6 +123,23 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
             pyright_phases[0].rerun_command,
             "python3 scripts/run_pyright_checks.py",
         )
+
+    def test_default_phases_end_with_python_so_the_overlap_stays_enabled(
+        self,
+    ) -> None:
+        """Issue #1131 review N4: _execute_suite's concurrent-overlap split
+        (scripts/run_test_suite.py) keys on the LAST phase being named
+        literally "python". A silent rename in either producer would fall
+        back to the still-correct-but-no-longer-concurrent fully-serial
+        path with nothing failing — it would just show up as "the suite
+        got slower" days later. Name the overlap directly instead."""
+        default_phases = _default_phases()
+        self.assertGreater(len(default_phases), 1)
+        self.assertEqual(default_phases[-1].name, "python")
+
+        selected_phases = targeted_phases(("tests.test_typing_ratchet",))
+        self.assertGreater(len(selected_phases), 1)
+        self.assertEqual(selected_phases[-1].name, "python")
 
     def test_summary_records_the_actual_invoked_suite_command(self) -> None:
         command = "python3 scripts/run_targeted_tests.py tests.test_alpha"
@@ -304,6 +326,223 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         )
         self.assertIn("INTERRUPTED: signal 15", terminal)
         self.assertFalse((result.bundle / "must-not-run.log").exists())
+
+    def test_leading_phases_run_concurrently_with_a_trailing_python_phase(
+        self,
+    ) -> None:
+        """Issue #1131: every phase before a phase literally named "python"
+        (the shape both _default_phases() and targeted_phases() always
+        produce) must run CONCURRENTLY with it, not serially.
+
+        Proven with a bounded rendezvous rather than a timing measurement:
+        the leading "js-syntax" phase polls (up to 5s) for a marker file
+        only the "python" phase creates. Under strict serial scheduling
+        "python" would never even start until "js-syntax" finished, so the
+        marker could never appear in time and the leading phase would fail
+        closed after the full 5s wait — this is this test's own known-bad
+        self-test: reverting to serial scheduling turns this from a
+        near-instant pass into a ~5s failure, not a hang.
+        """
+        marker = self.runtime / "python-phase-started"
+        poll_script = (
+            "import pathlib, time, sys\n"
+            f"target = pathlib.Path({str(marker)!r})\n"
+            "deadline = time.monotonic() + 5.0\n"
+            "while not target.exists():\n"
+            "    if time.monotonic() > deadline:\n"
+            "        sys.exit(1)\n"
+            "    time.sleep(0.02)\n"
+        )
+        phases = (
+            PhaseSpec(
+                "js-syntax",
+                (sys.executable, "-c", poll_script),
+                "leading-check",
+                "generic",
+            ),
+            PhaseSpec(
+                "python",
+                (
+                    sys.executable,
+                    "-c",
+                    f"import pathlib; pathlib.Path({str(marker)!r}).touch()",
+                ),
+                "python3 scripts/run_python_tests.py",
+                "python",
+            ),
+        )
+
+        result, _terminal = self._run(phases)
+        summary = decode_summary(result.bundle / "summary.json")
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(summary.state, "passed")
+        self.assertEqual(
+            tuple(phase.state for phase in summary.phases),
+            ("passed", "passed"),
+        )
+
+    def test_sigterm_kills_every_concurrently_active_phase(self) -> None:
+        """Issue #1131 regression pin for the single-``_active_process``
+        shape ``execute_phase``/the interrupt handler replaced with a
+        registry: once a leading phase and a trailing "python" phase run
+        concurrently, SIGTERM must signal BOTH currently-running
+        processes, not only whichever most recently registered. A third
+        leading phase ("js-unit") that has not started yet when the
+        signal arrives must still stay "not-run" — the same "no new phase
+        starts after an interrupt" contract the single-group case already
+        had, now proven independently for the leading group's own thread.
+
+        Issue #1131 review B1: the ``"interrupted"`` STATE alone is not
+        proof of an actual kill — ``run_one_phase`` labels a phase
+        interrupted purely from ``interrupted_signal`` being set once its
+        executor call returns, regardless of whether THAT process was ever
+        signalled. A registry collapsed back to a single most-recent slot
+        still kills "python" (the last to register) but leaves "js-syntax"
+        to sleep its own full ``time.sleep(30)`` — and the state tuple
+        alone would still read exactly
+        ``("interrupted", "not-run", "interrupted")``. Only the elapsed
+        time (or an unset post-sleep marker) distinguishes a genuine kill
+        from a label applied after the fact; the assertions below check
+        both.
+        """
+        leading_marker = self.runtime / "leading-phase-started"
+        leading_survived_sentinel = self.runtime / "js-syntax-survived-the-sleep"
+        js_unit_sentinel = self.runtime / "js-unit-ran"
+        phases = (
+            PhaseSpec(
+                "js-syntax",
+                (
+                    sys.executable,
+                    "-c",
+                    (
+                        "import pathlib, time\n"
+                        f"pathlib.Path({str(leading_marker)!r}).touch()\n"
+                        "time.sleep(30)\n"
+                        f"pathlib.Path({str(leading_survived_sentinel)!r}).touch()\n"
+                    ),
+                ),
+                "leading-check",
+                "generic",
+            ),
+            PhaseSpec(
+                "js-unit",
+                (
+                    sys.executable,
+                    "-c",
+                    f"import pathlib; pathlib.Path({str(js_unit_sentinel)!r}).touch()",
+                ),
+                "js-unit-check",
+                "generic",
+            ),
+            PhaseSpec(
+                "python",
+                (
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os, pathlib, signal, time, sys\n"
+                        f"target = pathlib.Path({str(leading_marker)!r})\n"
+                        "deadline = time.monotonic() + 5.0\n"
+                        "while not target.exists():\n"
+                        "    if time.monotonic() > deadline:\n"
+                        "        sys.exit(1)\n"
+                        "    time.sleep(0.02)\n"
+                        "os.kill(os.getppid(), signal.SIGTERM)\n"
+                        "time.sleep(30)\n"
+                    ),
+                ),
+                "python3 scripts/run_python_tests.py",
+                "python",
+            ),
+        )
+
+        result, terminal = self._run(phases)
+        summary = decode_summary(result.bundle / "summary.json")
+
+        self.assertEqual(result.exit_code, 143)
+        self.assertEqual(summary.state, "interrupted")
+        self.assertEqual(
+            tuple(phase.state for phase in summary.phases),
+            ("interrupted", "not-run", "interrupted"),
+        )
+        # The state tuple alone cannot distinguish "actually killed" from
+        # "labelled interrupted after running to completion regardless"
+        # (review B1) — these two assertions can, and are what a registry
+        # collapsed to a single most-recent slot actually fails.
+        self.assertLess(summary.phases[0].elapsed_seconds, 20.0)
+        self.assertLess(summary.phases[2].elapsed_seconds, 20.0)
+        self.assertFalse(leading_survived_sentinel.exists())
+        self.assertIn("INTERRUPTED: signal 15", terminal)
+        self.assertFalse(js_unit_sentinel.exists())
+
+    def test_leading_thread_start_failure_does_not_mask_the_real_exception(
+        self,
+    ) -> None:
+        """Issue #1131 review N5: if starting the leading-phase-group
+        thread itself raises (e.g. the OS refuses to spawn a new thread),
+        that original exception must propagate — not a RuntimeError from
+        `finally` calling `.join()` on a thread that was never started,
+        which would replace the real diagnosis with an unrelated one."""
+        phases = (
+            PhaseSpec(
+                "js-syntax",
+                _python_command("ok", 0),
+                "leading-check",
+                "generic",
+            ),
+            PhaseSpec(
+                "python",
+                _python_command("ok", 0),
+                "python3 scripts/run_python_tests.py",
+                "python",
+            ),
+        )
+        with mock.patch.object(
+            threading.Thread,
+            "start",
+            side_effect=RuntimeError("simulated thread start failure"),
+        ), self.assertRaisesRegex(
+            RuntimeError, "simulated thread start failure"
+        ):
+            self._run(phases)
+
+    def test_active_processes_lock_is_reentrant(self) -> None:
+        """Issue #1131 review B2: ``_active_processes_lock`` MUST be
+        reentrant. The SIGINT/SIGTERM/SIGHUP handler always runs on the
+        main thread (a Python guarantee), and the main thread also runs
+        ``execute_phase`` for the trailing "python" phase — so a signal
+        landing while that thread holds this lock inside
+        ``execute_phase`` (registering or de-registering its own
+        process) makes the handler RE-ENTER the same thread's lock. A
+        plain ``threading.Lock`` deadlocks there — unkillable, since
+        SIGTERM cannot interrupt a thread blocked acquiring its own
+        already-held lock — strictly worse than the pre-#1131 handler,
+        which took no lock at all.
+
+        Proven directly rather than via a real signal: that race's
+        window is microseconds, so reliably HITTING it through genuine
+        signal timing would make this test slow and flaky. Re-entering
+        from the same thread must succeed immediately for an RLock; a
+        plain Lock's ``acquire(blocking=False)`` returns False for that
+        same re-entry attempt — the exact call the signal handler makes
+        with ``blocking=True``, which is what would hang forever.
+        """
+        acquired_outer = _active_processes_lock.acquire(blocking=False)
+        self.assertTrue(acquired_outer, "outer acquire should never contend here")
+        try:
+            reentered = _active_processes_lock.acquire(blocking=False)
+            self.assertTrue(
+                reentered,
+                "re-entering _active_processes_lock from the same thread "
+                "must succeed immediately (RLock) — a plain Lock returns "
+                "False here, and would block forever under the signal "
+                "handler's real blocking=True acquire",
+            )
+            if reentered:
+                _active_processes_lock.release()
+        finally:
+            _active_processes_lock.release()
 
     def test_summary_schema_rejects_wrong_wire_types(self) -> None:
         result, _terminal = self._run(
@@ -934,6 +1173,79 @@ class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
                 os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
             else:
                 os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original
+
+    def test_default_headroom_minimum_scales_with_the_expected_worker_count(
+        self,
+    ) -> None:
+        """Issue #1131 review N1: raising the default worker count means
+        more concurrent ephemeral PostgreSQL clusters, so an UNSET
+        CRATEDIGGER_TEST_RAM_MIN_BYTES floor must scale with the Python
+        phase's own expected worker count, not stay a flat 1 GiB
+        regardless of how many workers that phase will actually spawn."""
+        original_floor = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+        original_jobs = os.environ.pop("CRATEDIGGER_TEST_JOBS", None)
+        try:
+            os.environ["CRATEDIGGER_TEST_JOBS"] = "40"
+            floor = _default_min_headroom_bytes()
+        finally:
+            if original_floor is None:
+                os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+            else:
+                os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original_floor
+            if original_jobs is None:
+                os.environ.pop("CRATEDIGGER_TEST_JOBS", None)
+            else:
+                os.environ["CRATEDIGGER_TEST_JOBS"] = original_jobs
+
+        self.assertGreater(floor, DEFAULT_MIN_HEADROOM_BYTES)
+        self.assertEqual(
+            floor, _HEADROOM_BASE_BYTES + _HEADROOM_PER_WORKER_BYTES * 40
+        )
+
+    def test_default_headroom_minimum_never_drops_below_the_flat_floor(
+        self,
+    ) -> None:
+        """A tiny expected worker count must not pull the floor BELOW the
+        original flat 1 GiB — the per-worker term only ever raises it."""
+        original_floor = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+        original_jobs = os.environ.pop("CRATEDIGGER_TEST_JOBS", None)
+        try:
+            os.environ["CRATEDIGGER_TEST_JOBS"] = "1"
+            floor = _default_min_headroom_bytes()
+        finally:
+            if original_floor is None:
+                os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+            else:
+                os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original_floor
+            if original_jobs is None:
+                os.environ.pop("CRATEDIGGER_TEST_JOBS", None)
+            else:
+                os.environ["CRATEDIGGER_TEST_JOBS"] = original_jobs
+
+        self.assertEqual(floor, DEFAULT_MIN_HEADROOM_BYTES)
+
+    def test_explicit_headroom_override_is_not_worker_scaled(self) -> None:
+        """An EXPLICIT CRATEDIGGER_TEST_RAM_MIN_BYTES override is honored
+        exactly as given, even under a large expected worker count that
+        would otherwise raise the floor well above it — the worker-aware
+        scaling only fills in the UNSET default (issue #1131 review N1)."""
+        original_floor = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+        original_jobs = os.environ.pop("CRATEDIGGER_TEST_JOBS", None)
+        try:
+            os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = "5000000"
+            os.environ["CRATEDIGGER_TEST_JOBS"] = "200"
+            floor = _default_min_headroom_bytes()
+        finally:
+            if original_floor is None:
+                os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+            else:
+                os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original_floor
+            if original_jobs is None:
+                os.environ.pop("CRATEDIGGER_TEST_JOBS", None)
+            else:
+                os.environ["CRATEDIGGER_TEST_JOBS"] = original_jobs
+
+        self.assertEqual(floor, 5000000)
 
     def test_malformed_headroom_env_var_fails_closed(self) -> None:
         original = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
