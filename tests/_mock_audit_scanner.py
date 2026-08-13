@@ -443,6 +443,10 @@ _LEAF_SEAM_PATTERNS = [
     # MusicBrainz / Discogs API fetch helpers — HTTP boundary.
     re.compile(r"^scripts\.pipeline_cli\.album_requests\.fetch_mb_release$"),
     re.compile(r"^lib\.\w+\.fetch_mb_release$"),
+    # MusicBrainz merge-survivor resolver (#1089) — one hop above the raw
+    # ``urllib.request`` fetch (``_fetch_json``), same shape as
+    # ``fetch_mb_release`` above.
+    re.compile(r"^lib\.mb_canonical\.canonical_release_id$"),
 
     # scripts.pipeline_cli loaders — each is a thin wrapper around a
     # disk/SQLite read in lib.config or lib.beets_db. Split into

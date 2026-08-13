@@ -1,6 +1,7 @@
-"""Release-identity routes — resolve-rg lazy backfill and Replace.
+"""Release-identity routes — resolve-rg lazy backfill, Replace, and the
+operator merge-rekey action.
 
-Split from web/routes/pipeline.py (#522).
+Split from web/routes/pipeline.py (#522); merge-rekey added by #1089.
 """
 
 import json
@@ -8,6 +9,11 @@ import json
 from pydantic import BaseModel, Field
 
 from lib import transitions
+from lib.merge_rekey_service import (
+    MERGE_REKEY_HTTP_STATUS,
+    RESULT_REKEYED,
+    MergeRekeyService,
+)
 from lib.pipeline_db import PipelineDB
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.replace_status import (
@@ -403,6 +409,62 @@ def post_pipeline_replace(
     h._error(f"Unknown replace outcome: {result.outcome}", 500)
 
 
+def post_pipeline_merge_rekey(
+    h: RouteHandler, body: dict[str, object], req_id_str: str,
+) -> None:
+    """``POST /api/pipeline/<id>/merge-rekey`` (#1089).
+
+    Operator action, surfaced from the dashboard's disk-coverage drift
+    panel: heal a request→Beets join after MusicBrainz merges the release an
+    ``imported`` request points at, by rekeying the LEDGER onto the survivor
+    Beets already holds. Request-ledger-only — never mutates Beets. No
+    request body. Wraps ``MergeRekeyService.rekey_request``, the one
+    canonical execution path shared with ``pipeline-cli merge-rekey``.
+
+    Status-code mapping (``lib.merge_rekey_service.MERGE_REKEY_HTTP_STATUS``):
+      * 200 — ``rekeyed``
+      * 404 — ``not_found``
+      * 409 — ``wrong_state`` (not an owner-free imported MB-sourced
+              request), ``library_not_at_survivor`` (Beets does not resolve
+              exactly one album at the survivor), or ``rekey_refused`` (the
+              request changed underneath the write — retry re-derives)
+      * 422 — ``not_merged`` (MusicBrainz names no different survivor for
+              the stored id; the #8792 refusal)
+      * 503 — ``mirror_unavailable`` (the canonical-release resolver is not
+              configured on this process)
+    """
+    del body
+    try:
+        request_id = int(req_id_str)
+    except (TypeError, ValueError):
+        h._error("Invalid request id")
+        return
+
+    s = _server()
+    beets = s._beets_db()
+    if beets is None:
+        h._error("Beets DB not available", 503)
+        return
+
+    service = MergeRekeyService(s._db(), beets)
+    result = service.rekey_request(request_id)
+
+    payload: dict[str, object] = {
+        "outcome": result.outcome,
+        "request_id": result.request_id,
+        "old_release_id": result.old_release_id,
+        "new_release_id": result.new_release_id,
+        "beets_album_id": result.beets_album_id,
+        "beets_checked_release_id": result.beets_checked_release_id,
+        "beets_album_ids": list(result.beets_album_ids),
+        "error_message": result.error_message,
+    }
+    status = MERGE_REKEY_HTTP_STATUS[result.outcome]
+    if result.outcome != RESULT_REKEYED:
+        payload["error"] = result.error_message or "merge rekey refused"
+    h._json(payload, status=status)
+
+
 ROUTES: list[RouteRegistration] = [
     pattern_route(
         "POST", r"^/api/pipeline/(\d+)/replace$", post_pipeline_replace,
@@ -414,6 +476,13 @@ ROUTES: list[RouteRegistration] = [
     pattern_route(
         "POST", r"^/api/pipeline/(\d+)/resolve-rg$", post_pipeline_resolve_rg,
         "Lazy-backfill mb_release_group_id for a legacy request row.",
+        classified=True,
+    ),
+    pattern_route(
+        "POST", r"^/api/pipeline/(\d+)/merge-rekey$", post_pipeline_merge_rekey,
+        "Rekey an imported request's ledger onto the MusicBrainz merge "
+        "survivor Beets already holds. Request-ledger-only; never "
+        "mutates Beets.",
         classified=True,
     ),
 ]

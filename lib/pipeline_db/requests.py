@@ -1963,7 +1963,7 @@ class _RequestsMixin(_PipelineDBBase):
         *,
         old_release_id: str,
         new_release_id: str,
-        expected_import_job_id: int,
+        expected_import_job_id: int | None,
     ) -> bool:
         """Rekey one request AND its evidence onto the merge survivor (#1059).
 
@@ -1980,10 +1980,12 @@ class _RequestsMixin(_PipelineDBBase):
         * ``mb_release_id = %s`` — a compare-and-set on the identity being
           moved. A row somebody else already rekeyed, superseded, or pointed
           elsewhere is left alone.
-        * **the caller still holds the import claim it took.** There are
-          exactly two, and this fence is each claim's own request predicate
-          copied verbatim, so "still claimed" means the same thing here as it
-          did at claim time:
+        * **the caller still holds the import claim it took, OR is the
+          operator asking directly.** There are exactly three arms. The
+          first two are each claim's own request predicate copied verbatim,
+          so "still claimed" means the same thing here as it did at claim
+          time; the third has no claim at all — it IS the operator, acting
+          on an ``imported`` row nothing else currently owns:
 
           - ``claim_automation_import_job_under_lock`` — ``status =
             'processing'`` and ``active_automation_import_job_id = %s``. That
@@ -2001,8 +2003,29 @@ class _RequestsMixin(_PipelineDBBase):
             lane could therefore never follow a merge — it met the merged-away
             release at the apply-time comparison inside ``import_one.py``
             instead, which has no redirect concept.
+          - **the operator merge-rekey arm (#1089)** — admitted only when
+            ``expected_import_job_id IS NULL`` (the two claim arms above are
+            each keyed to a real job id and so can never satisfy this one by
+            accident), ``status = 'imported'``, no automation owner attached,
+            AND no ``import_jobs`` row for this request is currently
+            ``queued`` or ``running`` (any job type — an in-flight force
+            import or YouTube rescue could otherwise have its identity moved
+            out from under it mid-launch). The web dashboard's drift panel
+            surfaces exactly the rows this arm can act on: an ``imported``
+            request whose stored id MusicBrainz has since merged away, where
+            Beets already holds the survivor (the request→beets join is
+            healed by moving the LEDGER onto the identity Beets already
+            has — Beets itself is never mutated by this arm).
 
-          A YouTube rescue job matches neither arm and never rekeys.
+            Authority: "really we need to re-key mbid and beets don't we so
+            they go away. we could surface these here and have a button
+            which re-keys with the current machinery we've built couldn't
+            we?" —
+            https://github.com/abl030/cratedigger/issues/1089#issuecomment-5274933957
+
+          A YouTube rescue job matches neither import-claim arm and never
+          rekeys through them; a ``queued``/``running`` rescue also blocks
+          the operator arm via its ``NOT EXISTS`` term above.
 
         Admitting the force claim here is an operator decision, not an
         inference from the automation arm:
@@ -2068,7 +2091,7 @@ class _RequestsMixin(_PipelineDBBase):
                         "WHERE id = %s AND mb_release_id = %s "
                         # The frozen-ancestor guard is its own top-level term,
                         # never a branch of the claim disjunction below: a
-                        # ``replaced`` row is out of scope for BOTH claims,
+                        # ``replaced`` row is out of scope for EVERY arm,
                         # and stating it once keeps that unconditional.
                         "AND status <> 'replaced' "
                         "AND ("
@@ -2085,12 +2108,29 @@ class _RequestsMixin(_PipelineDBBase):
                         "        AND j.status = 'running'"
                         "    )"
                         "  )"
+                        # The operator arm (#1089): ``%s IS NULL`` is the
+                        # guard that keeps this from ever widening the two
+                        # claim arms above — a real job id supplied by
+                        # automation or force NEVER satisfies this term, no
+                        # matter what the request row or the import_jobs
+                        # table otherwise look like.
+                        "  OR ("
+                        "    %s IS NULL"
+                        "    AND status = 'imported'"
+                        "    AND active_automation_import_job_id IS NULL"
+                        "    AND NOT EXISTS ("
+                        "      SELECT 1 FROM import_jobs j"
+                        "      WHERE j.request_id = album_requests.id"
+                        "        AND j.status IN ('queued', 'running')"
+                        "    )"
+                        "  )"
                         ")",
                         (
                             new_release_id,
                             now,
                             request_id,
                             old_release_id,
+                            expected_import_job_id,
                             expected_import_job_id,
                             expected_import_job_id,
                         ),

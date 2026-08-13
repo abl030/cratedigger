@@ -295,5 +295,49 @@ console.log('normalizeUnfindableBacklogSeries() maps due_backlog_at_start to a p
   }
 }
 
+console.log('renderDriftRow() renders the operator merge-rekey button (#1089)');
+{
+  const html = __test__.renderDriftRow({
+    id: 8792, artist_name: 'Slipknot', album_title: 'Vol. 3: (The Subliminal Verses)',
+    status: 'imported',
+  });
+  assertContains(html, '#8792 Slipknot', 'row names the request id and artist');
+  assertContains(html, 'Vol. 3: (The Subliminal Verses)', 'row names the album title');
+  assertContains(html, 'metric-bad">imported', 'row shows the drift status');
+  assertContains(html, 'window.mergeRekeyRequest(8792, this)', 'button wires the window binding with its request id');
+  assertContains(html, 'Follow MB merge', 'button label rendered');
+  assertContains(html, 'id="drift-note-8792"', 'inline refusal-note slot rendered for this request');
+}
+console.log('renderDriftRow() escapes artist/album HTML');
+{
+  const html = __test__.renderDriftRow({
+    id: 1, artist_name: '<script>x</script>', album_title: 'A & B', status: 'imported',
+  });
+  assertExcludes(html, '<script>x</script>', 'artist name is escaped');
+  assertContains(html, 'A &amp; B', 'album title is escaped');
+}
+console.log('renderDiskCoverageCard() composes one drift row per off-disk request');
+{
+  const html = __test__.renderDiskCoverageCard({
+    counts: {on_disk_total: 9, active_total: 11, off_disk_by_status: {wanted: 1}},
+    drift_rows: [
+      {id: 316, artist_name: 'Rebecca Black', album_title: 'Sing It', status: 'imported'},
+      {id: 8832, artist_name: 'Kim Petras', album_title: 'Detour', status: 'imported'},
+    ],
+  });
+  assertContains(html, 'Drift (imported, missing from beets)', 'drift metric label rendered');
+  assertContains(html, 'window.mergeRekeyRequest(316, this)', 'first drift row gets its own button');
+  assertContains(html, 'window.mergeRekeyRequest(8832, this)', 'second drift row gets its own button');
+}
+console.log('renderDiskCoverageCard() renders no drift rows or buttons when nothing has drifted');
+{
+  const html = __test__.renderDiskCoverageCard({
+    counts: {on_disk_total: 11, active_total: 11, off_disk_by_status: {}},
+    drift_rows: [],
+  });
+  assertContains(html, 'metric-good">0', 'zero drift renders the good class');
+  assertExcludes(html, 'mergeRekeyRequest', 'no button rendered with an empty drift list');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -256,6 +256,22 @@ depends on.
   request Queue subview was removed in #575 PR5: request state and actions live
   on Browse's unified artist/release rows, while diagnostic API/CLI routes
   remain available.
+- **Dashboard Disk Coverage drift panel — "Follow MB merge" button (#1089)** —
+  each `imported`-but-off-disk drift row (a request whose stored MusicBrainz
+  id was merged away and Beets no longer resolves against it) gets a button
+  that calls `POST /api/pipeline/<id>/merge-rekey`
+  (`MergeRekeyService.rekey_request`; CLI counterpart `pipeline-cli
+  merge-rekey`). Request-ledger-only — it rekeys `album_requests` (and the
+  request's evidence lineage) onto the MusicBrainz survivor, and never
+  mutates Beets; the precondition is that Beets already holds the survivor,
+  which is exactly what makes the row drift in the first place. On success
+  the row disappears from the drift list on the next render. On refusal the
+  row shows the outcome inline (`not_merged` for a request that was never
+  actually merged — e.g. request #8792, Slipknot Vol. 3, which resolves to
+  two current Beets albums with no MusicBrainz redirect; `wrong_state`,
+  `library_not_at_survivor`, `rekey_refused`, or `mirror_unavailable`
+  otherwise). Resolution happens only at click time, never during dashboard
+  render.
 - **Wrong Matches tab** — the obsolete Complete-folder/manual-import page is gone;
   the tab now opens straight into Wrong Matches. Import actions queue work and
   poll `import_jobs`, so long beets imports do not block the web request.

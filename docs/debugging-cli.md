@@ -23,7 +23,7 @@ ssh doc2 'pipeline-cli routes --json'
 The installed wrapper has two independent authority shapes:
 
 - `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
-  `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
+  `merge-rekey`, `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
   `wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
   `force-import`, `beets-distance`, and
   `import-preview --download-log-id` connect to
@@ -134,7 +134,7 @@ remains after a purge failure.
 ## API-backed mutation commands
 
 `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
-`resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
+`merge-rekey`, `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
 `wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
 `force-import`, `beets-distance`, and
 `import-preview --download-log-id` call the canonical web route over the
@@ -291,6 +291,13 @@ inside socket authorization, never credentials.
   conflicts emit the shared typed error and exit 4; expected Beets authority
   unavailability emits the retryable typed error and exits 5. Neither condition
   is rendered as an actionable Missing cohort.
+- `pipeline-cli merge-rekey` — Rekey an imported request onto the MusicBrainz
+  merge survivor Beets already holds, through its canonical web route.
+  Request-ledger-only; never mutates Beets. Refuses `not_merged` (422) when
+  MusicBrainz names no redirect for the stored id (e.g. request #8792,
+  Slipknot Vol. 3 — two current albums, no merge), and
+  `library_not_at_survivor` (409) unless Beets resolves exactly one album at
+  the survivor first.
 - `pipeline-cli pipeline-delete` — Delete a pipeline request through its canonical web route.
 - `pipeline-cli quality` — Simulate quality decisions and replay current candidate evidence.
 - `pipeline-cli query` — Run one read-only SQL statement, or the explicit write escape hatch.

@@ -7486,6 +7486,228 @@ class TestFakeMergeRekeyForceClaimFence(unittest.TestCase):
         self.assertEqual(row["mb_release_id"], self.MERGED)
 
 
+class TestFakeMergeRekeyOperatorClaimFence(unittest.TestCase):
+    """The fake's operator arm, term for term against the real SQL (#1089).
+
+    ``update_request_release_for_merge``'s operator arm is a four-term
+    conjunction: ``expected_import_job_id IS NULL``, ``status = 'imported'``,
+    no automation owner attached, and no ``queued``/``running`` import job at
+    all for this request (any job type — unlike the force arm's own
+    ``EXISTS``, this ``NOT EXISTS`` carries no ``job_type`` filter). Every
+    term is exercised on its own from a world that otherwise rekeys, mirroring
+    ``TestFakeMergeRekeyForceClaimFence`` above: a fake more permissive than
+    the write it stands in for is the test-fidelity Rule B failure this class
+    exists to prevent.
+    """
+
+    MERGED = "merged-id"
+    SURVIVOR = "survivor-id"
+
+    def _world(self, *, status: str = "imported", owner: int | None = None):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            mb_release_id=self.MERGED,
+            status=status,
+            active_automation_import_job_id=owner,
+        ))
+        return db
+
+    def _rekey(
+        self,
+        db: FakePipelineDB,
+        *,
+        request_id: int = 41,
+        expected_import_job_id: int | None = None,
+    ):
+        return db.update_request_release_for_merge(
+            request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=expected_import_job_id,
+        )
+
+    def test_an_operator_call_rekeys_an_imported_unowned_unclaimed_row(self):
+        db = self._world()
+
+        self.assertTrue(self._rekey(db))
+
+        row = db.request(41)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.SURVIVOR)
+        self.assertEqual(row["status"], "imported")
+        self.assertIsNone(row["active_automation_import_job_id"])
+        self.assertEqual(
+            db.update_request_release_for_merge_calls,
+            [(41, self.MERGED, self.SURVIVOR, None)],
+        )
+
+    def test_a_real_job_id_never_satisfies_the_operator_arm(self):
+        """``expected_import_job_id IS NULL`` — the arm-widening guard.
+
+        A world that is otherwise exactly the operator's own (imported,
+        unowned, nothing active) must still refuse a caller that supplies a
+        real job id, even a job with no bearing on either claim arm (queued,
+        not force). Dropping this guard would let the operator arm silently
+        widen a force/automation caller's own — narrower — claim fence.
+        """
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+
+        db = self._world()
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=41,
+            dedupe_key="force-41",
+            payload=force_import_payload(
+                download_log_id=1, failed_path="/quarantine/album",
+            ),
+        )
+        db.mark_import_job_completed(job.id, result={}, message="done")
+
+        self.assertFalse(self._rekey(db, expected_import_job_id=job.id))
+
+        row = db.request(41)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.MERGED)
+
+    def test_a_non_imported_status_writes_nothing_under_the_operator_arm(self):
+        for status in (
+            "wanted", "downloading", "unsearchable", "processing", "replaced",
+        ):
+            with self.subTest(status=status):
+                db = self._world(status=status)
+
+                self.assertFalse(self._rekey(db))
+
+                row = db.request(41)
+                assert row is not None
+                self.assertEqual(row["mb_release_id"], self.MERGED)
+
+    def test_an_automation_owned_imported_row_writes_nothing(self):
+        """The owner term alone — reachable on ``imported`` only in the fake.
+
+        Migration 066 ties the owner pointer to ``processing`` in real
+        PostgreSQL, so this exact combination (``imported`` + an owner) never
+        occurs there — but the fake has no CHECK, and it stands in for every
+        seam test in this repository, so the term is exercised directly.
+        """
+        db = self._world(owner=777)
+
+        self.assertFalse(self._rekey(db))
+
+        row = db.request(41)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.MERGED)
+
+    def test_a_queued_import_job_blocks_the_operator_arm(self):
+        from lib.import_queue import IMPORT_JOB_YOUTUBE, youtube_import_payload
+
+        db = self._world()
+        db.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=41,
+            payload=youtube_import_payload(
+                staged_path="/Incoming/auto-import/album",
+                request_id=41,
+                browse_id="MPREb_x",
+                download_log_id=9,
+            ),
+        )
+
+        self.assertFalse(self._rekey(db))
+
+        row = db.request(41)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.MERGED)
+
+    def test_a_running_import_job_blocks_the_operator_arm(self):
+        """No ``job_type`` filter — an in-flight rescue blocks it too."""
+        from lib.import_queue import IMPORT_JOB_YOUTUBE, youtube_import_payload
+
+        db = self._world()
+        job = db.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=41,
+            payload=youtube_import_payload(
+                staged_path="/Incoming/auto-import/album",
+                request_id=41,
+                browse_id="MPREb_x",
+                download_log_id=9,
+            ),
+        )
+        db.mark_import_job_preview_importable(
+            job.id, preview_result={}, message="ready",
+        )
+        claimed = db.claim_import_job_candidate(job.id, worker_id="fence-test")
+        assert claimed is not None and claimed.status == "running"
+
+        self.assertFalse(self._rekey(db))
+
+        row = db.request(41)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.MERGED)
+
+    def test_a_terminal_import_job_never_blocks_the_operator_arm(self):
+        """Must-still-work: a completed/failed job on this request is inert."""
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+
+        for outcome in ("completed", "failed"):
+            with self.subTest(outcome=outcome):
+                db = self._world()
+                job = db.enqueue_import_job(
+                    IMPORT_JOB_FORCE,
+                    request_id=41,
+                    dedupe_key=f"force-41-{outcome}",
+                    payload=force_import_payload(
+                        download_log_id=1, failed_path="/quarantine/album",
+                    ),
+                )
+                if outcome == "completed":
+                    db.mark_import_job_completed(job.id, result={}, message="done")
+                else:
+                    db.mark_import_job_failed(job.id, error="synthetic failure")
+
+                self.assertTrue(self._rekey(db))
+
+                row = db.request(41)
+                assert row is not None
+                self.assertEqual(row["mb_release_id"], self.SURVIVOR)
+
+    def test_an_active_job_on_a_different_request_never_blocks(self):
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+
+        db = self._world()
+        db.seed_request(make_request_row(id=42, mb_release_id="other-id"))
+        db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="force-42",
+            payload=force_import_payload(
+                download_log_id=2, failed_path="/quarantine/other",
+            ),
+        )
+
+        self.assertTrue(self._rekey(db))
+
+        row = db.request(41)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.SURVIVOR)
+
+    def test_a_stale_identity_writes_nothing_under_the_operator_arm(self):
+        db = self._world()
+
+        self.assertFalse(db.update_request_release_for_merge(
+            41,
+            old_release_id="somebody-elses-id",
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=None,
+        ))
+
+        row = db.request(41)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.MERGED)
+
+
 class TestFakeRequestUniqueMbReleaseId(unittest.TestCase):
     """The fake mirrors migrations/001's UNIQUE on album_requests.mb_release_id.
 

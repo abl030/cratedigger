@@ -463,6 +463,20 @@ def cmd_resolve_rg(_db: object, args: argparse.Namespace) -> int:
     ))
 
 
+def cmd_merge_rekey(_db: object, args: argparse.Namespace) -> int:
+    """Thin HTTP adapter for ``POST /api/pipeline/<id>/merge-rekey`` (#1089).
+
+    The route is the one canonical execution path
+    (``MergeRekeyService.rekey_request``); every status this command's
+    outcomes can produce (``lib.merge_rekey_service.MERGE_REKEY_HTTP_STATUS``
+    — 200/404/409/422/503) already matches ``_exit_code``'s default
+    status→exit mapping, so no ``exit_overrides`` are needed.
+    """
+    return _relay(args.api_endpoint, _ApiMutation(
+        path=f"/api/pipeline/{args.request_id}/merge-rekey", body={},
+    ))
+
+
 def add_api_mutation_subparsers(
     sub: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
@@ -486,3 +500,11 @@ def add_api_mutation_subparsers(
 
     resolve = sub.add_parser("resolve-rg", help="Resolve one request release-group via the web API")
     resolve.add_argument("request_id", type=int)
+
+    merge_rekey = sub.add_parser(
+        "merge-rekey",
+        help="Rekey an imported request onto the MusicBrainz merge "
+             "survivor Beets already holds, via the web API. "
+             "Request-ledger-only; never mutates Beets.",
+    )
+    merge_rekey.add_argument("request_id", type=int)

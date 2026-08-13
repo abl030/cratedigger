@@ -905,6 +905,13 @@ def main() -> int:
     if args.discogs_api:
         _discogs.DISCOGS_API_BASE = args.discogs_api
 
+    # MusicBrainz merge-survivor resolution (#1089): the web server is the
+    # second of the two processes that reach a merge seam — the operator
+    # merge-rekey route, via ``MergeRekeyService``. Shared with the importer
+    # so neither silently drifts; see ``lib/mb_canonical.py``.
+    from lib.mb_canonical import configure_canonical_release_lookup
+    configure_canonical_release_lookup(admitted_config)
+
     global _db_dsn
     _db_dsn = args.dsn
     # Fail fast at boot if the DB is unreachable; request threads open

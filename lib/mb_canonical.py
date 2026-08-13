@@ -11,7 +11,7 @@ this module never creates a second one — it reports the survivor, and the
 sweep acts on that answer immediately: retag the installed Beets album onto
 the survivor first (Beets keys album duplicate detection on ``mb_albumid``, so
 rekeying first would land a second album), then rekey the request. Nothing is
-persisted as an alternate identity, and nothing on a request path ever calls
+persisted as an alternate identity, and no PASSIVE read/render path ever calls
 this.
 
 That placement is the whole lesson of the earlier attempts (PR #1056, and the
@@ -21,6 +21,12 @@ rounds, and cost ~28s on an uncached long-tail render — and preserving both
 IDs as simultaneous identities never reached the import-time match, which is
 where a merged request actually fails. One sweep, one question, one current
 ID.
+
+The one deliberate exception (#1089) is the operator merge-rekey web route: a
+single explicit, operator-initiated button click, not a read/render path
+behind an arbitrary consumer count — the exact shape the #1056/#1074 lesson
+warns against. It asks this module exactly once per click, at request time,
+and never during dashboard render.
 
 **Fail-open by contract.** Every failure returns ``None``, and the caller
 keeps exactly today's behaviour. In particular a ``4xx`` is NEVER read as
@@ -45,9 +51,13 @@ import logging
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from lib.json_narrow import json_dict
 from lib.release_identity import detect_release_source, normalize_release_id
+
+if TYPE_CHECKING:
+    from lib.config import CratediggerConfig
 
 logger = logging.getLogger("cratedigger")
 
@@ -209,11 +219,42 @@ def production_canonical_release_fn() -> CanonicalReleaseFn:
     return resolve
 
 
+def configure_canonical_release_lookup(cfg: CratediggerConfig) -> None:
+    """Point MusicBrainz merge-survivor resolution at the operator's mirror.
+
+    This module starts inert, and an unwired process does not fail loudly —
+    it reports "no redirect" forever and looks perfectly healthy. Two
+    processes reach a merge seam and must both call this at startup: the
+    importer (``lib.download_validation._follow_merged_release``, draining
+    automation/force jobs) and the web server (the operator merge-rekey
+    route, #1089, reached from ``MergeRekeyService``). Sharing ONE
+    implementation is what keeps those two callers from silently drifting
+    apart — see CLAUDE.md's "No Parallel Code Paths".
+
+    A blank base leaves resolution inert rather than silently reaching out to
+    public MusicBrainz from a deployment that configured a mirror on purpose.
+    """
+    from web.api_bases import mb_ws2_base
+
+    origin = (cfg.musicbrainz_api_base or "").strip()
+    if not origin:
+        logger.warning(
+            "No [MusicBrainz] api_base configured; MusicBrainz merge "
+            "survivors will not be resolved — a merged-away request stays "
+            "rejected as mbid_not_found in the importer, and the operator "
+            "merge-rekey button reports mirror_unavailable on the web UI",
+        )
+        configure_canonical_base(None)
+        return
+    configure_canonical_base(mb_ws2_base(origin))
+
+
 __all__ = [
     "CanonicalFetchFn",
     "CanonicalReleaseFn",
     "canonical_release_id",
     "configure_canonical_base",
+    "configure_canonical_release_lookup",
     "configured_canonical_base",
     "production_canonical_release_fn",
 ]

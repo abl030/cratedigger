@@ -142,6 +142,7 @@ class TestApiMutationCli(unittest.TestCase):
             "upgrade": api_mutations.cmd_upgrade,
             "wrong-match-converge": api_mutations.cmd_wrong_match_converge,
             "resolve-rg": api_mutations.cmd_resolve_rg,
+            "merge-rekey": api_mutations.cmd_merge_rekey,
         }
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -168,6 +169,9 @@ class TestApiMutationCli(unittest.TestCase):
             ("resolve-rg", {"api_endpoint": api_mutations.TcpApiEndpoint(
                 "http://api"), "request_id": 9},
              "/api/pipeline/9/resolve-rg", {}),
+            ("merge-rekey", {"api_endpoint": api_mutations.TcpApiEndpoint(
+                "http://api"), "request_id": 316},
+             "/api/pipeline/316/merge-rekey", {}),
         ]
         for command, values, path, body in cases:
             with self.subTest(command=command), patch(
@@ -301,6 +305,7 @@ class TestApiMutationCli(unittest.TestCase):
             ["upgrade", "release-2"],
             ["wrong-match-converge", "8", "150", "--apply"],
             ["resolve-rg", "9"],
+            ["merge-rekey", "316"],
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = os.path.join(temp_dir, "config.ini")
@@ -683,6 +688,45 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
         self.db.update_request_fields(105, mb_release_group_id="rg-already-set")
         code, body = self._call(api_mutations.cmd_resolve_rg, request_id=105)
         self.assertEqual((code, body["status"]), (0, "resolved"))
+
+    def test_merge_rekey_reaches_the_real_route(self) -> None:
+        """A sixth adapter (#1089), tested standalone: its happy path needs
+        Beets + mirror fixtures the other five don't, so it gets its own
+        real-route round trip rather than folding into the five above."""
+        from lib.mb_canonical import (
+            configure_canonical_base,
+            configured_canonical_base,
+        )
+
+        merged = "6b209cc5-62b0-4ef7-9336-c2dbd876301a"
+        survivor = "9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4"
+        self.db.seed_request(make_request_row(
+            id=316, mb_release_id=merged, status="imported",
+            artist_name="Rebecca Black", album_title="Sing It",
+        ))
+        import web.server as srv
+        from tests.fakes import FakeBeetsDB
+
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(survivor, [19345])
+
+        previous_base = configured_canonical_base()
+        self.addCleanup(configure_canonical_base, previous_base)
+        configure_canonical_base("http://fake-mirror/ws/2")
+        with (
+            patch.object(srv, "_beets_db", return_value=beets),
+            patch(
+                "lib.mb_canonical.canonical_release_id", return_value=survivor,
+            ),
+        ):
+            code, body = self._call(
+                api_mutations.cmd_merge_rekey, request_id=316,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(body["outcome"], "rekeyed")
+        self.assertEqual(body["new_release_id"], survivor)
+        self.assertEqual(self.db.request(316)["mb_release_id"], survivor)
 
     def test_pipeline_delete_round_trip_preserves_processing_owner(self) -> None:
         self._seed(106, "a0000000-0000-0000-0000-000000000006")
