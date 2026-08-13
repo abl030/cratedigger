@@ -9773,9 +9773,19 @@ class TestForceWrongMatchReceiptStartupReplayGenerated(unittest.TestCase):
         elif outcome == "historical_completed_no_marker":
             # Live-row evidence: 477 of the 619 pre-feature rows doc2
             # measured were exactly this shape — a 'completed' force job
-            # from before ``_job_result`` ever wrote the era marker.
+            # from before ``_job_result`` ever wrote the era marker. The
+            # measured live shape is the older three-key
+            # ``{deferred, message, success}`` payload (review round 3,
+            # MINOR-2), not a bare ``{"success": True}`` — selection is
+            # identical either way (both lack the marker), but the fixture
+            # should say what was actually measured.
             db.mark_import_job_completed(
-                job.id, result={"success": True}, message="imported",
+                job.id,
+                result={
+                    "deferred": False, "message": "imported",
+                    "success": True,
+                },
+                message="imported",
             )
         elif outcome == "historical_executor_crash":
             # The literal shape ``process_claimed_job``'s own top-level
@@ -9798,14 +9808,34 @@ class TestForceWrongMatchReceiptStartupReplayGenerated(unittest.TestCase):
             # terminalization outside the adjudicating decision path.
             db.mark_import_job_failed(job.id, error="operator cancelled")
         elif outcome == "historical_preview_shape":
-            # Live-row evidence (issue #1122 review MAJOR-3, doc2
-            # measurement): 130 of 142 pre-feature failed rows carried
-            # this shape. No CURRENT production code path writes it;
-            # registered as a HISTORICAL trigger per test-fidelity.md
-            # Rule C's escape hatch.
-            db.mark_import_job_failed(
-                job.id, error="preview lifecycle",
-                result={"preview": {"stale": True}},
+            # Real producer (review round 3, MEDIUM-1 corrected a false
+            # "no current producer" claim): TWO live paths write the
+            # literal ``{"preview": <preview_result>}`` shape into
+            # ``result`` —
+            # ``lib/pipeline_db/import_jobs.py::mark_import_job_preview_failed``
+            # (called from ``scripts/import_preview_worker.py``'s
+            # ``job.request_id is None or request is None`` branch) and
+            # ``lib/pipeline_db/terminal_outcomes.py::
+            # persist_preview_terminal_outcome``'s non-automation branch
+            # (called via ``lib.dispatch._record_preview_measurement_failed``,
+            # ``import_preview_worker.py:952``). Live proof: force job
+            # 59313 (2026-07-25). Driven directly through the simpler of
+            # the two real producers — the write method itself decides
+            # the exact ``result`` shape, so calling it directly is the
+            # real producer, not a stand-in for it (freshly enqueued
+            # ``job`` is already ``status='queued',
+            # preview_status='waiting'``, exactly this method's
+            # precondition).
+            db.mark_import_job_preview_failed(
+                job.id,
+                preview_status="measurement_failed",
+                error="measurement_crashed",
+                preview_result={
+                    "reason": "measurement_crashed",
+                    "detail": "measurement_failed",
+                    "source_path": "",
+                },
+                message="Preview measurement failed: measurement_crashed",
             )
         elif outcome == "historical_null_result":
             # A genuinely NULL ``result`` column has no public-API

@@ -737,7 +737,11 @@ class _ImportJobsMixin(
            stay receiptless forever by design: they never adjudicated the
            candidate, so replaying anything for them would be a fabricated
            verdict, and their quarantine folders (if any) were already
-           swept by the #1077 D10 cleanup sweep.
+           swept by the #1077 D10 cleanup sweep. This closure is a
+           single-writer invariant, review-enforced: only
+           ``scripts/importer.py::_job_result`` may ever write
+           ``post_commit_wrong_match_scenario``; a second writer
+           re-widens this predicate back to pre-#1122 behavior.
         2. The receipt itself must be PROVEN successful, not merely
            PRESENT: ``result #>> '{wrong_match_dismissal,success}'`` /
            ``result #>> '{cleanup,success}'`` ``IS DISTINCT FROM 'true'``.
