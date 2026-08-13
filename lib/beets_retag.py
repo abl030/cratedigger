@@ -30,17 +30,18 @@ by query. It has no equivalent failure mode, and it makes no network call.
 
 Five properties are load-bearing:
 
-* **The query and the post-retag guard select by the SAME mechanism.**
-  :func:`retag_album_query` uses Beets' exact-match query prefix,
-  ``mb_albumid:=<id>`` — NOT a regex — so it can only ever name albums whose
-  ``mb_albumid`` is exactly SQL-equal to the old ID, live-verified to parse
-  to ``dbcore.query.MatchQuery`` and emit the clause
-  ``albums.mb_albumid = ?`` (``beets/library/queries.py``,
-  ``beets/dbcore/query.py::MatchQuery.col_clause``). That is the identical
-  comparison :meth:`lib.beets_db.BeetsDB.resolve_current_releases` already
-  performs when it re-reads the library (a TEXT-equality membership test),
-  so the query and the guard now select by one mechanism, not two that can
-  silently disagree. Before #1093 the query was an anchored regex
+* **The query and the post-retag guard select by the SAME mechanism, AND the
+  query pins the exact row the guard already resolved.** The query is an AND
+  of two exact-match clauses: ``id:=<album_id>`` — the ALBUM PRIMARY KEY the
+  guard's pre-check just resolved — and ``mb_albumid:=<old-id>``, Beets'
+  ``=`` prefix, NOT a regex. Both compile to ``dbcore.query.MatchQuery`` and
+  emit plain SQL equality — ``(albums.id = ?) and (albums.mb_albumid = ?)``
+  (``beets/library/queries.py``, ``beets/dbcore/query.py::
+  MatchQuery.col_clause``) — the identical comparison
+  :meth:`lib.beets_db.BeetsDB.resolve_current_releases` already performs
+  when it re-reads the library (a TEXT-equality membership test), so the
+  query and the guard select by one mechanism, not two that can silently
+  disagree. Before #1093 the query was an anchored regex
   (``mb_albumid::^<id>\\Z``) evaluated by Beets' SQLite ``regexp()`` UDF,
   which DECODES a BLOB-stored value before matching
   (``beets/dbcore/db.py``) — so a BLOB-stored ``mb_albumid`` (only
@@ -49,24 +50,50 @@ Five properties are load-bearing:
   guard's exact-equality comparison. Live-verified against a real BLOB
   write: the retired regex form matched it, the exact-match form and the
   guard now both report it absent (#1093 item 2).
+
+  Storage-shape agreement alone still leaves a TIME-OF-CHECK/TIME-OF-USE
+  gap: the guard resolves the row on ONE connection, then ``beet modify``
+  re-selects BY VALUE on a SEPARATE connection at a LATER time. If a second
+  album lands at the old id in that window, a value-only query would retag
+  BOTH — the guard counted one, but the query matches whatever holds the
+  value NOW. The ``id:=<album_id>`` clause closes this: it pins the EXACT
+  row the guard authorized, so a second album at the same value is never
+  touched by this execution regardless of what the value-only clause would
+  have matched. The ``mb_albumid:=<old-id>`` clause is not redundant with
+  it — dropping it would turn a conditional retag into a blind write:
+  without the value compare-and-set, a row whose ``mb_albumid`` has ALREADY
+  moved off the old id since the guard's read (retagged by a concurrent
+  actor, or simply raced onto the survivor already) would be overwritten
+  anyway, based on identity alone. Live-verified against a real
+  ``beet modify`` subprocess, three ways: the correct id AND the correct
+  value retags; the correct value but a WRONG id (a different album now
+  holding the guard-resolved id) is refused (``No matching albums found.``,
+  the row is untouched); the correct id but a CHANGED value (something else
+  retagged this exact album since the guard's read) is refused the same
+  way. Both clauses are load-bearing; keeping only one reopens the harm the
+  other half exists to prevent (#1093 review residual).
 * **``-a`` targets Albums, not Items — and that is what makes the identity
   move on both.** ``beets/ui/commands/modify.py::modify_parse_args``
   classifies each argument by CONTENT, not position: a token is an
   assignment iff it contains ``=`` and the text before the first ``=``
-  contains no ``:``. The exact-match query contains BOTH ``:`` and ``=``
-  (``mb_albumid:=<old-id>``), but its ``:`` still precedes its first ``=``,
-  so it stays a query token; ``mb_albumid=<new-id>`` contains no ``:``
-  before its ``=`` (an assignment). Argument order is therefore
-  irrelevant. ``-a`` selects
+  contains no ``:``. Both exact-match query tokens contain BOTH ``:`` and
+  ``=`` (``id:=<album_id>``, ``mb_albumid:=<old-id>``), but each one's
+  ``:`` still precedes its first ``=``, so both stay query tokens;
+  ``mb_albumid=<new-id>`` contains no ``:`` before its ``=`` (an
+  assignment). Argument order is therefore irrelevant. ``-a`` selects
   ``library.Album`` as ``modify_items``'s query target, and
   ``Album.try_sync(write, move, inherit)`` calls ``Album.store(inherit=True)``
   (the default; inherit is only off with ``-I``), which fans every
   inheritable FIXED attribute out to every item and stores it —
   ``mb_albumid`` is one, via ``Album.item_keys``
   (``beets/library/models.py:593-628``). Drop ``-a`` and the query instead
-  matches ITEMS directly: each item's own ``mb_albumid`` moves, the ALBUM
-  row's does not, and the library is left in exactly the split state this
-  module exists to prevent.
+  matches ITEMS directly — and the ``id:=<album_id>`` clause then binds to
+  the ITEMS table's own, independent primary key namespace rather than the
+  album's: only whichever item's OWN id happens to coincide with the
+  guard-resolved album id can move at all (live-verified, deterministic in
+  the T6 fixture: a single coincidental collision, not every item). Either
+  way the ALBUM row's ``mb_albumid`` does not move, and the library is left
+  in exactly the split state this module exists to prevent.
 * **Identity only — never a tag write, never a file move.** ``-W``
   (``--nowrite``) and ``-M`` (``--nomove``) are both explicit ``False``
   overrides (``beets/ui/__init__.py::should_write`` / ``should_move``) that
@@ -216,11 +243,15 @@ class BeetsRetagResult:
     detail: str
 
 
-#: The injected ``beet modify`` runner. It is a definition-time default on
-#: :func:`retag_merged_album`, so tests pass a replacement explicitly and
-#: never patch the module binding — patching does not replace a captured
-#: default (`.claude/rules/code-quality.md` § mocks, strategy 2).
-type RetagModifyFn = Callable[[str, str], ModifyRetagRun]
+#: The injected ``beet modify`` runner. ``query_tokens`` is the compound
+#: query :func:`retag_album_query` returns — the ``id:=`` and
+#: ``mb_albumid:=`` clauses, as SEPARATE argv elements (Beets ANDs distinct
+#: query tokens implicitly; joining them into one string would not). It is
+#: a definition-time default on :func:`retag_merged_album`, so tests pass a
+#: replacement explicitly and never patch the module binding — patching
+#: does not replace a captured default (`.claude/rules/code-quality.md` §
+#: mocks, strategy 2).
+type RetagModifyFn = Callable[[tuple[str, str], str], ModifyRetagRun]
 
 type SubprocessRunFn = Callable[..., sp.CompletedProcess[bytes]]
 
@@ -258,42 +289,69 @@ class CurrentReleaseResolver(Protocol):
         ...
 
 
-def retag_album_query(identity: ReleaseIdentity) -> str:
-    """The exact-match Beets query naming precisely the album filed under
-    ``identity`` — and nothing else, by the same SQL-equality mechanism the
-    post-retag guard uses to read the library back (#1093).
+def retag_album_query(
+    identity: ReleaseIdentity, *, album_id: int,
+) -> tuple[str, str]:
+    """Two ANDed exact-match Beets query tokens naming precisely the ONE
+    album row the guard just resolved — and nothing else, by the same
+    SQL-equality mechanism the post-retag guard uses to read the library
+    back, AND pinned to the exact primary key the guard resolved rather
+    than re-selected by value alone (#1093).
 
-    Uses Beets' ``=`` query prefix: ``mb_albumid:=<id>``.
+    Token 1, ``id:=<album_id>``, pins the exact row the pre-check's
+    ``CurrentBeetsUnique.album_id`` named. Token 2,
+    ``mb_albumid:=<old-id>``, is Beets' ``=`` query prefix — NOT a regex —
+    keeping the identity compare-and-set: a row whose ``mb_albumid`` has
+    already moved off ``identity`` since the guard's read is not blindly
+    overwritten by primary key alone. Beets ANDs separate argv query
+    tokens implicitly (``dbcore.parse_sorted_query``), so passing both as
+    SEPARATE argv elements (never one joined string) is load-bearing.
+
     ``beets/library/queries.py::parse_query_parts`` maps prefix ``=`` to
-    ``dbcore.query.MatchQuery`` (before #1093 this used the ``:`` prefix,
-    mapped to ``RegexpQuery``, with the query pattern anchored
-    ``^<escaped-id>\\Z``). ``MatchQuery.col_clause()``
-    (``beets/dbcore/query.py``) emits plain SQL equality —
-    ``<field> = ?`` — the identical comparison
-    :meth:`lib.beets_db.BeetsDB.resolve_current_releases` performs when it
-    re-reads the library (``a.mb_albumid IN (SELECT ... FROM
-    json_each(?))``, itself a TEXT-equality membership test). One
+    ``dbcore.query.MatchQuery`` for BOTH tokens (before #1093 the
+    ``mb_albumid`` token used the ``:`` prefix, mapped to ``RegexpQuery``,
+    with the pattern anchored ``^<escaped-id>\\Z``, and there was no ``id``
+    token at all). ``MatchQuery.col_clause()`` (``beets/dbcore/query.py``)
+    emits plain SQL equality for each — live-verified compiled clause:
+    ``(albums.id = ?) and (albums.mb_albumid = ?)`` — the identical
+    comparison :meth:`lib.beets_db.BeetsDB.resolve_current_releases`
+    performs when it re-reads the library (``a.mb_albumid IN (SELECT ...
+    FROM json_each(?))``, itself a TEXT-equality membership test). One
     selection mechanism for one operation, rather than two
     independently-correct ones that could silently disagree: live-verified,
-    a ``:=`` query selects only the exact target out of a same-prefix decoy
-    (``<id>0``, which a substring/prefix query would also match), and does
-    NOT select a BLOB-stored value the retired regex form could see via the
-    ``regexp()`` UDF's byte-decoding (``beets/dbcore/db.py``) but the guard
-    could not (only reachable via a third-party raw-SQL writer; Beets
-    itself always writes ``str``).
+    the ``mb_albumid:=`` token alone selects only the exact target out of a
+    same-prefix decoy (``<id>0``, which a substring/prefix query would also
+    match), and does NOT select a BLOB-stored value the retired regex form
+    could see via the ``regexp()`` UDF's byte-decoding
+    (``beets/dbcore/db.py``) but the guard could not (only reachable via a
+    third-party raw-SQL writer; Beets itself always writes ``str``).
 
-    ``modify_parse_args`` (``beets/ui/commands/modify.py``) classifies this
-    token by CONTENT, not position: it contains ``=``, but the text before
-    the first ``=`` (``"mb_albumid:"``) still contains ``:``, so it falls
-    to the ``else: query.append(arg)`` branch — a QUERY, never an
-    assignment — verified against the real parser, live, not merely read.
+    The compound form closes the residual TIME-OF-CHECK/TIME-OF-USE gap a
+    value-only query leaves: the guard resolves the row on one connection,
+    then ``beet modify`` re-selects by value on a separate connection at a
+    later time. Live-verified against a real subprocess, three ways: the
+    correct id AND value together retag; the correct value with a WRONG id
+    (a different album now holding the guard-resolved id) is refused (``No
+    matching albums found.``, untouched); the correct id with a CHANGED
+    value (something else retagged this exact album since the guard's
+    read) is refused the same way — proving the ``id`` clause alone is
+    unsafe (it would convert this into a blind write) and the ``mb_albumid``
+    clause alone is unsafe (it would retag whoever now holds the value, not
+    only the row the guard authorized).
+
+    ``modify_parse_args`` (``beets/ui/commands/modify.py``) classifies both
+    tokens by CONTENT, not position: each contains ``=``, but the text
+    before its first ``=`` (``"id:"``, ``"mb_albumid:"``) still contains
+    ``:``, so both fall to the ``else: query.append(arg)`` branch — QUERY
+    tokens, never assignments — verified against the real parser, live,
+    not merely read.
     """
     if identity.source != "musicbrainz":
         raise ValueError(
             "retag query is MusicBrainz-only; refusing to build a query for "
             f"{identity.source} release {identity.release_id}"
         )
-    return f"mb_albumid:={identity.release_id}"
+    return (f"id:={album_id}", f"mb_albumid:={identity.release_id}")
 
 
 def retag_assignment(identity: ReleaseIdentity) -> str:
@@ -301,13 +359,14 @@ def retag_assignment(identity: ReleaseIdentity) -> str:
 
     ``modify_parse_args`` classifies any argument containing ``=`` whose text
     before the first ``=`` contains no ``:`` as an assignment — never a
-    query token. Both this and :func:`retag_album_query` now contain ``=``
-    (the query as its exact-match prefix, this as its assignment operator),
-    but the query's colon always precedes its ``=``, so the two remain
-    unambiguous regardless of argv order. The value is template-evaluated
-    (``functemplate.template``) before being stored; MusicBrainz UUIDs
-    contain no ``$``/``%`` so they are inert, but this function only ever
-    accepts an already-validated :class:`ReleaseIdentity` — never raw text.
+    query token. This and both tokens :func:`retag_album_query` returns
+    contain ``=`` (the query tokens as their exact-match prefix, this as its
+    assignment operator), but each query token's colon always precedes its
+    ``=``, so all three remain unambiguous regardless of argv order. The
+    value is template-evaluated (``functemplate.template``) before being
+    stored; MusicBrainz UUIDs contain no ``$``/``%`` so they are inert, but
+    this function only ever accepts an already-validated
+    :class:`ReleaseIdentity` — never raw text.
     """
     if identity.source != "musicbrainz":
         raise ValueError(
@@ -318,20 +377,23 @@ def retag_assignment(identity: ReleaseIdentity) -> str:
 
 
 def run_beets_modify_retag(
-    query: str,
+    query_tokens: tuple[str, str],
     assignment: str,
     *,
     runner: SubprocessRunFn = sp.run,
     timeout: int = RETAG_TIMEOUT_SECONDS,
 ) -> ModifyRetagRun:
-    """Run ``beet modify -a -M -W -y`` for one query in the deployment-supplied
-    Beets runtime.
+    """Run ``beet modify -a -M -W -y`` for the compound query in the
+    deployment-supplied Beets runtime.
 
-    Invoked as ``<beets python> -m beets modify -a -M -W -y <query>
-    <assignment>``: ``python -m beets`` is a valid entry point in the pinned
-    2.13.1, and depending on a ``beet`` binary being on this process's PATH
-    would silently pick up whatever beets the invoking user happens to have.
-    The interpreter and environment come from
+    Invoked as ``<beets python> -m beets modify -a -M -W -y <id-token>
+    <mb_albumid-token> <assignment>`` — the two query tokens are SEPARATE
+    argv elements, never joined into one string, because Beets ANDs
+    distinct argv query tokens implicitly; a joined string would parse as
+    one malformed token instead. ``python -m beets`` is a valid entry point
+    in the pinned 2.13.1, and depending on a ``beet`` binary being on this
+    process's PATH would silently pick up whatever beets the invoking user
+    happens to have. The interpreter and environment come from
     ``lib/util.py::beets_subprocess_env`` — the single source of truth for
     how a beets subprocess finds its config and interpreter.
 
@@ -352,7 +414,7 @@ def run_beets_modify_retag(
         [
             python, "-m", "beets", "modify",
             RETAG_ALBUM_FLAG, RETAG_NOMOVE_FLAG, RETAG_NOWRITE_FLAG,
-            RETAG_YES_FLAG, query, assignment,
+            RETAG_YES_FLAG, *query_tokens, assignment,
         ],
         capture_output=True,
         timeout=timeout,
@@ -498,10 +560,16 @@ def retag_merged_album(
             ),
         )
 
-    query = retag_album_query(old_identity)
+    # `old` is CurrentBeetsUnique here — every other pre-state returned
+    # above. Its album_id is what the compound query pins (#1093 review
+    # residual): the id clause names the EXACT row this resolution
+    # authorized, closing the gap a value-only re-select would leave open
+    # to a second album landing at old_identity between this read and the
+    # subprocess launch.
+    query_tokens = retag_album_query(old_identity, album_id=old.album_id)
     assignment = retag_assignment(new_identity)
     try:
-        run = run_modify(query, assignment)
+        run = run_modify(query_tokens, assignment)
     except Exception as exc:  # noqa: BLE001 - external edge, typed outcome
         modify_note = f"beet modify raised {type(exc).__name__}: {exc}"
         log.warning("beet modify for %s raised: %s", old_identity.release_id, exc)
@@ -537,27 +605,63 @@ def retag_merged_album(
             ),
         )
 
-    # The pre-check already established `old` was uniquely held before this
-    # attempt (every other pre-state returned above, before `run_modify` was
-    # ever called) — so `old_after` no longer being CurrentBeetsUnique is
-    # genuine evidence the library DID move, even though this outcome still
-    # cannot be rekeyed onto. Naming that truthfully matters: "the library
-    # did not move" is correct ONLY while old_after is still Unique; saying
-    # it in the other branch was self-contradictory whenever old_after
-    # showed the old id already gone — e.g. old missing, new ambiguous
-    # across two albums — a real, reachable world this module must never
-    # describe as "did not move" (#1093 item 5).
-    if isinstance(old_after, CurrentBeetsUnique):
+    # Three honest shapes for what "not ready" can mean here (#1093 item 5,
+    # review round 2). `old` is CurrentBeetsUnique — every other pre-state
+    # returned above — so its album_id is the one album THIS execution was
+    # retagging.
+    #
+    # "did not move" is true ONLY when old_after is STILL Unique at the
+    # SAME album_id: nothing happened to the row this execution targeted.
+    # A DIFFERENT album now occupying old_identity (old_after.album_id !=
+    # old.album_id) is a distinct shape — the original occupant is gone,
+    # but old_identity is still held, just by someone else — never "did not
+    # move" and never "moved off" (the id itself is not gone).
+    #
+    # "moved off" is true ONLY when old_after is CurrentBeetsMissing — the
+    # id matches ZERO album rows. CurrentBeetsAmbiguous is NEVER "moved
+    # off": every CurrentBeetsAmbiguous reason
+    # (`multiple_matches`/`conflicting_identity`/`empty_topology`/
+    # `invalid_path`/`unresolved_relative_path`/`split_topology`) requires
+    # `resolve_current_releases` to have found at least one matching album
+    # row — `album_ids` is only ever empty for CurrentBeetsMissing
+    # (`lib/beets_db.py::resolve_current_releases`). Two distinct
+    # self-contradictions have shipped from conflating these: round 1 (the
+    # bug the "did not move" branch above fixes) said "...the library did
+    # not move: <old> is not held; <new> is ambiguous across 7, 8" — wrong
+    # because old_after WAS Missing there, genuine evidence of a move.
+    # Round 2 (this branch) is the SAME conflation from the other
+    # direction: this module's first fix pass unconditionally said "moved
+    # off" whenever old_after was not Unique, which is equally wrong when
+    # old_after is Ambiguous — e.g. a concurrent writer lands a SECOND
+    # album at old_identity, `modify` moves nothing, and old_after reads
+    # Ambiguous(multiple_matches, album_ids=(7, 9)) — the id is still held
+    # (by both albums, including the original 7), never gone.
+    if (
+        isinstance(old_after, CurrentBeetsUnique)
+        and old_after.album_id == old.album_id
+    ):
         return _failed(
             f"{modify_note}, but the library did not move: "
             f"{old_identity.release_id} is {_describe(old_after)}; "
             f"{new_identity.release_id} is {_describe(new_after)}"
         )
+    if isinstance(old_after, CurrentBeetsMissing):
+        return _failed(
+            f"{modify_note}; the library moved off {old_identity.release_id} "
+            "but did not land at a state the caller may rekey onto: "
+            f"{old_identity.release_id} is now {_describe(old_after)}; "
+            f"{new_identity.release_id} is {_describe(new_after)}"
+        )
+    if isinstance(old_after, CurrentBeetsUnique):
+        return _failed(
+            f"{modify_note}; {old_identity.release_id} changed occupant: "
+            f"was album {old.album_id}, is now {_describe(old_after)}; "
+            f"{new_identity.release_id} is {_describe(new_after)}"
+        )
     return _failed(
-        f"{modify_note}; the library moved off {old_identity.release_id} "
-        "but did not land at a state the caller may rekey onto: "
-        f"{old_identity.release_id} is now {_describe(old_after)}; "
-        f"{new_identity.release_id} is {_describe(new_after)}"
+        f"{modify_note}; {old_identity.release_id} is still held but "
+        f"{_describe(old_after)}; {new_identity.release_id} is "
+        f"{_describe(new_after)}"
     )
 
 
