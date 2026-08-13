@@ -95,8 +95,9 @@ def compute_library_rank(
     always the measured single-ladder band, which since issue #1145 is the
     only MP3 ladder there is; before it, this call passed ``is_cbr=False`` and
     got the more generous of two. A library MP3 that a decision would promote
-    on its LAME contract therefore bands one or two tiers below the rank the
-    importer computes for it.
+    on its LAME contract therefore bands below the rank the importer computes
+    for it — by however far the contract outruns the measurement, which for a
+    lo-fi ``-V 0`` can be several tiers.
     """
     if not format_str:
         return BAND_UNKNOWN
@@ -122,12 +123,14 @@ def _band_current_unique(
         if item.bitrate is not None and item.bitrate > 0
     ]
     # The one bps->kbps reduction (issue #1144's ``kbps_from_bps``), not a
-    # local float-divide-and-truncate. This was the last floored copy: the
-    # band a release shows must not sit a kbps below the rank the decision
-    # path computes from the same Beets rows. Its generated pin
-    # (``test_mixed_format_precedence_is_item_order_invariant``) already said
-    # the divergence was invisible only because no band edge fell where floor
-    # and round disagree — moving the MP3 edges in #1145 made one.
+    # local float-divide-and-truncate: the band a release shows must not sit a
+    # kbps below the rank the decision path computes from the same Beets rows.
+    # Its generated pin (``test_mixed_format_precedence_is_item_order_invariant``)
+    # already said the divergence was invisible only because no band edge fell
+    # where floor and round disagree — moving the MP3 edges in #1145 made one.
+    # ``lib/artist_compare.py`` still floors its own bps values for the artist
+    # catalogue overlay; that surface is untouched here and is recorded as a
+    # residual on the #1145 PR rather than claimed as fixed.
     average_kbps = (
         kbps_from_bps(sum(bitrates) // len(bitrates))
         if bitrates else 0

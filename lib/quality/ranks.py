@@ -499,9 +499,10 @@ def quality_rank(
 
     No step reads an encoding mode. ``is_cbr`` used to select between two MP3
     ladders 75 kbps apart, on a boolean derived from per-track bitrate
-    uniformity — not an encoder-mode detector, and absent entirely for 38% of
-    the library. A VBR encode is promoted above the single ladder only by a
-    proven ``-V`` contract at step 3 (``lib.quality.encoder_contract``).
+    uniformity — not an encoder-mode detector, and unknowable for the 4,331 of
+    10,036 live MP3 items whose LAME tag is absent. A VBR encode is promoted
+    above the single ladder only by a proven ``-V`` contract at step 3
+    (``lib.quality.encoder_contract``).
     """
     if format_hint is None and bitrate_kbps is None:
         return QualityRank.UNKNOWN

@@ -59,10 +59,10 @@ through six steps, in order:
 
 **No step reads an encoding mode** (issue #1145). MP3 used to route to
 `cfg.mp3_cbr` or `cfg.mp3_vbr` on an `is_cbr` boolean derived from per-track
-bitrate uniformity — not an encoder-mode detector, absent entirely for 38% of
-the library, and worth a 75 kbps swing in the transparent floor. A VBR encode
-is promoted above the single measured ladder only through step 3, by a proven
-LAME `-V` contract.
+bitrate uniformity — not an encoder-mode detector, unknowable for the 4,331 of
+10,036 live MP3 items whose LAME tag is absent, and worth a 75 kbps swing in
+the transparent floor. A VBR encode is promoted above the single measured
+ladder only through step 3, by a proven LAME `-V` contract.
 
 The **label path** (step 3-4) is what makes lo-fi V0 imports work without the
 old `verified_lossless` blanket bypass: a 207 kbps file with `format="mp3 v0"`

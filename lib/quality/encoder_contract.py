@@ -33,12 +33,13 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 
-#: LAME writes the level it was invoked with. ``-V`` is upper case in every
-#: live string (``-V 0``, ``-V 2 --vbr-new``, ``-V 0 --vbr-old``); a lower-case
-#: ``-v`` is LAME's *verbose* flag and must never be read as a quality level,
-#: so this pattern is deliberately case-sensitive. The trailing guard rejects
-#: a multi-digit run so a hypothetical ``-V 10`` is unparsed rather than
-#: silently truncated to V1.
+#: mutagen renders the LAME tag's quality byte as upper-case ``-V n``, and
+#: that is the spelling of every live string (``-V 0``, ``-V 2 --vbr-new``,
+#: ``-V 0 --vbr-old``). Case-sensitive on purpose: LAME's own CLI also accepts
+#: a lower-case ``-v`` (its documented shorthand for ``-V 4``), but mutagen
+#: never emits that form, so matching it would read a level out of a string no
+#: producer writes. The trailing guard rejects a multi-digit run so a
+#: hypothetical ``-V 10`` is unparsed rather than silently truncated to V1.
 _LAME_VBR_LEVEL_RE = re.compile(r"(?:^|\s)-V\s*([0-9])(?![0-9])")
 
 #: The one preset alias LAME documents as an exact ``-V`` equivalence and the

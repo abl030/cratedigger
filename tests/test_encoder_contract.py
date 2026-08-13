@@ -7,10 +7,11 @@ Every positive fixture here is produced by the REAL encoder (``lame``, in the
 dev shell for exactly this reason) or by the real Beets column, never by a
 hand-typed settings string. That is test-fidelity Rule C applied to an input:
 a contract minted from a literal nobody can emit would be a green test for a
-world that does not exist. The negative fixtures matter just as much — 38% of
-the live MP3 library carries no LAME tag at all, and ffmpeg's own
-``libmp3lame`` writes a bare Xing header with no encoder settings, so both
-"unreadable" shapes below are real populations, not invented ones.
+world that does not exist. The negative fixtures matter just as much — 4,331
+of the 10,036 live MP3 items carry no encoder-settings string at all, and
+ffmpeg's own ``libmp3lame`` writes a bare Xing header with no encoder
+settings, so both "unreadable" shapes below are real populations, not invented
+ones.
 """
 
 from __future__ import annotations
@@ -101,7 +102,9 @@ class TestLameVbrLevelParsing(unittest.TestCase):
         ("blank", "", None),
         ("whitespace only", "   ", None),
         ("absent", None, None),
-        ("lower-case -v is LAME's verbose flag, not a level", "-v 0", None),
+        # LAME's CLI shorthand for -V 4, which mutagen never writes into
+        # the tag. Reading a level out of it would be a guess.
+        ("lower-case -v carries no explicit level", "-v 0", None),
         ("two-digit level is unparsed, never truncated", "-V 10", None),
     ]
 
@@ -194,12 +197,12 @@ class TestRealEncoderProducesTheContract(unittest.TestCase):
             mp3_vbr_contract_format(folder_mp3_encoder_settings(str(album))))
 
     def test_ffmpeg_libmp3lame_writes_no_contract(self) -> None:
-        """The 38%-of-the-library case, from a real encoder that omits the tag.
+        """The untagged-library case, from a real encoder that omits the tag.
 
         ffmpeg's ``libmp3lame`` emits a bare Xing header, so mutagen reports
-        no encoder settings at all. That is the same shape as the 3,648 live
-        items with a blank ``encoder_settings`` column, and it must withhold
-        the contract rather than fall back to a mode guess.
+        no encoder settings at all. That is the same shape as the 4,331 live
+        MP3 items with a blank ``encoder_settings`` column, and it must
+        withhold the contract rather than fall back to a mode guess.
         """
         album = self._album("ffmpeg")
         out = album / "01.mp3"
@@ -437,14 +440,16 @@ class TestTheMintIsGatedOnTheReducedCodec(unittest.TestCase):
     def test_the_codec_gate_alone_stops_a_unanimous_non_mp3_album(self) -> None:
         """The gate at its own seam, with unanimity deliberately satisfied.
 
-        Stated honestly: Beets only populates ``items.encoder_settings`` for
-        MP3 (mediafile reads it out of the LAME tag), so no live album can
-        reduce to a non-MP3 codec while every measured item reports a ``-V``
-        level. The world below is therefore built directly against the
-        module-level helper rather than through Beets — this clause is
-        fail-closed legislation for whatever writer fills that column next,
-        and legislation still has to be shown to work. Without it a FLAC
-        album would be labelled ``mp3 v0`` and drop out of LOSSLESS.
+        Stated honestly, and measured: across the whole live library every
+        non-MP3 item's ``items.encoder_settings`` is blank (AAC, ALAC, FLAC,
+        OGG, Opus and WMA — 83,621 items, zero populated), because the column
+        comes from the LAME tag. So no live album can reduce to a non-MP3
+        codec while every measured item reports a ``-V`` level. The world
+        below is therefore built directly against the module-level helper
+        rather than through Beets — this clause is fail-closed legislation for
+        whatever writer fills that column next, and legislation still has to
+        be shown to work. Without it a FLAC album would be labelled
+        ``mp3 v0`` and drop out of LOSSLESS.
         """
         from lib.beets_db import CurrentBeetsItem, _mp3_contract_or_codec
 

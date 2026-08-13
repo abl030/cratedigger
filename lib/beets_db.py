@@ -403,11 +403,14 @@ def _mp3_contract_or_codec(
     """Promote an all-MP3 album to its proven ``mp3 vN`` contract, or keep the
     reduced codec label.
 
-    Gated on the reduction having produced exactly ``mp3``: a mixed-codec
-    album reduces to its worst codec and must keep that conservative label,
-    and a non-MP3 album has no ``-V`` contract to mint. Unanimity across every
-    measured item is enforced by ``mp3_vbr_contract_format``, which withholds
-    on a single unlabelled or disagreeing file.
+    Gated on the reduction having produced exactly ``mp3``: an album whose
+    canonical codec is something else must keep that label, contract or not —
+    a mixed album that reduces to FLAC would otherwise be relabelled ``mp3 v0``
+    by its MP3 items and drop out of LOSSLESS. Unanimity across every measured
+    item is the second, independent gate, enforced by
+    ``mp3_vbr_contract_format``: one unlabelled or disagreeing file withholds
+    the contract for the whole album, which is also what keeps a mixed album
+    that DOES reduce to ``mp3`` from minting off its MP3 items alone.
     """
     if format_codec_token(reduced_format) != "mp3":
         return reduced_format
