@@ -405,10 +405,12 @@ binds and verify the effective mount behavior. With a private `/mnt`, expose
 broad shared-tree visibility using `BindReadOnlyPaths`, then add writable binds
 only for the unit-specific roots listed above. On doc2, the metadata gate used
 by web, importer, and import-preview-worker writes under
-`/run/cratedigger-metadata-gate`, so that exact directory must appear in those
-units' `ReadWritePaths`; the YouTube worker does not run the gate. This module
-does not grant generic `/run` write access. The issue remains open until this
-module change and the downstream mount/runtime-path configuration are merged,
+`/var/lib/cratedigger-metadata-gate`, so that exact directory must appear in
+those units' `ReadWritePaths`; the YouTube worker does not run the gate. This
+root is separate from `stateDir` and is not part of the upstream module's own
+writable-path derivation, so the downstream wrapper adds it explicitly rather
+than relying on a generic grant. The issue remains open until this module
+change and the downstream mount/runtime-path configuration are merged,
 deployed, and verified on the live units.
 
 ### CD-SEC-18 — Transactional track replacement (Medium)

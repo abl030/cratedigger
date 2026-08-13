@@ -692,9 +692,11 @@ writable binds.
 
 All service phases inherit the sandbox, including downstream `ExecCondition`
 and `ExecStartPre` commands. On doc2, the metadata gate used by web, importer,
-and import-preview-worker writes under `/run/cratedigger-metadata-gate`, so
-that exact directory must appear in those units' `ReadWritePaths`. The
-upstream module deliberately does not grant generic write access to `/run`.
+and import-preview-worker writes under `/var/lib/cratedigger-metadata-gate`, so
+that exact directory must appear in those units' `ReadWritePaths`. This root is
+separate from `stateDir` (`/var/lib/cratedigger`) and is not part of the
+upstream module's own writable-path derivation in the table above, so the
+downstream wrapper adds it explicitly rather than relying on a generic grant.
 
 ## Sops + per-key secrets
 
