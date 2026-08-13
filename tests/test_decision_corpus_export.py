@@ -1218,7 +1218,7 @@ class TestDecisionCorpusExport(unittest.TestCase):
                     script,
                 )
                 completed = subprocess.run(
-                    ["nix-shell", "--run", f"{sys.executable} {script} --help"],
+                    [sys.executable, str(script), "--help"],
                     check=False,
                     capture_output=True,
                     text=True,
@@ -1239,11 +1239,7 @@ class TestDecisionCorpusExport(unittest.TestCase):
                         *(("--counterfactual",) if counterfactual else ()),
                     )
                     completed = subprocess.run(
-                        [
-                            "nix-shell",
-                            "--run",
-                            " ".join((sys.executable, str(script), *args)),
-                        ],
+                        [sys.executable, str(script), *args],
                         check=False,
                         capture_output=True,
                         text=True,
