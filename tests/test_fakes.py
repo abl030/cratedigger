@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import msgspec
 
+from lib.beets_db import AlbumInfo
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.pipeline_db import (
     PersistedDistance,
@@ -6673,6 +6674,170 @@ class TestFakeBeetsDB(unittest.TestCase):
             beets.get_album_info_calls,
             ["mbid-1", "mbid-1", "mbid-unknown"],
         )
+
+    def _rounding_boundary_album(self) -> AlbumInfo:
+        """What the shrunk lineage world really reduces to.
+
+        Hypothesis shrank to three tracks at 32 / 57 / 57 kbps. Their mean
+        is 48666 bps, which production's ``kbps_from_bps`` rounds to 49
+        while a floored copy reads 48 — the one-kbps gap that made a seeded
+        AlbumInfo and its rebuilt twin disagree. (Seeding this AlbumInfo
+        synthesizes 32 / 57 / 58, the whole-kilobit world with the same
+        aggregates.)
+        """
+        return AlbumInfo(
+            album_id=1,
+            track_count=3,
+            min_bitrate_kbps=32,
+            avg_bitrate_kbps=49,
+            median_bitrate_kbps=57,
+            is_cbr=False,
+            album_path="/Beets/Artist/Rounding",
+            format="AAC",
+        )
+
+    def _sub_kilobit_tracks(self) -> list[dict[str, object]]:
+        """Two items whose rate is not a whole number of kilobits.
+
+        Real Beets rows carry raw bits per second, which almost never land
+        on a kilobit boundary. 255600 is where flooring and rounding
+        disagree — 255 against 256 — so a floored copy of either projection
+        shows here and nowhere in the whole-kbps worlds ``set_album_info``
+        can express.
+        """
+        return [
+            {"bitrate": 255_600, "format": "MP3"},
+            {"bitrate": 255_600, "format": "MP3"},
+        ]
+
+    def test_get_album_info_is_the_production_projection(self) -> None:
+        """The fake must not re-derive what album_info_from_current derives.
+
+        Its hand-copied projection floored bps->kbps after production moved
+        to rounding, so the fake answered one kbps low for identical seeded
+        items. Both sides of every assertion were the copy, so nothing could
+        see it.
+        """
+        from lib.beets_db import CurrentBeetsUnique, album_info_from_current
+        from lib.quality import QualityRankConfig
+        from tests.fakes.beets import _lookup_identity
+
+        beets = FakeBeetsDB()
+        beets.set_tracks_for_release("mbid-sub", self._sub_kilobit_tracks())
+
+        identity = _lookup_identity("mbid-sub")
+        assert identity is not None
+        resolution = beets.resolve_current_release(identity)
+        assert isinstance(resolution, CurrentBeetsUnique)
+        expected = album_info_from_current(
+            resolution, QualityRankConfig.defaults(),
+        )
+        assert expected is not None
+        actual = beets.get_album_info("mbid-sub")
+        assert actual is not None
+
+        self.assertEqual(actual.min_bitrate_kbps, expected.min_bitrate_kbps)
+        self.assertEqual(actual.avg_bitrate_kbps, expected.avg_bitrate_kbps)
+        self.assertEqual(
+            actual.median_bitrate_kbps, expected.median_bitrate_kbps,
+        )
+        # 255 is what the floored copy reported.
+        self.assertEqual(actual.min_bitrate_kbps, 256)
+        self.assertEqual(actual.avg_bitrate_kbps, 256)
+        self.assertEqual(actual.median_bitrate_kbps, 256)
+        # Production also publishes the per-item codec set; the copy never
+        # did, so a mixed-codec fake album silently looked single-codec.
+        self.assertEqual(actual.formats_on_disk, expected.formats_on_disk)
+        self.assertEqual(actual.formats_on_disk, frozenset({"mp3"}))
+
+    def test_check_mbids_detail_shares_the_projection_reduction(self) -> None:
+        """The two projections of one album must not disagree in the fake."""
+        beets = FakeBeetsDB()
+        beets.set_tracks_for_release("mbid-sub", self._sub_kilobit_tracks())
+
+        detail = beets.check_mbids_detail(["mbid-sub"])["mbid-sub"]
+        projected = beets.get_album_info("mbid-sub")
+        assert projected is not None
+
+        self.assertEqual(detail["beets_bitrate"], projected.min_bitrate_kbps)
+        self.assertEqual(
+            detail["beets_avg_bitrate"], projected.avg_bitrate_kbps,
+        )
+        self.assertEqual(detail["beets_bitrate"], 256)
+        self.assertEqual(detail["beets_avg_bitrate"], 256)
+
+    def test_seeding_refuses_a_world_production_cannot_reduce_to(self) -> None:
+        """min/avg/median the synthesizer can no longer build.
+
+        32 / 48 / 57 is what the floored helper derived from tracks at
+        32 / 57 / 57, and it is not reachable from whole-kilobit tracks:
+        the median pins two of them at 57000 bps, so the smallest mean the
+        synthesizer can reach already rounds to 49. (Sub-kilobit tracks —
+        31500 / 56500 / 56500 — do reduce to it, which is why the refusal
+        is a limit of this constructor, not a claim about production.)
+        """
+        beets = FakeBeetsDB()
+        with self.assertRaisesRegex(
+            AssertionError, "not jointly expressible",
+        ):
+            beets.set_album_info("mbid-floored", AlbumInfo(
+                album_id=1,
+                track_count=3,
+                min_bitrate_kbps=32,
+                avg_bitrate_kbps=48,
+                median_bitrate_kbps=57,
+                is_cbr=False,
+                album_path="/Beets/Artist/Floored",
+                format="AAC",
+            ))
+
+    def test_seed_projection_checker_rejects_a_mismatched_album(self) -> None:
+        """Known-bad self-test for the seed round-trip's mismatch clause.
+
+        Driven through the real ``set_album_info``, so it also proves the
+        check is wired into seeding rather than merely callable.
+        """
+        class _WrongSynthesis(FakeBeetsDB):
+            @staticmethod
+            def _synthesize_bitrates(info: AlbumInfo) -> list[int]:
+                # Right min and median, wrong top track: production
+                # averages this world to 53, not the 49 asked for. (Nudging
+                # the top track by one kbps is NOT a mutant — 58000 still
+                # reduces to 49, which is the whole point of this check.)
+                return [32_000, 57_000, 70_000]
+
+        beets = _WrongSynthesis()
+        with self.assertRaisesRegex(
+            AssertionError, "do not reduce to the requested AlbumInfo",
+        ):
+            beets.set_album_info("mbid-round", self._rounding_boundary_album())
+
+    def test_seed_projection_checker_rejects_an_unresolvable_release(
+        self,
+    ) -> None:
+        """Known-bad self-test for the seed round-trip's resolution clause.
+
+        An album path that escapes the library root resolves ambiguous, so
+        there is no projection to compare against — also through the real
+        seeding path.
+        """
+        import dataclasses
+
+        beets = FakeBeetsDB()
+        with self.assertRaisesRegex(
+            AssertionError, "does not resolve to a unique current release",
+        ):
+            beets.set_album_info("mbid-escape", dataclasses.replace(
+                self._rounding_boundary_album(), album_path="../escape",
+            ))
+
+    def test_seeding_does_not_record_its_own_verification(self) -> None:
+        """A seed is not an observation the test asked for."""
+        beets = FakeBeetsDB()
+        beets.set_album_info("mbid-round", self._rounding_boundary_album())
+
+        self.assertEqual(beets.resolve_current_release_calls, [])
+        self.assertEqual(beets.get_album_info_calls, [])
 
     def test_check_mbids_uses_seeded_album_exists_state(self) -> None:
         beets = FakeBeetsDB()

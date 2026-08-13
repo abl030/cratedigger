@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import IO
+from unittest.mock import patch
 
 from lib.media_readiness import (
     MediaReadinessError,
@@ -233,3 +235,36 @@ class TestAverageBitrateDerivationPin(unittest.TestCase):
         ):
             with self.subTest(label):
                 self.assertIsNone(average_bitrate_kbps_from_frames(*args))
+
+    def test_the_reader_itself_reports_the_exact_rate(self) -> None:
+        """The fix has to reach the call site, not just the helper.
+
+        ``media_facts_for_path`` is what every consumer actually calls, and
+        it kept its own float derivation until this change. Only ffprobe
+        itself is replaced, at the subprocess leaf; its compact output is
+        then parsed, validated and reduced entirely by production code.
+        """
+        compressed_bytes, sample_count, sample_rate = self.KOPPEL_TRACK_04
+        probe_output = (
+            f"index=0|codec_type=audio|codec_name=mp3"
+            f"|sample_rate={sample_rate}|channels=2\n"
+            f"stream_index=0|nb_samples={sample_count}\n"
+            f"stream_index=0|size={compressed_bytes}\n"
+            f"format_name=mp3\n"
+        )
+
+        def fake_ffprobe(
+            argv: list[str], *, stdout: IO[str], **_kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            stdout.write(probe_output)
+            return subprocess.CompletedProcess(argv, 0)
+
+        with patch(
+            "lib.media_readiness.subprocess.run", side_effect=fake_ffprobe,
+        ):
+            facts = media_facts_for_path("/nonexistent/04 Koppel.mp3")
+
+        # Guards against a fixture that stopped reproducing the live world.
+        self.assertEqual(facts.sample_count, sample_count)
+        self.assertEqual(facts.compressed_audio_bytes, compressed_bytes)
+        self.assertEqual(facts.average_bitrate_kbps, 256)

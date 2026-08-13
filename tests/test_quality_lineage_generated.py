@@ -30,6 +30,7 @@ from lib.import_preview import (
     prepare_current_evidence_for_failure,
 )
 from lib.measurement import PreimportMeasurement
+from lib.media_readiness import kbps_from_bps
 from lib.pipeline_db.download_log import _DownloadLogMixin
 from lib.quality import (
     IMPORT_RESULT_SENTINEL,
@@ -106,10 +107,18 @@ def _coherent_three_track_metrics(
     second: int,
     third: int,
 ) -> tuple[int, int, int, bool]:
-    """Turn generated item bitrates into production-derived album metrics."""
+    """Turn generated item bitrates into production-derived album metrics.
+
+    The album average is reduced by the production helper, not by a
+    test-side ``int(.../3)``. Flooring here derived an AlbumInfo one kbps
+    below the one ``album_info_from_current`` rebuilds from the very same
+    three tracks (it rounds half-up), so the round trip these tests assert
+    was being fed a world production cannot produce.
+    """
 
     minimum, median, maximum = sorted((first, second, third))
-    average = int((minimum + median + maximum) / 3)
+    bitrates_bps = [value * 1000 for value in (minimum, median, maximum)]
+    average = kbps_from_bps(sum(bitrates_bps) // len(bitrates_bps))
     return minimum, average, median, minimum == maximum
 
 
