@@ -512,13 +512,19 @@ class TestModuleScheduling(unittest.TestCase):
         # tests are cost-grouped into two exception-memoizing cached
         # helpers, which only pay off when every one of a group's
         # consumers runs in the same worker process. A blind method_batch
-        # split could land the module's two heaviest nix-eval methods in
-        # one batch; a naive full unshard (this issue's own round 1)
-        # serializes every merged world onto one target instead
-        # (measured: main's own worst-case bin-packed batch is 61.6s, a
-        # full unshard is 118.3s). HOTSPOT_ISOLATED_METHODS below is the
-        # narrower fix: carve the single heaviest consumer into its own
-        # target, bundle everything else into one remainder target.
+        # split could land more than one of the module's heavy nix-eval
+        # methods in one batch (up to 5, main's own scheme); a naive full
+        # unshard (this issue's own round 1) serializes every merged world
+        # onto one target instead (measured: main's own worst-case
+        # bin-packed batch is 61.6s, a full unshard is 118.3s).
+        # HOTSPOT_ISOLATED_METHODS below is the narrower fix: carve the
+        # single heaviest consumer into its own target, bundle everything
+        # else into one remainder target — floor level with main (not
+        # better), at most TWO concurrent heavy nix-eval subprocesses
+        # instead of up to five, which is what makes raising the suite's
+        # worker count affordable (main's own worker-count sweep shows
+        # this module's pole inflating hard with concurrency: 88.0s at 8
+        # workers, 122.7s at 12, 147.7s at 16, 152.3s at 20).
         self.assertEqual(
             HOTSPOT_SHARD_POLICIES,
             {
@@ -541,8 +547,14 @@ class TestModuleScheduling(unittest.TestCase):
         )
 
     def test_isolated_method_ids_are_real_discovered_tests(self) -> None:
-        """Rule C-adjacent: an isolated ID that drifted (renamed/removed)
-        must fail the suite closed, not silently stop isolating anything.
+        """Dev-loop drift signal, not a suite-level guard: hotspot_targets'
+        own runtime check (an isolated ID missing from the real discovery
+        manifest) already fails the suite closed during scheduling, before
+        this test would ever run in a normal `scripts/test.sh` or
+        `run_tests.sh` invocation. This pin exists so a direct
+        `unittest tests.test_parallel_test_runner` run (or an isolated
+        rerun of just this test) also catches a renamed/removed isolated
+        test id quickly, without needing a full scheduling pass.
         """
         for module_name, isolated in HOTSPOT_ISOLATED_METHODS.items():
             discovered = {
@@ -645,9 +657,24 @@ class TestModuleScheduling(unittest.TestCase):
         )
 
         assert_exact_target_coverage(module, test_ids, targets)
-        # Isolation carves one target off; "method" then shards the other
-        # two into one target EACH — three targets total, not two.
         self.assertEqual(len(targets), 3)
+        # A bare target COUNT can't distinguish this from isolation being
+        # disabled entirely: "method" granularity already puts every test
+        # in its own target, so 1 isolated + 2 method shards and 3 plain
+        # method shards both total 3 targets with the same expected_test_ids.
+        # The real discriminator is load_names: hotspot_targets sets it
+        # explicitly for the isolated singleton, while shard_test_ids's
+        # own plain (non-batch) branch leaves it empty (falls back to
+        # test_name at load time) — so under isolation-disabled, the
+        # target covering the "expensive" ID would have load_names == ().
+        isolated_target = next(
+            t for t in targets
+            if t.expected_test_ids == ("tests.test_hotspot.TestCases.test_expensive",)
+        )
+        self.assertEqual(isolated_target.load_names, isolated_target.expected_test_ids)
+        for other in targets:
+            if other is not isolated_target:
+                self.assertEqual(other.load_names, ())
 
     def test_hotspot_targets_rejects_an_unknown_isolated_id(self) -> None:
         """Known-bad self-test: an isolated ID that drifted out of the

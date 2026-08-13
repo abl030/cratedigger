@@ -130,20 +130,22 @@ class TestDecisionDifferentialWrapperContract(unittest.TestCase):
 
 
 #: Issue #1131 review round 2: exception-memoizing cache for the two
-#: cost-grouped nix evaluations below, keyed by an arbitrary string tag.
+#: cost-grouped nix evaluations below, keyed by the EXPRESSION itself
+#: (never a hand-written tag — a stale or mismatched tag would silently
+#: return one expression's cached value for a different one).
 #: ``functools.cache`` does not memoize a raised exception — on a real
 #: module regression every consumer of a failing evaluation would
 #: independently re-pay the full ``nix eval`` just to report the same
 #: failure. Memoizing the exception too means a real regression costs one
 #: nix eval to detect, not one per consumer.
-_NIX_EVAL_CACHE: dict[str, dict[str, object] | BaseException] = {}
+_NIX_EVAL_CACHE: dict[str, dict[str, object] | Exception] = {}
 
 
-def _cached_nix_eval_json(cache_key: str, expression: str) -> dict[str, object]:
-    """Run one ``nix eval --json`` at most once per process per cache key."""
-    cached = _NIX_EVAL_CACHE.get(cache_key)
+def _cached_nix_eval_json(expression: str) -> dict[str, object]:
+    """Run one ``nix eval --json`` at most once per process per expression."""
+    cached = _NIX_EVAL_CACHE.get(expression)
     if cached is not None:
-        if isinstance(cached, BaseException):
+        if isinstance(cached, Exception):
             raise cached
         return cached
     try:
@@ -159,10 +161,13 @@ def _cached_nix_eval_json(cache_key: str, expression: str) -> dict[str, object]:
         value = json.loads(result.stdout)
         if not isinstance(value, dict):
             raise TypeError(value)
-    except BaseException as exc:
-        _NIX_EVAL_CACHE[cache_key] = exc
+    except Exception as exc:
+        # Not `except BaseException`: a Ctrl-C or SystemExit must propagate
+        # normally, never get memoized and instantly re-raised at every
+        # later consumer for the rest of the process.
+        _NIX_EVAL_CACHE[expression] = exc
         raise
-    _NIX_EVAL_CACHE[cache_key] = value
+    _NIX_EVAL_CACHE[expression] = value
     return value
 
 
@@ -172,17 +177,30 @@ def _shared_module_worlds_web_auth_matrix() -> dict[str, object]:
     Issue #1131 review round 2: measured per-world costs are wildly uneven
     (``headlessComposition`` 0.80s, ``beetsReadiness`` 3.46s,
     ``mergedGateway`` 18.67s, ``beetsCapability`` 38.28s, ``webAuthMatrix``
-    65.44s — the pole). Merging every world into ONE evaluation and running
-    the whole module unsharded serializes ALL of that onto a single target
-    and pushes the module's critical-path contribution from main's own
-    61.6s (its worst `method_batch` bin-packing) to 118.3s — a regression,
-    not a fix; that full-unshard attempt is what round 1 of this review
-    reverted. Splitting the merge by cost and restoring a 2-target shard —
-    this world isolated, the other four bundled in
-    ``_shared_module_worlds_rest`` — keeps the floor level with main
-    (~65s vs ~61.6s) while still cutting total nix-eval CPU work (~100.8s
-    measured vs main's ~126.6s) by sharing this evaluation's own preamble
-    across its 39 internal worlds in one process.
+    65.44s — the pole). Running the whole module unsharded (this issue's
+    own round 1) serializes every merged world onto ONE target and pushes
+    the module's critical-path contribution from main's own 61.6s (its
+    worst `method_batch` bin-packing) to 118.3s — a regression, not a fix.
+
+    The CPU saved by merging evaluations is modest, NOT the headline
+    reason for this split: the shared preamble (``getFlake`` + ``import
+    nixpkgs`` + ``import ./nix/beets.nix``) measured at well under 1s
+    forced standalone, so eliminating N-1 redundant preambles is bounded
+    above by roughly N-1 seconds, not by the sum of each eval's SOLO wall
+    time (which double-counts nixpkgs-import work every eval pays whether
+    merged or not). The real reason to split by cost rather than merge
+    everything or run one unsharded target: main's own `method_batch`
+    sharding can (and, this module's own shard simulation shows, does)
+    land more than one of these multi-GB nix-eval methods in the same
+    12-way batch, and a worker-count sweep on main shows this module's
+    pole inflating hard with concurrency (88.0s at 8 workers, 122.7s at
+    12, 147.7s at 16, 152.3s at 20). Isolating this one world caps this
+    module at AT MOST TWO concurrent
+    heavy nix-eval subprocesses (this function's, plus
+    ``_shared_module_worlds_rest``'s), down from up to five under main's
+    own scheme — which is what would make raising the suite's worker
+    count affordable, the next lever on this issue. Floor: level with
+    main's own 61.6s (~61-65s measured), not better.
 
     See ``HOTSPOT_ISOLATED_METHODS`` in ``scripts/run_python_tests.py`` for
     the scheduler half of this split: the whole point is defeated if this
@@ -579,7 +597,7 @@ def _shared_module_worlds_web_auth_matrix() -> dict[str, object]:
           };
       }
     '''
-    return _cached_nix_eval_json("web_auth_matrix", expression)
+    return _cached_nix_eval_json(expression)
 
 
 def _shared_module_worlds_rest() -> dict[str, object]:
@@ -587,16 +605,21 @@ def _shared_module_worlds_rest() -> dict[str, object]:
 
     Issue #1131 review round 2: ``headlessComposition`` (0.80s),
     ``mergedGateway`` (18.67s), ``beetsCapability`` (38.28s), and
-    ``beetsReadiness`` (3.46s) sum to ~61s — close enough to
+    ``beetsReadiness`` (3.46s) sum to ~61s solo — close enough to
     ``webAuthMatrix``'s own 65.44s (see
     ``_shared_module_worlds_web_auth_matrix``) that bundling them into one
     target keeps the module's two-target floor level with main's own
-    worst-case bin-packed batch (61.6s), while still merging away the
-    redundant ``getFlake`` + ``import nixpkgs`` + ``import ./nix/beets.nix``
-    preamble each of these four used to pay independently. Every world here
-    only ever reads ``.config.assertions`` or plain option/service values,
-    never forces ``.system.build.toplevel``, so none of them can raise
-    mid-evaluation and take the others down with it.
+    worst-case bin-packed batch (~61.6s), not better. Merging these four
+    also eliminates 3 of the 4 redundant ``getFlake`` + ``import nixpkgs``
+    + ``import ./nix/beets.nix`` preambles they used to pay independently
+    — each measured at well under 1s standalone, so the CPU this merge
+    actually saves is on the order of a few seconds, not the difference
+    between the four solo totals and one combined run (those totals
+    double-count nixpkgs-import work every eval pays regardless of
+    merging). Every world here only ever reads ``.config.assertions`` or
+    plain option/service values, never forces ``.system.build.toplevel``,
+    so none of them can raise mid-evaluation and take the others down
+    with it.
 
     ``test_injected_basic_path_cannot_render_toplevel`` DOES force
     ``.system.build.toplevel`` to observe the resulting Nix assertion
@@ -993,7 +1016,7 @@ def _shared_module_worlds_rest() -> dict[str, object]:
           };
       }
     '''
-    return _cached_nix_eval_json("rest", expression)
+    return _cached_nix_eval_json(expression)
 
 
 class TestDefaultHeadlessComposition(unittest.TestCase):
@@ -1716,10 +1739,11 @@ class TestModuleVmPerformanceContract(unittest.TestCase):
         through ``nix build .#checks.x86_64-linux.moduleVm`` under KVM
         (4:33 wall vs 5:34 at the old default of 1) rather than a loose
         ``> 1`` bound — a future edit to e.g. 2 cores would pass a `> 1`
-        check without ever being verified under the real VM check, and
-        raising guest cores is known to be able to surface latent timing
-        races (issue #1130's own precedent), so a value change here is a
-        deliberate, re-verified decision, not a silent drift.
+        check without ever being verified under the real VM check. Guest
+        core count changes guest scheduling/timing, which can in principle
+        surface a latent race in a test that happens to be sensitive to
+        it, so a value change here should be a deliberate, re-verified
+        decision under the real VM check, not a silent drift.
         """
         text = MODULE_VM_NIX.read_text(encoding="utf-8")
         match = re.search(r"virtualisation\.cores\s*=\s*(\d+)\s*;", text)

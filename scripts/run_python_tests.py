@@ -73,13 +73,20 @@ AUDITED_FRONTLOAD_MODULES = frozenset({"tests.test_nix_module"})
 #: — a cache only pays off when every one of its consumers runs in the same
 #: worker PROCESS. method_batch splits methods across separate processes by
 #: TEST COUNT, blind to cost, and a naive full unshard (this issue's own
-#: round 1) serializes every merged world onto ONE target. Measured
+#: round 1) serializes every merged world onto ONE target instead. Measured
 #: (round 2 review, quiet 30-core host): main's own method_batch worst case
 #: is 61.6s; a full unshard is 118.3s (+92%); this module's own
 #: HOTSPOT_ISOLATED_METHODS carve-out below restores a 2-target floor level
-#: with main (~65s) while still merging the redundant preamble each
-#: `nix eval` used to pay independently (total eval CPU 100.8s vs main's
-#: 126.6s).
+#: with main (~61-65s), not better. The CPU merging saves is modest — on
+#: the order of a few seconds, bounded by the sub-1s shared preamble each
+#: eliminated `nix eval` call no longer pays, NOT the gap between each
+#: world's SOLO measured time and one combined run. The real payoff is
+#: capping this module at AT MOST TWO concurrent heavy nix-eval
+#: subprocesses instead of up to five under main's own scheme: a
+#: worker-count sweep on main shows this module's pole inflating hard with
+#: concurrency (88.0s at 8 workers, 122.7s at 12, 147.7s at 16, 152.3s at
+#: 20), so bounding its own concurrency is what makes raising the suite's
+#: worker count affordable — the next lever on this issue, not this PR.
 HOTSPOT_SHARD_POLICIES = {
     "tests.test_beets_destructive_configs_generated": "method_batch",
     "tests.test_deploy_pin_generated": "method_batch",
@@ -652,6 +659,17 @@ def hotspot_targets(
     refactored (a rename or removal) without updating this table, and
     fails closed rather than silently dropping coverage.
     """
+    # Same module-membership check shard_test_ids performs. Without a
+    # granularity, the remainder target is built directly (not handed to
+    # shard_test_ids), so this function must enforce it itself — otherwise
+    # a foreign test ID slipped into test_ids would be silently bundled
+    # into the remainder target instead of rejected.
+    prefix = f"{module.name}."
+    foreign = [test_id for test_id in test_ids if not test_id.startswith(prefix)]
+    if foreign:
+        raise ValueError(
+            f"test ID {foreign[0]} does not belong to module {module.name}"
+        )
     unknown = isolated - set(test_ids)
     if unknown:
         raise ValueError(

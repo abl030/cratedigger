@@ -201,13 +201,27 @@ class TestTargetedTestSelection(unittest.TestCase):
                     changed_paths=(relative,),
                     repo_root=REPO_ROOT,
                 )
-                # hotspot_policies={}: this pin only proves every selector
-                # resolves to a real discovered module (issue #1081's actual
-                # concern) — hotspot method/class sharding is a separate,
+                # hotspot_policies={} / hotspot_isolated_methods={}: this pin
+                # only proves every selector resolves to a real discovered
+                # module (issue #1081's actual concern) — hotspot
+                # method/class sharding AND the cost-aware isolation
+                # carve-out (issue #1131 review round 2) are a separate,
                 # already-covered concern (tests.test_parallel_test_runner)
                 # that needs an expensive discovery-manifest subprocess per
-                # hotspot module, irrelevant here.
-                select_test_targets(modules, selection, hotspot_policies={})
+                # hotspot module, irrelevant here. Passing only
+                # hotspot_policies={} is NOT enough on its own:
+                # select_test_targets defaults hotspot_isolated_methods to
+                # the real HOTSPOT_ISOLATED_METHODS registry, so a selector
+                # resolving to tests.test_nix_module would still route
+                # through hotspot_targets (isolation is non-empty even
+                # with an empty shard policy) and raise "missing discovery
+                # manifest" here, since no listed_test_ids was supplied.
+                select_test_targets(
+                    modules,
+                    selection,
+                    hotspot_policies={},
+                    hotspot_isolated_methods={},
+                )
 
     def test_shared_fakes_map_to_their_real_consumers_not_only_test_fakes(
         self,
