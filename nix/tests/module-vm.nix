@@ -4920,6 +4920,19 @@ pkgs.testers.nixosTest {
         "systemctl show cratedigger-import-preview-worker.service "
         "-p InvocationID --value"
     ).strip()
+    # This unit is Type=simple, so systemd reports "active" the moment it
+    # execs -- before the Python interpreter has run the admission check at
+    # all. Reading the journal here samples a window the worker has not yet
+    # written to, which is why the exact-count assertions below flaked to 0
+    # on a slow (TCG-emulated) host while passing under KVM (#1130). The
+    # admission line is emitted AFTER every warning line
+    # (lib/beets_startup.py), so waiting for it proves both are present and
+    # keeps the counts exact rather than weakening them to ">= 1". Same
+    # barrier as the safe/recovered admission sites below.
+    machine.wait_until_succeeds(
+        f"journalctl _SYSTEMD_INVOCATION_ID={warning_invocation} -o cat "
+        "| grep -q 'Beets configuration admitted for preview'"
+    )
     warning_log = machine.succeed(
         f"journalctl _SYSTEMD_INVOCATION_ID={warning_invocation} -o cat"
     )
