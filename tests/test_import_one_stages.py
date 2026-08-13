@@ -2354,6 +2354,67 @@ class TestCleanupStagedDirProtectedRoots(unittest.TestCase):
                 "a disposable per-artist parent must still be pruned",
             )
 
+    def test_unreadable_runtime_config_fails_closed_and_skips_prune(self) -> None:
+        """Issue #1122, review round 3, residual-1: read_runtime_config()'s
+        own documented contract (lib/config.py's docstring, issue #117) is
+        that an unreadable config.ini raises PermissionError -- that raise
+        must not propagate out of this post-import cleanup step, since it
+        runs after Beets has already launched and may be unacknowledged by
+        the caller, so a raise here would turn a config-read hiccup into a
+        crash on a launched-but-unacknowledged child. Fail-closed means
+        "don't prune", not "crash": the staged album directory is still
+        removed (that happens unconditionally, before the guard), but the
+        parent is left untouched rather than guessed at.
+
+        Drives the exception through _cleanup_staged_dir's own
+        read_runtime_config_fn kwarg-DI seam (production default: the real
+        read_runtime_config) rather than an actual chmod(0o000) file:
+        empirically, configparser.RawConfigParser.read() silently swallows
+        OSError (including PermissionError) per file and never lets it
+        reach read_runtime_config()'s own except clause in the Python
+        version this repo pins -- a pre-existing, out-of-scope discrepancy
+        between lib/config.py's docstring/except-clause intent and its
+        current real behavior, not something this PR's guard introduced or
+        is scoped to fix. The injected callable still raises the real,
+        documented exception type (Rule B, test-fidelity.md), matching
+        what read_runtime_config() promises to raise; the DI seam itself
+        (not a patch of our own owned function, tests/test_mock_audit.py's
+        multiline-patch baseline) is the sanctioned way to reach this
+        branch."""
+        from harness.import_one import _cleanup_staged_dir
+        from lib.config import CratediggerConfig
+
+        def _raise_permission_error() -> CratediggerConfig:
+            raise PermissionError(
+                "Cannot read /fake/config.ini — check file mode"
+            )
+
+        with tempfile.TemporaryDirectory() as root:
+            parent = os.path.join(root, "slskd", "Some Artist")
+            staged_path = os.path.join(parent, "Some Album")
+            os.makedirs(staged_path)
+            with open(os.path.join(staged_path, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+
+            # cfg=None (the production default) forces
+            # read_runtime_config_fn() to run -- passing a real cfg would
+            # bypass the raising branch entirely.
+            _cleanup_staged_dir(
+                staged_path, read_runtime_config_fn=_raise_permission_error,
+            )
+
+            self.assertFalse(
+                os.path.exists(staged_path),
+                "the staged album directory is removed unconditionally, "
+                "before the config-dependent guard ever runs",
+            )
+            self.assertTrue(
+                os.path.isdir(parent),
+                "fail-closed means the parent is left untouched when the "
+                "protected-root guard cannot even be evaluated -- never "
+                "pruned on an unproven world",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

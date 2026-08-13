@@ -691,7 +691,9 @@ upstream module VM proves the generic module boundary without downstream
 writable binds.
 
 All service phases inherit the sandbox, including downstream `ExecCondition`
-and `ExecStartPre` commands. On doc2, all four sandboxed units -- web,
+and `ExecStartPre` commands, unless `+`-prefixed (which runs with full
+privileges, bypassing the sandbox entirely -- see below). On doc2, all four
+sandboxed units -- web,
 importer, import-preview-worker, AND youtube-ingest -- run the metadata gate's
 `ExecCondition` start-check and declare `/var/lib/cratedigger-metadata-gate`
 in their `ReadWritePaths` (verified via `systemctl show <unit> -p

@@ -1714,7 +1714,10 @@ def _materialize_quality_evidence_action(
 
 
 def _cleanup_staged_dir(
-    work_path: str, *, cfg: CratediggerConfig | None = None,
+    work_path: str,
+    *,
+    cfg: CratediggerConfig | None = None,
+    read_runtime_config_fn: Callable[[], CratediggerConfig] = read_runtime_config,
 ) -> None:
     if not os.path.isdir(work_path):
         return
@@ -1763,7 +1766,24 @@ def _cleanup_staged_dir(
         # (root deleted -> recreated cratedigger-owned by the next
         # rescue): see lib.processing_paths.protected_staging_roots's
         # docstring.
-        resolved_cfg = cfg or read_runtime_config()
+        # Fail-closed (issue #1122, review round 3, residual-1): the one
+        # raising branch of read_runtime_config() is an unreadable
+        # (PermissionError) config file. This runs post-import, after
+        # Beets has already launched and may be unacknowledged by the
+        # caller -- raising here would turn a config-read hiccup into a
+        # crash on a launched-but-unacknowledged child. Log and skip the
+        # prune instead: the worst case is a harmless leftover empty
+        # directory, never a deleted shared root.
+        try:
+            resolved_cfg = cfg or read_runtime_config_fn()
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+            _log(
+                f"[WARN] staged-dir parent-prune guard could not read "
+                f"runtime config ({type(exc).__name__}: {exc}); skipping "
+                f"prune of {parent}"
+            )
+            _log_timing("cleanup_staged_dir", stage_start)
+            return
         protected = protected_staging_roots(
             processing_dir=resolved_cfg.processing_dir,
             beets_staging_dir=resolved_cfg.beets_staging_dir,
