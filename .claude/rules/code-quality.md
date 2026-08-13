@@ -331,6 +331,119 @@ of checks. The suite's terminal output is a compact complete failure index; the
 printed private-tmpfs bundle contains `summary.json`, `summary.md`, and every
 complete phase log.
 
+**Admission control on the shared test RAM root** (issue #1111): the fixed-size
+tmpfs backing `TMPDIR` has no capacity of its own to arbitrate concurrent
+suites, so `scripts/run_test_suite.py::run_suite` takes an advisory
+`fcntl.flock` (`acquire_suite_admission`, lockfile
+`<runtime>/.cratedigger-test-admission.lock`) before running any phase, held
+for the whole run — never per-phase. Scoped to `run_suite` itself, not to
+every `nix-shell` shellHook entry, which would also serialize interactive
+dev shells that never call `run_suite` at all. `scripts/test.sh` targeted
+runs DO take this same lock: `scripts/run_targeted_tests.py` calls the
+identical `run_suite` with no `runtime_dir` override, so it resolves the
+same shared root and contends for the same lockfile as the canonical suite
+— deliberately, since #1111's own incident record includes a
+`scripts/test.sh` collision (`BrokenProcessPool` at host load ~46) and the
+reap-safety argument below depends on every caller serializing through this
+one lock. A second concurrently-launched `run_suite` call waits, bounded
+(`DEFAULT_ADMISSION_TIMEOUT_SECONDS`, a
+`run_suite(admission_timeout_seconds=...)` kwarg — no environment override,
+unlike the headroom minimum below; expiry is exit-2-indistinguishable from a
+genuine infrastructure failure, a stated residual), printing progress naming
+the contended lockfile and, only when a stored pid+start-ticks pair is BOTH
+present AND verified currently live (`_proc_start_ticks(pid) == ticks`, the
+same `same_process` liveness check `run_final_gate.sh` already uses), the
+current holder's identity — never an unverified one, since the identity is
+cleared on release but a write can itself be lost to the very exhaustion
+this PR exists for, so a stale or unreadable value falls back to the plain
+lockfile-path message rather than confidently naming a dead process
+(`_write_lock_holder_identity` / `_read_lock_holder_identity`, mirroring
+`run_final_gate.sh`'s own helper/gate identity precedent). Since the shellHook's own
+entry-time headroom check (`scripts/test_tmpfs.sh`) runs BEFORE this lock is
+even reached, a naive second suite would still die at shell entry under
+contention with the old unnamed message instead of queueing — so every
+automated launcher of the canonical suite (`scripts/test.sh`,
+`scripts/run_final_gate.sh`, and `scripts/daily_flake_update.sh`'s
+`deterministic_suite` stage — the complete set as of issue #1111 review
+MAJOR-1, grepped for every `nix-shell --run .*run_tests.sh` invocation) sets
+`CRATEDIGGER_SUITE_OWNS_HEADROOM=1` before its own `nix-shell` invocation,
+which tells that shellHook check to skip only its free-bytes refusal
+(everything else in `setup_cratedigger_test_tmpfs` still runs); `run_suite`'s
+own post-lock headroom precondition is then the single enforcement point for
+every suite run launched this way. The documented DIRECT command
+(`nix-shell --run "bash scripts/run_tests.sh"`, CLAUDE.md/README.md/this
+file's own code block above) deliberately stays as-is: a human running it
+interactively gets the entry guard on purpose, since nothing there is
+launching it as an unattended, contention-prone automation.
+
+It is NOT only interactive entries that differ: the var is
+an inherited process-environment setting, so a NESTED `nix-shell` a test
+spawns as its own subprocess (`tests/test_decision_corpus_export.py` does
+this) also inherits it from the enclosing suite and skips the same
+refusal — deliberately, since the enclosing `run_suite` already owns
+headroom enforcement for the whole run and a nested shell re-imposing its
+own would be redundant, not protective. Only a genuinely interactive
+`nix-shell` entry, started outside any suite run, never has this var set and
+keeps its entry guard.
+
+Once admitted, `run_suite` best-effort reaps scratch directories nothing can
+still be writing (`reap_stale_check_bundles`, prefix set
+`_REAPABLE_PREFIXES`: `cratedigger-checks.*` bundles plus this test-infra
+change's own `cratedigger-{suite,admission,reap,headroom}-test-*` fixture
+directories, so a killed test process can't leak one forever) idle past
+`DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS` — safe for another `run_suite`'s own
+bundles specifically, because reaping happens exclusively under the same
+lock every `run_suite` call takes; it is NOT a claim about every possible
+creator of a matching prefix — `tests/test_final_gate_receipt.py` constructs
+a `cratedigger-checks.*` fixture directly, outside `run_suite` and outside
+the lock, and the age gate (not lock exclusivity) is what protects it. The
+4-hour floor protects the bundle's detailed EVIDENCE (per-phase logs,
+summary.md), not receipt reuse itself: `run_final_gate.sh status` checks a
+receipt's `bundle` FILE (a path string) and now separately stats the
+directory it names, failing visibly when it is gone rather than silently
+reporting `pass` over evidence that no longer exists — a receipt's own
+`terminal` verdict was always durable regardless of this floor. Before the
+age gate ever applies, `_receipt_protected_bundles` excludes any bundle path
+still named by a `cratedigger-final-gate.*/bundle` file (receipts are never
+themselves reaped — a different, unlisted prefix) — so a bundle a live
+receipt still references survives regardless of age, preserving both the
+verdict and its evidence for a long-running review (issue #1111 review
+m13). A receipt whose protected bundle turns out to be missing anyway is a
+genuinely dangling receipt; the protection does not paper over that —
+`status`'s own stat check surfaces it, and the honest response is to
+re-run.
+
+`run_suite` then checks headroom (`_check_suite_headroom`, same
+`CRATEDIGGER_TEST_RAM_MIN_BYTES` env var and 1 GiB default as
+`scripts/test_tmpfs.sh`'s own shell-entry guard, and honoring the same
+`CRATEDIGGER_TEST_RAM_ROOT` override when set) BEFORE creating a bundle.
+Insufficient headroom raises `RamRootExhaustedError` immediately, with no
+phase run and no bundle created — the whole suite fails once, with its real
+reason, instead of a phase deep into the run tripping the same guard after
+earlier phases already passed. Mid-run,
+`scripts/run_python_tests.py::_collapse_disk_full_failures` folds every
+disk-full-classified target/test into ONE `test RAM root exhausted`
+`CheckFailureMarker` (`TEST_RAM_ROOT_EXHAUSTED`, shared with
+`scripts/run_test_suite.py`) instead of N separately-indexed disguises
+(`FileNotFoundError` on `raw-output.log`, a Hypothesis `FlakyFailure`, ...);
+classification measures free bytes at the moment a worker's own exception is
+caught (`_classify_target_infrastructure_failure`, same configured
+`CRATEDIGGER_TEST_RAM_MIN_BYTES` floor `run_suite` itself enforces, not the
+running-test classifier's much lower internal 64 MiB fallback) or a running
+test's own ENOSPC-shaped exception fires (`_classify_test_infrastructure_error`,
+unchanged) — never a scan of log text, per the semantic-source-scanner
+prohibition above. Stated honestly: a genuine exhaustion event whose
+measured moment happens to read above the configured floor still shows as an
+ordinary failure — a known miss, never a false green, since nothing here
+ever hides a real defect, only relabels ones it can prove are environmental.
+A target whose failures are ENTIRELY disk-full returns
+`TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE` so the phase (and the suite) reports
+`infrastructure-failure`, not an ordinary `failed`, without touching
+`scripts/run_test_suite.py`'s generic phase-state derivation.
+`scripts/fuzz_burst.sh` and `scripts/run_world_model_burst.py` remain
+entirely outside this gate — a known, stated residual, part of #1111's own
+incident set, not a hidden gap.
+
 **Generated (property-based) production tests**
 (`tests/test_*_generated.py`, Hypothesis)
 run deterministically in the suite. After changing quality policy, run the

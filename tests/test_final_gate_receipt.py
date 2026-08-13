@@ -18,6 +18,7 @@ HELPER = REPO_ROOT / "scripts" / "run_final_gate.sh"
 _FAKE_NIX_SHELL = """#!/usr/bin/env bash
 set -u
 printf '%s\\n' "$@" > "$FAKE_NIX_SHELL_RECORD"
+printf '%s' "${CRATEDIGGER_SUITE_OWNS_HEADROOM:-}" > "$FAKE_NIX_SHELL_HEADROOM_ENV_RECORD"
 printf 'gate output\\n'
 printf 'gate error\\n' >&2
 if [[ "${2:-}" == "bash scripts/run_tests.sh" ]]; then
@@ -53,6 +54,7 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         fake_nix_shell.write_text(_FAKE_NIX_SHELL)
         fake_nix_shell.chmod(0o755)
         self.record = Path(self.fake_bin.name) / "nix-shell.argv"
+        self.headroom_env_record = Path(self.fake_bin.name) / "nix-shell.headroom-env"
         self.created_receipts: list[Path] = []
         self._git("init", "-q")
         self._git("config", "user.email", "tests@example.invalid")
@@ -75,15 +77,27 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         )
 
     def _env(self, mode: str = "exit", exit_code: int = 0) -> dict[str, str]:
-        return os.environ | {
+        # Explicitly cleared, not just left to os.environ: if this test's
+        # OWN suite run was itself launched via scripts/test.sh or
+        # run_final_gate.sh, the ambient environment already carries
+        # CRATEDIGGER_SUITE_OWNS_HEADROOM=1 from THAT wrapper — inheriting
+        # it here would let the MAJOR-3 pin below pass even if
+        # run_final_gate.sh's own `env` prefix were deleted, exactly the
+        # leakage class issue #1111 review M2 already caught once
+        # (tests/test_test_tmpfs.py::low_headroom_environment).
+        env = dict(os.environ)
+        env.pop("CRATEDIGGER_SUITE_OWNS_HEADROOM", None)
+        env |= {
             "XDG_RUNTIME_DIR": str(self.runtime),
             "PATH": f"{self.fake_bin.name}:{os.environ['PATH']}",
             "FAKE_NIX_SHELL_RECORD": str(self.record),
+            "FAKE_NIX_SHELL_HEADROOM_ENV_RECORD": str(self.headroom_env_record),
             "FAKE_NIX_SHELL_MODE": mode,
             "FAKE_NIX_SHELL_EXIT": str(exit_code),
             "FAKE_NIX_SHELL_REPO": self.repo.name,
             "FAKE_NIX_SHELL_BUNDLE": str(self.bundle),
         }
+        return env
 
     def _launch(self, mode: str = "exit", exit_code: int = 0) -> subprocess.Popen[str]:
         process = subprocess.Popen(
@@ -145,6 +159,20 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         self.assertEqual((receipt / "bundle").read_text().strip(), str(self.bundle))
         self.assertEqual((receipt.stat().st_mode & 0o777), 0o700)
 
+    def test_gate_sets_the_suite_owns_headroom_env_var(self) -> None:
+        """Issue #1111 review MAJOR-3: the M2 producer side is otherwise
+        unpinned — deleting `env CRATEDIGGER_SUITE_OWNS_HEADROOM=1` from
+        run_final_gate.sh's own nix-shell invocation would leave every
+        other test green while M2 silently reverts. The fake nix-shell
+        records the var's value from its OWN received environment, not the
+        argv (an `env VAR=val cmd` prefix doesn't change `cmd`'s argv at
+        all, only its environment)."""
+        process = self._launch()
+        self._receipt_from(process)
+        process.communicate(timeout=10)
+
+        self.assertEqual(self.headroom_env_record.read_text(), "1")
+
     def test_nonzero_exit_is_preserved_not_masked(self) -> None:
         process = self._launch(exit_code=23)
         receipt = self._receipt_from(process)
@@ -170,6 +198,29 @@ class FinalGateReceiptTestCase(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing its suite bundle path", result.stderr)
+
+    def test_passing_receipt_whose_bundle_directory_was_reaped_is_rejected(self) -> None:
+        """Issue #1111 review m5: a receipt's own `terminal`/`bundle` FILE
+        surviving is not evidence the bundle DIRECTORY it names still
+        exists — admission-time reaping can remove an idle one. `status`
+        must fail visibly rather than silently report `pass` over evidence
+        that is gone."""
+        process = self._launch()
+        receipt = self._receipt_from(process)
+        process.communicate(timeout=10)
+        shutil.rmtree(self.bundle)
+
+        result = subprocess.run(
+            [str(HELPER), "status", str(receipt)],
+            cwd=self.repo.name,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no longer exists", result.stderr)
+        self.assertIn(str(self.bundle), result.stderr)
 
     def test_active_detached_recovery_requires_the_exact_live_process_identity(self) -> None:
         process = self._launch(mode="sleep")

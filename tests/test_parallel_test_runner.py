@@ -30,15 +30,22 @@ from scripts.run_python_tests import (
     HOTSPOT_SHARD_POLICIES,
     HYPOTHESIS_CASE_STATUSES,
     STRATEGY_SPACE_EXHAUSTED,
+    TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
     WORLD_MODEL_MODULE,
+    ChildInfrastructureError,
     ChildTargetResult,
     HypothesisPropertyStats,
     HypothesisStatsRecorder,
     RecordingTextTestResult,
+    TargetInfrastructureFailure,
+    TargetRunResult,
     TestModule,
     TestTarget,
+    _classify_target_infrastructure_failure,
     _classify_test_infrastructure_error,
+    _collapse_disk_full_failures,
     _iter_test_cases,
+    _run_targets,
     assert_exact_schedule,
     assert_exact_target_coverage,
     assert_hypothesis_deadlines_disabled,
@@ -54,11 +61,23 @@ from scripts.run_python_tests import (
     test_subprocess_environment,
     worker_environment,
 )
+from scripts.run_test_suite import (
+    FAILURE_MARKER_PREFIX,
+    TEST_RAM_ROOT_EXHAUSTED,
+    CheckFailureMarker,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNNER = REPO_ROOT / "scripts" / "run_python_tests.py"
 RUN_TESTS_SH = REPO_ROOT / "scripts" / "run_tests.sh"
 RUN_SUITE = REPO_ROOT / "scripts" / "run_test_suite.py"
+
+
+def _target(name: str) -> TestTarget:
+    return TestTarget(
+        module=TestModule(name=name, path=Path(f"tests/{name}.py"), weight=1),
+        test_name=name,
+    )
 
 
 class TestInfrastructureFailureClassification(unittest.TestCase):
@@ -103,6 +122,278 @@ class TestInfrastructureFailureClassification(unittest.TestCase):
         error = (result.infrastructure_errors or [])[0]
         self.assertEqual(error.kind, "disk_full")
         self.assertIn("stage='snapshot'", error.test_id)
+
+
+class TestWorkerCrashClassification(unittest.TestCase):
+    """A worker's own crash (issue #1111's dominant symptom) is classified
+    by measuring free bytes at the moment it is caught — never by parsing
+    the exception's text."""
+
+    def test_low_measured_headroom_marks_the_failure_disk_full(self) -> None:
+        failure = _classify_target_infrastructure_failure(
+            _target("tests.test_alpha"),
+            FileNotFoundError(2, "No such file or directory", "raw-output.log"),
+            available_bytes=lambda: 1,
+        )
+
+        self.assertTrue(failure.disk_full)
+        self.assertIn("1 bytes free", failure.detail)
+        self.assertIn("FileNotFoundError", failure.detail)
+
+    def test_ample_measured_headroom_is_an_ordinary_worker_failure(self) -> None:
+        failure = _classify_target_infrastructure_failure(
+            _target("tests.test_alpha"),
+            RuntimeError("target subprocess exited 1: traceback"),
+            available_bytes=lambda: 10 * 1024 * 1024 * 1024,
+        )
+
+        self.assertFalse(failure.disk_full)
+        self.assertEqual(failure.detail, "RuntimeError: target subprocess exited 1: traceback")
+
+    def test_unmeasurable_headroom_never_claims_exhaustion(self) -> None:
+        failure = _classify_target_infrastructure_failure(
+            _target("tests.test_alpha"),
+            RuntimeError("boom"),
+            available_bytes=lambda: None,
+        )
+
+        self.assertFalse(failure.disk_full)
+
+    def test_default_floor_is_the_configured_one_gib_minimum_not_64mib(
+        self,
+    ) -> None:
+        """Issue #1111 review M3: 100 MiB free is BELOW run_suite's own
+        configured 1 GiB startup floor (CRATEDIGGER_TEST_RAM_MIN_BYTES) —
+        real exhaustion the suite would refuse to even start under — but
+        was ABOVE the old internal _MIN_VALID_TEMP_HEADROOM_BYTES (64 MiB),
+        so it used to read as an ordinary worker failure. tests/test_
+        decision_corpus_export.py's nested nix-shell subprocesses genuinely
+        fail in exactly this band mid-run.
+        """
+        original = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+        try:
+            os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+            failure = _classify_target_infrastructure_failure(
+                _target("tests.test_alpha"),
+                RuntimeError("target subprocess exited 1: traceback"),
+                available_bytes=lambda: 100 * 1024 * 1024,
+            )
+        finally:
+            if original is not None:
+                os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original
+
+        self.assertTrue(failure.disk_full)
+        self.assertIn("104857600 bytes free", failure.detail)
+
+    def test_explicit_minimum_bytes_overrides_the_configured_default(
+        self,
+    ) -> None:
+        failure = _classify_target_infrastructure_failure(
+            _target("tests.test_alpha"),
+            RuntimeError("boom"),
+            available_bytes=lambda: 100 * 1024 * 1024,
+            minimum_bytes=10 * 1024 * 1024,
+        )
+
+        self.assertFalse(failure.disk_full)
+
+
+class TestCollapseDiskFullFailures(unittest.TestCase):
+    """Issue #1111 item 2: N disk-full-classified failures fold into ONE
+    named failure-index entry; anything else is reported unchanged."""
+
+    def test_no_disk_full_signal_passes_everything_through_unchanged(self) -> None:
+        result = TargetRunResult(
+            target=_target("tests.test_alpha"),
+            worker_pid=1,
+            successful=False,
+            tests_run=3,
+            elapsed_seconds=0.1,
+            output="",
+            failed_test_ids=("tests.test_alpha.Alpha.test_real_bug",),
+        )
+        infra = TargetInfrastructureFailure(
+            target=_target("tests.test_beta"), detail="segfault"
+        )
+
+        remaining_results, remaining_infra, marker = _collapse_disk_full_failures(
+            [result], [infra]
+        )
+
+        self.assertEqual(remaining_results, (result,))
+        self.assertEqual(remaining_infra, (infra,))
+        self.assertIsNone(marker)
+
+    def test_whole_target_worker_crash_is_dropped_and_folded_into_one_marker(
+        self,
+    ) -> None:
+        crashed = TargetInfrastructureFailure(
+            target=_target("tests.test_alpha"),
+            detail="FileNotFoundError: raw-output.log",
+            disk_full=True,
+        )
+        also_crashed = TargetInfrastructureFailure(
+            target=_target("tests.test_beta"),
+            detail="temporary filesystem has 1 bytes free; RuntimeError: exited 1",
+            disk_full=True,
+        )
+
+        remaining_results, remaining_infra, marker = _collapse_disk_full_failures(
+            [], [crashed, also_crashed]
+        )
+
+        self.assertEqual(remaining_results, ())
+        self.assertEqual(remaining_infra, ())
+        self.assertIsNotNone(marker)
+        assert marker is not None
+        self.assertEqual(marker.identity, TEST_RAM_ROOT_EXHAUSTED)
+        self.assertEqual(
+            set(marker.test_ids),
+            {"tests.test_alpha", "tests.test_beta"},
+        )
+
+    def test_a_mixed_target_keeps_its_real_failures_and_strips_only_disk_full_ones(
+        self,
+    ) -> None:
+        result = TargetRunResult(
+            target=_target("tests.test_alpha"),
+            worker_pid=1,
+            successful=False,
+            tests_run=2,
+            elapsed_seconds=0.1,
+            output="",
+            failed_test_ids=(
+                "tests.test_alpha.Alpha.test_real_bug",
+                "tests.test_alpha.Alpha.test_hit_enospc",
+            ),
+            infrastructure_errors=(
+                ChildInfrastructureError(
+                    test_id="tests.test_alpha.Alpha.test_hit_enospc",
+                    kind="disk_full",
+                    detail="OSError: No space left on device",
+                ),
+            ),
+        )
+
+        remaining_results, remaining_infra, marker = _collapse_disk_full_failures(
+            [result], []
+        )
+
+        self.assertEqual(len(remaining_results), 1)
+        self.assertEqual(
+            remaining_results[0].failed_test_ids,
+            ("tests.test_alpha.Alpha.test_real_bug",),
+        )
+        self.assertEqual(remaining_infra, ())
+        self.assertIsNotNone(marker)
+        assert marker is not None
+        self.assertEqual(
+            marker.test_ids, ("tests.test_alpha.Alpha.test_hit_enospc",)
+        )
+
+    def test_a_target_whose_only_failures_are_disk_full_is_dropped_entirely(
+        self,
+    ) -> None:
+        result = TargetRunResult(
+            target=_target("tests.test_alpha"),
+            worker_pid=1,
+            successful=False,
+            tests_run=1,
+            elapsed_seconds=0.1,
+            output="",
+            failed_test_ids=("tests.test_alpha.Alpha.test_hit_enospc",),
+            infrastructure_errors=(
+                ChildInfrastructureError(
+                    test_id="tests.test_alpha.Alpha.test_hit_enospc",
+                    kind="disk_full",
+                    detail="OSError: No space left on device",
+                ),
+            ),
+        )
+
+        remaining_results, _remaining_infra, marker = _collapse_disk_full_failures(
+            [result], []
+        )
+
+        self.assertEqual(remaining_results, ())
+        self.assertIsNotNone(marker)
+
+    def test_database_unavailable_is_never_folded_into_the_ram_root_bucket(
+        self,
+    ) -> None:
+        result = TargetRunResult(
+            target=_target("tests.test_alpha"),
+            worker_pid=1,
+            successful=False,
+            tests_run=1,
+            elapsed_seconds=0.1,
+            output="",
+            failed_test_ids=("tests.test_alpha.Alpha.test_flaky_db",),
+            infrastructure_errors=(
+                ChildInfrastructureError(
+                    test_id="tests.test_alpha.Alpha.test_flaky_db",
+                    kind="database_unavailable",
+                    detail="OperationalError: could not connect",
+                ),
+            ),
+        )
+
+        remaining_results, _remaining_infra, marker = _collapse_disk_full_failures(
+            [result], []
+        )
+
+        self.assertEqual(remaining_results, (result,))
+        self.assertIsNone(marker)
+
+
+class TestRunTargetsWorkerExceptionWiring(unittest.TestCase):
+    """`_run_targets` really delegates to the measured classifier (#1111)."""
+
+    def test_a_real_worker_exception_is_classified_by_live_measured_headroom(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            tests_dir = root / "fixture_tests"
+            tests_dir.mkdir()
+            (tests_dir / "__init__.py").write_text("", encoding="utf-8")
+            (tests_dir / "test_alpha.py").write_text(
+                "import unittest\n\n"
+                "class Alpha(unittest.TestCase):\n"
+                "    def test_ok(self):\n"
+                "        pass\n",
+                encoding="utf-8",
+            )
+            module = TestModule(
+                name="fixture_tests.test_alpha",
+                path=tests_dir / "test_alpha.py",
+                weight=1,
+            )
+            # A real, deterministic parent-side exception (no disk pressure
+            # needed): the child legitimately reports its own real test IDs,
+            # and the parent's own mismatch guard raises before returning.
+            target = TestTarget(
+                module=module,
+                test_name="fixture_tests.test_alpha",
+                expected_test_ids=(
+                    "fixture_tests.test_alpha.Alpha.test_bogus",
+                ),
+            )
+
+            results, infrastructure_failures = _run_targets(
+                (target,),
+                worker_count=1,
+                top_level_directory=root,
+                durations=0,
+            )
+
+        self.assertEqual(results, ())
+        self.assertEqual(len(infrastructure_failures), 1)
+        failure = infrastructure_failures[0]
+        self.assertIn("unexpected test IDs", failure.detail)
+        # Ample real headroom on the host running this test — proves the
+        # measurement is live, not a fake stand-in for "always disk_full".
+        self.assertFalse(failure.disk_full)
 
 
 class TestModuleDiscovery(unittest.TestCase):
@@ -443,6 +734,112 @@ class TestRunnerProcessContract(unittest.TestCase):
         self.assertIn("alpha third failure sentinel", result.stdout)
         self.assertIn("beta delayed failure sentinel", result.stdout)
         self.assertIn("FAILED", result.stdout)
+
+    def _run_enospc_fixture(
+        self, *, mixed: bool
+    ) -> subprocess.CompletedProcess[str]:
+        """Deterministically trip the ENOSPC classifier — no real disk pressure.
+
+        `_classify_test_infrastructure_error` recognises a bare
+        `OSError(errno.ENOSPC, ...)` regardless of the host's actual free
+        space (`_find_disk_full_exception`), so this reproduces issue
+        #1111's "N disguised failures" shape without ever touching the
+        shared tmpfs.
+        """
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            tests_dir = root / "fixture_tests"
+            tests_dir.mkdir()
+            (tests_dir / "__init__.py").write_text("", encoding="utf-8")
+            real_bug = (
+                "    def test_real_bug(self):\n"
+                "        self.assertEqual(0, 1, 'genuine alpha bug')\n"
+                if mixed
+                else ""
+            )
+            (tests_dir / "test_alpha.py").write_text(
+                "import errno\n"
+                "import unittest\n\n"
+                "class Alpha(unittest.TestCase):\n"
+                f"{real_bug}"
+                "    def test_hit_enospc(self):\n"
+                "        raise OSError(errno.ENOSPC, "
+                "'No space left on device')\n",
+                encoding="utf-8",
+            )
+            (tests_dir / "test_beta.py").write_text(
+                "import unittest\n\n"
+                "class Beta(unittest.TestCase):\n"
+                "    def test_ok(self):\n"
+                "        pass\n",
+                encoding="utf-8",
+            )
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(RUNNER),
+                    "--start-directory",
+                    str(tests_dir),
+                    "--top-level-directory",
+                    str(root),
+                    "--jobs",
+                    "2",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+    def test_pure_ram_root_exhaustion_collapses_to_one_named_failure(
+        self,
+    ) -> None:
+        result = self._run_enospc_fixture(mixed=False)
+
+        self.assertEqual(
+            result.returncode,
+            TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
+            result.stdout + result.stderr,
+        )
+        self.assertEqual(
+            result.stdout.count(FAILURE_MARKER_PREFIX),
+            1,
+            "every disk-full-classified failure must fold into ONE marker",
+        )
+        self.assertIn(TEST_RAM_ROOT_EXHAUSTED, result.stdout)
+        self.assertIn("fixture_tests.test_alpha.Alpha.test_hit_enospc", result.stdout)
+
+    def test_mixed_ram_root_exhaustion_still_reports_the_real_bug(self) -> None:
+        result = self._run_enospc_fixture(mixed=True)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stdout.count(FAILURE_MARKER_PREFIX),
+            2,
+            "the real bug and the collapsed disk-full bucket are two "
+            "SEPARATE entries — neither swallows the other",
+        )
+        self.assertIn(TEST_RAM_ROOT_EXHAUSTED, result.stdout)
+        self.assertIn("genuine alpha bug", result.stdout)
+        markers = [
+            msgspec.json.decode(
+                line.removeprefix(FAILURE_MARKER_PREFIX), type=CheckFailureMarker
+            )
+            for line in result.stdout.splitlines()
+            if line.startswith(FAILURE_MARKER_PREFIX)
+        ]
+        identities = {marker.identity for marker in markers}
+        self.assertEqual(identities, {"fixture_tests.test_alpha", TEST_RAM_ROOT_EXHAUSTED})
+        alpha_marker = next(
+            marker
+            for marker in markers
+            if marker.identity == "fixture_tests.test_alpha"
+        )
+        self.assertEqual(
+            alpha_marker.test_ids,
+            ("fixture_tests.test_alpha.Alpha.test_real_bug",),
+        )
 
     def test_each_module_gets_a_fresh_python_interpreter(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

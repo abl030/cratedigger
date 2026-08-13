@@ -17,7 +17,7 @@ import unittest
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import TracebackType
 from typing import Literal, TypeIs
@@ -37,8 +37,10 @@ from lib.json_narrow import json_dict, json_list
 from scripts.run_test_suite import (
     FAILURE_MARKER_PREFIX,
     METRICS_MARKER_PREFIX,
+    TEST_RAM_ROOT_EXHAUSTED,
     CheckFailureMarker,
     CheckMetricsMarker,
+    _default_min_headroom_bytes,
 )
 
 ExcInfo = (
@@ -50,6 +52,16 @@ DEFAULT_MAX_WORKERS = 12
 DEFAULT_DURATIONS = 15
 _FAILURE_MARKER = "=" * 70
 _SCHEMA_READY_ENV = "CRATEDIGGER_TEST_SCHEMA_READY"
+
+#: Distinct from the ordinary "1" failure exit code (issue #1111 item 2):
+#: every failure this run reported turned out to be the shared test RAM root
+#: running out, not a real test defect. scripts/run_test_suite.py's generic
+#: phase-state derivation treats any exit code outside a phase's declared
+#: `failure_exit_codes` (just `(1,)` for the "python" phase) as an
+#: infrastructure failure, so returning this code alone is enough to promote
+#: the phase — and the whole suite — out of an ordinary "failed" state,
+#: without touching that generic logic.
+TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE = 4
 WORLD_MODEL_MODULE = "tests.world_model.state_machine"
 # Method profiling showed the dominant Nix evaluation was otherwise admitted
 # late enough to become the deterministic suite's tail.
@@ -113,6 +125,7 @@ class TargetRunResult:
     elapsed_seconds: float
     output: str
     failed_test_ids: tuple[str, ...]
+    infrastructure_errors: tuple[ChildInfrastructureError, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -121,6 +134,7 @@ class TargetInfrastructureFailure:
 
     target: TestTarget
     detail: str
+    disk_full: bool = False
 
 
 class HypothesisPropertyStats(msgspec.Struct, frozen=True):
@@ -266,6 +280,14 @@ def _is_exception_group(
     return isinstance(error, ExceptionGroup)
 
 
+def _measure_tempdir_available_bytes() -> int | None:
+    """Free bytes on the shared test RAM root right now, or None if unreadable."""
+    try:
+        return shutil.disk_usage(tempfile.gettempdir()).free
+    except OSError:
+        return None
+
+
 def _classify_test_infrastructure_error(
     error: BaseException,
     *,
@@ -275,12 +297,11 @@ def _classify_test_infrastructure_error(
     disk_full = _find_disk_full_exception(error)
     if disk_full is not None:
         return "disk_full", f"{type(disk_full).__name__}: {disk_full}"
-    available = available_temp_bytes
-    if available is None:
-        try:
-            available = shutil.disk_usage(tempfile.gettempdir()).free
-        except OSError:
-            available = None
+    available = (
+        available_temp_bytes
+        if available_temp_bytes is not None
+        else _measure_tempdir_available_bytes()
+    )
     if (
         available is not None
         and available < _MIN_VALID_TEMP_HEADROOM_BYTES
@@ -1085,7 +1106,51 @@ def _run_test_target(target: TestTarget, durations: int) -> TargetRunResult:
         elapsed_seconds=time.monotonic() - started_at,
         output=child.output,
         failed_test_ids=child.failed_test_ids,
+        infrastructure_errors=child.infrastructure_errors,
     )
+
+
+def _classify_target_infrastructure_failure(
+    target: TestTarget,
+    exc: Exception,
+    *,
+    available_bytes: Callable[[], int | None] = _measure_tempdir_available_bytes,
+    minimum_bytes: int | None = None,
+) -> TargetInfrastructureFailure:
+    """Classify a worker's own crash by measuring free bytes right now.
+
+    Covers the shape a running test's own classifier cannot see: the worker
+    subprocess never produced a result at all (the observed
+    ``FileNotFoundError`` on ``raw-output.log``, or any other shape a
+    starved tmpfs produces). Measured, not parsed — the same honest
+    "check bytes at failure time" the running-test classifier already uses
+    (`_classify_test_infrastructure_error`), never a scan of `exc`'s text.
+
+    The floor is the SAME configured minimum ``run_suite``'s own startup
+    precondition enforces (``CRATEDIGGER_TEST_RAM_MIN_BYTES``, 1 GiB
+    default) — not the running-test classifier's much lower internal
+    ``_MIN_VALID_TEMP_HEADROOM_BYTES`` (64 MiB), which is intentionally
+    unchanged. Below the suite's own floor is by definition the unsupported
+    regime, since ``run_suite`` refuses to even start there and the floor
+    only shrinks as the run consumes tmpfs: a worker crash measured in the
+    64 MiB-1 GiB band is real exhaustion this classifier would otherwise
+    miss, wherever in the run it happens to be measured.
+
+    Residual, stated honestly: this can still MISS a genuine exhaustion
+    event whose measured moment happened to read comfortably above the
+    floor (a sudden large write between this check and the crash) — that
+    failure reads as an ordinary worker failure, the same as it always did.
+    It can never fold a genuine code defect INTO this bucket and hide it:
+    nothing here suppresses a failure, only relabels ones it can prove are
+    environmental.
+    """
+    available = available_bytes()
+    floor = minimum_bytes if minimum_bytes is not None else _default_min_headroom_bytes()
+    disk_full = available is not None and available < floor
+    detail = f"{type(exc).__name__}: {exc}"
+    if disk_full:
+        detail = f"temporary filesystem has {available} bytes free; {detail}"
+    return TargetInfrastructureFailure(target=target, detail=detail, disk_full=disk_full)
 
 
 def _run_targets(
@@ -1117,10 +1182,7 @@ def _run_targets(
                 result = future.result()
             except Exception as exc:  # noqa: BLE001 - worker infrastructure boundary
                 infrastructure_failures.append(
-                    TargetInfrastructureFailure(
-                        target=target,
-                        detail=f"{type(exc).__name__}: {exc}",
-                    )
+                    _classify_target_infrastructure_failure(target, exc)
                 )
                 continue
             if result.target != target:
@@ -1135,6 +1197,77 @@ def _run_targets(
                 continue
             results.append(result)
     return tuple(results), tuple(infrastructure_failures)
+
+
+def _collapse_disk_full_failures(
+    failed_results: Sequence[TargetRunResult],
+    infrastructure_failures: Sequence[TargetInfrastructureFailure],
+) -> tuple[
+    tuple[TargetRunResult, ...],
+    tuple[TargetInfrastructureFailure, ...],
+    CheckFailureMarker | None,
+]:
+    """Fold every disk-full-classified failure into one named marker.
+
+    Issue #1111 item 2: a target whose worker never produced a result at all
+    (`TargetInfrastructureFailure.disk_full`) is unambiguous — it contributes
+    nothing else and is dropped from the per-target reporting entirely. A
+    target that ran but had one or more individual tests trip the
+    ENOSPC-shaped classifier mid-run (`ChildInfrastructureError(kind=
+    "disk_full")`, which can also surface as a Hypothesis ``FlakyFailure``)
+    keeps its OTHER, unrelated failures reported normally — only the
+    disk-full test IDs move into the combined bucket. Returns the inputs
+    unchanged with a ``None`` marker when nothing was disk-full, so the
+    ordinary (and by far the common) case is a no-op.
+    """
+    combined_ids: list[str] = []
+    combined_details: list[str] = []
+    remaining_results: list[TargetRunResult] = []
+    for result in failed_results:
+        disk_full_ids = frozenset(
+            error.test_id
+            for error in result.infrastructure_errors
+            if error.kind == "disk_full"
+        )
+        if not disk_full_ids:
+            remaining_results.append(result)
+            continue
+        combined_ids.extend(sorted(disk_full_ids))
+        combined_details.extend(
+            error.detail
+            for error in result.infrastructure_errors
+            if error.kind == "disk_full"
+        )
+        remaining_ids = tuple(
+            test_id
+            for test_id in result.failed_test_ids
+            if test_id not in disk_full_ids
+        )
+        if remaining_ids:
+            remaining_results.append(replace(result, failed_test_ids=remaining_ids))
+
+    remaining_infrastructure: list[TargetInfrastructureFailure] = []
+    for failure in infrastructure_failures:
+        if failure.disk_full:
+            combined_ids.append(failure.target.test_name)
+            combined_details.append(failure.detail)
+        else:
+            remaining_infrastructure.append(failure)
+
+    if not combined_ids:
+        return tuple(remaining_results), tuple(remaining_infrastructure), None
+
+    marker = CheckFailureMarker(
+        identity=TEST_RAM_ROOT_EXHAUSTED,
+        owner="",
+        detail=(
+            f"{len(combined_ids)} target(s)/test(s) failed while the shared "
+            "test RAM root was exhausted; sample: "
+            f"{combined_details[0] if combined_details else 'no detail'}"
+        ),
+        test_ids=tuple(combined_ids),
+    )
+    return tuple(remaining_results), tuple(remaining_infrastructure), marker
 
 
 def _failure_diagnostics(output: str) -> str:
@@ -1270,8 +1403,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     assert_exact_target_schedule(schedule, completed_targets)
 
     if failed_results or infrastructure_failures:
+        (
+            remaining_failed_results,
+            remaining_infrastructure_failures,
+            ram_root_marker,
+        ) = _collapse_disk_full_failures(failed_results, infrastructure_failures)
         for result in sorted(
-            failed_results,
+            remaining_failed_results,
             key=lambda item: item.target.test_name,
         ):
             try:
@@ -1295,7 +1433,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(_failure_diagnostics(result.output))
         for failure in sorted(
-            infrastructure_failures,
+            remaining_infrastructure_failures,
             key=lambda item: item.target.test_name,
         ):
             try:
@@ -1317,8 +1455,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{failure.target.test_name} ---"
             )
             print(failure.detail)
+        if ram_root_marker is not None:
+            # Issue #1111 item 2: every disk-full-classified failure is ONE
+            # named entry here, never N separately-indexed disguises.
+            print(FAILURE_MARKER_PREFIX + msgspec.json.encode(ram_root_marker).decode())
+            print(
+                "\n--- FAIL: "
+                f"{TEST_RAM_ROOT_EXHAUSTED} "
+                f"({len(ram_root_marker.test_ids)} target(s)/test(s)) ---"
+            )
+            print(ram_root_marker.detail)
         known_count = sum(result.tests_run for result in results)
-        failed_targets = len(failed_results) + len(infrastructure_failures)
+        failed_targets = (
+            len(remaining_failed_results)
+            + len(remaining_infrastructure_failures)
+            + (1 if ram_root_marker is not None else 0)
+        )
         print(
             METRICS_MARKER_PREFIX
             + msgspec.json.encode(
@@ -1333,6 +1485,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"\nFAILED: {failed_targets} of {len(schedule)} targets; "
             f"Ran {known_count} reported tests in {wall_seconds:.1f}s"
         )
+        if (
+            not remaining_failed_results
+            and not remaining_infrastructure_failures
+            and ram_root_marker is not None
+        ):
+            return TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
         return 1
 
     total_tests = sum(result.tests_run for result in results)

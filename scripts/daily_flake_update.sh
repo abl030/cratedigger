@@ -112,6 +112,7 @@ run_stage() {
 
 daily_resource_monitor_set_phase runner_overhead
 run_stage deterministic_suite "deterministic full suite" \
+    env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 \
     nix-shell --run "bash scripts/run_tests.sh"
 run_stage stable_nix "stable Nix and Beets-release checks" \
     nix build .#checks.x86_64-linux.beetsStableCandidate --print-build-logs

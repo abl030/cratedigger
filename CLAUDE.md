@@ -205,6 +205,22 @@ suite bundle, specialized evidence, generated/fuzz testing, no-skips policy,
 and hooks — is in `.claude/rules/code-quality.md` § "Test execution, evidence,
 and hooks".
 
+**The shared host's test RAM root is a fixed-size tmpfs with no other admission
+control, so every `run_suite` invocation admits one at a time** (issue #1111):
+an advisory lock, stale-scratch reaping, and a headroom precondition all run
+before any phase. This covers BOTH the canonical suite AND `scripts/test.sh`
+targeted runs — `scripts/run_targeted_tests.py` calls the identical
+`run_suite` with no override, so it shares the same lock (#1111's own
+incident record includes a `scripts/test.sh` collision; excluding targeted
+runs would leave that exact case unprotected). Only the `nix-shell` shellHook
+entry level is excluded, since gating it would also serialize interactive
+dev shells that never call `run_suite`. A second concurrently-launched
+`run_suite` call waits, bounded, instead of colliding with the first one's
+roughly a dozen ephemeral PostgreSQL clusters. Full mechanism — holder
+identity, the shellHook's deferral via `CRATEDIGGER_SUITE_OWNS_HEADROOM`, the
+collapsed `test RAM root exhausted` failure entry, and stated residuals — is
+in `.claude/rules/code-quality.md` § "Test execution, evidence, and hooks".
+
 ## Shared AI surfaces
 
 One authored source exists for each concept; client-specific formats are adapters:

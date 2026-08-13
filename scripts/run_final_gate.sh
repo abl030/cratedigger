@@ -68,7 +68,7 @@ canonical_command() {
 }
 
 status_receipt() {
-    local receipt=$1 runtime parent terminal helper_pid helper_ticks gate_pid gate_ticks
+    local receipt=$1 runtime parent terminal helper_pid helper_ticks gate_pid gate_ticks bundle_path
     runtime=$(runtime_dir)
     [[ -d "$receipt" && ! -L "$receipt" ]] || die "receipt directory is unavailable: $receipt"
     receipt=$(realpath -e "$receipt")
@@ -85,6 +85,17 @@ status_receipt() {
         if [[ "$terminal" == "pass 0" && ! -f "$receipt/bundle" ]]; then
             die "passing receipt is missing its suite bundle path: $receipt"
         fi
+    fi
+    # A receipt's own terminal/bundle FILE surviving is not evidence the
+    # bundle DIRECTORY it names still exists — admission-time reaping
+    # (scripts/run_test_suite.py::reap_stale_check_bundles) can remove an
+    # idle one out from under an old receipt. One stat check, fail-visible,
+    # rather than silently reporting "pass" over evidence that is gone
+    # (issue #1111 review m5).
+    if [[ -f "$receipt/bundle" ]]; then
+        bundle_path=$(<"$receipt/bundle")
+        [[ -d "$bundle_path" ]] \
+            || die "receipt's suite bundle no longer exists (likely reaped): $bundle_path"
     fi
 
     if [[ -f "$receipt/terminal" ]]; then
@@ -145,7 +156,10 @@ run_gate() {
     local -a gate_argv
     runtime=$(runtime_dir)
     command=$(canonical_command)
-    gate_argv=(nix-shell --run "$command")
+    # See scripts/test.sh for why: run_suite()'s own post-lock headroom
+    # precondition is the single enforcement point for suite runs; the
+    # nix-shell shellHook entry guard defers to it here too (issue #1111 M2).
+    gate_argv=(env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 nix-shell --run "$command")
     receipt=$(mktemp -d "$runtime/cratedigger-final-gate.XXXXXXXX") \
         || die "cannot create final-gate receipt beneath $runtime"
     chmod 700 "$receipt" || die "cannot secure receipt directory: $receipt"

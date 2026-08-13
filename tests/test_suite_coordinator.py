@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import io
 import json
 import os
@@ -9,18 +10,32 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
 import msgspec
 
+from scripts.run_python_tests import TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
+from scripts.run_targeted_tests import targeted_phases
 from scripts.run_test_suite import (
     FAILURE_MARKER_PREFIX,
+    TEST_RAM_ROOT_EXHAUSTED,
     CheckFailureMarker,
     CheckSummary,
     PhaseSpec,
+    RamRootExhaustedError,
+    SuiteAdmissionTimeout,
+    _check_suite_headroom,
+    _default_min_headroom_bytes,
     _default_phases,
+    _proc_start_ticks,
+    _read_lock_holder_identity,
+    acquire_suite_admission,
+    admission_lock_path,
     dirty_state_fingerprint,
+    reap_stale_check_bundles,
     run_suite,
 )
 
@@ -42,24 +57,37 @@ def _python_command(output: str, exit_code: int) -> tuple[str, ...]:
 
 class SuiteCoordinatorTestCase(unittest.TestCase):
     def setUp(self) -> None:
-        self.runtime = Path(
+        shared = Path(
             os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
         )
         self.assertTrue(
-            self.runtime.is_dir(),
+            shared.is_dir(),
             "private runtime tmpfs is required for this test",
+        )
+        # A fresh subdirectory per test, not the shared XDG_RUNTIME_DIR
+        # itself: run_suite() now takes an exclusive admission lock scoped to
+        # its runtime_dir (issue #1111), and this module's own tests run
+        # AS PART OF the real canonical suite's own "python" phase, which
+        # already holds that lock on the shared root for the whole run.
+        # Reusing the shared root here would deadlock every nested run_suite()
+        # call in this file against its own enclosing suite invocation.
+        self.runtime = Path(
+            tempfile.mkdtemp(dir=shared, prefix="cratedigger-suite-test-")
         )
         self.bundles: list[Path] = []
 
     def tearDown(self) -> None:
         for bundle in self.bundles:
             shutil.rmtree(bundle, ignore_errors=True)
+        shutil.rmtree(self.runtime, ignore_errors=True)
 
     def _run(
         self,
         phases: tuple[PhaseSpec, ...],
         *,
         command: str = "bash scripts/run_tests.sh",
+        min_headroom_bytes: int | None = 0,
+        admission_timeout_seconds: float = 5.0,
     ):
         stream = io.StringIO()
         result = run_suite(
@@ -68,6 +96,8 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
             runtime_dir=self.runtime,
             stream=stream,
             command=command,
+            min_headroom_bytes=min_headroom_bytes,
+            admission_timeout_seconds=admission_timeout_seconds,
         )
         self.bundles.append(result.bundle)
         return result, stream.getvalue()
@@ -403,6 +433,543 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         )
         self.assertIn("first: unused variable", terminal)
         self.assertIn("second: unused function", terminal)
+
+    def test_ram_root_exhausted_exit_code_is_not_an_ordinary_python_failure_code(
+        self,
+    ) -> None:
+        """Issue #1111 review M4(a)/m14: TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
+        must stay outside the "python" phase's declared failure_exit_codes
+        in BOTH the canonical suite's _default_phases() and the targeted
+        runner's targeted_phases() — either one silently regaining it would
+        let the infrastructure-failure promotion revert with no test
+        noticing, exactly the shape M4 closed for the plain exit-code
+        contract."""
+        canonical_python = next(
+            phase for phase in _default_phases() if phase.name == "python"
+        )
+        targeted_python = next(
+            phase
+            for phase in targeted_phases(("tests.test_typing_ratchet",))
+            if phase.name == "python"
+        )
+        for desc, phase in (
+            ("canonical _default_phases", canonical_python),
+            ("targeted targeted_phases", targeted_python),
+        ):
+            with self.subTest(desc=desc):
+                self.assertNotIn(
+                    TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE, phase.failure_exit_codes
+                )
+
+    def test_pure_ram_root_exhaustion_promotes_the_suite_to_infrastructure_failure(
+        self,
+    ) -> None:
+        """Issue #1111 review M4(b): a "python" phase that emits the
+        collapsed ram-root marker and exits TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
+        must promote the whole suite to infrastructure-failure (exit 2), not
+        an ordinary failed (exit 1) — made permanent from the review's own
+        probe."""
+        marker = msgspec.json.encode(
+            CheckFailureMarker(
+                identity=TEST_RAM_ROOT_EXHAUSTED,
+                owner="",
+                detail=(
+                    "1 target(s)/test(s) failed while the shared test RAM "
+                    "root was exhausted"
+                ),
+                test_ids=("tests.test_alpha",),
+            )
+        ).decode()
+        phases = (
+            PhaseSpec(
+                "python",
+                _python_command(
+                    f"{FAILURE_MARKER_PREFIX}{marker}",
+                    TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
+                ),
+                "python3 scripts/run_python_tests.py",
+                "python",
+            ),
+        )
+
+        result, _terminal = self._run(phases)
+        summary = decode_summary(result.bundle / "summary.json")
+
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(summary.state, "infrastructure-failure")
+        self.assertEqual(summary.phases[0].state, "infrastructure-failure")
+        self.assertEqual(
+            summary.phases[0].failures[0].identity, TEST_RAM_ROOT_EXHAUSTED
+        )
+
+
+class SuiteAdmissionTestCase(unittest.TestCase):
+    """Direct contracts for the exclusive suite-runner admission lock (#1111)."""
+
+    def setUp(self) -> None:
+        shared = Path(
+            os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        )
+        self.assertTrue(
+            shared.is_dir(),
+            "private runtime tmpfs is required for this test",
+        )
+        self.runtime = Path(
+            tempfile.mkdtemp(dir=shared, prefix="cratedigger-admission-test-")
+        )
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.runtime, ignore_errors=True)
+
+    def test_lock_path_is_scoped_to_the_given_runtime_root(self) -> None:
+        self.assertEqual(
+            admission_lock_path(self.runtime),
+            self.runtime / ".cratedigger-test-admission.lock",
+        )
+
+    def test_wait_times_out_and_names_the_contended_lock_path(self) -> None:
+        lock_path = admission_lock_path(self.runtime)
+        held = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        try:
+            stream = io.StringIO()
+            with (
+                self.assertRaises(SuiteAdmissionTimeout) as caught,
+                acquire_suite_admission(
+                    self.runtime,
+                    stream=stream,
+                    timeout_seconds=0.15,
+                    poll_seconds=0.02,
+                    progress_interval_seconds=0.05,
+                ),
+            ):
+                raise AssertionError("must not run while contended")
+            self.assertIn(str(lock_path), str(caught.exception))
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+            os.close(held)
+
+        # A progress message names what it is waiting for BEFORE timing out.
+        self.assertIn("waiting for admission", stream.getvalue())
+        self.assertIn(str(lock_path), stream.getvalue())
+
+    def test_wait_succeeds_once_the_holder_releases(self) -> None:
+        lock_path = admission_lock_path(self.runtime)
+        held = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(held, fcntl.LOCK_EX)
+
+        def _release_shortly() -> None:
+            time.sleep(0.05)
+            fcntl.flock(held, fcntl.LOCK_UN)
+            os.close(held)
+
+        releaser = threading.Thread(target=_release_shortly)
+        releaser.start()
+        try:
+            stream = io.StringIO()
+            entered = False
+            with acquire_suite_admission(
+                self.runtime,
+                stream=stream,
+                timeout_seconds=5.0,
+                poll_seconds=0.02,
+                progress_interval_seconds=0.05,
+            ):
+                entered = True
+            self.assertTrue(entered)
+            self.assertIn("waiting for admission", stream.getvalue())
+            self.assertIn("admission acquired", stream.getvalue())
+        finally:
+            releaser.join(timeout=5.0)
+
+    def test_an_uncontended_lock_is_acquired_without_any_progress_message(
+        self,
+    ) -> None:
+        stream = io.StringIO()
+
+        with acquire_suite_admission(self.runtime, stream=stream):
+            pass
+
+        self.assertEqual(stream.getvalue(), "")
+
+    def test_waiter_reports_the_real_holders_identity(self) -> None:
+        """Issue #1111 review m9: a waiter's progress message names the
+        actual current holder (pid + start ticks), read from what
+        acquire_suite_admission itself writes on acquisition — not just a
+        generic "another canonical suite" with no identity, matching
+        run_final_gate.sh's own helper/gate pid+start-ticks precedent."""
+        holder_ready = threading.Event()
+        release_holder = threading.Event()
+
+        def _hold() -> None:
+            with acquire_suite_admission(self.runtime, stream=io.StringIO()):
+                holder_ready.set()
+                release_holder.wait(5.0)
+
+        holder_thread = threading.Thread(target=_hold)
+        holder_thread.start()
+        try:
+            self.assertTrue(holder_ready.wait(5.0), "holder never acquired")
+            stream = io.StringIO()
+            with (
+                self.assertRaises(SuiteAdmissionTimeout),
+                acquire_suite_admission(
+                    self.runtime,
+                    stream=stream,
+                    timeout_seconds=0.2,
+                    poll_seconds=0.02,
+                    progress_interval_seconds=0.05,
+                ),
+            ):
+                raise AssertionError("must not run while contended")
+            # threading shares one process pid; this proves the wiring reads
+            # what the real holder wrote, not a hand-typed placeholder.
+            self.assertIn(f"pid {os.getpid()}", stream.getvalue())
+            self.assertIn("start ticks", stream.getvalue())
+        finally:
+            release_holder.set()
+            holder_thread.join(timeout=5.0)
+
+    def test_read_lock_holder_identity_rejects_malformed_content(self) -> None:
+        lock_path = admission_lock_path(self.runtime)
+        CASES = (
+            ("missing file", None),
+            ("empty", ""),
+            ("only a pid", "12345"),
+            ("three fields", "12345 6789 extra"),
+            ("non-digit pid", "abc 6789"),
+            ("non-digit ticks", "12345 abc"),
+        )
+        for desc, content in CASES:
+            with self.subTest(desc=desc):
+                if content is not None:
+                    lock_path.write_text(content)
+                elif lock_path.exists():
+                    lock_path.unlink()
+
+                self.assertIsNone(_read_lock_holder_identity(lock_path))
+
+    def test_read_lock_holder_identity_parses_well_formed_live_content(
+        self,
+    ) -> None:
+        """A syntactically well-formed pid+ticks pair is only trusted once
+        verified live (issue #1111 review MAJOR-2) — this uses our own real,
+        currently-running process so the liveness check genuinely passes."""
+        lock_path = admission_lock_path(self.runtime)
+        ticks = _proc_start_ticks(os.getpid())
+        assert ticks is not None
+        lock_path.write_text(f"{os.getpid()} {ticks}\n")
+
+        self.assertEqual(
+            _read_lock_holder_identity(lock_path),
+            f"pid {os.getpid()}, start ticks {ticks}",
+        )
+
+    def test_read_lock_holder_identity_rejects_a_stale_dead_pid(self) -> None:
+        """A syntactically well-formed but DEAD pid+ticks pair — e.g. a
+        lingering write from a holder that has since released — must never
+        be reported as live (issue #1111 review MAJOR-2)."""
+        lock_path = admission_lock_path(self.runtime)
+        # A PID far past any real process on this host; guaranteed dead.
+        lock_path.write_text("999999999 123456\n")
+
+        self.assertIsNone(_read_lock_holder_identity(lock_path))
+
+    def test_waiter_falls_back_to_pathname_only_message_for_a_stale_identity(
+        self,
+    ) -> None:
+        """The waiter must not confidently name a dead process (issue #1111
+        review MAJOR-2): a lingering/bogus identity in the lockfile degrades
+        to the plain lockfile-path message, exercised through the real
+        contended-wait path, not just the pure reader in isolation."""
+        lock_path = admission_lock_path(self.runtime)
+        held = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        lock_path.write_text("999999999 123456\n")
+        try:
+            stream = io.StringIO()
+            with (
+                self.assertRaises(SuiteAdmissionTimeout),
+                acquire_suite_admission(
+                    self.runtime,
+                    stream=stream,
+                    timeout_seconds=0.15,
+                    poll_seconds=0.02,
+                    progress_interval_seconds=0.05,
+                ),
+            ):
+                raise AssertionError("must not run while contended")
+            output = stream.getvalue()
+            self.assertIn("waiting for admission", output)
+            self.assertNotIn("999999999", output)
+            self.assertNotIn("pid ", output)
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+            os.close(held)
+
+    def test_release_clears_the_holder_identity(self) -> None:
+        """Issue #1111 review MAJOR-2: releasing must not leave a stale
+        identity for the next waiter to mis-attribute."""
+        lock_path = admission_lock_path(self.runtime)
+
+        with acquire_suite_admission(self.runtime, stream=io.StringIO()):
+            self.assertNotEqual(lock_path.read_text().strip(), "")
+
+        self.assertEqual(lock_path.read_text().strip(), "")
+
+
+class StaleCheckBundleReapTestCase(unittest.TestCase):
+    """Contracts for admission-time cleanup of stale check bundles (#1111)."""
+
+    def setUp(self) -> None:
+        shared = Path(
+            os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        )
+        self.assertTrue(
+            shared.is_dir(),
+            "private runtime tmpfs is required for this test",
+        )
+        self.runtime = Path(
+            tempfile.mkdtemp(dir=shared, prefix="cratedigger-reap-test-")
+        )
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.runtime, ignore_errors=True)
+
+    def _bundle(self, name: str, *, age_seconds: float, now: float) -> Path:
+        bundle = self.runtime / name
+        bundle.mkdir(mode=0o700)
+        summary = bundle / "summary.json"
+        summary.write_text("{}\n", encoding="utf-8")
+        stamp = now - age_seconds
+        os.utime(summary, (stamp, stamp))
+        return bundle
+
+    def test_reaps_bundles_older_than_the_threshold(self) -> None:
+        now = time.time()
+        stale = self._bundle("cratedigger-checks.stale", age_seconds=999, now=now)
+
+        reaped = reap_stale_check_bundles(
+            self.runtime,
+            max_age_seconds=100,
+            reference_time=now,
+        )
+
+        self.assertEqual(reaped, (stale,))
+        self.assertFalse(stale.exists())
+
+    def test_keeps_bundles_within_the_threshold(self) -> None:
+        now = time.time()
+        fresh = self._bundle("cratedigger-checks.fresh", age_seconds=10, now=now)
+
+        reaped = reap_stale_check_bundles(
+            self.runtime,
+            max_age_seconds=100,
+            reference_time=now,
+        )
+
+        self.assertEqual(reaped, ())
+        self.assertTrue(fresh.exists())
+
+    def test_ignores_directories_matching_no_reapable_prefix(self) -> None:
+        now = time.time()
+        unrelated = self.runtime / "cratedigger-tests.unrelated"
+        unrelated.mkdir(mode=0o700)
+        stamp = now - 999
+        os.utime(unrelated, (stamp, stamp))
+
+        reaped = reap_stale_check_bundles(
+            self.runtime,
+            max_age_seconds=100,
+            reference_time=now,
+        )
+
+        self.assertEqual(reaped, ())
+        self.assertTrue(unrelated.exists())
+
+    def _leaked_test_scaffold(
+        self, name: str, *, age_seconds: float, now: float
+    ) -> Path:
+        """A directory shaped like a killed test process's own leaked
+        tempfile.mkdtemp fixture — no summary.json, just the bare dir."""
+        scaffold = self.runtime / name
+        scaffold.mkdir(mode=0o700)
+        stamp = now - age_seconds
+        os.utime(scaffold, (stamp, stamp))
+        return scaffold
+
+    def test_reaps_stale_test_scaffolding_prefixes_too(self) -> None:
+        """Issue #1111 review m8: a killed test process (SIGKILL, OOM)
+        leaks its tests/test_suite_coordinator.py fixture directory before
+        tearDown can remove it — those prefixes must also age out."""
+        now = time.time()
+        stale = tuple(
+            self._leaked_test_scaffold(name, age_seconds=999, now=now)
+            for name in (
+                "cratedigger-suite-test-leaked",
+                "cratedigger-admission-test-leaked",
+                "cratedigger-reap-test-leaked",
+                "cratedigger-headroom-test-leaked",
+            )
+        )
+        fresh = self._leaked_test_scaffold(
+            "cratedigger-suite-test-current", age_seconds=1, now=now
+        )
+
+        reaped = reap_stale_check_bundles(
+            self.runtime,
+            max_age_seconds=100,
+            reference_time=now,
+        )
+
+        self.assertEqual(set(reaped), set(stale))
+        for path in stale:
+            self.assertFalse(path.exists())
+        self.assertTrue(fresh.exists())
+
+    def _receipt(self, name: str, *, bundle: Path) -> Path:
+        receipt = self.runtime / name
+        receipt.mkdir(mode=0o700)
+        (receipt / "bundle").write_text(f"{bundle}\n", encoding="utf-8")
+        return receipt
+
+    def test_never_reaps_a_bundle_a_live_receipt_still_references(self) -> None:
+        """Issue #1111 review m13: a run_final_gate.sh receipt's own bundle
+        survives regardless of age, preserving both verdict and evidence
+        for a long-running review."""
+        now = time.time()
+        referenced = self._bundle(
+            "cratedigger-checks.referenced", age_seconds=999, now=now
+        )
+        self._receipt("cratedigger-final-gate.live", bundle=referenced)
+
+        reaped = reap_stale_check_bundles(
+            self.runtime, max_age_seconds=100, reference_time=now
+        )
+
+        self.assertEqual(reaped, ())
+        self.assertTrue(referenced.exists())
+
+    def test_still_reaps_an_unreferenced_bundle_alongside_a_protected_one(
+        self,
+    ) -> None:
+        now = time.time()
+        referenced = self._bundle(
+            "cratedigger-checks.referenced", age_seconds=999, now=now
+        )
+        unreferenced = self._bundle(
+            "cratedigger-checks.unreferenced", age_seconds=999, now=now
+        )
+        self._receipt("cratedigger-final-gate.live", bundle=referenced)
+
+        reaped = reap_stale_check_bundles(
+            self.runtime, max_age_seconds=100, reference_time=now
+        )
+
+        self.assertEqual(reaped, (unreferenced,))
+        self.assertTrue(referenced.exists())
+        self.assertFalse(unreferenced.exists())
+
+
+class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
+    """The whole suite fails once, immediately, before any phase runs (#1111)."""
+
+    def setUp(self) -> None:
+        shared = Path(
+            os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        )
+        self.assertTrue(
+            shared.is_dir(),
+            "private runtime tmpfs is required for this test",
+        )
+        self.runtime = Path(
+            tempfile.mkdtemp(dir=shared, prefix="cratedigger-headroom-test-")
+        )
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.runtime, ignore_errors=True)
+
+    def test_insufficient_headroom_fails_before_any_phase_runs(self) -> None:
+        sentinel = self.runtime / "must-not-run"
+        phases = (
+            PhaseSpec(
+                "must-not-run",
+                (
+                    sys.executable,
+                    "-c",
+                    f"open({str(sentinel)!r}, 'w').close()",
+                ),
+                "must-not-run",
+                "generic",
+            ),
+        )
+        stream = io.StringIO()
+
+        with self.assertRaises(RamRootExhaustedError) as caught:
+            run_suite(
+                repo_root=REPO_ROOT,
+                phases=phases,
+                runtime_dir=self.runtime,
+                stream=stream,
+                min_headroom_bytes=1 << 62,
+            )
+
+        self.assertIn(TEST_RAM_ROOT_EXHAUSTED, str(caught.exception))
+        self.assertFalse(sentinel.exists(), "the whole suite must not run")
+        self.assertEqual(
+            list(self.runtime.glob("cratedigger-checks.*")),
+            [],
+            "a headroom failure must not create a bundle",
+        )
+
+    def test_default_headroom_minimum_reads_the_shared_shell_env_var(
+        self,
+    ) -> None:
+        original = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+        try:
+            os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = "123456"
+            self.assertEqual(_default_min_headroom_bytes(), 123456)
+        finally:
+            if original is None:
+                os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+            else:
+                os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original
+
+    def test_malformed_headroom_env_var_fails_closed(self) -> None:
+        original = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+        try:
+            os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = "not-a-number"
+            with self.assertRaises(ValueError):
+                _default_min_headroom_bytes()
+        finally:
+            if original is None:
+                os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+            else:
+                os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original
+
+    def test_headroom_check_honors_the_ram_root_override(self) -> None:
+        """Issue #1111 review m10: CRATEDIGGER_TEST_RAM_ROOT must be measured
+        the same way scripts/test_tmpfs.sh's own shell-entry guard measures
+        it — not silently ignored in favour of the passed-in runtime_dir."""
+        # Matches _REAPABLE_PREFIXES' "cratedigger-headroom-test-" entry — a
+        # differently-worded prefix here would silently escape reaping
+        # (issue #1111 review m12).
+        other = Path(
+            tempfile.mkdtemp(dir=self.runtime.parent, prefix="cratedigger-headroom-test-")
+        )
+        original = os.environ.pop("CRATEDIGGER_TEST_RAM_ROOT", None)
+        try:
+            os.environ["CRATEDIGGER_TEST_RAM_ROOT"] = str(self.runtime)
+            with self.assertRaises(RamRootExhaustedError) as caught:
+                _check_suite_headroom(other, minimum_bytes=1 << 62)
+            self.assertIn(str(self.runtime), str(caught.exception))
+            self.assertNotIn(str(other), str(caught.exception))
+        finally:
+            shutil.rmtree(other, ignore_errors=True)
+            if original is None:
+                os.environ.pop("CRATEDIGGER_TEST_RAM_ROOT", None)
+            else:
+                os.environ["CRATEDIGGER_TEST_RAM_ROOT"] = original
 
 
 class JsCheckHelperTestCase(unittest.TestCase):

@@ -70,14 +70,31 @@ setup_cratedigger_test_tmpfs() {
         current="$(dirname -- "$current")"
     done
 
-    available_bytes="$(
-        df -B1 --output=avail "$parent" | tail -n 1 | tr -d '[:space:]'
-    )" || return 1
-    if (( available_bytes < minimum_bytes )); then
-        echo \
-            "Test RAM root lacks headroom: $parent has $available_bytes bytes, needs $minimum_bytes" \
-            >&2
-        return 1
+    # scripts/test.sh and scripts/run_final_gate.sh set this before their own
+    # nix-shell invocation: run_suite() (scripts/run_test_suite.py) takes an
+    # exclusive admission lock and its own post-lock headroom precondition
+    # for every suite run, canonical or targeted, so it is the single
+    # enforcement point there. Without this skip, a second concurrently-
+    # launched suite would die right here at shell entry with this unnamed
+    # message instead of queueing on the lock (issue #1111 review M2) — this
+    # setup still runs in full otherwise; only the free-bytes refusal defers.
+    # This is inherited process environment, not an entry-time flag: a
+    # NESTED nix-shell a test spawns as its own subprocess (e.g.
+    # tests/test_decision_corpus_export.py) also inherits it from the
+    # enclosing suite and skips the same refusal — deliberately, since the
+    # enclosing run_suite() already owns headroom enforcement for the whole
+    # run. Only a genuinely interactive nix-shell entry, started outside any
+    # suite run, never has this set and keeps its own entry guard.
+    if [[ "${CRATEDIGGER_SUITE_OWNS_HEADROOM:-}" != "1" ]]; then
+        available_bytes="$(
+            df -B1 --output=avail "$parent" | tail -n 1 | tr -d '[:space:]'
+        )" || return 1
+        if (( available_bytes < minimum_bytes )); then
+            echo \
+                "Test RAM root lacks headroom: $parent has $available_bytes bytes, needs $minimum_bytes" \
+                >&2
+            return 1
+        fi
     fi
 
     _CRATEDIGGER_TEST_TMP_PARENT="$parent"
