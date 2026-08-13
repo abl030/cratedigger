@@ -84,6 +84,7 @@ from lib.import_preview import (
 from lib.measurement import ExistingSpectralAuditLookup
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.quality import (
+    AacLatticeCapture,
     AudioQualityMeasurement,
     ImportResult,
     SpectralAnalysisDetail,
@@ -258,6 +259,25 @@ def _materialize_canonical_album(
     return db, ctx, album, staged_album
 
 
+def _stub_aac_lattice(_path: str) -> AacLatticeCapture:
+    """No-op stand-in for the real AAC-lattice frame-DSP.
+
+    ``measure_and_persist_candidate_evidence`` defaults
+    ``aac_lattice_measure_fn`` to the real ``measure_aac_lattice`` (issue
+    #829 PR-A), which decodes every candidate track via a subprocess and
+    runs MDCT/FFT analysis on it — tens of seconds of real CPU per call,
+    on manifests this module builds purely to exercise file *presence*,
+    never audio *content*. It is capture-only for every assertion this
+    module makes: manifest purity, action-file-handoff safety, and
+    rematerialize/dispatch outcomes all key on which files exist under
+    the canonical directory, never on ``AlbumQualityEvidence.aac_lattice``
+    — this is the same sanctioned kwarg-DI seam already used for
+    ``spectral_detail_analyzer`` below, injecting the well-formed "measured
+    nothing" capture instead of the expensive default.
+    """
+    return AacLatticeCapture()
+
+
 def _stub_import_one_run() -> ImportOneRun:
     """A minimal, valid harness result — the harness subprocess itself is
     the sanctioned ``run_import_fn`` kwarg-DI seam (never the sidecar
@@ -339,6 +359,7 @@ def _run_owned_preview_action(
                 attempted=True, grade="genuine", bitrate_kbps=1000,
                 spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
             ),
+            aac_lattice_measure_fn=_stub_aac_lattice,
         )
     assert len(handoffs) == 1, "lossless preview must hand off one action file"
     return result, handoffs[0]
