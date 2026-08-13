@@ -78,12 +78,15 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         self.assertEqual(payload["albums"], [])
 
     def test_missing_beets_is_an_unavailable_report(self) -> None:
+        """#1093 review round 3, finding 1 — 503, not 200: the audit
+        never actually ran, so 200 would let a caller read "no
+        divergence" from a report that answered nothing."""
         from web import server
 
         with patch.object(server, "_beets_db", return_value=None):
             status, payload = self._get("/api/audit/retag-divergence")
 
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 503)
         self.assertEqual(payload["status"], "beets_unavailable")
         self.assertFalse(payload["complete"])
         self.assertIsNotNone(payload["unavailable_detail"])
@@ -110,6 +113,8 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         )
 
     def test_expected_open_failure_is_an_unavailable_report(self) -> None:
+        """#1093 review round 3, finding 1 — 503, not 200 (see
+        ``test_missing_beets_is_an_unavailable_report``)."""
         from web import server
 
         failure = sqlite3.OperationalError("database is locked")
@@ -117,7 +122,7 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         with patch.object(server, "_beets_db", side_effect=failure):
             status, payload = self._get("/api/audit/retag-divergence")
 
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 503)
         self.assertFalse(payload["complete"])
         self.assertEqual(payload["status"], "beets_unavailable")
 

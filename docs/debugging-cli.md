@@ -511,13 +511,21 @@ only that reached prefix. Run the CLI for a full, unbounded census.
 
 Machine-readable output has `status` (`clean`, `divergence_found`,
 `incomplete`, or `beets_unavailable`), `complete`, `counts`, and `albums`
-(only the non-agreeing ones, each with every item's classification). The
-CLI exits 1 iff `status="divergence_found"` — the one thing this
-instrument exists to surface; every other outcome (`clean`, `incomplete`,
-`beets_unavailable`) exits 0, mirroring `pipeline-cli audit world`'s own
-convention that an incomplete or unavailable read is not itself a finding,
-so a cron alerting on exit 1 is never paged for a transient permission
-error or a locked database as though a divergence had appeared. An
+(only the non-agreeing ones, each with every item's classification).
+**Exit/status-code mapping:** `clean` and `incomplete` are `0`/`200` — an
+incomplete scan (unreadable/empty/refused-only findings, or a truncated
+deadline) is not itself a finding, only `divergence_found` is, so it alone
+maps to `1`/`200` — the one thing this instrument exists to surface.
+`beets_unavailable` maps to `5`/`503`: the audit never actually ran, so a
+`0`/`200` there would let a cron or `&& echo "cohort empty"` read "no
+divergence" from a report that answered nothing — `database is locked` /
+`PermissionError` / `FileNotFoundError` are exactly the transient/retryable
+class `.claude/rules/code-quality.md` § CLI ⇄ API Surface Symmetry maps to
+`5`/`503`. **This deliberately diverges from `pipeline-cli audit world` /
+`GET /api/audit/world`, which exit `0`/`200` for their own analogous
+beets-unavailable bucket** — that sibling itself deviates from the
+documented convention; changing an already-shipped command's exit-code
+contract is out of this issue's scope and is left as a follow-up. An
 unexpected schema, decoder, invariant, programming, close, or serialization
 defect remains a transport failure: CLI exit 5 or HTTP 503.
 

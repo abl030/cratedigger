@@ -7387,6 +7387,44 @@ class TestWorldAuditCLI(unittest.TestCase):
             "world_audit_failed",
         )
 
+    def test_render_failure_after_a_successful_scan_still_exits_five(
+        self,
+    ) -> None:
+        """#1093 review round 3, finding 2 — the same defect class as
+        `cmd_audit_retag_divergence`'s finding-5 fix: the previous shape
+        called `msgspec.convert`/the render+encode steps OUTSIDE the try,
+        so a defect there tracebacked out uncaught (Python's default exit
+        1), not the documented exit 5. Fail the RENDER step specifically,
+        after `report` is already computed, to prove the fix covers the
+        whole body, not just the audit call."""
+        import scripts.pipeline_cli.audit as audit_cli
+
+        db = FakePipelineDB()
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", return_value=FakeBeetsDB()),
+            patch.object(
+                audit_cli.msgspec,
+                "to_builtins",
+                side_effect=RuntimeError("render programmer defect"),
+            ),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_world(
+                db,
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        self.assertEqual(rc, 5)
+        self.assertEqual(
+            json.loads(output.getvalue())["error"],
+            "world_audit_failed",
+        )
+
     def test_parser_exposes_nested_audit_world_command(self) -> None:
         from scripts.pipeline_cli.routes_meta import _build_parser
 
@@ -7509,10 +7547,11 @@ class TestRetagDivergenceAuditCLI(unittest.TestCase):
         self.assertEqual(len(payload["albums"]), 1)
         self.assertEqual(payload["albums"][0]["album_class"], "diverges")
 
-    def test_expected_beets_unavailability_exits_zero(self) -> None:
-        """#1093 review finding 6 — matches ``cmd_audit_world``'s own
-        exit-0-for-beets-unavailable convention: a transient/unavailable
-        read is not itself a finding."""
+    def test_expected_beets_unavailability_exits_five(self) -> None:
+        """#1093 review round 3, finding 1 — the audit never actually ran,
+        so exit 0 would let a cron read "no divergence" from a report that
+        answered nothing. `database is locked` is exactly the transient/
+        retryable class `.claude/rules/code-quality.md` maps to 5/503."""
         import scripts.pipeline_cli.audit as audit_cli
 
         failure = sqlite3.OperationalError("database is locked")
@@ -7532,7 +7571,7 @@ class TestRetagDivergenceAuditCLI(unittest.TestCase):
             )
 
         payload = json.loads(output.getvalue())
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 5)
         self.assertEqual(payload["status"], "beets_unavailable")
         self.assertFalse(payload["complete"])
 

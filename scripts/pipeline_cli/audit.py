@@ -118,17 +118,28 @@ def cmd_audit_retag_divergence(db: object, args: object) -> int:
     ``audit`` subcommand's dispatch dict is called with) is unused.
 
     Exit 1 iff ``status == "divergence_found"`` — a genuine identity
-    mismatch, the one thing this instrument exists to surface. Every other
-    outcome (``clean``, ``incomplete``, ``beets_unavailable``) exits 0,
-    mirroring ``cmd_audit_world``'s own convention: an incomplete or
-    unavailable read is not itself a finding, and a cron alerting on exit 1
-    must never be paged for "database is locked" or a permission error as
-    though a divergence had appeared (#1093 review findings 3 and 6). Exit
-    5 covers ONLY an unexpected transport/decode/render defect — the whole
-    body below runs inside the try so a `msgspec.convert`/serialization
-    failure can't traceback out as an unmapped exit 1 (#1093 review
-    finding 5; the previous shape left the argument decode and the
-    render/json-encode steps outside the try).
+    mismatch, the one thing this instrument exists to surface. Exit 5 iff
+    ``status == "beets_unavailable"`` — the audit never actually ran, so
+    exit 0 there would let a cron or `&& echo "cohort empty"` read "no
+    divergence" from a report that answered nothing; `SQLITE_BUSY`/
+    `SQLITE_LOCKED`/`SQLITE_CANTOPEN`, `PermissionError`, and
+    `FileNotFoundError` are exactly the transient/retryable class
+    `.claude/rules/code-quality.md` § CLI ⇄ API Surface Symmetry maps to
+    5/503 (#1093 review round 3, finding 1). ``clean`` and ``incomplete``
+    both exit 0 — an incomplete scan (unreadable/empty/refused-only
+    findings, or a truncated deadline) is not itself a finding, only a
+    genuine divergence is. NOTE: `cmd_audit_world` still exits 0 for its
+    own analogous beets-unavailable bucket — a pre-existing deviation from
+    the same documented convention, deliberately left alone here (see the
+    PR body / post-ship reflection) as an existing command's contract
+    change outside this issue's scope.
+
+    Exit 5 also covers an unexpected transport/decode/render defect — the
+    whole body below runs inside the try so a
+    `msgspec.convert`/serialization failure can't traceback out as an
+    unmapped exit 1 (#1093 review round 2, finding 5; the previous shape
+    left the argument decode and the render/json-encode steps outside the
+    try).
     """
     del db
     try:
@@ -149,13 +160,25 @@ def cmd_audit_retag_divergence(db: object, args: object) -> int:
             "detail": str(exc),
         }))
         return 5
-    return 1 if report.status == "divergence_found" else 0
+    if report.status == "divergence_found":
+        return 1
+    if report.status == "beets_unavailable":
+        return 5
+    return 0
 
 
 def cmd_audit_world(db: WorldAuditPipelineDB, args: object) -> int:
-    """Run the shared world invariant bank without mutating either store."""
-    typed_args = msgspec.convert(vars(args), type=_AuditWorldArgs)
+    """Run the shared world invariant bank without mutating either store.
+
+    The whole body runs inside the try so a `msgspec.convert`/
+    serialization defect can't traceback out as an unmapped exit 1 instead
+    of the documented exit 5 (#1093 review round 3, finding 2 — the same
+    defect class as `cmd_audit_retag_divergence`'s finding-5 fix, in the
+    same function family in the same file; the previous shape here left
+    the argument decode and the render/json-encode steps outside the try).
+    """
     try:
+        typed_args = msgspec.convert(vars(args), type=_AuditWorldArgs)
         report = audit_world_from_factory(
             db,
             lambda: _open_beets(
@@ -163,16 +186,16 @@ def cmd_audit_world(db: WorldAuditPipelineDB, args: object) -> int:
                 typed_args.beets_directory,
             ),
         )
+        if typed_args.json:
+            print(json.dumps(msgspec.to_builtins(report), indent=2))
+        else:
+            _render_text(report)
     except Exception as exc:  # noqa: BLE001 - transport boundary, not typed B
         print(json.dumps({
             "error": "world_audit_failed",
             "detail": str(exc),
         }))
         return 5
-    if typed_args.json:
-        print(json.dumps(msgspec.to_builtins(report), indent=2))
-    else:
-        _render_text(report)
     return 1 if report.status == "integrity_failed" else 0
 
 
