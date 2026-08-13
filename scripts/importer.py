@@ -2115,7 +2115,24 @@ def recover_abandoned_running_jobs(
     for job in db.list_terminal_force_action_cleanup_jobs():
         _record_terminal_force_action_cleanup(db, job, job)
     for job in db.list_terminal_force_wrong_match_cleanup_jobs():
-        _record_terminal_force_wrong_match_cleanup(db, job)
+        try:
+            _record_terminal_force_wrong_match_cleanup(db, job)
+        except Exception:
+            # One unrecoverable job must not crash the whole importer
+            # process (issue #1122 review MEDIUM-4): unlike
+            # ``_record_terminal_force_action_cleanup``'s own callee
+            # (fully exception-safe internally), ``_cleanup_failed_force_import``'s
+            # ``audio_corrupt`` branch calls DB methods with no internal
+            # guard, and an escape here would otherwise propagate through
+            # this startup sweep into ``main()`` — a full process exit
+            # under ``Restart=on-failure`` takes the entire import queue
+            # down in a 5s crash loop over one bad row. The row is left
+            # exactly as it was and retried on the next startup.
+            logger.exception(
+                "Recovery pass failed for wrong-match cleanup job %s; "
+                "continuing",
+                job.id,
+            )
     recovered.extend(recover_abandoned_automation_owners(
         db,
         liveness_probe=liveness_probe,

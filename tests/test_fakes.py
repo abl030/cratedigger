@@ -5161,8 +5161,11 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
 
         Real-PG proof of the same predicate lives in
         ``tests/test_pipeline_db.py`` — this pins the fake against an
-        identical scenario matrix so the two never silently drift
-        (test-fidelity.md's fake-vs-SQL predicate drift class).
+        IDENTICAL scenario matrix so the two never silently drift
+        (test-fidelity.md's fake-vs-SQL predicate drift class). Covers the
+        review-round corrections: MAJOR-1 (success-keyed, not
+        presence-keyed), MAJOR-2/3 (the era-AND-lane marker excludes every
+        historical/non-adjudicating shape by construction).
         """
         from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
 
@@ -5180,6 +5183,8 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
                 ),
             )
 
+        # -- completed arm --------------------------------------------------
+
         completed_missing = _force_job("completed-missing")
         db.mark_import_job_completed(
             completed_missing.id,
@@ -5190,15 +5195,31 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             message="done",
         )
 
-        completed_done = _force_job("completed-done")
+        completed_failed_receipt = _force_job("completed-failed-receipt")
         db.mark_import_job_completed(
-            completed_done.id,
+            completed_failed_receipt.id,
             result={
-                "success": True,
+                "success": True, "message": "done", "deferred": False,
+                "code": None, "post_commit_wrong_match_scenario": None,
+                "wrong_match_dismissal": {
+                    "success": False, "error": "path_unavailable: EACCES",
+                },
+            },
+            message="done",
+        )
+
+        completed_successful_receipt = _force_job("completed-successful-receipt")
+        db.mark_import_job_completed(
+            completed_successful_receipt.id,
+            result={
+                "success": True, "message": "done", "deferred": False,
+                "code": None, "post_commit_wrong_match_scenario": None,
                 "wrong_match_dismissal": {"success": True},
             },
             message="done",
         )
+
+        # -- failed arm -------------------------------------------------
 
         failed_missing = _force_job("failed-missing")
         db.mark_import_job_failed(
@@ -5212,6 +5233,38 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             message="rejected",
         )
 
+        failed_failed_receipt = _force_job("failed-failed-receipt")
+        db.mark_import_job_failed(
+            failed_failed_receipt.id,
+            error="beets rejected: audio_corrupt",
+            result={
+                "success": False, "message": "rejected", "deferred": False,
+                "code": None,
+                "post_commit_wrong_match_scenario": "audio_corrupt",
+                "cleanup": {
+                    "success": False, "outcome": "deleted_operator_force_source",
+                    "error": "path_unavailable: EACCES",
+                },
+            },
+            message="rejected",
+        )
+
+        failed_successful_receipt = _force_job("failed-successful-receipt")
+        db.mark_import_job_failed(
+            failed_successful_receipt.id,
+            error="beets rejected",
+            result={
+                "success": False, "message": "rejected", "deferred": False,
+                "code": None,
+                "post_commit_wrong_match_scenario": "high_distance",
+                "cleanup": {
+                    "success": True,
+                    "outcome": "preserved_operator_force_source",
+                },
+            },
+            message="rejected",
+        )
+
         failed_requeue = _force_job("failed-requeue")
         db.mark_import_job_failed(
             failed_requeue.id,
@@ -5219,19 +5272,9 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             result={
                 "success": False, "message": "requeue UPDATE failed",
                 "deferred": False, "code": "requeue_failed",
+                "post_commit_wrong_match_scenario": None,
             },
             message="requeue UPDATE failed",
-        )
-
-        failed_done = _force_job("failed-done")
-        db.mark_import_job_failed(
-            failed_done.id,
-            error="beets rejected",
-            result={
-                "success": False,
-                "cleanup": {"outcome": "preserved_operator_force_source"},
-            },
-            message="rejected",
         )
 
         failed_deferred = _force_job("failed-deferred")
@@ -5242,20 +5285,54 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
                 "success": False,
                 "message": "Another import is already in progress",
                 "deferred": True, "code": None,
+                "post_commit_wrong_match_scenario": None,
             },
             message="Another import is already in progress",
         )
+
+        # -- historical / non-adjudicating shapes (MAJOR-2/3) ------------
+
+        historical_completed = _force_job("historical-completed-no-marker")
+        db.mark_import_job_completed(
+            historical_completed.id,
+            result={"success": True},
+            message="done",
+        )
+
+        historical_failed = _force_job("historical-failed-no-marker")
+        db.mark_import_job_failed(
+            historical_failed.id,
+            error="RuntimeError: boom",
+            result={"success": False},
+            message="Executor crashed",
+        )
+
+        # A genuinely NULL ``result`` column has no public-API constructor
+        # on the fake either (``mark_import_job_failed`` always writes
+        # ``result or {}``) — reach into the fake's own row store directly,
+        # mirroring the real-PG test's raw ``UPDATE ... result = NULL``.
+        historical_null_result = _force_job("historical-null-result")
+        db.mark_import_job_failed(historical_null_result.id, error="boom")
+        for row in db._import_jobs:
+            if row["id"] == historical_null_result.id:
+                row["result"] = None
+                break
 
         selected = {
             job.id
             for job in db.list_terminal_force_wrong_match_cleanup_jobs()
         }
         self.assertIn(completed_missing.id, selected)
-        self.assertNotIn(completed_done.id, selected)
+        self.assertIn(completed_failed_receipt.id, selected)
+        self.assertNotIn(completed_successful_receipt.id, selected)
         self.assertIn(failed_missing.id, selected)
+        self.assertIn(failed_failed_receipt.id, selected)
+        self.assertNotIn(failed_successful_receipt.id, selected)
         self.assertNotIn(failed_requeue.id, selected)
-        self.assertNotIn(failed_done.id, selected)
         self.assertNotIn(failed_deferred.id, selected)
+        self.assertNotIn(historical_completed.id, selected)
+        self.assertNotIn(historical_failed.id, selected)
+        self.assertNotIn(historical_null_result.id, selected)
 
     def test_search_log_history(self):
         db = FakePipelineDB()

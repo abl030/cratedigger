@@ -197,22 +197,38 @@ behavior load-bearing rather than incidental:
   cleanup of the raw source requires a distinct operator action, never a
   quality result.
 - **A crash between the terminal commit and this receipt is durably
-  retried, not lost** (issue #1122): `lib/pipeline_db/import_jobs.py::
-  list_terminal_force_wrong_match_cleanup_jobs` names any terminal force
-  job whose `result` lacks `wrong_match_dismissal` (success) or `cleanup`
-  (failure), and `scripts/importer.py::recover_abandoned_running_jobs`
-  replays `_dismiss_successful_force_import` /
-  `_cleanup_failed_force_import` for exactly those rows on every importer
-  startup — the SAME helper the live path calls, driven from the `result`
-  JSONB alone (never a live `DispatchOutcome`), so the delete/preserve
-  decision above is identical whether it ran live or was replayed. Two
-  failure-arm rows are excluded because the LIVE path never reaches a
-  cleanup decision for them either: `code = 'requeue_failed'` (the requeue
-  UPDATE itself failed, never even calls the cleanup helper) and
-  `deferred = true` (e.g. release-lock contention — the cleanup helper IS
-  called live but its own first line skips the decision). Replay must
-  reach that identical no-op, not invent a verdict the live path never
-  made.
+  retried, not lost** (issue #1122): `scripts/importer.py::
+  recover_abandoned_running_jobs` replays `_dismiss_successful_force_import`
+  / `_cleanup_failed_force_import` — the SAME helper the live path calls,
+  driven from the `result` JSONB alone, never a live `DispatchOutcome` —
+  for every row `lib/pipeline_db/import_jobs.py::
+  list_terminal_force_wrong_match_cleanup_jobs` names, on every importer
+  startup.
+- **That predicate is a POSITIVE selection rule, not an exclusion
+  enumeration** (issue #1122 review round corrected an unsound draft that
+  shipped as an exclusion list): a row qualifies only if (1) its `result`
+  carries `post_commit_wrong_match_scenario` — an era-AND-lane marker only
+  `scripts/importer.py::_job_result` ever writes, so every historical
+  (pre-#1122) or otherwise non-adjudicating shape is excluded by
+  construction, not by naming each one — measured live on doc2: 619
+  pre-feature rows would have matched a presence-only predicate at first
+  startup (477 completed, 142 failed), none of them actual crash-window
+  rows, and they stay receiptless forever by design; and (2) its existing
+  receipt, if any, is not PROVEN successful
+  (`result #>> '{wrong_match_dismissal,success}'` /
+  `result #>> '{cleanup,success}'` `IS DISTINCT FROM 'true'`) — a receipt
+  can be PRESENT with `success: false` (entry not found, an unsafe path,
+  an `rmtree` failure, an EACCES-shaped `path_unavailable` — the #1063
+  shape), and a presence-only check would treat that failed receipt as
+  "done," parking the row forever; keying on proven success instead means
+  a persistently failing cleanup is retried every startup, never parked.
+  Two failure-arm rows carry the marker but are still excluded, because
+  the LIVE path never reaches a cleanup decision for them either:
+  `code = 'requeue_failed'` (the requeue UPDATE itself failed, never even
+  calls the cleanup helper) and `deferred = true` (e.g. release-lock
+  contention — the cleanup helper IS called live but its own first line
+  skips the decision). Replay must reach that identical no-op, not invent
+  a verdict the live path never made.
 
 ## The `wrong_match_triage` audit block is reducer-only
 

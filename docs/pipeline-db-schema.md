@@ -1125,9 +1125,10 @@ below — see `lib.wrong_match_delete_service`).
    crash between the terminal `completed`/`failed` write and this receipt
    is durably retried, never lost (issue #1122): every importer startup
    replays the same decision, from the persisted `result` JSONB alone, for
-   any terminal force job still missing its `wrong_match_dismissal` or
-   `cleanup` key — see `docs/rejection-routing.md` § "Force-import outcomes
-   (D7)" for the exact query and replay function names.
+   any terminal force job whose era-marked receipt is not yet PROVEN
+   successful — see `docs/rejection-routing.md` § "Force-import outcomes
+   (D7)" for the exact positive selection rule, query, and replay function
+   names.
 
 ```bash
 pipeline_cli.py force-import <download_log_id>
