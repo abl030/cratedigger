@@ -72,6 +72,12 @@ class EphemeralPostgres:
 
     @property
     def _server_options(self) -> tuple[str, ...]:
+        # This cluster is disposable: its data is destroyed at teardown (or
+        # on the next reboot if teardown never runs) and it is used by
+        # exactly one test worker process. Every setting below trades a
+        # production durability/scalability guarantee this world does not
+        # need for less RAM and less tmpfs — do NOT copy this list into a
+        # production or long-lived Postgres config.
         return (
             f"-k {self._socket_dir}",
             "-c listen_addresses=''",
@@ -80,6 +86,39 @@ class EphemeralPostgres:
             # instead of relying on the five-minute production default.
             "-c checkpoint_timeout=30s",
             "-c checkpoint_completion_target=0.1",
+            # 128MB (the stock default) is sized for a real workload's
+            # buffer pool; a throwaway schema exercised by one worker at a
+            # time never approaches it. This is the single biggest real-RAM
+            # lever available (issue #1131) — it does not touch tmpfs bytes,
+            # since shared_buffers is anonymous shared memory, not a file
+            # under the data directory.
+            "-c shared_buffers=16MB",
+            # No crash recovery is ever performed on this cluster — it is
+            # deleted outright on any failure (EphemeralPostgres._cleanup)
+            # rather than restarted against its data directory. Durability
+            # and torn-page protection exist to survive a crash; skipping
+            # them here is safe by construction, not merely acceptable.
+            "-c fsync=off",
+            "-c full_page_writes=off",
+            "-c synchronous_commit=off",
+            # Recycled-WAL-segment floor. The stock 80MB/1GB defaults size
+            # for sustained production write volume; shrinking both keeps
+            # pg_wal from ballooning under a busy test worker while staying
+            # well above the single-segment floor initdb --wal-segsize=1
+            # already established below.
+            "-c min_wal_size=32MB",
+            "-c max_wal_size=64MB",
+            # Autovacuum exists to reclaim space and update planner stats
+            # over a database's working lifetime. Nothing here has one:
+            # tests TRUNCATE between runs (reclaiming space immediately,
+            # unlike DELETE) and the whole cluster is destroyed in minutes.
+            "-c autovacuum=off",
+            # One worker process owns this cluster; the busiest concurrent-
+            # connection tests in this repo top out around 2-3 threads
+            # sharing it. 20 keeps a comfortable multiple of that instead of
+            # reserving shared-memory bookkeeping (PGPROC slots, the lock
+            # table) for the stock 100.
+            "-c max_connections=20",
         )
 
     def _failure_detail(self, error: subprocess.CalledProcessError) -> str:
@@ -135,6 +174,12 @@ class EphemeralPostgres:
                 [
                     "initdb", "-D", str(self._datadir), "--no-locale", "-E", "UTF8",
                     "-A", "trust",
+                    # Disposable cluster (see _server_options): skip initdb's
+                    # own fsync of the freshly written catalog files, and
+                    # shrink the WAL segment size to its 1MB floor so pg_wal
+                    # starts (and stays) far below the 16MB-per-segment
+                    # default footprint.
+                    "--no-sync", "--wal-segsize=1",
                 ],
                 capture_output=True,
                 check=True,

@@ -71,6 +71,14 @@ class TestEphemeralPostgresIsolation(unittest.TestCase):
                 "-c listen_addresses=''",
                 "-c checkpoint_timeout=30s",
                 "-c checkpoint_completion_target=0.1",
+                "-c shared_buffers=16MB",
+                "-c fsync=off",
+                "-c full_page_writes=off",
+                "-c synchronous_commit=off",
+                "-c min_wal_size=32MB",
+                "-c max_wal_size=64MB",
+                "-c autovacuum=off",
+                "-c max_connections=20",
             ),
         )
 
@@ -83,6 +91,40 @@ class TestEphemeralPostgresIsolation(unittest.TestCase):
                     "current_setting('checkpoint_completion_target')"
                 )
                 self.assertEqual(cursor.fetchone(), ("30s", "0.1"))
+
+    def test_live_cluster_applies_the_disposable_diet_settings(self) -> None:
+        """Issue #1131: every RAM/tmpfs trim actually takes effect live.
+
+        `_server_options` is a seam-level pin on the argv shape; this proves
+        PostgreSQL itself accepted and applied every setting rather than
+        silently falling back to a stock default on a typo or a rejected
+        value.
+        """
+        with EphemeralPostgres() as pg:
+            assert pg.dsn is not None
+            with psycopg2.connect(pg.dsn) as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT current_setting('shared_buffers'), "
+                    "current_setting('fsync'), "
+                    "current_setting('full_page_writes'), "
+                    "current_setting('synchronous_commit'), "
+                    "current_setting('min_wal_size'), "
+                    "current_setting('max_wal_size'), "
+                    "current_setting('autovacuum'), "
+                    "current_setting('max_connections')"
+                )
+                self.assertEqual(
+                    cursor.fetchone(),
+                    ("16MB", "off", "off", "off", "32MB", "64MB", "off", "20"),
+                )
+
+    def test_initdb_shrinks_the_wal_segment_size_to_its_floor(self) -> None:
+        """--wal-segsize=1 is initdb-time, so pin it directly (issue #1131)."""
+        with EphemeralPostgres() as pg:
+            assert pg.dsn is not None
+            with psycopg2.connect(pg.dsn) as connection, connection.cursor() as cursor:
+                cursor.execute("SHOW wal_segment_size")
+                self.assertEqual(cursor.fetchone(), ("1MB",))
 
     def test_long_tmpdir_keeps_socket_path_below_postgres_limit(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as root:
