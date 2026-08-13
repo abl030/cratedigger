@@ -2523,17 +2523,28 @@ in {
       # not by leaving the worker dead.
       #
       # Issue #1089: the importer now catches this same ordinary deploy
-      # SIGTERM and stops claiming new jobs while letting its own in-flight
-      # job (beets child included) finish — a graceful drain, not a
-      # behavior change to the restart itself. ``TimeoutStopSec`` bounds
-      # how long systemd waits for that drain before it falls back to
-      # SIGKILL, same as before this existed. A large virtiofs import can
-      # still exceed this bound (the #1089 RCA's own 51-track box set ran
-      # 26 minutes) — that residual SIGKILL-mid-import world is NOT fixed
-      # here; it is exactly what recovery-side crash-debris removal
-      # (``lib.automation_recovery_debris``) now cleans up on the next
-      # startup/liveness-reprobe sweep, so a bounded wait here is
-      # deliberately preferred over an unbounded one.
+      # SIGTERM and stops claiming new jobs, letting its own in-flight job
+      # finish. That drain is only real with ``KillMode = "mixed"``: the
+      # systemd DEFAULT (``control-group``) delivers SIGTERM to every
+      # process in the unit's cgroup at once, including the beets child
+      # subprocess — which has no handler and dies immediately regardless
+      # of what the parent does (the RCA's own <1s stop). ``mixed`` signals
+      # only the main PID; the child is untouched by the graceful stop and
+      # can genuinely finish. ``TimeoutStopSec`` bounds how long systemd
+      # waits for that drain before ``mixed``'s own escalation — a
+      # cgroup-wide SIGKILL that takes the still-running child down with
+      # the parent. A large virtiofs import can still exceed this bound
+      # (the #1089 RCA's own 51-track box set ran 26 minutes); that
+      # residual SIGKILL-mid-import world lands the owner process itself
+      # dead, which is exactly the abandoned-owner recovery sweep
+      # (`recover_abandoned_automation_owners`) and its recovery-side
+      # crash-debris removal (`lib.automation_recovery_debris`) already
+      # cover — a bounded wait here is deliberately preferred over an
+      # unbounded one. The SAME debris check is also wired into the
+      # in-process self-heal path (`_self_heal_automation_world_failure`)
+      # for every OTHER child-death-with-surviving-parent world (OOM, a
+      # crash, an operator `kill -9` of just the child) that this
+      # KillMode change does not touch.
       restartIfChanged = true;
       path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
       serviceConfig = (untrustedInputSandbox importerSandboxWritePaths) // {
@@ -2548,6 +2559,7 @@ in {
         WorkingDirectory = cfg.stateDir;
         Restart = "on-failure";
         RestartSec = 5;
+        KillMode = "mixed";
         TimeoutStopSec = "10min";
       };
     };

@@ -32,10 +32,28 @@ debris mode (``BeetsDeleteRequest.debris_confinement_root``) removes ONLY the
 Beets catalog row (``album.remove(delete=False)``), confined to the launch
 source path rather than the configured library root, because crash debris
 is — by construction — an album whose files never reached the library. The
-processing source tree itself is left for the existing journaled cleanup
-(``lib.processing_cleanup``) to remove, so this action composes safely
-regardless of whether that cleanup runs before, after, or is a resumed
-journal from an earlier interrupted recovery attempt.
+automation lane's processing source tree itself is left for the existing
+journaled cleanup (``lib.processing_cleanup``) to remove; its two callers
+(below) both run this check BEFORE that cleanup, never after, so it composes
+safely whether the cleanup that follows finds a fresh source tree, a resumed
+journal from an earlier interrupted attempt, or an already-removed one.
+
+Issue #1089 review round 1 (B1) widened the exposure this module covers: a
+killed automation import is not only the restart-based "owner process
+itself died" world ``recover_abandoned_automation_owners`` sweeps for. The
+SAME committed-but-unmoved catalog row is left behind whenever a launched
+Beets child dies while the owning process stays alive — a crash, an
+ambiguous acknowledgement, a missing completion receipt — which the
+in-process self-heal path (``scripts/importer.py::_self_heal_automation_world_failure``)
+now also checks — before the SAME ``lib.processing_cleanup`` journaled
+mechanism (``_complete_automation_processing_cleanup``) — and a
+launch-authorized force/YouTube job found still ``running`` at startup
+(``PipelineDB.recover_running_import_jobs``), which checks it too, before
+THAT lane's own, DIFFERENT cleanup mechanism
+(``scripts/importer.py``'s ``force_action_cleanup``, not
+``lib.processing_cleanup`` — the force/YouTube lane has no processing
+journal to resume). All three call sites share this one function and its
+one precondition pair; none of them mutates a filesystem path either.
 """
 
 from __future__ import annotations
@@ -81,7 +99,23 @@ RecoveryDebrisOutcomeKind = Literal[
     # Beets itself could not be opened or queried (a known, expected
     # unavailability category — ``lib.beets_db.beets_authority_availability_category``,
     # the same classifier the world audit uses). Never a reason to remove
-    # anything; recovery proceeds and the next liveness re-probe tries again.
+    # anything: recovery proceeds and the request returns to ``wanted`` in
+    # every case, per invariant 11 — a transient Beets outage must never
+    # park an otherwise-recoverable world. Issue #1089 review M3: this
+    # check itself is NOT retried against the SAME job. All three
+    # producers (`recover_abandoned_automation_owners`,
+    # `_self_heal_automation_world_failure`, `recover_running_import_jobs`)
+    # terminalize their exact job in the SAME transaction regardless of the
+    # debris outcome — the first two clear the request's owner pointer
+    # (`active_automation_import_job_id`) a fresh automation launch would
+    # need a NEW job id to re-acquire; the third marks the launch-authorized
+    # force/YouTube job terminally `failed` with no replay path at all. None
+    # of the three ever re-checks the SAME job a second time. A ghost this
+    # one shot could not rule out stays unproven; the bucket-C
+    # library-root-containment invariant
+    # (`lib.world_invariants.check_library_root_containment`) is the
+    # designed backstop that surfaces it on the very next world audit,
+    # independent of whether this recovery ever gets a second attempt.
     "beets_unavailable",
 ]
 
@@ -98,6 +132,13 @@ class RecoveryDebrisReport(msgspec.Struct, frozen=True):
     album_id: int | None = None
     item_paths: tuple[str, ...] = ()
     detail: str = ""
+    # Mirrors ``BeetsDeleteCompleted.metadata_only`` (always True on
+    # ``outcome="removed"`` — this module's ONLY delete request ever sets
+    # ``debris_confinement_root``, never the file-removing library-delete
+    # mode) — kept as its own explicit field, not inferred from ``outcome``,
+    # so a persisted/replayed report is self-describing without a caller
+    # needing to know this module's invariant.
+    metadata_only: bool = False
 
 
 class SupportsRecoveryDebrisBeetsDB(Protocol):
@@ -263,6 +304,7 @@ def remove_recovery_debris(
             outcome="removed",
             album_id=album_id,
             item_paths=paths,
+            metadata_only=outcome.metadata_only,
         )
     return RecoveryDebrisReport(
         outcome="removal_failed",

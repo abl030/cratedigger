@@ -3,8 +3,14 @@
 The web process may authorize a deletion, but it does not mutate Beets'
 SQLite database or unlink library files. This module is executed in the
 deployment-supplied Beets Python/config environment and uses Beets' own models and
-filesystem helpers.  The album row remains the retry manifest until every
-positively-owned artifact has been removed and verified absent.
+filesystem helpers. In the ordinary (Bad Rip / Replace / library-delete) mode
+the album row remains the retry manifest until every positively-owned
+artifact has been removed and verified absent. A second, metadata-only mode
+(``BeetsDeleteRequest.debris_confinement_root``, issue #1089) instead removes
+ONLY the Beets catalog row for an album provably still confined to a killed
+automation job's own launch source path — it never touches a file, since
+that debris never reached the library in the first place
+(``BeetsDeleteCompleted.metadata_only=True`` marks this mode's outcome).
 """
 
 from __future__ import annotations

@@ -300,13 +300,17 @@ class TestWorldInvariantGenerated(unittest.TestCase):
         release_id=_SEGMENT,
         folder=_SEGMENT,
     )
-    def test_library_root_containment_is_silent_without_a_configured_root(
+    def test_library_root_containment_fails_closed_without_a_configured_root(
         self,
         release_id: str,
         folder: str,
     ) -> None:
-        """Must-still-work: an unconfigured root can prove nothing, so it
-        reports nothing — never a false accusation on every album."""
+        """Issue #1089 review m7: an unconfigured root can prove nothing
+        about ANY individual album, so it never manufactures a
+        per-album accusation — but it must still name the one
+        ``library_root_unavailable`` fact about the invocation itself,
+        for every world this strategy can produce, regardless of what
+        album/release/path shape rode along with it."""
         outside = os.path.join("/processing/albums", folder)
         violations = check_library_root_containment((LibraryAlbumSnapshot(
             1,
@@ -315,7 +319,10 @@ class TestWorldInvariantGenerated(unittest.TestCase):
             (os.path.join(outside, "01 Track.flac"),),
         ),), library_root="")
 
-        self.assertEqual(violations, ())
+        self.assertEqual(
+            {v.code for v in violations},
+            {"library_root_unavailable"},
+        )
 
     @given(
         release_id=_SEGMENT,

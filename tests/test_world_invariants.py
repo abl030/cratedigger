@@ -53,6 +53,7 @@ EXPECTED_WORLD_VIOLATION_BUCKETS = {
     "evidence_link_without_album": "B",
     "current_evidence_missing": "B",
     "album_fingerprint_unavailable": "B",
+    "library_root_unavailable": "B",
     "album_empty": "C",
     "item_outside_album_folder": "C",
     "folder_shared": "C",
@@ -515,11 +516,14 @@ class TestWorldInvariantCheckersTripOnKnownBad(unittest.TestCase):
 
         self.assertEqual(violations, ())
 
-    def test_library_root_containment_is_silent_when_root_is_unconfigured(
+    def test_library_root_containment_fails_closed_when_root_is_unconfigured(
         self,
     ) -> None:
-        """Must-still-work: an empty root proves nothing, so it reports
-        nothing rather than false-positiving every album."""
+        """Issue #1089 review m7: an empty root cannot evaluate ANY album's
+        containment, so it reports one named ``library_root_unavailable``
+        violation for the invocation rather than staying silent — silence
+        would let a real misconfiguration hide indefinitely behind a
+        world audit that always reports zero containment findings."""
         violations = check_library_root_containment((LibraryAlbumSnapshot(
             album_id=1,
             release_id="release-a",
@@ -529,7 +533,9 @@ class TestWorldInvariantCheckersTripOnKnownBad(unittest.TestCase):
             ),
         ),), library_root="")
 
-        self.assertEqual(violations, ())
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0].code, "library_root_unavailable")
+        self.assertEqual(world_violation_bucket(violations[0].code), "B")
 
     def test_replaced_checker_trips_on_thawed_audit_row(self) -> None:
         before = {"id": 41, "status": "replaced", "updated_at": "t0"}

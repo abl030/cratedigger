@@ -30,7 +30,12 @@ from lib.import_execution import (
     ExecutionLivenessEvidence,
     ProcessIdentity,
 )
-from lib.import_queue import IMPORT_JOB_FORCE, ImportJob
+from lib.import_queue import (
+    IMPORT_JOB_FORCE,
+    ImportJob,
+    force_import_dedupe_key,
+    force_import_payload,
+)
 from lib.pipeline_db import PipelineDB
 from lib.pipeline_db.cleanup_journal import CleanupJournalIntent
 from lib.pipeline_db.import_jobs import (
@@ -355,6 +360,55 @@ class _StartupRecoveryBuilders:
             expected_execution_lease=import_lease,
         ) is not None
         return owner, import_lease
+
+    def _force_launched_job(self, canonical_path: str) -> ImportJob:
+        """Drive a force-import job to an authorized Beets launch.
+
+        Issue #1089 review m5: ``authorize_import_job_launch`` sets the SAME
+        ``beets_launch_release_id``/``beets_launch_source_path`` columns for
+        ``force_import`` as it does for ``automation_import`` — this mirrors
+        ``_launched_owner`` for the force lane, no lease params required
+        (force/YouTube launches are unfenced by an execution lease).
+        """
+        download_log_id = self.db.log_download(
+            self.request_id,
+            outcome="rejected",
+            error_message="force owner source",
+        )
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.request_id,
+            dedupe_key=force_import_dedupe_key(download_log_id),
+            payload=force_import_payload(
+                download_log_id=download_log_id,
+                failed_path=canonical_path,
+            ),
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id=self.mb_release_id,
+            source_path=canonical_path,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        assert self.db.set_import_job_candidate_evidence(
+            job.id, persisted.id,
+        )
+        assert self.db.mark_import_job_preview_importable(job.id) is not None
+        assert claim_next_import_job(
+            self.db, worker_id="force-before-restart",
+        ) is not None
+        authorized = self.db.authorize_import_job_launch(
+            job.id,
+            request_id=self.request_id,
+            release_id=self.mb_release_id,
+            source_path=canonical_path,
+        )
+        assert authorized is not None
+        return authorized
 
     def _journal(self, job_id: int, source_path: str) -> None:
         inspection = inspect_processing_cleanup_source(source_path)
@@ -908,6 +962,81 @@ class _StartupRecoveryContract(_StartupRecoveryBuilders):
             case.assertIsNotNone(beets.get_album_detail(album_id))
         latest = self._audit_rows()[0]
         case.assertIn("recovery debris not_found", str(latest["error_message"]))
+        case.assertEqual(self.db.list_denylist_rows(), [])
+
+    def test_beets_unavailable_world_still_cleans_up_and_reopens_the_search(
+        self,
+    ) -> None:
+        """Must-still-work (issue #1089 review M3): a Beets outage during the
+        debris check must be surfaced, never raised — the SAME source-tree
+        cleanup and ``wanted`` transition every other outcome gets, with the
+        failure named in Recents evidence and zero denylist rows written.
+        """
+        case = self._case()
+        path = self._album_dir("frozen-beets-unavailable", "01 - Track.mp3")
+        owner, lease = self._launched_owner(path)
+
+        def unavailable(
+            *, launch_release_id: str | None, launch_source_path: str | None,
+        ) -> RecoveryDebrisReport:
+            del launch_release_id, launch_source_path
+            return RecoveryDebrisReport(
+                outcome="beets_unavailable",
+                detail="FileNotFoundError: Beets DB not found",
+            )
+
+        recovered = self._recover(
+            owner.id, lease, debris_removal_fn=unavailable,
+        )
+
+        assert recovered is not None
+        case.assertEqual(recovered.status, "failed")
+        self._assert_returned_to_search_pool(owner.id)
+        case.assertFalse(os.path.exists(path))
+        latest = self._audit_rows()[0]
+        case.assertIn(
+            "recovery debris beets_unavailable", str(latest["error_message"]),
+        )
+        case.assertEqual(self.db.list_denylist_rows(), [])
+
+    # --- #1089 review m5: force/YouTube launched-but-running lane -------
+
+    def test_force_launched_job_removes_its_own_beets_debris_at_startup(
+        self,
+    ) -> None:
+        """Issue #1089 review m5: the startup-only force/YouTube sweep
+        (``recover_running_import_jobs``) shares the exact same
+        ``beets_launch_release_id``/``beets_launch_source_path`` pair the
+        automation lane checks — ``authorize_import_job_launch`` sets both
+        columns identically regardless of job type — so a killed force or
+        YouTube child can leave behind the SAME committed-but-unmoved crash
+        debris. Real recovery + real beets SQLite, mirroring the automation
+        composition pin above but through the force lane's own entry point.
+        """
+        case = self._case()
+        path = self._album_dir("frozen-force-ghost", "01 - Track.mp3")
+        job = self._force_launched_job(path)
+        db_path, root, runtime_config = self._beets_fixture()
+        album_id = self._seed_debris_album(
+            db_path, root, release_id=self.mb_release_id, source_dir=path,
+        )
+
+        with patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(runtime_config),
+        }):
+            recovered = self.db.recover_running_import_jobs(
+                requeue_message="safe to replay",
+                recovery_message="importer restarted mid-import",
+                debris_removal_fn=self._debris_removal_fn(db_path, root),
+            )
+
+        case.assertEqual([item.id for item in recovered], [job.id])
+        case.assertEqual(recovered[0].status, "failed")
+        with BeetsDB(str(db_path), library_root=str(root)) as beets:
+            case.assertIsNone(beets.get_album_detail(album_id))
+        message = str(recovered[0].message)
+        case.assertIn("recovery debris removed", message)
+        case.assertIn(str(album_id), message)
         case.assertEqual(self.db.list_denylist_rows(), [])
 
 

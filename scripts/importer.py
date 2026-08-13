@@ -14,6 +14,8 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, assert_never, runtime_checkable
 
+import msgspec
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
@@ -240,6 +242,7 @@ class _StartupRecoveryDB(
         requeue_message: str,
         recovery_message: str,
         limit: int = 50,
+        debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
     ) -> list[ImportJob]: ...
 
 
@@ -1319,6 +1322,7 @@ def _self_heal_automation_world_failure(
     owner_session_identity: OwnerSessionIdentity,
     reason: str,
     result: dict[str, object],
+    debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
 ) -> ImportJob | None:
     """Surface one world failure as audit evidence and re-open the search.
 
@@ -1339,6 +1343,18 @@ def _self_heal_automation_world_failure(
     ``job`` must be the freshly re-read owner row: its launch fence, preview
     stage and captured completion receipt are the exact authority the terminal
     compare-and-set compares against.
+
+    Issue #1089 (B1): this is THE composition the RCA's own incident lived
+    in — a launched Beets child dying while THIS process stays alive (a
+    crash, an ambiguous acknowledgement, a missing completion receipt) is
+    exactly as exposed to a committed-but-unmoved catalog row as the
+    restart-based abandoned-owner sweep already covered
+    (``lib.automation_recovery_debris``). Before cleanup — while an explicit
+    checkpoint still proves this exact owner session live — the same
+    ``debris_removal_fn`` checks Beets for an album provably this job's own
+    crash debris and removes only its catalog row when proven; either
+    precondition unmet is surfaced, never removed, exactly like the
+    restart-side check.
 
     Raises :class:`AutomationOwnerFailStop` when this execution cannot author
     an owner-atomic terminal write. The row stays ``running`` under its
@@ -1378,6 +1394,31 @@ def _self_heal_automation_world_failure(
             detail=detail,
             error_message=detail,
         )
+        # Re-verify this exact owner session immediately before the
+        # irreversible Beets mutation below (issue #1089 review n8) — the
+        # same live-session proof ``_complete_automation_processing_cleanup``
+        # itself re-checks via its own internal checkpoint, just pulled
+        # forward so the debris removal is never unfenced.
+        checkpoint_automation_owner(
+            db,
+            import_job_id=job.id,
+            execution_lease=execution_lease,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
+        )
+        debris_report = debris_removal_fn(
+            launch_release_id=job.beets_launch_release_id,
+            launch_source_path=job.beets_launch_source_path,
+        )
+        if debris_report.outcome != "no_launch":
+            detail = f"{detail}; recovery debris {debris_report.outcome}"
+            if debris_report.album_id is not None:
+                detail = f"{detail} (beets album {debris_report.album_id})"
+            if debris_report.detail:
+                detail = f"{detail}: {debris_report.detail}"
+            pending = replace(pending, audit=replace(
+                pending.audit, error_message=detail,
+            ))
         # Cleanup runs first and while the job is still the running owner: its
         # checkpoint heartbeats a 'running' row, and the terminal bundle
         # consumes the receipt it produces.
@@ -1392,6 +1433,9 @@ def _self_heal_automation_world_failure(
         completion_receipt = automation_completion_receipt(job)
         terminal_result = dict(result)
         terminal_result[AUTOMATION_WORLD_FAILURE_RESULT_KEY] = reason
+        terminal_result["recovery_debris_removal"] = msgspec.to_builtins(
+            debris_report,
+        )
         terminal = db.persist_import_terminal_outcome(
             replace(
                 pending,
@@ -1612,6 +1656,7 @@ def process_claimed_job(
     execution_lease: ExecutionLeaseSnapshot | None = None,
     cancellation_token: CancellationToken | None = None,
     owner_session_identity: OwnerSessionIdentity | None = None,
+    debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
 ) -> ImportJob | None:
     """Execute a claimed job and persist its terminal queue status.
 
@@ -1689,6 +1734,7 @@ def process_claimed_job(
                     owner_session_identity=owner_session_identity,
                     reason=crash,
                     result={"success": False, "message": crash},
+                    debris_removal_fn=debris_removal_fn,
                 )
             return db.requeue_import_job_for_preview(
                 job.id,
@@ -1743,6 +1789,7 @@ def process_claimed_job(
                     owner_session_identity=owner_session_identity,
                     reason=outcome.message,
                     result=result,
+                    debris_removal_fn=debris_removal_fn,
                 )
             db.requeue_import_job_for_preview(
                 job.id,
@@ -1768,6 +1815,7 @@ def process_claimed_job(
                 owner_session_identity=owner_session_identity,
                 reason=outcome.message,
                 result=result,
+                debris_removal_fn=debris_removal_fn,
             )
         if outcome.terminal_outcome is None:
             return _self_heal_automation_world_failure(
@@ -1781,6 +1829,7 @@ def process_claimed_job(
                     "outcome"
                 ),
                 result=result,
+                debris_removal_fn=debris_removal_fn,
             )
         # The owned-processor cleanup and the terminal persist are the last
         # stage of a Beets-mutating execution, and both raise: seven owner
@@ -1813,6 +1862,7 @@ def process_claimed_job(
                         "Automation completion receipt is missing or invalid"
                     ),
                     result=result,
+                    debris_removal_fn=debris_removal_fn,
                 )
             pending = replace(
                 outcome.terminal_outcome,
@@ -1850,6 +1900,7 @@ def process_claimed_job(
                 owner_session_identity=owner_session_identity,
                 reason=f"{type(exc).__name__}: {exc}",
                 result=result,
+                debris_removal_fn=debris_removal_fn,
             )
         _cleanup_committed_wrong_match_rejection(
             db,
@@ -2154,6 +2205,7 @@ def recover_abandoned_running_jobs(
     db: _StartupRecoveryDB,
     *,
     liveness_probe: ExecutionLivenessProbe | None = None,
+    debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
 ) -> list[ImportJob]:
     """Recover only executions whose exact persisted lease is proven dead.
 
@@ -2161,6 +2213,10 @@ def recover_abandoned_running_jobs(
     ``running`` row without a liveness probe, which is sound exactly once,
     before this singleton worker has claimed anything. The automation half is
     the re-runnable sweep and is also called periodically from ``main``.
+
+    ``debris_removal_fn`` (issue #1089) is forwarded, unchanged, to
+    ``db.recover_running_import_jobs`` — production always uses the real
+    ``remove_recovery_debris`` default; tests inject a stub.
     """
     recovered: list[ImportJob] = []
     batch_size = 50
@@ -2169,6 +2225,7 @@ def recover_abandoned_running_jobs(
             requeue_message=RESTART_REQUEUE_MESSAGE,
             recovery_message=RESTART_RECOVERY_MESSAGE,
             limit=batch_size,
+            debris_removal_fn=debris_removal_fn,
         )
         recovered.extend(batch)
         if len(batch) < batch_size:

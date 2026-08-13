@@ -2132,7 +2132,14 @@ class FakePipelineDB:
         requeue_message: str,
         recovery_message: str,
         limit: int = 50,
+        debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
     ) -> list[ImportJob]:
+        """Fake mirror of PipelineDB.recover_running_import_jobs.
+
+        ``debris_removal_fn`` (issue #1089) mirrors the real method exactly:
+        production default unless a test injects a stub — the force/YouTube
+        launch fields are the same columns the automation lane checks.
+        """
         from lib.terminal_outcomes import non_automation_failure_terminal_outcome
 
         running = [
@@ -2151,6 +2158,24 @@ class FakePipelineDB:
                     "the library"
                 )
                 job = ImportJob.from_row(copy.deepcopy(row))
+                debris_report = debris_removal_fn(
+                    launch_release_id=job.beets_launch_release_id,
+                    launch_source_path=job.beets_launch_source_path,
+                )
+                if debris_report.outcome != "no_launch":
+                    no_replay_reason = (
+                        f"{no_replay_reason}; recovery debris "
+                        f"{debris_report.outcome}"
+                    )
+                    if debris_report.album_id is not None:
+                        no_replay_reason = (
+                            f"{no_replay_reason} "
+                            f"(beets album {debris_report.album_id})"
+                        )
+                    if debris_report.detail:
+                        no_replay_reason = (
+                            f"{no_replay_reason}: {debris_report.detail}"
+                        )
                 terminal = self.persist_import_terminal_outcome(
                     non_automation_failure_terminal_outcome(
                         job,
@@ -2159,6 +2184,9 @@ class FakePipelineDB:
                         result={
                             "success": False,
                             "recovery": "launch_authorized_no_replay",
+                            "recovery_debris_removal": msgspec.to_builtins(
+                                debris_report,
+                            ),
                         },
                     )
                 )

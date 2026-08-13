@@ -1297,12 +1297,30 @@ class _ImportJobsMixin(
         requeue_message: str,
         recovery_message: str,
         limit: int = 50,
+        debris_removal_fn: RecoveryDebrisRemovalFn = remove_recovery_debris,
     ) -> list[ImportJob]:
         """Requeue unlaunched jobs; terminalize launched jobs visibly.
 
         A launch-authorized job may already have reached Beets, so startup
         must never requeue it.  Its terminal command is the same atomic audit
         plus job-failure path used by in-frame force/YouTube executor errors.
+
+        Before that terminal write, ``debris_removal_fn`` (issue #1089)
+        applies the SAME observational Beets check as the automation lanes
+        (``lib.automation_recovery_debris``): a force/YouTube job that was
+        launch-authorized shares the identical
+        ``beets_launch_release_id``/``beets_launch_source_path`` pair set by
+        ``authorize_import_job_launch`` regardless of job type, so a killed
+        force/YouTube child can leave the exact same committed-but-unmoved
+        crash debris behind. Removal is metadata-only, never mutates a
+        filesystem path, and never writes a ``source_denylist`` row.
+
+        No owner checkpoint runs before this call, unlike the automation
+        lanes: this method is documented (see ``recover_abandoned_running_jobs``
+        in ``scripts/importer.py``) as sound to call exactly once, at worker
+        startup, before this singleton importer has claimed anything under
+        its own advisory lock — there is no other live execution of this
+        exact job that a checkpoint could still be racing.
         """
         cur = self._execute("""
             SELECT *
@@ -1320,6 +1338,24 @@ class _ImportJobsMixin(
                     "Automatic replay refused because Beets may have mutated "
                     "the library"
                 )
+                debris_report = debris_removal_fn(
+                    launch_release_id=job.beets_launch_release_id,
+                    launch_source_path=job.beets_launch_source_path,
+                )
+                if debris_report.outcome != "no_launch":
+                    no_replay_reason = (
+                        f"{no_replay_reason}; recovery debris "
+                        f"{debris_report.outcome}"
+                    )
+                    if debris_report.album_id is not None:
+                        no_replay_reason = (
+                            f"{no_replay_reason} "
+                            f"(beets album {debris_report.album_id})"
+                        )
+                    if debris_report.detail:
+                        no_replay_reason = (
+                            f"{no_replay_reason}: {debris_report.detail}"
+                        )
                 terminal = self.persist_import_terminal_outcome(
                     non_automation_failure_terminal_outcome(
                         job,
@@ -1328,6 +1364,9 @@ class _ImportJobsMixin(
                         result={
                             "success": False,
                             "recovery": "launch_authorized_no_replay",
+                            "recovery_debris_removal": msgspec.to_builtins(
+                                debris_report,
+                            ),
                         },
                     )
                 )
@@ -1617,6 +1656,12 @@ class _ImportJobsMixin(
             def checkpoint() -> None:
                 self.require_automation_recovery_owner(cas)
 
+            # Re-verify this exact owner CAS immediately before the
+            # irreversible Beets mutation below (issue #1089 review n8) —
+            # the same proof ``complete_owner_processing_cleanup`` itself
+            # re-checks via this same ``checkpoint`` closure, just pulled
+            # forward so the debris removal is never unfenced.
+            checkpoint()
             debris_report = debris_removal_fn(
                 launch_release_id=job.beets_launch_release_id,
                 launch_source_path=job.beets_launch_source_path,

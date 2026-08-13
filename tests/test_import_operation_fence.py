@@ -48,6 +48,7 @@ from tests.helpers import (
     make_album_quality_evidence,
     make_request_row,
 )
+from tests.test_automation_startup_recovery import _no_debris_removal
 from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 
 
@@ -428,7 +429,9 @@ class TestImportOperationFence(unittest.TestCase):
         )
         assert authorized is not None
 
-        recovered = importer.recover_abandoned_running_jobs(cast(Any, db))
+        recovered = importer.recover_abandoned_running_jobs(
+            cast(Any, db), debris_removal_fn=_no_debris_removal,
+        )
         by_id = {job.id: job for job in recovered}
 
         self.assertEqual(by_id[first.id].status, "queued")
@@ -908,6 +911,7 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             terminalized = db.recover_running_import_jobs(
                 requeue_message="safe retry",
                 recovery_message="startup ambiguity",
+                debris_removal_fn=_no_debris_removal,
             )
             self.assertEqual([item.id for item in terminalized], [job.id])
             self.assertEqual(terminalized[0].status, "failed")

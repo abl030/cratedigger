@@ -74,7 +74,7 @@ is pure attribute assignment across the whole supported range — only when the
 cheap check finds neither attribute. The 19-leg `beetsStableCandidate` matrix
 is what caught this.
 
-Cratedigger has exactly three Beets mutation lanes:
+Cratedigger has four Beets mutation lanes:
 
 1. The serial importer worker drives the JSON harness for admitted imports and
    same-release duplicate replacement.
@@ -91,9 +91,19 @@ Cratedigger has exactly three Beets mutation lanes:
    merges the release but not the underlying recordings) does not preserve —
    so it silently retagged nothing on the common case. `beet modify` sets one
    field by query; it needs no candidate mapping and makes no network call.
+4. Recovery-side crash-debris removal (issue #1089): after a killed
+   automation import's owning process is proven dead — whether by the
+   restart-based startup sweep, the in-process self-heal path, or a
+   force/YouTube job found still `running` at startup — recovery may remove
+   ONE Beets catalog row it can prove is that exact job's own crash debris
+   (`lib/automation_recovery_debris.py::remove_recovery_debris`), through
+   the SAME exact-album delete child in `lib/beets_delete.py` but its
+   metadata-only mode (`debris_confinement_root`): no file is ever touched,
+   because the debris being removed is — by construction — an album whose
+   files never reached the library. It never writes a `source_denylist` row.
 
-Lane 3 is deliberately the narrowest of the three, and every clause is
-load-bearing:
+Lane 3 is deliberately the narrowest of the first three lanes above, and
+every clause is load-bearing:
 
 - **`-a` targets Albums, not Items.** `Album.try_sync(inherit=True)` (the
   default) fans every inheritable fixed attribute — `mb_albumid` is one — out
@@ -796,10 +806,11 @@ printf 'a\n' | beet import ...  # Blindly accepts ANY match without inspection.
                                 # Use the harness instead — it lets you verify MBID and distance.
 ```
 
-Cratedigger's explicit Bad Rip, Replace, and library-delete actions are the
-narrow exceptions: they resolve one current exact album primary key and route
-destructive removal through the admitted-runtime exact-delete child in
-`lib/beets_delete.py`. Selector-based `beet remove -d` is retired. The
+Cratedigger's explicit Bad Rip, Replace, library-delete, and recovery-side
+crash-debris-removal actions are the narrow exceptions: they resolve one
+current exact album primary key and route destructive removal through the
+admitted-runtime exact-delete child in `lib/beets_delete.py`. Selector-based
+`beet remove -d` is retired. The
 effective Beets `clutter` list includes the exact derived filename
 `cratedigger.json`, allowing Beets to prune a directory whose managed audio
 and sidecar are all gone. Any file that does not match the configured clutter
@@ -816,7 +827,20 @@ checks. Before mutation, the harness also proves that its active `library:`
 and `directory:` resolve to the exact SQLite path and root used by the web/CLI
 preflight. Beets metadata is removed with `delete=False` only after every
 owned artifact is absent; album, item, and flexible-field rows share one outer
-transaction with explicit rollback on any exception.
+transaction with explicit rollback on any exception. This is the file-removing
+mode of the child, and its "removes and verifies exact item paths" claim
+applies to THIS mode only.
+
+Recovery-side crash-debris removal (`lib/automation_recovery_debris.py`,
+issue #1089) drives the SAME child in a second, metadata-only mode
+(`BeetsDeleteRequest.debris_confinement_root`) instead: it never touches a
+file. It removes ONLY the Beets catalog row for an album whose release
+identity matches a killed automation job's `beets_launch_release_id` AND
+whose every item path is confined under that job's own
+`beets_launch_source_path` — never the configured library root — because
+debris that never reached the library cannot be library-confined by
+definition. Any album failing either precondition is surfaced, never
+removed, and this mode writes no `source_denylist` row.
 
 The child commits that final metadata transaction before its JSON result can
 reach the parent, so a process exit or malformed/truncated acknowledgement is

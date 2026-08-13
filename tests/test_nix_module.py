@@ -1444,6 +1444,25 @@ class TestImporterServiceContract(unittest.TestCase):
         importer_block = text[importer_block_start:importer_block_end]
         self.assertIn("restartIfChanged = true", importer_block)
 
+    def test_importer_service_kill_mode_is_mixed(self) -> None:
+        """Issue #1089 B1: the graceful drain is only real under
+        ``KillMode = "mixed"``. The systemd DEFAULT (``control-group``)
+        signals every process in the cgroup at once — including the beets
+        child subprocess, which has no handler and dies immediately
+        regardless of the parent's own drain logic (the RCA's own <1s
+        stop). ``mixed`` signals only the main PID, so a deploy stop lets
+        the child actually finish before the bounded ``TimeoutStopSec``
+        escalates to a cgroup-wide SIGKILL.
+        """
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        importer_block_start = text.index("systemd.services.cratedigger-importer")
+        importer_block_end = text.index(
+            "systemd.services.cratedigger-import-preview-worker"
+        )
+        importer_block = text[importer_block_start:importer_block_end]
+        self.assertIn('KillMode = "mixed"', importer_block)
+        self.assertIn('TimeoutStopSec = "10min"', importer_block)
+
     def test_preview_worker_service_restarts_on_switch(self) -> None:
         """Same rationale as the importer worker.
 

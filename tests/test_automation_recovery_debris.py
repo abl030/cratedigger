@@ -136,6 +136,10 @@ class TestRemoveRecoveryDebris(unittest.TestCase):
         self.assertEqual(report.outcome, "removed")
         self.assertEqual(report.album_id, 19823)
         self.assertCountEqual(report.item_paths, (f"{SOURCE}/01.flac", f"{SOURCE}/02.flac"))
+        # Issue #1089 review m6: propagated straight from the admitted
+        # delete lane's own outcome, not hardcoded — proven below by a
+        # planted mutant on the propagation, not merely asserted here.
+        self.assertTrue(report.metadata_only)
         self.assertEqual(len(stub.requests), 1)
         request = stub.requests[0]
         self.assertEqual(request.album_id, 19823)
@@ -143,6 +147,33 @@ class TestRemoveRecoveryDebris(unittest.TestCase):
         self.assertEqual(request.library_db_path, beets.library_db_path)
         self.assertEqual(request.library_root, beets.library_root)
         self.assertEqual(request.debris_confinement_root, SOURCE)
+
+    def test_removed_metadata_only_is_propagated_not_hardcoded(self) -> None:
+        """Issue #1089 review m6: feed the admitted lane's own outcome with
+        ``metadata_only=False`` and confirm the report reflects it — proves
+        this is a genuine field propagation, not a hardcoded ``True``
+        (production's own delete request always sets
+        ``debris_confinement_root``, so a real ``removed`` outcome is
+        always ``metadata_only=True`` in practice; this test isolates the
+        propagation itself from that production-side invariant)."""
+        beets = self._beets()
+        beets.set_album_ids_for_release(RELEASE, [19823])
+        beets.set_album_detail(19823, _detail(f"{SOURCE}/01.flac"))
+        stub = _StubBeetsDelete(BeetsDeleteCompleted(
+            album_id=19823, album_name="Frozen", artist_name="Idina Menzel",
+            former_album_path=SOURCE, deleted_tracks=0, deleted_artifacts=0,
+            preserved_paths=(), metadata_only=False,
+        ))
+
+        report = remove_recovery_debris(
+            launch_release_id=RELEASE,
+            launch_source_path=SOURCE,
+            beets_db_factory=_RecordingBeetsDbFactory(beets),
+            beets_delete_fn=stub,
+        )
+
+        self.assertEqual(report.outcome, "removed")
+        self.assertFalse(report.metadata_only)
 
     def test_removal_failed_surfaces_the_delete_lane_reason(self) -> None:
         beets = self._beets()

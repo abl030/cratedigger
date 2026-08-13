@@ -114,6 +114,7 @@ WORLD_VIOLATION_BUCKETS: Mapping[str, WorldViolationBucket] = MappingProxyType({
     "evidence_link_without_album": "B",
     "current_evidence_missing": "B",
     "album_fingerprint_unavailable": "B",
+    "library_root_unavailable": "B",
     # C — Beets/library health.
     "album_empty": "C",
     "item_outside_album_folder": "C",
@@ -237,14 +238,27 @@ def check_library_root_containment(
     processing tree). This checker fires immediately, from path location
     alone, independent of whether the files still physically exist.
 
-    An unconfigured (empty) ``library_root`` reports nothing — this checker
-    cannot prove anything is outside an unknown root, and false-positiving
-    every album on a misconfiguration would be worse than staying silent
-    for that one input.
+    Issue #1089 review m7: an unconfigured (empty) ``library_root`` used to
+    report nothing — silently skipping every album's containment check
+    rather than false-positiving them all against an unknown root. That
+    reasoning conflated two different failures: "cannot evaluate this
+    album's containment" (correctly silent) is not "cannot evaluate ANY
+    album's containment because the configuration itself is missing" (a
+    real, nameable fact about THIS invocation, worth its own violation).
+    Bucket B, alongside ``current_beets_authority_unavailable`` — "we
+    cannot prove this" rather than bucket A's "this IS wrong" — because an
+    unset root is a caller-configuration gap, not evidence any album is
+    actually misplaced.
     """
 
     if not library_root:
-        return ()
+        return (WorldViolation(
+            code="library_root_unavailable",
+            detail=(
+                "library_root is empty/unset — album folder/item "
+                "containment cannot be evaluated for any album"
+            ),
+        ),)
 
     violations: list[WorldViolation] = []
     root = _normal_path(library_root)
