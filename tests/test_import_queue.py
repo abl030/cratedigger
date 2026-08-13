@@ -7982,18 +7982,19 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
         self.assertIn("request_id", outcome.message)
 
     def test_wrong_status_guards_the_shared_auto_import_staging_root(self):
-        """Issue #1122 item 4: the wrong-status branch's ``staged_path``
-        (``payload.staged_path``) is a direct child of the shared,
-        externally provisioned auto-import staging root
-        (``lib.processing_paths.stage_to_ai_root(auto_import=True)`` of
-        ``cfg.beets_staging_dir`` — the same root every other unit stages
-        into, per ``scripts/youtube_ingest_worker.py``'s ``build_service``).
-        Before this fix the returned ``PostCommitCleanup`` carried no
-        ``staged_path_protected_parent`` at all, so
+        """Issue #1122 item 4 (widened, review round 2): the wrong-status
+        branch's ``staged_path`` (``payload.staged_path``) is a direct
+        child of the shared, externally provisioned auto-import staging
+        root (``lib.processing_paths.stage_to_ai_root(auto_import=True)``
+        of ``cfg.beets_staging_dir`` — the same root every other unit
+        stages into, per ``scripts/youtube_ingest_worker.py``'s
+        ``build_service``). Before this fix the returned
+        ``PostCommitCleanup`` carried no protected parent at all, so
         ``_run_post_commit_cleanup``'s empty-parent prune (``lib.dispatch.
         helpers._cleanup_staged_dir``) could ``rmdir`` that shared root the
         moment this album's staged folder was its only child — the same
-        shape issue #1077 guarded at the three other real callers."""
+        shape issue #1077 guarded at every other real caller of that
+        helper."""
         from lib.processing_paths import stage_to_ai_root
         from scripts import importer
 
@@ -8030,7 +8031,8 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
         cleanup = outcome.post_commit_cleanup
         assert cleanup is not None
         self.assertEqual(cleanup.staged_path, staged_path)
-        self.assertEqual(cleanup.staged_path_protected_parent, auto_import_root)
+        assert cleanup.staged_path_protected_parents is not None
+        self.assertIn(auto_import_root, cleanup.staged_path_protected_parents)
 
     def test_wrong_status_post_commit_cleanup_never_removes_the_auto_import_root(
         self,

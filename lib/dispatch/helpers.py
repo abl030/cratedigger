@@ -160,27 +160,32 @@ def _guard_failure_detail(ir: ImportResult) -> str | None:
     return detail
 
 
-def _cleanup_staged_dir(dest: str, *, protected_parent: str | None = None) -> None:
+def _cleanup_staged_dir(
+    dest: str, *, protected_parents: frozenset[str] | None = None,
+) -> None:
     """Remove a staged directory and its parent if empty.
 
-    ``protected_parent`` (issue #1077, "smalls" round-2 review): a root
-    that must NEVER be removed by the parent-prune step, however empty it
-    looks. Callers passing a canonical processing album path (``dest``
-    directly under ``<processing_dir>/albums/``) MUST pass that root here
-    — it is a Nix-provisioned, 0700 directory ``open_private_child_
-    directory`` refuses to recreate, and is today shielded from this
-    prune only by lock-shard files that happen to never be unlinked, a
-    side effect, not a guard. Callers whose ``dest`` genuinely nests under
-    a disposable per-artist directory (the ordinary slskd download-dir
-    layout) pass nothing and keep the existing prune-the-empty-parent
-    behavior.
+    ``protected_parents`` (issue #1077, "smalls" round-2 review; widened
+    to a set in issue #1122, review round 2): every root that must NEVER
+    be removed by the parent-prune step, however empty it looks. Pass
+    ``lib.processing_paths.protected_staging_roots(...)`` -- never a
+    hand-built string or a single value -- so a caller reachable from more
+    than one lane (force / automation / YouTube rescue) protects every
+    shared root regardless of which lane's ``dest`` it was actually
+    called with (issue #1122 F1/F2: a guard scoped to only the canonical
+    processing albums root silently fell through for a YouTube rescue's
+    auto-import-staging-root parent). Callers whose ``dest`` genuinely
+    nests under a disposable per-artist directory (the ordinary slskd
+    download-dir layout) pass nothing and keep the existing
+    prune-the-empty-parent behavior.
     """
     if os.path.isdir(dest):
         shutil.rmtree(dest)
         logger.info(f"  Cleaned up staged dir: {dest}")
         parent = os.path.dirname(dest)
-        if protected_parent is not None and os.path.isdir(parent) and (
-            os.path.realpath(parent) == os.path.realpath(protected_parent)
+        if protected_parents is not None and os.path.isdir(parent) and any(
+            os.path.realpath(parent) == os.path.realpath(root)
+            for root in protected_parents
         ):
             return
         if os.path.isdir(parent) and not os.listdir(parent):

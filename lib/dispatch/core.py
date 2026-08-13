@@ -72,6 +72,7 @@ from lib.processing_paths import (
     normalize_source_dirs,
     path_is_within_root,
     processing_albums_dir,
+    protected_staging_roots,
 )
 from lib.quality import (
     AlbumQualityEvidence,
@@ -1023,8 +1024,12 @@ def dispatch_import_core(
                         quality_ranks=(
                             cfg.quality_ranks if cfg is not None else None
                         ),
-                        processing_dir=(
-                            cfg.processing_dir if cfg is not None else None
+                        protected_roots=(
+                            protected_staging_roots(
+                                processing_dir=cfg.processing_dir,
+                                beets_staging_dir=cfg.beets_staging_dir,
+                            )
+                            if cfg is not None else None
                         ),
                     )
                 quality_evidence_action_file = _write_quality_evidence_action_file(
@@ -1539,17 +1544,34 @@ def dispatch_import_core(
         post_commit_cleanup=(
             PostCommitCleanup(
                 staged_path=post_commit_staged_path,
-                # Issue #1077, R4-1 (round-4 review): a force job's success
-                # path is ``<processing_dir>/albums/force-action-<id>`` — a
-                # direct child of the shared albums root, reaching
-                # ``_run_post_commit_cleanup`` the same as the reject path's
-                # deferred plan. Without this guard the empty-parent prune
-                # there could ``rmdir`` the Nix-provisioned root right out
-                # from under every other request, shielded today only by
-                # the lock-shard side effect (see the R3-3 guard on the
-                # reject path for the same reasoning).
-                staged_path_protected_parent=(
-                    processing_albums_dir(cfg.processing_dir)
+                # Issue #1077, R4-1 (round-4 review); widened issue #1122
+                # F2 (review round 2): ``post_commit_staged_path = path``
+                # above is set for EVERY successful cleanup-eligible lane —
+                # force (``<processing_dir>/albums/force-action-<id>``),
+                # automation (a direct child of the shared albums root), AND
+                # a YouTube rescue (a direct child of the shared auto-import
+                # staging root, since it imports in place and is never
+                # materialized under the canonical root). A single
+                # ``processing_albums_dir``-only guard protected the first
+                # two but silently fell through for the third: the realpath
+                # comparison in ``_cleanup_staged_dir`` never matched, so a
+                # successful YouTube import whose staged folder was the
+                # auto-import root's only child could ``rmdir`` that shared,
+                # externally provisioned root right out from under every
+                # other in-flight request. ``protected_staging_roots``
+                # covers every lane without branching on which one ran here
+                # (see the R3-3/F1 guard on the reject path and
+                # ``harness/import_one.py``'s own guard for the same
+                # reasoning applied at the other two ``_cleanup_staged_dir``
+                # producers). Ownership-drift residual (root deleted ->
+                # recreated cratedigger-owned by the next rescue): see
+                # ``lib.processing_paths.protected_staging_roots``'s
+                # docstring.
+                staged_path_protected_parents=(
+                    protected_staging_roots(
+                        processing_dir=cfg.processing_dir,
+                        beets_staging_dir=cfg.beets_staging_dir,
+                    )
                     if post_commit_staged_path is not None and cfg is not None
                     else None
                 ),

@@ -52,12 +52,14 @@ _bootstrap_import_paths()
 from lib import transitions
 from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
 from lib.beets_db import AlbumInfo, BeetsDB, validate_beets_storage_pair
+from lib.config import CratediggerConfig, read_runtime_config
 from lib.media_readiness import (
     MediaReadinessError,
     media_facts_for_path,
     normalize_media_metadata,
 )
 from lib.permissions import fix_library_modes, reset_umask
+from lib.processing_paths import protected_staging_roots
 from lib.release_identity import ReleaseIdentity
 from lib.util import beets_subprocess_env, validate_audio
 
@@ -1711,7 +1713,9 @@ def _materialize_quality_evidence_action(
     }
 
 
-def _cleanup_staged_dir(work_path: str) -> None:
+def _cleanup_staged_dir(
+    work_path: str, *, cfg: CratediggerConfig | None = None,
+) -> None:
     if not os.path.isdir(work_path):
         return
     stage_start = time.monotonic()
@@ -1728,10 +1732,52 @@ def _cleanup_staged_dir(work_path: str) -> None:
     except OSError:
         pass
     parent = os.path.dirname(work_path)
-    try:
-        os.rmdir(parent)
-    except OSError:
-        pass
+    if os.path.isdir(parent):
+        # Issue #1122 F1 (review round 2): this SEPARATE _cleanup_staged_dir
+        # (harness-local -- NOT lib.dispatch.helpers._cleanup_staged_dir) ran
+        # an unconditional os.rmdir(parent) with no protected-root guard at
+        # all. A YouTube rescue imports in place from the auto-import
+        # staging child -- it is never materialized under the canonical
+        # processing albums root -- so a successful import whose staged
+        # folder was the auto-import root's only child removed that shared,
+        # externally provisioned root right out from under every other
+        # in-flight request. This same unconditional prune also targets
+        # ``<processing_dir>/albums/`` on the canonical automation lane;
+        # the parent-dirname is whatever lane actually ran, so both shared
+        # roots need the guard, not just the one this incident hit.
+        #
+        # import_one.py runs under sys.executable in-repo (not the
+        # deployment Beets Python subprocess it later launches for the
+        # nested harness), so it can read the runtime config directly for
+        # this narrow safety net -- unlike the explicitly snapshotted Beets
+        # identity args above (``--beets-library-db`` etc., pinned so a
+        # runtime-config swap between dispatch and this child launch can
+        # never redirect the preflight/postflight DB), nothing here is
+        # identity-critical: the protected roots are deploy-provisioned
+        # directories, not runtime state that could drift mid-flight.
+        # ``cfg`` is a kwarg-DI seam (production default ``None`` ->
+        # ``read_runtime_config()``) purely so tests can inject a real,
+        # directly-constructed ``CratediggerConfig`` instead of relying on
+        # a config.ini fixture on disk -- the guard logic itself still runs
+        # unmocked against a real filesystem. Ownership-drift residual
+        # (root deleted -> recreated cratedigger-owned by the next
+        # rescue): see lib.processing_paths.protected_staging_roots's
+        # docstring.
+        resolved_cfg = cfg or read_runtime_config()
+        protected = protected_staging_roots(
+            processing_dir=resolved_cfg.processing_dir,
+            beets_staging_dir=resolved_cfg.beets_staging_dir,
+        )
+        if any(
+            os.path.realpath(parent) == os.path.realpath(protected_root)
+            for protected_root in protected
+        ):
+            _log_timing("cleanup_staged_dir", stage_start)
+            return
+        try:
+            os.rmdir(parent)
+        except OSError:
+            pass
     _log_timing("cleanup_staged_dir", stage_start)
 
 

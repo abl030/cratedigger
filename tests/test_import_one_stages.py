@@ -2232,5 +2232,128 @@ class TestDryRunMintsVerifiedLosslessProof(unittest.TestCase):
         self.assertFalse(worse.comparison_basis.verified_lossless_bypass)
 
 
+class TestCleanupStagedDirProtectedRoots(unittest.TestCase):
+    """Issue #1122 F1 (review round 2): ``harness.import_one.
+    _cleanup_staged_dir`` is a SEPARATE function from ``lib.dispatch.
+    helpers._cleanup_staged_dir`` -- before this fix it ran an
+    unconditional ``os.rmdir(parent)`` after a successful import with NO
+    protected-root guard at all. A YouTube rescue imports in place from
+    the auto-import staging child (never materialized under the canonical
+    processing albums root), so a successful import whose staged folder
+    was the auto-import root's only child removed that shared, externally
+    provisioned root right out from under every other in-flight request.
+    The same unconditional prune also targets ``<processing_dir>/albums/``
+    on the canonical automation lane -- the parent-dirname is whatever
+    lane actually ran, so both shared roots need their own proof.
+
+    Drives ``_cleanup_staged_dir`` directly against a real filesystem
+    tree with a real, directly-constructed ``CratediggerConfig`` injected
+    through its ``cfg=`` kwarg-DI seam (production default ``None`` ->
+    ``read_runtime_config()``) -- no mocking of the cleanup function
+    itself."""
+
+    def _world(self, *, root: str) -> tuple[str, str]:
+        """Build a real ``processing_dir``/``beets_staging_dir`` pair
+        under ``root``."""
+        processing_dir = os.path.join(root, "processing")
+        beets_staging_dir = os.path.join(root, "Incoming")
+        return processing_dir, beets_staging_dir
+
+    def test_youtube_shaped_success_path_protects_the_auto_import_root(
+        self,
+    ) -> None:
+        """Mutant target: dropping the protected-root guard (restoring the
+        historical unconditional ``os.rmdir(parent)``) must turn this RED.
+        """
+        from harness.import_one import _cleanup_staged_dir
+        from lib.config import CratediggerConfig
+        from lib.processing_paths import stage_to_ai_root
+
+        with tempfile.TemporaryDirectory() as root:
+            processing_dir, beets_staging_dir = self._world(root=root)
+            cfg = CratediggerConfig(
+                processing_dir=processing_dir,
+                beets_staging_dir=beets_staging_dir,
+            )
+            auto_import_root = stage_to_ai_root(
+                staging_dir=beets_staging_dir, auto_import=True,
+            )
+            staged_path = os.path.join(auto_import_root, "Artist - Album")
+            os.makedirs(staged_path)
+            with open(os.path.join(staged_path, "01.opus"), "wb") as handle:
+                handle.write(b"audio")
+
+            _cleanup_staged_dir(staged_path, cfg=cfg)
+
+            self.assertFalse(os.path.exists(staged_path))
+            self.assertTrue(
+                os.path.isdir(auto_import_root),
+                "the shared auto-import staging root must survive even "
+                "though it is now empty -- it is externally provisioned, "
+                "not a disposable per-artist directory",
+            )
+            self.assertEqual(os.listdir(auto_import_root), [])
+
+    def test_canonical_lane_success_path_still_protects_the_albums_root(
+        self,
+    ) -> None:
+        """Must-still-work control: the multi-root migration (issue #1122)
+        must not regress the ORIGINAL canonical-lane protection this
+        function never had before this PR either -- ``processing_albums_
+        dir`` must stay protected alongside the new auto-import root."""
+        from harness.import_one import _cleanup_staged_dir
+        from lib.config import CratediggerConfig
+        from lib.processing_paths import processing_albums_dir
+
+        with tempfile.TemporaryDirectory() as root:
+            processing_dir, beets_staging_dir = self._world(root=root)
+            cfg = CratediggerConfig(
+                processing_dir=processing_dir,
+                beets_staging_dir=beets_staging_dir,
+            )
+            albums_root = processing_albums_dir(processing_dir)
+            staged_path = os.path.join(albums_root, "Artist - Album")
+            os.makedirs(staged_path)
+            with open(os.path.join(staged_path, "01.flac"), "wb") as handle:
+                handle.write(b"audio")
+
+            _cleanup_staged_dir(staged_path, cfg=cfg)
+
+            self.assertFalse(os.path.exists(staged_path))
+            self.assertTrue(
+                os.path.isdir(albums_root),
+                "the shared processing albums root must survive even "
+                "though it is now empty",
+            )
+            self.assertEqual(os.listdir(albums_root), [])
+
+    def test_non_shared_parent_still_prunes_as_before(self) -> None:
+        """Must-still-work control: the ordinary slskd download-dir shape
+        (a disposable per-artist parent, not one of the two shared roots)
+        keeps pruning its now-empty parent exactly as before this fix."""
+        from harness.import_one import _cleanup_staged_dir
+        from lib.config import CratediggerConfig
+
+        with tempfile.TemporaryDirectory() as root:
+            processing_dir, beets_staging_dir = self._world(root=root)
+            cfg = CratediggerConfig(
+                processing_dir=processing_dir,
+                beets_staging_dir=beets_staging_dir,
+            )
+            parent = os.path.join(root, "slskd", "Some Artist")
+            staged_path = os.path.join(parent, "Some Album")
+            os.makedirs(staged_path)
+            with open(os.path.join(staged_path, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+
+            _cleanup_staged_dir(staged_path, cfg=cfg)
+
+            self.assertFalse(os.path.exists(staged_path))
+            self.assertFalse(
+                os.path.exists(parent),
+                "a disposable per-artist parent must still be pruned",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
