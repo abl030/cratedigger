@@ -100,6 +100,27 @@ def _unique(release_id: str, album_id: int, folder: str) -> CurrentBeetsUnique:
     )
 
 
+class TestInsideSegmentPredicate(unittest.TestCase):
+    """The ``_INSIDE_SEGMENT`` guarantee, checked in the SUITE tier.
+
+    Deterministic on purpose: this is test machinery, which never gets a
+    generated property. It exists because of the tier gap — restoring
+    ``_SEGMENT`` on either "inside" test is caught only by the fuzz tier
+    otherwise, stochastically, and the first symptom would again be a red
+    daily gate rather than a red local suite.
+    """
+
+    def test_the_one_escaping_segment_is_rejected(self) -> None:
+        self.assertFalse(_stays_under_a_root(os.pardir))
+
+    def test_ordinary_and_no_op_segments_are_kept(self) -> None:
+        """``"."`` composes back to the root itself, which the checker
+        treats as inside — a legitimate world this must not discard."""
+        self.assertTrue(_stays_under_a_root("Artist - Album [2002]"))
+        self.assertTrue(_stays_under_a_root(os.curdir))
+        self.assertTrue(_stays_under_a_root("..leading-dots"))
+
+
 class TestWorldInvariantGenerated(unittest.TestCase):
     @given(
         codes=st.lists(
