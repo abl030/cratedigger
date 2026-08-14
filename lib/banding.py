@@ -16,9 +16,9 @@ from lib.beets_db import (
     CurrentBeetsMissing,
     CurrentBeetsResolution,
     CurrentBeetsUnique,
-    _reduce_album_format,
+    album_info_from_current,
+    rank_format_for_current,
 )
-from lib.media_readiness import kbps_from_bps
 from lib.quality import QualityRankConfig
 from lib.release_identity import ReleaseIdentity
 
@@ -112,30 +112,29 @@ def _band_current_unique(
     current: CurrentBeetsUnique,
     cfg: QualityRankConfig,
 ) -> str:
-    """Rank one exact resolution from its coherent item snapshot."""
-    album_format = _reduce_album_format(
-        {item.format for item in current.items if item.format},
+    """Rank one exact resolution through the decision path's own projection.
+
+    ``album_info_from_current`` is the function the importer ranks against, so
+    banding calls it rather than re-deriving the same aggregates beside it.
+    That is what keeps the badge and the decision on one answer: it supplies
+    the ``kbps_from_bps`` reduction (issue #1144) AND the ``mp3 vN`` contract
+    minted from the items' LAME tags (issue #1145). Re-deriving here is how
+    the two drifted — first by a kbps at a band edge, then by up to three
+    tiers on a contract-bearing album.
+
+    ``lib/artist_compare.py`` still floors its own bps values for the artist
+    catalogue overlay; that surface is untouched here and is recorded as a
+    residual on the #1145 PR rather than claimed as fixed.
+    """
+    info = album_info_from_current(current, cfg)
+    # ``rank_format_for_current`` owns the bitrate-less fallback, so this
+    # surface and ``check_mbids_detail``'s ``beets_format`` cannot answer
+    # that case differently.
+    return compute_library_rank(
+        rank_format_for_current(current, info, cfg),
+        info.avg_bitrate_kbps if info is not None else 0,
         cfg,
     )
-    bitrates = [
-        item.bitrate
-        for item in current.items
-        if item.bitrate is not None and item.bitrate > 0
-    ]
-    # The one bps->kbps reduction (issue #1144's ``kbps_from_bps``), not a
-    # local float-divide-and-truncate: the band a release shows must not sit a
-    # kbps below the rank the decision path computes from the same Beets rows.
-    # Its generated pin (``test_mixed_format_precedence_is_item_order_invariant``)
-    # already said the divergence was invisible only because no band edge fell
-    # where floor and round disagree — moving the MP3 edges in #1145 made one.
-    # ``lib/artist_compare.py`` still floors its own bps values for the artist
-    # catalogue overlay; that surface is untouched here and is recorded as a
-    # residual on the #1145 PR rather than claimed as fixed.
-    average_kbps = (
-        kbps_from_bps(sum(bitrates) // len(bitrates))
-        if bitrates else 0
-    )
-    return compute_library_rank(album_format, average_kbps, cfg)
 
 
 def band_current_resolutions(

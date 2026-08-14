@@ -217,7 +217,7 @@ class TestCurrentBeetsResolverPins(unittest.TestCase):
                 result = beets.resolve_current_release(_identity("mb"))
                 self.assertEqual(beets.check_mbids([MB_TARGET]), set())
                 self.assertEqual(beets.get_album_ids_by_mbids([MB_TARGET]), {})
-                self.assertEqual(beets.check_mbids_detail([MB_TARGET]), {})
+                self.assertEqual(beets.check_mbids_detail([MB_TARGET], QualityRankConfig.defaults()), {})
             assert_current_resolution(result, ResolverExpectation(
                 identity=_identity("mb"), exact_album_count=2,
             ))
@@ -347,7 +347,7 @@ class TestCurrentBeetsResolverGenerated(unittest.TestCase):
 
         current = fake.resolve_current_release(_identity(identity_source))
         info = fake.get_album_info(target, QualityRankConfig.defaults())
-        detail = fake.check_mbids_detail([target])[target]
+        detail = fake.check_mbids_detail([target], QualityRankConfig.defaults())[target]
         tracks = fake.get_tracks_by_mb_release_id(target)
 
         self.assertIsInstance(current, CurrentBeetsUnique)
@@ -463,7 +463,7 @@ class TestCurrentBeetsResolverGenerated(unittest.TestCase):
                     with self.assertRaises(ConflictingReleaseIdentityError):
                         beets.get_album_ids_by_mbids([release_id])
                     with self.assertRaises(ConflictingReleaseIdentityError):
-                        beets.check_mbids_detail([release_id])
+                        beets.check_mbids_detail([release_id], QualityRankConfig.defaults())
                     with self.assertRaises(ConflictingReleaseIdentityError):
                         beets.get_albums_by_release_ids([release_id])
                     batch_present = False
@@ -472,7 +472,7 @@ class TestCurrentBeetsResolverGenerated(unittest.TestCase):
                 else:
                     batch_present = release_id in beets.check_mbids([release_id])
                     batch_ids = beets.get_album_ids_by_mbids([release_id])
-                    detail = beets.check_mbids_detail([release_id])
+                    detail = beets.check_mbids_detail([release_id], QualityRankConfig.defaults())
                 album_info = beets.get_album_info(
                     release_id, QualityRankConfig.defaults(),
                 )

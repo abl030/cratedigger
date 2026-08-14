@@ -479,8 +479,11 @@ def _overlay_disambiguate(skeleton: _DisambiguateSkeleton) -> _DisambiguateSkele
         beets_ids: dict[str, int] = (
             b.get_album_ids_by_mbids(lib_mbids) if lib_mbids and b else {}
         )
+        from web import overlay as _overlay_module
+
         quality: dict[str, dict[str, object]] = (
-            b.check_mbids_detail(lib_mbids) if lib_mbids and b else {}
+            b.check_mbids_detail(lib_mbids, _overlay_module._rank_cfg())
+            if lib_mbids and b else {}
         )
 
         rg_quality: dict[str, object] | None = None

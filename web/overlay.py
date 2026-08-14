@@ -17,7 +17,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import date, datetime
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from lib.quality import QualityRankConfig
 
 
 class OverlayPipelineDB(Protocol):
@@ -35,7 +38,7 @@ class OverlayBeetsDB(Protocol):
     def check_mbids(self, mbids: list[str]) -> set[str]: ...
 
     def check_mbids_detail(
-        self, mbids: list[str],
+        self, mbids: list[str], cfg: QualityRankConfig,
     ) -> dict[str, dict[str, object]]: ...
 
     def get_albums_by_artist(
@@ -76,9 +79,15 @@ def check_beets_library(
 def check_beets_library_detail(
     beets: OverlayBeetsDB | None,
     mbids: list[str] | list[object],
+    cfg: QualityRankConfig,
 ) -> dict[str, dict[str, object]]:
-    """Check beets library with track counts and audio quality."""
-    return _require_beets(beets).check_mbids_detail([str(m) for m in mbids])
+    """Check beets library with track counts and audio quality.
+
+    ``cfg`` reaches ``album_info_from_current``, which owns every field in
+    the projection — including the reduced/minted format the badge bands on.
+    """
+    return _require_beets(beets).check_mbids_detail(
+        [str(m) for m in mbids], cfg)
 
 
 def get_library_artist(

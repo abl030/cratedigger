@@ -986,7 +986,6 @@
       [Quality Ranks]
       bitrate_metric = ${qr.bitrateMetric}
       within_rank_tolerance_kbps = ${toString qr.withinRankToleranceKbps}
-      mp3_vbr_spectral_gate_kbps = ${toString qr.mp3VbrSpectralGateKbps}
 
       ${bandSection "opus" qr.bands.opus}
       ${bandSection "mp3" qr.bands.mp3}
@@ -1865,16 +1864,6 @@ in {
       withinRankToleranceKbps = mkOption {
         type = types.int;
         default = 5;
-      };
-      mp3VbrSpectralGateKbps = mkOption {
-        type = types.int;
-        default = 210;
-        description = ''
-          Album-average bitrate (kbps) at or above which a VBR MP3 is treated
-          as a plausible genuine V0 and skips the pre-import spectral scan.
-          Scan selection only — never a rank band. Lower it to scan more
-          albums.
-        '';
       };
       bands = {
         opus = mkCodecBands "Opus" {

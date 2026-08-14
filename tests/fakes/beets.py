@@ -21,6 +21,7 @@ from lib.beets_db import (
     ReleaseLocation,
     _lookup_identity,
     album_info_from_current,
+    rank_format_for_current,
 )
 from lib.media_readiness import kbps_from_bps
 from lib.quality.encoder_contract import mp3_vbr_contract_level
@@ -544,8 +545,20 @@ class FakeBeetsDB:
         return set(self.get_album_ids_by_mbids(mbids))
 
     def check_mbids_detail(
-        self, mbids: list[str],
+        self,
+        mbids: list[str],
+        cfg: QualityRankConfig,
     ) -> dict[str, dict[str, Any]]:
+        """Mirror of ``BeetsDB.check_mbids_detail``.
+
+        Every field comes from the production ``album_info_from_current``
+        (plus ``rank_format_for_current`` for the bitrate-less codec-only
+        case), never re-derived beside it — the same delegation rule the
+        seed round-trip and ``get_min_bitrate`` follow. ``cfg`` is required
+        exactly as production requires it: a fake that defaults it would be
+        the more permissive of the two, which is the shape
+        ``.claude/rules/test-fidelity.md`` exists to forbid.
+        """
         self.check_mbids_detail_calls.append(list(mbids))
         result: dict[str, dict[str, Any]] = {}
         for mbid in mbids:
@@ -555,13 +568,7 @@ class FakeBeetsDB:
             current = self.resolve_current_release(identity)
             if not isinstance(current, CurrentBeetsUnique):
                 continue
-            formats = tuple(dict.fromkeys(
-                item.format for item in current.items if item.format
-            ))
-            bitrates = [
-                item.bitrate for item in current.items
-                if item.bitrate is not None and item.bitrate > 0
-            ]
+            info = self._album_info_from_resolution(current, cfg)
             samplerates = [
                 item.samplerate for item in current.items
                 if item.samplerate is not None
@@ -571,18 +578,18 @@ class FakeBeetsDB:
                 if item.bitdepth is not None
             ]
             result[identity.release_id] = {
-                "beets_tracks": len(current.items),
-                "beets_format": ",".join(formats) if formats else None,
-                # Same shared reduction production's check_mbids_detail
-                # uses; a floored copy here would let the two projections
-                # of one album disagree in the fake while agreeing in
-                # production.
+                "beets_tracks": (
+                    info.track_count if info is not None
+                    else len(current.items)
+                ),
+                "beets_format": (
+                    rank_format_for_current(current, info, cfg) or None
+                ),
                 "beets_bitrate": (
-                    kbps_from_bps(min(bitrates)) if bitrates else None
+                    info.min_bitrate_kbps if info is not None else None
                 ),
                 "beets_avg_bitrate": (
-                    kbps_from_bps(sum(bitrates) // len(bitrates))
-                    if bitrates else None
+                    info.avg_bitrate_kbps if info is not None else None
                 ),
                 "beets_samplerate": min(samplerates) if samplerates else None,
                 "beets_bitdepth": max(bitdepths) if bitdepths else None,

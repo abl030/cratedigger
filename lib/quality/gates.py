@@ -15,23 +15,36 @@ from lib.quality.evidence_types import CODEC_FAMILY_MP3, CodecFamily
 def spectral_gate_trigger(
     *,
     is_flac: bool,
-    is_cbr: bool | None,
-    is_vbr: bool | None = None,
-    avg_bitrate_kbps: int | None = None,
-    vbr_threshold_kbps: int,
     codec_family: CodecFamily | None,
 ) -> str:
     """Decide whether the PREIMPORT spectral gate would run on this file.
 
     Mirrors ``lib.measurement._needs_spectral_check`` — and only that. That
-    helper reads a filetype string and answers "lossless source → always;
-    MP3 → per the VBR rules; **every other codec → never, they have no
-    calibrated cliff policy**". This mirror used to see only
-    ``is_flac``/``is_cbr``/``is_vbr`` and so answered ``"would_run"`` for an
-    AAC or Opus candidate the preimport gate would never have run on — the
-    codec-blind seam issue #829 exists to close. ``codec_family`` is
-    required (not defaulted) precisely so a caller cannot silently
-    reintroduce that blindness.
+    helper reads a filetype string and answers "lossless source → run; MP3 →
+    run; **every other codec → never, they have no calibrated cliff
+    policy**". This mirror used to see only ``is_flac``/``is_cbr``/``is_vbr``
+    and so answered ``"would_run"`` for an AAC or Opus candidate the
+    preimport gate would never have run on — the codec-blind seam issue #829
+    exists to close. ``codec_family`` is required (not defaulted) precisely so
+    a caller cannot silently reintroduce that blindness.
+
+    Issue #1145 removed the VBR skip from both sides: an MP3 is scanned
+    whatever its declared mode or album average, because neither is evidence
+    about provenance — the mode is the encoder's own Xing/Info header, and a
+    transcode re-encoded high genuinely has a high average. The
+    ``skipped_vbr_high_avg`` outcome, the threshold parameter, and the
+    one-kbps ``<=``/``>=`` boundary disagreement between this mirror and
+    ``_needs_spectral_check`` all went with it. Historical
+    ``download_log`` stage chains still carry the retired string; it is
+    opaque audit text there and nothing re-derives it.
+
+    One divergence survives and is deliberate: ``_needs_spectral_check``
+    answers True for a lossless candidate (preview must produce affirmative
+    evidence for it), while this mirror reports ``"skipped_flac"`` because
+    the verdict Stage 1 consumes for a FLAC comes from convert → V0 →
+    ``transcode_detection``, not from the MP3 preimport gate. Same codec, two
+    different questions; ``full_pipeline_decision`` reads that by passing
+    ``stage0_gates_stage1 = gate == "would_run" or is_flac``.
 
     **This is not a claim that the album was never measured.**
     ``harness/import_one.py`` calls ``collect_attempt_spectral_audit``
@@ -52,15 +65,7 @@ def spectral_gate_trigger(
                                   unknown), so the preimport gate never
                                   fires and no cliff policy is calibrated
                                   for it
-        "skipped_vbr_high_avg"  — VBR MP3 with avg bitrate >= threshold;
-                                  genuine V0 falls through without analysis
-        "would_run"             — CBR MP3, MP3 with unknown VBR, or VBR MP3
-                                  with avg below / equal to / unknown
-
-    When ``is_vbr`` is None but ``is_cbr`` is known, ``is_vbr`` is derived
-    as ``not is_cbr``. Callers that have genuine ambiguity (mutagen failed
-    to read bitrate_mode) pass ``is_vbr=None`` AND ``is_cbr=None`` and an
-    MP3 routes to "would_run" — the conservative choice within MP3.
+        "would_run"             — any MP3
 
     An unknown ``codec_family`` skips rather than running: production's
     ``_needs_spectral_check`` reaches its ``is_mp3`` test with the same
@@ -71,12 +76,6 @@ def spectral_gate_trigger(
         return "skipped_flac"
     if codec_family != CODEC_FAMILY_MP3:
         return "skipped_uncalibrated_codec"
-    if is_vbr is None and is_cbr is not None:
-        is_vbr = not is_cbr
-    if not is_vbr:
-        return "would_run"
-    if avg_bitrate_kbps is not None and avg_bitrate_kbps >= vbr_threshold_kbps:
-        return "skipped_vbr_high_avg"
     return "would_run"
 
 

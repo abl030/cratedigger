@@ -142,8 +142,11 @@ def overlay_release_rows_in_place(
     beets_ids: dict[str, int] = (
         b.get_album_ids_by_mbids(list(in_library)) if in_library and b else {}
     )
+    from web import overlay as _overlay_module
+
     quality: dict[str, dict[str, object]] = (
-        b.check_mbids_detail(list(in_library)) if in_library and b else {}
+        b.check_mbids_detail(list(in_library), _overlay_module._rank_cfg())
+        if in_library and b else {}
     )
 
     for r in rows:

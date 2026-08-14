@@ -390,7 +390,8 @@ def check_beets_library(mbids: list[str] | list[object]) -> set[str]:
 
 
 def check_beets_library_detail(mbids: list[str] | list[object]) -> dict[str, dict[str, object]]:
-    return _overlay.check_beets_library_detail(_beets_db(), mbids)
+    return _overlay.check_beets_library_detail(
+        _beets_db(), mbids, _overlay._rank_cfg())
 
 
 def get_library_artist(

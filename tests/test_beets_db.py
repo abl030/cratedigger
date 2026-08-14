@@ -633,7 +633,7 @@ class TestBatchLookupAlbumIds(unittest.TestCase):
                 "average bitrate": lambda: db.get_avg_bitrate_kbps("aaa-111"),
                 "item paths": lambda: db.get_item_paths("aaa-111"),
                 "tracks": lambda: db.get_tracks_by_mb_release_id("aaa-111"),
-                "batch detail": lambda: db.check_mbids_detail(["aaa-111"]),
+                "batch detail": lambda: db.check_mbids_detail(["aaa-111"], QualityRankConfig.defaults()),
             }
             for label, operation in operations.items():
                 with self.subTest(operation=label):
@@ -1237,7 +1237,7 @@ class TestCheckMbidsDetail(unittest.TestCase):
 
     def test_returns_correct_detail(self) -> None:
         with BeetsDB(self.db_path) as db:
-            detail = db.check_mbids_detail(["aaa-111", "bbb-222"])
+            detail = db.check_mbids_detail(["aaa-111", "bbb-222"], QualityRankConfig.defaults())
         self.assertIn("aaa-111", detail)
         self.assertEqual(detail["aaa-111"]["beets_tracks"], 2)
         self.assertEqual(detail["aaa-111"]["beets_format"], "MP3")
@@ -1256,7 +1256,7 @@ class TestCheckMbidsDetail(unittest.TestCase):
         ])
 
         with BeetsDB(self.db_path) as db:
-            detail = db.check_mbids_detail(["request-6039"])["request-6039"]
+            detail = db.check_mbids_detail(["request-6039"], QualityRankConfig.defaults())["request-6039"]
             info = db.get_album_info(
                 "request-6039", QualityRankConfig.defaults()
             )
@@ -1273,7 +1273,7 @@ class TestCheckMbidsDetail(unittest.TestCase):
 
     def test_missing_mbid_not_in_result(self) -> None:
         with BeetsDB(self.db_path) as db:
-            detail = db.check_mbids_detail(["zzz-999"])
+            detail = db.check_mbids_detail(["zzz-999"], QualityRankConfig.defaults())
         self.assertEqual(detail, {})
 
     def test_discogs_numeric_id_matches_discogs_albumid(self) -> None:
@@ -1291,7 +1291,7 @@ class TestCheckMbidsDetail(unittest.TestCase):
         ], discogs_albumid=12856590)
 
         with BeetsDB(self.db_path) as db:
-            detail = db.check_mbids_detail(["12856590"])
+            detail = db.check_mbids_detail(["12856590"], QualityRankConfig.defaults())
 
         self.assertIn("12856590", detail)
         self.assertEqual(detail["12856590"]["beets_tracks"], 1)
@@ -1307,7 +1307,7 @@ class TestCheckMbidsDetail(unittest.TestCase):
         ], discogs_albumid=99)
 
         with BeetsDB(self.db_path) as db:
-            detail = db.check_mbids_detail(["aaa-111", "99"])
+            detail = db.check_mbids_detail(["aaa-111", "99"], QualityRankConfig.defaults())
 
         self.assertIn("aaa-111", detail)
         self.assertIn("99", detail)
@@ -1326,7 +1326,7 @@ class TestCheckMbidsDetail(unittest.TestCase):
         ])
 
         with BeetsDB(self.db_path) as db:
-            detail = db.check_mbids_detail(["5555555"])
+            detail = db.check_mbids_detail(["5555555"], QualityRankConfig.defaults())
 
         self.assertIn("5555555", detail)
         self.assertEqual(detail["5555555"]["beets_format"], "FLAC")
@@ -1579,7 +1579,7 @@ class TestGetAlbumsByReleaseIds(unittest.TestCase):
                 ConflictingReleaseIdentityError,
                 release_id,
             ):
-                db.check_mbids_detail([release_id])
+                db.check_mbids_detail([release_id], QualityRankConfig.defaults())
 
             with self.subTest(
                 release_id=release_id,
@@ -1596,7 +1596,8 @@ class TestGetAlbumsByReleaseIds(unittest.TestCase):
             ] = {
                 "albums": BeetsDB.get_albums_by_release_ids,
                 "presence": BeetsDB.check_mbids,
-                "detail": BeetsDB.check_mbids_detail,
+                "detail": lambda db, ids: db.check_mbids_detail(
+                    ids, QualityRankConfig.defaults()),
                 "album-id": BeetsDB.get_album_ids_by_mbids,
             }
             for ids in (
@@ -1617,7 +1618,7 @@ class TestGetAlbumsByReleaseIds(unittest.TestCase):
         with BeetsDB(self.db_path) as db:
             self.assertEqual(db.get_albums_by_release_ids(["99999999"]), [])
             self.assertEqual(db.check_mbids(["99999999"]), set())
-            self.assertEqual(db.check_mbids_detail(["99999999"]), {})
+            self.assertEqual(db.check_mbids_detail(["99999999"], QualityRankConfig.defaults()), {})
             self.assertEqual(db.get_album_ids_by_mbids(["99999999"]), {})
 
 

@@ -395,13 +395,13 @@ class LocalFileInspection:
     force-import would pass gates and then produce a misclassified/
     empty measurement in the harness.
 
-    ``avg_bitrate_bps`` is the mean bitrate across all readable MP3 files —
-    used by the VBR spectral-gate threshold (issue #93). Genuine V0 averages
-    ~240-260kbps; VBR transcodes masquerading as V0 average well below that.
+    ``is_vbr`` is mutagen's ``bitrate_mode`` — the encoder-written
+    Xing/Info/VBRI header, recorded as a persisted fact about the download.
+    It is not a gate input: since issue #1145 the spectral gate reads the
+    codec alone.
     """
     filetype: str = ""           # comma-separated lowercase extensions
     min_bitrate_bps: int | None = None
-    avg_bitrate_bps: int | None = None
     is_vbr: bool | None = None
     has_nested_audio: bool = False
 
@@ -435,7 +435,6 @@ def inspect_local_files(path: str) -> LocalFileInspection:
 
     extensions: set[str] = set()
     min_bitrate: int | None = None
-    mp3_bitrates: list[int] = []
     any_vbr: bool | None = None
     has_nested_audio = False
     try:
@@ -484,7 +483,6 @@ def inspect_local_files(path: str) -> LocalFileInspection:
                             if facts is not None and facts.average_bitrate_kbps is not None
                             else br
                         )
-                        mp3_bitrates.append(observed_bitrate)
                         min_bitrate = (
                             observed_bitrate
                             if min_bitrate is None
@@ -498,12 +496,9 @@ def inspect_local_files(path: str) -> LocalFileInspection:
                     logger.debug(f"inspect_local_files: failed to read {full}",
                                  exc_info=True)
 
-    avg_bitrate = sum(mp3_bitrates) // len(mp3_bitrates) if mp3_bitrates else None
-
     return LocalFileInspection(
         filetype=", ".join(sorted(extensions)),
         min_bitrate_bps=min_bitrate,
-        avg_bitrate_bps=avg_bitrate,
         is_vbr=any_vbr,
         has_nested_audio=has_nested_audio,
     )
@@ -606,55 +601,45 @@ def has_supported_lossless_audio(
 
 def _needs_spectral_check(
     filetype: str,
-    is_vbr: bool | None,
     *,
     lossless_candidate: bool,
-    avg_bitrate_kbps: int | None = None,
-    vbr_threshold_kbps: int | None = None,
 ) -> bool:
     """Decide whether to run spectral analysis as a preimport gate.
 
-    Rules:
-      - A caller-classified supported lossless source (FLAC, WAV, ALAC,
-        including ALAC-in-M4A) → always run. Verification requires affirmative
-        preview-time spectral evidence. AAC-in-M4A remains lossy.
-      - Other non-MP3 codecs → skip; they have no calibrated cliff policy.
-      - CBR MP3 or unknown VBR (is_vbr is None) → run. CBR is the classic
-        transcode-cliff case; unknown VBR is the conservative default
-        (issue #39: resumed downloads without slskd metadata).
-      - VBR MP3 → run only when ``avg_bitrate_kbps`` is unknown (conservative)
-        or at or below ``vbr_threshold_kbps``. Issue #93: a VBR MP3 at avg
-        182kbps (well below genuine V0's ~240-260kbps range) was an obvious
-        transcode that the old ``is_vbr``-only gate let through. The threshold
-        comes from ``cfg.quality_ranks.mp3_vbr_spectral_gate_kbps``. This is a
-        scan-selection policy only; the later transcode decision consumes the
-        resulting spectral grade, not the bitrate threshold.
+    Two rules, both about the CODEC and nothing else:
 
-        The comparison is INCLUSIVE. ``average_bitrate_kbps_from_frames``
-        reports the nearest integer rather than the floor, so a per-track
-        rate can read up to one kbps higher than it used to and an album
-        whose true average sits just under the threshold can now land
-        exactly on it. Under a strict ``<`` that album would silently stop
-        being scanned, in the last kbps before the boundary — which is
-        precisely where a fake V0 is most likely to sit. Reading exactly
-        the threshold means "not yet proven above it", so we scan.
+      - A caller-classified supported lossless source (FLAC, WAV, ALAC,
+        including ALAC-in-M4A) → run. Verification requires affirmative
+        preview-time spectral evidence. AAC-in-M4A remains lossy.
+      - MP3 → run. Every MP3, always.
+      - Any other codec → skip; they have no calibrated cliff policy.
+
+    **Measurement decides; no presumption** (issue #1145). This used to skip a
+    VBR MP3 whose album average cleared a threshold, on the premise that a
+    high-average VBR MP3 is self-evidently genuine. Neither half of that
+    premise is evidence about provenance, for two different reasons.
+    ``is_vbr`` is a self-declaration: ``inspect_local_files`` reads mutagen's
+    ``bitrate_mode``, which reports the Xing/Info/VBRI header the encoder
+    wrote. The average IS genuinely measured from the frames — but a
+    transcode re-encoded at a high bitrate genuinely HAS a high average, so
+    clearing the threshold says nothing about what the audio came from.
+
+    Issue #1145 also lets a candidate carry an ``mp3 vN`` contract minted
+    from its own LAME tag. Together with the skip that was a complete
+    self-certification route: write ``-V 0``, encode above the threshold,
+    never be measured, and be labelled TRANSPARENT on the strength of the
+    tag alone. A peer-supplied tag can still set the LABEL. It can no longer
+    buy an escape from measurement — a forged ``-V 0`` now meets its own
+    spectral cliff, and the clamp in ``compare_quality`` demotes it on the
+    evidence.
 
     This helper is pure: filesystem enumeration and any M4A codec probe happen
     once at the measurement boundary and arrive as ``lossless_candidate``.
-    ``avg_bitrate_kbps`` / ``vbr_threshold_kbps`` are keyword-only to keep the
-    VBR scan threshold explicit; both must be known for that branch to skip.
     """
     filetype_lower = (filetype or "").lower()
     if lossless_candidate:
         return True
-    is_mp3 = "mp3" in filetype_lower and "flac" not in filetype_lower
-    if not is_mp3:
-        return False
-    if not bool(is_vbr):
-        return True
-    if avg_bitrate_kbps is None or vbr_threshold_kbps is None:
-        return True
-    return avg_bitrate_kbps <= vbr_threshold_kbps
+    return "mp3" in filetype_lower and "flac" not in filetype_lower
 
 
 def _persist_spectral_state(
@@ -988,12 +973,11 @@ def measure_preimport_state(
                     spectral_audit=spectral_audit,
                 )
 
-    # --- Resolve VBR / min_bitrate / avg bitrate / layout via filesystem inspection ---
+    # --- Resolve VBR / min_bitrate / layout via filesystem inspection ---
     # ``precomputed_inspection`` lets the force-import path (which already
     # inspected to decide the nested-layout gate) avoid a second mutagen
     # walk. Auto path passes None and does the walk here.
     inspection: LocalFileInspection | None = None
-    avg_bitrate_bps: int | None = None
     if "mp3" in filetype_band and "flac" not in filetype_band:
         inspection = (precomputed_inspection if precomputed_inspection is not None
                       else inspect_local_files(path))
@@ -1001,7 +985,6 @@ def measure_preimport_state(
             download_is_vbr = inspection.is_vbr
         if download_min_bitrate_bps is None:
             download_min_bitrate_bps = inspection.min_bitrate_bps
-        avg_bitrate_bps = inspection.avg_bitrate_bps
     elif precomputed_inspection is not None:
         # Non-MP3 paths with a precomputed inspection — capture layout / count
         # without redoing the bitrate walk.
@@ -1032,18 +1015,17 @@ def measure_preimport_state(
             cd_rip_verification = None
 
     # --- Spectral gate ---
-    # Threshold: cfg.quality_ranks.mp3_vbr_spectral_gate_kbps. Controls whether a
-    # VBR MP3 is scanned; it is not itself transcode-decision evidence.
-    avg_bitrate_kbps = (avg_bitrate_bps // 1000) if avg_bitrate_bps else None
+    # Codec-only since issue #1145: every MP3 and every lossless candidate is
+    # scanned, whatever its declared mode or average. The one remaining
+    # bypass is an exact CD-rip bit verification, which is stronger evidence
+    # than a spectral estimate rather than an assumption about one.
     download_spectral: SpectralMeasurement | None = None
     existing_spectral: SpectralMeasurement | None = None
     existing_min_bitrate: int | None = None
 
     if cd_rip_verification is None and _needs_spectral_check(
-        download_filetype, download_is_vbr,
+        download_filetype,
         lossless_candidate=lossless_candidate,
-        avg_bitrate_kbps=avg_bitrate_kbps,
-        vbr_threshold_kbps=cfg.quality_ranks.mp3_vbr_spectral_gate_kbps,
     ):
         spectral_audit, existing_lookup = collect_release_attempt_spectral_audit(
             path,

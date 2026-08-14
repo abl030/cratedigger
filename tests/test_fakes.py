@@ -6377,6 +6377,8 @@ class TestFakeBeetsDB(unittest.TestCase):
         )
 
     def test_check_mbids_detail_returns_seeded_rows_only(self) -> None:
+        from lib.quality import QualityRankConfig
+
         beets = FakeBeetsDB()
         beets.set_mbid_detail(
             "mbid-1",
@@ -6386,7 +6388,8 @@ class TestFakeBeetsDB(unittest.TestCase):
                 "beets_avg_bitrate": 288,
             },
         )
-        out = beets.check_mbids_detail(["mbid-1", "mbid-2"])
+        out = beets.check_mbids_detail(
+            ["mbid-1", "mbid-2"], QualityRankConfig.defaults())
         self.assertEqual(out, {"mbid-1": {
             "beets_tracks": 11,
             "beets_format": None,
@@ -6752,10 +6755,13 @@ class TestFakeBeetsDB(unittest.TestCase):
 
     def test_check_mbids_detail_shares_the_projection_reduction(self) -> None:
         """The two projections of one album must not disagree in the fake."""
+        from lib.quality import QualityRankConfig
+
         beets = FakeBeetsDB()
         beets.set_tracks_for_release("mbid-sub", self._sub_kilobit_tracks())
 
-        detail = beets.check_mbids_detail(["mbid-sub"])["mbid-sub"]
+        detail = beets.check_mbids_detail(
+            ["mbid-sub"], QualityRankConfig.defaults())["mbid-sub"]
         projected = beets.get_album_info("mbid-sub")
         assert projected is not None
 

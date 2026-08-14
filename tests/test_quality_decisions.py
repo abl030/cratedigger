@@ -65,21 +65,28 @@ from tests.helpers import make_audio_corrupt_validation_report
 class TestSpectralGateTrigger(unittest.TestCase):
     """Test the pre-analysis "would spectral run?" decision (issue #93).
 
-    Mirrors the live gate in lib.measurement._needs_spectral_check. Delivers
-    the input the UI Decisions tab and pipeline-cli quality simulator need
-    to explain which files go through spectral vs. skip.
+    Mirrors the live gate in ``lib.measurement._needs_spectral_check``.
+    Delivers the input the ``pipeline-cli quality`` simulator needs to
+    explain which files go through spectral and which skip.
+
+    Since issue #1145 that is a question about the CODEC alone. The VBR
+    skip — and with it ``skipped_vbr_high_avg``, the threshold parameter,
+    and the ``is_cbr``/``is_vbr``/``avg_bitrate_kbps`` inputs — is gone.
+
+    **Equivalence note for the deleted pins.** ``test_vbr_threshold_table``,
+    ``test_is_vbr_derived_from_is_cbr_when_omitted`` and
+    ``test_both_unknown_falls_back_to_would_run`` covered three things:
+    (a) which averages skipped, now covered by
+    ``test_every_mp3_runs_whatever_its_mode_or_average`` asserting that NONE
+    do; (b) the ``is_vbr = not is_cbr`` derivation, deleted with the
+    parameters it derived; (c) the both-unknown conservative default, also
+    subsumed by (a) — an MP3 with nothing known still runs.
     """
 
-    THRESHOLD = 210
-
-    def _run(self, *, is_flac, is_cbr, is_vbr=None, avg=None,
-             codec_family: "CodecFamily | None" = "mp3"):
+    def _run(self, *, is_flac, codec_family: "CodecFamily | None" = "mp3"):
         from lib.quality import spectral_gate_trigger
         return spectral_gate_trigger(
-            is_flac=is_flac, is_cbr=is_cbr, is_vbr=is_vbr,
-            avg_bitrate_kbps=avg, vbr_threshold_kbps=self.THRESHOLD,
-            codec_family=codec_family,
-        )
+            is_flac=is_flac, codec_family=codec_family)
 
     def test_uncalibrated_codecs_skip(self):
         """Issue #829 Phase 5 PR2b: the mirror must answer what its own
@@ -100,65 +107,49 @@ class TestSpectralGateTrigger(unittest.TestCase):
         for family in families:
             with self.subTest(codec_family=family):
                 self.assertEqual(
-                    self._run(is_flac=False, is_cbr=True, codec_family=family),
+                    self._run(is_flac=False, codec_family=family),
                     "skipped_uncalibrated_codec")
         # FLAC's own branch still wins over the codec test.
         self.assertEqual(
-            self._run(is_flac=True, is_cbr=False, codec_family="lossless"),
+            self._run(is_flac=True, codec_family="lossless"),
             "skipped_flac")
 
     def test_flac_skips(self):
         """FLAC has its own flow (convert → V0 → transcode_detection)."""
-        self.assertEqual(self._run(is_flac=True, is_cbr=False), "skipped_flac")
-        self.assertEqual(self._run(is_flac=True, is_cbr=True), "skipped_flac")
+        self.assertEqual(self._run(is_flac=True), "skipped_flac")
         self.assertEqual(
-            self._run(is_flac=True, is_cbr=False, is_vbr=True, avg=245),
-            "skipped_flac",
-            "FLAC always takes precedence over VBR avg")
+            self._run(is_flac=True, codec_family="mp3"), "skipped_flac",
+            "FLAC always takes precedence over the codec test")
 
-    def test_cbr_mp3_always_runs(self):
-        """CBR MP3 is the classic transcode-cliff case."""
-        self.assertEqual(
-            self._run(is_flac=False, is_cbr=True), "would_run")
-        self.assertEqual(
-            self._run(is_flac=False, is_cbr=True, avg=320), "would_run")
-        self.assertEqual(
-            self._run(is_flac=False, is_cbr=True, avg=128), "would_run")
+    def test_every_mp3_runs_whatever_its_mode_or_average(self):
+        """Issue #1145: no MP3 buys an exemption from measurement.
 
-    def test_vbr_threshold_table(self):
-        """VBR MP3: gate skips only when avg is known and >= threshold."""
-        CASES = [
-            # (desc, avg, expected)
-            ("avg unknown → would_run (conservative)",  None, "would_run"),
-            ("Go! Team avg 182 < 210",                   182, "would_run"),
-            ("just below threshold 209",                 209, "would_run"),
-            ("at threshold 210 → high avg skip",         210, "skipped_vbr_high_avg"),
-            ("genuine V0 245 → skip",                    245, "skipped_vbr_high_avg"),
-            ("genuine V0 260 → skip",                    260, "skipped_vbr_high_avg"),
-            ("lowfi 96 → would_run",                      96, "would_run"),
-        ]
-        for desc, avg, expected in CASES:
-            with self.subTest(desc=desc, avg=avg):
-                got = self._run(is_flac=False, is_cbr=False,
-                                is_vbr=True, avg=avg)
-                self.assertEqual(got, expected)
+        The retired skip let a VBR MP3 past when its album average cleared
+        a threshold. Neither half of that is provenance evidence: the mode
+        is the encoder's own Xing/Info header, and a transcode re-encoded
+        at a high bitrate genuinely has a high average. Once a candidate
+        may also carry an ``mp3 vN`` contract minted from its own LAME tag,
+        the skip was a route to self-certifying TRANSPARENT without ever
+        being measured. The mirror now takes neither input, so this asserts
+        the stronger fact: for MP3 there is exactly one answer.
+        """
+        self.assertEqual(self._run(is_flac=False, codec_family="mp3"),
+                         "would_run")
 
-    def test_is_vbr_derived_from_is_cbr_when_omitted(self):
-        """Legacy simulator callers that pass is_cbr without is_vbr get
-        sensible default: is_vbr = not is_cbr."""
-        self.assertEqual(
-            self._run(is_flac=False, is_cbr=False), "would_run",
-            "derived is_vbr=True with avg=None → gate still runs")
-        self.assertEqual(
-            self._run(is_flac=False, is_cbr=False, avg=245),
-            "skipped_vbr_high_avg",
-            "derived is_vbr=True with high avg → skip")
+    def test_the_mirror_takes_no_mode_or_bitrate_input(self):
+        """The parameters are gone, not merely ignored.
 
-    def test_both_unknown_falls_back_to_would_run(self):
-        """is_cbr=None AND is_vbr=None → conservative default."""
-        self.assertEqual(
-            self._run(is_flac=False, is_cbr=None),
-            "would_run")
+        A signature check rather than a value check: an ignored parameter
+        is an invitation to reconnect it, and the point of #1145 is that
+        the gate has no business reading either fact. Same shape as
+        ``TestFullPipelineContract``'s ``existing_min_bitrate`` guard.
+        """
+        import inspect
+
+        from lib.quality import spectral_gate_trigger
+
+        parameters = inspect.signature(spectral_gate_trigger).parameters
+        self.assertEqual(set(parameters), {"is_flac", "codec_family"})
 
 
 class TestSpectralImportDecision(unittest.TestCase):
@@ -1041,7 +1032,7 @@ EXPECTED_RESULT_KEYS = {
 # Valid values for each stage (None means stage was skipped)
 VALID_PREIMPORT_AUDIO = {None, "pass", "reject_corrupt", "skipped_off"}
 VALID_PREIMPORT_NESTED = {None, "pass", "reject_nested", "skipped_auto"}
-VALID_STAGE0 = {None, "would_run", "skipped_vbr_high_avg", "skipped_flac",
+VALID_STAGE0 = {None, "would_run", "skipped_flac",
                 "skipped_uncalibrated_codec"}
 VALID_STAGE1 = {None, "import", "import_upgrade", "import_no_exist", "reject"}
 VALID_STAGE2 = {None, "import", "downgrade", "transcode_upgrade",
@@ -1746,27 +1737,44 @@ class TestFullPipelineContract(unittest.TestCase):
             self.assertIn(r["stage0_spectral_gate"], VALID_STAGE0,
                           f"Unexpected stage0 value: {r['stage0_spectral_gate']}")
 
-    def test_stage0_high_avg_vbr_skips_stage1(self):
-        """When stage 0 says skip, stage 1 must be None even if spectral
-        was (accidentally) supplied — otherwise the simulator would
-        misrepresent production behavior, which skips spectral entirely."""
+    def test_stage0_high_avg_vbr_no_longer_skips_stage1(self):
+        """Issue #1145: the world that used to skip now measures.
+
+        Equivalence note — this replaces the deleted
+        ``test_stage0_high_avg_vbr_skips_stage1``, which pinned
+        ``skipped_vbr_high_avg`` + ``stage1_spectral is None`` for exactly
+        these inputs. What that test really protected is that stage 1 is
+        modelled iff the gate fired, and that is asserted here in the other
+        direction: the gate fires, so a supplied grade DOES reach Stage 1.
+        The "gate said skip → Stage 1 is None" direction survives for the
+        codecs that still skip — see
+        ``TestQualityClassification``'s ``skipped_uncalibrated_codec`` rows.
+
+        The candidate is a high-average VBR MP3 carrying a suspect grade
+        against a cleaner HAVE: precisely the shape the old skip waved
+        through unmeasured.
+        """
         r = full_pipeline_decision(
             is_flac=False, min_bitrate=220, is_cbr=False,
             is_vbr=True, avg_bitrate=245, new_format="MP3",
-            # Caller supplied spectral_grade, but stage 0 says don't gate.
             spectral_grade="suspect", spectral_bitrate=192,
-            existing_spectral_bitrate=128, existing_spectral_grade="suspect",
+            existing_format="MP3", existing_min_bitrate=224,
+            existing_spectral_bitrate=256, existing_spectral_grade="suspect",
         )
-        self.assertEqual(r["stage0_spectral_gate"], "skipped_vbr_high_avg")
-        self.assertIsNone(
+        self.assertEqual(r["stage0_spectral_gate"], "would_run")
+        self.assertIsNotNone(
             r["stage1_spectral"],
-            "stage 1 must not run when the gate trigger said skip — "
-            "production's _needs_spectral_check would short-circuit before "
-            "spectral_analyze is even called")
+            "an MP3 is always scanned now, so a supplied grade must reach "
+            "Stage 1 instead of being discarded by a mode-based skip")
 
     def test_stage0_low_avg_vbr_runs_stage1(self):
-        """Go! Team case: VBR avg 182 < 210 → stage 0 would_run → if
-        spectral is provided, stage 1 executes and can reject."""
+        """Go! Team case: an MP3 gates, so a supplied grade can reject.
+
+        The average used to be load-bearing here (182 fell below the 210
+        scan threshold). Since issue #1145 the codec alone fires the gate;
+        the 182 is retained because this is the real album the lane exists
+        for, not because any comparison reads it.
+        """
         r = full_pipeline_decision(
             is_flac=False, min_bitrate=126, is_cbr=False,
             is_vbr=True, avg_bitrate=182, new_format="MP3",
@@ -1795,8 +1803,9 @@ class TestFullPipelineContract(unittest.TestCase):
             is_flac=False, min_bitrate=200, is_cbr=False,
             is_vbr=True, avg_bitrate=245, new_format="MP3",
         )
-        # Stage 0: avg >= threshold → skip
-        self.assertEqual(r["stage0_spectral_gate"], "skipped_vbr_high_avg")
+        # Stage 0 fires for every MP3 since #1145; with no grade supplied
+        # there is still nothing for Stage 1 to decide.
+        self.assertEqual(r["stage0_spectral_gate"], "would_run")
         # Stage 2 uses AVG metric → 245 → TRANSPARENT → import
         self.assertEqual(r["stage2_import"], "import")
         # Stage 3 is search policy, not an acceptance floor.
@@ -3488,7 +3497,8 @@ class TestCompareQuality(unittest.TestCase):
          "equivalent"),
 
         # --- Same rank, same bare codec family, measurable bitrate ---
-        # Default mp3_vbr bands: transparent=245, excellent=210
+        # Default MP3 bands after the #1145 ladder collapse:
+        # transparent=320, excellent=256, good=192, acceptable=128.
         ("bare MP3 260 > MP3 250 (same rank TRANSPARENT)",
          {"format": "MP3", "avg_bitrate_kbps": 260},
          {"format": "MP3", "avg_bitrate_kbps": 250},
@@ -4029,7 +4039,6 @@ class TestQualityRankConfigFromIni(unittest.TestCase):
             "[Quality Ranks]\n"
             "bitrate_metric = min\n"
             "within_rank_tolerance_kbps = 10\n"
-            "mp3_vbr_spectral_gate_kbps = 199\n"
             "opus.transparent = 120\n"
             "opus.excellent = 100\n"
             "opus.good = 80\n"
@@ -4053,7 +4062,6 @@ class TestQualityRankConfigFromIni(unittest.TestCase):
         )
         self.assertEqual(cfg.bitrate_metric, RankBitrateMetric.MIN)
         self.assertEqual(cfg.within_rank_tolerance_kbps, 10)
-        self.assertEqual(cfg.mp3_vbr_spectral_gate_kbps, 199)
         self.assertEqual(cfg.opus.transparent, 120)
         self.assertEqual(cfg.mp3.transparent, 320)
         self.assertEqual(cfg.mp3.excellent, 250)
@@ -4274,7 +4282,6 @@ class TestQualityRankConfigRoundTrip(unittest.TestCase):
         payload = json.loads(QualityRankConfig.defaults().to_json())
         expected_keys = {
             "bitrate_metric", "within_rank_tolerance_kbps",
-            "mp3_vbr_spectral_gate_kbps",
             "opus", "mp3", "aac", "vorbis", "wma",
             "mp3_vbr_levels", "lossless_codecs", "mixed_format_precedence",
         }
@@ -4399,12 +4406,6 @@ class TestQualityRankConfigDefaults(unittest.TestCase):
         self.assertEqual(CFG.mp3.excellent, 256)
         self.assertEqual(CFG.mp3.good, 192)
         self.assertEqual(CFG.mp3.acceptable, 128)
-
-    def test_default_mp3_vbr_spectral_gate(self):
-        """The pre-import VBR scan threshold keeps 210 across the ladder
-        collapse. It used to be read off ``mp3_vbr.excellent``; reading it
-        off the surviving table would silently move it to 256."""
-        self.assertEqual(CFG.mp3_vbr_spectral_gate_kbps, 210)
 
     def test_default_aac_bands(self):
         """Hydrogenaudio consensus places the music quality ceiling at 192."""

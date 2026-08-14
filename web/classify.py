@@ -36,6 +36,7 @@ from lib.quality import (
     QualityComparisonBasis,
     dispatch_action,
     interpret_measurement,
+    mp3_vbr_contract_level,
     proof_tier_statement,
     proof_verdict_from_facts,
     verified_lossless_generation_label,
@@ -470,7 +471,25 @@ def _quality_label_from_bitrate(fmt: str, bitrate_kbps: int) -> str:
 
 
 def average_quality_label(fmt: str, avg_bitrate_kbps: int) -> str:
-    """Current-state label from the average positive track bitrate."""
+    """Current-state label from the average positive track bitrate.
+
+    An ``mp3 vN`` contract label already IS the quality statement — the same
+    reason ``quality_rank`` step 3 ranks on the contract instead of the
+    measured bitrate — so it is returned as-is rather than having a
+    bitrate-derived tier appended to it.
+
+    Issue #1145 made this reachable: once ``check_mbids_detail`` reports the
+    minted label instead of the raw Beets codec, the old unconditional
+    append produced ``"MP3 V0 V0"`` on 91 live albums and ``"MP3 V2 V2"`` on
+    55 more, plus 23 where the contract and the measured tier disagree and
+    the operator was shown the flatly contradictory ``"MP3 V0 V2"``.
+
+    ``legacy_floor_quality_label`` deliberately does NOT get this branch: its
+    vocabulary is frozen byte for byte for rows without ``comparison_basis``.
+    """
+    level = mp3_vbr_contract_level(fmt) if fmt else None
+    if level is not None:
+        return f"MP3 V{level}"
     return _quality_label_from_bitrate(fmt, avg_bitrate_kbps)
 
 

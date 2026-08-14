@@ -1128,7 +1128,6 @@ def make_quality_rank_config(
     *,
     bitrate_metric: RankBitrateMetric | None = None,
     within_rank_tolerance_kbps: int | None = None,
-    mp3_vbr_spectral_gate_kbps: int | None = None,
     opus: CodecRankBands | None = None,
     mp3: CodecRankBands | None = None,
     aac: CodecRankBands | None = None,
@@ -1147,11 +1146,6 @@ def make_quality_rank_config(
             within_rank_tolerance_kbps
             if within_rank_tolerance_kbps is not None
             else base.within_rank_tolerance_kbps
-        ),
-        mp3_vbr_spectral_gate_kbps=(
-            mp3_vbr_spectral_gate_kbps
-            if mp3_vbr_spectral_gate_kbps is not None
-            else base.mp3_vbr_spectral_gate_kbps
         ),
         opus=opus if opus is not None else base.opus,
         mp3=mp3 if mp3 is not None else base.mp3,

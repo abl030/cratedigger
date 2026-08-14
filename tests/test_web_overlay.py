@@ -8,6 +8,7 @@ tests/web/test_server_threading.py::TestProductionWiringOverlays.
 import datetime
 import unittest
 
+from lib.quality import QualityRankConfig
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 from web import overlay
@@ -48,7 +49,8 @@ class TestBeetsHelpers(unittest.TestCase):
     def test_none_beets_fails_loudly_instead_of_fabricating_absence(self):
         calls = (
             lambda: overlay.check_beets_library(None, ["m"]),
-            lambda: overlay.check_beets_library_detail(None, ["m"]),
+            lambda: overlay.check_beets_library_detail(
+                None, ["m"], QualityRankConfig.defaults()),
             lambda: overlay.get_library_artist(None, "X"),
         )
         for call in calls:

@@ -280,20 +280,38 @@ that genuinely have none are AAC — whose cliff is a one-sided content
 *floor*, never a class — and Opus/HE-AAC, which assert nothing at all. See
 `docs/research/spectral-calibration-findings.md`.
 
-### Spectral scan selection — `mp3_vbr_spectral_gate_kbps`
+### Spectral scan selection — codec only
 
-Default **210**. A VBR MP3 whose album average reaches this value is a
-plausible genuine V0 and skips the pre-import spectral scan; below it, the
-scan runs (issue #93 — a VBR MP3 at avg 182 kbps was an obvious transcode the
-old `is_vbr`-only gate let through). Scan selection only: it never classifies
-anything and the transcode decision consumes the resulting grade, not this
-number.
+Every MP3 and every lossless candidate is spectrally scanned at preview; no
+other codec is (none has a calibrated cliff policy). There is no bitrate
+threshold and no mode test.
 
-It used to be read off `mp3_vbr.excellent`, which happened to be 210. That
-made it invisible collateral of any MP3 band retune, and the #1145 ladder
-collapse would have silently moved it to 256 — so it now has its own name and
-keeps its own value. `lib/quality/gates.py::spectral_gate_trigger` and
-`lib.measurement._needs_spectral_check` are the two readers.
+There used to be: a VBR MP3 whose album average cleared 210 kbps skipped the
+scan, on the premise that a high-average VBR MP3 is self-evidently genuine.
+Issue #1145 removed it, because neither half of that premise is evidence
+about provenance. `is_vbr` is a self-declaration — `inspect_local_files`
+reads mutagen's `bitrate_mode`, i.e. the Xing/Info/VBRI header the encoder
+wrote. The average is genuinely measured from the frames, but a transcode
+re-encoded at a high bitrate genuinely *has* a high average, so clearing the
+threshold said nothing about the source. Add the `mp3 vN` contract that can
+now be minted from a file's own LAME tag and the skip completed a
+self-certification route: write `-V 0`, encode above the threshold, never be
+measured, be labelled TRANSPARENT. A peer-supplied tag can still set the
+label; it can no longer buy an escape from measurement. **Measurement
+decides; no presumption.**
+
+`lib/quality/gates.py::spectral_gate_trigger` and
+`lib.measurement._needs_spectral_check` are the two readers and now agree
+except on one deliberate point: `_needs_spectral_check` answers "run" for a
+lossless candidate (preview must produce affirmative evidence for it), while
+the simulator mirror reports `skipped_flac`, because the Stage 1 verdict for
+a FLAC comes from convert → V0 → `transcode_detection` rather than from the
+MP3 preimport gate. The one-kbps boundary disagreement the threshold used to
+create is gone with the threshold.
+
+The one remaining bypass is an exact CD-rip bit verification, which is
+stronger evidence than a spectral estimate rather than an assumption about
+one.
 
 ### AAC
 
@@ -379,7 +397,6 @@ else stays at defaults).
 [Quality Ranks]
 bitrate_metric = avg
 within_rank_tolerance_kbps = 5
-mp3_vbr_spectral_gate_kbps = 210
 
 opus.transparent = 112
 opus.excellent = 88
@@ -509,7 +526,6 @@ All options live under `services.cratedigger.qualityRanks.*` and are declared by
 |---|---|---|---|
 | `bitrateMetric` | enum (`min`, `avg`, `median`) | `"avg"` | Which per-album bitrate statistic feeds rank classification. `avg` is robust to VBR per-track variance. `median` is outlier-resistant -- prefer when albums commonly have quiet intros/hidden tracks/skits that skew `avg`. `min` is legacy and penalizes legitimately-encoded lo-fi VBR. See `docs/quality-ranks.md` "When to prefer median". |
 | `withinRankToleranceKbps` | int | `5` | Same-rank equivalence window in kbps. Two bare-codec measurements in the same rank tier within this tolerance are "equivalent"; outside it, one is "better"/"worse". |
-| `mp3VbrSpectralGateKbps` | int | `210` | Album-average bitrate at or above which a VBR MP3 skips the pre-import spectral scan. Scan selection only, never a rank band. |
 
 **Per-codec band tables** (`bands.<codec>.{transparent,excellent,good,acceptable}`, all in kbps, used when the format hint is a bare codec string like `"MP3"` rather than an explicit label like `"mp3 v0"`):
 

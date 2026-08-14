@@ -587,24 +587,21 @@ def cmd_quality(db: PipelineDB, args: argparse.Namespace) -> None:
             "candidate_v0_probe_min": 219,
             "candidate_v0_probe_kind": "lossless_source_v0"}),
         # --- MP3 VBR downloads ---
-        # avg_bitrate drives the new preimport spectral gate (issue #93):
-        # VBR with avg >= cfg.mp3_vbr_spectral_gate_kbps skips spectral
-        # entirely, below gates through analysis even without a
-        # spectral_grade input. (That is ``spectral_gate_trigger``'s
-        # comparison, the mirror this simulator runs; production's own
-        # ``_needs_spectral_check`` is inclusive the other way and still
-        # scans AT the threshold.)
-        ("MP3 V0 genuine (avg 245kbps, gate skips)", {
+        # ``avg_bitrate`` no longer selects whether the preimport spectral
+        # gate runs: issue #1145 retired that skip, so every MP3 below is
+        # scanned. The averages still matter — they are what the measured
+        # rank classifies — but the gate reads the codec alone.
+        ("MP3 V0 genuine (avg 245kbps)", {
             "is_flac": False, "min_bitrate": 240, "is_cbr": False,
             "is_vbr": True, "avg_bitrate": 245}),
-        ("MP3 V0 (low, avg 205kbps, gate runs)", {
+        ("MP3 V0 (low, avg 205kbps)", {
             "is_flac": False, "min_bitrate": 205, "is_cbr": False,
             "is_vbr": True, "avg_bitrate": 205}),
         ("VBR transcode (Go! Team shape, avg 182kbps)", {
             "is_flac": False, "min_bitrate": 126, "is_cbr": False,
             "is_vbr": True, "avg_bitrate": 182,
             "spectral_grade": "likely_transcode", "spectral_bitrate": 96}),
-        ("MP3 V2 (avg 190kbps, gate runs)", {
+        ("MP3 V2 (avg 190kbps)", {
             "is_flac": False, "min_bitrate": 190, "is_cbr": False,
             "is_vbr": True, "avg_bitrate": 190}),
         # --- MP3 CBR downloads (no spectral) ---

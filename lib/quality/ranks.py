@@ -146,15 +146,6 @@ class QualityRankConfig:
     bitrate_metric: RankBitrateMetric = RankBitrateMetric.AVG
     within_rank_tolerance_kbps: int = 5
 
-    # Scan-selection threshold for the pre-import MP3 spectral gate: a VBR MP3
-    # whose album average reaches this value is a plausible genuine V0 and is
-    # not scanned. This is NOT a rank band — it never classifies anything — and
-    # it kept its 210 value when the two MP3 band tables collapsed into one
-    # (issue #1145). It used to borrow ``mp3_vbr.excellent``, which is exactly
-    # why it needs its own name now: reading it off the surviving table would
-    # silently move the gate from 210 to 256.
-    mp3_vbr_spectral_gate_kbps: int = 210
-
     # --- Per-codec band tables ---
     # One table per codec family. Explicit labels like "mp3 v0" / "opus 128"
     # bypass the band tables via the V-level / declared-bitrate resolution
@@ -219,7 +210,6 @@ class QualityRankConfig:
 
             bitrate_metric            = min | avg | median
             within_rank_tolerance_kbps = <int>
-            mp3_vbr_spectral_gate_kbps = <int>
             <codec>.<band>            = <int>
               codecs: opus, mp3, aac, vorbis, wma
               bands:  transparent, excellent, good, acceptable
@@ -264,13 +254,6 @@ class QualityRankConfig:
         if tolerance < 0:
             raise ValueError(
                 f"[{section}] within_rank_tolerance_kbps: must be >= 0, got {tolerance}")
-
-        spectral_gate = _get_int(
-            "mp3_vbr_spectral_gate_kbps", base.mp3_vbr_spectral_gate_kbps)
-        if spectral_gate < 0:
-            raise ValueError(
-                f"[{section}] mp3_vbr_spectral_gate_kbps: must be >= 0, "
-                f"got {spectral_gate}")
 
         # --- Codec bands ---
         def _get_bands(codec: str, default: CodecRankBands) -> CodecRankBands:
@@ -348,7 +331,6 @@ class QualityRankConfig:
         return cls(
             bitrate_metric=metric,
             within_rank_tolerance_kbps=tolerance,
-            mp3_vbr_spectral_gate_kbps=spectral_gate,
             opus=opus,
             mp3=mp3,
             aac=aac,
@@ -368,7 +350,6 @@ class QualityRankConfig:
         payload: dict[str, Any] = {
             "bitrate_metric": self.bitrate_metric.value,
             "within_rank_tolerance_kbps": self.within_rank_tolerance_kbps,
-            "mp3_vbr_spectral_gate_kbps": self.mp3_vbr_spectral_gate_kbps,
             "opus": asdict(self.opus),
             "mp3": asdict(self.mp3),
             "aac": asdict(self.aac),
@@ -399,8 +380,6 @@ class QualityRankConfig:
             return cls(
                 bitrate_metric=RankBitrateMetric(payload["bitrate_metric"]),
                 within_rank_tolerance_kbps=int(payload["within_rank_tolerance_kbps"]),
-                mp3_vbr_spectral_gate_kbps=int(
-                    payload["mp3_vbr_spectral_gate_kbps"]),
                 opus=CodecRankBands(**payload["opus"]),
                 mp3=CodecRankBands(**payload["mp3"]),
                 aac=CodecRankBands(**payload["aac"]),

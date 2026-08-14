@@ -460,10 +460,21 @@ the old thresholds produced.
    graded, or affirmatively graded but proof-denied — still produces a V0
    source probe and uses the provisional lossless-source comparison lane
    instead of becoming verified (issue #990).
-2. **MP3 downloads (especially CBR 320)**: Run spectral check post-download. Cliff + high deficit = upsampled garbage.
-3. **High-band native VBR MP3**: The named policy may deliberately skip
-   spectral analysis. This is an explicit non-verification lane: bitrate can
-   drive relative rank, but it cannot mint verified-lossless proof.
+2. **MP3 downloads**: Run spectral check post-download, on every MP3. Cliff +
+   high deficit = upsampled garbage.
+3. **Non-MP3 lossy (AAC, Opus, Vorbis, WMA)**: No preimport scan. No cliff
+   policy is calibrated for them, so an analysis would produce a number no
+   decision may consume. This is the explicit non-verification lane: bitrate
+   can drive relative rank, but it cannot mint verified-lossless proof.
+
+   There used to be a fourth lane — a high-average native VBR MP3 skipped the
+   scan on the premise that its bitrate was self-evidence of provenance.
+   Issue #1145 removed it: the declared mode is the encoder's own Xing/Info
+   header, and while the average is genuinely measured, a transcode
+   re-encoded at a high bitrate genuinely has a high one. Add the `mp3 vN`
+   contract mintable from a peer's own LAME tag and the skip was a route to
+   self-certifying TRANSPARENT unmeasured. A peer-supplied tag still sets the
+   label; it no longer escapes measurement.
 
 If a candidate-side required scan is missing or errors, preview records
 `measurement_failed`; if fresh analysis of an installed HAVE is missing or

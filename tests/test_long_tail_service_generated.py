@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import errno
+import os
 import sqlite3
+import tempfile
 import unittest
 import uuid
 from collections.abc import Mapping, Sequence
@@ -17,15 +19,19 @@ from lib.banding import (
     BAND_MISSING,
     CurrentBeetsBandingAmbiguityError,
     band_current_resolutions,
+    band_from_detail,
     compute_library_rank,
 )
 from lib.beets_db import (
+    BeetsDB,
     CurrentBeetsAmbiguityReason,
     CurrentBeetsAmbiguous,
     CurrentBeetsItem,
     CurrentBeetsMissing,
     CurrentBeetsResolution,
     CurrentBeetsUnique,
+    album_info_from_current,
+    rank_format_for_current,
 )
 from lib.long_tail_service import list_long_tail
 from lib.media_readiness import kbps_from_bps
@@ -318,6 +324,200 @@ class TestLongTailIdentitySelectionGenerated(unittest.TestCase):
 
         with self.assertRaisesRegex(AssertionError, "identity selection drifted"):
             assert_exact_identity_selection(rows, mb_only)
+
+
+#: LAME settings strings drawn from the live ``items.encoder_settings``
+#: census — the fact ``album_info_from_current`` mints a contract from.
+_BANDING_SETTINGS = (None, "", "-V 0", "-V 2", "-V 5", "-b 320",
+                     "--alt-preset standard")
+
+
+def banding_projection_violations(
+    *,
+    band: str,
+    projected_band: str,
+    context: str,
+) -> list[str]:
+    """The badge must be the decision projection's own answer.
+
+    ``projected_band`` is ``compute_library_rank`` applied to
+    ``album_info_from_current``'s output — the aggregates the importer ranks.
+    Any other derivation is the divergence issue #1145 F5 closed.
+    """
+    violations: list[str] = []
+    if band != projected_band:
+        violations.append(
+            f"banded {band!r} where the decision projection says "
+            f"{projected_band!r}: {context}"
+        )
+    return violations
+
+
+def _browse_surface_violations(
+    current: CurrentBeetsUnique,
+    projected_band: str,
+    cfg: QualityRankConfig,
+) -> list[str]:
+    """Band the same album through the real browse adapter.
+
+    Materialises the items as an actual Beets-shaped SQLite library so
+    ``BeetsDB.check_mbids_detail`` — not a fake — produces the projection
+    ``band_from_detail`` reads. Anything less would leave the browse surface
+    asserted only by construction.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "beets.db")
+        library_root = os.path.join(tmp, "Music")
+        os.makedirs(library_root, exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            "CREATE TABLE albums (id INTEGER PRIMARY KEY, mb_albumid TEXT, "
+            "discogs_albumid INTEGER);"
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, album_id INTEGER, "
+            "path BLOB, title TEXT, track INTEGER, disc INTEGER, "
+            "length REAL, format TEXT, bitrate INTEGER, samplerate INTEGER, "
+            "bitdepth INTEGER, encoder_settings TEXT);"
+        )
+        conn.execute(
+            "INSERT INTO albums (id, mb_albumid, discogs_albumid) "
+            "VALUES (1, ?, NULL)",
+            (current.identity.release_id,),
+        )
+        for index, item in enumerate(current.items, start=1):
+            path = os.path.join(library_root, "Artist", "Album", f"{index}.mp3")
+            conn.execute(
+                "INSERT INTO items (id, album_id, path, title, track, disc, "
+                "length, format, bitrate, samplerate, bitdepth, "
+                "encoder_settings) VALUES (?, 1, ?, ?, ?, 1, 100.0, ?, ?, "
+                "44100, NULL, ?)",
+                (index, path.encode(), f"Track {index}", index, item.format,
+                 item.bitrate, item.encoder_settings),
+            )
+        conn.commit()
+        conn.close()
+
+        release_id = current.identity.release_id
+        with BeetsDB(db_path, library_root=library_root) as db:
+            detail = db.check_mbids_detail([release_id], cfg)
+        return banding_projection_violations(
+            band=band_from_detail(release_id, {release_id}, detail, cfg),
+            projected_band=projected_band,
+            context=f"browse surface: {current.items!r}",
+        )
+
+
+class TestBandingReadsTheDecisionProjectionGenerated(unittest.TestCase):
+    """One projection, both surfaces — patrolled over generated item worlds.
+
+    The deterministic pins live in ``tests/test_banding_projection.py`` and
+    drive real Beets SQLite rows; this drives the in-memory resolution
+    directly so the world space can include contract-bearing, mixed-codec and
+    band-edge albums the fixtures cannot enumerate.
+
+    ``bitrates`` deliberately includes 0, which is what Beets stores for an
+    item it could not measure. Those albums do not project at all, and the
+    first version of this property could not draw one — so the codec-only
+    fallback both surfaces depend on went unpatrolled, and a real divergence
+    (``lossless`` on the worklist, ``unknown`` on browse) survived it. The
+    remedy is a wider world set, not a narrower invariant.
+    """
+
+    @given(
+        settings=st.lists(
+            st.sampled_from(_BANDING_SETTINGS), min_size=1, max_size=4),
+        bitrates=st.lists(
+            st.one_of(
+                st.just(0),
+                st.integers(min_value=32_000, max_value=1_400_000),
+            ),
+            min_size=1, max_size=4),
+        formats=st.lists(
+            st.sampled_from(("MP3", "FLAC", "Opus", "AAC")),
+            min_size=1, max_size=4),
+    )
+    # A proven V0 whose measured average alone would band two tiers lower.
+    @example(settings=["-V 0", "-V 0"], bitrates=[245_000, 245_000],
+             formats=["MP3", "MP3"])
+    # The #1144 band edge: 255.6 kbps floors to good, rounds to excellent.
+    @example(settings=[None, None], bitrates=[255_600, 255_600],
+             formats=["MP3", "MP3"])
+    # Mixed codec: the precedence reduction must reach the badge.
+    @example(settings=[None, None], bitrates=[900_000, 200_000],
+             formats=["FLAC", "MP3"])
+    # No usable bitrate anywhere: no projection, codec-only band on both.
+    @example(settings=[None], bitrates=[0], formats=["FLAC"])
+    @example(settings=["-V 0"], bitrates=[0], formats=["MP3"])
+    # Partly measured: the projection exists but is built from the measured
+    # items only, so the unmeasured one must not drag the label around.
+    @example(settings=[None, None], bitrates=[0, 245_000],
+             formats=["FLAC", "MP3"])
+    def test_the_badge_is_the_projections_own_answer(
+        self,
+        settings: list[str | None],
+        bitrates: list[int],
+        formats: list[str],
+    ) -> None:
+        count = min(len(settings), len(bitrates), len(formats))
+        identity = ReleaseIdentity(
+            source="musicbrainz", release_id=MB_RELEASE)
+        current = CurrentBeetsUnique(
+            identity=identity,
+            album_id=1,
+            album_path="/music/projection",
+            items=tuple(
+                CurrentBeetsItem(
+                    id=index,
+                    path=f"/music/projection/{index:02d}.mp3",
+                    format=formats[index],
+                    bitrate=bitrates[index],
+                    encoder_settings=settings[index],
+                )
+                for index in range(count)
+            ),
+            selectors=(f"mb_albumid:{MB_RELEASE}",),
+        )
+        cfg = QualityRankConfig.defaults()
+        info = album_info_from_current(current, cfg)
+        # ``info`` is None exactly when no item carries a usable bitrate.
+        # The band is then codec-only, through the same shared helper both
+        # production surfaces use — asserting the two AGREE, which is the
+        # invariant, rather than asserting a value derived here.
+        projected = compute_library_rank(
+            rank_format_for_current(current, info, cfg),
+            info.avg_bitrate_kbps if info is not None else 0,
+            cfg,
+        )
+
+        violations = banding_projection_violations(
+            band=band_current_resolutions({identity: current}, cfg)[
+                identity.release_id],
+            projected_band=projected,
+            context=f"long-tail surface: {current.items!r}",
+        )
+        # The OTHER badge surface, through the real BeetsDB adapter — the
+        # rule that "agree by construction stops at the outermost real
+        # adapter" (.claude/rules/code-quality.md). The long-tail path above
+        # never touches ``check_mbids_detail``, so a divergence reintroduced
+        # there would be invisible to it.
+        violations += _browse_surface_violations(current, projected, cfg)
+        self.assertEqual(violations, [])
+
+    def test_projection_checker_trips_on_a_divergent_band(self) -> None:
+        """Known-bad self-test for the checker's one clause."""
+        violations = banding_projection_violations(
+            band="good", projected_band="transparent", context="planted",
+        )
+        self.assertEqual(len(violations), 1, violations)
+        self.assertIn("where the decision projection says", violations[0])
+
+    def test_projection_checker_is_silent_when_they_agree(self) -> None:
+        self.assertEqual(
+            banding_projection_violations(
+                band="excellent", projected_band="excellent",
+                context="agreeing",
+            ),
+            [],
+        )
 
 
 class TestCurrentBeetsBandingGenerated(unittest.TestCase):
