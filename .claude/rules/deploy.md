@@ -150,3 +150,8 @@ The end of a shipped series is the only moment its debt is cheap to see — the 
   `scripts/cratedigger_deploy_hold.py::lifecycle_preflight`, which blocks
   `acquire` unless active automation jobs, `recovery_required` jobs, and dirty
   `downloading` rows are all zero.
+- `TIMER_UNITS` in `scripts/cratedigger_deploy_hold.py` deliberately excludes
+  `cratedigger-retag-census.timer` (#1142): that daily census oneshot has no
+  pipeline-DB dependency and never mutates Beets — it only reads Beets and
+  writes its own unrelated JSON snapshot file — so it touches nothing a
+  migration hold exists to quiesce and is safe to leave running through one.
