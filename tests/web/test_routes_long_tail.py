@@ -206,11 +206,13 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
             id=1, status="wanted", mb_release_id=MB_RELEASE_1))
 
         beets_db = FakeBeetsDB()
-        # MP3 @ 256 kbps classifies TRANSPARENT in the default rank model
-        # (Opus 128 / MP3 V0 are transparent; see docs/quality-ranks.md).
+        # MP3 @ 320 kbps classifies TRANSPARENT in the default rank model.
+        # 320, not the pre-#1145 256: one MP3 ladder puts the transparent
+        # floor at 320 (see docs/quality-ranks.md). The band under test is
+        # still ``transparent`` — only the bitrate that earns it moved.
         beets_db.set_mbid_detail(
             MB_RELEASE_1, {"beets_format": "MP3", "beets_bitrate": 194,
-                           "beets_avg_bitrate": 256})
+                           "beets_avg_bitrate": 320})
         with patch("web.server._beets_db", return_value=beets_db):
             status, data = self._get("/api/pipeline/long-tail")
 

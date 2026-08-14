@@ -31,6 +31,8 @@ def test_upsert_round_trip_preserves_every_field(self):
 
 **When a test fakes an external dependency that has a documented exception contract, the failure-case fake MUST use the real exception classes the production code can encounter. Do not return `None` (or any synthetic stand-in) where the real adapter raises.**
 
+A fake must also mirror *when* the real edge fails, not only what it raises. An operator-facing claim about process behaviour owes a real-subprocess test. A fake that fails earlier than the real producer can manufacture a passing test for a false claim (a write-failing stdout fake vs a block-buffered pipe that raises EPIPE at shutdown).
+
 External dependencies in scope:
 - `web/mb.py::get_release` and `get_release_group_releases` — raises `urllib.error.HTTPError` on 404, `urllib.error.URLError` on transport failure
 - `web/discogs.py::get_release` and `get_master_releases` — same exception shape plus `requests.HTTPError` paths

@@ -31,36 +31,85 @@ from lib.quality.spectral_interpretation import (
     spectral_classes_comparable,
 )
 
-#: The one codec family whose class ladder is calibrated to
-#: ``QualityRankConfig.mp3_cbr``'s thresholds, and therefore the only family
-#: whose spectral-bound value may be classified with CBR bands regardless of
-#: the file's own encoding mode. See ``_shared_spectral_bitrates``.
-_CBR_CALIBRATED_RANK_FAMILY = "mp3"
 
+def _rank_gap_is_within_tolerance(
+    *,
+    new_value: int | None,
+    existing_value: int | None,
+    new_format: str | None,
+    existing_format: str | None,
+    either_spectral_bound: bool,
+    cfg: QualityRankConfig,
+) -> bool:
+    """Whether a RANK difference is too small to be a real quality difference.
 
-def _classify_with_cbr_bands(format_hint: str | None, *, spectral_bound: bool) -> bool:
-    """Whether a spectral-bound side must be ranked through the CBR bands.
+    ``quality_rank`` is a step function evaluated with NO tolerance, and it
+    decides first — ``cfg.within_rank_tolerance_kbps`` only ever ran in the
+    same-rank ``metric_tiebreak`` below. That was survivable while the MP3
+    ladder's edges were 245/210/170/130, and the reason is the CANDIDATE
+    side, not the installed one. Both cliffs need a pair: an installed album
+    just below an edge AND a candidate on it. Measured on the 2026-08-14
+    library (1,101 measured all-MP3 albums): 817 of them average EXACTLY a
+    collapsed edge — 614 at 320, 127 at 192, 45 at 128, 31 at 256 — while
+    only 5 land exactly on a retired VBR edge. Issue #1145 moved every cliff
+    onto the nominal values three quarters of the population sits on, so the
+    pairing went from vanishingly rare to routine. (The installed half was
+    always populated: 38 albums sit 1-5 kbps below a collapsed edge, and 75
+    sat below a retired one — so "the old edges fell between the common
+    bitrates" is NOT the explanation, and measuring it was what showed that.)
+    Each such pair is a full replace + ``beet move`` + media-server churn for
+    a difference no listener can hear — the dl 39947 failure this series
+    began with, re-entering by a different door.
 
-    Only MP3 routes on ``is_cbr`` at all (``quality_rank`` step 5: Opus,
-    AAC, Vorbis and WMA each have a single band table), and only MP3's
-    class ladder is calibrated to ``cfg.mp3_cbr``'s thresholds. Forcing CBR
-    for any other family was scoring an album on MP3-CBR bands purely
-    because a spectral number existed — the same class of error as the LAME
-    table itself (issue #829 Phase 5 PR2b).
+    So the tolerance is applied to the rank comparison too, under exactly the
+    conditions that make the two values comparable:
 
-    Honest scope: against the SHIPPED band config this restriction is
-    provably inert, because every non-MP3 family already ignores ``is_cbr``
-    and only the two ladder families can be spectral-bound at all. It is
-    kept as a stated boundary rather than an implicit one, so that adding a
-    CBR/VBR split to another codec's bands (an ordinary config change)
-    cannot silently resurrect the defect. Pinned directly by
-    ``tests/test_quality_decisions.py::TestClassifyWithCbrBands`` — a
-    mutant widening it dies there, not at a decision, because there is no
-    decision left for it to move.
+    * **Neither side's spectral clamp actually BOUND.** A bound side's value
+      is a spectral CLASS, not a measured rate; letting a ±5 window cancel a
+      rank the clamp produced would weaken the clamp in both directions —
+      suppressing a demotion it earned, or suppressing an upgrade over an
+      album it demoted.
+
+      The test is ``either`` bound rather than "a shared clamp exists"
+      because those are different questions: when both sides carry spectral
+      evidence and NEITHER estimate falls below its own raw metric, both
+      clamped values simply ARE the raw metrics, and the window is as
+      applicable there as anywhere. **This is fail-closed legislation for a
+      world the corpus does not yet hold, not a live branch.** Measured
+      2026-08-14 by running this function over every candidate/current pair
+      in the rebuilt live corpus (17,096 pairs): 22 ``rank_within_tolerance``
+      firings, all 22 unclamped, **ZERO with a shared clamp**. An independent
+      count over a wider pair enumeration reached 31 firings and the same
+      zero; the total depends on which pairs you admit, the zero does not,
+      and the zero is the load-bearing half. The coarser gate would move no
+      live row today; it is
+      written this way so that a future album carrying spectral evidence on
+      both sides — which the clamp path is steadily making more common — does
+      not silently fall out of the guard for a reason that has nothing to do
+      with why the guard exists.
+    * **Same codec family**, so the two numbers mean the same thing. A
+      cross-family rank difference is real (``cross_family_same_rank`` only
+      ever fires at EQUAL rank).
+    * **Both sides bare codec labels.** An explicit label's rank ignores the
+      measured bitrate entirely, so a kbps delta says nothing about it.
+    * **Both values present.**
+
+    The window is the configured one, so a genuinely larger gap still
+    promotes on rank: 320-vs-200 remains an upgrade. Under every shipped band
+    table the narrowest edge spacing (16 kbps, Opus and Vorbis) is wider than
+    the default 5 kbps window, so a qualifying gap straddles at most one edge;
+    a config that narrowed a band below the tolerance would not break the
+    rule, only widen what it cancels.
     """
-    return spectral_bound and (
-        _codec_family_of(format_hint) == _CBR_CALIBRATED_RANK_FAMILY
-    )
+    if either_spectral_bound:
+        return False
+    if new_value is None or existing_value is None:
+        return False
+    if _codec_family_of(new_format) != _codec_family_of(existing_format):
+        return False
+    if _is_explicit_label(new_format) or _is_explicit_label(existing_format):
+        return False
+    return abs(new_value - existing_value) <= cfg.within_rank_tolerance_kbps
 
 
 def _is_explicit_label(format_hint: str | None) -> bool:
@@ -221,18 +270,26 @@ def _shared_spectral_bitrates(
     existing_spectral_bound)`` — the two ``*_spectral_bound`` flags tell the
     caller which side's returned value IS the spectral class (clamp bound,
     ``class <= raw``) versus which is still the untouched raw metric (clamp
-    did not bind, ``class > raw``). This matters for rank classification
-    (issue #813 Finding 1): an MP3 class ladder is calibrated to
-    ``QualityRankConfig.mp3_cbr``'s thresholds (128=acceptable, 192=good,
-    256=excellent, 320=transparent), not ``mp3_vbr``'s more generous ones.
-    Classifying a spectral-bound value through a VBR-tagged side's own
-    ``is_cbr=False`` inflates its rank purely from table choice, not real
-    content. The caller only forces CBR bands when BOTH sides are bound
-    (symmetric) AND the side is MP3 (``_classify_with_cbr_bands``) —
-    forcing it on one bound side while an unbound side keeps its own
-    (possibly more generous VBR) table mixes a spectral-calibrated number
-    against a raw-metric number under two different band tables, which can
-    itself invert the ordering.
+    did not bind, ``class > raw``). Those flags gate the same-rank
+    ``spectral_tiebreak`` (issue #813 Finding 1) — a like-for-like tiebreak
+    needs BOTH sides holding a class, not one class against one raw metric.
+
+    That is now their ONLY consumer: issue #1145 deleted
+    ``_classify_with_cbr_bands``. The MP3 class ladder is a set of nominal
+    kbps values (96/112/128/160/192/224/256/320) and ``QualityRankConfig.mp3``
+    draws its four thresholds from that same ladder, so a spectral-bound value
+    now classifies through the one table like everything else. There is no
+    second, more generous MP3 table left to inflate it, so the "force CBR
+    bands when both sides are bound" rule has nothing left to force.
+
+    Being the only consumer is why the gate is pinned directly rather than
+    left to prose: ``tests/test_quality_decisions.py``
+    ``::test_one_bound_side_never_reaches_the_spectral_tiebreak`` drives the
+    asymmetric world, and
+    ``tests/test_mp3_ladder_generated.py::TestSpectralTiebreakIsGatedGenerated``
+    patrols it. Two mutants are recorded against them — pinning the flag
+    ``True`` at the assignment, and dropping it from the guard — and each is
+    killed by both the pin and the property.
     """
     if not spectral_classes_comparable(new_spectral, existing_spectral).comparable:
         return None
@@ -533,10 +590,7 @@ def compare_quality(
             existing_spectral=existing_spectral,
         )
         if bounded_new_br is not None:
-            bound_new_rank = quality_rank(
-                new_format, bounded_new_br,
-                _classify_with_cbr_bands(new_format, spectral_bound=True), cfg,
-            )
+            bound_new_rank = quality_rank(new_format, bounded_new_br, cfg)
             bound_existing_rank = measurement_rank(existing, cfg)
             if bound_new_rank > bound_existing_rank:
                 bound_verdict = "better"
@@ -560,44 +614,40 @@ def compare_quality(
         rank_new_value, rank_existing_value = new_br, existing_br
         spectral_clamped = False
         both_spectral_bound = False
+        either_spectral_bound = False
     else:
         clamped_new_br, clamped_existing_br, new_bound, existing_bound = shared
-        projected_is_cbr = (
-            new_target_contract.is_cbr
-            if new_target_contract is not None
-            else new.is_cbr
-        )
-        # A spectral-bound side's clamped value is its codec's class,
-        # calibrated to the CBR band thresholds regardless of that side's
-        # own encoding mode (see ``_shared_spectral_bitrates``'s docstring)
-        # — classify it with CBR bands. Two gates, both load-bearing.
-        # BOTH sides must be spectral-bound: forcing CBR on a bound side
-        # while an UNBOUND side keeps its own (possibly more generous VBR)
-        # bands mixes a spectral-calibrated number against a raw-metric
-        # number under two different band tables, which can itself invert
-        # the ordering. And the side must be MP3
-        # (``_classify_with_cbr_bands``): only MP3 routes on ``is_cbr`` at
-        # all, and only MP3's ladder is calibrated to ``cfg.mp3_cbr``
-        # (issue #829 Phase 5 PR2b). A side whose clamp did NOT bind still
-        # carries its own genuine raw metric, classified with its own
-        # encoding mode as before.
+        # ``both_spectral_bound`` survives the #1145 ladder collapse: it no
+        # longer picks a band table (there is one per family now), but it
+        # still gates the same-rank ``spectral_tiebreak`` below, which is only
+        # like-for-like when BOTH clamped values ARE spectral classes. That
+        # branch is its only remaining reader — see ``_shared_spectral_bitrates``
+        # for the pin and the property that hold it up.
         both_spectral_bound = new_bound and existing_bound
-        new_rank = quality_rank(
-            new_format, clamped_new_br,
-            _classify_with_cbr_bands(
-                new_format, spectral_bound=both_spectral_bound,
-            ) or projected_is_cbr,
-            cfg,
-        )
-        existing_rank = quality_rank(
-            existing.format, clamped_existing_br,
-            _classify_with_cbr_bands(
-                existing.format, spectral_bound=both_spectral_bound,
-            ) or existing.is_cbr,
-            cfg,
-        )
+        either_spectral_bound = new_bound or existing_bound
+        new_rank = quality_rank(new_format, clamped_new_br, cfg)
+        existing_rank = quality_rank(existing.format, clamped_existing_br, cfg)
         rank_new_value, rank_existing_value = clamped_new_br, clamped_existing_br
         spectral_clamped = True
+
+    # A rank difference the configured tolerance says is not a difference.
+    # This runs BEFORE the rank short-circuit because rank is a no-tolerance
+    # step function that would otherwise never let ``metric_tiebreak`` see
+    # these two values at all (issue #1145 H2).
+    if new_rank != existing_rank and _rank_gap_is_within_tolerance(
+        new_value=rank_new_value,
+        existing_value=rank_existing_value,
+        new_format=new_format,
+        existing_format=existing.format,
+        either_spectral_bound=either_spectral_bound,
+        cfg=cfg,
+    ):
+        return _basis(
+            "equivalent", "rank_within_tolerance", new_rank, existing_rank,
+            new_value=rank_new_value, existing_value=rank_existing_value,
+            spectral_clamped=spectral_clamped,
+            tolerance_kbps=cfg.within_rank_tolerance_kbps,
+        )
 
     if new_rank > existing_rank:
         return _basis(

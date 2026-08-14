@@ -57,6 +57,7 @@ from lib.pipeline_db import (
 )
 from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
 from lib.quality import (
+    CURRENT_EVIDENCE_LINEAGE_VERSION,
     ActiveDownloadState,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
@@ -7463,7 +7464,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertIsNotNone(loaded.verified_lossless_proof)
         self.assertEqual(loaded.target_format, "lossless")
         self.assertFalse(loaded.target_is_cbr)
-        self.assertEqual(loaded.lineage_version, 4)
+        self.assertEqual(loaded.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
         self.assertIsNotNone(loaded.verified_lossless_proof)
         # Files round-trip sorted-for-storage.
         self.assertEqual(
@@ -8638,7 +8639,8 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         )
         row = cur.fetchone()
         assert row is not None
-        self.assertEqual(row["lineage_version"], 4)
+        self.assertEqual(
+            row["lineage_version"], CURRENT_EVIDENCE_LINEAGE_VERSION)
         self.assertTrue(all(
             row[column] is None
             for column in (

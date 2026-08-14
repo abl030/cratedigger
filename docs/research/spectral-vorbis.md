@@ -43,7 +43,7 @@ math, and sizes the risk.
   systematically overestimates quality**, because Vorbis preserves more
   high-frequency content per kbps than LAME at matched nominal bitrates.
   This isn't cosmetic: `lib/quality/compare.py` folds
-  `spectral_bitrate_kbps` into rank comparison via `mp3_cbr` band
+  `spectral_bitrate_kbps` into rank comparison via the MP3 band
   thresholds (128=acceptable, 192=good, 256=excellent, 320=transparent).
   A lawfully-cliffed Vorbis file can read as "transparent" under those
   bands when its true source was materially worse.
@@ -245,7 +245,7 @@ see that far.
 
 **This is decision-relevant, not cosmetic.** `lib/quality/compare.py`
 folds a detected `spectral_bitrate_kbps` into rank comparison as a clamp
-bound, calibrated against `QualityRankConfig.mp3_cbr`'s bands
+bound, calibrated against `QualityRankConfig.mp3`'s bands
 ("128=acceptable, 192=good, 256=excellent, 320=transparent" —
 `lib/quality/compare.py` docstring, ~lines 160-165). A real aoTuV q5
 (160 kbps) file with a genuinely-detected 19.5 kHz cliff buckets to

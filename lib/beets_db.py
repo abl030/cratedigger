@@ -354,7 +354,7 @@ class AlbumInfo:
         album_requests.final_format when available. Defaults to empty string
         so tests constructing AlbumInfo directly (e.g. integration slices)
         don't have to pass every field. Production always sets it via
-        get_album_info() → _reduce_album_format().
+        get_album_info() → album_info_from_current().
     formats_on_disk:
         Every canonical codec label observed across the album's Beets items,
         before mixed-format rank reduction. Current-evidence propagation uses
@@ -882,7 +882,33 @@ class BeetsDB:
         return album_info_from_current(current, cfg)
 
     def get_min_bitrate(self, mb_release_id: str) -> int | None:
-        """Get min track bitrate (kbps) for a release. Returns None if not found."""
+        """Get min track bitrate (kbps) for a release. Returns None if not found.
+
+        Reduced by the SAME ``kbps_from_bps`` ``album_info_from_current`` uses
+        (issue #1145 scope E). This value is written to
+        ``album_requests.min_bitrate`` by the web requeue/upgrade routes;
+        the post-import path writes that same column from the imported
+        candidate's own measured ``min_bitrate_kbps``
+        (``lib/dispatch/core.py`` reads ``ImportResult.source_measurement``
+        and hands it to ``lib/dispatch/post_import.py``). One column, more
+        than one producer, so they must reduce identically or the operator
+        reads a value that flips by a kbps depending on which path last
+        touched the request.
+
+        **No decision reads the column.** Traced for issue #1145 scope E:
+        every read of ``album_requests.min_bitrate`` is a display, audit, CLI
+        or service projection — ``web/classify.py`` says so at its own
+        ``request_min_bitrate`` field, which it forbids per-row displays from
+        falling back to. The one field that could carry a request-side floor
+        INTO a decision is ``GrabListEntry.current_min_bitrate``, which
+        ``lib/download_validation.py`` passes to
+        ``compute_effective_override_bitrate``; no production code assigns
+        that field, so it is ``None`` on every live path, and
+        ``lib/dispatch/core.py`` overrides the result from linked current
+        evidence whenever one exists. Flooring here would therefore have been
+        conservative in a place nothing conservative is needed; consistency
+        is the property this value actually owes.
+        """
         current = self._resolve_unique(mb_release_id)
         if current is None:
             return None
@@ -892,7 +918,7 @@ class BeetsDB:
         ]
         if not bitrates:
             return None
-        return int(min(bitrates) / 1000)
+        return kbps_from_bps(min(bitrates))
 
     def get_item_paths(self, mb_release_id: str) -> list[tuple[int, str]]:
         """Get all (item_id, path) pairs for an album. Returns empty list if not found."""

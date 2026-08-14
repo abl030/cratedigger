@@ -685,6 +685,56 @@ class TestAnnotateInLibrary(unittest.TestCase):
         self.assertEqual(rg.library_avg_bitrate, 288)
         self.assertEqual(seen, [("MP3", 288)])
 
+    def test_sub_kilobit_average_rounds_like_every_other_surface(self):
+        """Issue #1145 H3: one reduction, or the badge disagrees with itself.
+
+        ``_ALBUM_SELECT`` already truncates once (``CAST(AVG(...) AS
+        INTEGER)``), so a second floor here banded this surface a whole tier
+        below the long-tail worklist for any album averaging ``x.5``-or-above
+        kbps. Live: 26 albums at 319.x read ``excellent`` on the artist
+        catalogue and ``transparent`` on the worklist.
+
+        319_600 bps floors to 319 (``excellent``) and rounds to 320
+        (``transparent``), which is exactly the collapsed MP3 edge.
+        """
+        rg = _mb("Rounded", id="rg-round")
+        lib = [{
+            "mb_releasegroupid": "rg-round",
+            "album": "Rounded",
+            "formats": "MP3",
+            "min_bitrate": 245_600,
+            "avg_bitrate": 319_600,
+        }]
+        seen: list[tuple[str, int]] = []
+
+        def rank_fn(fmt: str, kbps: int) -> str:
+            seen.append((fmt, kbps))
+            return "transparent"
+
+        annotate_in_library([rg], [], lib, rank_fn=rank_fn)
+
+        self.assertEqual(rg.library_avg_bitrate, 320)
+        self.assertEqual(rg.library_min_bitrate, 246)
+        self.assertEqual(seen, [("MP3", 320)])
+
+    def test_a_whole_kilobit_average_is_unchanged(self):
+        """Must-still-work: rounding did not shift the ordinary case.
+
+        Without this arm the pin above passes against a helper that simply
+        added one kbps to everything.
+        """
+        rg = _mb("Exact", id="rg-exact")
+        lib = [{
+            "mb_releasegroupid": "rg-exact",
+            "album": "Exact",
+            "formats": "MP3",
+            "min_bitrate": 192_000,
+            "avg_bitrate": 256_000,
+        }]
+        annotate_in_library([rg], [], lib)
+        self.assertEqual(rg.library_avg_bitrate, 256)
+        self.assertEqual(rg.library_min_bitrate, 192)
+
     def test_no_quality_fields_when_unmatched(self):
         rg = _mb("Unowned")
         annotate_in_library([rg], [], [])

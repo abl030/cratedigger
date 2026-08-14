@@ -161,6 +161,7 @@ from lib.quality import (
     AlbumQualityV0Metric,
     CodecFamily,
     CooldownConfig,
+    evidence_is_source_semantic,
 )
 from lib.quality_evidence import (
     SpectralWriteIntent,
@@ -7822,7 +7823,12 @@ class FakePipelineDB:
         if ev is not None:
             ev_m = ev.measurement
             ev_v0 = ev.v0_metric
-            source_semantic = ev.lineage_version in (3, 4)
+            # Delegate: production's own predicate, never a copy of the
+            # version tuple. Issue #1145 added lineage 5 and a hand-copied
+            # ``(3, 4)`` here would have silently stopped projecting every
+            # rebuilt row's source facts.
+            source_semantic = evidence_is_source_semantic(
+                ev.lineage_version)
             if source_semantic \
                     and row.get("source_format") is None \
                     and ev_m.format is not None:
@@ -7947,7 +7953,7 @@ class FakePipelineDB:
             "_evidence_cd_rip_verification": (
                 msgspec.to_builtins(evidence.cd_rip_verification)
                 if evidence is not None
-                and evidence.lineage_version in (3, 4)
+                and evidence_is_source_semantic(evidence.lineage_version)
                 and evidence.cd_rip_verification is not None
                 else None
             ),

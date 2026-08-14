@@ -109,37 +109,36 @@ class TestNeedsSpectralCheckDecisions(unittest.TestCase):
     SpectralContext plumbing.
 
     Signature (see lib/measurement.py::_needs_spectral_check):
-        _needs_spectral_check(filetype, is_vbr, avg_bitrate_kbps,
-                              vbr_threshold_kbps, lossless_candidate) -> bool
+        _needs_spectral_check(filetype, *, lossless_candidate) -> bool
 
-    The VBR branch is gated on ``avg_bitrate_kbps < vbr_threshold_kbps``
-    so transcodes uploaded as fake V0 (avg ~180kbps) are still analyzed.
-    Genuine V0 (avg ~245kbps+) falls through unchanged.
+    Issue #1145 removed the VBR skip. The gate reads the CODEC and nothing
+    else: a lossless candidate runs, an MP3 runs, everything else skips.
+
+    **Equivalence note for the deleted pins.** ``test_vbr_threshold_table``
+    covered which averages skipped and which scanned; that whole axis is
+    replaced by ``test_every_mp3_runs_whatever_its_declared_mode`` asserting
+    that none skip. ``TestVbrScanThresholdIsInclusive`` (added by #1144 to
+    pin the ``<=`` boundary) is deleted outright — the boundary it defended
+    no longer exists, and the rounding behaviour it was protecting is pinned
+    at its own source by
+    ``tests/test_media_readiness.py::test_exactly_representable_rate_is_not_floored_one_low``.
     """
 
-    # Threshold matches cfg.quality_ranks.mp3_vbr.excellent default (210).
-    THRESHOLD = 210
-
-    def _run(self, filetype, is_vbr, avg_kbps=None, threshold=None):
+    def _run(self, filetype, lossless_candidate=None):
         from lib.measurement import _needs_spectral_check
-        return _needs_spectral_check(
-            filetype, is_vbr,
-            lossless_candidate=any(
+        if lossless_candidate is None:
+            lossless_candidate = any(
                 codec in {"flac", "wav", "alac"}
                 for codec in filetype.lower().replace(",", " ").split()
-            ),
-            avg_bitrate_kbps=avg_kbps,
-            vbr_threshold_kbps=threshold if threshold is not None else self.THRESHOLD,
-        )
+            )
+        return _needs_spectral_check(
+            filetype, lossless_candidate=lossless_candidate)
 
     def test_unambiguous_lossless_containers_always_run(self):
         """Affirmative verification requires preview-time source evidence."""
         for filetype in ("flac", "wav", "alac"):
             with self.subTest(filetype=filetype):
-                self.assertTrue(self._run(filetype, False))
-                self.assertTrue(self._run(filetype, None))
-                self.assertTrue(self._run(filetype, True))
-                self.assertTrue(self._run(filetype, True, avg_kbps=150))
+                self.assertTrue(self._run(filetype))
 
     def test_aac_in_m4a_is_not_a_lossless_candidate(self):
         """The M4A container must not promote its lossy AAC codec."""
@@ -178,11 +177,7 @@ class TestNeedsSpectralCheckDecisions(unittest.TestCase):
             )
             self.assertTrue(
                 _needs_spectral_check(
-                    "m4a",
-                    False,
-                    lossless_candidate=lossless_candidate,
-                    avg_bitrate_kbps=None,
-                    vbr_threshold_kbps=self.THRESHOLD,
+                    "m4a", lossless_candidate=lossless_candidate,
                 )
             )
 
@@ -207,51 +202,55 @@ class TestNeedsSpectralCheckDecisions(unittest.TestCase):
                     "m4a", [path], codec_probe=lambda _path: None,
                 )
 
-    def test_cbr_mp3_always_runs(self):
-        """CBR MP3 always runs spectral — avg bitrate irrelevant."""
-        self.assertTrue(self._run("mp3", False))
-        self.assertTrue(self._run("mp3", False, avg_kbps=320))
-        self.assertTrue(self._run("mp3", False, avg_kbps=128))
+    def test_every_mp3_runs_whatever_its_declared_mode(self):
+        """Issue #1145: measurement decides; no presumption.
 
-    def test_unknown_vbr_mp3_always_runs(self):
-        """is_vbr=None → run (conservative). measure_preimport_state
-        reinspects first, so None here means truly unresolvable."""
-        self.assertTrue(self._run("mp3", None))
-        self.assertTrue(self._run("mp3", None, avg_kbps=245))
+        The retired skip trusted two facts that prove nothing about
+        provenance — the declared VBR mode (the encoder's own Xing/Info
+        header) and the album average (genuinely measured, but a transcode
+        re-encoded high genuinely has a high one) — to decide that a file
+        did not need measuring. With an ``mp3 vN`` contract mintable from a
+        peer's own LAME tag, that let a forged ``-V 0`` skip the one
+        measurement that would catch it and self-certify TRANSPARENT. The
+        helper no longer takes either fact, so this asserts the whole
+        surviving MP3 rule: it runs.
+        """
+        for filetype in ("mp3", "MP3", "mp3, mp3"):
+            with self.subTest(filetype=filetype):
+                self.assertTrue(self._run(filetype))
+
+    def test_the_gate_takes_no_mode_or_bitrate_input(self):
+        """The parameters are gone, not merely ignored.
+
+        An ignored parameter is an invitation to reconnect it, and the point
+        of #1145 is that this gate has no business reading either fact.
+        """
+        import inspect
+
+        from lib.measurement import _needs_spectral_check
+
+        parameters = inspect.signature(_needs_spectral_check).parameters
+        self.assertEqual(set(parameters), {"filetype", "lossless_candidate"})
 
     def test_mixed_mp3_flac_runs_for_lossless_member(self):
         """A lossless member still requires an affirmative candidate scan."""
-        self.assertTrue(self._run("flac, mp3", False))
+        self.assertTrue(self._run("flac, mp3"))
 
     def test_empty_filetype_skips(self):
-        self.assertFalse(self._run("", False))
+        self.assertFalse(self._run(""))
 
-    def test_vbr_threshold_table(self):
-        """VBR branch: gate when avg is unknown or at/below the threshold."""
-        CASES = [
-            # (desc, avg_kbps, expected)
-            ("avg unknown → gate (conservative)",          None, True),
-            ("go_team case — avg 182 < 210 → gate",         182, True),
-            ("live issue #93 avg 182kbps transcode",        182, True),
-            ("just below threshold — 200 → gate",           200, True),
-            # Inclusive since PR #1144: per-track rates are rounded to the
-            # nearest integer rather than floored, so a true 209.6 album now
-            # reads exactly 210. A strict `<` would silently stop scanning it
-            # in the last kbps before the boundary — where a fake V0 is most
-            # likely to sit. Reading exactly the threshold is "not yet proven
-            # above it". See TestVbrScanThresholdIsInclusive.
-            ("at threshold — 210 is not proven above → gate", 210, True),
-            ("first kbps proven above threshold — 211 → skip", 211, False),
-            ("genuine V0 avg ~245 → skip",                  245, False),
-            ("genuine V0 avg ~260 → skip",                  260, False),
-            ("very low 96kbps → gate",                       96, True),
-        ]
-        for desc, avg, expected in CASES:
-            with self.subTest(desc=desc, avg=avg):
-                got = self._run("mp3", True, avg_kbps=avg)
-                self.assertEqual(
-                    got, expected,
-                    f"VBR avg={avg} expected {expected}, got {got}")
+    def test_non_mp3_lossy_codecs_still_never_run(self):
+        """Must-still-work: removing the MP3 skip widened nothing else.
+
+        AAC, Opus, Vorbis and WMA have no calibrated cliff policy, so the
+        preimport gate does not fire for them and did not start to. A
+        regression here would put every Opus download through an ~8s/track
+        analysis whose result no decision may consume.
+        """
+        for filetype in ("aac", "opus", "vorbis", "wma", "m4a", "ogg"):
+            with self.subTest(filetype=filetype):
+                self.assertFalse(
+                    self._run(filetype, lossless_candidate=False))
 
 
 class TestInspectLocalFilesRecursive(unittest.TestCase):
@@ -321,15 +320,16 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
                 has_supported_lossless_audio(inspection.filetype, [Path(disguised)]),
             )
 
-    def test_inspect_reports_avg_bitrate(self):
-        """inspect_local_files must also return avg_bitrate_bps across all
-        MP3 files so measure_preimport_state can decide whether to gate a
-        VBR upload against cfg.quality_ranks.mp3_vbr.excellent.
+    def test_inspect_reports_min_bitrate_and_mode(self):
+        """What survives of the retired avg-bitrate pins (issue #1145).
 
-        A VBR MP3 transcode at avg 182kbps (issue #93, The Go! Team) must be
-        distinguishable from a genuine V0 at avg ~245kbps. Container min
-        alone is not enough — lo-fi V0 can have low-bitrate silent tracks
-        that look identical to a transcode's min.
+        Equivalence note: ``test_inspect_reports_avg_bitrate`` and
+        ``test_inspect_avg_bitrate_none_when_no_mp3`` existed to prove
+        ``inspect_local_files`` produced the album mean the VBR scan
+        threshold read. The threshold is gone and so is the field. The
+        remaining facts the inspection owes — the minimum and the declared
+        mode, both still consumed by ``measure_preimport_state`` — are
+        asserted here over the same three-track world.
         """
         import os
         from unittest.mock import patch
@@ -339,13 +339,12 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         try:
             paths = []
-            for i in range(3):
-                p = os.path.join(tmpdir, f"{i:02}.mp3")
-                with open(p, "wb") as f:
-                    f.write(b"fake mp3")
-                paths.append(p)
+            for index in range(3):
+                path = os.path.join(tmpdir, f"{index:02}.mp3")
+                with open(path, "wb") as handle:
+                    handle.write(b"fake mp3")
+                paths.append(path)
 
-            # Simulate three tracks: two at ~240kbps, one at ~260kbps → avg 247.
             def fake_mp3_open(path):
                 mapping = {
                     paths[0]: 240_000,
@@ -358,29 +357,9 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
             with patch("mutagen.mp3.MP3", side_effect=fake_mp3_open):
                 inspection = inspect_local_files(tmpdir)
 
-            self.assertIsNotNone(inspection.avg_bitrate_bps,
-                                 "avg_bitrate_bps must be populated for MP3")
-            assert inspection.avg_bitrate_bps is not None
-            self.assertEqual(inspection.avg_bitrate_bps, (240_000 + 240_000 + 260_000) // 3)
             self.assertEqual(inspection.min_bitrate_bps, 240_000)
             self.assertTrue(inspection.is_vbr)
-        finally:
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_inspect_avg_bitrate_none_when_no_mp3(self):
-        """Non-MP3 downloads leave avg_bitrate_bps=None (no mutagen walk)."""
-        import os
-
-        from lib.measurement import inspect_local_files
-
-        tmpdir = tempfile.mkdtemp()
-        try:
-            with open(os.path.join(tmpdir, "01.flac"), "wb") as f:
-                f.write(b"fake flac")
-            inspection = inspect_local_files(tmpdir)
-            self.assertIsNone(inspection.avg_bitrate_bps,
-                              "avg_bitrate_bps stays None without any MP3 to read")
+            self.assertEqual(inspection.filetype, "mp3")
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -810,13 +789,15 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_low_avg_vbr_mp3_runs_spectral(self):
-        """Issue #93: VBR MP3 at avg 182kbps (below 210 threshold) MUST gate.
+        """Issue #93's live album still gates, by the #1145 rule.
 
         The Go! Team - Are You Ready for More?: uploaded as VBR MP3 with
-        126min / 182avg kbps. Current gate skips all VBR MP3 → transcode
-        imports through. Post-fix: the gate runs spectral because avg
-        (182) < cfg.quality_ranks.mp3_vbr.excellent (210) → transcode
-        correctly caught.
+        126min / 182avg kbps. The original #93 gate skipped every VBR MP3
+        and this transcode imported through; the threshold that fixed it
+        scanned this album because 182 fell below 210. Both are history —
+        it is scanned now for being an MP3 at all — and the album stays
+        pinned because it is the real-world shape the whole lane exists
+        for.
         """
         import os
         from unittest.mock import patch
@@ -835,7 +816,6 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
             inspected = LocalFileInspection(
                 filetype="mp3",
                 min_bitrate_bps=126_000,
-                avg_bitrate_bps=182_000,
                 is_vbr=True,
             )
             with patch("lib.measurement.inspect_local_files",
@@ -860,9 +840,8 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
                 )
             self.assertEqual(
                 mock_spectral.call_count, 1,
-                "VBR MP3 at avg 182kbps (< 210kbps threshold) must run "
-                "spectral — this is the live issue #93 bug: skipping all "
-                "VBR MP3 would let transcodes through")
+                "an MP3 must run spectral — this is the live issue #93 bug: "
+                "skipping VBR MP3 let this transcode through")
             # Grade came back likely_transcode → should populate download_spectral
             self.assertIsNotNone(
                 measurement.download_spectral,
@@ -871,61 +850,110 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_high_avg_vbr_mp3_skips_spectral(self):
-        """Genuine V0 at avg 245kbps (>= 210 threshold) must keep skipping.
+    def test_high_avg_vbr_mp3_is_scanned_too(self):
+        """Issue #1145 at the real measurement seam, not the pure helper.
 
-        Guard: the threshold fix must not over-gate. Genuine V0 uploads
-        have high avg bitrates; trusting the VBR metadata here preserves
-        current behavior and avoids unnecessary ~8s-per-track spectral
-        analysis on every genuine VBR download.
+        Equivalence note: this replaces ``test_high_avg_vbr_mp3_skips_spectral``
+        (the genuine-V0 skip) and ``test_the_scan_boundary_is_the_configured_gate_not_a_band``
+        (which pinned that ``lib/measurement.py`` read the threshold, and
+        was written for this PR's own F4 review finding). Neither has a
+        subject any more: there is no threshold to read and no average that
+        skips. What both were really protecting — that
+        ``measure_preimport_state``'s own gate call decides correctly, and
+        that its behaviour cannot silently follow a rank band — is asserted
+        here across the averages that used to straddle the boundary.
+
+        A mutant that reintroduces ANY average- or mode-based skip at this
+        site fails on the 245 and 320 rows.
         """
         import os
         from unittest.mock import patch
 
         from lib.measurement import LocalFileInspection, measure_preimport_state
 
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=1))
         cfg = CratediggerConfig(audio_check_mode="off")
+        for avg_kbps in (96, 182, 210, 211, 245, 320):
+            with self.subTest(avg_kbps=avg_kbps):
+                tmpdir = tempfile.mkdtemp()
+                try:
+                    with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
+                        handle.write(b"x")
+                    inspected = LocalFileInspection(
+                        filetype="mp3",
+                        min_bitrate_bps=avg_kbps * 1000,
+                        is_vbr=True,
+                    )
+                    with patch("lib.measurement.inspect_local_files",
+                               return_value=inspected), \
+                         patch("lib.measurement.spectral_analyze") as spectral:
+                        spectral.return_value = AlbumResult(
+                            grade="genuine", estimated_bitrate_kbps=None,
+                            suspect_pct=0.0, tracks=[])
+                        measure_preimport_state(
+                            path=tmpdir,
+                            mb_release_id="",
+                            label="Genuine V0 Album",
+                            download_filetype="mp3",
+                            download_min_bitrate_bps=avg_kbps * 1000,
+                            download_is_vbr=True,
+                            cfg=cfg,
+                        )
+                    self.assertEqual(
+                        spectral.call_count, 1,
+                        "every MP3 is scanned since #1145 — a peer-declared "
+                        "mode and average buy no exemption")
+                finally:
+                    import shutil
+                    shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_a_non_mp3_lossy_download_is_still_not_scanned(self):
+        """Must-still-work at the same seam: nothing else widened.
+
+        The paired control for the pin above. Removing the MP3 skip must not
+        start scanning Opus, whose cliff carries no calibrated policy and
+        whose scan no decision may consume.
+        """
+        import os
+        from unittest.mock import patch
+
+        from lib.measurement import LocalFileInspection, measure_preimport_state
+
+        cfg = CratediggerConfig(audio_check_mode="off")
         tmpdir = tempfile.mkdtemp()
         try:
-            with open(os.path.join(tmpdir, "01.mp3"), "wb") as f:
-                f.write(b"x")
+            with open(os.path.join(tmpdir, "01.opus"), "wb") as handle:
+                handle.write(b"x")
             inspected = LocalFileInspection(
-                filetype="mp3",
-                min_bitrate_bps=220_000,
-                avg_bitrate_bps=245_000,   # genuine V0 range
-                is_vbr=True,
-            )
+                filetype="opus", min_bitrate_bps=128_000, is_vbr=True)
             with patch("lib.measurement.inspect_local_files",
                        return_value=inspected), \
-                 patch("lib.measurement.spectral_analyze") as mock_spectral:
+                 patch("lib.measurement.spectral_analyze") as spectral:
+                spectral.return_value = AlbumResult(
+                    grade="genuine", estimated_bitrate_kbps=None,
+                    suspect_pct=0.0, tracks=[])
                 measure_preimport_state(
                     path=tmpdir,
                     mb_release_id="",
-                    label="Genuine V0 Album",
-                    download_filetype="mp3",
-                    download_min_bitrate_bps=220_000,
+                    label="Opus Album",
+                    download_filetype="opus",
+                    download_min_bitrate_bps=128_000,
                     download_is_vbr=True,
                     cfg=cfg,
-                    db=db,  # type: ignore[arg-type]
-                    request_id=1,
                 )
-            self.assertEqual(
-                mock_spectral.call_count, 0,
-                "genuine V0 (avg 245kbps >= 210kbps) must skip spectral "
-                "to avoid wasted analysis on good files")
+            self.assertEqual(spectral.call_count, 0)
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_vbr_mp3_without_avg_still_gates(self):
-        """VBR MP3 with avg=None → still gate (conservative).
+    def test_mp3_with_no_readable_bitrate_still_gates(self):
+        """An unreadable MP3 is still an MP3, so it is still scanned.
 
-        When mutagen can't compute avg (corrupt files, empty folder), the
-        gate must fall through to running spectral rather than skipping.
-        Matches the ``is_vbr=None`` handling — err on the side of analyzing.
+        Equivalence note: renamed from ``test_vbr_mp3_without_avg_still_gates``,
+        which framed this as the conservative arm of the avg-based skip
+        ("avg=None → gate anyway"). There is no avg input and no skip any
+        more, so the surviving fact is simpler and strictly stronger — the
+        codec alone decides, and mutagen failing to read a bitrate cannot
+        change the codec.
         """
         import os
         from unittest.mock import patch
@@ -942,8 +970,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
                 f.write(b"x")
             inspected = LocalFileInspection(
                 filetype="mp3",
-                min_bitrate_bps=None,
-                avg_bitrate_bps=None,   # mutagen couldn't read
+                min_bitrate_bps=None,   # mutagen couldn't read
                 is_vbr=True,
             )
             with patch("lib.measurement.inspect_local_files",
@@ -955,7 +982,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
                 measure_preimport_state(
                     path=tmpdir,
                     mb_release_id="",
-                    label="Unknown Avg",
+                    label="Unreadable Bitrate",
                     download_filetype="mp3",
                     download_min_bitrate_bps=None,
                     download_is_vbr=True,
@@ -1073,45 +1100,3 @@ class TestFallbackSkippedWhenBeetsFindsNoAlbum(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class TestVbrScanThresholdIsInclusive(unittest.TestCase):
-    """A rounded average must not round an album out of the transcode scan.
-
-    ``average_bitrate_kbps_from_frames`` reports the nearest integer rather
-    than the floor (PR #1144). That lifts a per-track rate by up to one kbps,
-    so an album whose true average sits just under
-    ``cfg.quality_ranks.mp3_vbr.excellent`` can now read exactly the
-    threshold. With a strict ``<`` that album silently stops being scanned —
-    the issue #93 fake-V0 gate losing coverage in the last kbps before the
-    boundary, which is the one place a fake V0 is most likely to sit.
-
-    The threshold is therefore inclusive: reading exactly the threshold is
-    "not yet proven above it", and the conservative action is to scan.
-    """
-
-    THRESHOLD = 210
-
-    def _run(self, avg_kbps: int | None) -> bool:
-        from lib.measurement import _needs_spectral_check
-        return _needs_spectral_check(
-            "mp3", True,
-            lossless_candidate=False,
-            avg_bitrate_kbps=avg_kbps,
-            vbr_threshold_kbps=self.THRESHOLD,
-        )
-
-    def test_album_landing_exactly_on_the_threshold_is_still_scanned(self) -> None:
-        # True per-track rate 209.6: floored to 209 before the rounding fix,
-        # rounded to 210 after it. Both must still be scanned.
-        self.assertTrue(self._run(209), "below threshold must scan")
-        self.assertTrue(self._run(self.THRESHOLD), "exactly at threshold must scan")
-
-    def test_genuinely_above_threshold_still_skips(self) -> None:
-        # Must-still-work guard: a real V0 (~245) is not dragged into the scan.
-        for avg in (self.THRESHOLD + 1, 245, 260):
-            with self.subTest(avg=avg):
-                self.assertFalse(self._run(avg))
-
-    def test_unknown_average_remains_conservative(self) -> None:
-        self.assertTrue(self._run(None))

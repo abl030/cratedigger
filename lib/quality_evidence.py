@@ -20,6 +20,7 @@ from lib.evidence_media_identity import (
     is_lossless_evidence_codec,
 )
 from lib.quality import (
+    CURRENT_EVIDENCE_LINEAGE_VERSION,
     EVIDENCE_PROVENANCE_CARRIED,
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
@@ -499,9 +500,10 @@ def current_evidence_rebuild_reasons(
 ) -> list[str]:
     """Return reasons a current-library snapshot must be measured again."""
     reasons = evidence.policy_incomplete_reasons()
-    if evidence.lineage_version != 4:
+    if evidence.lineage_version != CURRENT_EVIDENCE_LINEAGE_VERSION:
         reasons.append(
-            f"lineage_version {evidence.lineage_version} must be rebuilt as 4"
+            f"lineage_version {evidence.lineage_version} must be rebuilt as "
+            f"{CURRENT_EVIDENCE_LINEAGE_VERSION}"
         )
     measurement = evidence.measurement
     if (
@@ -946,7 +948,7 @@ def evidence_from_import_result(
         storage_format=audio_measurement.format,
         target_format=target_format,
         target_is_cbr=target_is_cbr,
-        lineage_version=4,
+        lineage_version=CURRENT_EVIDENCE_LINEAGE_VERSION,
         v0_metric=(
             neutral_v0_metric_from_probe(import_result.v0_probe)
         ),
@@ -1077,7 +1079,7 @@ def evidence_from_measurement(
         # absent instead of fabricating a bitrate mode.
         target_format=None,
         target_is_cbr=None,
-        lineage_version=4,
+        lineage_version=CURRENT_EVIDENCE_LINEAGE_VERSION,
         v0_metric=None,
         verified_lossless_proof=(
             measurement.cd_rip_verification.verified_lossless_proof()
@@ -1153,7 +1155,7 @@ def evidence_from_album_info(
         codec=files[0].codec,
         container=files[0].container,
         storage_format=measurement.format,
-        lineage_version=4,
+        lineage_version=CURRENT_EVIDENCE_LINEAGE_VERSION,
         v0_metric=None,
         verified_lossless_proof=proof,
         cd_rip_verification=carried_cd_rip,
@@ -1647,7 +1649,7 @@ def propagate_candidate_evidence_to_current(
         container=library_container_from_files,
         storage_format=measurement.format,
         target_format=None,
-        lineage_version=4,
+        lineage_version=CURRENT_EVIDENCE_LINEAGE_VERSION,
         v0_metric=carried_v0,
         verified_lossless_proof=carried_proof,
         cd_rip_verification=carried_cd_rip,

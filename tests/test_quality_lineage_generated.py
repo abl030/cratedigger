@@ -33,7 +33,9 @@ from lib.measurement import PreimportMeasurement
 from lib.media_readiness import kbps_from_bps
 from lib.pipeline_db.download_log import _DownloadLogMixin
 from lib.quality import (
+    CURRENT_EVIDENCE_LINEAGE_VERSION,
     IMPORT_RESULT_SENTINEL,
+    SOURCE_SEMANTIC_LINEAGE_VERSIONS,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
@@ -43,6 +45,7 @@ from lib.quality import (
     SpectralAnalysisDetail,
     TargetQualityContract,
     V0ProbeEvidence,
+    evidence_is_source_semantic,
     full_pipeline_decision,
     full_pipeline_decision_from_evidence,
     gate_rank,
@@ -237,11 +240,12 @@ def assert_failure_v1_refresh_phases(
     """Failure preparation refreshes identity before later enrichment."""
     if outcome != "ready":
         raise AssertionError("installed current evidence was not prepared")
-    if initial_lineage == 1 and prepared_lineage != 4:
+    if (initial_lineage == 1
+            and prepared_lineage != CURRENT_EVIDENCE_LINEAGE_VERSION):
         raise AssertionError("failure preparation retained ambiguous lineage")
     if refresh_status != "wanted":
         raise AssertionError("failure refresh ran before request became wanted")
-    if final_lineage != 4:
+    if final_lineage != CURRENT_EVIDENCE_LINEAGE_VERSION:
         raise AssertionError("post-failure refresh retained ambiguous lineage")
 
 
@@ -251,7 +255,8 @@ def assert_import_attempt_uses_v3_current_evidence(
     decision_lineage: int | None,
 ) -> None:
     """An actual import attempt may not decide from ambiguous v1 evidence."""
-    if initial_lineage == 1 and decision_lineage != 4:
+    if (initial_lineage == 1
+            and decision_lineage != CURRENT_EVIDENCE_LINEAGE_VERSION):
         raise AssertionError("import attempt retained ambiguous current lineage")
 
 
@@ -265,8 +270,9 @@ def assert_action_refresh_carries_only_source_facts(
     spectral_bitrate: int | None,
 ) -> None:
     """Lineage repair carries source facts and drops ambiguous on-disk facts."""
-    if decision_lineage != 4:
-        raise AssertionError("action did not rebuild current evidence as v4")
+    if decision_lineage != CURRENT_EVIDENCE_LINEAGE_VERSION:
+        raise AssertionError(
+            "action did not rebuild current evidence as the current lineage")
     if v0_subject != "source":
         raise AssertionError("action discarded lossless-source V0 evidence")
     if v0_provenance != "carried":
@@ -275,6 +281,47 @@ def assert_action_refresh_carries_only_source_facts(
         raise AssertionError("action replaced exact-snapshot V0 evidence")
     if spectral_grade is not None or spectral_bitrate is not None:
         raise AssertionError("action retained ambiguous legacy spectral evidence")
+
+
+class TestCurrentLineageIsSourceSemantic(unittest.TestCase):
+    """The lineage every writer emits must be a source-semantic one.
+
+    ``evidence_is_source_semantic`` gates whether a row's measurement and its
+    minted verified-lossless proof may be read at all. If a lineage bump adds
+    a version to ``CURRENT_EVIDENCE_LINEAGE_VERSION`` without adding it to
+    ``SOURCE_SEMANTIC_LINEAGE_VERSIONS``, every row written from that moment
+    reads as ambiguous-legacy: ``lib/wrong_match_cleanup_service.py`` drops
+    its measurement, and the three "proved by" surfaces stop stating a proof
+    the album really has.
+
+    Issue #1145 bumped 4 → 5 and a mutant reverting only the source-semantic
+    tuple survived the whole suite, so the pair is asserted directly rather
+    than left implied by the writers.
+    """
+
+    def test_the_current_lineage_is_admitted_as_source_semantic(self):
+        self.assertIn(
+            CURRENT_EVIDENCE_LINEAGE_VERSION, SOURCE_SEMANTIC_LINEAGE_VERSIONS)
+        self.assertTrue(
+            evidence_is_source_semantic(CURRENT_EVIDENCE_LINEAGE_VERSION))
+
+    def test_the_ambiguous_legacy_lineage_is_still_refused(self):
+        """Must-still-work: the predicate did not become unconditionally True.
+
+        Without this arm the pin above passes against
+        ``evidence_is_source_semantic = lambda _: True``, which would
+        reinstate exactly the v1 target-projection reads it exists to block.
+        """
+        self.assertFalse(evidence_is_source_semantic(1))
+        self.assertNotIn(1, SOURCE_SEMANTIC_LINEAGE_VERSIONS)
+
+    @given(lineage=st.integers(min_value=0, max_value=9))
+    def test_every_admitted_version_agrees_with_the_predicate(self, lineage):
+        """The tuple and the predicate are one answer over the whole domain."""
+        self.assertEqual(
+            evidence_is_source_semantic(lineage),
+            lineage in SOURCE_SEMANTIC_LINEAGE_VERSIONS,
+        )
 
 
 class TestQualityLineagePins(unittest.TestCase):
@@ -314,7 +361,7 @@ class TestQualityLineagePins(unittest.TestCase):
                 initial_lineage=1,
                 prepared_lineage=1,
                 refresh_status="wanted",
-                final_lineage=4,
+                final_lineage=CURRENT_EVIDENCE_LINEAGE_VERSION,
             )
 
     def test_import_attempt_checker_rejects_v1_decision_evidence(self):
@@ -327,7 +374,7 @@ class TestQualityLineagePins(unittest.TestCase):
     def test_action_refresh_checker_rejects_lost_lossless_source_v0(self):
         with self.assertRaisesRegex(AssertionError, "discarded"):
             assert_action_refresh_carries_only_source_facts(
-                decision_lineage=4,
+                decision_lineage=CURRENT_EVIDENCE_LINEAGE_VERSION,
                 v0_subject=None,
                 v0_provenance=None,
                 v0_average=None,
@@ -338,7 +385,7 @@ class TestQualityLineagePins(unittest.TestCase):
     def test_action_refresh_checker_rejects_legacy_spectral_carry(self):
         with self.assertRaisesRegex(AssertionError, "ambiguous legacy spectral"):
             assert_action_refresh_carries_only_source_facts(
-                decision_lineage=4,
+                decision_lineage=CURRENT_EVIDENCE_LINEAGE_VERSION,
                 v0_subject="source",
                 v0_provenance="carried",
                 v0_average=195,
@@ -1239,6 +1286,18 @@ class TestQualityLineagePins(unittest.TestCase):
         )
 
     def test_single_track_bare_mp3_preserves_legacy_cbr_projection(self):
+        """The projected-contract path and the legacy proxy path agree.
+
+        The installed side is 100 kbps, not the 128-vs-123 pair this world
+        used to carry. That pair only compared "better" on ``main`` because
+        the two sides routed through DIFFERENT MP3 tables — the candidate's
+        ``is_cbr=True`` picked ``mp3_cbr`` (acceptable 128) while the
+        installed side's ``is_cbr=False`` picked ``mp3_vbr`` (acceptable
+        130) — which is the amplifier issue #1145 removes. With one table
+        and the rank tolerance (H2) a 5-kbps gap is correctly no upgrade, so
+        the fixture now uses a gap that is genuinely one: the parity this
+        test exists for is still pinned on the UPGRADE path.
+        """
         projected_bitrates = [128]
         projected_is_cbr = projected_is_cbr_from_bitrates(projected_bitrates)
         contract = TargetQualityContract.from_projection(
@@ -1252,8 +1311,8 @@ class TestQualityLineagePins(unittest.TestCase):
             is_cbr=True,
         )
         current = AudioQualityMeasurement(
-            min_bitrate_kbps=123,
-            avg_bitrate_kbps=123,
+            min_bitrate_kbps=100,
+            avg_bitrate_kbps=100,
             format="MP3",
             is_cbr=False,
         )
@@ -1282,8 +1341,8 @@ class TestQualityLineagePins(unittest.TestCase):
             is_flac=True,
             min_bitrate=800,
             is_cbr=False,
-            existing_min_bitrate=123,
-            existing_avg_bitrate=123,
+            existing_min_bitrate=100,
+            existing_avg_bitrate=100,
             existing_format="MP3",
             existing_is_cbr=False,
             post_conversion_min_bitrate=128,

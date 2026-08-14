@@ -704,8 +704,21 @@ def cd_rip_proof_pair_validation_errors(
 #: fact about a source, and migration 021 §6b cross-walked those older rows
 #: onto whichever content-addressed evidence row their release already had —
 #: so a v1 row can belong to a sibling attempt entirely.
-#: ``lineage_version`` is constrained to 1, 3 or 4.
-SOURCE_SEMANTIC_LINEAGE_VERSIONS: tuple[int, ...] = (3, 4)
+#: ``lineage_version`` is constrained to 1, 3, 4 or 5.
+SOURCE_SEMANTIC_LINEAGE_VERSIONS: tuple[int, ...] = (3, 4, 5)
+
+#: The lineage every writer emits today. A row below it reports itself stale
+#: (``lib.quality_evidence.current_evidence_rebuild_reasons``) and is rebuilt
+#: from live Beets facts before it decides anything, which is how a policy
+#: change to *derivation* reaches existing rows without a backfill. Bumped to 5
+#: by issue #1145: a v4 MP3 row was ranked against one of two band tables 75
+#: kbps apart, chosen by an inferred encoding mode; a v5 row is ranked against
+#: the single ``mp3`` table. The two-axis fact vocabulary is unchanged between
+#: 4 and 5 — every ``lineage_version < 4`` merge predicate in
+#: ``lib.pipeline_db.evidence`` means "predates that vocabulary" and stays at
+#: 4 deliberately, because widening it would replace (not merge) the preserved
+#: spectral and V0 tuples on every v4 row's rebuild.
+CURRENT_EVIDENCE_LINEAGE_VERSION = 5
 
 
 def evidence_is_source_semantic(lineage_version: object) -> bool:
@@ -772,8 +785,11 @@ class AlbumQualityEvidence(
     # contract fact, not the downloaded source or materialized-output mode.
     target_is_cbr: bool | None = None
     # Migration 050 marks the interpretation of storage/target fields.
-    # Historical rows are v1/v3; every two-axis writer emits v4.
-    lineage_version: int = 4
+    # Historical rows are v1/v3; the two-axis vocabulary starts at v4.
+    # v5 (issue #1145) keeps that vocabulary exactly and re-derives the MP3
+    # rank: the bump exists so every v4 row rebuilds through the single
+    # collapsed ladder instead of needing a backfill.
+    lineage_version: int = CURRENT_EVIDENCE_LINEAGE_VERSION
     v0_metric: AlbumQualityV0Metric | None = None
     # Preview-owned, content-snapshot-local idempotence marker. A failed or
     # empty on-disk V0 research probe is still an attempt; import/cleanup
@@ -887,11 +903,11 @@ class AlbumQualityEvidence(
             errors.append("mb_release_id must be a non-empty string")
         if not self.snapshot_fingerprint:
             errors.append("snapshot_fingerprint must be a non-empty string")
-        if self.lineage_version not in (1, 3, 4):
-            errors.append("lineage_version must be 1, 3, or 4")
+        if self.lineage_version not in (1, 3, 4, 5):
+            errors.append("lineage_version must be 1, 3, 4, or 5")
         if self.lineage_version >= 3:
             errors.extend(self.measurement.new_row_validation_errors(
-                two_axis=self.lineage_version == 4,
+                two_axis=self.lineage_version >= 4,
             ))
             if (self.target_format is None) != (self.target_is_cbr is None):
                 errors.append(
@@ -945,9 +961,9 @@ class AlbumQualityEvidence(
                     f"duplicate snapshot relative_path: {file.relative_path}"
                 )
             relative_paths.add(file.relative_path)
-        if self.lineage_version == 4 and self.v0_metric is not None:
+        if self.lineage_version >= 4 and self.v0_metric is not None:
             errors.extend(self.v0_metric.validation_errors())
-        if self.lineage_version == 4 and self.verified_lossless_proof is not None:
+        if self.lineage_version >= 4 and self.verified_lossless_proof is not None:
             errors.extend(self.verified_lossless_proof.validation_errors())
         if self.aac_lattice is not None:
             errors.extend(self.aac_lattice.validation_errors())
@@ -1054,6 +1070,10 @@ class QualityComparisonBasis(
 
 COMPARISON_BASIS_BRANCHES: frozenset[str] = frozenset({
     "rank",                        # ranks differ — the primary key decided
+    "rank_within_tolerance",       # ranks differ but by less than
+                                   # within_rank_tolerance_kbps of measured
+                                   # bitrate — same family, both bare labels,
+                                   # no spectral clamp (issue #1145)
     "lossless_same_rank",          # both LOSSLESS: equivalent by identity
     "cross_family_same_rank",      # same rank, different codec family
     "label_contract_same_rank",    # same rank, explicit label is authoritative

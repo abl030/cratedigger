@@ -750,8 +750,8 @@ class InadmissibleSpectralPairWorld:
       2, which this domain does not cover; see
       ``test_every_generated_candidate_reaches_stage_1_with_a_class``;
     * the preimport gate would actually fire (CBR, or VBR below
-      ``cfg.mp3_vbr.excellent``), so ``stage1_spectral`` is a real verdict
-      rather than ``None``;
+      ``cfg.mp3_vbr_spectral_gate_kbps``), so ``stage1_spectral`` is a real
+      verdict rather than ``None``;
     * the HAVE carries real spectral evidence that the pre-#829 seam WOULD
       have consumed, while ``spectral_classes_comparable`` refuses it —
       for the reason named in ``shape``.
@@ -953,7 +953,7 @@ def assert_stage1_never_contradicts_stage2(
 
     ``stage1 is None`` means the Stage-0 preimport gate never fired for this
     candidate at all (a non-MP3 codec, or a VBR MP3 whose average is at or
-    above ``cfg.mp3_vbr.excellent``), so Stage 1 has no verdict to
+    above ``cfg.mp3_vbr_spectral_gate_kbps``), so Stage 1 has no verdict to
     contradict with. That case became VISIBLE only in issue #829 Phase 5
     PR2d: the harness used to reproduce the decider's Stage-1 wiring inline
     and computed a Stage-1 verdict for worlds where production skips the
@@ -1294,6 +1294,17 @@ def assert_basis_consistent(result: SimResult) -> None:
     branch = basis["branch"]
     if branch == "rank" and basis["new_rank"] == basis["existing_rank"]:
         raise AssertionError(f"rank branch with equal ranks: {basis!r}")
+    if branch == "rank_within_tolerance":
+        # Issue #1145 H2: the one branch where the ranks DIFFER and the
+        # verdict is still equivalent. Equal ranks would mean the ordinary
+        # same-rank tiebreak should have fired instead, and any other verdict
+        # would contradict the branch's whole meaning.
+        if basis["new_rank"] == basis["existing_rank"]:
+            raise AssertionError(
+                f"within-tolerance branch with equal ranks: {basis!r}")
+        if verdict != "equivalent":
+            raise AssertionError(
+                f"within-tolerance branch is not equivalent: {basis!r}")
     if (branch in _BASIS_SAME_RANK_BRANCHES
             and basis["new_rank"] != basis["existing_rank"]):
         raise AssertionError(f"same-rank branch with differing ranks: {basis!r}")
@@ -1508,13 +1519,6 @@ _LAME_BUCKET_CLASSES = (96, 112, 128, 160, 192, 224, 256, 320)
 #: ``stage_parity_worlds``.
 _LADDER_FORMATS = ("MP3", "Vorbis")
 
-#: The average bitrate at or above which ``spectral_gate_trigger`` skips a
-#: VBR MP3 — i.e. above which no Stage-1 verdict exists at all. READ from
-#: the production config, exactly as ``full_pipeline_decision`` reads it
-#: (``.claude/rules/test-fidelity.md`` Rule C: the trigger comes from the
-#: producer, never a transcribed literal).
-_PREIMPORT_GATE_VBR_THRESHOLD = QualityRankConfig.defaults().mp3_vbr.excellent
-
 
 def _lame_buckets_at_or_below(container: int) -> st.SearchStrategy[int]:
     """A producible spectral class no higher than its own container."""
@@ -1576,22 +1580,25 @@ def stage_parity_worlds(draw) -> StageParityWorld:
     checker forbids the Stage-1 rejection outright and therefore subsumes
     this checker there.
 
-    **The shared format is MP3, and a VBR candidate's container stays
-    below the preimport gate's threshold** (issue #829 Phase 5 PR2d). Both
-    narrowings are the same coverage argument the paragraphs above already
-    make, applied to facts the harness could not see until it started
-    driving the real decider. ``spectral_gate_trigger`` fires the preimport
-    gate ONLY for an MP3 candidate, and skips a VBR MP3 whose average is at
-    or above ``cfg.mp3_vbr.excellent``; outside that domain
-    ``stage1_spectral`` is ``None`` and the disagreement this property
-    hunts is unreachable by construction — not "safe", *absent*. The old
-    inline harness computed a Stage-1 verdict regardless, which is how
-    Vorbis and high-average VBR worlds looked like coverage while
+    **The shared format is MP3** (issue #829 Phase 5 PR2d). Same coverage
+    argument the paragraphs above already make, applied to a fact the
+    harness could not see until it started driving the real decider:
+    ``spectral_gate_trigger`` fires the preimport gate ONLY for an MP3
+    candidate, so outside that domain ``stage1_spectral`` is ``None`` and
+    the disagreement this property hunts is unreachable by construction —
+    not "safe", *absent*. The old inline harness computed a Stage-1 verdict
+    regardless, which is how Vorbis worlds looked like coverage while
     production never ran Stage 1 on them at all: over 5,000 draws of the
-    pre-PR2d strategy, 3,189 (63.8%) were worlds production gate-skips
-    (2,347 uncalibrated-codec, 842 high-average VBR). The strategy below
-    measures 0/5,000. The threshold is READ from the production config,
-    never transcribed (``.claude/rules/test-fidelity.md`` Rule C).
+    pre-PR2d strategy, 3,189 (63.8%) were worlds production gate-skipped at
+    the time (2,347 uncalibrated-codec, 842 high-average VBR — the latter
+    842 no longer skip anywhere, since #1145 removed that half).
+
+    The second half of that narrowing is gone: PR2d also had to hold a VBR
+    candidate's container below the preimport gate's average threshold,
+    because a high-average VBR MP3 was gate-skipped and had no Stage-1
+    verdict either. Issue #1145 removed the skip, so every MP3 container
+    is in-domain now and the strategy draws the full range — a strictly
+    wider world set, not a relaxed one.
 
     Vorbis is consequently no longer drawn HERE. Its ladder is still real
     and a same-Vorbis pair is still comparable at Stage 2 — that is
@@ -1600,12 +1607,9 @@ def stage_parity_worlds(draw) -> StageParityWorld:
     Stage 1.
     """
     new_is_cbr = draw(st.booleans())
-    # A VBR MP3 at or above the threshold is gate-skipped, so its Stage-1
-    # verdict does not exist. Draw inside the domain where it does.
-    new_container = draw(_bitrates(
-        min_value=1,
-        max_value=3000 if new_is_cbr else _PREIMPORT_GATE_VBR_THRESHOLD - 1,
-    ))
+    # Every MP3 reaches Stage 1 since issue #1145, so the container is drawn
+    # across the whole range whatever the declared mode.
+    new_container = draw(_bitrates(min_value=1, max_value=3000))
     new_spectral = draw(_lame_buckets_at_or_below(new_container))
     existing_container = draw(_bitrates(min_value=1, max_value=3000))
     existing_spectral = draw(_lame_buckets_at_or_below(existing_container))
@@ -1675,9 +1679,9 @@ def stage1_rejecting_worlds(draw) -> StageParityWorld:
     """
     basis = draw(st.sampled_from(("stored_bucket", "cliff_hz")))
     new_is_cbr = draw(st.booleans())
-    # A VBR MP3 at or above the gate threshold is skipped, so its class must
-    # fit below that threshold too (the class never exceeds its container).
-    class_ceiling = 3000 if new_is_cbr else _PREIMPORT_GATE_VBR_THRESHOLD - 1
+    # No gate threshold since issue #1145: every MP3 is scanned, so the class
+    # ceiling is the container range itself whatever the declared mode.
+    class_ceiling = 3000
     if basis == "cliff_hz":
         classes = tuple(_MP3_CLIFFS_BY_CLASS)
     else:
@@ -1799,13 +1803,14 @@ def inadmissible_spectral_pair_worlds(draw) -> InadmissibleSpectralPairWorld:
     """
     shape = draw(st.sampled_from(_INADMISSIBLE_SHAPES))
     grade = draw(st.sampled_from(("suspect", "likely_transcode")))
-    # The preimport gate must fire for Stage 1 to produce a verdict at all:
-    # MP3 CBR always, MP3 VBR only below ``cfg.mp3_vbr.excellent`` (210).
+    # The preimport gate must fire for Stage 1 to produce a verdict at all.
+    # That is now true of every MP3 whatever its declared mode (issue #1145
+    # retired the VBR average skip), so the container is drawn across the
+    # whole range for both modes. The VBR arm used to be capped at 209 to
+    # stay under the retired threshold, which left every high-average VBR
+    # world unreachable for this property.
     new_is_cbr = draw(st.booleans())
-    new_container = draw(
-        _bitrates(min_value=1, max_value=3000) if new_is_cbr
-        else _bitrates(min_value=1, max_value=209)
-    )
+    new_container = draw(_bitrates(min_value=1, max_value=3000))
     existing_container = draw(_bitrates(min_value=1, max_value=3000))
     existing_is_cbr = draw(st.booleans())
 
@@ -2026,16 +2031,22 @@ _FRESH_ALBUM = AlbumState(
     "generated_fresh_request", None, False, None, None, False, None)
 
 
+#: (min_bitrate, avg_bitrate, is_cbr, existing_format) — the two ways an
+#: installed MP3 reaches TRANSPARENT. Since issue #1145 the V0 shape gets
+#: there through its proven ``mp3 v0`` contract, not through a second band
+#: table: a bare measured 245 is GOOD, and the label is what production now
+#: mints for it from the LAME header. Both shapes are what
+#: ``album_info_from_current`` really produces for those albums.
 _TRANSPARENT_EXISTING_SHAPES = (
-    # (min_bitrate, avg_bitrate, is_cbr) — MP3 320 CBR and MP3 V0.
-    (320, 320, True),
-    (245, 245, False),
+    (320, 320, True, "MP3"),
+    (245, 245, False, "mp3 v0"),
 )
 
 
 @st.composite
 def transparent_mp3_albums(draw) -> AlbumState:
-    min_br, avg_br, is_cbr = draw(st.sampled_from(_TRANSPARENT_EXISTING_SHAPES))
+    min_br, avg_br, is_cbr, existing_format = draw(
+        st.sampled_from(_TRANSPARENT_EXISTING_SHAPES))
     return AlbumState(
         name="generated_transparent_mp3",
         min_bitrate=min_br,
@@ -2044,7 +2055,7 @@ def transparent_mp3_albums(draw) -> AlbumState:
         spectral_bitrate=None,
         verified_lossless=False,
         search_filetype_override=None,
-        existing_format="MP3",
+        existing_format=existing_format,
         avg_bitrate=avg_br,
     )
 
@@ -2461,7 +2472,8 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
     # exists for never fires; it only ever "worked" because the old harness
     # fed ``compare_quality`` raw stored numbers. The producible values
     # (256/320) do fire the clamp, but the CONTRADICTION shape cannot
-    # follow: a VBR MP3 is gate-skipped at or above ``cfg.mp3_vbr.excellent``
+    # follow: a VBR MP3 is gate-skipped at or above
+    # ``cfg.mp3_vbr_spectral_gate_kbps``
     # and below it no container can exceed a high enough class for the
     # candidate to be spectral-bound, so Stage 1 has no verdict at all — the
     # checker returns immediately. An exhaustive sweep of the producible
@@ -2700,7 +2712,7 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         assert_have_is_represented_by_its_own_class(
             existing_rank,
             quality_rank(
-                world.existing_format, class_kbps, True,
+                world.existing_format, class_kbps,
                 QualityRankConfig.defaults(),
             ).name.lower(),
             context=repr(world),
@@ -7121,7 +7133,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             comparison_basis=basis)
 
     def test_basis_checker_trips_on_every_clause(self):
-        """All ten basis clauses, each proven by its own message.
+        """All twelve basis clauses, each proven by its own message.
 
         The checker raises rather than accumulating, so the four clauses that
         used to have a self-test only ever proved the four they reached first;
@@ -7159,6 +7171,19 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             ("transcode_regression_not_worse", "import",
              self._planted_basis(branch="transcode_rank_regression"),
              r"^transcode rank regression must be worse: "),
+            # Issue #1145 H2's two clauses. The first is reached with a
+            # verdict the branch allows, so only the equal-ranks clause can
+            # fire; the second keeps the ranks differing so only the verdict
+            # clause can.
+            ("within_tolerance_equal_ranks", "downgrade",
+             self._planted_basis(branch="rank_within_tolerance",
+                                 verdict="equivalent",
+                                 existing_rank="transparent"),
+             r"^within-tolerance branch with equal ranks: "),
+            ("within_tolerance_not_equivalent", "downgrade",
+             self._planted_basis(branch="rank_within_tolerance",
+                                 verdict="worse"),
+             r"^within-tolerance branch is not equivalent: "),
         ):
             with self.subTest(clause=label), self.assertRaisesRegex(
                     AssertionError, expected):

@@ -21,6 +21,7 @@ import msgspec
 from lib.beets_db import AlbumInfo
 from lib.measurement import PreimportMeasurement
 from lib.quality import (
+    CURRENT_EVIDENCE_LINEAGE_VERSION,
     AccurateRipBitMatch,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
@@ -1110,7 +1111,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         )
 
         assert result.evidence is not None
-        self.assertEqual(result.evidence.lineage_version, 4)
+        self.assertEqual(result.evidence.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
         self.assertEqual(result.evidence.measurement.spectral_subject, "source")
         self.assertEqual(result.evidence.measurement.spectral_provenance, "carried")
         assert result.evidence.v0_metric is not None
@@ -1200,7 +1201,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
 
         self.assertTrue(result.available)
         assert result.evidence is not None
-        self.assertEqual(result.evidence.lineage_version, 4)
+        self.assertEqual(result.evidence.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
         self.assertEqual(result.evidence.measurement.spectral_subject, "source")
         self.assertEqual(result.evidence.measurement.spectral_provenance, "carried")
         assert result.evidence.v0_metric is not None
@@ -1270,7 +1271,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
 
                 self.assertTrue(result.available)
                 assert result.evidence is not None
-                self.assertEqual(result.evidence.lineage_version, 4)
+                self.assertEqual(result.evidence.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
                 self.assertIsNone(result.evidence.measurement.spectral_grade)
                 self.assertIsNone(result.evidence.measurement.spectral_subject)
                 self.assertIsNone(result.evidence.measurement.spectral_provenance)
@@ -1341,7 +1342,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
 
         self.assertTrue(result.available)
         assert result.evidence is not None
-        self.assertEqual(result.evidence.lineage_version, 4)
+        self.assertEqual(result.evidence.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
         m = result.evidence.measurement
         self.assertEqual(m.was_converted_from, "flac")
         self.assertEqual(m.spectral_grade, "likely_transcode")

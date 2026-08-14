@@ -962,10 +962,10 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         dispatch_import_core — and persists NULL, not a fabricated 0.0, in
         both sinks (album_requests.beets_distance via _do_mark_done and the
         download_log.beets_distance column)."""
-        ir = make_import_result(decision="import", new_min_bitrate=245)
+        ir = make_import_result(decision="import", new_min_bitrate=320)
         beets_info = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="MP3",
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
             is_cbr=False, album_path="/Beets/Test")
 
         # Stale non-None value proves the write actively NULLs the column
@@ -989,10 +989,10 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         """Decision 17 / AE6: a genuine transparent import narrows to
         lossless-only at import time — the request stays wanted and only
         a lossless source can beat the retained copy."""
-        ir = make_import_result(decision="import", new_min_bitrate=245)
+        ir = make_import_result(decision="import", new_min_bitrate=320)
         beets_info = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="MP3",
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
             is_cbr=False, album_path="/Beets/Test")
 
         db = self._run_dispatch(ir, beets_info)
@@ -1000,7 +1000,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(row["search_filetype_override"], "lossless")
-        self.assertEqual(row["min_bitrate"], 245)
+        self.assertEqual(row["min_bitrate"], 320)
         self.assertEqual(len(db.denylist), 1)
         self.assertEqual(len(db.download_logs), 1)
         db.assert_log(self, 0, outcome="success", request_id=42)
@@ -1013,8 +1013,8 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             imported_path="/Beets/Test Artist/2005 - Test Album_",
         )
         beets_info = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="MP3",
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
             is_cbr=False, album_path="/Beets/Test")
 
         db = self._run_dispatch(ir, beets_info)
@@ -1131,12 +1131,12 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         """
         from lib.quality import QualityRankConfig, RankBitrateMetric
 
-        ir = make_import_result(decision="import", new_min_bitrate=60)
+        ir = make_import_result(decision="import", new_min_bitrate=128)
         beets_info = AlbumInfo(
             album_id=1, track_count=5,
-            min_bitrate_kbps=60,
-            avg_bitrate_kbps=171,
-            median_bitrate_kbps=245,
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=257,
+            median_bitrate_kbps=320,
             format="MP3", is_cbr=False, album_path="/Beets/Test")
 
         custom_cfg = CratediggerConfig(
@@ -1160,12 +1160,12 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         Pinning this proves the difference in the MEDIAN test really comes
         from the policy switch — not from a hidden change in dispatch flow.
         """
-        ir = make_import_result(decision="import", new_min_bitrate=60)
+        ir = make_import_result(decision="import", new_min_bitrate=128)
         beets_info = AlbumInfo(
             album_id=1, track_count=5,
-            min_bitrate_kbps=60,
-            avg_bitrate_kbps=171,
-            median_bitrate_kbps=245,
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=257,
+            median_bitrate_kbps=320,
             format="MP3", is_cbr=False, album_path="/Beets/Test")
 
         db = self._run_dispatch(ir, beets_info)
@@ -1185,10 +1185,10 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         it forever. The success path must clear stale `final_format` when the
         new import does not carry an explicit label.
         """
-        ir = make_import_result(decision="import", new_min_bitrate=245)
+        ir = make_import_result(decision="import", new_min_bitrate=320)
         beets_info = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="MP3",
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
             is_cbr=False, album_path="/Beets/Test")
 
         db = self._run_dispatch(
@@ -3184,10 +3184,10 @@ class TestReleaseLockContention(unittest.TestCase):
 
         db = self._make_db()
         # Default: all locks acquired. Happy path.
-        ir = make_import_result(decision="import", new_min_bitrate=245)
+        ir = make_import_result(decision="import", new_min_bitrate=320)
         beets_info = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="MP3",
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
             is_cbr=False, album_path="/Beets/Test")
         dl_info = DownloadInfo(username="user1")
 
@@ -3297,10 +3297,10 @@ class TestReleaseLockContention(unittest.TestCase):
             status="downloading",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
-        ir = make_import_result(decision="import", new_min_bitrate=245)
+        ir = make_import_result(decision="import", new_min_bitrate=320)
         beets_info = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="MP3",
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
             is_cbr=False, album_path="/Beets/Test")
         dl_info = DownloadInfo(username="user1")
 

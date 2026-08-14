@@ -15,6 +15,7 @@ import msgspec
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.quality import (
+    CODEC_FAMILY_MP3,
     DECISION_LOSSLESS_SOURCE_LOCKED,
     DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
     DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
@@ -53,7 +54,9 @@ from lib.quality import (
     spectral_import_decision,
     transcode_detection,
 )
+from lib.quality.compare import _shared_spectral_bitrates
 from lib.quality.decisions import post_import_search_action
+from lib.quality.spectral_interpretation import interpret_measurement
 from tests.helpers import make_audio_corrupt_validation_report
 
 # ============================================================================
@@ -63,21 +66,28 @@ from tests.helpers import make_audio_corrupt_validation_report
 class TestSpectralGateTrigger(unittest.TestCase):
     """Test the pre-analysis "would spectral run?" decision (issue #93).
 
-    Mirrors the live gate in lib.measurement._needs_spectral_check. Delivers
-    the input the UI Decisions tab and pipeline-cli quality simulator need
-    to explain which files go through spectral vs. skip.
+    Mirrors the live gate in ``lib.measurement._needs_spectral_check``.
+    Delivers the input the ``pipeline-cli quality`` simulator needs to
+    explain which files go through spectral and which skip.
+
+    Since issue #1145 that is a question about the CODEC alone. The VBR
+    skip — and with it ``skipped_vbr_high_avg``, the threshold parameter,
+    and the ``is_cbr``/``is_vbr``/``avg_bitrate_kbps`` inputs — is gone.
+
+    **Equivalence note for the deleted pins.** ``test_vbr_threshold_table``,
+    ``test_is_vbr_derived_from_is_cbr_when_omitted`` and
+    ``test_both_unknown_falls_back_to_would_run`` covered three things:
+    (a) which averages skipped, now covered by
+    ``test_every_mp3_runs_whatever_its_mode_or_average`` asserting that NONE
+    do; (b) the ``is_vbr = not is_cbr`` derivation, deleted with the
+    parameters it derived; (c) the both-unknown conservative default, also
+    subsumed by (a) — an MP3 with nothing known still runs.
     """
 
-    THRESHOLD = 210
-
-    def _run(self, *, is_flac, is_cbr, is_vbr=None, avg=None,
-             codec_family: "CodecFamily | None" = "mp3"):
+    def _run(self, *, is_flac, codec_family: "CodecFamily | None" = "mp3"):
         from lib.quality import spectral_gate_trigger
         return spectral_gate_trigger(
-            is_flac=is_flac, is_cbr=is_cbr, is_vbr=is_vbr,
-            avg_bitrate_kbps=avg, vbr_threshold_kbps=self.THRESHOLD,
-            codec_family=codec_family,
-        )
+            is_flac=is_flac, codec_family=codec_family)
 
     def test_uncalibrated_codecs_skip(self):
         """Issue #829 Phase 5 PR2b: the mirror must answer what its own
@@ -98,65 +108,49 @@ class TestSpectralGateTrigger(unittest.TestCase):
         for family in families:
             with self.subTest(codec_family=family):
                 self.assertEqual(
-                    self._run(is_flac=False, is_cbr=True, codec_family=family),
+                    self._run(is_flac=False, codec_family=family),
                     "skipped_uncalibrated_codec")
         # FLAC's own branch still wins over the codec test.
         self.assertEqual(
-            self._run(is_flac=True, is_cbr=False, codec_family="lossless"),
+            self._run(is_flac=True, codec_family="lossless"),
             "skipped_flac")
 
     def test_flac_skips(self):
         """FLAC has its own flow (convert → V0 → transcode_detection)."""
-        self.assertEqual(self._run(is_flac=True, is_cbr=False), "skipped_flac")
-        self.assertEqual(self._run(is_flac=True, is_cbr=True), "skipped_flac")
+        self.assertEqual(self._run(is_flac=True), "skipped_flac")
         self.assertEqual(
-            self._run(is_flac=True, is_cbr=False, is_vbr=True, avg=245),
-            "skipped_flac",
-            "FLAC always takes precedence over VBR avg")
+            self._run(is_flac=True, codec_family="mp3"), "skipped_flac",
+            "FLAC always takes precedence over the codec test")
 
-    def test_cbr_mp3_always_runs(self):
-        """CBR MP3 is the classic transcode-cliff case."""
-        self.assertEqual(
-            self._run(is_flac=False, is_cbr=True), "would_run")
-        self.assertEqual(
-            self._run(is_flac=False, is_cbr=True, avg=320), "would_run")
-        self.assertEqual(
-            self._run(is_flac=False, is_cbr=True, avg=128), "would_run")
+    def test_every_mp3_runs_whatever_its_mode_or_average(self):
+        """Issue #1145: no MP3 buys an exemption from measurement.
 
-    def test_vbr_threshold_table(self):
-        """VBR MP3: gate skips only when avg is known and >= threshold."""
-        CASES = [
-            # (desc, avg, expected)
-            ("avg unknown → would_run (conservative)",  None, "would_run"),
-            ("Go! Team avg 182 < 210",                   182, "would_run"),
-            ("just below threshold 209",                 209, "would_run"),
-            ("at threshold 210 → high avg skip",         210, "skipped_vbr_high_avg"),
-            ("genuine V0 245 → skip",                    245, "skipped_vbr_high_avg"),
-            ("genuine V0 260 → skip",                    260, "skipped_vbr_high_avg"),
-            ("lowfi 96 → would_run",                      96, "would_run"),
-        ]
-        for desc, avg, expected in CASES:
-            with self.subTest(desc=desc, avg=avg):
-                got = self._run(is_flac=False, is_cbr=False,
-                                is_vbr=True, avg=avg)
-                self.assertEqual(got, expected)
+        The retired skip let a VBR MP3 past when its album average cleared
+        a threshold. Neither half of that is provenance evidence: the mode
+        is the encoder's own Xing/Info header, and a transcode re-encoded
+        at a high bitrate genuinely has a high average. Once a candidate
+        may also carry an ``mp3 vN`` contract minted from its own LAME tag,
+        the skip was a route to self-certifying TRANSPARENT without ever
+        being measured. The mirror now takes neither input, so this asserts
+        the stronger fact: for MP3 there is exactly one answer.
+        """
+        self.assertEqual(self._run(is_flac=False, codec_family="mp3"),
+                         "would_run")
 
-    def test_is_vbr_derived_from_is_cbr_when_omitted(self):
-        """Legacy simulator callers that pass is_cbr without is_vbr get
-        sensible default: is_vbr = not is_cbr."""
-        self.assertEqual(
-            self._run(is_flac=False, is_cbr=False), "would_run",
-            "derived is_vbr=True with avg=None → gate still runs")
-        self.assertEqual(
-            self._run(is_flac=False, is_cbr=False, avg=245),
-            "skipped_vbr_high_avg",
-            "derived is_vbr=True with high avg → skip")
+    def test_the_mirror_takes_no_mode_or_bitrate_input(self):
+        """The parameters are gone, not merely ignored.
 
-    def test_both_unknown_falls_back_to_would_run(self):
-        """is_cbr=None AND is_vbr=None → conservative default."""
-        self.assertEqual(
-            self._run(is_flac=False, is_cbr=None),
-            "would_run")
+        A signature check rather than a value check: an ignored parameter
+        is an invitation to reconnect it, and the point of #1145 is that
+        the gate has no business reading either fact. Same shape as
+        ``TestFullPipelineContract``'s ``existing_min_bitrate`` guard.
+        """
+        import inspect
+
+        from lib.quality import spectral_gate_trigger
+
+        parameters = inspect.signature(spectral_gate_trigger).parameters
+        self.assertEqual(set(parameters), {"is_flac", "codec_family"})
 
 
 class TestSpectralImportDecision(unittest.TestCase):
@@ -809,8 +803,12 @@ class TestGateRank(unittest.TestCase):
         cfg = QualityRankConfig.defaults()
         # Without clamp, label "mp3 320" → TRANSPARENT
         self.assertEqual(measurement_rank(m, cfg), QualityRank.TRANSPARENT)
-        # With clamp, spectral 128 against mp3_vbr.acceptable=130 → POOR
-        self.assertEqual(gate_rank(m, cfg), QualityRank.POOR)
+        # With clamp, spectral 128 against the one MP3 table (acceptable=128)
+        # → ACCEPTABLE. Pre-#1145 the clamp read the estimate through the more
+        # generous ``mp3_vbr`` table (acceptable=130) and landed on POOR; the
+        # class ladder these estimates come from is the 96/112/128/…/320 one,
+        # which is what ``cfg.mp3`` now holds.
+        self.assertEqual(gate_rank(m, cfg), QualityRank.ACCEPTABLE)
 
     def test_verified_lossless_ignores_stale_spectral_clamp(self):
         """Verified lossless is already source-proven; a stale pre-import
@@ -836,7 +834,7 @@ class TestGateRank(unittest.TestCase):
             format="mp3", avg_bitrate_kbps=140, is_cbr=False,
             spectral_bitrate_kbps=240)
         cfg = QualityRankConfig.defaults()
-        # measurement: 140 → ACCEPTABLE; spectral 240 → EXCELLENT (higher); no clamp
+        # measurement: 140 → ACCEPTABLE; spectral 240 → GOOD (higher); no clamp
         self.assertEqual(gate_rank(m, cfg), QualityRank.ACCEPTABLE)
 
     def test_afx_analord_regression(self):
@@ -853,7 +851,7 @@ class TestGateRank(unittest.TestCase):
             spectral_bitrate_kbps=160)
         cfg = QualityRankConfig.defaults()
         rank = gate_rank(m, cfg)
-        # Spectral 160 → mp3_vbr.acceptable=130, between acceptable/good → ACCEPTABLE
+        # Spectral 160 → cfg.mp3 acceptable=128, below good=192 → ACCEPTABLE
         self.assertEqual(rank, QualityRank.ACCEPTABLE)
         # And quality_gate_decision agrees
         self.assertEqual(quality_gate_decision(m, cfg), "requeue_upgrade")
@@ -1035,7 +1033,7 @@ EXPECTED_RESULT_KEYS = {
 # Valid values for each stage (None means stage was skipped)
 VALID_PREIMPORT_AUDIO = {None, "pass", "reject_corrupt", "skipped_off"}
 VALID_PREIMPORT_NESTED = {None, "pass", "reject_nested", "skipped_auto"}
-VALID_STAGE0 = {None, "would_run", "skipped_vbr_high_avg", "skipped_flac",
+VALID_STAGE0 = {None, "would_run", "skipped_flac",
                 "skipped_uncalibrated_codec"}
 VALID_STAGE1 = {None, "import", "import_upgrade", "import_no_exist", "reject"}
 VALID_STAGE2 = {None, "import", "downgrade", "transcode_upgrade",
@@ -1740,27 +1738,44 @@ class TestFullPipelineContract(unittest.TestCase):
             self.assertIn(r["stage0_spectral_gate"], VALID_STAGE0,
                           f"Unexpected stage0 value: {r['stage0_spectral_gate']}")
 
-    def test_stage0_high_avg_vbr_skips_stage1(self):
-        """When stage 0 says skip, stage 1 must be None even if spectral
-        was (accidentally) supplied — otherwise the simulator would
-        misrepresent production behavior, which skips spectral entirely."""
+    def test_stage0_high_avg_vbr_no_longer_skips_stage1(self):
+        """Issue #1145: the world that used to skip now measures.
+
+        Equivalence note — this replaces the deleted
+        ``test_stage0_high_avg_vbr_skips_stage1``, which pinned
+        ``skipped_vbr_high_avg`` + ``stage1_spectral is None`` for exactly
+        these inputs. What that test really protected is that stage 1 is
+        modelled iff the gate fired, and that is asserted here in the other
+        direction: the gate fires, so a supplied grade DOES reach Stage 1.
+        The "gate said skip → Stage 1 is None" direction survives for the
+        codecs that still skip — see
+        ``TestQualityClassification``'s ``skipped_uncalibrated_codec`` rows.
+
+        The candidate is a high-average VBR MP3 carrying a suspect grade
+        against a cleaner HAVE: precisely the shape the old skip waved
+        through unmeasured.
+        """
         r = full_pipeline_decision(
             is_flac=False, min_bitrate=220, is_cbr=False,
             is_vbr=True, avg_bitrate=245, new_format="MP3",
-            # Caller supplied spectral_grade, but stage 0 says don't gate.
             spectral_grade="suspect", spectral_bitrate=192,
-            existing_spectral_bitrate=128, existing_spectral_grade="suspect",
+            existing_format="MP3", existing_min_bitrate=224,
+            existing_spectral_bitrate=256, existing_spectral_grade="suspect",
         )
-        self.assertEqual(r["stage0_spectral_gate"], "skipped_vbr_high_avg")
-        self.assertIsNone(
+        self.assertEqual(r["stage0_spectral_gate"], "would_run")
+        self.assertIsNotNone(
             r["stage1_spectral"],
-            "stage 1 must not run when the gate trigger said skip — "
-            "production's _needs_spectral_check would short-circuit before "
-            "spectral_analyze is even called")
+            "an MP3 is always scanned now, so a supplied grade must reach "
+            "Stage 1 instead of being discarded by a mode-based skip")
 
     def test_stage0_low_avg_vbr_runs_stage1(self):
-        """Go! Team case: VBR avg 182 < 210 → stage 0 would_run → if
-        spectral is provided, stage 1 executes and can reject."""
+        """Go! Team case: an MP3 gates, so a supplied grade can reject.
+
+        The average used to be load-bearing here (182 fell below the 210
+        scan threshold). Since issue #1145 the codec alone fires the gate;
+        the 182 is retained because this is the real album the lane exists
+        for, not because any comparison reads it.
+        """
         r = full_pipeline_decision(
             is_flac=False, min_bitrate=126, is_cbr=False,
             is_vbr=True, avg_bitrate=182, new_format="MP3",
@@ -1789,8 +1804,9 @@ class TestFullPipelineContract(unittest.TestCase):
             is_flac=False, min_bitrate=200, is_cbr=False,
             is_vbr=True, avg_bitrate=245, new_format="MP3",
         )
-        # Stage 0: avg >= threshold → skip
-        self.assertEqual(r["stage0_spectral_gate"], "skipped_vbr_high_avg")
+        # Stage 0 fires for every MP3 since #1145; with no grade supplied
+        # there is still nothing for Stage 1 to decide.
+        self.assertEqual(r["stage0_spectral_gate"], "would_run")
         # Stage 2 uses AVG metric → 245 → TRANSPARENT → import
         self.assertEqual(r["stage2_import"], "import")
         # Stage 3 is search policy, not an acceptance floor.
@@ -1850,12 +1866,12 @@ class TestFullPipelineContract(unittest.TestCase):
 
         m = AudioQualityMeasurement(
             min_bitrate_kbps=200,
-            avg_bitrate_kbps=245,
-            median_bitrate_kbps=245,
+            avg_bitrate_kbps=320,
+            median_bitrate_kbps=320,
             format="MP3",
             is_cbr=False,
         )
-        # With `==` comparison the AVG policy picks avg=245 → TRANSPARENT.
+        # With `==` comparison the AVG policy picks avg=320 → TRANSPARENT.
         # With `is` comparison it would fall through to min=200 → GOOD.
         self.assertEqual(
             measurement_rank(m, foreign_cfg).name, "TRANSPARENT",
@@ -2713,8 +2729,8 @@ class TestResolveRejectionSearchOverride(unittest.TestCase):
     def setUp(self):
         self.cfg = QualityRankConfig.defaults()
         self.measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=self.cfg.mp3_cbr.transparent,
-            avg_bitrate_kbps=self.cfg.mp3_cbr.transparent,
+            min_bitrate_kbps=self.cfg.mp3.transparent,
+            avg_bitrate_kbps=self.cfg.mp3.transparent,
             format="MP3",
             is_cbr=True,
             spectral_grade="genuine",
@@ -2989,7 +3005,7 @@ class TestRejectionBackfillOverride(unittest.TestCase):
         result = self._override(
             is_cbr=True, min_bitrate_kbps=256,
             spectral_grade="genuine", verified_lossless=False)
-        # 256 against mp3_cbr (transparent=320, excellent=256) → EXCELLENT,
+        # 256 against cfg.mp3 (transparent=320, excellent=256) → EXCELLENT,
         # EXCELLENT < TRANSPARENT → no backfill
         self.assertIsNone(result)
 
@@ -3039,8 +3055,8 @@ class TestTransparentGenuineLossyRejectionBackfill(unittest.TestCase):
     def test_codec_general_positive_matrix(self):
         cfg = QualityRankConfig.defaults()
         cases = [
-            ("mp3 cbr 320", "MP3", cfg.mp3_cbr.transparent, True),
-            ("mp3 v0 measurement", "MP3", cfg.mp3_vbr.transparent, False),
+            ("mp3 cbr 320", "MP3", cfg.mp3.transparent, True),
+            ("mp3 v0 measurement", "mp3 v0", cfg.mp3.transparent, False),
             ("opus transparent", "Opus", cfg.opus.transparent, False),
             ("aac transparent", "AAC", cfg.aac.transparent, False),
             ("vorbis transparent", "Vorbis", cfg.vorbis.transparent, False),
@@ -3060,11 +3076,11 @@ class TestTransparentGenuineLossyRejectionBackfill(unittest.TestCase):
     def test_negative_matrix(self):
         cfg = QualityRankConfig.defaults()
         cases = [
-            ("excellent mp3", "MP3", cfg.mp3_cbr.excellent, True, True, "genuine", None),
-            ("transparent suspect", "MP3", cfg.mp3_cbr.transparent, True, True, "suspect", None),
-            ("transparent marginal", "MP3", cfg.mp3_cbr.transparent, True, True, "marginal", None),
-            ("failed audit", "MP3", cfg.mp3_cbr.transparent, True, True, None, "spectral failed"),
-            ("missing audit", "MP3", cfg.mp3_cbr.transparent, True, False, None, None),
+            ("excellent mp3", "MP3", cfg.mp3.excellent, True, True, "genuine", None),
+            ("transparent suspect", "MP3", cfg.mp3.transparent, True, True, "suspect", None),
+            ("transparent marginal", "MP3", cfg.mp3.transparent, True, True, "marginal", None),
+            ("failed audit", "MP3", cfg.mp3.transparent, True, True, None, "spectral failed"),
+            ("missing audit", "MP3", cfg.mp3.transparent, True, False, None, None),
             ("vorbis transparent suspect", "Vorbis", cfg.vorbis.transparent, False, True, "suspect", None),
             ("vorbis transparent likely transcode", "Vorbis", cfg.vorbis.transparent, False, True, "likely_transcode", None),
             ("wma transparent suspect", "WMA", cfg.wma.transparent, False, True, "suspect", None),
@@ -3087,8 +3103,8 @@ class TestTransparentGenuineLossyRejectionBackfill(unittest.TestCase):
 
         cfg = QualityRankConfig.defaults()
         measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=cfg.mp3_cbr.transparent,
-            avg_bitrate_kbps=cfg.mp3_cbr.transparent,
+            min_bitrate_kbps=cfg.mp3.transparent,
+            avg_bitrate_kbps=cfg.mp3.transparent,
             format="MP3",
             is_cbr=True,
             spectral_grade="genuine",
@@ -3156,118 +3172,141 @@ class TestQualityRank(unittest.TestCase):
     (the defaults are the contract).
     """
 
-    # (description, format_hint, bitrate_kbps, is_cbr, expected_rank)
+    # (description, format_hint, bitrate_kbps, expected_rank)
     CASES: ClassVar = [
         # --- Step 1: both None → UNKNOWN ---
-        ("None format + None bitrate",             None,            None, False, QualityRank.UNKNOWN),
+        ("None format + None bitrate",             None,            None, QualityRank.UNKNOWN),
 
         # --- Step 2: lossless family ---
-        ("FLAC label",                             "FLAC",          1000, False, QualityRank.LOSSLESS),
-        ("flac label lowercase",                   "flac",          1200, False, QualityRank.LOSSLESS),
-        ("lossless label",                         "lossless",      1100, False, QualityRank.LOSSLESS),
-        ("ALAC label",                             "ALAC",           900, False, QualityRank.LOSSLESS),
-        ("WAV label",                              "WAV",           1411, False, QualityRank.LOSSLESS),
-        ("flac with None bitrate",                 "flac",          None, False, QualityRank.LOSSLESS),
+        ("FLAC label",                             "FLAC",          1000, QualityRank.LOSSLESS),
+        ("flac label lowercase",                   "flac",          1200, QualityRank.LOSSLESS),
+        ("lossless label",                         "lossless",      1100, QualityRank.LOSSLESS),
+        ("ALAC label",                             "ALAC",           900, QualityRank.LOSSLESS),
+        ("WAV label",                              "WAV",           1411, QualityRank.LOSSLESS),
+        ("flac with None bitrate",                 "flac",          None, QualityRank.LOSSLESS),
 
         # --- Step 3: explicit MP3 VBR quality label ---
-        ("mp3 v0 lo-fi",                           "mp3 v0",         207, False, QualityRank.TRANSPARENT),
-        ("mp3 v0 dense",                           "mp3 v0",         260, False, QualityRank.TRANSPARENT),
-        ("mp3 v1 label",                           "mp3 v1",         220, False, QualityRank.EXCELLENT),
-        ("mp3 v2 label",                           "mp3 v2",         190, False, QualityRank.EXCELLENT),
-        ("mp3 v3 label",                           "mp3 v3",         170, False, QualityRank.GOOD),
-        ("mp3 v4 label",                           "mp3 v4",         155, False, QualityRank.GOOD),
-        ("mp3 v5 label",                           "mp3 v5",         130, False, QualityRank.ACCEPTABLE),
-        ("mp3 v9 label",                           "mp3 v9",          65, False, QualityRank.ACCEPTABLE),
+        ("mp3 v0 lo-fi",                           "mp3 v0",         207, QualityRank.TRANSPARENT),
+        ("mp3 v0 dense",                           "mp3 v0",         260, QualityRank.TRANSPARENT),
+        ("mp3 v1 label",                           "mp3 v1",         220, QualityRank.EXCELLENT),
+        ("mp3 v2 label",                           "mp3 v2",         190, QualityRank.EXCELLENT),
+        ("mp3 v3 label",                           "mp3 v3",         170, QualityRank.GOOD),
+        ("mp3 v4 label",                           "mp3 v4",         155, QualityRank.GOOD),
+        ("mp3 v5 label",                           "mp3 v5",         130, QualityRank.ACCEPTABLE),
+        ("mp3 v9 label",                           "mp3 v9",          65, QualityRank.ACCEPTABLE),
 
         # --- Step 4: explicit Opus bitrate label ---
-        ("opus 128 label",                         "opus 128",        95, False, QualityRank.TRANSPARENT),
-        ("opus 96 label",                          "opus 96",        100, False, QualityRank.EXCELLENT),
-        ("opus 64 label",                          "opus 64",        100, False, QualityRank.GOOD),
-        ("opus 48 label",                          "opus 48",        100, False, QualityRank.ACCEPTABLE),
-        ("opus 32 label",                          "opus 32",        100, False, QualityRank.POOR),
+        ("opus 128 label",                         "opus 128",        95, QualityRank.TRANSPARENT),
+        ("opus 96 label",                          "opus 96",        100, QualityRank.EXCELLENT),
+        ("opus 64 label",                          "opus 64",        100, QualityRank.GOOD),
+        ("opus 48 label",                          "opus 48",        100, QualityRank.ACCEPTABLE),
+        ("opus 32 label",                          "opus 32",        100, QualityRank.POOR),
 
         # --- Step 4: explicit MP3 CBR bitrate label (used for "mp3 320" style) ---
-        ("mp3 320 label",                          "mp3 320",        320, True,  QualityRank.TRANSPARENT),
-        ("mp3 256 label",                          "mp3 256",        256, True,  QualityRank.EXCELLENT),
-        ("mp3 192 label",                          "mp3 192",        192, True,  QualityRank.GOOD),
-        ("mp3 128 label",                          "mp3 128",        128, True,  QualityRank.ACCEPTABLE),
+        ("mp3 320 label",                          "mp3 320",        320, QualityRank.TRANSPARENT),
+        ("mp3 256 label",                          "mp3 256",        256, QualityRank.EXCELLENT),
+        ("mp3 192 label",                          "mp3 192",        192, QualityRank.GOOD),
+        ("mp3 128 label",                          "mp3 128",        128, QualityRank.ACCEPTABLE),
 
         # --- Step 4: explicit AAC bitrate label ---
-        ("aac 192 label",                          "aac 192",        192, False, QualityRank.TRANSPARENT),
-        ("aac 144 label",                          "aac 144",        144, False, QualityRank.EXCELLENT),
-        ("aac 112 label",                          "aac 112",        112, False, QualityRank.GOOD),
-        ("aac 80 label",                           "aac 80",          80, False, QualityRank.ACCEPTABLE),
+        ("aac 192 label",                          "aac 192",        192, QualityRank.TRANSPARENT),
+        ("aac 144 label",                          "aac 144",        144, QualityRank.EXCELLENT),
+        ("aac 112 label",                          "aac 112",        112, QualityRank.GOOD),
+        ("aac 80 label",                           "aac 80",          80, QualityRank.ACCEPTABLE),
         ("vorbis bitrate label ignores measurement",
-         f"vorbis {CFG.vorbis.transparent}", 1, False, QualityRank.TRANSPARENT),
+         f"vorbis {CFG.vorbis.transparent}", 1, QualityRank.TRANSPARENT),
         ("wma bitrate label ignores measurement",
-         f"wma {CFG.wma.transparent}", 1, False, QualityRank.TRANSPARENT),
+         f"wma {CFG.wma.transparent}", 1, QualityRank.TRANSPARENT),
 
         # --- Step 5: bare codec name + measured bitrate (beets items.format path) ---
-        # Default mp3_vbr bands: transparent=245, excellent=210, good=170, acceptable=130
-        ("MP3 VBR beets 260",                      "MP3",            260, False, QualityRank.TRANSPARENT),
-        ("MP3 VBR beets 245",                      "MP3",            245, False, QualityRank.TRANSPARENT),
-        ("MP3 VBR beets 220",                      "MP3",            220, False, QualityRank.EXCELLENT),
-        ("MP3 VBR beets 210",                      "MP3",            210, False, QualityRank.EXCELLENT),
-        ("MP3 VBR beets 180",                      "MP3",            180, False, QualityRank.GOOD),
-        ("MP3 VBR beets 170",                      "MP3",            170, False, QualityRank.GOOD),
-        ("MP3 VBR beets 140",                      "MP3",            140, False, QualityRank.ACCEPTABLE),
-        ("MP3 VBR beets 130",                      "MP3",            130, False, QualityRank.ACCEPTABLE),
-        ("MP3 VBR beets 100",                      "MP3",            100, False, QualityRank.POOR),
-        ("MP3 CBR beets 320",                      "MP3",            320, True,  QualityRank.TRANSPARENT),
-        ("MP3 CBR beets 256",                      "MP3",            256, True,  QualityRank.EXCELLENT),
-        ("MP3 CBR beets 192",                      "MP3",            192, True,  QualityRank.GOOD),
-        ("MP3 CBR beets 128",                      "MP3",            128, True,  QualityRank.ACCEPTABLE),
-        ("Opus beets 120",                         "Opus",           120, False, QualityRank.TRANSPARENT),
-        ("Opus beets 95",                          "Opus",            95, False, QualityRank.EXCELLENT),
-        ("Opus beets 70",                          "Opus",            70, False, QualityRank.GOOD),
-        ("Opus beets 50",                          "Opus",            50, False, QualityRank.ACCEPTABLE),
-        ("AAC beets 200",                          "AAC",            200, False, QualityRank.TRANSPARENT),
-        ("AAC beets 150",                          "AAC",            150, False, QualityRank.EXCELLENT),
-        ("AAC beets 120",                          "AAC",            120, False, QualityRank.GOOD),
+        # One MP3 table since #1145: transparent=320, excellent=256,
+        # good=192, acceptable=128. The pre-#1145 rows below the 320 edge
+        # are the ladder collapse in table form — 260 was TRANSPARENT under
+        # the VBR table and is EXCELLENT here, 245 was TRANSPARENT and is
+        # GOOD, and neither depends on an encoding mode any more.
+        ("MP3 beets 260",                          "MP3",            260, QualityRank.EXCELLENT),
+        ("MP3 beets 245",                          "MP3",            245, QualityRank.GOOD),
+        ("MP3 beets 220",                          "MP3",            220, QualityRank.GOOD),
+        ("MP3 beets 210",                          "MP3",            210, QualityRank.GOOD),
+        ("MP3 beets 180",                          "MP3",            180, QualityRank.ACCEPTABLE),
+        ("MP3 beets 170",                          "MP3",            170, QualityRank.ACCEPTABLE),
+        ("MP3 beets 140",                          "MP3",            140, QualityRank.ACCEPTABLE),
+        ("MP3 beets 130",                          "MP3",            130, QualityRank.ACCEPTABLE),
+        ("MP3 beets 100",                          "MP3",            100, QualityRank.POOR),
+        # MP3: exact and immediately below every configured band edge.
+        ("MP3 transparent edge", "MP3", CFG.mp3.transparent, QualityRank.TRANSPARENT),
+        ("MP3 below transparent", "MP3", CFG.mp3.transparent - 1, QualityRank.EXCELLENT),
+        ("MP3 excellent edge", "MP3", CFG.mp3.excellent, QualityRank.EXCELLENT),
+        ("MP3 below excellent", "MP3", CFG.mp3.excellent - 1, QualityRank.GOOD),
+        ("MP3 good edge", "MP3", CFG.mp3.good, QualityRank.GOOD),
+        ("MP3 below good", "MP3", CFG.mp3.good - 1, QualityRank.ACCEPTABLE),
+        ("MP3 acceptable edge", "MP3", CFG.mp3.acceptable, QualityRank.ACCEPTABLE),
+        ("MP3 below acceptable", "MP3", CFG.mp3.acceptable - 1, QualityRank.POOR),
+        ("Opus beets 120",                         "Opus",           120, QualityRank.TRANSPARENT),
+        ("Opus beets 95",                          "Opus",            95, QualityRank.EXCELLENT),
+        ("Opus beets 70",                          "Opus",            70, QualityRank.GOOD),
+        ("Opus beets 50",                          "Opus",            50, QualityRank.ACCEPTABLE),
+        ("AAC beets 200",                          "AAC",            200, QualityRank.TRANSPARENT),
+        ("AAC beets 150",                          "AAC",            150, QualityRank.EXCELLENT),
+        ("AAC beets 120",                          "AAC",            120, QualityRank.GOOD),
 
         # Vorbis: exact and immediately below every configured band edge.
-        ("Vorbis transparent edge", "Vorbis", CFG.vorbis.transparent, False, QualityRank.TRANSPARENT),
-        ("Vorbis below transparent", "Vorbis", CFG.vorbis.transparent - 1, False, QualityRank.EXCELLENT),
-        ("Vorbis excellent edge", "Vorbis", CFG.vorbis.excellent, False, QualityRank.EXCELLENT),
-        ("Vorbis below excellent", "Vorbis", CFG.vorbis.excellent - 1, False, QualityRank.GOOD),
-        ("Vorbis good edge", "Vorbis", CFG.vorbis.good, False, QualityRank.GOOD),
-        ("Vorbis below good", "Vorbis", CFG.vorbis.good - 1, False, QualityRank.ACCEPTABLE),
-        ("Vorbis acceptable edge", "Vorbis", CFG.vorbis.acceptable, False, QualityRank.ACCEPTABLE),
-        ("Vorbis below acceptable", "Vorbis", CFG.vorbis.acceptable - 1, False, QualityRank.POOR),
+        ("Vorbis transparent edge", "Vorbis", CFG.vorbis.transparent, QualityRank.TRANSPARENT),
+        ("Vorbis below transparent", "Vorbis", CFG.vorbis.transparent - 1, QualityRank.EXCELLENT),
+        ("Vorbis excellent edge", "Vorbis", CFG.vorbis.excellent, QualityRank.EXCELLENT),
+        ("Vorbis below excellent", "Vorbis", CFG.vorbis.excellent - 1, QualityRank.GOOD),
+        ("Vorbis good edge", "Vorbis", CFG.vorbis.good, QualityRank.GOOD),
+        ("Vorbis below good", "Vorbis", CFG.vorbis.good - 1, QualityRank.ACCEPTABLE),
+        ("Vorbis acceptable edge", "Vorbis", CFG.vorbis.acceptable, QualityRank.ACCEPTABLE),
+        ("Vorbis below acceptable", "Vorbis", CFG.vorbis.acceptable - 1, QualityRank.POOR),
 
         # WMA: exact and immediately below every configured band edge.
-        ("WMA transparent edge", "WMA", CFG.wma.transparent, False, QualityRank.TRANSPARENT),
-        ("WMA below transparent", "WMA", CFG.wma.transparent - 1, False, QualityRank.EXCELLENT),
-        ("WMA excellent edge", "WMA", CFG.wma.excellent, False, QualityRank.EXCELLENT),
-        ("WMA below excellent", "WMA", CFG.wma.excellent - 1, False, QualityRank.GOOD),
-        ("WMA good edge", "WMA", CFG.wma.good, False, QualityRank.GOOD),
-        ("WMA below good", "WMA", CFG.wma.good - 1, False, QualityRank.ACCEPTABLE),
-        ("WMA acceptable edge", "WMA", CFG.wma.acceptable, False, QualityRank.ACCEPTABLE),
-        ("WMA below acceptable", "WMA", CFG.wma.acceptable - 1, False, QualityRank.POOR),
+        ("WMA transparent edge", "WMA", CFG.wma.transparent, QualityRank.TRANSPARENT),
+        ("WMA below transparent", "WMA", CFG.wma.transparent - 1, QualityRank.EXCELLENT),
+        ("WMA excellent edge", "WMA", CFG.wma.excellent, QualityRank.EXCELLENT),
+        ("WMA below excellent", "WMA", CFG.wma.excellent - 1, QualityRank.GOOD),
+        ("WMA good edge", "WMA", CFG.wma.good, QualityRank.GOOD),
+        ("WMA below good", "WMA", CFG.wma.good - 1, QualityRank.ACCEPTABLE),
+        ("WMA acceptable edge", "WMA", CFG.wma.acceptable, QualityRank.ACCEPTABLE),
+        ("WMA below acceptable", "WMA", CFG.wma.acceptable - 1, QualityRank.POOR),
 
         # --- Step 6: unknown codec family ---
-        ("unknown codec",                          "musepack",       200, False, QualityRank.UNKNOWN),
-        ("unknown codec with bitrate label",       "musepack 192",  None, False, QualityRank.UNKNOWN),
-        ("unsupported WMA vbr-ish label",          "wma v0",         None, False, QualityRank.UNKNOWN),
-        ("empty string format",                    "",               200, False, QualityRank.UNKNOWN),
-        ("whitespace-only format",                 "   ",            200, False, QualityRank.UNKNOWN),
+        ("unknown codec",                          "musepack",       200, QualityRank.UNKNOWN),
+        ("unknown codec with bitrate label",       "musepack 192",  None, QualityRank.UNKNOWN),
+        ("unsupported WMA vbr-ish label",          "wma v0",         None, QualityRank.UNKNOWN),
+        ("empty string format",                    "",               200, QualityRank.UNKNOWN),
+        ("whitespace-only format",                 "   ",            200, QualityRank.UNKNOWN),
 
         # --- Edge: bare codec with None bitrate → UNKNOWN ---
-        ("bare MP3 no bitrate",                    "MP3",            None, False, QualityRank.UNKNOWN),
-        ("bare Opus no bitrate",                   "Opus",           None, False, QualityRank.UNKNOWN),
+        ("bare MP3 no bitrate",                    "MP3",            None, QualityRank.UNKNOWN),
+        ("bare Opus no bitrate",                   "Opus",           None, QualityRank.UNKNOWN),
     ]
 
     def test_quality_rank_table(self):
-        for desc, fmt, br, is_cbr, expected in self.CASES:
+        for desc, fmt, br, expected in self.CASES:
             with self.subTest(desc=desc):
                 self.assertEqual(
-                    quality_rank(fmt, br, is_cbr, CFG), expected,
-                    f"{desc}: quality_rank({fmt!r}, {br!r}, {is_cbr!r}) "
+                    quality_rank(fmt, br, CFG), expected,
+                    f"{desc}: quality_rank({fmt!r}, {br!r}) "
                     f"expected {expected!r}",
                 )
 
-    def test_vorbis_and_wma_ignore_cbr_inference(self):
-        for family, bands in (("Vorbis", CFG.vorbis), ("WMA", CFG.wma)):
+    def test_every_family_ignores_the_encoding_mode(self):
+        """#1145 invariant I1, at the boundary where the mode still exists.
+
+        ``quality_rank`` no longer takes ``is_cbr`` at all, so the deterministic
+        pin has to sit one level up at ``measurement_rank``, which reads
+        ``AudioQualityMeasurement.is_cbr``. MP3 is the family that used to
+        branch; the others are the must-still-work control. A mutant that
+        restores an ``is_cbr`` branch for ANY family dies here.
+        """
+        for family, bands in (
+            ("MP3", CFG.mp3),
+            ("Vorbis", CFG.vorbis),
+            ("WMA", CFG.wma),
+            ("Opus", CFG.opus),
+            ("AAC", CFG.aac),
+        ):
             for bitrate in (
                 bands.transparent, bands.transparent - 1,
                 bands.excellent, bands.excellent - 1,
@@ -3275,10 +3314,46 @@ class TestQualityRank(unittest.TestCase):
                 bands.acceptable, bands.acceptable - 1,
             ):
                 with self.subTest(family=family, bitrate=bitrate):
+                    def measurement(
+                        is_cbr: bool,
+                        family: str = family,
+                        bitrate: int = bitrate,
+                    ) -> AudioQualityMeasurement:
+                        return AudioQualityMeasurement(
+                            min_bitrate_kbps=bitrate,
+                            avg_bitrate_kbps=bitrate,
+                            median_bitrate_kbps=bitrate,
+                            format=family,
+                            is_cbr=is_cbr,
+                        )
                     self.assertEqual(
-                        quality_rank(family, bitrate, False, CFG),
-                        quality_rank(family, bitrate, True, CFG),
+                        measurement_rank(measurement(False), CFG),
+                        measurement_rank(measurement(True), CFG),
                     )
+
+    def test_mp3_ladder_collapse_moves_the_bare_measured_bands(self):
+        """The collapse itself: bare MP3 245 was TRANSPARENT, now GOOD.
+
+        Paired with the promotion pin below — together they are the whole
+        point of ordering scope A before scope B. This one would pass just as
+        well against the retired CBR table, which is why it is not
+        sufficient on its own.
+        """
+        self.assertEqual(quality_rank("MP3", 245, CFG), QualityRank.GOOD)
+        self.assertEqual(quality_rank("MP3", 320, CFG), QualityRank.TRANSPARENT)
+
+    def test_proven_v0_contract_survives_the_collapse(self):
+        """Scope A rescues exactly the rows scope B would demote.
+
+        Same measured 245 kbps: bare it is GOOD, contract-bearing it is
+        TRANSPARENT. This is the two-tier gap the issue's ordering
+        requirement exists for.
+        """
+        self.assertEqual(quality_rank("mp3 v0", 245, CFG), QualityRank.TRANSPARENT)
+        self.assertEqual(
+            quality_rank("mp3 v0", 245, CFG),
+            CFG.mp3_vbr_levels[0],
+        )
 
     def test_cross_codec_band_parity(self):
         cases = [
@@ -3294,8 +3369,8 @@ class TestQualityRank(unittest.TestCase):
         for desc, left_fmt, left_br, right_fmt, right_br in cases:
             with self.subTest(desc=desc):
                 self.assertEqual(
-                    quality_rank(left_fmt, left_br, False, CFG),
-                    quality_rank(right_fmt, right_br, False, CFG),
+                    quality_rank(left_fmt, left_br, CFG),
+                    quality_rank(right_fmt, right_br, CFG),
                 )
 
 
@@ -3312,8 +3387,8 @@ class TestMeasurementRank(unittest.TestCase):
         m = AudioQualityMeasurement(
             min_bitrate_kbps=260, avg_bitrate_kbps=None, format="MP3")
         # Legacy measurement — AVG metric falls back to min.
-        # 260 is above default mp3_vbr.transparent=245 → TRANSPARENT.
-        self.assertEqual(measurement_rank(m, CFG), QualityRank.TRANSPARENT)
+        # 260 is above default cfg.mp3.excellent=256 → EXCELLENT.
+        self.assertEqual(measurement_rank(m, CFG), QualityRank.EXCELLENT)
 
     def test_min_metric_uses_min(self):
         cfg = QualityRankConfig(bitrate_metric=RankBitrateMetric.MIN)
@@ -3334,10 +3409,10 @@ class TestMeasurementRank(unittest.TestCase):
         # (description, min, avg, median, format, expected_rank)
         ("median wins over outlier-low min — Opus 130 album",
          60, 128, 130, "Opus", QualityRank.TRANSPARENT),
-        ("median wins over outlier-high avg — MP3 V0 album with one 320 hidden track",
-         200, 230, 215, "MP3", QualityRank.EXCELLENT),
+        ("median wins over outlier-high avg — MP3 album with one 320 hidden track",
+         200, 230, 215, "MP3", QualityRank.GOOD),
         ("median falls back to min when None",
-         260, 260, None, "MP3", QualityRank.TRANSPARENT),
+         260, 260, None, "MP3", QualityRank.EXCELLENT),
         ("median below acceptable → POOR",
          128, 128, 100, "MP3", QualityRank.POOR),
         ("median classifies bare Opus into GOOD band",
@@ -3368,8 +3443,8 @@ class TestMeasurementRank(unittest.TestCase):
         """Legacy measurements with only min populated still classify under MEDIAN."""
         cfg_median = QualityRankConfig(bitrate_metric=RankBitrateMetric.MEDIAN)
         m = AudioQualityMeasurement(min_bitrate_kbps=260, format="MP3")
-        # 260 ≥ default mp3_vbr.transparent=245 → TRANSPARENT
-        self.assertEqual(measurement_rank(m, cfg_median), QualityRank.TRANSPARENT)
+        # 260 ≥ default cfg.mp3.excellent=256 → EXCELLENT
+        self.assertEqual(measurement_rank(m, cfg_median), QualityRank.EXCELLENT)
 
 
 class TestCompareQuality(unittest.TestCase):
@@ -3423,7 +3498,8 @@ class TestCompareQuality(unittest.TestCase):
          "equivalent"),
 
         # --- Same rank, same bare codec family, measurable bitrate ---
-        # Default mp3_vbr bands: transparent=245, excellent=210
+        # Default MP3 bands after the #1145 ladder collapse:
+        # transparent=320, excellent=256, good=192, acceptable=128.
         ("bare MP3 260 > MP3 250 (same rank TRANSPARENT)",
          {"format": "MP3", "avg_bitrate_kbps": 260},
          {"format": "MP3", "avg_bitrate_kbps": 250},
@@ -3512,33 +3588,206 @@ class TestCompareQuality(unittest.TestCase):
         self.assertEqual(compare_quality(new, existing, cfg_min).verdict, "worse")
 
 
-class TestClassifyWithCbrBands(unittest.TestCase):
-    """The CBR-band forcing is scoped to MP3 (issue #829 Phase 5 PR2b).
+class TestRankGapWithinTolerance(unittest.TestCase):
+    """A rank difference smaller than the tolerance is not an upgrade.
 
-    ``quality_rank`` only consults ``is_cbr`` for the MP3 family, and only
-    MP3's class ladder is calibrated to ``cfg.mp3_cbr``'s thresholds. The
-    restriction is inert against the shipped band config by construction —
-    which is exactly why it needs a pin at its own seam: no decision can
-    carry it.
+    Issue #1145 H2. ``quality_rank`` is a step function evaluated FIRST with
+    no tolerance; ``within_rank_tolerance_kbps`` only ever ran in the
+    same-rank ``metric_tiebreak``. Collapsing the MP3 tables moved the band
+    edges onto 320/256/192/128 — the nominal bitrates real albums cluster on
+    — so a 1-kbps difference started straddling an edge, rank decided, and
+    the tolerance never ran. 38 of the 1,101 measured all-MP3 albums in the
+    2026-08-14 library sat 1-5 kbps below an edge and became beatable by a
+    candidate sitting exactly on it: a full replace, ``beet move`` and
+    media-server churn for nothing audible, which is the dl 39947 failure
+    this series began with.
+
+    These worlds are all-MP3, bare-label, unclamped — the exact regime the
+    tolerance is defined for — and every one of them was ``equivalent`` on
+    ``main``.
     """
 
-    def _classify(self, format_hint, *, bound):
-        from lib.quality.compare import _classify_with_cbr_bands
-        return _classify_with_cbr_bands(format_hint, spectral_bound=bound)
+    CFG: ClassVar = QualityRankConfig.defaults()
 
-    def test_only_mp3_is_forced(self):
-        for label in ("MP3", "mp3", "mp3 320"):
-            with self.subTest(format=label):
-                self.assertTrue(self._classify(label, bound=True))
-        for label in ("AAC", "Opus", "opus 128", "Vorbis", "WMA", "FLAC",
-                      "", "   ", None):
-            with self.subTest(format=label):
-                self.assertFalse(self._classify(label, bound=True))
+    def _m(self, kbps: int, fmt: str = "MP3") -> AudioQualityMeasurement:
+        return AudioQualityMeasurement(
+            min_bitrate_kbps=kbps, avg_bitrate_kbps=kbps,
+            median_bitrate_kbps=kbps, format=fmt,
+        )
 
-    def test_an_unbound_side_is_never_forced(self):
-        for label in ("MP3", "AAC", None):
-            with self.subTest(format=label):
-                self.assertFalse(self._classify(label, bound=False))
+    #: (description, candidate kbps, installed kbps, verdict, branch).
+    #: One case per collapsed band edge, straddled by 1 kbps and by the
+    #: whole tolerance, in both directions.
+    CASES: ClassVar = [
+        ("192 over 191 straddles good",
+         192, 191, "equivalent", "rank_within_tolerance"),
+        ("191 under 192 straddles good, mirrored",
+         191, 192, "equivalent", "rank_within_tolerance"),
+        ("256 over 252 straddles excellent at the tolerance",
+         256, 252, "equivalent", "rank_within_tolerance"),
+        ("320 over 317 straddles transparent",
+         320, 317, "equivalent", "rank_within_tolerance"),
+        ("128 over 126 straddles acceptable",
+         128, 126, "equivalent", "rank_within_tolerance"),
+        # One kbps beyond the window is a real rank upgrade again.
+        ("256 over 250 is one kbps past the window",
+         256, 250, "better", "rank"),
+        ("192 over 186 is one kbps past the window",
+         192, 186, "better", "rank"),
+        # Must-still-work: a genuinely large gap still promotes on rank.
+        ("320 over 200 is a real upgrade",
+         320, 200, "better", "rank"),
+        ("200 under 320 is a real downgrade",
+         200, 320, "worse", "rank"),
+        # Must-still-work: inside one band the ordinary tiebreak still runs.
+        ("300 over 260 inside excellent",
+         300, 260, "better", "metric_tiebreak"),
+        ("262 over 260 inside excellent, within tolerance",
+         262, 260, "equivalent", "metric_tiebreak"),
+    ]
+
+    def test_cases(self) -> None:
+        for desc, cand, inst, verdict, branch in self.CASES:
+            with self.subTest(desc=desc):
+                basis = compare_quality(
+                    self._m(cand), self._m(inst), self.CFG)
+                self.assertEqual(basis.verdict, verdict)
+                self.assertEqual(basis.branch, branch)
+
+    def test_the_tolerance_never_reaches_a_cross_family_pair(self) -> None:
+        """Cross-codec rank differences are real and must still decide.
+
+        MP3 192 (good) vs Opus 191 (transparent, its own table) differ by one
+        kbps and by two ranks; the numbers mean different things, so the
+        window must not cancel it.
+        """
+        basis = compare_quality(
+            self._m(192, "MP3"), self._m(191, "Opus"), self.CFG)
+        self.assertEqual(basis.branch, "rank")
+        self.assertEqual(basis.verdict, "worse")
+
+    def test_the_tolerance_never_reaches_an_explicit_label(self) -> None:
+        """A contract label's rank ignores the measured bitrate entirely."""
+        basis = compare_quality(
+            self._m(192, "mp3 v0"), self._m(191, "MP3"), self.CFG)
+        self.assertEqual(basis.branch, "rank")
+        self.assertEqual(basis.verdict, "better")
+
+    def test_a_spectrally_clamped_rank_gap_is_never_cancelled(self) -> None:
+        """The clamp must keep deciding — suppressing it would weaken #829.
+
+        Both sides carry a producible spectral class and an accusing grade,
+        so the shared clamp binds. The clamped values are classes, not
+        measured rates, and the window must not touch the rank they produce.
+        """
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=320, avg_bitrate_kbps=320,
+            median_bitrate_kbps=320, format="MP3",
+            spectral_grade="suspect", spectral_bitrate_kbps=192,
+            codec_family=CODEC_FAMILY_MP3,
+        )
+        existing = AudioQualityMeasurement(
+            min_bitrate_kbps=318, avg_bitrate_kbps=318,
+            median_bitrate_kbps=318, format="MP3",
+            spectral_grade="suspect", spectral_bitrate_kbps=128,
+            codec_family=CODEC_FAMILY_MP3,
+        )
+        basis = compare_quality(new, existing, self.CFG)
+        self.assertTrue(basis.spectral_clamped)
+        self.assertNotEqual(basis.branch, "rank_within_tolerance")
+        self.assertEqual(basis.verdict, "better")
+
+    def test_one_bound_side_keeps_the_rank_the_clamp_produced(self) -> None:
+        """The guard is ``either`` bound, and this is the world that proves it.
+
+        The candidate's estimate binds (192 class below its 320 raw) while
+        the installed side's does not (320 class above its 191 raw, so 191
+        stands). The two clamped values are 192 and 191 — one kbps apart, and
+        a class against a raw metric. Cancelling that rank would let a ±5
+        window in kbps overrule the spectral clamp, so the rank must stand.
+        """
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=320, avg_bitrate_kbps=320,
+            median_bitrate_kbps=320, format="MP3",
+            spectral_grade="suspect", spectral_bitrate_kbps=192,
+            codec_family=CODEC_FAMILY_MP3,
+        )
+        existing = AudioQualityMeasurement(
+            min_bitrate_kbps=191, avg_bitrate_kbps=191,
+            median_bitrate_kbps=191, format="MP3",
+            spectral_grade="suspect", spectral_bitrate_kbps=320,
+            codec_family=CODEC_FAMILY_MP3,
+        )
+        basis = compare_quality(new, existing, self.CFG)
+        self.assertTrue(basis.spectral_clamped)
+        self.assertEqual((basis.new_value_kbps, basis.existing_value_kbps),
+                         (192, 191))
+        self.assertNotEqual(basis.branch, "rank_within_tolerance")
+        self.assertEqual(basis.verdict, "better")
+
+    def test_neither_bound_still_gets_the_window(self) -> None:
+        """Both carry spectral evidence, neither estimate binds.
+
+        Both clamped values ARE the raw metrics, so they are the same kind of
+        number and the window applies — refusing it here (gating on "a shared
+        clamp exists" rather than "a clamp bound") would leave the churn alive
+        on every album that carries spectral evidence.
+        """
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=192, avg_bitrate_kbps=192,
+            median_bitrate_kbps=192, format="MP3",
+            spectral_grade="suspect", spectral_bitrate_kbps=320,
+            codec_family=CODEC_FAMILY_MP3,
+        )
+        existing = AudioQualityMeasurement(
+            min_bitrate_kbps=191, avg_bitrate_kbps=191,
+            median_bitrate_kbps=191, format="MP3",
+            spectral_grade="suspect", spectral_bitrate_kbps=320,
+            codec_family=CODEC_FAMILY_MP3,
+        )
+        basis = compare_quality(new, existing, self.CFG)
+        self.assertEqual((basis.new_value_kbps, basis.existing_value_kbps),
+                         (192, 191))
+        self.assertEqual(basis.branch, "rank_within_tolerance")
+        self.assertEqual(basis.verdict, "equivalent")
+
+    def test_a_retuned_tolerance_moves_the_window(self) -> None:
+        """The window is the configured one, not a constant."""
+        strict = QualityRankConfig(within_rank_tolerance_kbps=0)
+        self.assertEqual(
+            compare_quality(self._m(192), self._m(191), strict).branch, "rank")
+        wide = QualityRankConfig(within_rank_tolerance_kbps=40)
+        self.assertEqual(
+            compare_quality(self._m(192), self._m(160), wide).branch,
+            "rank_within_tolerance")
+
+    def test_the_decided_outcome_is_downgrade_not_import(self) -> None:
+        """The consequence, not a proxy: the pipeline must not re-import.
+
+        Driving the real decider end to end. Without the window this world
+        decides ``import`` — a whole replace for one kbps. The 320-vs-200
+        control below proves the guard did not simply stop importing.
+        """
+        churn = full_pipeline_decision(
+            is_flac=False, min_bitrate=192, is_cbr=False, avg_bitrate=192,
+            new_format="MP3",
+            existing_format="MP3",
+            existing_min_bitrate=191, existing_avg_bitrate=191,
+        )
+        self.assertEqual(churn["stage2_import"], "downgrade")
+        self.assertFalse(churn["imported"])
+        self.assertEqual(
+            churn["comparison_basis"]["branch"], "rank_within_tolerance")
+
+        real = full_pipeline_decision(
+            is_flac=False, min_bitrate=320, is_cbr=False, avg_bitrate=320,
+            new_format="MP3",
+            existing_format="MP3",
+            existing_min_bitrate=200, existing_avg_bitrate=200,
+        )
+        self.assertEqual(real["stage2_import"], "import")
+        self.assertTrue(real["imported"])
+        self.assertEqual(real["comparison_basis"]["branch"], "rank")
 
 
 class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
@@ -3752,9 +4001,15 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         a ``genuine`` album is the calibrated false positive: a minority
         track's natural rolloff on an album the verdict already cleared.
         With it withheld, the genuine album stands on its real avg 172
-        (``good``) while the candidate is bounded by its OWN class 160
-        (``acceptable``) — so the genuine copy is kept and the search
-        continues.
+        while the candidate is bounded by its OWN class 160 — so the genuine
+        copy is kept and the search continues.
+
+        Since #1145 both of those land in the single MP3 table's
+        ``acceptable`` band (128-191), where 172 used to be ``good`` on the
+        VBR table. The bound therefore ties instead of losing, and the
+        comparison reads ``equivalent`` rather than ``worse``. The DECIDED
+        outcome is unchanged and is what this test is really about: the
+        transcode still does not displace the genuine copy.
 
         The must-still-work direction is
         ``test_transcode_candidate_bounded_rank_strictly_better_still_imports``.
@@ -3779,11 +4034,96 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         )
 
         basis = compare_quality(new, existing, CFG)
-        self.assertEqual(basis.verdict, "worse")
+        self.assertEqual(basis.verdict, "equivalent")
         self.assertEqual(basis.branch, "spectral_candidate_bound")
         self.assertEqual(basis.new_value_kbps, 160)
+        # The consequence, not the intermediate verdict: the transcode is
+        # refused and the genuine copy stays installed.
         self.assertEqual(import_quality_decision(new, existing, cfg=CFG).decision,
                          "downgrade")
+
+    def test_one_bound_side_never_reaches_the_spectral_tiebreak(self):
+        """``both_spectral_bound`` is a GATE, and this is the world it gates.
+
+        Candidate MP3 raw 320 with a decision-grade class of 192; installed
+        MP3 raw 224 with a class of 256. ``_shared_spectral_bitrates``
+        returns ``(192, 224, True, False)`` — the candidate's class binds
+        (192 <= 320), the installed side's does not (256 > 224), so its
+        "clamped" value is just its raw metric. Comparing a spectral class
+        against a raw metric with no tolerance is not a like-for-like
+        tiebreak, so the branch must withhold and the raw +/-5 kbps
+        ``metric_tiebreak`` decides instead.
+
+        Issue #1145 deleted ``_classify_with_cbr_bands``, the flags' only
+        other consumer, leaving this branch as their ONLY reader — and no
+        test reached it, so both faithful mutants (``both_spectral_bound =
+        True`` at the assignment, and ``and both_spectral_bound`` ->
+        ``and True`` at the guard) survived. Under either one this world
+        reads ``spectral_tiebreak`` on 192 vs 224 and the DECIDED outcome
+        flips from import to downgrade.
+        """
+        new = self._m(
+            format="MP3", min_bitrate_kbps=320, avg_bitrate_kbps=320,
+            median_bitrate_kbps=320, is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate_kbps=192,
+        )
+        existing = self._m(
+            format="MP3", min_bitrate_kbps=224, avg_bitrate_kbps=224,
+            median_bitrate_kbps=224, is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate_kbps=256,
+        )
+
+        # The asymmetry is real, not assumed: assert the production helper's
+        # own bound flags rather than trusting the world's construction.
+        self.assertEqual(
+            _shared_spectral_bitrates(
+                new, existing, CFG,
+                new_spectral=interpret_measurement(new),
+                existing_spectral=interpret_measurement(existing),
+            ),
+            (192, 224, True, False),
+        )
+
+        basis = compare_quality(new, existing, CFG)
+        self.assertEqual(basis.branch, "metric_tiebreak")
+        self.assertEqual(basis.verdict, "better")
+        self.assertEqual(basis.new_value_kbps, 320)
+        self.assertEqual(basis.existing_value_kbps, 224)
+        # The consequence, not the branch label.
+        self.assertEqual(
+            import_quality_decision(new, existing, cfg=CFG).decision, "import")
+
+    def test_both_bound_sides_do_reach_the_spectral_tiebreak(self):
+        """Must-still-work: the gate is not "always withhold".
+
+        Both classes bind (224 and 192 against raw 320), both land in the
+        same ``good`` band, and they differ — so the clamped values decide
+        directly. Without this arm the pin above would pass just as well
+        against a branch deleted outright.
+        """
+        new = self._m(
+            format="MP3", min_bitrate_kbps=320, avg_bitrate_kbps=320,
+            median_bitrate_kbps=320, is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate_kbps=224,
+        )
+        existing = self._m(
+            format="MP3", min_bitrate_kbps=320, avg_bitrate_kbps=320,
+            median_bitrate_kbps=320, is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate_kbps=192,
+        )
+        self.assertEqual(
+            _shared_spectral_bitrates(
+                new, existing, CFG,
+                new_spectral=interpret_measurement(new),
+                existing_spectral=interpret_measurement(existing),
+            ),
+            (224, 192, True, True),
+        )
+        basis = compare_quality(new, existing, CFG)
+        self.assertEqual(basis.branch, "spectral_tiebreak")
+        self.assertEqual(basis.verdict, "better")
+        self.assertEqual(basis.new_value_kbps, 224)
+        self.assertEqual(basis.existing_value_kbps, 192)
 
     def test_transcode_candidate_bounded_rank_strictly_better_still_imports(self):
         """Must-still-work: the bound blocks nothing that is really better.
@@ -3895,7 +4235,7 @@ class TestQualityRankConfigFromIni(unittest.TestCase):
         self.assertEqual(cfg.opus.good, 64)
         self.assertEqual(cfg.opus.acceptable, 48)
         # And other codecs untouched
-        self.assertEqual(cfg.mp3_vbr, QualityRankConfig.defaults().mp3_vbr)
+        self.assertEqual(cfg.mp3, QualityRankConfig.defaults().mp3)
 
     def test_full_override(self):
         cfg = self._parse(
@@ -3906,14 +4246,10 @@ class TestQualityRankConfigFromIni(unittest.TestCase):
             "opus.excellent = 100\n"
             "opus.good = 80\n"
             "opus.acceptable = 60\n"
-            "mp3_vbr.transparent = 220\n"
-            "mp3_vbr.excellent = 180\n"
-            "mp3_vbr.good = 140\n"
-            "mp3_vbr.acceptable = 100\n"
-            "mp3_cbr.transparent = 320\n"
-            "mp3_cbr.excellent = 250\n"
-            "mp3_cbr.good = 200\n"
-            "mp3_cbr.acceptable = 130\n"
+            "mp3.transparent = 320\n"
+            "mp3.excellent = 250\n"
+            "mp3.good = 200\n"
+            "mp3.acceptable = 130\n"
             "aac.transparent = 200\n"
             "aac.excellent = 150\n"
             "aac.good = 120\n"
@@ -3930,8 +4266,8 @@ class TestQualityRankConfigFromIni(unittest.TestCase):
         self.assertEqual(cfg.bitrate_metric, RankBitrateMetric.MIN)
         self.assertEqual(cfg.within_rank_tolerance_kbps, 10)
         self.assertEqual(cfg.opus.transparent, 120)
-        self.assertEqual(cfg.mp3_vbr.transparent, 220)
-        self.assertEqual(cfg.mp3_cbr.excellent, 250)
+        self.assertEqual(cfg.mp3.transparent, 320)
+        self.assertEqual(cfg.mp3.excellent, 250)
         self.assertEqual(cfg.aac.acceptable, 90)
         self.assertEqual(cfg.vorbis.excellent, 170)
         self.assertEqual(cfg.wma.acceptable, 129)
@@ -4149,7 +4485,7 @@ class TestQualityRankConfigRoundTrip(unittest.TestCase):
         payload = json.loads(QualityRankConfig.defaults().to_json())
         expected_keys = {
             "bitrate_metric", "within_rank_tolerance_kbps",
-            "opus", "mp3_vbr", "mp3_cbr", "aac", "vorbis", "wma",
+            "opus", "mp3", "aac", "vorbis", "wma",
             "mp3_vbr_levels", "lossless_codecs", "mixed_format_precedence",
         }
         self.assertEqual(set(payload.keys()), expected_keys)
@@ -4264,22 +4600,15 @@ class TestQualityRankConfigDefaults(unittest.TestCase):
         self.assertEqual(CFG.opus.good, 64)
         self.assertEqual(CFG.opus.acceptable, 48)
 
-    def test_default_mp3_vbr_bands(self):
-        """Legacy QUALITY_MIN_BITRATE_KBPS=210 is preserved at ``excellent``
-        — see docs/quality-ranks.md and the
-        test_default_constant_matches_default_cfg_mp3_vbr_excellent pin."""
-        self.assertEqual(CFG.mp3_vbr.transparent, 245)
-        self.assertEqual(CFG.mp3_vbr.excellent, 210)
-        self.assertEqual(CFG.mp3_vbr.good, 170)
-        self.assertEqual(CFG.mp3_vbr.acceptable, 130)
-
-    def test_default_mp3_cbr_bands(self):
-        """Unverifiable CBR is only transparent at 320 — we can't prove
-        a CBR file came from lossless source."""
-        self.assertEqual(CFG.mp3_cbr.transparent, 320)
-        self.assertEqual(CFG.mp3_cbr.excellent, 256)
-        self.assertEqual(CFG.mp3_cbr.good, 192)
-        self.assertEqual(CFG.mp3_cbr.acceptable, 128)
+    def test_default_mp3_bands(self):
+        """One MP3 table (#1145). Unverifiable measured MP3 is only
+        transparent at 320 — we cannot prove a measured MP3 came from a
+        lossless source, and an inferred encoding mode is not proof.
+        A genuine VBR encode is promoted by ``mp3_vbr_levels`` instead."""
+        self.assertEqual(CFG.mp3.transparent, 320)
+        self.assertEqual(CFG.mp3.excellent, 256)
+        self.assertEqual(CFG.mp3.good, 192)
+        self.assertEqual(CFG.mp3.acceptable, 128)
 
     def test_default_aac_bands(self):
         """Hydrogenaudio consensus places the music quality ceiling at 192."""

@@ -33,6 +33,8 @@ from hypothesis.stateful import (
     rule,
 )
 
+from lib.quality import CURRENT_EVIDENCE_LINEAGE_VERSION
+
 # Start a throwaway PostgreSQL and apply the real migration stack before the
 # world imports TEST_DB_DSN. This never connects to production.
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
@@ -152,8 +154,10 @@ def _assert_missing_evidence_converges(
         snapshot_audio_files(album.album_path)
     ):
         raise AssertionError("current evidence did not fingerprint installed bytes")
-    if evidence.lineage_version != 4:
-        raise AssertionError("current evidence did not rebuild to lineage 4")
+    if evidence.lineage_version != CURRENT_EVIDENCE_LINEAGE_VERSION:
+        raise AssertionError(
+            "current evidence did not rebuild to lineage "
+            f"{CURRENT_EVIDENCE_LINEAGE_VERSION}")
     expected_policy_format = {
         "ogg": "vorbis",
         "wma": "wma",
@@ -592,7 +596,7 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             after_id = world.db.get_request_current_evidence_id(request_id)
             after = world.db.load_album_quality_evidence_by_id(after_id)
             assert after is not None
-            self.assertEqual(after.lineage_version, 4)
+            self.assertEqual(after.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
             world.assert_invariants()
 
     def test_missing_current_evidence_installed_census_converges(self) -> None:
@@ -754,7 +758,7 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             linked = world.db.load_album_quality_evidence_by_id(new_id)
             assert linked is not None
             self.assertTrue(linked.current_enrichment_required)
-            self.assertEqual(linked.lineage_version, 4)
+            self.assertEqual(linked.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
             world.assert_invariants()
 
     def test_drift_blocks_both_import_paths_until_enrichment(self) -> None:
@@ -870,7 +874,7 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
                     )
                     assert linked is not None
                     self.assertTrue(linked.current_enrichment_required)
-                    self.assertEqual(linked.lineage_version, 4)
+                    self.assertEqual(linked.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
                     world.assert_invariants()
 
     def test_every_live_evidence_fact_shape_has_stable_retry_outcome(self) -> None:
@@ -1383,7 +1387,7 @@ class TestGeneratedEvidenceDriftWorld(unittest.TestCase):
             linked = world.db.load_album_quality_evidence_by_id(new_id)
             assert linked is not None
             self.assertTrue(linked.current_enrichment_required)
-            self.assertEqual(linked.lineage_version, 4)
+            self.assertEqual(linked.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
             world.assert_invariants()
 
 

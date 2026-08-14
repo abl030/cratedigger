@@ -17,6 +17,7 @@ from typing import Literal
 from lib.json_narrow import is_str_object_dict
 from lib.quality import (
     CD_RIP_BIT_VERIFIED_CLASSIFIER,
+    CURRENT_EVIDENCE_LINEAGE_VERSION,
     AccurateRipBitMatch,
     AlbumQualityEvidenceFile,
     AudioQualityMeasurement,
@@ -98,7 +99,13 @@ class TestDecisionCorpusExport(unittest.TestCase):
         assert stored is not None and stored.id is not None
         return stored.id
 
-    def _cd_evidence(self, release: str, ordinal: int) -> int:
+    def _cd_evidence(
+        self,
+        release: str,
+        ordinal: int,
+        *,
+        lineage_version: int = CURRENT_EVIDENCE_LINEAGE_VERSION,
+    ) -> int:
         cd_rip = CdRipBitVerification(
             source_format="flac",
             toc=CdTocIdentity(
@@ -142,6 +149,7 @@ class TestDecisionCorpusExport(unittest.TestCase):
             storage_format="FLAC",
             verified_lossless_proof=cd_rip.verified_lossless_proof(),
             cd_rip_verification=cd_rip,
+            lineage_version=lineage_version,
         )
         self.db.upsert_album_quality_evidence(evidence)
         stored = self.db.find_album_quality_evidence(
@@ -1168,7 +1176,12 @@ class TestDecisionCorpusExport(unittest.TestCase):
             root = Path(tmp)
             release = "base-archive-decision-corpus"
             request_id = self._request(release)
-            candidate_id = self._cd_evidence(release, 71)
+            # Both base refs predate lineage 5 (issue #1145) and their own
+            # ``AlbumQualityEvidence`` refuses a version they have never
+            # heard of — as every historical tree must. This test is about
+            # the CD-rip proof boundary surviving the two-tree replay, so the
+            # corpus is seeded at the newest lineage BOTH sides can decide.
+            candidate_id = self._cd_evidence(release, 71, lineage_version=4)
             job = self.db.enqueue_import_job(
                 "force_import", request_id=request_id,
                 payload={"download_log_id": 1, "failed_path": "/tmp/candidate"},

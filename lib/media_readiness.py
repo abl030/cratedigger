@@ -415,16 +415,14 @@ def average_bitrate_kbps_from_frames(
     ``8517888 * 8 == 266.184 s * 256 kbps * 1000`` exactly, yet the float
     path yielded ``255.99999999999997`` and reported 255.
 
-    That single kbps is not cosmetic. Per-track bitrate uniformity is what
-    the two decision-path ``is_cbr`` derivations read
-    (``harness/import_one.py`` for the candidate, ``lib.beets_db`` for the
-    installed copy; the preview lane instead reads mutagen's declared
-    ``bitrate_mode``). One odd track makes a constant-bitrate album look
-    variable, and MP3 then ranks through ``cfg.mp3_vbr``
-    (transparent >= 245) instead of ``cfg.mp3_cbr`` (transparent >= 320).
-    At 255 kbps that ladder swap alone is GOOD -> TRANSPARENT, two tiers;
-    on the live album it was enough to put the candidate's TRANSPARENT above
-    the installed copy's EXCELLENT and trigger the re-import.
+    That single kbps is not cosmetic. It is a rank-band boundary away from
+    changing an album's tier, and both sides of every comparison must derive
+    it identically or the same audio compares unequal — the Koppel row above
+    re-imported an album over itself for exactly that reason (dl 39947).
+    (It used to matter a second way: per-track bitrate uniformity fed an
+    ``is_cbr`` boolean that chose between two MP3 ladders 75 kbps apart, so
+    one odd track moved a whole album two tiers. Issue #1145 removed that
+    amplifier — there is one MP3 ladder now, and ``is_cbr`` steers no rank.)
 
     The quotient is therefore evaluated as an exact integer ratio and
     rounded half-up. Rounding rather than truncating is the second half:

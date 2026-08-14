@@ -87,8 +87,8 @@ class TestTransparentHaveSearchOverrideChecker(unittest.TestCase):
     def test_checker_rejects_missing_lossless_override(self):
         cfg = QualityRankConfig.defaults()
         measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=cfg.mp3_cbr.transparent,
-            avg_bitrate_kbps=cfg.mp3_cbr.transparent,
+            min_bitrate_kbps=cfg.mp3.transparent,
+            avg_bitrate_kbps=cfg.mp3.transparent,
             format="MP3",
             is_cbr=True,
         )
@@ -126,8 +126,8 @@ class TestGeneratedTransparentHaveSearchOverride(unittest.TestCase):
     ))
     @example(world=(
         AudioQualityMeasurement(
-            min_bitrate_kbps=CFG.mp3_cbr.transparent,
-            avg_bitrate_kbps=CFG.mp3_cbr.transparent,
+            min_bitrate_kbps=CFG.mp3.transparent,
+            avg_bitrate_kbps=CFG.mp3.transparent,
             format="MP3",
             is_cbr=True,
             spectral_grade="genuine",
@@ -137,8 +137,8 @@ class TestGeneratedTransparentHaveSearchOverride(unittest.TestCase):
     ))
     @example(world=(
         AudioQualityMeasurement(
-            min_bitrate_kbps=CFG.mp3_cbr.excellent,
-            avg_bitrate_kbps=CFG.mp3_cbr.excellent,
+            min_bitrate_kbps=CFG.mp3.excellent,
+            avg_bitrate_kbps=CFG.mp3.excellent,
             format="MP3",
             is_cbr=True,
         ),

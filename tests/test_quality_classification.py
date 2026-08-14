@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from datetime import UTC
 
+from lib.json_narrow import json_dict
 from lib.quality import (
     STAGE2_COUNTERFACTUAL_UNAVAILABLE,
     CodecFamily,
@@ -1085,6 +1086,120 @@ class TestSpectralLandmineDecisionConsequence(unittest.TestCase):
         # The load-bearing pin: the persisted HAVE grade alone flips imported.
         self.assertFalse(self._decide("genuine", 160)["imported"])
         self.assertTrue(self._decide("likely_transcode", 128)["imported"])
+
+
+class TestBoundaryHysteresisAlbums(unittest.TestCase):
+    """Albums where a sub-tolerance difference must NOT authorise a replace.
+
+    Every bug in the #1144/#1145 series is one bug: a small measurement
+    difference crossing a discrete boundary produces a destructive action —
+    a full replace, a ``beet move``, and media-server churn for a difference
+    no listener can hear. These are the real worlds, kept as the contract.
+
+    The two controls at the end are what stop the guard from becoming "never
+    upgrade": a genuinely larger gap must still import, and a cross-family
+    pair must still be decided on rank even when its two bitrates are one
+    kbps apart, because those two numbers do not mean the same thing.
+    """
+
+    @staticmethod
+    def _decide(
+        *,
+        candidate_kbps: int,
+        candidate_format: str = "MP3",
+        candidate_is_cbr: bool = False,
+        installed_kbps: int,
+        installed_format: str = "MP3",
+        installed_is_cbr: bool = False,
+    ) -> dict[str, object]:
+        return full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=candidate_kbps,
+            avg_bitrate=candidate_kbps,
+            is_cbr=candidate_is_cbr,
+            new_format=candidate_format,
+            existing_min_bitrate=installed_kbps,
+            existing_avg_bitrate=installed_kbps,
+            existing_format=installed_format,
+            existing_is_cbr=installed_is_cbr,
+        )
+
+    def test_koppel_one_kbps_reimport_over_itself(self):
+        """BUG: download_log 39947, request 4781 — the album that started it.
+
+        Thomas Koppel, *Improvisationer for Klaver*. A re-download of an
+        album already installed at CBR 256 measured 255: the exact frame
+        arithmetic is 256 kbps
+        (``8517888 * 8 == 266.184 s * 256 kbps * 1000``) but the float path
+        yielded ``255.99999999999997`` and truncated. Two defects then
+        stacked on that one kbps: the
+        candidate's non-uniformity made it look VBR, so it ranked through the
+        retired ``mp3_vbr`` table (transparent >= 245) while the installed
+        CBR copy ranked through ``mp3_cbr`` (excellent at 256) — and the
+        rank difference short-circuited before the +-5 kbps tiebreak could
+        see that the two numbers were one kbps apart.
+
+        Issue #1144 removed the float truncation that produced the 255, and
+        issue #1145 removed the two-table amplifier; H2 then closed the
+        no-tolerance rank cliff underneath both. The album must not import.
+        """
+        result = self._decide(
+            candidate_kbps=255, candidate_is_cbr=False,
+            installed_kbps=256, installed_is_cbr=True,
+        )
+        self.assertFalse(result["imported"])
+        self.assertEqual(result["stage2_import"], "downgrade")
+        self.assertEqual(
+            json_dict(result["comparison_basis"])["branch"], "rank_within_tolerance")
+
+    def test_the_collapsed_band_edges_do_not_authorise_a_replace(self):
+        """Issue #1145 H2: the three live cliff worlds, rebuilt values.
+
+        Collapsing the MP3 tables put the band edges on 320/256/192/128 —
+        the nominal bitrates 817 of the library's 1,101 measured all-MP3
+        albums sit exactly on — so a candidate on an edge began outranking an
+        installed copy a few kbps below it. All three were ``equivalent`` on
+        ``main`` and must stay that way.
+        """
+        for description, candidate, installed in (
+            # Kerrie Biddell, *Only The Beginning* — installed avg 317.
+            ("request 5629, transparent edge", 320, 317),
+            # Dead Fawn, *Session III* — installed avg 190 (min 188).
+            ("request 3182, good edge", 192, 190),
+            # No live pair sits exactly here; this is the window's own edge.
+            ("excellent edge at the full window", 256, 252),
+        ):
+            with self.subTest(album=description):
+                result = self._decide(
+                    candidate_kbps=candidate, installed_kbps=installed)
+                self.assertFalse(result["imported"])
+                self.assertEqual(result["stage2_import"], "downgrade")
+                self.assertEqual(
+                    json_dict(result["comparison_basis"])["branch"],
+                    "rank_within_tolerance")
+
+    def test_a_real_upgrade_still_imports(self):
+        """Control: the guard must not become "never replace anything"."""
+        result = self._decide(candidate_kbps=320, installed_kbps=200)
+        self.assertTrue(result["imported"])
+        self.assertEqual(result["stage2_import"], "import")
+        self.assertEqual(json_dict(result["comparison_basis"])["branch"], "rank")
+
+    def test_a_cross_family_pair_one_kbps_apart_still_imports(self):
+        """Control: candidate 6963 / request 929 — Opus 127 over AAC 128.
+
+        One kbps apart and two ranks apart, because the two numbers are not
+        the same kind of number: 127 kbps of Opus is TRANSPARENT and 128 kbps
+        of AAC is GOOD. Widening the within-tolerance window into cross-codec
+        comparisons would silently stop this import; that is what this pins.
+        """
+        result = self._decide(
+            candidate_kbps=127, candidate_format="Opus",
+            installed_kbps=128, installed_format="AAC",
+        )
+        self.assertTrue(result["imported"])
+        self.assertEqual(result["stage2_import"], "import")
+        self.assertEqual(json_dict(result["comparison_basis"])["branch"], "rank")
 
 
 class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
@@ -4095,6 +4210,92 @@ class TestStage2CounterfactualAudit(unittest.TestCase):
                 self.assertIsNone(result["stage2_import_if_stage1_deferred"])
                 self.assertIsNone(
                     result["comparison_basis_if_stage1_deferred"])
+
+
+class TestBoundaryHysteresisAlbumsThroughEvidencePipeline(unittest.TestCase):
+    """The parity half of ``TestBoundaryHysteresisAlbums``.
+
+    Same four worlds, same expected outcomes, through the function the
+    importer actually calls. A guard that only holds in the flat-kwargs
+    simulator would not protect a single live album.
+    """
+
+    @staticmethod
+    def _decide(
+        *,
+        candidate_kbps: int,
+        candidate_format: str = "MP3",
+        candidate_is_cbr: bool = False,
+        installed_kbps: int,
+        installed_format: str = "MP3",
+        installed_is_cbr: bool = False,
+    ) -> dict[str, object]:
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = build_parity_candidate_evidence(
+            is_flac=False,
+            min_bitrate=candidate_kbps,
+            avg_bitrate=candidate_kbps,
+            is_cbr=candidate_is_cbr,
+            native_codec=candidate_format.lower(),
+            native_format=candidate_format,
+        )
+        current = build_parity_current_evidence(
+            min_bitrate=installed_kbps,
+            avg_bitrate=installed_kbps,
+            format=installed_format,
+            is_cbr=installed_is_cbr,
+        )
+        return full_pipeline_decision_from_evidence(candidate, current)
+
+    def test_koppel_one_kbps_reimport_over_itself_via_evidence(self):
+        """download_log 39947, request 4781 — through the real decider."""
+        result = self._decide(
+            candidate_kbps=255, candidate_is_cbr=False,
+            installed_kbps=256, installed_is_cbr=True,
+        )
+        self.assertFalse(result["imported"])
+        self.assertEqual(result["stage2_import"], "downgrade")
+        self.assertEqual(
+            json_dict(result["comparison_basis"])["branch"], "rank_within_tolerance")
+
+    def test_the_collapsed_band_edges_do_not_authorise_a_replace_via_evidence(
+        self,
+    ):
+        for description, candidate, installed in (
+            # Kerrie Biddell, *Only The Beginning* — installed avg 317.
+            ("request 5629, transparent edge", 320, 317),
+            # Dead Fawn, *Session III* — installed avg 190 (min 188).
+            ("request 3182, good edge", 192, 190),
+            # No live pair sits exactly here; this is the window's own edge.
+            ("excellent edge at the full window", 256, 252),
+        ):
+            with self.subTest(album=description):
+                result = self._decide(
+                    candidate_kbps=candidate, installed_kbps=installed)
+                self.assertFalse(result["imported"])
+                self.assertEqual(result["stage2_import"], "downgrade")
+                self.assertEqual(
+                    json_dict(result["comparison_basis"])["branch"],
+                    "rank_within_tolerance")
+
+    def test_a_real_upgrade_still_imports_via_evidence(self):
+        result = self._decide(candidate_kbps=320, installed_kbps=200)
+        self.assertTrue(result["imported"])
+        self.assertEqual(result["stage2_import"], "import")
+        self.assertEqual(json_dict(result["comparison_basis"])["branch"], "rank")
+
+    def test_a_cross_family_pair_one_kbps_apart_still_imports_via_evidence(
+        self,
+    ):
+        """Candidate 6963 / request 929 — Opus 127 over AAC 128."""
+        result = self._decide(
+            candidate_kbps=127, candidate_format="Opus",
+            installed_kbps=128, installed_format="AAC",
+        )
+        self.assertTrue(result["imported"])
+        self.assertEqual(result["stage2_import"], "import")
+        self.assertEqual(json_dict(result["comparison_basis"])["branch"], "rank")
 
 
 if __name__ == "__main__":

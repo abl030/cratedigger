@@ -138,7 +138,10 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
         self.assertEqual(by_id["both"]["beets_album_id"], 11)
         self.assertEqual(by_id["both"]["library_min_bitrate"], 194)
         self.assertEqual(by_id["both"]["library_avg_bitrate"], 288)
-        self.assertEqual(by_id["both"]["library_rank"], "transparent")
+        # One MP3 ladder since #1145: this fixture's average lands in
+        # ``excellent`` (256-319), where the old VBR table read it
+        # ``transparent``.
+        self.assertEqual(by_id["both"]["library_rank"], "excellent")
         self.assertEqual(by_id["both"]["pipeline_status"], "queued")
         self.assertEqual(by_id["both"]["pipeline_id"], 22)
         self.assertTrue(by_id["both"]["pipeline_verified_lossless"])

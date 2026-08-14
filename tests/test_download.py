@@ -34,6 +34,7 @@ from lib.import_execution import (
     ProcessIdentity,
 )
 from lib.pipeline_db import AlbumRequestRow, TransferLedgerRow
+from lib.quality import CURRENT_EVIDENCE_LINEAGE_VERSION
 from lib.slskd_client import TransferSnapshot
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 from tests.helpers import (
@@ -7450,7 +7451,7 @@ class TestComputeRejectionBackfillCfgThreading(unittest.TestCase):
         from lib.quality import QUALITY_LOSSLESS, CodecRankBands, QualityRankConfig
 
         custom = QualityRankConfig(
-            mp3_vbr=CodecRankBands(
+            mp3=CodecRankBands(
                 transparent=180,
                 excellent=170,
                 good=130,
@@ -8497,7 +8498,9 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         self.assertEqual(db.request(42)["status"], "wanted")
         current = db.load_album_quality_evidence_by_id(stored.id)
         assert current is not None
-        self.assertEqual(current.lineage_version, 4)
+        self.assertEqual(
+            current.lineage_version,
+            CURRENT_EVIDENCE_LINEAGE_VERSION)
         self.assertEqual(current.measured_at, stored.measured_at)
         self.assertEqual(ctx.evidence_enrichment_budget, 1)
         log_row = db.get_log(limit=1)[0]

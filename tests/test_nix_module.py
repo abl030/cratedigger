@@ -31,6 +31,7 @@ import re
 import subprocess
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODULE_NIX = REPO_ROOT / "nix" / "module.nix"
@@ -2259,6 +2260,89 @@ class TestStandaloneCheckerPackageIdentity(unittest.TestCase):
         self.assertIn("cratedigger-check-beets-config-package-boundary", flake)
         self.assertIn("hostile inherited PYTHONPATH imported beets", flake)
         self.assertIn("/bin/cratedigger-check-beets-config", flake)
+
+
+class TestQualityRankBandDefaultsMatchProduction(unittest.TestCase):
+    """The module's band defaults ARE ``QualityRankConfig.defaults()``.
+
+    ``nix/module.nix`` renders ``[Quality Ranks]`` into the immutable
+    deployed ``config.ini``, so a band declared here that disagrees with the
+    dataclass silently retunes live quality policy at the next switch, with
+    nothing in the Python suite reading the deployed value. Issue #1145
+    collapsed ``mp3_vbr``/``mp3_cbr`` into one ``mp3`` table on both sides;
+    a mutant that reverted only the Nix half survived every existing
+    ``tests/test_nix_module.py`` contract.
+
+    The expectation is DERIVED from the production dataclass, never typed
+    here, so retuning a band in one place fails until the other follows.
+    """
+
+    #: Nix option name -> ``QualityRankConfig`` attribute. Both directions are
+    #: checked below, so a codec added to one side and not the other fails.
+    _CODECS: ClassVar[dict[str, str]] = {
+        "opus": "opus",
+        "mp3": "mp3",
+        "aac": "aac",
+        "vorbis": "vorbis",
+        "wma": "wma",
+    }
+
+    @staticmethod
+    def _rendered_bands(source: str, codec: str) -> dict[str, int]:
+        match = re.search(
+            r"^\s*" + re.escape(codec) + r" = mkCodecBands \"[^\"]+\" \{"
+            r"(?P<body>.*?)^\s*\};",
+            source,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert match is not None, f"no mkCodecBands block for {codec!r}"
+        return {
+            name: int(value)
+            for name, value in re.findall(
+                r"(\w+)\s*=\s*(\d+);", match.group("body"))
+        }
+
+    def test_every_band_default_equals_the_dataclass(self) -> None:
+        from lib.quality import QualityRankConfig
+
+        source = MODULE_NIX.read_text(encoding="utf-8")
+        defaults = QualityRankConfig.defaults()
+        for nix_name, attr in self._CODECS.items():
+            with self.subTest(codec=nix_name):
+                bands = getattr(defaults, attr)
+                self.assertEqual(
+                    self._rendered_bands(source, nix_name),
+                    {
+                        "transparent": bands.transparent,
+                        "excellent": bands.excellent,
+                        "good": bands.good,
+                        "acceptable": bands.acceptable,
+                    },
+                )
+
+    def test_the_declared_codec_set_is_exactly_the_dataclass_set(self) -> None:
+        """No codec may exist on one side only — the #1145 failure shape.
+
+        Renaming ``mp3_vbr``/``mp3_cbr`` to ``mp3`` in Python while the Nix
+        option kept the old names would leave the deployed config naming a
+        section the INI parser no longer reads.
+        """
+        from lib.quality import QualityRankConfig
+
+        source = MODULE_NIX.read_text(encoding="utf-8")
+        bands_block = re.search(
+            r"^      bands = \{(?P<body>.*?)^      \};",
+            source, re.DOTALL | re.MULTILINE)
+        assert bands_block is not None
+        declared = set(re.findall(
+            r"^\s*(\w+) = mkCodecBands ", bands_block.group("body"),
+            re.MULTILINE))
+        self.assertEqual(declared, set(self._CODECS))
+        rendered = json.loads(QualityRankConfig.defaults().to_json())
+        for attr in self._CODECS.values():
+            self.assertIn(attr, rendered)
+        self.assertNotIn("mp3_vbr", rendered)
+        self.assertNotIn("mp3_cbr", rendered)
 
 
 if __name__ == "__main__":

@@ -566,7 +566,7 @@ class TestSimulatorInvariants(unittest.TestCase):
     def test_stage0_gate_propagates(self):
         """Issue #93: every simulation must populate stage0_spectral_gate
         so the CLI + web UI can explain why spectral ran or didn't."""
-        VALID = {"would_run", "skipped_vbr_high_avg", "skipped_flac"}
+        VALID = {"would_run", "skipped_flac", "skipped_uncalibrated_codec"}
         album = ALBUM_MAP["fresh_request"]
         for dl in DOWNLOAD_SCENARIOS:
             with self.subTest(dl=dl.name):
@@ -574,17 +574,32 @@ class TestSimulatorInvariants(unittest.TestCase):
                 self.assertIn(r.stage0_spectral_gate, VALID,
                               f"{dl.name}: stage0={r.stage0_spectral_gate}")
 
-    def test_vbr_high_avg_skips_spectral_stage(self):
-        """Genuine V0 download (avg 245) must have stage0=skipped_vbr_high_avg
-        AND stage1 must not run. This locks the production semantic the CLI
-        simulator must explain: 'we trust the VBR bitrate signal, no analysis'."""
+    def test_high_avg_vbr_mp3_is_still_scanned(self):
+        """Issue #1145: a genuine-looking V0 average buys no exemption.
+
+        This pinned ``skipped_vbr_high_avg`` until the skip was removed. The
+        premise was that a high-average VBR MP3 is self-evidently genuine —
+        but ``is_vbr`` is the encoder's own header and the ``-V`` tier is a
+        peer-written tag, so the skip was an invitation to self-certify.
+        Measurement decides.
+
+        The simulator must now explain the production semantic it really
+        has: every MP3 is scanned, so ``stage0`` reports ``would_run`` for
+        this download. Stage 1 stays ``None`` here because this scenario
+        supplies no spectral grade — the gate firing is what changed, not
+        the existence of a verdict to model. The gate-fired-so-a-supplied-
+        grade-reaches-Stage-1 direction is asserted in
+        ``test_vbr_low_avg_runs_spectral_stage`` and in
+        ``test_quality_decisions``'s
+        ``test_stage0_high_avg_vbr_no_longer_skips_stage1``.
+        """
         album = ALBUM_MAP["fresh_request"]
         r = simulate(album, DL_MAP["mp3_v0_240"])
-        self.assertEqual(r.stage0_spectral_gate, "skipped_vbr_high_avg")
+        self.assertEqual(r.stage0_spectral_gate, "would_run")
         self.assertIsNone(
             r.stage1_spectral,
-            "high-avg VBR must skip spectral entirely, not model a "
-            "decision on it")
+            "no spectral grade is supplied for this scenario, so the fired "
+            "gate has nothing to decide on")
 
     def test_vbr_low_avg_runs_spectral_stage(self):
         """Go! Team shape: VBR avg 182 + likely_transcode spectral → stage 0
@@ -1075,11 +1090,13 @@ class TestNamedRegressions(unittest.TestCase):
         self.assertEqual(r.stage2_import, "import")
 
     def test_lofi_verified_lossless_accepted(self):
-        """207kbps verified lossless -> quality gate accepts despite < 210 threshold.
+        """207kbps verified lossless -> the quality gate accepts it anyway.
 
         Bug: Quality gate re-queued 207kbps albums for upgrade even though the
         source was verified genuine FLAC. Lo-fi recordings legitimately produce
-        low V0 bitrates.
+        low V0 bitrates. 207 sits below the MP3 excellent band either way —
+        the number the gate is being asked to ignore moved from 210 to 256
+        with the #1145 ladder collapse, and the acceptance must not.
         """
         album = ALBUM_MAP["fresh_request"]
         r = simulate(album, DL_MAP["flac_genuine_lofi"])
@@ -1769,8 +1786,9 @@ class TestBackfillPropagation(unittest.TestCase):
                     have_spectral_grade="genuine",
                 ))
                 if not r.imported and r.keep_searching:
-                    self.assertIsNone(r.backfill_override,
-                                      "192 < 210 -> backfill should not fire")
+                    self.assertIsNone(
+                        r.backfill_override,
+                        "a 192kbps HAVE is not transparent -> no backfill")
 
     def test_existing_lossless_override_without_have_audit_is_preserved(self):
         """Missing HAVE evidence cannot alter an existing narrow override."""
