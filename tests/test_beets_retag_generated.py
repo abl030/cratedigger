@@ -663,31 +663,16 @@ MB_ALBUMID_STORAGE_SHAPES: tuple[MbAlbumidStorageShape, ...] = (
 MB_ALBUMID_STORAGE_SHAPE_STRATEGY = st.sampled_from(MB_ALBUMID_STORAGE_SHAPES)
 
 def _queried_identity(case: str) -> ReleaseIdentity:
-    """The QUERIED identity's own case (#1093 review round 3, F1 secondary
-    finding; round-3-of-round-3 N-3 — this is a plain two-literal helper,
-    not a Hypothesis strategy: nothing in this module draws a case at
-    random, so no ``st.sampled_from`` object sits over it).
+    """The QUERIED identity's own case.
 
-    ``case="exact"`` — the ONLY case the fuzzed property below draws, and
-    the ONLY case reachable in production. Verified, not merely asserted:
-    EVERY ``ReleaseIdentity`` that reaches
+    ``case="exact"`` is the only case reachable in production: every
+    ``ReleaseIdentity`` that reaches
     :func:`lib.beets_retag.retag_merged_album` is built via
-    ``ReleaseIdentity.from_id`` (traced through both call sites in
-    ``lib/download_validation.py`` — ``old_identity =
-    ReleaseIdentity.from_id(normalize_release_id(stored_release_id))`` and
-    ``new_identity = ReleaseIdentity.from_id(survivor)``), and ``from_id``
-    normalizes (lowercases UUIDs) internally.
+    ``ReleaseIdentity.from_id``, which lowercases UUIDs.
 
-    ``case="upper"`` is called directly, ONCE, by
-    :class:`TestKnownUnreachableQueriedIdentityCaseDivergence` below — the
-    one combination NOT reachable this way — proving the boundary
-    empirically rather than asserting it, per the "state the invariant
-    explicitly" branch of the review finding: widening the FUZZED property
-    to draw it would patrol a genuine, but currently unreachable,
-    pre-existing defect in ``resolve_current_releases`` itself (its SQL
-    comparison and Python-side re-key disagree on which side to normalize)
-    — a defect in a WIDELY shared method well beyond the retag module's
-    scope, not something to silently absorb into #1093.
+    ``case="upper"`` is still drawn by the generated property and the
+    #1138 pin — production cannot construct it, but
+    ``resolve_current_releases`` must attribute a SQL-fetched row anyway.
     """
     release_id = MERGED if case == "exact" else MERGED.upper()
     return ReleaseIdentity(source="musicbrainz", release_id=release_id)
@@ -816,63 +801,38 @@ class TestQueryAndGuardConvergeOnStorageShape(unittest.TestCase):
     """
 
     @settings(deadline=None)
-    @given(shape=MB_ALBUMID_STORAGE_SHAPE_STRATEGY)
+    @given(
+        shape=MB_ALBUMID_STORAGE_SHAPE_STRATEGY,
+        identity_case=st.sampled_from(("exact", "upper")),
+    )
     def test_query_and_guard_agree_on_every_storage_shape(
-        self, shape: MbAlbumidStorageShape,
+        self, shape: MbAlbumidStorageShape, identity_case: str,
     ) -> None:
-        """Queries with ``identity_case="exact"`` — the ONLY case reachable
-        in production (see :func:`_queried_identity`). The ``"upper"``
-        case is exercised separately, deterministically, in
-        :class:`TestKnownUnreachableQueriedIdentityCaseDivergence`."""
         library_db, album_id, library_root = _mb_albumid_convergence_world()
         _write_mb_albumid(library_db, album_id, shape.value)
-        identity = _queried_identity("exact")
+        identity = _queried_identity(identity_case)
 
         guard_matches = _guard_matches(library_db, library_root, identity)
         query_matches = _query_matches(library_db, album_id, identity)
 
         check_query_and_guard_agree_on_storage_shape(
-            guard_matches=guard_matches, query_matches=query_matches,
-            shape=shape, identity_case="exact",
+            guard_matches=guard_matches,
+            query_matches=query_matches,
+            shape=shape,
+            identity_case=identity_case,
         )
 
 
-class TestKnownUnreachableQueriedIdentityCaseDivergence(unittest.TestCase):
-    """#1093 review round 3, F1 secondary finding — the ONE combination
-    excluded from the fuzzed property above, driven for real rather than
-    left silently untested.
+class TestPreviouslyDivergentQueriedIdentityCaseConverges(unittest.TestCase):
+    """#1138 — the one 11×2 cell that used to disagree now agrees.
 
-    Algebraically: ``resolve_current_releases`` matches a row iff its SQL
-    WHERE clause (exact, case-sensitive comparison against the RAW queried
-    ``identity.release_id``) selects it AND the Python-side re-key
-    (``normalize_release_id(stored_value)`` looked up in a dict keyed by
-    that SAME raw ``identity.release_id``) also finds it. The retag
-    query's ``MatchQuery`` matches a row iff the SQL comparison alone
-    selects it. The two mechanisms therefore diverge EXACTLY when
-    ``stored_value == identity.release_id`` (so the query matches, and the
-    guard's SQL half matches too) but
-    ``normalize_release_id(stored_value) != identity.release_id`` (so the
-    guard's Python-side re-key misses) — which, since the two are already
-    equal, reduces to: ``identity.release_id`` is not already in its own
-    normalized form. Every OTHER storage shape in
-    ``MB_ALBUMID_STORAGE_SHAPES`` either does not equal the ``"upper"``
-    identity at all, or (for ``"exact"``) is already normalized, so this
-    is PROVABLY the only divergent point in the whole 11-shape × 2-case
-    grid — not a sampled coincidence.
-
-    This is a genuine, PRE-EXISTING defect in ``resolve_current_releases``
-    itself (its SQL comparison and its Python-side re-key disagree about
-    which side of the comparison gets normalized) — unrelated to
-    #1093's actual scope (unifying the retag query's OWN selection
-    mechanism with the guard's) and reachable only through a queried
-    identity that ``ReleaseIdentity.from_id`` — the sole constructor for
-    every identity that reaches :func:`lib.beets_retag.retag_merged_album`
-    in production — can never produce. Fixing ``resolve_current_releases``
-    itself is out of scope here: it is a widely shared method with many
-    consumers beyond the retag module that this PR has not audited.
+    Queried identity is UPPER (unreachable via ``ReleaseIdentity.from_id``).
+    Stored ``mb_albumid`` is the same uppercase text. SQL fetches the row;
+    the Python re-key must attribute it. The retag ``MatchQuery`` already
+    matched. Both sides must report a hit.
     """
 
-    def test_a_matching_but_non_normalized_identity_diverges(self) -> None:
+    def test_matching_non_normalized_identity_converges(self) -> None:
         shape = next(
             s for s in MB_ALBUMID_STORAGE_SHAPES if s.label == "case_upper"
         )
@@ -883,18 +843,15 @@ class TestKnownUnreachableQueriedIdentityCaseDivergence(unittest.TestCase):
         guard_matches = _guard_matches(library_db, library_root, identity)
         query_matches = _query_matches(library_db, album_id, identity)
 
-        self.assertFalse(
+        self.assertTrue(
             guard_matches,
-            "resolve_current_releases's Python-side re-key normalizes the "
-            "stored value but looks it up in a dict keyed by the RAW "
-            "queried identity, so a same-case-but-not-normalized match "
-            "misses — this assertion is the known defect, not a bug in "
-            "this test",
+            "SQL fetched the uppercase row; Python attribution must "
+            "attach it to the queried identity",
         )
         self.assertTrue(
             query_matches,
             "the retag query's MatchQuery does a single exact SQL "
-            "comparison with no re-key step, so it DOES match here",
+            "comparison, so it matches the same-case stored value",
         )
 
 
