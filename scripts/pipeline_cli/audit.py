@@ -14,6 +14,7 @@ from lib.beets_db import BeetsDB, open_beets_db
 from lib.retag_divergence_audit import (
     RetagDivergenceReport,
     SingleAlbumRetagCheckResult,
+    is_valid_album_id,
     parse_after_album_id_cursor,
     scan_retag_divergence_from_factory,
     scan_retag_divergence_single_album_from_factory,
@@ -99,6 +100,23 @@ def _argparse_after_album_id(text: str) -> int:
         return parse_after_album_id_cursor(text)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _argparse_album_id(text: str) -> int:
+    """``retag-divergence-album``'s positional ``album_id`` type callable
+    — rejects an id past SQLite's signed-64-bit ``INTEGER`` range at the
+    CLI's own input boundary, mirroring the HTTP route's 400 (#1142
+    review N10, CLI ⇄ API Surface Symmetry): such an id can never be
+    bound as a query parameter (``sqlite3`` raises ``OverflowError``
+    before any query runs), so it is rejected before ever reaching
+    Beets rather than surfacing as a confusing exit 5."""
+    try:
+        album_id = parse_after_album_id_cursor(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    if not is_valid_album_id(album_id):
+        raise argparse.ArgumentTypeError(f"album id {album_id} is out of range")
+    return album_id
 
 
 def _add_beets_override_args(parser: argparse.ArgumentParser) -> None:
@@ -432,7 +450,7 @@ def add_audit_subparser(
         ),
     )
     retag_divergence_album.add_argument(
-        "album_id", type=int, help="Beets album id to recheck.",
+        "album_id", type=_argparse_album_id, help="Beets album id to recheck.",
     )
     _add_beets_override_args(retag_divergence_album)
 

@@ -363,6 +363,24 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
         self.assertEqual(status, 404)
         self.assertIn("error", payload)
 
+    def test_oversized_album_id_is_a_400_not_a_503(self) -> None:
+        """N10 (#1142 review) — an id past SQLite's signed-64-bit INTEGER
+        range can never be bound as a query parameter at all (sqlite3
+        raises ``OverflowError`` before any query runs); this is invalid
+        CLIENT input, not a transient/retryable Beets-unavailable
+        condition, so it must reject as 400 before ever reaching Beets —
+        never a 503 with a swallowed traceback."""
+        from web import server
+
+        beets = _PoisonedWholeLibraryBeetsDB()
+        with patch.object(server, "_beets_db", return_value=beets):
+            status, payload = self._get(
+                "/api/audit/retag-divergence/album/99999999999999999999999999999",
+            )
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", payload)
+
     def test_missing_beets_is_503(self) -> None:
         from web import server
 

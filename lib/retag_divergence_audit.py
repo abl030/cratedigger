@@ -201,6 +201,26 @@ def parse_after_album_id_cursor(text: str) -> int:
     return int(text)
 
 
+#: SQLite's signed 64-bit ``INTEGER`` upper bound. An album id parsed from
+#: caller input past this can never exist as a real Beets album id (the
+#: ``albums`` table's ``INTEGER PRIMARY KEY`` is bounded the same way) and
+#: cannot even be BOUND as a query parameter — ``sqlite3`` raises
+#: ``OverflowError`` before any query runs. Reject it as invalid input at
+#: every surface that parses one from untrusted text, never as a
+#: transient/retryable "Beets unavailable" 503 with a swallowed
+#: traceback (#1142 review N10).
+SQLITE_MAX_INTEGER = 9223372036854775807
+
+
+def is_valid_album_id(album_id: int) -> bool:
+    """Whether ``album_id`` could ever name a real Beets album row —
+    bounded above by :data:`SQLITE_MAX_INTEGER`. Deliberately narrower
+    than "any ``int``"; every caller that parses an album id from
+    untrusted text (a URL path segment, a CLI positional) checks this
+    before it ever reaches a SQLite query."""
+    return 0 <= album_id <= SQLITE_MAX_INTEGER
+
+
 class TagReadOk(msgspec.Struct, frozen=True):
     """A file's tag was read successfully."""
 
@@ -797,6 +817,7 @@ def scan_retag_divergence_from_borrowed_factory(
 
 __all__ = [
     "REFUSED_OUTSIDE_LIBRARY_ROOT_DETAIL",
+    "SQLITE_MAX_INTEGER",
     "OwnedRetagDivergenceBeetsDB",
     "OwnedSingleAlbumRetagDivergenceBeetsDB",
     "RetagDivergenceAlbum",
@@ -817,6 +838,7 @@ __all__ = [
     "TagReadUnreadable",
     "album_class_from_items",
     "classify_retag_divergence_item",
+    "is_valid_album_id",
     "parse_after_album_id_cursor",
     "read_mb_albumid_tag",
     "scan_retag_divergence",

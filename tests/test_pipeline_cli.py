@@ -8000,6 +8000,20 @@ class TestRetagDivergenceAuditAlbumCLI(unittest.TestCase):
         self.assertEqual(args.album_id, 42)
         self.assertTrue(args.json)
 
+    def test_oversized_album_id_is_rejected_at_the_parser(self) -> None:
+        """N10 (#1142 review) — same rejection as the HTTP route's 400,
+        at the CLI's own input boundary (CLI ⇄ API surface symmetry):
+        an id past SQLite's signed-64-bit INTEGER range can never be
+        bound as a query parameter, so it must never even reach Beets."""
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args([
+                "audit", "retag-divergence-album",
+                "99999999999999999999999999999",
+            ])
+
 
 class TestRealBrokenPipeHandling(unittest.TestCase):
     """#1093 review round 5, finding 4 — the synthetic ``_BrokenPipeStdout``

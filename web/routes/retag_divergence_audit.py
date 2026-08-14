@@ -7,6 +7,7 @@ import logging
 import msgspec
 
 from lib.retag_divergence_audit import (
+    is_valid_album_id,
     parse_after_album_id_cursor,
     scan_retag_divergence_from_borrowed_factory,
     scan_retag_divergence_single_album_from_borrowed_factory,
@@ -156,12 +157,21 @@ def get_retag_divergence_audit_album(
       * 200 — ``found`` (any album class, including ``agrees`` — an
         explicit per-album check reports agreement too, unlike the
         whole-library report which only ever lists non-agreeing albums)
+      * 400 — the id is past SQLite's signed-64-bit ``INTEGER`` range
+        (:data:`lib.retag_divergence_audit.SQLITE_MAX_INTEGER`) — invalid
+        client input, rejected before ever reaching Beets, never the
+        misleading transient/retryable 503 an uncaught
+        ``sqlite3.OverflowError`` from binding it as a query parameter
+        would otherwise produce (#1142 review N10).
       * 404 — ``not_found`` (no album with this id in Beets)
       * 503 — ``beets_unavailable`` (Beets DB not configured, or a
         classified SQLite open/query failure) — same convention as
         :func:`get_retag_divergence_audit`.
     """
     album_id = int(album_id_str)
+    if not is_valid_album_id(album_id):
+        h._error(f"album id {album_id} is out of range")
+        return
     server = _server()
     try:
         def beets_factory():
