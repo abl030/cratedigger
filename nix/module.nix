@@ -983,6 +983,7 @@
     ${beetsRuntimeEnvironment}
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pyRunner} ${src}/scripts/run_retag_divergence_census.py \
+      "$@" \
       --config "${configTemplate}" \
       --runtime-dir "${cfg.stateDir}"
   '';
