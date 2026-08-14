@@ -842,6 +842,9 @@ rationale; never allowlist a pure decision.
   new false claim can hide. Earned four times in one batch (#1101,
   #1102, #1107, #1110); in each, the false claim was caught only by the
   next independent read, never by the round that wrote it.
+- Independent review plants at least two mutants at the named subject of
+  each new or changed test, not only at sites the author's kill matrix
+  already lists (issue #1143 / #1155).
 - Fix everything it finds before committing. This is not optional.
 
 ## Commits & PRs

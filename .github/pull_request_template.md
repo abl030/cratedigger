@@ -12,7 +12,7 @@ Every new or changed assertion, checker clause, and constant gets its own row. A
 
 ## Reviewer
 
-Plant at least two mutants yourself at sites the matrix names. Do not only check the author's table.
+Plant at least two mutants yourself. Aim at the named subject of each new or changed test, not only at sites the author's table already lists. A matrix that cites a scheduling mutant for a kill-both-phases test is the #1155 shape.
 
 ## Risk
 
