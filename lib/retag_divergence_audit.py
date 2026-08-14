@@ -590,9 +590,13 @@ class _BeetsAuthorityUnavailable(Exception):
         self.category = category
 
 
-def _open_beets_authority(
-    beets_factory: RetagDivergenceBeetsFactory,
-) -> OwnedRetagDivergenceBeetsDB | _BeetsAuthorityUnavailable:
+def _open_beets_authority[OwnedBeetsHandle](
+    beets_factory: Callable[[], OwnedBeetsHandle],
+) -> OwnedBeetsHandle | _BeetsAuthorityUnavailable:
+    """Shared open-mediation for both the whole-library and single-album
+    scan entrypoints below — generic over the exact handle protocol each
+    caller's factory returns, since this function itself only ever calls
+    ``beets_factory()`` and never touches the handle's methods."""
     try:
         return beets_factory()
     except Exception as exc:
@@ -646,6 +650,129 @@ def scan_retag_divergence_from_factory(
     return _unavailable_report(result.category, after_album_id=after_album_id)
 
 
+SingleAlbumRetagCheckStatus = Literal["found", "not_found", "beets_unavailable"]
+
+
+class SingleAlbumRetagCheckResult(msgspec.Struct, frozen=True):
+    """One on-demand per-album retag-divergence check (#1142) — the
+    dashboard's cheap recheck of a single album, as opposed to the
+    whole-library :class:`RetagDivergenceReport`. ``album`` is populated
+    iff ``status == "found"``, regardless of whether that album agrees or
+    diverges — unlike the whole-library report, an explicit single-album
+    check reports an agreeing album too, since the operator asked about
+    THIS album specifically."""
+
+    status: SingleAlbumRetagCheckStatus
+    album: RetagDivergenceAlbum | None = None
+    #: Populated iff ``status == "beets_unavailable"``.
+    unavailable_detail: str | None = None
+
+
+@runtime_checkable
+class SingleAlbumRetagDivergenceBeetsDB(Protocol):
+    def get_album_mb_identity(
+        self, album_id: int,
+    ) -> BeetsAlbumIdentityRow | None: ...
+
+
+class OwnedSingleAlbumRetagDivergenceBeetsDB(
+    SingleAlbumRetagDivergenceBeetsDB, Protocol,
+):
+    def close(self) -> None: ...
+
+
+type SingleAlbumRetagDivergenceBeetsFactory = Callable[
+    [], OwnedSingleAlbumRetagDivergenceBeetsDB,
+]
+
+
+def scan_retag_divergence_single_album(
+    beets: SingleAlbumRetagDivergenceBeetsDB,
+    album_id: int,
+    *,
+    read_tag: Callable[[str], str] = read_mb_albumid_tag,
+) -> RetagDivergenceAlbum | None:
+    """Census exactly one Beets album's DB identity against its file tags.
+
+    Pure composition over an already-open, already-readable ``beets``
+    handle — no availability mediation here, mirroring
+    :func:`scan_retag_divergence`. Returns ``None`` iff no album with this
+    id exists; unlike a zero-item album (a real, reachable ``empty``
+    class), a missing album id is not classifiable at all.
+    """
+    row = beets.get_album_mb_identity(album_id)
+    if row is None:
+        return None
+    return _build_album(row, read_tag=read_tag)
+
+
+def _unavailable_single_album_result(category: str) -> SingleAlbumRetagCheckResult:
+    return SingleAlbumRetagCheckResult(
+        status="beets_unavailable",
+        unavailable_detail=f"current Beets authority unavailable ({category})",
+    )
+
+
+def _single_album_result_with_mediated_beets(
+    beets: SingleAlbumRetagDivergenceBeetsDB,
+    album_id: int,
+    *,
+    read_tag: Callable[[str], str],
+) -> SingleAlbumRetagCheckResult | _BeetsAuthorityUnavailable:
+    try:
+        album = scan_retag_divergence_single_album(
+            beets, album_id, read_tag=read_tag,
+        )
+    except Exception as exc:
+        category = beets_authority_availability_category(exc)
+        if category is None:
+            raise
+        return _BeetsAuthorityUnavailable(category)
+    if album is None:
+        return SingleAlbumRetagCheckResult(status="not_found")
+    return SingleAlbumRetagCheckResult(status="found", album=album)
+
+
+def scan_retag_divergence_single_album_from_factory(
+    beets_factory: SingleAlbumRetagDivergenceBeetsFactory,
+    album_id: int,
+    *,
+    read_tag: Callable[[str], str] = read_mb_albumid_tag,
+) -> SingleAlbumRetagCheckResult:
+    """Own Beets open/query/close for one album's check; type only
+    expected unavailability — mirrors
+    :func:`scan_retag_divergence_from_factory`."""
+    opened = _open_beets_authority(beets_factory)
+    if isinstance(opened, _BeetsAuthorityUnavailable):
+        return _unavailable_single_album_result(opened.category)
+    with closing(opened):
+        result = _single_album_result_with_mediated_beets(
+            opened, album_id, read_tag=read_tag,
+        )
+    if isinstance(result, SingleAlbumRetagCheckResult):
+        return result
+    return _unavailable_single_album_result(result.category)
+
+
+def scan_retag_divergence_single_album_from_borrowed_factory(
+    beets_factory: SingleAlbumRetagDivergenceBeetsFactory,
+    album_id: int,
+    *,
+    read_tag: Callable[[str], str] = read_mb_albumid_tag,
+) -> SingleAlbumRetagCheckResult:
+    """Mediate a server-owned Beets handle without closing its lifecycle
+    — mirrors :func:`scan_retag_divergence_from_borrowed_factory`."""
+    opened = _open_beets_authority(beets_factory)
+    if isinstance(opened, _BeetsAuthorityUnavailable):
+        return _unavailable_single_album_result(opened.category)
+    result = _single_album_result_with_mediated_beets(
+        opened, album_id, read_tag=read_tag,
+    )
+    if isinstance(result, SingleAlbumRetagCheckResult):
+        return result
+    return _unavailable_single_album_result(result.category)
+
+
 def scan_retag_divergence_from_borrowed_factory(
     beets_factory: RetagDivergenceBeetsFactory,
     *,
@@ -671,6 +798,7 @@ def scan_retag_divergence_from_borrowed_factory(
 __all__ = [
     "REFUSED_OUTSIDE_LIBRARY_ROOT_DETAIL",
     "OwnedRetagDivergenceBeetsDB",
+    "OwnedSingleAlbumRetagDivergenceBeetsDB",
     "RetagDivergenceAlbum",
     "RetagDivergenceAlbumClass",
     "RetagDivergenceBeetsDB",
@@ -680,6 +808,10 @@ __all__ = [
     "RetagDivergenceItemClass",
     "RetagDivergenceReport",
     "RetagDivergenceStatus",
+    "SingleAlbumRetagCheckResult",
+    "SingleAlbumRetagCheckStatus",
+    "SingleAlbumRetagDivergenceBeetsDB",
+    "SingleAlbumRetagDivergenceBeetsFactory",
     "TagReadOk",
     "TagReadOutcome",
     "TagReadUnreadable",
@@ -690,4 +822,7 @@ __all__ = [
     "scan_retag_divergence",
     "scan_retag_divergence_from_borrowed_factory",
     "scan_retag_divergence_from_factory",
+    "scan_retag_divergence_single_album",
+    "scan_retag_divergence_single_album_from_borrowed_factory",
+    "scan_retag_divergence_single_album_from_factory",
 ]

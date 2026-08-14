@@ -1389,6 +1389,41 @@ class BeetsDB:
             for album_id in order
         ]
 
+    def get_album_mb_identity(self, album_id: int) -> "BeetsAlbumIdentityRow | None":
+        """Narrow single-album counterpart of :meth:`list_album_mb_identities`
+        (#1142) — the dashboard's per-album retag recheck reads exactly one
+        album's identity + item paths, never the whole library. Shares the
+        same containment/refusal semantics; ``None`` iff no album with this
+        id exists (unlike a zero-item album row, which is real and returns
+        an empty ``item_paths`` tuple, not ``None``)."""
+        rows = self._conn.execute(
+            "SELECT a.id, a.mb_albumid, i.path "
+            "FROM albums a "
+            "LEFT JOIN items i ON i.album_id = a.id "
+            "WHERE a.id = ? "
+            "ORDER BY i.id ASC",
+            (album_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        raw_mb_albumid = rows[0][1]
+        item_paths: list[str] = []
+        refused_paths: list[str] = []
+        for _raw_album_id, _raw_mb_albumid, raw_path in rows:
+            if raw_path is None:
+                continue
+            resolved, refused = self._contained_or_refused(raw_path)
+            if refused:
+                refused_paths.append(resolved)
+            else:
+                item_paths.append(resolved)
+        return BeetsAlbumIdentityRow(
+            album_id=album_id,
+            mb_albumid=normalize_release_id(raw_mb_albumid),
+            item_paths=tuple(item_paths),
+            refused_paths=tuple(refused_paths),
+        )
+
     @staticmethod
     def _album_row_to_dict(r: tuple[object, ...]) -> dict[str, object]:
         """Convert a standard album query row to dict.

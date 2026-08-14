@@ -2030,6 +2030,97 @@ class TestListAlbumMbIdentities(unittest.TestCase):
         self.assertEqual(len(rows[0].refused_paths), 1)
 
 
+class TestGetAlbumMbIdentity(unittest.TestCase):
+    """Narrow single-album counterpart of ``list_album_mb_identities``
+    (#1142) — the dashboard's cheap per-album retag recheck reads exactly
+    one album's identity + item paths instead of walking the whole
+    library."""
+
+    def test_returns_the_named_album_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            library_root = os.path.join(tmpdir, "library")
+            _create_test_db(db_path)
+            _insert_album(
+                db_path, 1, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                [(320000, "Artist/Album/01.flac")],
+            )
+            _insert_album(
+                db_path, 2, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                [(320000, "Artist/Other/01.flac")],
+            )
+
+            with BeetsDB(db_path, library_root=library_root) as db:
+                row = db.get_album_mb_identity(1)
+
+        assert row is not None
+        self.assertEqual(row.album_id, 1)
+        self.assertEqual(
+            row.mb_albumid, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        )
+        self.assertEqual(
+            row.item_paths,
+            (os.path.join(library_root, "Artist", "Album", "01.flac"),),
+        )
+        self.assertEqual(row.refused_paths, ())
+
+    def test_zero_item_album_returns_empty_paths_not_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            library_root = os.path.join(tmpdir, "library")
+            _create_test_db(db_path)
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "INSERT INTO albums (id, mb_albumid, discogs_albumid) "
+                "VALUES (3, 'cccccccc-cccc-cccc-cccc-cccccccccccc', 0)"
+            )
+            conn.commit()
+            conn.close()
+
+            with BeetsDB(db_path, library_root=library_root) as db:
+                row = db.get_album_mb_identity(3)
+
+        assert row is not None
+        self.assertEqual(row.album_id, 3)
+        self.assertEqual(row.item_paths, ())
+
+    def test_unknown_album_id_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            library_root = os.path.join(tmpdir, "library")
+            _create_test_db(db_path)
+
+            with BeetsDB(db_path, library_root=library_root) as db:
+                row = db.get_album_mb_identity(999)
+
+        self.assertIsNone(row)
+
+    def test_paths_outside_library_root_are_refused_not_opened(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            library_root = os.path.join(tmpdir, "library")
+            outside_root = os.path.join(tmpdir, "outside")
+            _create_test_db(db_path)
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "INSERT INTO albums (id, mb_albumid, discogs_albumid) "
+                "VALUES (1, 'cccccccc-cccc-cccc-cccc-cccccccccccc', 0)"
+            )
+            conn.execute(
+                "INSERT INTO items (id, album_id, path) VALUES (10, 1, ?)",
+                (os.path.join(outside_root, "01.mp3").encode(),),
+            )
+            conn.commit()
+            conn.close()
+
+            with BeetsDB(db_path, library_root=library_root) as db:
+                row = db.get_album_mb_identity(1)
+
+        assert row is not None
+        self.assertEqual(row.item_paths, ())
+        self.assertEqual(len(row.refused_paths), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 

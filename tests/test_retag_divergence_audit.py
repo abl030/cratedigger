@@ -46,6 +46,9 @@ from lib.retag_divergence_audit import (
     scan_retag_divergence,
     scan_retag_divergence_from_borrowed_factory,
     scan_retag_divergence_from_factory,
+    scan_retag_divergence_single_album,
+    scan_retag_divergence_single_album_from_borrowed_factory,
+    scan_retag_divergence_single_album_from_factory,
 )
 from tests.fakes import FakeBeetsDB
 from tests.test_beets_db import _create_test_db, _insert_album
@@ -969,6 +972,152 @@ class TestScanRetagDivergenceAvailability(unittest.TestCase):
         self.assertIsNone(from_start.after_album_id)
         self.assertIsNotNone(from_start.next_after_album_id)
         self.assertEqual(from_start.next_after_album_id, _LIBRARY_START_CURSOR)
+
+
+class TestScanRetagDivergenceSingleAlbum(unittest.TestCase):
+    """Pure per-album counterpart of :func:`scan_retag_divergence` (#1142)
+    — the dashboard's cheap recheck reuses the SAME classifier/tag-reader
+    seam as the whole-library census, over exactly one album."""
+
+    def test_agreeing_album_is_returned_as_agrees(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=("/a/01.mp3",),
+            ),
+        ])
+
+        album = scan_retag_divergence_single_album(
+            beets, 1, read_tag=_read_tag_from_map({"/a/01.mp3": SURVIVOR}),
+        )
+
+        assert album is not None
+        self.assertEqual(album.album_id, 1)
+        self.assertEqual(album.album_class, "agrees")
+        self.assertEqual(album.item_count, 1)
+
+    def test_diverging_album_is_returned_as_diverges(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=5, mb_albumid=SURVIVOR, item_paths=("/a/01.mp3",),
+            ),
+        ])
+
+        album = scan_retag_divergence_single_album(
+            beets, 5, read_tag=_read_tag_from_map({"/a/01.mp3": MERGED}),
+        )
+
+        assert album is not None
+        self.assertEqual(album.album_class, "diverges")
+
+    def test_unknown_album_id_returns_none(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=(),
+            ),
+        ])
+
+        album = scan_retag_divergence_single_album(
+            beets, 999, read_tag=_read_tag_from_map({}),
+        )
+
+        self.assertIsNone(album)
+
+
+class TestSingleAlbumRetagCheckAvailability(unittest.TestCase):
+    """Owning/borrowed factory availability mediation, mirroring
+    ``TestScanRetagDivergenceAvailability`` for the single-album seam."""
+
+    def test_found_album_reports_found(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=("/a/01.mp3",),
+            ),
+        ])
+
+        result = scan_retag_divergence_single_album_from_factory(
+            lambda: beets, 1,
+            read_tag=_read_tag_from_map({"/a/01.mp3": SURVIVOR}),
+        )
+
+        self.assertEqual(result.status, "found")
+        assert result.album is not None
+        self.assertEqual(result.album.album_id, 1)
+        self.assertEqual(beets.close_calls, 1)
+
+    def test_unknown_album_reports_not_found(self) -> None:
+        beets = FakeBeetsDB()
+
+        result = scan_retag_divergence_single_album_from_factory(
+            lambda: beets, 999, read_tag=_read_tag_from_map({}),
+        )
+
+        self.assertEqual(result.status, "not_found")
+        self.assertIsNone(result.album)
+        self.assertEqual(beets.close_calls, 1)
+
+    def test_expected_open_failure_is_unavailable(self) -> None:
+        failure = sqlite3.OperationalError("database is locked")
+        failure.sqlite_errorcode = sqlite3.SQLITE_LOCKED
+
+        def unavailable_factory() -> FakeBeetsDB:
+            raise failure
+
+        result = scan_retag_divergence_single_album_from_factory(
+            unavailable_factory, 1,
+        )
+
+        self.assertEqual(result.status, "beets_unavailable")
+        self.assertIsNone(result.album)
+        self.assertIsNotNone(result.unavailable_detail)
+
+    def test_expected_query_failure_is_unavailable_and_still_closes(self) -> None:
+        class QueryFailureBeets(FakeBeetsDB):
+            def get_album_mb_identity(
+                self, album_id: int,
+            ) -> BeetsAlbumIdentityRow | None:
+                failure = sqlite3.OperationalError("database is locked")
+                failure.sqlite_errorcode = sqlite3.SQLITE_LOCKED
+                raise failure
+
+        beets = QueryFailureBeets()
+
+        result = scan_retag_divergence_single_album_from_factory(
+            lambda: beets, 1,
+        )
+
+        self.assertEqual(result.status, "beets_unavailable")
+        self.assertEqual(beets.close_calls, 1)
+
+    def test_unexpected_query_failure_propagates(self) -> None:
+        class BrokenQueryBeets(FakeBeetsDB):
+            def get_album_mb_identity(
+                self, album_id: int,
+            ) -> BeetsAlbumIdentityRow | None:
+                raise RuntimeError("query programmer defect")
+
+        beets = BrokenQueryBeets()
+        with self.assertRaisesRegex(RuntimeError, "query programmer defect"):
+            scan_retag_divergence_single_album_from_factory(lambda: beets, 1)
+        self.assertEqual(beets.close_calls, 1)
+
+    def test_borrowed_handle_is_never_closed(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=(),
+            ),
+        ])
+
+        result = scan_retag_divergence_single_album_from_borrowed_factory(
+            lambda: beets, 1,
+        )
+
+        self.assertEqual(result.status, "found")
+        self.assertEqual(beets.close_calls, 0)
 
 
 class TestRealRetagDivergenceScan(unittest.TestCase):

@@ -125,8 +125,10 @@ from lib.retag_divergence_audit import (
     RetagDivergenceItem,
     RetagDivergenceItemClass,
     RetagDivergenceReport,
+    album_class_from_items,
     scan_retag_divergence,
     scan_retag_divergence_from_factory,
+    scan_retag_divergence_single_album,
 )
 from tests.fakes import FakeBeetsDB
 from tests.test_beets_retag import MERGED, SURVIVOR
@@ -603,6 +605,78 @@ def _one_album_budget_clock() -> Callable[[], float]:
         return 0.0 if calls["n"] <= 2 else 100.0
 
     return time_fn
+
+
+class TestSingleAlbumParityProperty(unittest.TestCase):
+    """#1142 — the per-album recheck (``scan_retag_divergence_single_album``,
+    the dashboard's cheap "Recheck" action) reuses ``_build_album``/
+    ``classify_retag_divergence_item`` exactly as the whole-library scan
+    does, but it is a SEPARATE entry point over a SEPARATE
+    ``BeetsDB.get_album_mb_identity`` read seam — a real production
+    bug class this property directly guards against is the single-album
+    path drifting out of sync with the whole-library one (e.g. a future
+    edit to one classifier call site but not the other). For every
+    generated world and every album in it, the single-album check must
+    classify that album's items and album-class IDENTICALLY to what the
+    whole-library scan computes for the same album — the "agree by
+    construction" boundary is the two real adapters
+    (``scan_retag_divergence`` and ``scan_retag_divergence_single_album``)
+    over the SAME real ``FakeBeetsDB`` world, not a shared helper in
+    isolation."""
+
+    @settings(deadline=None)
+    @given(albums=WORLD_STRATEGY)
+    @example(albums=[])
+    @example(albums=[("survivor", [])])
+    @example(albums=[("survivor", ["match", "match"])])
+    @example(albums=[("survivor", ["mismatch_known", "mismatch_known"])])
+    @example(albums=[("absent", ["mismatch_known"])])
+    @example(albums=[("survivor", ["unreadable"])])
+    @example(albums=[("survivor", ["unreadable", "mismatch_known"])])
+    @example(albums=[("survivor", ["blank"])])
+    @example(albums=[("survivor", ["refused"])])
+    @example(albums=[("survivor", ["refused", "match"])])
+    def test_single_album_check_matches_the_whole_library_scan(
+        self, albums: list[tuple[str, list[str]]],
+    ) -> None:
+        rows, read_tag, expectations = _build_world(albums)
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities(rows)
+
+        for row in rows:
+            single = scan_retag_divergence_single_album(
+                beets, row.album_id, read_tag=read_tag,
+            )
+            if single is None:
+                raise AssertionError(
+                    f"album {row.album_id} exists in the seeded world but "
+                    "the single-album check reports it missing"
+                )
+            expected_items = expectations[row.album_id]
+            actual_items = [item.item_class for item in single.items]
+            if actual_items != expected_items:
+                raise AssertionError(
+                    f"album {row.album_id}: single-album check classified "
+                    f"items {actual_items} but the whole-library scan's "
+                    f"own construction expects {expected_items}"
+                )
+            expected_class = album_class_from_items(single.items)
+            if single.album_class != expected_class:
+                raise AssertionError(
+                    f"album {row.album_id}: single-album album_class "
+                    f"{single.album_class!r} disagrees with "
+                    f"album_class_from_items({expected_class!r}) over its "
+                    "own items"
+                )
+
+        unknown_id = max((row.album_id for row in rows), default=0) + 1
+        if scan_retag_divergence_single_album(
+            beets, unknown_id, read_tag=read_tag,
+        ) is not None:
+            raise AssertionError(
+                f"album id {unknown_id} was never seeded but the "
+                "single-album check returned a result for it"
+            )
 
 
 class TestChainedResumeProperties(unittest.TestCase):
