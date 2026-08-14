@@ -443,57 +443,6 @@ def average_bitrate_kbps_from_frames(
     return (numerator + denominator // 2) // denominator
 
 
-def mp3_encoder_settings(path: Path) -> str | None:
-    """Read one MP3's LAME-tag encoder settings, or ``None``.
-
-    ffprobe does not surface the LAME tag, so this is the one mutagen read in
-    this module. It is deliberately NOT a ``MediaFileFacts`` field: every
-    ``inspect_media`` caller would then pay an extra open per file for a fact
-    only the MP3 rank contract consumes.
-
-    Returns the raw string LAME wrote (``"-V 0"``, ``"-V 2 --vbr-new"``,
-    ``"-b 320"``, …), or ``None`` when the file has no LAME tag or cannot be
-    read at all. Parsing it is
-    ``lib.quality.encoder_contract.lame_vbr_level``'s job; an unreadable file
-    is indistinguishable from an untagged one here, and both withhold the
-    contract downstream.
-    """
-    try:
-        from mutagen.mp3 import MP3
-
-        settings = getattr(MP3(str(path)).info, "encoder_settings", None)
-    except Exception:
-        logger.debug("encoder settings unreadable for %s", path, exc_info=True)
-        return None
-    if not isinstance(settings, str) or not settings.strip():
-        return None
-    return settings
-
-
-def folder_mp3_encoder_settings(folder_path: str) -> list[str | None] | None:
-    """LAME settings for every MP3 in an all-MP3 folder, else ``None``.
-
-    ``None`` means "this folder cannot certify an album-wide MP3 contract":
-    it holds no audio, or it holds a non-MP3 audio file. Otherwise one entry
-    per MP3, in path order, each possibly ``None`` for a file with no readable
-    LAME tag — ``mp3_vbr_contract_format`` withholds on any of those.
-
-    Extension-based, matching ``_audio_paths``. A mislabelled file is not a
-    risk here: a non-MP3 named ``.mp3`` has no LAME tag, so mutagen returns
-    nothing and the album withholds its contract, which is the fail-closed
-    direction.
-    """
-    try:
-        paths = _audio_paths(folder_path)
-    except MediaReadinessError:
-        return None
-    if not paths:
-        return None
-    if any(path.suffix.lower() != ".mp3" for path in paths):
-        return None
-    return [mp3_encoder_settings(path) for path in paths]
-
-
 def _facts_for_path(path: Path) -> MediaFileFacts:
     wire = _ffprobe_readiness(path)
     stream_index, codec, sample_rate, channels, bit_depth, container = _stream_facts(path, wire)

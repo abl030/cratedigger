@@ -1,9 +1,9 @@
 -- 078_quality_evidence_lineage_v5.sql
 --
--- Issue #1145. v4 rows derived an MP3's rank format from an inferred encoding
--- mode (per-track bitrate uniformity) and chose between two band tables 75
--- kbps apart. v5 derives it from one table plus a LAME `-V` contract proven
--- from `items.encoder_settings` / the file's own LAME tag.
+-- Issue #1145. A v4 MP3 row was ranked against one of two band tables 75 kbps
+-- apart, chosen by an encoding mode inferred from per-track bitrate
+-- uniformity. v5 ranks every MP3 against the single `mp3` table; nothing
+-- reads an encoding mode any more.
 --
 -- No backfill: the bump alone makes every v4 row report itself stale to
 -- `lib.quality_evidence.current_evidence_rebuild_reasons`, which rebuilds it
@@ -37,4 +37,4 @@ ALTER TABLE album_quality_evidence
 COMMENT ON COLUMN album_quality_evidence.lineage_version IS
     '1=historical ambiguous storage/target projection, 3=separate source and '
     'target facts, 4=two-axis subject/provenance vocabulary, 5=one MP3 band '
-    'table plus proven LAME -V contract (4 and 5 share the v4 fact vocabulary)';
+    'table, no inferred encoding mode (4 and 5 share the v4 fact vocabulary)';

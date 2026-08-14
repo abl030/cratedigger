@@ -1,17 +1,13 @@
-"""Generated properties for the one MP3 ladder and its proof (issue #1145).
+"""Generated properties for the one MP3 ladder (issue #1145).
 
 Three production invariants, each paired with a deterministic pin elsewhere:
 
 * **I1 — one ladder.** A bare measured MP3 ranks through exactly one band
   table, whatever ``is_cbr`` says. Pin:
   ``tests/test_quality_decisions.py::TestQualityRank``.
-* **I2 — contract only by proof.** An ``mp3 vN`` contract is minted only from
-  a parsed LAME ``-V N`` (or the one mapped preset), never inferred from
-  bitrate, uniformity, or an encoding mode. Pin:
-  ``tests/test_encoder_contract.py``.
 * **I3 — comparison symmetry.** Two measurements of the same audio rank equal
   regardless of which side of a comparison they sit on. Pin:
-  ``tests/test_encoder_contract.py::TestContractChangesTheDecidedOutcome``.
+  ``tests/test_quality_decisions.py::TestCompareQuality``.
 * **I4 — a spectral class only decides against another spectral class.**
   ``spectral_tiebreak`` fires only when BOTH sides' clamped values ARE their
   spectral classes; one bound side against one raw metric falls through to the
@@ -47,10 +43,7 @@ from lib.quality import (
     QualityRank,
     QualityRankConfig,
     compare_quality,
-    lame_vbr_level,
     measurement_rank,
-    mp3_vbr_contract_format,
-    mp3_vbr_contract_level,
     quality_rank,
 )
 from lib.quality.compare import _shared_spectral_bitrates
@@ -80,17 +73,6 @@ _PRODUCIBLE_CLASSES: tuple[int, ...] = tuple(
 #: audit-only, carries no class, and the clamp is withheld — so a strategy
 #: that omitted them would generate nothing but the no-clamp path.
 _ACCUSING_GRADES = ("suspect", "likely_transcode")
-
-#: Settings strings drawn from the live ``items.encoder_settings`` census.
-_LIVE_SETTINGS = (
-    None, "", "   ",
-    "-V 0", "-V 1", "-V 2", "-V 4", "-V 5", "-V 9",
-    "-V 0 --vbr-new", "-V 2 --vbr-new", "-V 0 --vbr-old",
-    "--alt-preset standard", "--preset standard",
-    "--preset insane", "--preset extreme", "--alt-preset extreme",
-    "-b 320", "-b 256", "-b 192", "-b 160", "-b 128", "-b 255+",
-    "--abr 255+", "--preset 240", "--preset 256", "--alt-preset 246",
-)
 
 
 def _bitrates() -> st.SearchStrategy[int]:
@@ -160,44 +142,6 @@ def _bands_for(label: str, cfg: QualityRankConfig) -> CodecRankBands:
         "vorbis": cfg.vorbis,
         "wma": cfg.wma,
     }[label.strip().lower()]
-
-
-# ---------------------------------------------------------------------------
-# I2 — a contract is minted only from proof
-# ---------------------------------------------------------------------------
-
-def contract_minting_violations(
-    *,
-    settings: list[str | None],
-    contract: str | None,
-) -> list[str]:
-    """The contract must be exactly the unanimous, explicit LAME level."""
-    violations: list[str] = []
-    levels = [lame_vbr_level(value) for value in settings]
-    unanimous = (
-        bool(levels) and None not in levels and len(set(levels)) == 1
-    )
-    if contract is not None and not unanimous:
-        violations.append(
-            f"minted {contract!r} without a unanimous explicit level: "
-            f"{settings!r}"
-        )
-    if contract is None and unanimous:
-        violations.append(
-            f"withheld a contract from a unanimous explicit level: "
-            f"{settings!r}"
-        )
-    if contract is not None:
-        level = mp3_vbr_contract_level(contract)
-        if level is None:
-            violations.append(
-                f"minted {contract!r}, which its own reader cannot parse"
-            )
-        elif levels and level != levels[0]:
-            violations.append(
-                f"minted {contract!r} for level {levels[0]!r}"
-            )
-    return violations
 
 
 # ---------------------------------------------------------------------------
@@ -329,58 +273,6 @@ class TestOneMp3LadderGenerated(unittest.TestCase):
                 quality_rank(other, bitrate, cfg),
                 quality_rank(other, bitrate, CFG),
             )
-
-
-class TestContractOnlyByProofGenerated(unittest.TestCase):
-    @given(settings=st.lists(
-        st.sampled_from(_LIVE_SETTINGS), min_size=0, max_size=6))
-    @example(settings=["-V 0", "-V 0"])
-    @example(settings=["-V 0", "-V 2"])
-    @example(settings=["-V 0", None])
-    @example(settings=["--alt-preset standard", "-V 2"])
-    @example(settings=["--preset standard", "--preset standard"])
-    @example(settings=[])
-    def test_a_contract_is_exactly_the_unanimous_explicit_level(
-        self, settings: list[str | None],
-    ) -> None:
-        violations = contract_minting_violations(
-            settings=settings,
-            contract=mp3_vbr_contract_format(settings),
-        )
-        self.assertEqual(violations, [], repr(settings))
-
-    @given(
-        settings=st.lists(
-            st.sampled_from(_LIVE_SETTINGS), min_size=1, max_size=6),
-        bitrate=_bitrates(),
-        is_cbr=st.booleans(),
-    )
-    def test_bitrate_and_encoding_mode_never_enter_the_contract(
-        self, settings: list[str | None], bitrate: int, is_cbr: bool,
-    ) -> None:
-        """The mint reads the LAME string and nothing else.
-
-        ``bitrate``/``is_cbr`` are drawn and deliberately unused as MINT
-        inputs: the assertion is that the contract for a given settings list
-        is the same whatever measurement surrounds it, which is the
-        inference this issue removed.
-        """
-        contract = mp3_vbr_contract_format(settings)
-        measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=bitrate,
-            avg_bitrate_kbps=bitrate,
-            median_bitrate_kbps=bitrate,
-            format=contract or "MP3",
-            is_cbr=is_cbr,
-        )
-        self.assertEqual(mp3_vbr_contract_format(settings), contract)
-        if contract is not None:
-            level = mp3_vbr_contract_level(contract)
-            assert level is not None
-            # A contract is self-certifying: its rank is the configured
-            # V-level rank, never the measured bitrate's band.
-            self.assertEqual(
-                measurement_rank(measurement, CFG), CFG.mp3_vbr_levels[level])
 
 
 class TestComparisonSymmetryGenerated(unittest.TestCase):
@@ -587,38 +479,6 @@ class TestMp3LadderCheckersTripOnViolations(unittest.TestCase):
         )
         self.assertEqual(len(violations), 1, violations)
         self.assertIn("did not route through cfg.mp3", violations[0])
-
-    def test_contract_clause_minted_without_unanimity(self) -> None:
-        violations = contract_minting_violations(
-            settings=["-V 0", "-b 320"], contract="mp3 v0",
-        )
-        self.assertTrue(
-            any("without a unanimous explicit level" in item
-                for item in violations),
-            violations,
-        )
-
-    def test_contract_clause_withheld_from_proof(self) -> None:
-        violations = contract_minting_violations(
-            settings=["-V 2", "-V 2"], contract=None,
-        )
-        self.assertEqual(len(violations), 1, violations)
-        self.assertIn("withheld a contract", violations[0])
-
-    def test_contract_clause_unparseable_label(self) -> None:
-        """Reached with unanimity satisfied, so only this clause can fire."""
-        violations = contract_minting_violations(
-            settings=["-V 0", "-V 0"], contract="mp3 vzero",
-        )
-        self.assertEqual(len(violations), 1, violations)
-        self.assertIn("its own reader cannot parse", violations[0])
-
-    def test_contract_clause_wrong_level(self) -> None:
-        violations = contract_minting_violations(
-            settings=["-V 0", "-V 0"], contract="mp3 v2",
-        )
-        self.assertEqual(len(violations), 1, violations)
-        self.assertIn("minted 'mp3 v2' for level 0", violations[0])
 
     def test_symmetry_clause_unmirrored_verdict(self) -> None:
         violations = comparison_symmetry_violations(

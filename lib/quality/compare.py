@@ -5,7 +5,6 @@ Pure move: every definition is AST-identical to the original.
 """
 
 
-from lib.quality.encoder_contract import mp3_vbr_contract_level
 from lib.quality.evidence_types import (
     SPECTRAL_TRANSCODE_GRADES,
     AudioQualityMeasurement,
@@ -18,6 +17,7 @@ from lib.quality.ranks import (
     QualityRankConfig,
     _codec_family_of,
     _parse_bitrate_label,
+    _parse_vbr_level,
     _selected_bitrate,
     _selected_bitrate_with_source,
     _selected_quality_bitrate_with_source,
@@ -41,7 +41,7 @@ def _is_explicit_label(format_hint: str | None) -> bool:
     """
     if format_hint is None:
         return False
-    if mp3_vbr_contract_level(format_hint) is not None:
+    if _parse_vbr_level(format_hint) is not None:
         return True
     return _parse_bitrate_label(format_hint) is not None
 
@@ -195,22 +195,21 @@ def _shared_spectral_bitrates(
     needs BOTH sides holding a class, not one class against one raw metric.
 
     That is now their ONLY consumer: issue #1145 deleted
-    ``_classify_with_cbr_bands``, because the MP3 class ladder is drawn from
-    the nominal kbps values 96/112/128/160/192/224/256/320, which are exactly
-    ``QualityRankConfig.mp3``'s thresholds now that the VBR/CBR ladder split
-    is gone. There is no second, more generous MP3 table left for a
-    spectral-bound value to be inflated by, so the "force CBR bands when both
-    sides are bound" rule has nothing to force.
+    ``_classify_with_cbr_bands``. The MP3 class ladder is a set of nominal
+    kbps values (96/112/128/160/192/224/256/320) and ``QualityRankConfig.mp3``
+    draws its four thresholds from that same ladder, so a spectral-bound value
+    now classifies through the one table like everything else. There is no
+    second, more generous MP3 table left to inflate it, so the "force CBR
+    bands when both sides are bound" rule has nothing left to force.
 
     Being the only consumer is why the gate is pinned directly rather than
     left to prose: ``tests/test_quality_decisions.py``
     ``::test_one_bound_side_never_reaches_the_spectral_tiebreak`` drives the
     asymmetric world, and
     ``tests/test_mp3_ladder_generated.py::TestSpectralTiebreakIsGatedGenerated``
-    patrols it. Both mutants — pinning the flag ``True`` at the assignment,
-    and dropping it from the guard — flip a live decision from import to
-    downgrade, and survived every quality/compare/spectral module before
-    those landed.
+    patrols it. Two mutants are recorded against them — pinning the flag
+    ``True`` at the assignment, and dropping it from the guard — and each is
+    killed by both the pin and the property.
     """
     if not spectral_classes_comparable(new_spectral, existing_spectral).comparable:
         return None

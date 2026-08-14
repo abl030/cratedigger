@@ -24,8 +24,6 @@ from lib.evidence_media_identity import (
     canonical_beets_format,
 )
 from lib.media_readiness import kbps_from_bps
-from lib.quality.encoder_contract import mp3_vbr_contract_format
-from lib.quality.ranks import format_codec_token
 from lib.release_identity import (
     ConflictingReleaseIdentityError,
     ReleaseIdentity,
@@ -90,11 +88,6 @@ class CurrentBeetsItem:
     bitrate: int | None = None
     samplerate: int | None = None
     bitdepth: int | None = None
-    #: The encoder's own invocation string, straight from Beets
-    #: ``items.encoder_settings`` (mutagen reads it out of the LAME tag).
-    #: The one fact that can prove an installed MP3's VBR level; see
-    #: ``lib.quality.encoder_contract``.
-    encoder_settings: str | None = None
 
 
 @dataclass(frozen=True)
@@ -202,7 +195,6 @@ def _raise_conflicting_release_identities(
 
 type _RawCurrentItem = tuple[
     int,
-    object,
     object,
     object,
     object,
@@ -353,26 +345,16 @@ class AlbumInfo:
     """Query result from beets DB for a single album.
 
     format:
-        The album's rank format hint. Normally the canonical codec family
-        derived from beets.items.format (e.g. "MP3", "FLAC", "Opus", "AAC");
-        when an album has multiple codecs on disk (rare — manually merged
-        album), the worst-ranked codec wins per
-        QualityRankConfig.mixed_format_precedence.
-
-        One exception, issue #1145: an all-MP3 album whose items unanimously
-        carry the same explicit LAME ``-V`` level is labelled ``"mp3 vN"``, a
-        self-certifying contract quality_rank() resolves through
-        cfg.mp3_vbr_levels instead of the measured band table. The candidate
-        side mints the identical label from the downloaded files
-        (harness/import_one.py::_detect_source_format), so identical audio
-        carries the identical contract on both sides of a comparison.
-
-        Consumers that need the plain codec must reduce this to its first
-        token (lib.quality.format_codec_token) rather than comparing the whole
-        string — formats_on_disk stays bare for exactly that purpose. Defaults
-        to empty string so tests constructing AlbumInfo directly (e.g.
-        integration slices) don't have to pass every field. Production always
-        sets it via get_album_info() → album_info_from_current().
+        The canonical codec family for the album, derived from
+        beets.items.format (e.g. "MP3", "FLAC", "Opus", "AAC"). When an album
+        has multiple codecs on disk (rare — manually merged album), the
+        worst-ranked codec wins per QualityRankConfig.mixed_format_precedence.
+        This is the bare codec string for quality_rank() — the pipeline
+        carries the richer "opus 128" / "mp3 v0" labels via ImportResult /
+        album_requests.final_format when available. Defaults to empty string
+        so tests constructing AlbumInfo directly (e.g. integration slices)
+        don't have to pass every field. Production always sets it via
+        get_album_info() → album_info_from_current().
     formats_on_disk:
         Every canonical codec label observed across the album's Beets items,
         before mixed-format rank reduction. Current-evidence propagation uses
@@ -396,59 +378,6 @@ class AlbumInfo:
     formats_on_disk: frozenset[str] = frozenset()
 
 
-def _mp3_contract_or_codec(
-    reduced_format: str,
-    measured: list[tuple[CurrentBeetsItem, int]],
-) -> str:
-    """Promote an all-MP3 album to its proven ``mp3 vN`` contract, or keep the
-    reduced codec label.
-
-    Gated on the reduction having produced exactly ``mp3``: an album whose
-    canonical codec is something else must keep that label, contract or not —
-    a mixed album that reduces to FLAC would otherwise be relabelled ``mp3 v0``
-    by its MP3 items and drop out of LOSSLESS. Unanimity across every measured
-    item is the second, independent gate, enforced by
-    ``mp3_vbr_contract_format``: one unlabelled or disagreeing file withholds
-    the contract for the whole album, which is also what keeps a mixed album
-    that DOES reduce to ``mp3`` from minting off its MP3 items alone.
-    """
-    if format_codec_token(reduced_format) != "mp3":
-        return reduced_format
-    return mp3_vbr_contract_format(
-        item.encoder_settings for item, _bitrate in measured
-    ) or reduced_format
-
-
-def rank_format_for_current(
-    current: CurrentBeetsUnique,
-    info: AlbumInfo | None,
-    cfg: "QualityRankConfig",
-) -> str:
-    """The codec label a rank or badge must use for one exact resolution.
-
-    Normally ``info.format`` — reduced by ``mixed_format_precedence`` and
-    promoted to an ``mp3 vN`` contract when every measured item proves one.
-
-    When no item carries a usable bitrate ``album_info_from_current``
-    returns ``None``, because there is nothing to average. The CODEC is
-    still known, though, and a FLAC album is ``lossless`` on identity
-    alone — so the observed formats are reduced the same way and returned
-    bare. There is no contract to miss on that path: a contract is minted
-    only from measured items, and there are none.
-
-    The long-tail badge (``lib/banding.py``) and the detail projection the
-    browse badge reads (``check_mbids_detail`` → ``band_from_detail``) both
-    call this, so a bitrate-less album cannot band ``lossless`` on one and
-    ``unknown`` on the other. Deriving it separately is exactly how they
-    diverged (issue #1145 F5).
-    """
-    if info is not None:
-        return info.format
-    return _reduce_album_format(
-        {item.format for item in current.items if item.format}, cfg,
-    )
-
-
 def album_info_from_current(
     current: CurrentBeetsUnique,
     cfg: "QualityRankConfig",
@@ -470,8 +399,6 @@ def album_info_from_current(
         if item.format
     }
     observed_formats = {item.format for item in current.items if item.format}
-    reduced_format = _reduce_album_format(measured_formats, cfg)
-    rank_format = _mp3_contract_or_codec(reduced_format, measured)
     return AlbumInfo(
         album_id=current.album_id,
         track_count=len(measured),
@@ -488,7 +415,7 @@ def album_info_from_current(
         ),
         is_cbr=len(set(numeric_bitrates)) == 1,
         album_path=current.album_path,
-        format=rank_format,
+        format=_reduce_album_format(measured_formats, cfg),
         formats_on_disk=frozenset(
             canonical_beets_codec(observed)
             for observed in observed_formats
@@ -634,7 +561,7 @@ class BeetsDB:
                 "SELECT CAST(value AS INTEGER) AS release_id FROM json_each(?)"
                 ") SELECT a.id, a.mb_albumid, a.discogs_albumid, "
                 "i.id, i.path, i.title, i.track, i.disc, i.length, i.format, "
-                "i.bitrate, i.samplerate, i.bitdepth, i.encoder_settings "
+                "i.bitrate, i.samplerate, i.bitdepth "
                 "FROM albums a LEFT JOIN items i ON i.album_id = a.id "
                 "WHERE a.mb_albumid IN (SELECT release_id FROM wanted_mb) "
                 "OR a.discogs_albumid IN ("
@@ -659,7 +586,6 @@ class BeetsDB:
                 raw_bitrate,
                 raw_samplerate,
                 raw_bitdepth,
-                raw_encoder_settings,
             ) in rows:
                 album_id = int(raw_album_id)
                 item_rows_by_album_id.setdefault(album_id, [])
@@ -694,7 +620,6 @@ class BeetsDB:
                             int(raw_item_id), raw_path, raw_title, raw_track,
                             raw_disc, raw_length, raw_format, raw_bitrate,
                             raw_samplerate, raw_bitdepth,
-                            raw_encoder_settings,
                         ),
                     )
 
@@ -746,7 +671,6 @@ class BeetsDB:
                 raw_bitrate,
                 raw_samplerate,
                 raw_bitdepth,
-                raw_encoder_settings,
             ) in rows:
                 if raw_path is None:
                     invalid_path = True
@@ -782,10 +706,6 @@ class BeetsDB:
                         raw_samplerate, (int, float)) else None),
                     bitdepth=(int(raw_bitdepth) if isinstance(
                         raw_bitdepth, (int, float)) else None),
-                    encoder_settings=(
-                        str(raw_encoder_settings)
-                        if raw_encoder_settings is not None else None
-                    ),
                 ))
                 directories.add(os.path.dirname(absolute))
             if invalid_path:
@@ -950,19 +870,28 @@ class BeetsDB:
 
         Reduced by the SAME ``kbps_from_bps`` ``album_info_from_current`` uses
         (issue #1145 scope E). This value is written to
-        ``album_requests.min_bitrate`` by the two web requeue/upgrade routes;
-        the post-import quality gate writes that same column from the evidence
-        row's already-rounded ``min_bitrate_kbps``. One column, two producers,
-        so they must reduce identically or the operator reads a value that
-        flips by a kbps depending on which path last touched the request.
+        ``album_requests.min_bitrate`` by the web requeue/upgrade routes;
+        the post-import path writes that same column from the imported
+        candidate's own measured ``min_bitrate_kbps``
+        (``lib/dispatch/core.py`` reads ``ImportResult.source_measurement``
+        and hands it to ``lib/dispatch/post_import.py``). One column, more
+        than one producer, so they must reduce identically or the operator
+        reads a value that flips by a kbps depending on which path last
+        touched the request.
 
-        No decision reads the column — traced in the #1145 PR body: the
-        importer's ``existing_min`` comes from the linked current evidence
-        measurement, ``override_min_bitrate`` from
-        ``override_bitrate_from_current_evidence``, and ``AlbumRecord`` (the
-        search input) carries no bitrate floor at all. It is audit and display
-        only, which is exactly why consistency, not conservatism, is the
-        property it owes.
+        **No decision reads the column.** Traced for issue #1145 scope E:
+        every read of ``album_requests.min_bitrate`` is a display, audit, CLI
+        or service projection — ``web/classify.py`` says so at its own
+        ``request_min_bitrate`` field, which it forbids per-row displays from
+        falling back to. The one field that could carry a request-side floor
+        INTO a decision is ``GrabListEntry.current_min_bitrate``, which
+        ``lib/download_validation.py`` passes to
+        ``compute_effective_override_bitrate``; no production code assigns
+        that field, so it is ``None`` on every live path, and
+        ``lib/dispatch/core.py`` overrides the result from linked current
+        evidence whenever one exists. Flooring here would therefore have been
+        conservative in a place nothing conservative is needed; consistency
+        is the property this value actually owes.
         """
         current = self._resolve_unique(mb_release_id)
         if current is None:
@@ -1018,34 +947,12 @@ class BeetsDB:
             for r in rows
         ]
 
-    def check_mbids_detail(
-        self,
-        mbids: list[str],
-        cfg: "QualityRankConfig",
-    ) -> dict[str, dict[str, object]]:
+    def check_mbids_detail(self, mbids: list[str]) -> dict[str, dict[str, object]]:
         """Batch lookup of release IDs and current beets audio aggregates.
 
         ``beets_bitrate`` remains the minimum-track floor in kbps.
         ``beets_avg_bitrate`` is the average across positive track bitrates
         and is the current-state label/rank signal.
-
-        Every field here comes from ``album_info_from_current`` — the same
-        function the decision path calls — so the badge a release shows and
-        the rank the importer computes cannot disagree. ``cfg`` is required
-        for exactly that reason: the projection needs
-        ``mixed_format_precedence`` to reduce a multi-codec album, and
-        ``mp3_vbr_levels`` is what an ``mp3 vN`` contract resolves through.
-        Before issue #1145 this method joined the observed formats with a
-        comma and the badge read the first one, which ignored both.
-
-        The one field with a fallback is ``beets_format``, through
-        ``rank_format_for_current``: an album whose items carry no usable
-        bitrate has no projection at all, and must still report its codec
-        so a bitrate-less FLAC bands ``lossless`` here exactly as it does
-        on the long-tail worklist. Both bitrate fields stay ``None`` on that
-        path — there is genuinely no rate to report. ``beets_tracks`` falls
-        back to the raw item count, and ``beets_samplerate`` /
-        ``beets_bitdepth`` never came from the projection at all.
 
         Accepts both MusicBrainz UUIDs (matched against ``albums.mb_albumid``)
         and Discogs numeric IDs (matched against ``albums.discogs_albumid``,
@@ -1067,7 +974,13 @@ class BeetsDB:
             current = resolutions[identity]
             if not isinstance(current, CurrentBeetsUnique):
                 continue
-            info = album_info_from_current(current, cfg)
+            formats = tuple(dict.fromkeys(
+                item.format for item in current.items if item.format
+            ))
+            bitrates = [
+                item.bitrate for item in current.items
+                if item.bitrate is not None and item.bitrate > 0
+            ]
             samplerates = [
                 item.samplerate for item in current.items
                 if item.samplerate is not None
@@ -1077,23 +990,16 @@ class BeetsDB:
                 if item.bitdepth is not None
             ]
             result[release_id] = {
-                "beets_tracks": (
-                    info.track_count if info is not None
-                    else len(current.items)
-                ),
-                # The projection's own rank label — reduced by
-                # mixed_format_precedence and promoted to an ``mp3 vN``
-                # contract when the items prove one, with the same
-                # codec-only fallback the long-tail badge uses for an album
-                # that carries no usable bitrate.
-                "beets_format": (
-                    rank_format_for_current(current, info, cfg) or None
-                ),
+                "beets_tracks": len(current.items),
+                "beets_format": ",".join(formats) if formats else None,
+                # Same shared reduction as get_album_info — these two
+                # projections of the same album must never disagree.
                 "beets_bitrate": (
-                    info.min_bitrate_kbps if info is not None else None
+                    kbps_from_bps(min(bitrates)) if bitrates else None
                 ),
                 "beets_avg_bitrate": (
-                    info.avg_bitrate_kbps if info is not None else None
+                    kbps_from_bps(sum(bitrates) // len(bitrates))
+                    if bitrates else None
                 ),
                 "beets_samplerate": min(samplerates) if samplerates else None,
                 "beets_bitdepth": max(bitdepths) if bitdepths else None,

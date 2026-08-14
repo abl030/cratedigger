@@ -98,8 +98,7 @@ def _write_beets_db(
             length REAL,
             format TEXT,
             samplerate INTEGER,
-            bitdepth INTEGER,
-            encoder_settings TEXT
+            bitdepth INTEGER
         );
     """)
     conn.execute("INSERT INTO albums (id, mb_albumid) VALUES (1, 'media-id')")

@@ -13,7 +13,6 @@ from lib.quality.audio_validation import (
     AudioToolDiagnostic,
     AudioValidationReport,
 )
-from lib.quality.encoder_contract import mp3_vbr_contract_level
 from lib.quality.evidence_types import (
     EVIDENCE_PROVENANCE_CARRIED,
     EVIDENCE_PROVENANCE_MEASURED,
@@ -351,31 +350,6 @@ class ImportResult(msgspec.Struct):
             errors = measurement.new_row_validation_errors(source=source)
             if errors:
                 raise ValueError(f"{field_name}: {'; '.join(errors)}")
-        # The downloaded source is never described by the label we PLAN to
-        # convert it to. Declared-bitrate targets ("opus 128", "mp3 320") are
-        # already refused above: a measured format must be one token. Issue
-        # #1145 opened exactly one hole in that rule by making ``mp3 vN`` a
-        # label the harness can MEASURE from the source files' own LAME
-        # header, so this clause closes exactly that hole — a V-level target
-        # label copied onto the source measurement, which is the original
-        # defect (a FLAC album recorded as its own MP3 V0 proxy).
-        #
-        # Deliberately keyed on the target being a V-LEVEL label, not on the
-        # two labels merely matching: a keep-lossless import legitimately
-        # names ``flac`` on both sides, and rejecting that would break the
-        # bare-codec contract pin in tests/test_quality_lineage_generated.py.
-        if (
-            target is not None
-            and self.source_measurement is not None
-            and mp3_vbr_contract_level(target.format) is not None
-        ):
-            source_label = (self.source_measurement.format or "").strip().lower()
-            if source_label and source_label == target.format.strip().lower():
-                raise ValueError(
-                    "source_measurement: measurement.format must describe the "
-                    "downloaded source, not the projected target "
-                    f"{target.format!r}"
-                )
         proof = self.verified_lossless_proof
         if proof is not None:
             errors = proof.validation_errors()

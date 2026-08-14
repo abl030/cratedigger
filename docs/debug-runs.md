@@ -87,7 +87,7 @@ Mountain Goats only. Both fixes deployed:
 
 ## Key Decisions & Assumptions
 
-1. ~~**VBR MP3 downloads skip spectral check** — VBR bitrate IS the quality signal. A V0 file at 240kbps from genuine lossless can't be faked. Only CBR 320 and FLAC need spectral verification.~~ **Reversed by issue #1145.** "Can't be faked" was the error: the declared VBR mode is just the encoder's own Xing/Info header, a high average is exactly what a transcode re-encoded at a high bitrate has, and a `-V 0` LAME tag can be written by anyone. Every MP3 is scanned now.
+1. ~~**VBR MP3 downloads skip spectral check** — VBR bitrate IS the quality signal. A V0 file at 240kbps from genuine lossless can't be faked. Only CBR 320 and FLAC need spectral verification.~~ **Reversed by issue #1145.** "Can't be faked" was the error: the declared VBR mode is just the encoder's own Xing/Info header, and a high average is exactly what a transcode re-encoded at a high bitrate has. Every MP3 is scanned now.
 
 2. **CBR 320 spectral check runs in cratedigger.py, not import_one.py** — Because CBR 320 downloads don't go through FLAC→V0 conversion, they need spectral checking at the cratedigger level before staging/import.
 

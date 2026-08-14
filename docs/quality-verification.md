@@ -471,10 +471,9 @@ the old thresholds produced.
    scan on the premise that its bitrate was self-evidence of provenance.
    Issue #1145 removed it: the declared mode is the encoder's own Xing/Info
    header, and while the average is genuinely measured, a transcode
-   re-encoded at a high bitrate genuinely has a high one. Add the `mp3 vN`
-   contract mintable from a peer's own LAME tag and the skip was a route to
-   self-certifying TRANSPARENT unmeasured. A peer-supplied tag still sets the
-   label; it no longer escapes measurement.
+   re-encoded at a high bitrate genuinely has a high one. Neither half of the
+   premise said anything about where the audio came from, so the album that
+   most needed measuring was the one that skipped it.
 
 If a candidate-side required scan is missing or errors, preview records
 `measurement_failed`; if fresh analysis of an installed HAVE is missing or

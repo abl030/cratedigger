@@ -15,7 +15,6 @@ from lib.quality.audio_validation import (
     legacy_unrecorded_audio_validation_report,
     validate_audio_validation_report,
 )
-from lib.quality.encoder_contract import mp3_vbr_contract_level
 
 V0_PROBE_LOSSLESS_SOURCE = "lossless_source_v0"
 V0_PROBE_NATIVE_LOSSY_RESEARCH = "native_lossy_research_v0"
@@ -136,17 +135,9 @@ class AudioQualityMeasurement(
         errors: list[str] = []
         if self.format is not None:
             label = self.format.strip()
-            # Same admission as ``AlbumQualityEvidence.storage_format``, and
-            # necessarily so — the two must be equal when both are set. A
-            # measured codec label, or an ``mp3 vN`` contract minted from a
-            # LAME ``-V`` header (issue #1145); never a projected target.
-            if not label or (
-                len(label.split()) != 1
-                and mp3_vbr_contract_level(label) is None
-            ):
+            if not label or len(label.split()) != 1:
                 errors.append(
-                    "measurement.format must be a measured codec label, "
-                    "optionally an mp3 vN contract"
+                    "measurement.format must be a bare measured codec label"
                 )
         if source and self.was_converted_from is not None:
             errors.append(
@@ -720,10 +711,10 @@ SOURCE_SEMANTIC_LINEAGE_VERSIONS: tuple[int, ...] = (3, 4, 5)
 #: (``lib.quality_evidence.current_evidence_rebuild_reasons``) and is rebuilt
 #: from live Beets facts before it decides anything, which is how a policy
 #: change to *derivation* reaches existing rows without a backfill. Bumped to 5
-#: by issue #1145: v4 rows derived their MP3 rank format from an inferred
-#: encoding mode and two band tables; v5 derives it from one table plus a
-#: proven LAME ``-V`` contract. The two-axis fact vocabulary is unchanged
-#: between 4 and 5 — every ``lineage_version < 4`` merge predicate in
+#: by issue #1145: a v4 MP3 row was ranked against one of two band tables 75
+#: kbps apart, chosen by an inferred encoding mode; a v5 row is ranked against
+#: the single ``mp3`` table. The two-axis fact vocabulary is unchanged between
+#: 4 and 5 — every ``lineage_version < 4`` merge predicate in
 #: ``lib.pipeline_db.evidence`` means "predates that vocabulary" and stays at
 #: 4 deliberately, because widening it would replace (not merge) the preserved
 #: spectral and V0 tuples on every v4 row's rebuild.
@@ -796,9 +787,8 @@ class AlbumQualityEvidence(
     # Migration 050 marks the interpretation of storage/target fields.
     # Historical rows are v1/v3; the two-axis vocabulary starts at v4.
     # v5 (issue #1145) keeps that vocabulary exactly and re-derives the MP3
-    # rank format: the bump exists so every v4 row rebuilds through the
-    # collapsed ladder and the LAME ``-V`` contract instead of needing a
-    # backfill.
+    # rank: the bump exists so every v4 row rebuilds through the single
+    # collapsed ladder instead of needing a backfill.
     lineage_version: int = CURRENT_EVIDENCE_LINEAGE_VERSION
     v0_metric: AlbumQualityV0Metric | None = None
     # Preview-owned, content-snapshot-local idempotence marker. A failed or
@@ -925,19 +915,9 @@ class AlbumQualityEvidence(
                 )
             if self.storage_format is not None:
                 storage_label = self.storage_format.strip()
-                # A measured codec label, or the one measured CONTRACT the
-                # pipeline can prove from bytes: ``mp3 vN`` minted from a LAME
-                # ``-V`` header (issue #1145). A projected target label such as
-                # ``"mp3 320"`` or ``"opus 128"`` is still refused — separating
-                # measured storage from projected target is what this check
-                # exists for, and lineage v1's ambiguity there is why it exists.
-                if not storage_label or (
-                    len(storage_label.split()) != 1
-                    and mp3_vbr_contract_level(storage_label) is None
-                ):
+                if not storage_label or len(storage_label.split()) != 1:
                     errors.append(
-                        "storage_format must be a measured codec label, "
-                        "optionally an mp3 vN contract"
+                        "storage_format must be a bare measured codec label"
                     )
                 measurement_label = (
                     self.measurement.format.strip().lower()

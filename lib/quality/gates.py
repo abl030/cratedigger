@@ -34,17 +34,42 @@ def spectral_gate_trigger(
     transcode re-encoded high genuinely has a high average. The
     ``skipped_vbr_high_avg`` outcome, the threshold parameter, and the
     one-kbps ``<=``/``>=`` boundary disagreement between this mirror and
-    ``_needs_spectral_check`` all went with it. Historical
-    ``download_log`` stage chains still carry the retired string; it is
-    opaque audit text there and nothing re-derives it.
+    ``_needs_spectral_check`` all went with it. 675 historical
+    ``download_log`` rows still carry the retired string (measured
+    2026-08-14); it is opaque audit text there and nothing re-derives it.
 
-    One divergence survives and is deliberate: ``_needs_spectral_check``
-    answers True for a lossless candidate (preview must produce affirmative
-    evidence for it), while this mirror reports ``"skipped_flac"`` because
-    the verdict Stage 1 consumes for a FLAC comes from convert → V0 →
-    ``transcode_detection``, not from the MP3 preimport gate. Same codec, two
-    different questions; ``full_pipeline_decision`` reads that by passing
+    TWO divergences survive. Both are recorded rather than closed, and both
+    are one-directional: this mirror can only ever *withhold* a spectral
+    opinion where production measured, never present an album as scanned
+    that was not.
+
+    First, ``skipped_flac``. ``_needs_spectral_check`` answers True for a
+    lossless candidate (preview must produce affirmative evidence for it),
+    while this mirror reports ``"skipped_flac"`` because the verdict Stage 1
+    consumes for a FLAC comes from convert → V0 → ``transcode_detection``,
+    not from the MP3 preimport gate. Same codec, two different questions;
+    ``full_pipeline_decision`` reads that by passing
     ``stage0_gates_stage1 = gate == "would_run" or is_flac``.
+
+    Second, an unresolved codec. The two sides are NOT given the same
+    information, so this one is a real disagreement rather than two
+    questions: ``_needs_spectral_check`` receives the candidate's filetype
+    STRING and answers a substring test on it (``"mp3" in filetype and
+    "flac" not in filetype``), while this mirror receives an already
+    RESOLVED ``codec_family``. ``resolve_measured_codec_family`` fails
+    closed to ``None`` before anything else on a mixed-codec album, and for
+    any row whose labels resolve to no family::
+
+        filetype "mp3",      family None  -> production True,
+                                             mirror skipped_uncalibrated_codec
+        filetype "m4a, mp3", family None  -> production True,
+                                             mirror skipped_uncalibrated_codec
+
+    Keying this mirror off the filetype string instead would reconcile them
+    and reintroduce exactly the codec blindness issue #829 Phase 5 PR2b
+    removed: reading a codec out of a label is what made this function claim
+    ``would_run`` for AAC and Opus candidates. The divergence is the price of
+    that fix, and it is paid in the conservative direction.
 
     **This is not a claim that the album was never measured.**
     ``harness/import_one.py`` calls ``collect_attempt_spectral_audit``
@@ -66,11 +91,6 @@ def spectral_gate_trigger(
                                   fires and no cliff policy is calibrated
                                   for it
         "would_run"             — any MP3
-
-    An unknown ``codec_family`` skips rather than running: production's
-    ``_needs_spectral_check`` reaches its ``is_mp3`` test with the same
-    unknown label and answers False. Conservatism here means *withholding a
-    spectral opinion*, never rejecting an album.
     """
     if is_flac:
         return "skipped_flac"

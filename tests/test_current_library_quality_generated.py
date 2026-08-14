@@ -112,7 +112,7 @@ class TestCurrentLibraryQualityGenerated(unittest.TestCase):
             ],
         )
         self.writer.commit()
-        detail = self.db.check_mbids_detail(["generated-release"], QualityRankConfig.defaults())[
+        detail = self.db.check_mbids_detail(["generated-release"])[
             "generated-release"
         ]
 

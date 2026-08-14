@@ -41,7 +41,6 @@ from lib.quality import (
     V0ProbeEvidence,
     VerifiedLosslessProof,
     candidate_preimport_reject_fact,
-    format_codec_token,
     legacy_unrecorded_audio_validation_report,
 )
 
@@ -368,17 +367,10 @@ def current_evidence_preserves_source_spectral(
     # containers are not (notably, .m4a can be AAC or ALAC). Treat missing or
     # conflicting labels as unresolved rather than preserving an old source
     # grade, then authorize their exact shared media pair.
-    #
-    # Reduced to the CODEC TOKEN because these two labels can carry a quality
-    # contract, not only a bare codec: ``"mp3 v0"`` names the same codec as
-    # ``"mp3"`` and must resolve to the same lossy media pair. 18 live rows
-    # already carry that spelling, so the whole-string comparison this
-    # replaces was withholding preservation from exactly the converted rows
-    # this function exists for; issue #1145 makes the spelling common.
     formats = {
-        token
+        label.strip().lower()
         for label in (evidence.storage_format, evidence.measurement.format)
-        if (token := format_codec_token(label)) is not None
+        if label is not None and label.strip()
     }
     return (
         len(containers) == 1
@@ -1566,17 +1558,11 @@ def propagate_candidate_evidence_to_current(
     output_source_format = (
         measured_source_format if is_transcode else None
     )
-    # ``album_info.format`` may be a proven MP3 contract (``"mp3 v0"``, issue
-    # #1145) while ``formats_on_disk`` always holds bare canonical codecs.
-    # Authority here is a question about the CODEC — "does one codec own this
-    # album" — so compare tokens; comparing the whole label would read every
-    # contract-bearing album as mixed and silently stop carrying its source
-    # spectral evidence.
-    reduced_format = format_codec_token(album_info.format) or ""
+    reduced_format = album_info.format.strip().lower()
     album_formats = frozenset(
-        token
+        value.strip().lower()
         for value in album_info.formats_on_disk
-        if (token := format_codec_token(value)) is not None
+        if value.strip()
     )
     if not album_formats and reduced_format:
         album_formats = frozenset({reduced_format})

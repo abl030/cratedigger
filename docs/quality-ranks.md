@@ -59,10 +59,11 @@ through six steps, in order:
 
 **No step reads an encoding mode** (issue #1145). MP3 used to route to
 `cfg.mp3_cbr` or `cfg.mp3_vbr` on an `is_cbr` boolean derived from per-track
-bitrate uniformity — not an encoder-mode detector, unknowable for the 4,331 of
-10,036 live MP3 items whose LAME tag is absent, and worth a 75 kbps swing in
-the transparent floor. A VBR encode is promoted above the single measured
-ladder only through step 3, by a proven LAME `-V` contract.
+bitrate uniformity — not an encoder-mode detector, and worth a 75 kbps swing
+in the transparent floor. A measured MP3 now ranks on its bitrate alone.
+Step 3 still exists, but its only producer is Cratedigger's own lossless → V0
+conversion naming the target it converted to; nothing reads a `-V` level out
+of a file's own LAME header.
 
 The **label path** (step 3-4) is what makes lo-fi V0 imports work without the
 old `verified_lossless` blanket bypass: a 207 kbps file with `format="mp3 v0"`
@@ -226,22 +227,17 @@ proof. Spectral cliff detection may clamp it down further.
 
 Until #1145 there were two tables 75 kbps apart, selected by `is_cbr` — a
 boolean derived from per-track bitrate *uniformity*, which is not an encoder
-mode. Measured on the live DB at the time: 13,983 of 14,001 MP3 evidence rows
-carried a bare codec label, so that boolean decided ~99.9% of MP3 ranks; 567 of
-5,146 `is_cbr=False` rows had `median − min ≤ 2 kbps` (the CBR jitter shape);
-and sampling 400 library MP3s found `bitrate_mode` UNKNOWN on 153 of them.
+mode. Measured on the live DB (2026-08-14): 13,993 of 14,011 MP3 evidence rows
+carry a bare codec label, so that boolean decided ~99.9% of MP3 ranks, and 570
+of the 5,151 `is_cbr=False` rows have `median − min ≤ 2 kbps` — the CBR jitter
+shape, ranked through the generous VBR table purely because one track differed.
 
-**A genuine VBR encode is promoted by proof, not by the table.** Cratedigger
-parses `-V N` out of the LAME header — `items.encoder_settings` on the
-installed side, the file's own tag on the candidate side — and mints an
-`mp3 vN` contract that resolves through `mp3_vbr_levels` (step 3), which is
-self-certifying. The mint is unanimous-or-nothing: one unlabelled or
-disagreeing file withholds the contract for the whole album, and only `-V N`
-plus the single documented alias `--alt-preset standard` (= V2) are mapped.
-Nothing is inferred from bitrate, uniformity, or `bitrate_mode`. Both sides of
-a comparison mint from the same rule, so identical audio carries an identical
-contract — without that symmetry the single ladder would rank a re-download of
-an installed album above itself. Owner: `lib/quality/encoder_contract.py`.
+**Nothing promotes a measured MP3 above this table.** A `-V` level in a file's
+LAME header is peer-writable and is deliberately not read: an earlier revision
+of this issue minted an `mp3 vN` contract from it, which let any file carrying
+`-V 0` outrank measured, accusing spectral evidence. `mp3_vbr_levels` (step 3)
+still exists for labels Cratedigger itself produced when converting a lossless
+source to V0 — a target we chose, not a claim a stranger made.
 
 **A spectral-bound value classifies via this table when the shared clamp
 binds.** The MP3 spectral class (`lib/spectral_check.py`'s `LAME_LOWPASS`
@@ -293,21 +289,29 @@ about provenance. `is_vbr` is a self-declaration — `inspect_local_files`
 reads mutagen's `bitrate_mode`, i.e. the Xing/Info/VBRI header the encoder
 wrote. The average is genuinely measured from the frames, but a transcode
 re-encoded at a high bitrate genuinely *has* a high average, so clearing the
-threshold said nothing about the source. Add the `mp3 vN` contract that can
-now be minted from a file's own LAME tag and the skip completed a
-self-certification route: write `-V 0`, encode above the threshold, never be
-measured, be labelled TRANSPARENT. A peer-supplied tag can still set the
-label; it can no longer buy an escape from measurement. **Measurement
-decides; no presumption.**
+threshold said nothing about the source. **Measurement decides; no
+presumption.**
 
 `lib/quality/gates.py::spectral_gate_trigger` and
-`lib.measurement._needs_spectral_check` are the two readers and now agree
-except on one deliberate point: `_needs_spectral_check` answers "run" for a
-lossless candidate (preview must produce affirmative evidence for it), while
-the simulator mirror reports `skipped_flac`, because the Stage 1 verdict for
-a FLAC comes from convert → V0 → `transcode_detection` rather than from the
-MP3 preimport gate. The one-kbps boundary disagreement the threshold used to
-create is gone with the threshold.
+`lib.measurement._needs_spectral_check` are the two readers. The one-kbps
+boundary disagreement the threshold used to create is gone with the
+threshold; two deliberate divergences remain, both one-directional (the
+mirror withholds an opinion where production measured, never the reverse):
+
+1. `_needs_spectral_check` answers "run" for a lossless candidate (preview
+   must produce affirmative evidence for it), while the simulator mirror
+   reports `skipped_flac`, because the Stage 1 verdict for a FLAC comes from
+   convert → V0 → `transcode_detection` rather than from the MP3 preimport
+   gate. Same codec, two different questions.
+2. The two are not given the same input. `_needs_spectral_check` reads the
+   candidate's filetype STRING and substring-tests it for `mp3`; the mirror
+   reads an already-resolved `codec_family`, which
+   `resolve_measured_codec_family` fails closed to `None` on a mixed-codec
+   album. So `filetype="m4a, mp3"` runs in production and reports
+   `skipped_uncalibrated_codec` in the mirror. Keying the mirror off the
+   string instead would reconcile them and reintroduce the codec blindness
+   issue #829 Phase 5 PR2b removed, so the divergence is recorded on both
+   docstrings rather than closed.
 
 The one remaining bypass is an exact CD-rip bit verification, which is
 stronger evidence than a spectral estimate rather than an assumption about
@@ -438,11 +442,9 @@ issue #65 wires them through the INI parser.
 
 - **`mp3_vbr_levels`** — comma-separated list of exactly 10 rank names
   (V0..V9). Maps each LAME VBR V-level to a rank when the format hint is
-  an `mp3 v0` / `mp3 v3` / etc. contract — either one Cratedigger's own
-  conversion produced, or one minted from a file's LAME header (#1145).
-  Since the MP3 band tables collapsed into one, this table is the ONLY way a
-  measured MP3 rises above the single measured ladder, so retuning it is the
-  lever for "how much do I trust a `-V` claim". Defaults assume LAME's
+  an explicit `mp3 v0` / `mp3 v3` / etc. label. The only producer of such a
+  label is Cratedigger's own lossless → V0 conversion naming its target; a
+  peer's LAME header is never read (#1145). Defaults assume LAME's
   documented V-level quality contract:
   - V0 → TRANSPARENT, V1-V2 → EXCELLENT, V3-V4 → GOOD, V5-V9 → ACCEPTABLE.
   - Tighten if you don't trust LAME's claim that V2 is transparent.
@@ -532,7 +534,7 @@ All options live under `services.cratedigger.qualityRanks.*` and are declared by
 | Codec | transparent | excellent | good | acceptable | Notes |
 |---|---|---|---|---|---|
 | `bands.opus`   | 112 | 88  | 64  | 48  | Unconstrained Opus VBR averages 120-135 kbps typical / 95-150 kbps per track. 112 leaves headroom for sparse material; 88 matches Opus 96 hydrogenaudio quality. |
-| `bands.mp3`    | 320 | 256 | 192 | 128 | One table for every measured MP3 (issue #1145). Unverifiable measured MP3 is only `transparent` at 320 because we can't prove it came from a lossless source, and an inferred encoding mode is not proof. A genuine VBR encode is promoted instead by its LAME `-V` contract through `mp3_vbr_levels`. Below that → requeue for a FLAC source to re-verify. |
+| `bands.mp3`    | 320 | 256 | 192 | 128 | One table for every measured MP3 (issue #1145). Unverifiable measured MP3 is only `transparent` at 320 because we can't prove it came from a lossless source, and an inferred encoding mode is not proof. Nothing promotes a measured MP3 above this table; `mp3_vbr_levels` applies only to a label Cratedigger's own conversion produced. Below that → requeue for a FLAC source to re-verify. |
 | `bands.aac`    | 192 | 144 | 112 | 80  | Hydrogenaudio consensus places the "no meaningful quality gain above here" ceiling for music at 192 kbps. |
 | `bands.vorbis` | 192 | 160 | 112 | 96  | Conservative q2/q3/q5/q6-region approximation. One table; `is_cbr` does not change routing. |
 | `bands.wma`    | 320 | 256 | 192 | 128 | Conservative WMA Standard table mirroring MP3 CBR. One table; `is_cbr` does not change routing. |
@@ -543,7 +545,7 @@ Leaving every option at its default produces exactly `QualityRankConfig.defaults
 
 Three fields are part of the rank model but are NOT surfaced as Nix options because they're rarely-if-ever retuned outside of development. They live on `QualityRankConfig` in `lib/quality/ranks.py`, are parseable from `[Quality Ranks]` as CSV (see #65), and default to sensible values. If you want to tune them, the cleanest path is editing the dataclass defaults and updating `TestQualityRankConfigDefaults` to pin the new values. Extending `nix/module.nix` to render them is a trivial follow-up if you find yourself retuning them often.
 
-- **`mp3_vbr_levels`** -- 10-tuple mapping LAME V-levels to ranks (V0..V9). The V-level is a **proven contract** -- when a file's LAME header (or a Cratedigger conversion) says `"mp3 v0"`, the rank model reads V0 from this tuple and bypasses `bands.mp3` entirely. This is why a 207 kbps lo-fi V0 still classifies as TRANSPARENT. Since #1145 collapsed the two MP3 tables this is the only route above the measured ladder, so it is the lever for how far a `-V` claim is trusted.
+- **`mp3_vbr_levels`** -- 10-tuple mapping LAME V-levels to ranks (V0..V9). The V-level is an **explicit label contract** -- when a Cratedigger conversion produced `"mp3 v0"`, the rank model reads V0 from this tuple and bypasses `bands.mp3` entirely. This is why a 207 kbps lo-fi V0 still classifies as TRANSPARENT. A file's own LAME header is never read (#1145), so no peer-supplied tag reaches this tuple.
 
   **Default ladder**: `V0=TRANSPARENT, V1-V2=EXCELLENT, V3-V4=GOOD, V5-V9=ACCEPTABLE`
 

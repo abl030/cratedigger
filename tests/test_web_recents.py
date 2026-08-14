@@ -28,7 +28,6 @@ from lib.quality import (
     V0ProbeEvidence,
     mint_verified_lossless_proof,
 )
-from lib.quality.encoder_contract import mp3_vbr_contract_format
 from web.classify import (
     ClassifiedEntry,
     LogEntry,
@@ -673,48 +672,6 @@ class TestQualityLabel(unittest.TestCase):
     def test_current_average_and_legacy_floor_use_distinct_request_6039_inputs(self):
         self.assertEqual(average_quality_label("mp3", 288), "MP3 V0")
         self.assertEqual(legacy_floor_quality_label("mp3", 194), "MP3 V2")
-
-    def test_a_contract_label_is_the_label_not_a_prefix_for_one(self):
-        """Issue #1145: the current-state label must not double up.
-
-        ``check_mbids_detail`` now reports the minted ``mp3 vN`` contract
-        rather than the raw Beets codec. Appending a bitrate-derived tier to
-        that produced ``"MP3 V0 V0"`` on 91 live albums, and — where the
-        contract and the measured average disagree — the contradictory
-        ``"MP3 V0 V2"`` on 23 more. The contract IS the statement.
-
-        The trigger strings are what ``mp3_vbr_contract_format`` mints, not
-        literals invented here (test-fidelity Rule C).
-        """
-        self.assertEqual(
-            mp3_vbr_contract_format(["-V 0", "-V 0"]), "mp3 v0")
-        # Contract agrees with the measured tier: still one V0, not two.
-        self.assertEqual(average_quality_label("mp3 v0", 245), "MP3 V0")
-        # Contract DISAGREES with the measured tier: the contract wins and
-        # the two are never juxtaposed.
-        self.assertEqual(average_quality_label("mp3 v0", 190), "MP3 V0")
-        self.assertEqual(average_quality_label("mp3 v2", 245), "MP3 V2")
-
-    def test_a_bare_codec_still_gets_its_measured_tier(self):
-        """Must-still-work: the contract branch did not swallow the rest.
-
-        Without this arm the pin above would pass against a label function
-        that had stopped reporting bitrate tiers altogether.
-        """
-        self.assertEqual(average_quality_label("mp3", 245), "MP3 V0")
-        self.assertEqual(average_quality_label("mp3", 190), "MP3 V2")
-        self.assertEqual(average_quality_label("mp3", 320), "MP3 320")
-        self.assertEqual(average_quality_label("flac", 900), "FLAC")
-
-    def test_the_frozen_legacy_vocabulary_is_untouched(self):
-        """``legacy_floor_quality_label`` keeps its byte-for-byte output.
-
-        Rows without ``comparison_basis`` render frozen history, so the
-        contract branch is deliberately absent there — including for the
-        persisted ``mp3 v0`` storage labels round 1 admitted.
-        """
-        self.assertEqual(legacy_floor_quality_label("mp3 v0", 245),
-                         "MP3 V0 V0")
 
     def test_flac(self):
         self.assertEqual(legacy_floor_quality_label("flac", 0), "FLAC")

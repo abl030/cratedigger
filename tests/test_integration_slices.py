@@ -804,13 +804,6 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
                         source.spectral_provenance if source else None
                     ),
                 ),
-                # Production always writes ``storage_format`` FROM the
-                # measurement's format (all four builders in
-                # ``lib/quality_evidence.py`` do), and the row validation
-                # requires them equal. A fixture that pinned the builder's
-                # "MP3" default while the measurement carried a proven
-                # ``mp3 v0`` contract would be an unbuildable row.
-                storage_format=beets_info.format,
                 verified_lossless_proof=ir.verified_lossless_proof,
             )
             claimed, execution_lease = _claim_dispatch_job(
@@ -969,10 +962,10 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         dispatch_import_core — and persists NULL, not a fabricated 0.0, in
         both sinks (album_requests.beets_distance via _do_mark_done and the
         download_log.beets_distance column)."""
-        ir = make_import_result(decision="import", new_min_bitrate=245)
+        ir = make_import_result(decision="import", new_min_bitrate=320)
         beets_info = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="mp3 v0",
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
             is_cbr=False, album_path="/Beets/Test")
 
         # Stale non-None value proves the write actively NULLs the column
@@ -996,10 +989,10 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         """Decision 17 / AE6: a genuine transparent import narrows to
         lossless-only at import time — the request stays wanted and only
         a lossless source can beat the retained copy."""
-        ir = make_import_result(decision="import", new_min_bitrate=245)
+        ir = make_import_result(decision="import", new_min_bitrate=320)
         beets_info = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="mp3 v0",
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
             is_cbr=False, album_path="/Beets/Test")
 
         db = self._run_dispatch(ir, beets_info)
@@ -1007,7 +1000,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
         self.assertEqual(row["search_filetype_override"], "lossless")
-        self.assertEqual(row["min_bitrate"], 245)
+        self.assertEqual(row["min_bitrate"], 320)
         self.assertEqual(len(db.denylist), 1)
         self.assertEqual(len(db.download_logs), 1)
         db.assert_log(self, 0, outcome="success", request_id=42)
@@ -1020,8 +1013,8 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             imported_path="/Beets/Test Artist/2005 - Test Album_",
         )
         beets_info = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="MP3",
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
             is_cbr=False, album_path="/Beets/Test")
 
         db = self._run_dispatch(ir, beets_info)
@@ -1192,10 +1185,10 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         it forever. The success path must clear stale `final_format` when the
         new import does not carry an explicit label.
         """
-        ir = make_import_result(decision="import", new_min_bitrate=245)
+        ir = make_import_result(decision="import", new_min_bitrate=320)
         beets_info = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="mp3 v0",
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
             is_cbr=False, album_path="/Beets/Test")
 
         db = self._run_dispatch(
@@ -3191,10 +3184,10 @@ class TestReleaseLockContention(unittest.TestCase):
 
         db = self._make_db()
         # Default: all locks acquired. Happy path.
-        ir = make_import_result(decision="import", new_min_bitrate=245)
+        ir = make_import_result(decision="import", new_min_bitrate=320)
         beets_info = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="mp3 v0",
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
             is_cbr=False, album_path="/Beets/Test")
         dl_info = DownloadInfo(username="user1")
 
@@ -3226,13 +3219,6 @@ class TestReleaseLockContention(unittest.TestCase):
                         source.spectral_provenance if source else None
                     ),
                 ),
-                # Production always writes ``storage_format`` FROM the
-                # measurement's format (all four builders in
-                # ``lib/quality_evidence.py`` do), and the row validation
-                # requires them equal. A fixture that pinned the builder's
-                # "MP3" default while the measurement carried a proven
-                # ``mp3 v0`` contract would be an unbuildable row.
-                storage_format=beets_info.format,
                 verified_lossless_proof=ir.verified_lossless_proof,
             )
             claimed, execution_lease = _claim_dispatch_job(
@@ -3311,10 +3297,10 @@ class TestReleaseLockContention(unittest.TestCase):
             status="downloading",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
-        ir = make_import_result(decision="import", new_min_bitrate=245)
+        ir = make_import_result(decision="import", new_min_bitrate=320)
         beets_info = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=245,
-            avg_bitrate_kbps=245, format="MP3",
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
             is_cbr=False, album_path="/Beets/Test")
         dl_info = DownloadInfo(username="user1")
 

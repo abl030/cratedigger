@@ -2065,8 +2065,7 @@ class TestLibraryArtistContract(unittest.TestCase):
                 id INTEGER PRIMARY KEY, album_id INTEGER,
                 bitrate INTEGER, path BLOB, title TEXT, artist TEXT,
                 track INTEGER, disc INTEGER, length REAL, format TEXT,
-                samplerate INTEGER, bitdepth INTEGER,
-                encoder_settings TEXT
+                samplerate INTEGER, bitdepth INTEGER
             );
             INSERT INTO albums (id, album, albumartist, year, mb_albumid,
                 mb_albumartistid, mb_releasegroupid, release_group_title,

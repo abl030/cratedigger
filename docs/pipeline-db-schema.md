@@ -54,8 +54,9 @@ Key fields:
   `target_format` and `target_is_cbr` NULL rather than guessing a mode.
 - `lineage_version SMALLINT` — `1` marks historical rows whose storage/target
   projection is ambiguous; `3` marks separated source and target facts; `4`
-  adds the two-axis evidence vocabulary; `5` re-derives the MP3 rank format
-  from one band table plus a proven LAME `-V` contract (issue #1145). 4 and 5
+  adds the two-axis evidence vocabulary; `5` re-derives the MP3 rank against
+  one band table instead of two selected by an inferred mode (issue #1145).
+  4 and 5
   share the v4 fact vocabulary, which is why every version-gated shape CHECK
   and every `lineage_version < 4` merge predicate stays at 4 — those mean
   "predates the two-axis vocabulary", not "predates the current version".

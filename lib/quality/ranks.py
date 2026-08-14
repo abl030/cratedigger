@@ -10,7 +10,6 @@ from dataclasses import asdict, dataclass, field
 from enum import IntEnum, StrEnum
 from typing import Any, Self
 
-from lib.quality.encoder_contract import mp3_vbr_contract_level
 from lib.quality.evidence_types import (
     V0_PROBE_LOSSLESS_SOURCE,
     AudioQualityMeasurement,
@@ -135,9 +134,9 @@ class QualityRankConfig:
       120-135 kbps on typical music; 112 leaves headroom for sparse material.
       ``excellent=88`` matches Opus 96 quality (hydrogenaudio/Kamedo2 4.65/5).
     - MP3 ``transparent=320``: one ladder for every measured MP3 (issue
-      #1145). Unverifiable measured MP3 is only transparent at 320; a genuine
-      VBR encode is promoted by its LAME ``-V`` contract through
-      ``mp3_vbr_levels``, never by an inferred encoding mode.
+      #1145). Unverifiable measured MP3 is only transparent at 320, and
+      nothing promotes it above that table — an inferred encoding mode used
+      to, and no longer does.
     - AAC ``transparent=192``: hydrogenaudio consensus ceiling for music.
     - Vorbis ``transparent=192``: conservative q6-region ceiling; one VBR table.
     - WMA ``transparent=320``: conservative parity with the MP3 table.
@@ -404,33 +403,36 @@ _KNOWN_CODEC_FAMILIES: frozenset[str] = frozenset(
     })
 
 
-def format_codec_token(format_hint: str | None) -> str | None:
-    """First whitespace token of a format label, lowercased.
-
-    ``"opus 128"`` → ``"opus"``, ``"MP3"`` → ``"mp3"``, ``"mp3 v0"`` → ``"mp3"``.
-    ``None`` for a missing or blank label.
-
-    This is the *codec fact* inside a format label, with no opinion about
-    whether the rank model knows that codec — ``_codec_family_of`` adds that
-    opinion. Callers that compare a format label against a plain codec name
-    (a snapshot container, a Beets codec label, a lossy media-pair table) want
-    this one: a contract label like ``"mp3 v0"`` is still an MP3, and reducing
-    it here is what stops the contract from reading as an unknown codec.
-    """
+def _codec_family_of(format_hint: str | None) -> str:
+    """First token of format, lowercased — "opus 128" → "opus", "MP3" → "mp3"."""
     if format_hint is None:
-        return None
+        return "unknown"
     first = format_hint.strip().lower().split(None, 1)
     if not first or not first[0]:
-        return None
-    return first[0]
-
-
-def _codec_family_of(format_hint: str | None) -> str:
-    """Rank-model codec family for a format label, or ``"unknown"``."""
-    token = format_codec_token(format_hint)
-    if token is not None and token in _KNOWN_CODEC_FAMILIES:
+        return "unknown"
+    token = first[0]
+    if token in _KNOWN_CODEC_FAMILIES:
         return token
     return "unknown"
+
+
+def _parse_vbr_level(format_hint: str) -> int | None:
+    """Parse V-level from a label like "mp3 v0" / "mp3 v9". Returns None otherwise.
+
+    The only producer of such a label is Cratedigger's own lossless → V0
+    conversion, which names the target it converted to. Nothing reads a V
+    level out of a file's own LAME header — a peer-writable tag is not
+    evidence (issue #1145).
+    """
+    parts = format_hint.strip().lower().split()
+    if len(parts) < 2 or parts[0] != "mp3":
+        return None
+    quality = parts[1]
+    if len(quality) >= 2 and quality[0] == "v" and quality[1:].isdigit():
+        level = int(quality[1:])
+        if 0 <= level <= 9:
+            return level
+    return None
 
 
 def _parse_bitrate_label(format_hint: str) -> int | None:
@@ -466,7 +468,9 @@ def quality_rank(
         1. format_hint is None and bitrate_kbps is None → UNKNOWN.
         2. First token of format_hint in cfg.lossless_codecs → LOSSLESS.
         3. Explicit VBR label ("mp3 v0"): index into cfg.mp3_vbr_levels.
-           Label is self-certifying — bitrate is irrelevant here.
+           Label is self-certifying — bitrate is irrelevant here. The only
+           producer of such a label is our own lossless → V0 conversion
+           naming its target; nothing mints one from a file's LAME header.
         4. Explicit bitrate label ("opus 128"): classify declared bitrate
            against the matching codec's CodecRankBands. The label is a
            contract — we converted to this target, so the declaration wins
@@ -476,12 +480,11 @@ def quality_rank(
            including MP3, has exactly one table (issue #1145).
         6. Unknown codec → UNKNOWN (never promote garbage).
 
-    No step reads an encoding mode. ``is_cbr`` used to select between two MP3
-    ladders 75 kbps apart, on a boolean derived from per-track bitrate
-    uniformity — not an encoder-mode detector, and unknowable for the 4,331 of
-    10,036 live MP3 items whose LAME tag is absent. A VBR encode is promoted
-    above the single ladder only by a proven ``-V`` contract at step 3
-    (``lib.quality.encoder_contract``).
+    No step reads an encoding mode (issue #1145). ``is_cbr`` used to select
+    between two MP3 ladders 75 kbps apart, on a boolean derived from per-track
+    bitrate uniformity — not an encoder-mode detector. One odd track flipped
+    it, and with it the album's whole tier. There is one MP3 table now, so a
+    measured MP3 ranks on its bitrate alone.
     """
     if format_hint is None and bitrate_kbps is None:
         return QualityRank.UNKNOWN
@@ -494,7 +497,7 @@ def quality_rank(
 
     # Step 3 — explicit VBR V-level label
     if format_hint is not None:
-        vbr_level = mp3_vbr_contract_level(format_hint)
+        vbr_level = _parse_vbr_level(format_hint)
         if vbr_level is not None:
             return cfg.mp3_vbr_levels[vbr_level]
 
@@ -639,9 +642,13 @@ def gate_rank(
     (set upstream only when the grade is suspect/likely_transcode — see
     ``_check_quality_gate_core()``), classify that estimate against the MP3
     band table and take the lower rank. This catches fake 320s and legacy
-    low-spectral transcodes. The MP3 spectral class ladder is drawn from the
-    same nominal kbps values as that table (96/112/128/160/192/224/256/320),
-    which is why it is the right table to read the estimate through.
+    low-spectral transcodes. The estimate is a NOMINAL MP3 bitrate class
+    (``lib/spectral_check.py``'s ``LAME_LOWPASS``:
+    96/112/128/160/192/224/256/320), and ``cfg.mp3``'s four thresholds are
+    drawn from that same ladder — which is why it is the right table to read
+    the estimate through. Before issue #1145 the second, more generous MP3
+    table made that choice load-bearing enough to need its own helper; with
+    one table there is nothing left to choose.
     """
     rank = measurement_rank(current, cfg, target_contract=target_contract)
     if verified_lossless_proof:

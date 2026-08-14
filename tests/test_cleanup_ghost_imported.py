@@ -39,8 +39,7 @@ def _make_beets_db(path: str) -> None:
             format TEXT,
             bitrate INTEGER,
             samplerate INTEGER,
-            bitdepth INTEGER,
-            encoder_settings TEXT
+            bitdepth INTEGER
         );
     """)
     conn.commit()

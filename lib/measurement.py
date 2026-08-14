@@ -606,7 +606,7 @@ def _needs_spectral_check(
 ) -> bool:
     """Decide whether to run spectral analysis as a preimport gate.
 
-    Two rules, both about the CODEC and nothing else:
+    Three rules, all about the CODEC and nothing else:
 
       - A caller-classified supported lossless source (FLAC, WAV, ALAC,
         including ALAC-in-M4A) → run. Verification requires affirmative
@@ -624,14 +624,12 @@ def _needs_spectral_check(
     transcode re-encoded at a high bitrate genuinely HAS a high average, so
     clearing the threshold says nothing about what the audio came from.
 
-    Issue #1145 also lets a candidate carry an ``mp3 vN`` contract minted
-    from its own LAME tag. Together with the skip that was a complete
-    self-certification route: write ``-V 0``, encode above the threshold,
-    never be measured, and be labelled TRANSPARENT on the strength of the
-    tag alone. A peer-supplied tag can still set the LABEL. It can no longer
-    buy an escape from measurement — a forged ``-V 0`` now meets its own
-    spectral cliff, and the clamp in ``compare_quality`` demotes it on the
-    evidence.
+    ``lib.quality.gates.spectral_gate_trigger`` is the simulator/Decisions-tab
+    mirror of this helper, and it does NOT read the same input: it is handed
+    an already-resolved ``codec_family``, which fails closed to ``None`` on a
+    mixed-codec album, where the substring test below still says True for any
+    filetype naming MP3. That divergence is deliberate and is documented in
+    full on the mirror; it only ever makes the mirror withhold an opinion.
 
     This helper is pure: filesystem enumeration and any M4A codec probe happen
     once at the measurement boundary and arrive as ``lossless_candidate``.
