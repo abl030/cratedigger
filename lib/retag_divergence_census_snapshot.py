@@ -22,6 +22,7 @@ filesystem beyond the one snapshot file it owns.
 
 from __future__ import annotations
 
+import json
 import os
 
 import msgspec
@@ -58,8 +59,23 @@ def write_retag_divergence_census_snapshot(
     """Publish ``snapshot`` at ``path`` in one atomic same-directory
     rename. A reader never observes a partially written file; a caller
     whose write raises (this propagates, never swallowed) has left any
-    prior file at ``path`` untouched."""
-    _atomic_write_bytes(path, msgspec.json.encode(snapshot))
+    prior file at ``path`` untouched.
+
+    Encodes via stdlib ``json.dumps`` (default ``ensure_ascii=True``),
+    not ``msgspec.json.encode`` (#1142 review N2): a Beets item path
+    decoded from non-UTF-8 filesystem bytes carries a lone surrogate
+    codepoint (``os.fsdecode``'s ``surrogateescape`` shape), which
+    ``msgspec.json.encode`` refuses to encode at all (strict UTF-8) —
+    the exact same string the pre-existing CLI/API JSON output (also
+    stdlib ``json.dumps``) already tolerates by escaping it to a plain
+    ASCII ``\\udcXX`` sequence. ``msgspec.to_builtins`` only converts
+    the Struct to plain dicts/lists/strings — it never touches string
+    content — so the round trip stays exactly as strict about
+    STRUCTURE as the previous ``msgspec.json`` calls, just tolerant of
+    this one real-world string shape.
+    """
+    data = json.dumps(msgspec.to_builtins(snapshot)).encode("ascii")
+    _atomic_write_bytes(path, data)
 
 
 def read_retag_divergence_census_snapshot(
@@ -69,15 +85,26 @@ def read_retag_divergence_census_snapshot(
     never published one yet — a real, honest state, not an error.
 
     Malformed content (a bit-rotted or hand-edited file — atomic
-    publication rules out a partial write from this module itself)
-    raises ``msgspec.DecodeError``/``msgspec.ValidationError``; callers
-    decide how to present that distinctly from "missing"."""
+    publication rules out a partial write from this module itself) can
+    raise ``UnicodeDecodeError`` (not ASCII), ``json.JSONDecodeError``
+    (not valid JSON), or ``msgspec.ValidationError`` (valid JSON, wrong
+    shape) — callers decide how to present any of those distinctly from
+    "missing". Decodes via stdlib ``json.loads`` then ``msgspec.convert``
+    for strict structural validation — the tolerant-encode counterpart
+    of :func:`write_retag_divergence_census_snapshot`; see its docstring
+    for why (#1142 review N2). ``msgspec.convert`` validates the
+    already-parsed Python object's shape/types exactly as strictly as
+    ``msgspec.json.decode`` did — it just never re-checks the string
+    VALUES for UTF-8 encodability, since they are already live Python
+    ``str`` objects at that point.
+    """
     try:
         with open(path, "rb") as fh:
             data = fh.read()
     except FileNotFoundError:
         return None
-    return msgspec.json.decode(data, type=RetagDivergenceCensusSnapshot)
+    decoded = json.loads(data.decode("ascii"))
+    return msgspec.convert(decoded, type=RetagDivergenceCensusSnapshot)
 
 
 __all__ = [

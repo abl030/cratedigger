@@ -523,6 +523,35 @@ class TestPipelineDashboardRetagDivergenceCensusContract(_FakeDbWebServerCase):
         self.assertIsNone(census["snapshot"])
         self.assertIsNotNone(census["error"])
 
+    def test_unreadable_state_on_permission_error(self) -> None:
+        """N4 (#1142 review) — a filesystem-level read failure (denied
+        permissions, or the path resolving to a directory) must ALSO
+        never 500 the whole dashboard, not just a content-decode
+        failure."""
+        import web.server as srv
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = retag_divergence_census_snapshot_path(tmpdir)
+            write_retag_divergence_census_snapshot(path, _snapshot("clean"))
+            with (
+                _retag_census_snapshot_path_set(path),
+                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+                patch(
+                    "lib.retag_divergence_census_snapshot.open",
+                    side_effect=PermissionError("denied"),
+                ),
+                self.assertLogs(
+                    "web.routes.pipeline_dashboard", level="ERROR",
+                ),
+            ):
+                status, data = self._get("/api/pipeline/dashboard")
+
+        self.assertEqual(status, 200)
+        census = data["retag_divergence_census"]
+        self.assertEqual(census["state"], "unreadable")
+        self.assertIsNone(census["snapshot"])
+        self.assertIsNotNone(census["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

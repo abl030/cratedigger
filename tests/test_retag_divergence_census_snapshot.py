@@ -16,7 +16,9 @@ import unittest
 from unittest.mock import patch
 
 from lib.retag_divergence_audit import (
+    RetagDivergenceAlbum,
     RetagDivergenceCounts,
+    RetagDivergenceItem,
     RetagDivergenceReport,
     RetagDivergenceStatus,
 )
@@ -68,6 +70,48 @@ class TestReadRetagDivergenceCensusSnapshot(unittest.TestCase):
             write_retag_divergence_census_snapshot(path, snapshot)
             read_back = read_retag_divergence_census_snapshot(path)
 
+        self.assertEqual(read_back, snapshot)
+
+    def test_round_trip_preserves_a_lone_surrogate_path(self) -> None:
+        """N2 (#1142 review) — a Beets item path decoded from non-UTF-8
+        filesystem bytes carries a lone surrogate codepoint (Python's
+        ``os.fsdecode``/``surrogateescape`` shape for a byte that isn't
+        valid UTF-8). ``msgspec.json.encode`` requires strict UTF-8 and
+        raises on exactly this string, even though the pre-existing CLI/
+        API JSON output (stdlib ``json.dumps``, which escapes it to a
+        plain ASCII ``\\udcXX`` sequence) already tolerates it — this
+        module must round-trip the same real-world path without
+        crashing the whole nightly write."""
+        surrogate_path = "/library/Weird\udcffAlbum/01.flac"
+        item = RetagDivergenceItem(
+            path=surrogate_path, item_class="diverges",
+            file_mb_albumid="deadbeef", detail=None,
+        )
+        album = RetagDivergenceAlbum(
+            album_id=1, db_mb_albumid="cafef00d",
+            album_class="diverges", item_count=1, items=(item,),
+        )
+        report = RetagDivergenceReport(
+            status="divergence_found", complete=True,
+            counts=RetagDivergenceCounts(1, 1, 0, 0, 1, 0, 0, 0),
+            albums=(album,),
+        )
+        snapshot = RetagDivergenceCensusSnapshot(
+            generated_at="2026-08-14T09:00:00+00:00",
+            duration_seconds=1.0,
+            report=report,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "retag-divergence-census.json")
+
+            write_retag_divergence_census_snapshot(path, snapshot)
+            read_back = read_retag_divergence_census_snapshot(path)
+
+        assert read_back is not None
+        self.assertEqual(
+            read_back.report.albums[0].items[0].path, surrogate_path,
+        )
         self.assertEqual(read_back, snapshot)
 
 

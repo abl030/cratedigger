@@ -4,6 +4,7 @@ Split from web/routes/pipeline.py (#522) — mirrors
 ``web/js/pipeline_dashboard.js`` on the frontend side.
 """
 
+import json
 import logging
 
 import msgspec
@@ -69,10 +70,18 @@ def _dashboard_retag_divergence_census() -> dict[str, object]:
         ``duration_seconds``, ``report``). The report's OWN ``status``
         (clean/divergence_found/incomplete/beets_unavailable) is nested
         inside — this route makes no claim about it.
-      * ``"unreadable"`` — a snapshot file exists but could not be
-        decoded (bit-rotted or hand-edited outside the atomic publish
-        path). Logged; never crashes the whole dashboard route over one
-        card.
+      * ``"unreadable"`` — a snapshot file exists but could not be read
+        or decoded: a filesystem-level failure (``OSError`` — denied
+        permissions, the path resolving to a directory, …) or malformed
+        content (bit-rotted or hand-edited outside the atomic publish
+        path — ``UnicodeDecodeError``/``json.JSONDecodeError``/
+        ``msgspec.ValidationError``, matching
+        ``read_retag_divergence_census_snapshot``'s own documented
+        exception contract). Logged; never crashes the whole dashboard
+        route over one card (#1142 review N4) — ``FileNotFoundError`` is
+        NOT in this set: that one is handled inside the read helper and
+        surfaces as the ordinary ``"missing"`` state below, not an
+        error.
     """
     s = _server()
     path = s.retag_census_snapshot_path
@@ -80,7 +89,10 @@ def _dashboard_retag_divergence_census() -> dict[str, object]:
         return {"state": "missing", "error": None, "snapshot": None}
     try:
         snapshot = read_retag_divergence_census_snapshot(path)
-    except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+    except (
+        OSError, UnicodeDecodeError, json.JSONDecodeError,
+        msgspec.ValidationError,
+    ) as exc:
         log.exception(
             "retag divergence census snapshot at %s is unreadable", path,
         )

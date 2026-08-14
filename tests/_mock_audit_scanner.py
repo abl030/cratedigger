@@ -497,6 +497,10 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.mbid_replace_service.delete_wrong_match_group': 9,
     'lib.quality.full_pipeline_decision_from_evidence': 1,
     'lib.quarantine_triage_service.os.scandir': 1,
+    # Leaf filesystem boundary: proves the dashboard's census card reads
+    # OSError (denied permissions, IsADirectoryError, ...) as "unreadable"
+    # rather than 500ing the whole dashboard (#1142 review N4).
+    'lib.retag_divergence_census_snapshot.open': 1,
     # Leaf filesystem boundary, mirroring lib.quarantine_triage_service.os.
     # scandir above: proves lib.retag_divergence_census_snapshot's atomic
     # write never touches a prior published snapshot when the final rename
