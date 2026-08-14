@@ -2535,6 +2535,17 @@ in {
         Type = "oneshot";
         User = cfg.user;
         Group = cfg.group;
+        # #1142: the runner calls enforce_beets_startup(role="web") like
+        # cratedigger-web/cratedigger-import-preview-worker, so it owes the
+        # same read-only state-file bind those observer-role units use
+        # (beetsObserverReadOnlyPaths) — otherwise the host-writable
+        # cratedigger-ops group permission on state.pickle trips the
+        # startup contract's state_writable_by_reader check. No
+        # ProtectSystem/ReadWritePaths sandbox: unlike the CD-SEC-04 units
+        # above, this oneshot accepts no untrusted network/media input, and
+        # it still needs plain host write access to publish its snapshot
+        # into cfg.stateDir.
+        BindReadOnlyPaths = beetsObserverReadOnlyPaths;
         ExecStart = "${retagDivergenceCensusPkg}/bin/cratedigger-retag-census";
         WorkingDirectory = cfg.stateDir;
         # A measured live unbounded whole-library scan (~93,700 files)
