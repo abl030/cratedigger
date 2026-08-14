@@ -32,6 +32,7 @@ export function renderPipelineDashboard(navHtml) {
       ${renderRedisCard(redis)}
       ${renderCoverageCard(coverageWithRates)}
       ${renderDiskCoverageCard(data.disk_coverage)}
+      ${renderRetagDivergenceCensusCard(data.retag_divergence_census)}
       ${renderWantedTrendCard(coverageWithRates.wanted_trend || {})}
       ${renderPeersCard(peers)}
       ${renderSearchCard(searches)}
@@ -256,6 +257,103 @@ function renderDriftRow(r) {
           <span>#${r.id} ${esc(r.artist_name || '?')} — ${esc(r.album_title || '?')}</span>
           <strong class="metric-bad">${esc(r.status)}</strong>
         </div>${action}`;
+}
+
+/**
+ * Render the daily whole-library retag-divergence census card (#1142) —
+ * Beets DB identity vs. installed file tags. Deliberately a SEPARATE
+ * card from Disk Coverage above (pipeline-ledger vs. Beets DB): the two
+ * drift questions are independent and must never be conflated in the UI.
+ *
+ * Reads a PERSISTED snapshot (`GET /api/pipeline/dashboard` embeds it
+ * read-only, per `web/routes/pipeline_dashboard.py`) — this module never
+ * triggers a scan. `state` mirrors the route's own three-way honest
+ * split: "missing" (no daily run has published yet), "unreadable" (a
+ * corrupt snapshot file — logged server-side, never a 500), "ok" (a
+ * real published report). Only non-agreeing albums are ever listed
+ * (the whole-library report's own contract), so no artificial
+ * client-side truncation is needed at the live population size this was
+ * built for (single digits) — see the module's own PR body for the
+ * measured live count.
+ * @param {any} census
+ * @returns {string}
+ */
+function renderRetagDivergenceCensusCard(census) {
+  const c = census || {};
+  const state = c.state || 'missing';
+  if (state === 'missing') {
+    return `
+      <div class="dashboard-card dashboard-wide">
+        <div class="dashboard-card-title">Beets DB &harr; File Tags Drift</div>
+        <div class="metric-list">
+          <div class="metric-row"><span>Status</span><strong class="metric-muted">no census published yet</strong></div>
+        </div>
+      </div>
+    `;
+  }
+  if (state === 'unreadable') {
+    return `
+      <div class="dashboard-card dashboard-wide">
+        <div class="dashboard-card-title">Beets DB &harr; File Tags Drift</div>
+        <div class="metric-list">
+          <div class="metric-row"><span>Status</span><strong class="metric-bad">snapshot unreadable</strong></div>
+          <div class="metric-row"><span>Error</span><strong>${esc(c.error || '')}</strong></div>
+        </div>
+      </div>
+    `;
+  }
+  const snapshot = c.snapshot || {};
+  const report = snapshot.report || {};
+  const counts = report.counts || {};
+  const albums = Array.isArray(report.albums) ? report.albums : [];
+  const statusClass = report.status === 'divergence_found' ? 'metric-bad'
+    : report.status === 'clean' ? 'metric-good' : 'metric-warn';
+  return `
+    <div class="dashboard-card dashboard-wide">
+      <div class="dashboard-card-title">Beets DB &harr; File Tags Drift</div>
+      <div class="metric-list">
+        <div class="metric-row"><span>Last run</span><strong>${snapshot.generated_at ? awstDateTime(snapshot.generated_at) : 'n/a'}</strong></div>
+        <div class="metric-row"><span>Duration</span><strong>${formatDuration(snapshot.duration_seconds)}</strong></div>
+        <div class="metric-row"><span>Result</span><strong class="${statusClass}">${esc(report.status || 'unknown')}</strong></div>
+        <div class="metric-row"><span>Albums scanned</span><strong>${formatCount(counts.albums_scanned)}</strong></div>
+        <div class="metric-row"><span>Listed (non-agreeing)</span><strong class="${albums.length ? 'metric-warn' : 'metric-good'}">${formatCount(albums.length)}</strong></div>
+        ${albums.map(a => renderRetagDivergenceAlbumRow(a)).join('')}
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * One retag-divergence album row, wrapped in an id'd container so the
+ * per-album recheck handler (`pipeline.js::recheckRetagDivergenceAlbum`)
+ * can patch just this row's `innerHTML` after a fresh check, instead of
+ * reloading the whole dashboard.
+ * @param {any} album
+ * @returns {string}
+ */
+function renderRetagDivergenceAlbumRow(album) {
+  return `
+    <div class="retag-album-row" id="retag-album-${album.album_id}">
+      ${renderRetagDivergenceAlbumRowInner(album)}
+    </div>
+  `;
+}
+
+export function renderRetagDivergenceAlbumRowInner(album) {
+  const classClass = album.album_class === 'agrees' ? 'metric-good'
+    : album.album_class === 'diverges' || album.album_class === 'file_tag_present_db_absent'
+      ? 'metric-bad'
+      : 'metric-warn';
+  return `
+    <div class="metric-row">
+      <span>Album #${album.album_id} <code title="${esc(album.db_mb_albumid || '')}">${esc(album.db_mb_albumid || '(none)')}</code></span>
+      <strong class="${classClass}">${esc(album.album_class)}</strong>
+    </div>
+    <div class="metric-row drift-row-action">
+      <button class="p-btn" onclick="window.recheckRetagDivergenceAlbum(${album.album_id}, this)">Recheck</button>
+      <span class="drift-row-note" id="retag-album-note-${album.album_id}"></span>
+    </div>
+  `;
 }
 
 function renderCoverageCard(coverage) {
@@ -762,6 +860,9 @@ export const __test__ = {
   renderMatchRateChart,
   renderPeerBrowseHeavyQueries,
   renderPeersCard,
+  renderRetagDivergenceAlbumRow,
+  renderRetagDivergenceAlbumRowInner,
+  renderRetagDivergenceCensusCard,
   renderUnfindableBacklogChart,
   renderUnfindableCard,
   renderWantedTrendCard,

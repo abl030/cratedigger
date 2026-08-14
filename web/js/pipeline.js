@@ -18,7 +18,10 @@ import {
 import { renderSearchPlanDetail } from './search_plan.js';
 import { loadLongTail, renderLongTailBody } from './long_tail.js';
 import { restoreLongTailConsoles } from './long_tail_console.js';
-import { renderPipelineDashboard as renderDashboardCards } from './pipeline_dashboard.js';
+import {
+  renderPipelineDashboard as renderDashboardCards,
+  renderRetagDivergenceAlbumRowInner,
+} from './pipeline_dashboard.js';
 import {
   qualityToneClass,
   spectralGradeClass,
@@ -203,6 +206,58 @@ export async function mergeRekeyRequest(requestId, btn) {
       note.className = 'drift-row-note metric-bad';
     }
     toast('Merge-rekey request failed', true);
+  }
+}
+
+/**
+ * Operator action (#1142): a cheap, explicit per-album retag-divergence
+ * recheck. Called from the "Beets DB ↔ File Tags Drift" card's
+ * "Recheck" button (`pipeline_dashboard.js::renderRetagDivergenceAlbumRowInner`).
+ * Read-only — never mutates Beets, PostgreSQL, or the filesystem, and
+ * (unlike `mergeRekeyRequest`) never reloads the whole dashboard: the
+ * whole point of a per-album check is to answer for THIS row's own
+ * files without re-running the ~200s whole-library scan, so a
+ * successful recheck patches just this row's DOM in place with the
+ * fresh classification.
+ *
+ * On refusal/failure the row's own inline note shows the outcome and
+ * the button re-arms for retry, mirroring `mergeRekeyRequest`.
+ *
+ * @param {number} albumId
+ * @param {HTMLButtonElement} btn
+ * @returns {Promise<void>}
+ */
+export async function recheckRetagDivergenceAlbum(albumId, btn) {
+  const note = document.getElementById(`retag-album-note-${albumId}`);
+  const container = document.getElementById(`retag-album-${albumId}`);
+  btn.disabled = true;
+  btn.textContent = 'Rechecking...';
+  try {
+    const r = await fetch(`${API}/api/audit/retag-divergence/album/${albumId}`);
+    const data = await r.json();
+    if (r.ok) {
+      if (container) {
+        container.innerHTML = renderRetagDivergenceAlbumRowInner(data);
+      }
+      toast(`Album #${albumId} rechecked: ${data.album_class}`);
+      return;
+    }
+    btn.disabled = false;
+    btn.textContent = 'Recheck';
+    const message = data.error || 'recheck failed';
+    if (note) {
+      note.textContent = message;
+      note.className = 'drift-row-note metric-bad';
+    }
+    toast(message, true);
+  } catch (_e) {
+    btn.disabled = false;
+    btn.textContent = 'Recheck';
+    if (note) {
+      note.textContent = 'Recheck request failed';
+      note.className = 'drift-row-note metric-bad';
+    }
+    toast('Recheck request failed', true);
   }
 }
 

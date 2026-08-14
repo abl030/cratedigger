@@ -361,5 +361,83 @@ console.log('renderDiskCoverageCard() renders no drift rows or buttons when noth
   assertExcludes(html, 'mergeRekeyRequest', 'no button rendered with an empty drift list');
 }
 
+console.log('renderRetagDivergenceCensusCard() honestly shows the missing state');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'missing', error: null, snapshot: null,
+  });
+  assertContains(html, 'Beets DB', 'card title mentions Beets DB');
+  assertContains(html, 'File Tags', 'card title mentions file tags — distinct from Disk Coverage');
+  assertContains(html, 'no census published yet', 'honest missing-state copy');
+  assertExcludes(html, 'Disk Coverage', 'never confused with the ledger-vs-beets Disk Coverage card');
+}
+console.log('renderRetagDivergenceCensusCard() shows the unreadable state without crashing');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'unreadable', error: 'DecodeError: bad json', snapshot: null,
+  });
+  assertContains(html, 'unreadable', 'unreadable state copy rendered');
+  assertContains(html, 'DecodeError: bad json', 'error detail rendered');
+}
+console.log('renderRetagDivergenceCensusCard() renders a clean snapshot with zero listed albums');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    snapshot: {
+      generated_at: '2026-08-14T09:00:00+00:00',
+      duration_seconds: 196.4,
+      report: {
+        status: 'clean', complete: true,
+        counts: {albums_scanned: 93700, items_scanned: 93700},
+        albums: [],
+      },
+    },
+  });
+  assertContains(html, 'metric-good">clean', 'clean status rendered with good class');
+  assertContains(html, '93,700', 'albums_scanned count rendered');
+  assertExcludes(html, 'window.recheckRetagDivergenceAlbum', 'no recheck buttons with nothing listed');
+}
+console.log('renderRetagDivergenceCensusCard() lists a divergent album with a recheck button');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    snapshot: {
+      generated_at: '2026-08-14T09:00:00+00:00',
+      duration_seconds: 196.4,
+      report: {
+        status: 'divergence_found', complete: true,
+        counts: {albums_scanned: 93700, items_scanned: 93700},
+        albums: [{
+          album_id: 6612, db_mb_albumid: 'd990b8af-0000-0000-0000-000000000000',
+          album_class: 'diverges', item_count: 8, items: [],
+        }],
+      },
+    },
+  });
+  assertContains(html, 'metric-bad">divergence_found', 'divergence status rendered with bad class');
+  assertContains(html, 'id="retag-album-6612"', 'per-album container id rendered for in-place patching');
+  assertContains(html, 'window.recheckRetagDivergenceAlbum(6612, this)', 'recheck button wired with the album id');
+  assertContains(html, 'id="retag-album-note-6612"', 'inline note slot rendered for this album');
+}
+console.log('renderRetagDivergenceCensusCard() escapes the db_mb_albumid value');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    snapshot: {
+      generated_at: '2026-08-14T09:00:00+00:00',
+      duration_seconds: 1.0,
+      report: {
+        status: 'divergence_found', complete: true,
+        counts: {},
+        albums: [{
+          album_id: 1, db_mb_albumid: '<script>x</script>',
+          album_class: 'diverges', item_count: 1, items: [],
+        }],
+      },
+    },
+  });
+  assertExcludes(html, '<script>x</script>', 'db_mb_albumid is escaped');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

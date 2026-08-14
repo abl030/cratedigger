@@ -9,7 +9,7 @@ import { state } from './state.js';
 import { searchArtists, cancelBrowseSearch, setSearchType, setBrowseSource, openBrowseArtist, closeBrowseArtist, reloadBrowseArtist, invalidateBrowseArtist, closeVaFallback } from './browse.js';
 import { loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
 import { loadRecents, setRecentsFilter, setRecentsSub, renderRecentsItems } from './recents.js';
-import { loadPipeline, loadPipelineDashboard, mergeRekeyRequest, setPipelineView, renderPipeline, toggleCoverageMatchGraph, toggleDetail, deleteRequest, updateStatus } from './pipeline.js';
+import { loadPipeline, loadPipelineDashboard, mergeRekeyRequest, recheckRetagDivergenceAlbum, setPipelineView, renderPipeline, toggleCoverageMatchGraph, toggleDetail, deleteRequest, updateStatus } from './pipeline.js';
 import { loadLongTail, setLongTailBand, onLongTailSearchInput } from './long_tail.js';
 import { toggleLongTailDetail, toggleLongTailPeers, checkYoutube, pickYoutubeRescue, longTailAcceptSibling, longTailSetIntent, longTailSetImported, longTailDeleteRequest } from './long_tail_console.js';
 import { checkYoutubeRescue } from './youtube_rescue_control.js';
@@ -183,6 +183,7 @@ Object.assign(window, {
   loadPipeline,
   loadPipelineDashboard,
   mergeRekeyRequest,
+  recheckRetagDivergenceAlbum,
   setPipelineView,
   renderPipeline,
   toggleCoverageMatchGraph,

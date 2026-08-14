@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_pipeline.mjs
  */
 
-import { __test__, mergeRekeyRequest } from '../web/js/pipeline.js';
+import { __test__, mergeRekeyRequest, recheckRetagDivergenceAlbum } from '../web/js/pipeline.js';
 import { state } from '../web/js/state.js';
 
 let passed = 0;
@@ -466,6 +466,124 @@ console.log('mergeRekeyRequest() refusal note falls back to the raw error field 
 
   assertEqual(dom.note.textContent, 'rekey_refused: route-level error text',
     'falls back to the route-level "error" field when error_message is absent');
+}
+
+// --- issue #1142: per-album retag-divergence recheck ---
+
+/**
+ * DOM stand-in for one retag-divergence album row: the id'd container
+ * `recheckRetagDivergenceAlbum` patches in place, its inline note slot,
+ * and `toast` — mirrors `installDriftDom` above.
+ */
+function installRetagAlbumDom(albumId) {
+  const container = { innerHTML: '' };
+  const toast = { textContent: '', className: '', style: { display: 'none' } };
+  const note = { textContent: '', className: '' };
+  const elements = new Map([
+    [`retag-album-${albumId}`, container],
+    ['toast', toast],
+    [`retag-album-note-${albumId}`, note],
+  ]);
+  globalThis.document = {
+    getElementById(id) {
+      return elements.has(id) ? elements.get(id) : null;
+    },
+  };
+  globalThis.setTimeout = (fn) => {
+    fn();
+    return 0;
+  };
+  return { container, toast, note };
+}
+
+console.log('recheckRetagDivergenceAlbum() success path GETs, patches the row in place, and toasts');
+{
+  const dom = installRetagAlbumDom(6612);
+  const btn = { disabled: false, textContent: 'Recheck' };
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url), options });
+    return {
+      ok: true,
+      json: async () => ({
+        album_id: 6612, db_mb_albumid: 'd990b8af-0000-0000-0000-000000000000',
+        album_class: 'agrees', item_count: 8, items: [],
+      }),
+    };
+  };
+
+  await recheckRetagDivergenceAlbum(6612, btn);
+
+  assertEqual(calls.length, 1, 'exactly one fetch issued');
+  assertEqual(calls[0].url, '/api/audit/retag-divergence/album/6612',
+    'GETs the exact per-album route');
+  assert(calls[0].options === undefined || calls[0].options.method === undefined
+    || calls[0].options.method === 'GET', 'uses GET, never POST — this is a read-only check');
+  assertContains(dom.container.innerHTML, 'agrees', 'row patched with the fresh classification');
+  assertContains(dom.container.innerHTML, 'window.recheckRetagDivergenceAlbum(6612, this)',
+    'patched row keeps its own recheck button wired for a further recheck');
+  assertEqual(dom.toast.textContent, 'Album #6612 rechecked: agrees', 'toasts the fresh result');
+  assertEqual(dom.toast.className, 'toast', 'success toast is not an error');
+  assertEqual(dom.note.textContent, '', 'success never writes the refusal note');
+}
+
+console.log('recheckRetagDivergenceAlbum() never reloads the whole dashboard on success');
+{
+  installRetagAlbumDom(6612);
+  const btn = { disabled: false, textContent: 'Recheck' };
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return {
+      ok: true,
+      json: async () => ({
+        album_id: 6612, db_mb_albumid: '', album_class: 'agrees',
+        item_count: 0, items: [],
+      }),
+    };
+  };
+
+  await recheckRetagDivergenceAlbum(6612, btn);
+
+  assert(!calls.includes('/api/pipeline/dashboard'),
+    'a per-album recheck never triggers a full dashboard reload');
+}
+
+console.log('recheckRetagDivergenceAlbum() not-found path re-arms the button and writes the inline note');
+{
+  const dom = installRetagAlbumDom(999);
+  const btn = { disabled: true, textContent: 'Rechecking...' };
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 404,
+    json: async () => ({ error: 'No Beets album with id 999' }),
+  });
+
+  await recheckRetagDivergenceAlbum(999, btn);
+
+  assertEqual(btn.disabled, false, 'the button re-arms for a retry');
+  assertEqual(btn.textContent, 'Recheck', 'the button label resets');
+  assertEqual(dom.note.textContent, 'No Beets album with id 999',
+    'the inline note names the exact error');
+  assertEqual(dom.note.className, 'drift-row-note metric-bad', 'the inline note uses the bad tone');
+  assertEqual(dom.toast.className, 'toast error', 'a refusal toast is an error');
+}
+
+console.log('recheckRetagDivergenceAlbum() network-error path re-arms the button with a generic note');
+{
+  const dom = installRetagAlbumDom(6612);
+  const btn = { disabled: true, textContent: 'Rechecking...' };
+  globalThis.fetch = async () => {
+    throw new TypeError('network down');
+  };
+
+  await recheckRetagDivergenceAlbum(6612, btn);
+
+  assertEqual(btn.disabled, false, 'the button re-arms after a network failure');
+  assertEqual(btn.textContent, 'Recheck', 'the button label resets');
+  assertEqual(dom.note.textContent, 'Recheck request failed',
+    'the inline note falls back to a generic message with no response to read');
+  assertEqual(dom.toast.className, 'toast error', 'a network failure toast is an error');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
