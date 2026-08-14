@@ -488,6 +488,16 @@ invariant is enforceable at the systemd level; refusing it because storage
 is unavailable would violate that invariant at the one place it is
 currently guaranteed.
 
+`cratedigger-retag-census.service` (#1142) is likewise **never gated** by
+this probe — it never calls `probe_startup_paths`/`web_required_paths` at
+all. It touches only `cfg.stateDir` (its own `WorkingDirectory`, always
+provisioned by the same `systemd.tmpfiles.rules` entry every other unit
+relies on) and the external Beets authority (already validated by
+`enforce_beets_startup` before any scan runs); a write failure there
+surfaces directly as the unit's own non-zero exit
+(`scripts/run_retag_divergence_census.py`'s `EXIT_RUN_FAILED`), with no
+separate startup gate needed.
+
 This probe is an earlier, louder check, never the only one — every
 existing action-time authority check (the private-root/quarantine
 descriptor checks above, the Beets startup contract) still runs on every
@@ -505,6 +515,7 @@ when a unit refuses at startup:
 | `cratedigger-web` | `slskd.downloadDir`, `processingDir/albums`, validation staging root (if configured) | `stateDir` (CD-rip cache/spool); `processingDir/albums`, validation staging root (if configured, generic — never the private primitives, matching Wrong Matches/Bad Rip's own `shutil.rmtree`-based delete); `processingDir` root, `processingDir/preview` (private primitives) |
 | `cratedigger-youtube-ingest` | — | `youtubeIngest.tempDir`; validation staging root (unconditionally required whenever this unit is enabled — the module's own assertion guarantees it is set) |
 | `cratedigger-unfindable` | never gated | never gated |
+| `cratedigger-retag-census` | never gated | never gated |
 
 `cratedigger-web` deliberately excludes `slskd.downloadDir` from write:
 web only ever deletes from its own `wrong_matches`/`failed_imports`
@@ -614,7 +625,7 @@ See [`examples/cratedigger.nix`](../examples/cratedigger.nix) for the full worke
 
 ## Systemd units
 
-- `cratedigger-db-migrate.service` — oneshot, `restartIfChanged = true`, `RemainAfterExit = true`. Runs the schema migrator on every `nixos-rebuild switch`. The long-running workers (`cratedigger-web`, `cratedigger-importer`, `cratedigger-import-preview-worker`, `cratedigger-youtube-ingest`) `requires` it, so they cannot start against an un-migrated DB. `cratedigger.service` and `cratedigger-unfindable.service` deliberately do NOT — both are timer-driven with `restartIfChanged = false`, and this unit's `ExecStart` store path changes on every deploy, so a `requires` edge would propagate its every-switch restart as a SIGTERM to a mid-flight cycle; they use `wants`+`after` instead and gate on schema currency themselves at startup (`lib/migrator.py::assert_schema_current`) so a behind/missing schema still aborts them before any work runs.
+- `cratedigger-db-migrate.service` — oneshot, `restartIfChanged = true`, `RemainAfterExit = true`. Runs the schema migrator on every `nixos-rebuild switch`. The long-running workers (`cratedigger-web`, `cratedigger-importer`, `cratedigger-import-preview-worker`, `cratedigger-youtube-ingest`) `requires` it, so they cannot start against an un-migrated DB. `cratedigger.service` and `cratedigger-unfindable.service` deliberately do NOT — both are timer-driven with `restartIfChanged = false`, and this unit's `ExecStart` store path changes on every deploy, so a `requires` edge would propagate its every-switch restart as a SIGTERM to a mid-flight cycle; they use `wants`+`after` instead and gate on schema currency themselves at startup (`lib/migrator.py::assert_schema_current`) so a behind/missing schema still aborts them before any work runs. `cratedigger-retag-census.service` (#1142, below) has no relationship to this unit at all — it never touches the pipeline DB, so it neither requires, wants, nor gates on migration state.
 - `redis-cratedigger.service` — app-owned Redis server for peer cache and web metadata cache. `cratedigger.service` and `cratedigger-web.service` want/after it, but do not require it; runtime Redis failures degrade to cold-cache behavior.
 - `cratedigger.service` — oneshot pipeline run. `restartIfChanged = false` (the timer picks up new code on the next cycle). It orders after and wants external Beets readiness, but deliberately does not require it: restarting readiness must not terminate an active timer-owned cycle.
 - `cratedigger.timer` — starts the next cycle after the previous oneshot exits
@@ -639,6 +650,24 @@ See [`examples/cratedigger.nix`](../examples/cratedigger.nix) for the full worke
   preview outside the beets mutation lane.
 - `cratedigger-unfindable.service` — oneshot, `Type=oneshot`, `restartIfChanged = false`, `TimeoutStartSec=5h` (raised from `2h` alongside the `DEFAULT_BATCH_SIZE` bump below — issue #1112), runs as `cfg.user`. Wraps `scripts/run_unfindable_detection.py` via the `cratedigger-unfindable` wrapper bin. `wants = ["cratedigger-db-migrate.service"]` (not `requires` — see the migrate unit's entry above). Unlike `cratedigger.service`, its `ExecStartPre` wires ONLY the optional `slskdHealthCheck` (when `healthCheck.enable = true`) — it does NOT share `cratedigger.service`'s `preStartScript` (that clears the main pipeline's singleton lock, which this unit never owns; `nix/tests/module-vm.nix` asserts `cratedigger-pipeline-prestart` is absent from `cratedigger-unfindable.service`). A slskd outage that's already down BEFORE the run starts fails the health check and the unit fast, before any probe fires. An outage that starts MID-RUN is a different case (issue #1090): the oneshot's own bounded per-probe submit retry and circuit breaker handle it, and `scripts/run_unfindable_detection.py::_process_batch` returns a distinct exit code — `0` for a fully classified run, `EXIT_INCOMPLETE_RUN=3` when the circuit breaker tripped after a sustained run of slskd submit failures (`systemctl status` then shows the unit as failed; no operator action needed, the untouched candidate tail rolls into the next daily run via the normal cadence), `EXIT_CONFIG_ABORT=2` for the pre-existing missing-config/behind-schema abort before any work runs. Lives in its own systemd unit, NOT inline in the main `cratedigger.service` loop, because R20 ("the system never stops searching") forbids the regular search cadence from being throttled by detection state. Implements PR3 U13 (`docs/plans/2026-05-25-001-feat-search-plan-iteration-2-plan.md`); the #1090 submit-resilience hardening is documented in `docs/search-plan-iter2-deploy.md` § "Post-iteration-2 hardening — submit resilience (issue #1090)". The upstream module sets `Environment="PIPELINE_DB_DSN=..."` only; the downstream wrapper must augment `serviceConfig.EnvironmentFile` with the sops `cratedigger-pgpass` path (same pattern the wrapper uses for `cratedigger.service`) — see `docs/search-plan-iter2-deploy.md` § "PR3 — Detection + telemetry" for the exact incantation and the 2026-05-26 first-deploy gotcha.
 - `cratedigger-unfindable.timer` — `OnCalendar=daily`, `Persistent=true`, `RandomizedDelaySec=30min`. The 30-min jitter is purely local cron-collision avoidance (logrotate, postgres autovacuum on doc2); the single-operator install has no fleet to spread across. The daily fire processes `DEFAULT_BATCH_SIZE` (`lib/unfindable_detection_service.py`) rows per run with a ~7-day `PROBE_INTERVAL_DAYS` per-request cadence target. Raised 100 -> 240 (issue #1112, 2026-08-12): the wanted cohort had grown to ~1,300 rows, needing ~186 probes/day just to hold the backlog flat, which K=100 structurally could not sustain (observed due-backlog growing 624 -> 639 -> 685 over three days, oldest probe 15 days stale) — K=240 clears a ~1,300-row cohort inside the 7-day cadence window itself (`ceil(1300/240) = 6` days) with headroom for further cohort growth. Run health (cohort size, due backlog, batch outcomes, circuit-breaker trips) is persisted per run to `unfindable_run_metrics` (migration 077) and surfaced on the Pipeline dashboard's "Unfindable detection" card.
+- `cratedigger-retag-census.service` (#1142) — oneshot, `Type=oneshot`,
+  `restartIfChanged = false`, `TimeoutStartSec=30min`, runs as `cfg.user`.
+  Wraps `scripts/run_retag_divergence_census.py` via the
+  `cratedigger-retag-census` wrapper bin, admitting the runtime config the
+  same explicit `--config`/`--runtime-dir` way `cratedigger-web` does (not
+  the env-var-only shape `cratedigger-unfindable`/`pipeline-cli` use) so
+  its published snapshot lands in the exact `cfg.stateDir` the dashboard
+  route reads from. Runs the UNBOUNDED whole-library retag ``-W``
+  divergence census (`lib/retag_divergence_audit.py`) and atomically
+  publishes a snapshot (`lib/retag_divergence_census_snapshot.py`) — see
+  `docs/debugging-cli.md` § "Daily whole-library census snapshot +
+  dashboard card" for the full read/write contract and exit-code mapping.
+  Beets-only: `after`/`wants` name only `cfg.beets.runtime.readinessUnits`,
+  with NO `cratedigger-db-migrate.service` edge at all (unlike every other
+  unit in this list) — it never opens the pipeline DB.
+- `cratedigger-retag-census.timer` — `OnCalendar=daily`, `Persistent=true`,
+  `RandomizedDelaySec=30min`, mirroring `cratedigger-unfindable.timer`'s
+  own cadence/jitter rationale above.
 - `cratedigger-web.socket` — systemd-owned AF_UNIX listener at
   `/run/cratedigger-web/web.sock`, node `root:<web.accessGroup> 0660` beneath a
   separately managed `root:<web.accessGroup> 0750` directory.
@@ -657,8 +686,9 @@ Exactly four long-running units receive the shared systemd sandbox:
 `cratedigger-web.service`, `cratedigger-importer.service`,
 `cratedigger-import-preview-worker.service`, and
 `cratedigger-youtube-ingest.service`. The timer-driven
-`cratedigger.service`/`cratedigger-unfindable.service` and the migration
-oneshot deliberately remain outside this boundary.
+`cratedigger.service`/`cratedigger-unfindable.service`/
+`cratedigger-retag-census.service` (#1142) and the migration oneshot
+deliberately remain outside this boundary.
 
 Every sandboxed unit has `NoNewPrivileges=yes`, `PrivateTmp=yes`,
 `ProtectSystem=strict`, `ProtectHome=yes`, and

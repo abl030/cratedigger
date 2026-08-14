@@ -2350,5 +2350,64 @@ class TestQualityRankBandDefaultsMatchProduction(unittest.TestCase):
         self.assertNotIn("mp3_cbr", rendered)
 
 
+class TestRetagDivergenceCensusServiceShape(unittest.TestCase):
+    """#1142 review N8 — the daily retag-divergence census oneshot/timer
+    shape, mirroring cratedigger-unfindable's own systemd contract but
+    with no pipeline-DB dependency."""
+
+    @staticmethod
+    def _block(source: str, marker: str) -> str:
+        """The next ``{ ... }`` attrset body starting at ``marker``,
+        found via matching brace depth (nested attrsets inside are
+        common — e.g. ``serviceConfig``/``timerConfig``)."""
+        start = source.index(marker)
+        open_brace = source.index("{", start)
+        depth = 0
+        for i in range(open_brace, len(source)):
+            if source[i] == "{":
+                depth += 1
+            elif source[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return source[open_brace:i + 1]
+        raise AssertionError(f"unterminated block for {marker!r}")
+
+    def setUp(self) -> None:
+        source = MODULE_NIX.read_text(encoding="utf-8")
+        self.service_block = self._block(
+            source, "systemd.services.cratedigger-retag-census",
+        )
+        self.timer_block = self._block(
+            source, "systemd.timers.cratedigger-retag-census",
+        )
+
+    def test_service_is_a_oneshot_that_never_restarts_on_deploy(self) -> None:
+        self.assertIn('Type = "oneshot";', self.service_block)
+        self.assertIn("restartIfChanged = false;", self.service_block)
+
+    def test_service_runs_as_the_configured_cratedigger_user(self) -> None:
+        self.assertIn("User = cfg.user;", self.service_block)
+        self.assertIn("Group = cfg.group;", self.service_block)
+
+    def test_service_has_a_bounded_timeout(self) -> None:
+        self.assertIn("TimeoutStartSec = ", self.service_block)
+
+    def test_service_has_no_pipeline_db_dependency(self) -> None:
+        """Beets-only — unlike every other unit in this module, it must
+        name neither the migration unit nor the pipeline DSN anywhere in
+        its own block."""
+        self.assertNotIn("cratedigger-db-migrate", self.service_block)
+        self.assertNotIn("pipelineDsn", self.service_block)
+        self.assertNotIn("PIPELINE_DB_DSN", self.service_block)
+
+    def test_timer_fires_daily_with_persistence_and_jitter(self) -> None:
+        self.assertIn('OnCalendar = "daily";', self.timer_block)
+        self.assertIn("Persistent = true;", self.timer_block)
+        self.assertIn("RandomizedDelaySec = ", self.timer_block)
+
+    def test_timer_is_wanted_by_timers_target(self) -> None:
+        self.assertIn('wantedBy = ["timers.target"];', self.timer_block)
+
+
 if __name__ == "__main__":
     unittest.main()
