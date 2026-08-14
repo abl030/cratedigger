@@ -1014,6 +1014,7 @@ def _shared_module_worlds_rest() -> dict[str, object]:
             importer = unit "cratedigger-importer";
             preview = unit "cratedigger-import-preview-worker";
             web = unit "cratedigger-web";
+            census = unit "cratedigger-retag-census";
           };
       }
     '''
@@ -2015,7 +2016,11 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
             }
             typed_units[role] = unit
             self.assertLessEqual(readiness, set(unit["after"]), role)
-            if role == "main":
+            if role in ("main", "census"):
+                # Both are timer-driven, restartIfChanged=false oneshots
+                # (CLAUDE.md's migration-hold rationale): they intentionally
+                # use wants+after, never requires, so the readiness units'
+                # own restart-on-deploy never SIGTERMs a mid-flight run.
                 self.assertLessEqual(readiness, set(unit["wants"]), role)
                 self.assertTrue(
                     readiness.isdisjoint(unit["requires"]),
@@ -2025,7 +2030,11 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
                 self.assertLessEqual(readiness, set(unit["requires"]), role)
             self.assertNotIn("/etc/beets", unit["readWritePaths"], role)
         state = "/var/lib/beets/state.pickle"
-        for role in ("main", "preview", "web"):
+        for role in ("main", "preview", "web", "census"):
+            # #1142: the census oneshot calls enforce_beets_startup(role="web")
+            # and must bind the state file read-only exactly like the other
+            # web-role/observer callers, or the host-writable group
+            # permission trips state_writable_by_reader at startup.
             self.assertIn(f"-{state}", typed_units[role]["bindReadOnlyPaths"], role)
             self.assertNotIn(state, typed_units[role]["bindPaths"], role)
         self.assertIn(f"-{state}", typed_units["importer"]["bindPaths"])
@@ -2035,7 +2044,7 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
             self.assertIn("-/srv/beets", typed_units[role]["readWritePaths"], role)
         self.assertIn("-/srv/music", typed_units["main"]["bindReadOnlyPaths"])
         self.assertIn("-/srv/beets", typed_units["main"]["bindReadOnlyPaths"])
-        for role in ("main", "preview"):
+        for role in ("main", "preview", "census"):
             self.assertNotIn("/srv/music", typed_units[role]["readWritePaths"], role)
             self.assertNotIn("/srv/beets", typed_units[role]["readWritePaths"], role)
         text = MODULE_NIX.read_text(encoding="utf-8")
@@ -2407,6 +2416,16 @@ class TestRetagDivergenceCensusServiceShape(unittest.TestCase):
 
     def test_timer_is_wanted_by_timers_target(self) -> None:
         self.assertIn('wantedBy = ["timers.target"];', self.timer_block)
+
+    def test_service_binds_the_beets_state_file_read_only(self) -> None:
+        """The runner calls enforce_beets_startup(role="web"); it owes the
+        same beetsObserverReadOnlyPaths bind as the other web-role/observer
+        callers (see the real-eval assertion in
+        TestExternalBeetsRuntimeCapability.test_readiness_and_role_state_capabilities_evaluate
+        for the rendered-path proof, not just this source-text check)."""
+        self.assertIn(
+            "BindReadOnlyPaths = beetsObserverReadOnlyPaths;", self.service_block,
+        )
 
 
 if __name__ == "__main__":
