@@ -27,6 +27,15 @@ function assertExcludes(haystack, needle, msg) {
   }
 }
 
+function assert(condition, msg) {
+  if (condition) {
+    passed++;
+  } else {
+    failed++;
+    console.error(`  FAIL: ${msg}`);
+  }
+}
+
 console.log('renderCoverageCard() shows found-enqueue match rates');
 {
   state.pipelineMatchGraphOpen = false;
@@ -397,6 +406,72 @@ console.log('renderRetagDivergenceCensusCard() renders a clean snapshot with zer
   assertContains(html, '93,700', 'albums_scanned count rendered');
   assertExcludes(html, 'window.recheckRetagDivergenceAlbum', 'no recheck buttons with nothing listed');
 }
+console.log('retagDivergenceSnapshotAgeHours() computes hours since generated_at');
+{
+  const nowMs = Date.parse('2026-08-16T00:00:00+00:00');
+  assert(
+    __test__.retagDivergenceSnapshotAgeHours('2026-08-15T00:00:00+00:00', nowMs) === 24,
+    '24h old is 24',
+  );
+  assert(
+    __test__.retagDivergenceSnapshotAgeHours(null, nowMs) === null,
+    'missing generated_at is null, not NaN',
+  );
+  assert(
+    __test__.retagDivergenceSnapshotAgeHours('not a date', nowMs) === null,
+    'unparsable generated_at is null',
+  );
+}
+console.log('N5 (#1142 review) — stale boundary is exactly 36h; 36.0h is fresh, 36.01h is stale');
+{
+  const nowMs = Date.parse('2026-08-16T00:00:00+00:00');
+  const atBoundary = new Date(nowMs - 36 * 3600000).toISOString();
+  const justPastBoundary = new Date(nowMs - 36.01 * 3600000).toISOString();
+  assert(
+    __test__.retagDivergenceSnapshotIsStale(atBoundary, nowMs) === false,
+    'exactly 36h old is NOT stale (boundary is exclusive)',
+  );
+  assert(
+    __test__.retagDivergenceSnapshotIsStale(justPastBoundary, nowMs) === true,
+    'just past 36h old IS stale',
+  );
+}
+console.log('renderRetagDivergenceCensusCard() N5 — a fresh snapshot never reads stale');
+{
+  const fresh = new Date(Date.now() - 2 * 3600000).toISOString();
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    snapshot: {
+      generated_at: fresh,
+      duration_seconds: 196.4,
+      report: {
+        status: 'clean', complete: true,
+        counts: {albums_scanned: 93700},
+        albums: [],
+      },
+    },
+  });
+  assertExcludes(html, 'stale', 'a 2h-old snapshot never renders any "stale" text');
+  assertContains(html, 'metric-good">fresh', 'freshness row reads fresh');
+}
+console.log('renderRetagDivergenceCensusCard() N5 — a snapshot older than 36h reads stale with a warn tone');
+{
+  const stale = new Date(Date.now() - 40 * 3600000).toISOString();
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    snapshot: {
+      generated_at: stale,
+      duration_seconds: 196.4,
+      report: {
+        status: 'clean', complete: true,
+        counts: {albums_scanned: 93700},
+        albums: [],
+      },
+    },
+  });
+  assertContains(html, 'metric-warn">stale', 'freshness row reads stale with warn tone');
+  assertContains(html, '40.0h', 'stale label names the exact age');
+}
 console.log('renderRetagDivergenceCensusCard() lists a divergent album with a recheck button');
 {
   const html = __test__.renderRetagDivergenceCensusCard({
@@ -437,6 +512,58 @@ console.log('renderRetagDivergenceCensusCard() escapes the db_mb_albumid value')
     },
   });
   assertExcludes(html, '<script>x</script>', 'db_mb_albumid is escaped');
+}
+console.log('renderRetagDivergenceCensusCard() N1 — an incomplete report with nothing listed never reads green');
+{
+  // A world the daily writer itself cannot currently produce (incomplete
+  // always implies something listed for an unbounded, cursor-less scan —
+  // see lib/retag_divergence_audit.py), but the frontend must stay
+  // defensively correct on its own terms rather than trusting that
+  // backend invariant to hold forever.
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    snapshot: {
+      generated_at: '2026-08-14T09:00:00+00:00',
+      duration_seconds: 5.0,
+      report: {
+        status: 'incomplete', complete: true,
+        counts: {albums_scanned: 0},
+        albums: [],
+      },
+    },
+  });
+  assertContains(html, 'metric-warn">incomplete', 'incomplete status rendered with warn class');
+  // The Listed row's own tone must not be metric-good when status isn't
+  // clean, regardless of the zero count.
+  const listedRowMatch = html.match(/Listed \(non-agreeing\)<\/span><strong class="([^"]*)">0/);
+  assert(listedRowMatch !== null, 'Listed row with a 0 count is present');
+  assert(listedRowMatch[1] !== 'metric-good',
+    `Listed row must not be metric-good for status=incomplete, got ${listedRowMatch[1]}`);
+  const scannedRowMatch = html.match(/Albums scanned<\/span><strong class="([^"]*)">0/);
+  assert(scannedRowMatch !== null, 'Albums scanned row is present');
+  assert(scannedRowMatch[1] === 'metric-muted',
+    `Albums scanned must read muted (untrustworthy count) for status=incomplete, got ${JSON.stringify(scannedRowMatch[1])}`);
+}
+console.log('renderRetagDivergenceCensusCard() N1 — a clean report keeps Albums scanned unmuted');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    snapshot: {
+      generated_at: '2026-08-14T09:00:00+00:00',
+      duration_seconds: 196.4,
+      report: {
+        status: 'clean', complete: true,
+        counts: {albums_scanned: 8487},
+        albums: [],
+      },
+    },
+  });
+  const scannedRowMatch = html.match(/Albums scanned<\/span><strong class="([^"]*)">8,487/);
+  assert(scannedRowMatch !== null, 'Albums scanned row with the real count is present');
+  assert(scannedRowMatch[1] !== 'metric-muted',
+    `Albums scanned must not read muted for a clean, trustworthy status, got ${JSON.stringify(scannedRowMatch[1])}`);
+  const listedRowMatch = html.match(/Listed \(non-agreeing\)<\/span><strong class="([^"]*)">0/);
+  assert(listedRowMatch[1] === 'metric-good', 'clean + zero listed still reads good');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

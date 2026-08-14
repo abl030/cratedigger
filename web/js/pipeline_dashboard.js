@@ -260,6 +260,57 @@ function renderDriftRow(r) {
 }
 
 /**
+ * Snapshot age past which the "Last run" reads stale (#1142 review N5)
+ * — a full day past the expected 24h daily cadence, well outside the
+ * timer's own 30min jitter, so ordinary scheduling variance never trips
+ * it; anything past this really has missed at least one scheduled run.
+ * The boundary is EXCLUSIVE: exactly 36h old is still fresh.
+ */
+const RETAG_CENSUS_STALE_AFTER_HOURS = 36;
+
+/**
+ * Hours between `generatedAt` and `nowMs`, or `null` when `generatedAt`
+ * is missing or unparsable — computed client-side, no persisted field
+ * needed (#1142 review N5).
+ * @param {string | null | undefined} generatedAt
+ * @param {number} [nowMs]
+ * @returns {number | null}
+ */
+function retagDivergenceSnapshotAgeHours(generatedAt, nowMs = Date.now()) {
+  if (!generatedAt) return null;
+  const then = Date.parse(generatedAt);
+  if (Number.isNaN(then)) return null;
+  return (nowMs - then) / 3600000;
+}
+
+/**
+ * Whether a snapshot this old counts as stale — see
+ * `RETAG_CENSUS_STALE_AFTER_HOURS` for the exact (exclusive) boundary.
+ * @param {string | null | undefined} generatedAt
+ * @param {number} [nowMs]
+ * @returns {boolean}
+ */
+function retagDivergenceSnapshotIsStale(generatedAt, nowMs = Date.now()) {
+  const ageHours = retagDivergenceSnapshotAgeHours(generatedAt, nowMs);
+  return ageHours != null && ageHours > RETAG_CENSUS_STALE_AFTER_HOURS;
+}
+
+/**
+ * Tone for the census report's own `status` field — `clean` is the
+ * ONLY status that ever reads good; `divergence_found` reads bad;
+ * everything else (`incomplete`, or a defensively-handled
+ * `beets_unavailable` the daily writer no longer actually publishes)
+ * reads warn (#1142 review N1).
+ * @param {string | undefined} status
+ * @returns {string}
+ */
+function retagDivergenceStatusTone(status) {
+  if (status === 'clean') return 'metric-good';
+  if (status === 'divergence_found') return 'metric-bad';
+  return 'metric-warn';
+}
+
+/**
  * Render the daily whole-library retag-divergence census card (#1142) —
  * Beets DB identity vs. installed file tags. Deliberately a SEPARATE
  * card from Disk Coverage above (pipeline-ledger vs. Beets DB): the two
@@ -306,17 +357,39 @@ function renderRetagDivergenceCensusCard(census) {
   const report = snapshot.report || {};
   const counts = report.counts || {};
   const albums = Array.isArray(report.albums) ? report.albums : [];
-  const statusClass = report.status === 'divergence_found' ? 'metric-bad'
-    : report.status === 'clean' ? 'metric-good' : 'metric-warn';
+  const statusClass = retagDivergenceStatusTone(report.status);
+  // The "Listed" count only ever means "verified clean" when the run
+  // itself says `clean` — a non-clean status (e.g. `incomplete`, or a
+  // defensively-handled `beets_unavailable`) reading zero listed albums
+  // is NOT the same fact as a clean library, so it must never render
+  // the same green as a genuine clean result (#1142 review N1).
+  const listedClass = report.status === 'clean' ? 'metric-good'
+    : albums.length ? 'metric-warn' : 'metric-muted';
+  // Albums-scanned is only a trustworthy whole-library count when the
+  // scan itself answered in full (`clean`/`divergence_found`); mute it
+  // otherwise rather than presenting a possibly-partial number plainly.
+  const scannedClass = report.status === 'clean' || report.status === 'divergence_found'
+    ? '' : 'metric-muted';
+  // A retained snapshot from a run that never happened (a missed daily
+  // timer fire, or every recent run failing before publish) must say so
+  // honestly rather than silently presenting yesterday's — or last
+  // week's — report as current (#1142 review N5).
+  const ageHours = retagDivergenceSnapshotAgeHours(snapshot.generated_at);
+  const isStale = retagDivergenceSnapshotIsStale(snapshot.generated_at);
+  const freshnessLabel = ageHours == null ? 'unknown'
+    : isStale ? `stale — ${formatDecimal(ageHours)}h old` : 'fresh';
+  const freshnessClass = ageHours == null ? 'metric-muted'
+    : isStale ? 'metric-warn' : 'metric-good';
   return `
     <div class="dashboard-card dashboard-wide">
       <div class="dashboard-card-title">Beets DB &harr; File Tags Drift</div>
       <div class="metric-list">
-        <div class="metric-row"><span>Last run</span><strong>${snapshot.generated_at ? awstDateTime(snapshot.generated_at) : 'n/a'}</strong></div>
+        <div class="metric-row"><span>Last run</span><strong class="${isStale ? 'metric-warn' : ''}">${snapshot.generated_at ? awstDateTime(snapshot.generated_at) : 'n/a'}</strong></div>
+        <div class="metric-row"><span>Freshness</span><strong class="${freshnessClass}">${esc(freshnessLabel)}</strong></div>
         <div class="metric-row"><span>Duration</span><strong>${formatDuration(snapshot.duration_seconds)}</strong></div>
         <div class="metric-row"><span>Result</span><strong class="${statusClass}">${esc(report.status || 'unknown')}</strong></div>
-        <div class="metric-row"><span>Albums scanned</span><strong>${formatCount(counts.albums_scanned)}</strong></div>
-        <div class="metric-row"><span>Listed (non-agreeing)</span><strong class="${albums.length ? 'metric-warn' : 'metric-good'}">${formatCount(albums.length)}</strong></div>
+        <div class="metric-row"><span>Albums scanned</span><strong class="${scannedClass}">${formatCount(counts.albums_scanned)}</strong></div>
+        <div class="metric-row"><span>Listed (non-agreeing)</span><strong class="${listedClass}">${formatCount(albums.length)}</strong></div>
         ${albums.map(a => renderRetagDivergenceAlbumRow(a)).join('')}
       </div>
     </div>
@@ -339,6 +412,17 @@ function renderRetagDivergenceAlbumRow(album) {
   `;
 }
 
+/**
+ * The inner content of one retag-divergence album row (classification
+ * line + Recheck button), WITHOUT the outer id'd container
+ * `renderRetagDivergenceAlbumRow` wraps it in. Exported (not just
+ * `__test__`-only) because `pipeline.js::recheckRetagDivergenceAlbum`
+ * calls this for real, to re-render just this row's `innerHTML` in
+ * place after a fresh per-album check — never the outer container,
+ * which already exists in the DOM and must keep its own `id`.
+ * @param {any} album
+ * @returns {string}
+ */
 export function renderRetagDivergenceAlbumRowInner(album) {
   const classClass = album.album_class === 'agrees' ? 'metric-good'
     : album.album_class === 'diverges' || album.album_class === 'file_tag_present_db_absent'
@@ -867,5 +951,7 @@ export const __test__ = {
   renderUnfindableCard,
   renderWantedTrendCard,
   renderWantedTrendChart,
+  retagDivergenceSnapshotAgeHours,
+  retagDivergenceSnapshotIsStale,
   withCoverageMatchRates,
 };
