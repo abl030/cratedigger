@@ -25,10 +25,13 @@ from lib.import_evidence import (
 )
 from lib.quality import (
     CURRENT_EVIDENCE_LINEAGE_VERSION,
+    AccurateRipBitMatch,
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    CdRipBitVerification,
+    CdTocIdentity,
     QualityRankConfig,
     VerifiedLosslessProof,
 )
@@ -48,6 +51,10 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.root = tempfile.mkdtemp()
         with open(os.path.join(self.root, "01 - Track.mp3"), "wb") as handle:
             handle.write(b"audio")
+        self.flac_root = tempfile.mkdtemp()
+        for track in ("01 - Intro.flac", "02 - Drunk Driving.flac"):
+            with open(os.path.join(self.flac_root, track), "wb") as handle:
+                handle.write(b"fLaC audio")
         self.db = FakePipelineDB()
         self.db.seed_request(make_request_row(id=42, mb_release_id="release-1"))
         self.download_log_id = self.db.log_download(
@@ -57,6 +64,123 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.flac_root, ignore_errors=True)
+
+    def _cd_rip_proof(self) -> CdRipBitVerification:
+        """An AccurateRip all-track bit match, shaped like request 712's."""
+        return CdRipBitVerification(
+            provenance="measured",
+            source_format="flac",
+            toc=CdTocIdentity(
+                track_offsets_sectors=[0, 7013],
+                leadout_sector=38019,
+                accuraterip_id="001f0be7-0195fc21-030a4a12",
+                musicbrainz_disc_id="8NDppmvWEFT9wu_FMwlZKkhZDgE-",
+            ),
+            accuraterip=AccurateRipBitMatch(
+                provider="accuraterip",
+                url="https://www.accuraterip.com/accuraterip/x.bin",
+                checksum_version="arv2",
+                read_offset_samples=0,
+                track_confidences=[12, 12],
+                track_checksums=[0xAABBCCDD, 0x11223344],
+                response_sha256="a" * 64,
+            ),
+        )
+
+    def _persist_stale_generation_candidate(
+        self,
+        *,
+        cd_rip_proven: bool,
+    ) -> int:
+        """Persist a FLAC candidate carrying a pre-stamp spectral grade.
+
+        This is issue #1162's shrunk world: a grade with no generation
+        stamp, on bytes a re-measurement will never re-grade.
+        """
+        cd_rip = self._cd_rip_proof() if cd_rip_proven else None
+        evidence = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
+            mb_release_id="release-1",
+            source_path=self.flac_root,
+            files=snapshot_audio_files(self.flac_root),
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            cd_rip_verification=cd_rip,
+            # Derived from the producer, never hand-typed: the row's scalar
+            # proof must be exactly what the structured fact projects.
+            verified_lossless_proof=(
+                cd_rip.verified_lossless_proof() if cd_rip is not None else None
+            ),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=380,
+                avg_bitrate_kbps=460,
+                median_bitrate_kbps=451,
+                format="FLAC",
+                is_cbr=False,
+                spectral_grade="likely_transcode",
+                spectral_subject="source",
+                spectral_provenance="measured",
+                spectral_measurement_version=None,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_download_log_candidate_evidence(
+            self.download_log_id, persisted.id
+        )
+        return persisted.id
+
+    def test_cd_rip_proven_candidate_admits_despite_stale_generation(self):
+        """#1162: the gate honours the bypass the producer already takes.
+
+        ``lib.measurement`` skips the spectral gate entirely when a CD-rip
+        bit verification is present, so no re-measurement can ever advance
+        this row's generation. Demanding one is unsatisfiable, and the
+        importer requeued to preview forever (job 60635: 2,463 passes).
+        """
+        self._persist_stale_generation_candidate(cd_rip_proven=True)
+
+        result = ensure_candidate_evidence_for_action(
+            self.db,
+            source_path=self.flac_root,
+            download_log_id=self.download_log_id,
+        )
+
+        self.assertTrue(result.available)
+        self.assertFalse(result.provenance.fail_closed)
+        self.assertNotIn(
+            "spectral measurement generation",
+            result.provenance.fallback_reason or "",
+        )
+
+    def test_unproven_candidate_still_blocks_on_stale_generation(self):
+        """The must-still-work half: the bypass is keyed on the proof alone.
+
+        Without a CD-rip bit verification a re-measurement WILL re-grade
+        these bytes, so the generation demand is satisfiable and must
+        still be enforced — admitting a pre-#829 codec-blind grade here
+        would silently reject a legitimate import.
+        """
+        self._persist_stale_generation_candidate(cd_rip_proven=False)
+
+        result = ensure_candidate_evidence_for_action(
+            self.db,
+            source_path=self.flac_root,
+            download_log_id=self.download_log_id,
+        )
+
+        self.assertFalse(result.available)
+        self.assertTrue(result.provenance.fail_closed)
+        self.assertIn(
+            "spectral measurement generation is not current",
+            result.provenance.fallback_reason or "",
+        )
 
     def _candidate_evidence(self) -> AlbumQualityEvidence:
         return make_album_quality_evidence(
