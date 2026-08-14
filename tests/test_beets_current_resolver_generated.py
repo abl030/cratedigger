@@ -173,6 +173,26 @@ class TestCurrentBeetsResolverPins(unittest.TestCase):
                     f"mb_albumid:{DISCOGS_TARGET}",
                 ))
 
+    def test_non_normalized_discogs_query_attributes_the_sql_hit(self) -> None:
+        """#1138 sibling — SQL CAST hits 12856590 for queried '012856590';
+        Python attribution must use the normalized key or the row is lost.
+        """
+
+        identity = ReleaseIdentity(
+            source="discogs", release_id=f"0{DISCOGS_TARGET}",
+        )
+        with BeetsWorld(REPO) as world:
+            snapshot = world.import_release(_release("discogs", tracks=1))
+            with BeetsDB(
+                str(world.library_db),
+                library_root=str(world.library_root),
+            ) as beets:
+                result = beets.resolve_current_release(identity)
+        self.assertIsInstance(result, CurrentBeetsUnique)
+        assert isinstance(result, CurrentBeetsUnique)
+        self.assertEqual(result.album_path, snapshot.album_path)
+        self.assertEqual(result.identity, identity)
+
     def test_each_discogs_layout_preserves_zero_and_two_match_cardinality(self) -> None:
         for legacy in (False, True):
             for cardinality in (0, 2):

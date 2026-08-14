@@ -532,21 +532,37 @@ class BeetsDB:
         self,
         identities: list[ReleaseIdentity],
     ) -> dict[ReleaseIdentity, CurrentBeetsResolution]:
-        """Batch the same exact resolver contract without cardinality loss."""
+        """Batch the same exact resolver contract without cardinality loss.
+
+        SQL membership stays exact on the queried raw id. Python
+        attribution keys on ``normalize_release_id`` so a fetched row is
+        attached even when the caller handed a non-normalized identity.
+        """
 
         unique_identities = tuple(dict.fromkeys(identities))
         album_ids_by_identity: dict[ReleaseIdentity, set[int]] = {
             identity: set() for identity in unique_identities
         }
-        mb_by_release_id = {
-            identity.release_id: identity
-            for identity in unique_identities
-        }
-        discogs_by_release_id = {
-            identity.release_id: identity
+        mb_sql_ids = tuple(
+            identity.release_id for identity in unique_identities
+        )
+        mb_identities_by_normalized: dict[str, list[ReleaseIdentity]] = {}
+        for identity in unique_identities:
+            key = normalize_release_id(identity.release_id)
+            mb_identities_by_normalized.setdefault(key, []).append(identity)
+        discogs_sql_ids = tuple(
+            identity.release_id
             for identity in unique_identities
             if identity.source == "discogs"
-        }
+        )
+        discogs_identities_by_normalized: dict[str, list[ReleaseIdentity]] = {}
+        for identity in unique_identities:
+            if identity.source != "discogs":
+                continue
+            key = normalize_release_id(identity.release_id)
+            discogs_identities_by_normalized.setdefault(key, []).append(
+                identity,
+            )
 
         # One joined SELECT is the snapshot boundary. Beets can move an album
         # concurrently; separate album and item queries could otherwise return
@@ -568,8 +584,8 @@ class BeetsDB:
                 "SELECT release_id FROM wanted_discogs"
                 ") ORDER BY a.id, i.id",
                 (
-                    json.dumps(tuple(mb_by_release_id)),
-                    json.dumps(tuple(discogs_by_release_id)),
+                    json.dumps(mb_sql_ids),
+                    json.dumps(discogs_sql_ids),
                 ),
             ).fetchall()
             for (
@@ -591,17 +607,17 @@ class BeetsDB:
                 item_rows_by_album_id.setdefault(album_id, [])
 
                 mb_release_id = normalize_release_id(raw_mb_release_id)
-                mb_identity = mb_by_release_id.get(mb_release_id)
-                if mb_identity is not None:
+                for mb_identity in mb_identities_by_normalized.get(
+                    mb_release_id, (),
+                ):
                     album_ids_by_identity[mb_identity].add(album_id)
 
                 discogs_release_id = normalize_release_id(
                     raw_discogs_release_id,
                 )
-                discogs_identity = discogs_by_release_id.get(
-                    discogs_release_id,
-                )
-                if discogs_identity is not None:
+                for discogs_identity in discogs_identities_by_normalized.get(
+                    discogs_release_id, (),
+                ):
                     album_ids_by_identity[discogs_identity].add(album_id)
 
                 # UUID + numeric Discogs is a valid cross-source identity pair.
