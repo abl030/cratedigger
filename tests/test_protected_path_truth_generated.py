@@ -21,7 +21,6 @@ import itertools
 import os
 import re
 import shutil
-import socket
 import stat
 import tempfile
 import unittest
@@ -59,6 +58,7 @@ from tests.fakes import FakePipelineDB
 from tests.helpers import (
     SeededWrongMatch,
     make_request_row,
+    make_socket_file,
     seed_visible_wrong_match,
 )
 from tests.node_jsonl_worker import NodeJsonlWorker
@@ -707,11 +707,7 @@ def build_explorer_world(
             # A Unix-domain socket: ``O_NOFOLLOW`` answers ENXIO before a
             # descriptor exists (issue #868's ``not_regular_file``), and
             # that refusal is counted since issue #1086 too.
-            sock = socket.socket(socket.AF_UNIX)
-            try:
-                sock.bind(os.path.join(album, f"{index:02d} weird.mp3"))
-            finally:
-                sock.close()
+            make_socket_file(os.path.join(album, f"{index:02d} weird.mp3"))
         else:
             path = os.path.join(album, f"{index:02d} locked-dir")
             os.makedirs(path)
@@ -1872,11 +1868,7 @@ def _build_agreement_world(
                 fixture_flac, os.path.join(external_dir, "hidden.flac"))
             os.symlink(external_dir, path)
         else:  # refused_socket
-            sock = socket.socket(socket.AF_UNIX)
-            try:
-                sock.bind(path)
-            finally:
-                sock.close()
+            make_socket_file(path)
     return locked
 
 

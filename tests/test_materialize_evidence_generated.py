@@ -49,7 +49,6 @@ from __future__ import annotations
 import errno
 import os
 import re
-import socket
 import tempfile
 import unittest
 import unittest.mock
@@ -102,6 +101,7 @@ from tests.fakes import FakePipelineDB
 from tests.helpers import (
     make_ctx_with_fake_db,
     make_grab_list_entry,
+    make_socket_file,
 )
 from tests.test_path_authority import assert_publication_invariant
 
@@ -342,7 +342,6 @@ class _World:
         self.cfg = cfg
         self.file = file
         self.restore_modes: list[str] = []
-        self.sockets: list[socket.socket] = []
         # The bytes a refused materialize must not touch, and whether this
         # world has any in the first place. Measured, never assumed: a
         # hardcoded ``source_exists=True`` would make the shared
@@ -356,15 +355,12 @@ class _World:
     def close(self) -> None:
         for path in self.restore_modes:
             os.chmod(path, 0o700)
-        for sock in self.sockets:
-            sock.close()
 
 
 def _build_world(parent: str, world: str, leaf: str) -> _World:
     """Build one failure world; the caller must ``close()`` it.
 
-    ``close`` restores any mode-000 path so the tempdir can be torn down,
-    and releases bound unix sockets.
+    ``close`` restores any mode-000 path so the tempdir can be torn down.
     """
     source = os.path.join(parent, "downloads")
     processing = os.path.join(parent, "processing")
@@ -427,16 +423,13 @@ def _build_world(parent: str, world: str, leaf: str) -> _World:
         # exists for an ``S_ISREG`` check to inspect — the shape that
         # errno-only classification files under the wrong family.
         #
-        # A FIXED SHORT NAME on purpose: AF_UNIX ``sun_path`` is ~107
-        # bytes, and TMPDIR here comes from XDG_RUNTIME_DIR /
-        # CRATEDIGGER_TEST_RAM_ROOT (scripts/test_tmpfs.sh). A generated
-        # leaf under a longer root overruns it, and ``bind`` would raise
-        # "AF_UNIX path too long" — a hard suite failure, since this repo
-        # bans skips.
-        stamped = os.path.join(source, "s")
-        sock = socket.socket(socket.AF_UNIX)
-        built.sockets.append(sock)
-        sock.bind(stamped)
+        # Planted at the real event-stamped path, like every other world
+        # here. This world used to substitute a fixed short leaf name to
+        # stay under AF_UNIX ``sun_path``'s ~107 bytes — a workaround that
+        # both weakened the world (the generated leaf was the one thing
+        # the stamp is supposed to carry) and only moved the ceiling.
+        # ``make_socket_file`` removes it entirely; see its docstring.
+        make_socket_file(stamped)
         file.local_path = stamped
         built.source_path = stamped
         built.source_survives = True
