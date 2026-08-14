@@ -381,6 +381,37 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
         self.assertEqual(status, 400)
         self.assertIn("error", payload)
 
+    def test_a_4301_digit_album_id_is_a_clean_400_not_a_500(self) -> None:
+        """N3 (fresh review) — Python's own int() conversion refuses a
+        string past ``sys.int_info.default_max_str_digits`` (4300) with a
+        bare ``ValueError``. The route's URL regex (\\d+) matches ANY
+        digit run, so a 4301-digit path previously reached an unguarded
+        ``int(album_id_str)`` and propagated all the way out of the
+        handler to ``web.server.Handler.do_GET``'s broad
+        ``except Exception`` — a full traceback log, an unnecessary
+        ``_try_reconnect_db()`` DB-reconnect churn, and a generic 500,
+        for what is really just malformed input. Must be a clean 400,
+        driven through the REAL route dispatch (not a mocked handler
+        call), with no ERROR-level log from either logger the two
+        failure paths use."""
+        from web import server
+
+        digit_string = "9" * 4301
+        beets = _PoisonedWholeLibraryBeetsDB()
+        with (
+            patch.object(server, "_beets_db", return_value=beets),
+            self.assertNoLogs("web.server", level="ERROR"),
+            self.assertNoLogs(
+                "web.routes.retag_divergence_audit", level="ERROR",
+            ),
+        ):
+            status, payload = self._get(
+                f"/api/audit/retag-divergence/album/{digit_string}",
+            )
+
+        self.assertEqual(status, 400)
+        self.assertIn("out of range", payload.get("error", ""))
+
     def test_missing_beets_is_503(self) -> None:
         from web import server
 

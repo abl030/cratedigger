@@ -162,13 +162,23 @@ def get_retag_divergence_audit_album(
         client input, rejected before ever reaching Beets, never the
         misleading transient/retryable 503 an uncaught
         ``sqlite3.OverflowError`` from binding it as a query parameter
-        would otherwise produce (#1142 review N10).
+        would otherwise produce (#1142 review N10). Also covers an id
+        with MORE digits than Python's own ``int()`` conversion accepts
+        at all (``sys.int_info.default_max_str_digits``, 4300) — that
+        raises a bare ``ValueError`` on parse, before there is even an
+        ``int`` to range-check, and must be caught here rather than
+        propagating out to the generic 500/traceback/DB-reconnect path
+        (#1142 review N3, fresh round).
       * 404 — ``not_found`` (no album with this id in Beets)
       * 503 — ``beets_unavailable`` (Beets DB not configured, or a
         classified SQLite open/query failure) — same convention as
         :func:`get_retag_divergence_audit`.
     """
-    album_id = int(album_id_str)
+    try:
+        album_id = int(album_id_str)
+    except ValueError:
+        h._error(f"album id {album_id_str!r} is out of range")
+        return
     if not is_valid_album_id(album_id):
         h._error(f"album id {album_id} is out of range")
         return
