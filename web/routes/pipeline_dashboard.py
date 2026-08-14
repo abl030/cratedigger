@@ -19,6 +19,16 @@ from web.routes._server_access import _server
 
 log = logging.getLogger(__name__)
 
+#: Maximum non-agreeing albums the DASHBOARD route ever embeds in one
+#: response (#1142 fresh review N1). The PERSISTED snapshot on disk is
+#: never touched or truncated — a read-failure-heavy world could
+#: legitimately list every one of the ~8,700 real albums — but this
+#: route's own JSON projection is a dashboard card, not a bulk export,
+#: and must not serialize an unbounded response. ``albums_shown``/
+#: ``albums_listed_total`` in the payload make the cap visible to the
+#: caller rather than a silent truncation.
+DASHBOARD_RETAG_CENSUS_ALBUM_CAP = 50
+
 
 def get_pipeline_dashboard(h: RouteHandler, params: dict[str, list[str]]) -> None:
     """Return operational metrics for the Pipeline dashboard subtab."""
@@ -69,7 +79,14 @@ def _dashboard_retag_divergence_census() -> dict[str, object]:
         ``RetagDivergenceCensusSnapshot`` (``generated_at``,
         ``duration_seconds``, ``report``). The report's OWN ``status``
         (clean/divergence_found/incomplete/beets_unavailable) is nested
-        inside — this route makes no claim about it.
+        inside — this route makes no claim about it. ``report.counts``
+        is always the true, uncapped whole-library numbers — ONLY
+        ``report.albums`` (the per-album listing) is capped at
+        :data:`DASHBOARD_RETAG_CENSUS_ALBUM_CAP`, never silently: the
+        sibling ``albums_shown``/``albums_listed_total`` fields name
+        exactly how many were embedded versus how many the persisted
+        report actually lists (#1142 fresh review N1). The persisted
+        file on disk is never rewritten by this cap.
       * ``"unreadable"`` — a snapshot file exists but could not be read
         or decoded: a filesystem-level failure (``OSError`` — denied
         permissions, the path resolving to a directory, …) or malformed
@@ -82,11 +99,15 @@ def _dashboard_retag_divergence_census() -> dict[str, object]:
         NOT in this set: that one is handled inside the read helper and
         surfaces as the ordinary ``"missing"`` state below, not an
         error.
+
+    ``albums_shown``/``albums_listed_total`` are always present (``0``
+    for ``missing``/``unreadable``) so the payload shape never branches
+    on state.
     """
     s = _server()
     path = s.retag_census_snapshot_path
     if path is None:
-        return {"state": "missing", "error": None, "snapshot": None}
+        return _empty_retag_divergence_census("missing")
     try:
         snapshot = read_retag_divergence_census_snapshot(path)
     except (
@@ -96,11 +117,29 @@ def _dashboard_retag_divergence_census() -> dict[str, object]:
         log.exception(
             "retag divergence census snapshot at %s is unreadable", path,
         )
-        return {"state": "unreadable", "error": str(exc), "snapshot": None}
+        result = _empty_retag_divergence_census("unreadable")
+        result["error"] = str(exc)
+        return result
     if snapshot is None:
-        return {"state": "missing", "error": None, "snapshot": None}
+        return _empty_retag_divergence_census("missing")
+    snapshot_dict = msgspec.to_builtins(snapshot)
+    report_dict = snapshot_dict["report"]
+    all_albums = report_dict["albums"]
+    albums_listed_total = len(all_albums)
+    report_dict["albums"] = all_albums[:DASHBOARD_RETAG_CENSUS_ALBUM_CAP]
     return {
-        "state": "ok", "error": None, "snapshot": msgspec.to_builtins(snapshot),
+        "state": "ok",
+        "error": None,
+        "snapshot": snapshot_dict,
+        "albums_shown": len(report_dict["albums"]),
+        "albums_listed_total": albums_listed_total,
+    }
+
+
+def _empty_retag_divergence_census(state: str) -> dict[str, object]:
+    return {
+        "state": state, "error": None, "snapshot": None,
+        "albums_shown": 0, "albums_listed_total": 0,
     }
 
 

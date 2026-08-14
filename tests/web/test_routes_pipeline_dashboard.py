@@ -17,12 +17,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from lib.beets_db import BeetsAlbumIdentityRow
 from lib.retag_divergence_audit import (
+    RetagDivergenceAlbum,
     RetagDivergenceCounts,
     RetagDivergenceReport,
     RetagDivergenceStatus,
 )
 from lib.retag_divergence_census_snapshot import (
     RetagDivergenceCensusSnapshot,
+    read_retag_divergence_census_snapshot,
     retag_divergence_census_snapshot_path,
     write_retag_divergence_census_snapshot,
 )
@@ -389,7 +391,9 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
             data["unfindable"]["backlog_trend"]["current_backlog"], 686)
 
 
-DASHBOARD_RETAG_DIVERGENCE_CENSUS_FIELDS = {"state", "error", "snapshot"}
+DASHBOARD_RETAG_DIVERGENCE_CENSUS_FIELDS = {
+    "state", "error", "snapshot", "albums_shown", "albums_listed_total",
+}
 
 
 @contextmanager
@@ -460,7 +464,10 @@ class TestPipelineDashboardRetagDivergenceCensusContract(_FakeDbWebServerCase):
         )
         self.assertEqual(
             data["retag_divergence_census"],
-            {"state": "missing", "error": None, "snapshot": None},
+            {
+                "state": "missing", "error": None, "snapshot": None,
+                "albums_shown": 0, "albums_listed_total": 0,
+            },
         )
 
     def test_missing_state_when_path_configured_but_file_absent(self) -> None:
@@ -499,6 +506,79 @@ class TestPipelineDashboardRetagDivergenceCensusContract(_FakeDbWebServerCase):
             census["snapshot"]["duration_seconds"], snapshot.duration_seconds,
         )
         self.assertEqual(census["snapshot"]["report"]["status"], "divergence_found")
+        # An uncapped small report — shown equals the true total.
+        self.assertEqual(census["albums_shown"], len(snapshot.report.albums))
+        self.assertEqual(
+            census["albums_listed_total"], len(snapshot.report.albums),
+        )
+
+    def test_ok_state_caps_the_embedded_album_list(self) -> None:
+        """N1 (fresh review) — the PERSISTED snapshot may legitimately
+        list every non-agreeing album (a read-failure-heavy world could
+        mean thousands), but the DASHBOARD route's own JSON projection
+        must never serialize more than
+        ``DASHBOARD_RETAG_CENSUS_ALBUM_CAP`` of them — no silent
+        truncation: albums_shown/albums_listed_total tell the caller
+        exactly what happened. The persisted file on disk is untouched
+        (this route only reads it)."""
+        import web.server as srv
+        from web.routes.pipeline_dashboard import (
+            DASHBOARD_RETAG_CENSUS_ALBUM_CAP,
+        )
+
+        total_albums = DASHBOARD_RETAG_CENSUS_ALBUM_CAP + 7
+        albums = tuple(
+            RetagDivergenceAlbum(
+                album_id=i, db_mb_albumid=f"mb-{i}",
+                album_class="diverges", item_count=0, items=(),
+            )
+            for i in range(1, total_albums + 1)
+        )
+        snapshot = RetagDivergenceCensusSnapshot(
+            generated_at="2026-08-14T09:00:00+00:00",
+            duration_seconds=1.0,
+            report=RetagDivergenceReport(
+                status="divergence_found", complete=True,
+                counts=RetagDivergenceCounts(
+                    total_albums, 0, 0, 0, total_albums, 0, 0, 0,
+                ),
+                albums=albums,
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = retag_divergence_census_snapshot_path(tmpdir)
+            write_retag_divergence_census_snapshot(path, snapshot)
+            with (
+                _retag_census_snapshot_path_set(path),
+                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+            ):
+                status, data = self._get("/api/pipeline/dashboard")
+
+            # The persisted file on disk still has every album — this
+            # route only ever reads it, never rewrites the cap back to
+            # disk. Read back while tmpdir is still alive.
+            read_back = read_retag_divergence_census_snapshot(path)
+
+        self.assertEqual(status, 200)
+        census = data["retag_divergence_census"]
+        self.assertEqual(census["state"], "ok")
+        # Never serializes beyond the cap.
+        self.assertEqual(
+            len(census["snapshot"]["report"]["albums"]),
+            DASHBOARD_RETAG_CENSUS_ALBUM_CAP,
+        )
+        self.assertEqual(census["albums_shown"], DASHBOARD_RETAG_CENSUS_ALBUM_CAP)
+        self.assertEqual(census["albums_listed_total"], total_albums)
+        # The existing honest whole-library counts are untouched by the
+        # projection cap — still the true, uncapped numbers.
+        self.assertEqual(
+            census["snapshot"]["report"]["counts"]["albums_scanned"],
+            total_albums,
+        )
+        self.assertEqual(census["snapshot"]["report"]["status"], "divergence_found")
+        assert read_back is not None
+        self.assertEqual(len(read_back.report.albums), total_albums)
 
     def test_unreadable_state_on_malformed_snapshot_file(self) -> None:
         import web.server as srv
