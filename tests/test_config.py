@@ -388,9 +388,127 @@ class TestReadVerifiedLosslessTarget(unittest.TestCase):
 
 
 class TestReadRuntimeConfig(unittest.TestCase):
+    """Finite filesystem/config contract for ``read_runtime_config``.
+
+    The production outcomes are a closed partition, not an open world:
+    admitted match, missing (including open-time FileNotFoundError),
+    unreadable leaf, inaccessible ancestor, preserved non-permission
+    OSError, malformed, and readable valid. Fresh entropy cannot invent
+    a new clause, so this stays an exhaustive deterministic table per
+    the settled #893 policy rather than a manufactured ``@given`` /
+    ``test_*_generated.py`` costume.
+    """
+
     def test_missing_config_returns_default(self):
         cfg = read_runtime_config("/nonexistent/config.ini")
         self.assertEqual(cfg.beets_harness_path, "")
+
+    def test_unreadable_leaf_raises_actionable_permission_error(self) -> None:
+        """Issue #1136: an existing but unreadable config.ini must raise.
+
+        ``RawConfigParser.read()`` swallows per-file ``OSError``, so a
+        ``chmod 0o000`` leaf never reached the documented
+        ``PermissionError`` branch. ``open()`` + ``read_file()`` must.
+        """
+        with tempfile.TemporaryDirectory() as root:
+            config_path = os.path.join(root, "config.ini")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write("[Slskd]\napi_key = ignored\n")
+            os.chmod(config_path, 0o000)
+            try:
+                with self.assertRaises(PermissionError) as caught:
+                    read_runtime_config(config_path)
+            finally:
+                os.chmod(config_path, 0o600)
+        message = str(caught.exception)
+        self.assertIn(config_path, message)
+        self.assertIn("mode", message)
+        self.assertIn("ownership", message)
+        self.assertIn("ancestor", message)
+        self.assertIn("searchable", message)
+        self.assertNotIn("configMode", message)
+        self.assertNotIn("configGroup", message)
+
+    def test_inaccessible_ancestor_raises_actionable_permission_error(self) -> None:
+        """Issue #1136: a config behind an unsearchable directory must raise.
+
+        ``open()`` of a descendant under a ``chmod 0o000`` ancestor is
+        ``PermissionError``, the same existing-but-unreadable class as a
+        locked leaf. A preflight ``exists()`` / ``os.access()`` probe is
+        not a substitute: it cannot see this path and would lie.
+        """
+        with tempfile.TemporaryDirectory() as root:
+            parent = os.path.join(root, "locked")
+            os.mkdir(parent)
+            config_path = os.path.join(parent, "config.ini")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write("[Slskd]\napi_key = ignored\n")
+            os.chmod(parent, 0o000)
+            try:
+                with self.assertRaises(PermissionError) as caught:
+                    read_runtime_config(config_path)
+            finally:
+                os.chmod(parent, 0o700)
+        message = str(caught.exception)
+        self.assertIn(config_path, message)
+        self.assertIn("mode", message)
+        self.assertIn("ownership", message)
+        self.assertIn("ancestor", message)
+        self.assertIn("searchable", message)
+        self.assertNotIn("configMode", message)
+        self.assertNotIn("configGroup", message)
+
+    def test_directory_path_returns_default(self) -> None:
+        """Issue #1136: a non-permission OSError keeps the soft fallback.
+
+        ``open()`` on a directory raises ``IsADirectoryError``, an
+        ``OSError`` subclass that is neither ``FileNotFoundError`` nor
+        ``PermissionError``. Deleting or narrowing ``except OSError``
+        would leave the permission-denial pins green. There is no
+        production open-boundary seam for an ``EIO`` injection, so this
+        real directory world is the owned coverage for that catch.
+        """
+        with tempfile.TemporaryDirectory() as root:
+            cfg = read_runtime_config(root)
+        self.assertEqual(cfg.beets_harness_path, "")
+
+    def test_malformed_config_returns_default(self) -> None:
+        """Issue #1136: a readable but unparseable file stays a soft fallback."""
+        with tempfile.TemporaryDirectory() as root:
+            config_path = os.path.join(root, "config.ini")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write("[Beets\nconfig_dir = broken\n")
+            cfg = read_runtime_config(config_path)
+        self.assertEqual(cfg.beets_harness_path, "")
+
+    def test_admitted_matching_config_returns_the_same_object(self) -> None:
+        """Issue #1136: an admitted match is identity, not a reparse."""
+        from lib import config as runtime_config_module
+
+        prior_runtime = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
+        prior_beetsdir = os.environ.get("BEETSDIR")
+        prior_admitted = runtime_config_module._admitted_runtime_config
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                config_path = os.path.join(root, "config.ini")
+                with open(config_path, "w", encoding="utf-8") as handle:
+                    handle.write("[Slskd]\napi_key = ignored\n")
+                admitted = CratediggerConfig(slskd_api_key="admitted-not-from-disk")
+                runtime_config_module.install_admitted_runtime_config(
+                    config_path, admitted,
+                )
+                self.assertIs(read_runtime_config(), admitted)
+                self.assertIs(read_runtime_config(config_path), admitted)
+        finally:
+            runtime_config_module._admitted_runtime_config = prior_admitted
+            if prior_runtime is None:
+                os.environ.pop("CRATEDIGGER_RUNTIME_CONFIG", None)
+            else:
+                os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = prior_runtime
+            if prior_beetsdir is None:
+                os.environ.pop("BEETSDIR", None)
+            else:
+                os.environ["BEETSDIR"] = prior_beetsdir
 
     def test_reads_full_runtime_config(self):
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".ini") as tmp:

@@ -444,13 +444,19 @@ def read_runtime_config(config_path: str | None = None) -> CratediggerConfig:
     CratediggerConfig so callers degrade safely. This covers test environments and
     the very first deploy before the prestart has rendered the file.
 
-    Unreadable config (file exists but PermissionError) raises loudly. This
-    is a deployment bug — usually config.ini's mode is too restrictive for
-    the calling user. Silently returning empty config previously masked
-    issue #117 (force-import via pipeline-cli failed with cryptic
-    "import_one.py not found" (bad user-home path) because beets_harness_path was
-    empty). Surfacing the real cause beats the silent path-resolution
-    fallout downstream.
+    Unreadable config (file exists but PermissionError, including an
+    inaccessible ancestor directory) raises loudly. This is a deployment
+    bug — usually the calling user cannot open the path. Silently
+    returning empty config previously masked issue #117 (force-import via
+    pipeline-cli failed with cryptic "import_one.py not found" (bad
+    user-home path) because beets_harness_path was empty). Surfacing the
+    real cause beats the silent path-resolution fallout downstream.
+
+    ``RawConfigParser.read()`` swallows per-file ``OSError``, so this
+    function opens the path itself. ``FileNotFoundError`` (missing file
+    or an open-time disappearance race) stays a soft default; other
+    non-permission I/O errors keep that same fallback so unrelated
+    behavior does not change.
     """
     path = _runtime_config_path(config_path)
     admitted = _admitted_runtime_config
@@ -458,21 +464,25 @@ def read_runtime_config(config_path: str | None = None) -> CratediggerConfig:
         admitted_path, admitted_config = admitted
         if os.path.abspath(os.path.expanduser(path)) == admitted_path:
             return admitted_config
-    if not path or not os.path.exists(path):
+    if not path:
         return CratediggerConfig()
 
     parser = configparser.RawConfigParser()
     try:
-        parser.read(path)
-    except configparser.Error:
+        with open(path, encoding="utf-8") as handle:
+            parser.read_file(handle, source=path)
+    except FileNotFoundError:
         return CratediggerConfig()
     except PermissionError as exc:
         raise PermissionError(
-            f"Cannot read {path} — check file mode / group ownership. "
-            "On the upstream NixOS module, set services.cratedigger.configMode "
-            "(default 0600) and services.cratedigger.configGroup so the calling "
-            "user can read it. See issue #117."
+            f"Cannot read {path} — check the file mode and ownership, and "
+            "that every ancestor directory is searchable by this process. "
+            "See issue #117."
         ) from exc
+    except OSError:
+        return CratediggerConfig()
+    except configparser.Error:
+        return CratediggerConfig()
 
     runtime_dir = os.path.dirname(path)
     return CratediggerConfig.from_ini(
