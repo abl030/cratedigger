@@ -1286,6 +1286,18 @@ class TestQualityLineagePins(unittest.TestCase):
         )
 
     def test_single_track_bare_mp3_preserves_legacy_cbr_projection(self):
+        """The projected-contract path and the legacy proxy path agree.
+
+        The installed side is 100 kbps, not the 128-vs-123 pair this world
+        used to carry. That pair only compared "better" on ``main`` because
+        the two sides routed through DIFFERENT MP3 tables — the candidate's
+        ``is_cbr=True`` picked ``mp3_cbr`` (acceptable 128) while the
+        installed side's ``is_cbr=False`` picked ``mp3_vbr`` (acceptable
+        130) — which is the amplifier issue #1145 removes. With one table
+        and the rank tolerance (H2) a 5-kbps gap is correctly no upgrade, so
+        the fixture now uses a gap that is genuinely one: the parity this
+        test exists for is still pinned on the UPGRADE path.
+        """
         projected_bitrates = [128]
         projected_is_cbr = projected_is_cbr_from_bitrates(projected_bitrates)
         contract = TargetQualityContract.from_projection(
@@ -1299,8 +1311,8 @@ class TestQualityLineagePins(unittest.TestCase):
             is_cbr=True,
         )
         current = AudioQualityMeasurement(
-            min_bitrate_kbps=123,
-            avg_bitrate_kbps=123,
+            min_bitrate_kbps=100,
+            avg_bitrate_kbps=100,
             format="MP3",
             is_cbr=False,
         )
@@ -1329,8 +1341,8 @@ class TestQualityLineagePins(unittest.TestCase):
             is_flac=True,
             min_bitrate=800,
             is_cbr=False,
-            existing_min_bitrate=123,
-            existing_avg_bitrate=123,
+            existing_min_bitrate=100,
+            existing_avg_bitrate=100,
             existing_format="MP3",
             existing_is_cbr=False,
             post_conversion_min_bitrate=128,

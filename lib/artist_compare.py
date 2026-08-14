@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from lib.artist_catalogue import ArtistCataloguePair, ArtistCatalogueRow
+from lib.media_readiness import kbps_from_bps
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 _STRUCTURAL_TYPES = frozenset({"Album", "EP", "Single"})
@@ -75,8 +76,14 @@ def annotate_in_library(
         min_br_bps = min_br_raw if isinstance(min_br_raw, int) else 0
         avg_br_raw = match.get("avg_bitrate")
         avg_br_bps = avg_br_raw if isinstance(avg_br_raw, int) else 0
-        min_kbps = (min_br_bps // 1000) if min_br_bps else 0
-        avg_kbps = (avg_br_bps // 1000) if avg_br_bps else 0
+        # Rounded through the shared helper, not truncated (issue #1144).
+        # ``_ALBUM_SELECT`` already truncates once with
+        # ``CAST(AVG(i.bitrate) AS INTEGER)``; a second floor here put this
+        # surface a whole band below the long-tail worklist for any album
+        # whose average lands on ``x.5``-or-above kbps — 26 live albums at
+        # 319.x, all of them ``excellent`` here and ``transparent`` there.
+        min_kbps = kbps_from_bps(min_br_bps) if min_br_bps else 0
+        avg_kbps = kbps_from_bps(avg_br_bps) if avg_br_bps else 0
         row.library_format = fmt
         row.library_min_bitrate = min_kbps
         row.library_avg_bitrate = avg_kbps

@@ -1788,7 +1788,10 @@ def _verdict_from_basis(basis: QualityComparisonBasis) -> str:
         # they matched), but the two sides are measured differently and the
         # phrase has to keep saying so.
         core = f"{new_fmt} {new_val} vs {ex_val} — both {basis.new_rank}"
-    else:  # metric_tiebreak
+    else:  # metric_tiebreak / rank_within_tolerance
+        # Both are "these two bitrates are inside the configured window", so
+        # they read identically; ``rank_within_tolerance`` (issue #1145) is
+        # the same statement made across a band edge rather than within one.
         tol = (f" (within {basis.tolerance_kbps}k)"
                if basis.tolerance_kbps is not None else "")
         core = f"{new_fmt} {new_val} vs {ex_val}{tol}"

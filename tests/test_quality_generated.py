@@ -1294,6 +1294,17 @@ def assert_basis_consistent(result: SimResult) -> None:
     branch = basis["branch"]
     if branch == "rank" and basis["new_rank"] == basis["existing_rank"]:
         raise AssertionError(f"rank branch with equal ranks: {basis!r}")
+    if branch == "rank_within_tolerance":
+        # Issue #1145 H2: the one branch where the ranks DIFFER and the
+        # verdict is still equivalent. Equal ranks would mean the ordinary
+        # same-rank tiebreak should have fired instead, and any other verdict
+        # would contradict the branch's whole meaning.
+        if basis["new_rank"] == basis["existing_rank"]:
+            raise AssertionError(
+                f"within-tolerance branch with equal ranks: {basis!r}")
+        if verdict != "equivalent":
+            raise AssertionError(
+                f"within-tolerance branch is not equivalent: {basis!r}")
     if (branch in _BASIS_SAME_RANK_BRANCHES
             and basis["new_rank"] != basis["existing_rank"]):
         raise AssertionError(f"same-rank branch with differing ranks: {basis!r}")
@@ -7122,7 +7133,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             comparison_basis=basis)
 
     def test_basis_checker_trips_on_every_clause(self):
-        """All ten basis clauses, each proven by its own message.
+        """All twelve basis clauses, each proven by its own message.
 
         The checker raises rather than accumulating, so the four clauses that
         used to have a self-test only ever proved the four they reached first;
@@ -7160,6 +7171,19 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             ("transcode_regression_not_worse", "import",
              self._planted_basis(branch="transcode_rank_regression"),
              r"^transcode rank regression must be worse: "),
+            # Issue #1145 H2's two clauses. The first is reached with a
+            # verdict the branch allows, so only the equal-ranks clause can
+            # fire; the second keeps the ranks differing so only the verdict
+            # clause can.
+            ("within_tolerance_equal_ranks", "downgrade",
+             self._planted_basis(branch="rank_within_tolerance",
+                                 verdict="equivalent",
+                                 existing_rank="transparent"),
+             r"^within-tolerance branch with equal ranks: "),
+            ("within_tolerance_not_equivalent", "downgrade",
+             self._planted_basis(branch="rank_within_tolerance",
+                                 verdict="worse"),
+             r"^within-tolerance branch is not equivalent: "),
         ):
             with self.subTest(clause=label), self.assertRaisesRegex(
                     AssertionError, expected):

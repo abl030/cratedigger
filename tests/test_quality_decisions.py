@@ -15,6 +15,7 @@ import msgspec
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.quality import (
+    CODEC_FAMILY_MP3,
     DECISION_LOSSLESS_SOURCE_LOCKED,
     DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
     DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
@@ -3585,6 +3586,208 @@ class TestCompareQuality(unittest.TestCase):
         # Under MIN: new=60 (POOR) vs existing=210 (EXCELLENT) → worse
         cfg_min = QualityRankConfig(bitrate_metric=RankBitrateMetric.MIN)
         self.assertEqual(compare_quality(new, existing, cfg_min).verdict, "worse")
+
+
+class TestRankGapWithinTolerance(unittest.TestCase):
+    """A rank difference smaller than the tolerance is not an upgrade.
+
+    Issue #1145 H2. ``quality_rank`` is a step function evaluated FIRST with
+    no tolerance; ``within_rank_tolerance_kbps`` only ever ran in the
+    same-rank ``metric_tiebreak``. Collapsing the MP3 tables moved the band
+    edges onto 320/256/192/128 — the nominal bitrates real albums cluster on
+    — so a 1-kbps difference started straddling an edge, rank decided, and
+    the tolerance never ran. 38 of the 1,101 measured all-MP3 albums in the
+    2026-08-14 library sat 1-5 kbps below an edge and became beatable by a
+    candidate sitting exactly on it: a full replace, ``beet move`` and
+    media-server churn for nothing audible, which is the dl 39947 failure
+    this series began with.
+
+    These worlds are all-MP3, bare-label, unclamped — the exact regime the
+    tolerance is defined for — and every one of them was ``equivalent`` on
+    ``main``.
+    """
+
+    CFG: ClassVar = QualityRankConfig.defaults()
+
+    def _m(self, kbps: int, fmt: str = "MP3") -> AudioQualityMeasurement:
+        return AudioQualityMeasurement(
+            min_bitrate_kbps=kbps, avg_bitrate_kbps=kbps,
+            median_bitrate_kbps=kbps, format=fmt,
+        )
+
+    #: (description, candidate kbps, installed kbps, verdict, branch).
+    #: One case per collapsed band edge, straddled by 1 kbps and by the
+    #: whole tolerance, in both directions.
+    CASES: ClassVar = [
+        ("192 over 191 straddles good",
+         192, 191, "equivalent", "rank_within_tolerance"),
+        ("191 under 192 straddles good, mirrored",
+         191, 192, "equivalent", "rank_within_tolerance"),
+        ("256 over 252 straddles excellent at the tolerance",
+         256, 252, "equivalent", "rank_within_tolerance"),
+        ("320 over 317 straddles transparent",
+         320, 317, "equivalent", "rank_within_tolerance"),
+        ("128 over 126 straddles acceptable",
+         128, 126, "equivalent", "rank_within_tolerance"),
+        # One kbps beyond the window is a real rank upgrade again.
+        ("256 over 250 is one kbps past the window",
+         256, 250, "better", "rank"),
+        ("192 over 186 is one kbps past the window",
+         192, 186, "better", "rank"),
+        # Must-still-work: a genuinely large gap still promotes on rank.
+        ("320 over 200 is a real upgrade",
+         320, 200, "better", "rank"),
+        ("200 under 320 is a real downgrade",
+         200, 320, "worse", "rank"),
+        # Must-still-work: inside one band the ordinary tiebreak still runs.
+        ("300 over 260 inside excellent",
+         300, 260, "better", "metric_tiebreak"),
+        ("262 over 260 inside excellent, within tolerance",
+         262, 260, "equivalent", "metric_tiebreak"),
+    ]
+
+    def test_cases(self) -> None:
+        for desc, cand, inst, verdict, branch in self.CASES:
+            with self.subTest(desc=desc):
+                basis = compare_quality(
+                    self._m(cand), self._m(inst), self.CFG)
+                self.assertEqual(basis.verdict, verdict)
+                self.assertEqual(basis.branch, branch)
+
+    def test_the_tolerance_never_reaches_a_cross_family_pair(self) -> None:
+        """Cross-codec rank differences are real and must still decide.
+
+        MP3 192 (good) vs Opus 191 (transparent, its own table) differ by one
+        kbps and by two ranks; the numbers mean different things, so the
+        window must not cancel it.
+        """
+        basis = compare_quality(
+            self._m(192, "MP3"), self._m(191, "Opus"), self.CFG)
+        self.assertEqual(basis.branch, "rank")
+        self.assertEqual(basis.verdict, "worse")
+
+    def test_the_tolerance_never_reaches_an_explicit_label(self) -> None:
+        """A contract label's rank ignores the measured bitrate entirely."""
+        basis = compare_quality(
+            self._m(192, "mp3 v0"), self._m(191, "MP3"), self.CFG)
+        self.assertEqual(basis.branch, "rank")
+        self.assertEqual(basis.verdict, "better")
+
+    def test_a_spectrally_clamped_rank_gap_is_never_cancelled(self) -> None:
+        """The clamp must keep deciding — suppressing it would weaken #829.
+
+        Both sides carry a producible spectral class and an accusing grade,
+        so the shared clamp binds. The clamped values are classes, not
+        measured rates, and the window must not touch the rank they produce.
+        """
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=320, avg_bitrate_kbps=320,
+            median_bitrate_kbps=320, format="MP3",
+            spectral_grade="suspect", spectral_bitrate_kbps=192,
+            codec_family=CODEC_FAMILY_MP3,
+        )
+        existing = AudioQualityMeasurement(
+            min_bitrate_kbps=318, avg_bitrate_kbps=318,
+            median_bitrate_kbps=318, format="MP3",
+            spectral_grade="suspect", spectral_bitrate_kbps=128,
+            codec_family=CODEC_FAMILY_MP3,
+        )
+        basis = compare_quality(new, existing, self.CFG)
+        self.assertTrue(basis.spectral_clamped)
+        self.assertNotEqual(basis.branch, "rank_within_tolerance")
+        self.assertEqual(basis.verdict, "better")
+
+    def test_one_bound_side_keeps_the_rank_the_clamp_produced(self) -> None:
+        """The guard is ``either`` bound, and this is the world that proves it.
+
+        The candidate's estimate binds (192 class below its 320 raw) while
+        the installed side's does not (320 class above its 191 raw, so 191
+        stands). The two clamped values are 192 and 191 — one kbps apart, and
+        a class against a raw metric. Cancelling that rank would let a ±5
+        window in kbps overrule the spectral clamp, so the rank must stand.
+        """
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=320, avg_bitrate_kbps=320,
+            median_bitrate_kbps=320, format="MP3",
+            spectral_grade="suspect", spectral_bitrate_kbps=192,
+            codec_family=CODEC_FAMILY_MP3,
+        )
+        existing = AudioQualityMeasurement(
+            min_bitrate_kbps=191, avg_bitrate_kbps=191,
+            median_bitrate_kbps=191, format="MP3",
+            spectral_grade="suspect", spectral_bitrate_kbps=320,
+            codec_family=CODEC_FAMILY_MP3,
+        )
+        basis = compare_quality(new, existing, self.CFG)
+        self.assertTrue(basis.spectral_clamped)
+        self.assertEqual((basis.new_value_kbps, basis.existing_value_kbps),
+                         (192, 191))
+        self.assertNotEqual(basis.branch, "rank_within_tolerance")
+        self.assertEqual(basis.verdict, "better")
+
+    def test_neither_bound_still_gets_the_window(self) -> None:
+        """Both carry spectral evidence, neither estimate binds.
+
+        Both clamped values ARE the raw metrics, so they are the same kind of
+        number and the window applies — refusing it here (gating on "a shared
+        clamp exists" rather than "a clamp bound") would leave the churn alive
+        on every album that carries spectral evidence.
+        """
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=192, avg_bitrate_kbps=192,
+            median_bitrate_kbps=192, format="MP3",
+            spectral_grade="suspect", spectral_bitrate_kbps=320,
+            codec_family=CODEC_FAMILY_MP3,
+        )
+        existing = AudioQualityMeasurement(
+            min_bitrate_kbps=191, avg_bitrate_kbps=191,
+            median_bitrate_kbps=191, format="MP3",
+            spectral_grade="suspect", spectral_bitrate_kbps=320,
+            codec_family=CODEC_FAMILY_MP3,
+        )
+        basis = compare_quality(new, existing, self.CFG)
+        self.assertEqual((basis.new_value_kbps, basis.existing_value_kbps),
+                         (192, 191))
+        self.assertEqual(basis.branch, "rank_within_tolerance")
+        self.assertEqual(basis.verdict, "equivalent")
+
+    def test_a_retuned_tolerance_moves_the_window(self) -> None:
+        """The window is the configured one, not a constant."""
+        strict = QualityRankConfig(within_rank_tolerance_kbps=0)
+        self.assertEqual(
+            compare_quality(self._m(192), self._m(191), strict).branch, "rank")
+        wide = QualityRankConfig(within_rank_tolerance_kbps=40)
+        self.assertEqual(
+            compare_quality(self._m(192), self._m(160), wide).branch,
+            "rank_within_tolerance")
+
+    def test_the_decided_outcome_is_downgrade_not_import(self) -> None:
+        """The consequence, not a proxy: the pipeline must not re-import.
+
+        Driving the real decider end to end. Without the window this world
+        decides ``import`` — a whole replace for one kbps. The 320-vs-200
+        control below proves the guard did not simply stop importing.
+        """
+        churn = full_pipeline_decision(
+            is_flac=False, min_bitrate=192, is_cbr=False, avg_bitrate=192,
+            new_format="MP3",
+            existing_format="MP3",
+            existing_min_bitrate=191, existing_avg_bitrate=191,
+        )
+        self.assertEqual(churn["stage2_import"], "downgrade")
+        self.assertFalse(churn["imported"])
+        self.assertEqual(
+            churn["comparison_basis"]["branch"], "rank_within_tolerance")
+
+        real = full_pipeline_decision(
+            is_flac=False, min_bitrate=320, is_cbr=False, avg_bitrate=320,
+            new_format="MP3",
+            existing_format="MP3",
+            existing_min_bitrate=200, existing_avg_bitrate=200,
+        )
+        self.assertEqual(real["stage2_import"], "import")
+        self.assertTrue(real["imported"])
+        self.assertEqual(real["comparison_basis"]["branch"], "rank")
 
 
 class TestCompareQualitySharedSpectralBucket(unittest.TestCase):

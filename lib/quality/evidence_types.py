@@ -1070,6 +1070,10 @@ class QualityComparisonBasis(
 
 COMPARISON_BASIS_BRANCHES: frozenset[str] = frozenset({
     "rank",                        # ranks differ — the primary key decided
+    "rank_within_tolerance",       # ranks differ but by less than
+                                   # within_rank_tolerance_kbps of measured
+                                   # bitrate — same family, both bare labels,
+                                   # no spectral clamp (issue #1145)
     "lossless_same_rank",          # both LOSSLESS: equivalent by identity
     "cross_family_same_rank",      # same rank, different codec family
     "label_contract_same_rank",    # same rank, explicit label is authoritative

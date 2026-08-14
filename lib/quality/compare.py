@@ -32,6 +32,72 @@ from lib.quality.spectral_interpretation import (
 )
 
 
+def _rank_gap_is_within_tolerance(
+    *,
+    new_value: int | None,
+    existing_value: int | None,
+    new_format: str | None,
+    existing_format: str | None,
+    either_spectral_bound: bool,
+    cfg: QualityRankConfig,
+) -> bool:
+    """Whether a RANK difference is too small to be a real quality difference.
+
+    ``quality_rank`` is a step function evaluated with NO tolerance, and it
+    decides first — ``cfg.within_rank_tolerance_kbps`` only ever ran in the
+    same-rank ``metric_tiebreak`` below. That was survivable while the MP3
+    ladder's edges were 245/210/170/130, and the reason is the CANDIDATE
+    side, not the installed one. Both cliffs need a pair: an installed album
+    just below an edge AND a candidate on it. Measured on the 2026-08-14
+    library (1,101 measured all-MP3 albums): 817 of them average EXACTLY a
+    collapsed edge — 614 at 320, 127 at 192, 45 at 128, 31 at 256 — while
+    only 5 land exactly on a retired VBR edge. Issue #1145 moved every cliff
+    onto the nominal values three quarters of the population sits on, so the
+    pairing went from vanishingly rare to routine. (The installed half was
+    always populated: 38 albums sit 1-5 kbps below a collapsed edge, and 75
+    sat below a retired one — so "the old edges fell between the common
+    bitrates" is NOT the explanation, and measuring it was what showed that.)
+    Each such pair is a full replace + ``beet move`` + media-server churn for
+    a difference no listener can hear — the dl 39947 failure this series
+    began with, re-entering by a different door.
+
+    So the tolerance is applied to the rank comparison too, under exactly the
+    conditions that make the two values comparable:
+
+    * **Neither side's spectral clamp actually BOUND.** A bound side's value
+      is a spectral CLASS, not a measured rate; letting a ±5 window cancel a
+      rank the clamp produced would weaken the clamp in both directions —
+      suppressing a demotion it earned, or suppressing an upgrade over an
+      album it demoted. The test is ``either`` bound, not "a shared clamp
+      exists": when both sides carry spectral evidence and NEITHER estimate
+      is below its own raw metric, both clamped values simply ARE the raw
+      metrics, and refusing the window there would leave the churn this
+      guard exists to stop alive on exactly those albums.
+    * **Same codec family**, so the two numbers mean the same thing. A
+      cross-family rank difference is real (``cross_family_same_rank`` only
+      ever fires at EQUAL rank).
+    * **Both sides bare codec labels.** An explicit label's rank ignores the
+      measured bitrate entirely, so a kbps delta says nothing about it.
+    * **Both values present.**
+
+    The window is the configured one, so a genuinely larger gap still
+    promotes on rank: 320-vs-200 remains an upgrade. Under every shipped band
+    table the narrowest edge spacing (16 kbps, Opus and Vorbis) is wider than
+    the default 5 kbps window, so a qualifying gap straddles at most one edge;
+    a config that narrowed a band below the tolerance would not break the
+    rule, only widen what it cancels.
+    """
+    if either_spectral_bound:
+        return False
+    if new_value is None or existing_value is None:
+        return False
+    if _codec_family_of(new_format) != _codec_family_of(existing_format):
+        return False
+    if _is_explicit_label(new_format) or _is_explicit_label(existing_format):
+        return False
+    return abs(new_value - existing_value) <= cfg.within_rank_tolerance_kbps
+
+
 def _is_explicit_label(format_hint: str | None) -> bool:
     """True if format_hint carries an explicit quality contract (VBR or bitrate).
 
@@ -534,6 +600,7 @@ def compare_quality(
         rank_new_value, rank_existing_value = new_br, existing_br
         spectral_clamped = False
         both_spectral_bound = False
+        either_spectral_bound = False
     else:
         clamped_new_br, clamped_existing_br, new_bound, existing_bound = shared
         # ``both_spectral_bound`` survives the #1145 ladder collapse: it no
@@ -543,10 +610,30 @@ def compare_quality(
         # branch is its only remaining reader — see ``_shared_spectral_bitrates``
         # for the pin and the property that hold it up.
         both_spectral_bound = new_bound and existing_bound
+        either_spectral_bound = new_bound or existing_bound
         new_rank = quality_rank(new_format, clamped_new_br, cfg)
         existing_rank = quality_rank(existing.format, clamped_existing_br, cfg)
         rank_new_value, rank_existing_value = clamped_new_br, clamped_existing_br
         spectral_clamped = True
+
+    # A rank difference the configured tolerance says is not a difference.
+    # This runs BEFORE the rank short-circuit because rank is a no-tolerance
+    # step function that would otherwise never let ``metric_tiebreak`` see
+    # these two values at all (issue #1145 H2).
+    if new_rank != existing_rank and _rank_gap_is_within_tolerance(
+        new_value=rank_new_value,
+        existing_value=rank_existing_value,
+        new_format=new_format,
+        existing_format=existing.format,
+        either_spectral_bound=either_spectral_bound,
+        cfg=cfg,
+    ):
+        return _basis(
+            "equivalent", "rank_within_tolerance", new_rank, existing_rank,
+            new_value=rank_new_value, existing_value=rank_existing_value,
+            spectral_clamped=spectral_clamped,
+            tolerance_kbps=cfg.within_rank_tolerance_kbps,
+        )
 
     if new_rank > existing_rank:
         return _basis(

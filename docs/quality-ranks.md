@@ -72,7 +72,25 @@ encoder actually produced on quiet material.
 
 ## `compare_quality()` semantics
 
-Primary key is the rank. Within the same rank:
+Primary key is the rank — but not a rank difference *smaller than the
+tolerance*. `quality_rank` is a step function with no tolerance of its own,
+and it decides before the same-rank tiebreak ever runs, so a band edge
+falling between two albums used to mean the ±`within_rank_tolerance_kbps`
+window never ran at all. That was survivable while MP3's edges were
+245/210/170/130 — not because installed albums avoided them (75 sat 1-5 kbps
+below one) but because a *candidate* essentially never landed ON one: 5 of
+the 1,101 measured all-MP3 albums average exactly a retired VBR edge, against
+817 that average exactly a collapsed edge (614 at 320, 127 at 192, 45 at 128,
+31 at 256). Collapsing the tables (issue #1145) therefore put every cliff
+where three quarters of the population sits. So the window is applied to the
+rank comparison too,
+under the conditions that make the two numbers comparable — same codec
+family, both bare labels, and neither side's spectral clamp actually bound —
+and the basis records it as the `rank_within_tolerance` branch. A gap larger
+than the window still promotes on rank, and a bound spectral clamp still
+decides.
+
+Within the same rank:
 
 - **LOSSLESS always equivalent** — FLAC bitrate variance (800-1100) has no
   quality meaning.
@@ -527,7 +545,7 @@ All options live under `services.cratedigger.qualityRanks.*` and are declared by
 | Option | Type | Default | Meaning |
 |---|---|---|---|
 | `bitrateMetric` | enum (`min`, `avg`, `median`) | `"avg"` | Which per-album bitrate statistic feeds rank classification. `avg` is robust to VBR per-track variance. `median` is outlier-resistant -- prefer when albums commonly have quiet intros/hidden tracks/skits that skew `avg`. `min` is legacy and penalizes legitimately-encoded lo-fi VBR. See `docs/quality-ranks.md` "When to prefer median". |
-| `withinRankToleranceKbps` | int | `5` | Same-rank equivalence window in kbps. Two bare-codec measurements in the same rank tier within this tolerance are "equivalent"; outside it, one is "better"/"worse". |
+| `withinRankToleranceKbps` | int | `5` | Bare-codec equivalence window in kbps. Two same-family bare-codec measurements this close are "equivalent"; outside it, one is "better"/"worse". Since issue #1145 the window applies **across a band edge too** — a rank difference this small is not a difference — so raising it also raises how far apart two albums may sit before a replacement is authorised. It does not apply when either side's spectral clamp bound, or when either side carries an explicit label. |
 
 **Per-codec band tables** (`bands.<codec>.{transparent,excellent,good,acceptable}`, all in kbps, used when the format hint is a bare codec string like `"MP3"` rather than an explicit label like `"mp3 v0"`):
 

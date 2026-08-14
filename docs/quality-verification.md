@@ -1208,7 +1208,20 @@ both carry a `spectral_bitrate_kbps`):
 
    `both_spectral_bound` itself survives, for finding 1 above only: the
    same-rank `spectral_tiebreak` is like-for-like only when both clamped
-   values ARE spectral classes.
+   values ARE spectral classes. Its sibling `either_spectral_bound` gates
+   the `rank_within_tolerance` branch below.
+
+3. **A rank cliff on a nominal bitrate** (`rank` branch) — introduced by the
+   collapse itself and fixed in the same issue. Rank is a no-tolerance step
+   function evaluated before the tolerant same-rank tiebreak, so once the MP3
+   edges moved onto 320/256/192/128 a 1-kbps difference started authorising a
+   full replacement. `compare_quality` now applies
+   `within_rank_tolerance_kbps` to the rank comparison for same-family,
+   bare-label pairs where NEITHER side's spectral clamp bound, and records
+   the `rank_within_tolerance` branch. A bound clamp still decides — the gate
+   is "did a clamp bind", not "does a shared clamp exist", so two albums that
+   merely carry spectral evidence without it binding are still compared as
+   the raw metrics they are.
 
 #### The cross-codec domain (issue #829 Phase 5 PR2c)
 

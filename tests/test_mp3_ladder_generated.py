@@ -8,6 +8,17 @@ Three production invariants, each paired with a deterministic pin elsewhere:
 * **I3 — comparison symmetry.** Two measurements of the same audio rank equal
   regardless of which side of a comparison they sit on. Pin:
   ``tests/test_quality_decisions.py::TestCompareQuality``.
+* **I2 — a rank gap inside the tolerance is not an upgrade.** For a
+  same-family, bare-label, unclamped pair, a verdict of better/worse requires
+  the two measured bitrates to differ by MORE than
+  ``cfg.within_rank_tolerance_kbps`` — whether or not a band edge sits
+  between them. Pin:
+  ``tests/test_quality_decisions.py::TestRankGapWithinTolerance``.
+
+  This invariant exists because collapsing the MP3 tables (issue #1145) moved
+  the band edges onto the nominal bitrates albums cluster on, so rank — a
+  no-tolerance step function evaluated before the tolerant tiebreak — started
+  deciding 1-kbps differences.
 * **I4 — a spectral class only decides against another spectral class.**
   ``spectral_tiebreak`` fires only when BOTH sides' clamped values ARE their
   spectral classes; one bound side against one raw metric falls through to the
@@ -145,6 +156,48 @@ def _bands_for(label: str, cfg: QualityRankConfig) -> CodecRankBands:
 
 
 # ---------------------------------------------------------------------------
+# I2 — a rank gap inside the tolerance is not an upgrade
+# ---------------------------------------------------------------------------
+
+def rank_tolerance_violations(
+    *,
+    new_kbps: int,
+    existing_kbps: int,
+    verdict: str,
+    branch: str,
+    tolerance_kbps: int,
+) -> list[str]:
+    """Every way the tolerance could stop covering a same-family bare pair.
+
+    The caller has already restricted the world to one codec family, two bare
+    labels and no spectral clamp — the regime
+    ``_rank_gap_is_within_tolerance`` is defined for. ``verdict``/``branch``
+    come from the real ``compare_quality`` basis.
+    """
+    violations: list[str] = []
+    delta = abs(new_kbps - existing_kbps)
+    inside = delta <= tolerance_kbps
+    if inside and verdict != "equivalent":
+        violations.append(
+            f"{new_kbps} vs {existing_kbps} differ by {delta} kbps, inside the "
+            f"{tolerance_kbps} kbps window, but compared {verdict!r} "
+            f"(branch {branch!r})"
+        )
+    if not inside and verdict == "equivalent" and branch == "rank_within_tolerance":
+        violations.append(
+            f"{new_kbps} vs {existing_kbps} differ by {delta} kbps, outside the "
+            f"{tolerance_kbps} kbps window, but were cancelled as "
+            f"within-tolerance"
+        )
+    if branch == "rank_within_tolerance" and verdict != "equivalent":
+        violations.append(
+            f"the within-tolerance branch returned {verdict!r}, which is not "
+            f"a non-difference"
+        )
+    return violations
+
+
+# ---------------------------------------------------------------------------
 # I3 — comparison symmetry
 # ---------------------------------------------------------------------------
 
@@ -273,6 +326,108 @@ class TestOneMp3LadderGenerated(unittest.TestCase):
                 quality_rank(other, bitrate, cfg),
                 quality_rank(other, bitrate, CFG),
             )
+
+
+def _straddle(drawn: tuple[str, int, int, bool]) -> tuple[str, int, int]:
+    """Place a pair around one band edge, ``gap`` kbps apart."""
+    label, edge_index, gap, flip = drawn
+    bands = _bands_for(label, CFG)
+    edge = (bands.transparent, bands.excellent,
+            bands.good, bands.acceptable)[edge_index]
+    lower = edge - gap
+    return (label, lower, edge) if flip else (label, edge, lower)
+
+
+def _edge_straddling_pairs() -> st.SearchStrategy[tuple[str, int, int]]:
+    """Worlds placed around a real band edge, inside and outside the window.
+
+    The edges are DERIVED from the shipped config, never transcribed, so
+    retuning a band moves the worlds with it. ``gap`` spans 0 through well
+    past ``within_rank_tolerance_kbps`` so the strategy reaches both sides of
+    the boundary — an inside-only strategy would make the property
+    unfalsifiable in the direction that matters — and ``flip`` puts the
+    higher value on each side in turn.
+    """
+    return st.tuples(
+        st.sampled_from(_BARE_LOSSY_LABELS),
+        st.integers(min_value=0, max_value=3),
+        st.integers(min_value=0, max_value=CFG.within_rank_tolerance_kbps * 3),
+        st.booleans(),
+    ).map(_straddle)
+
+
+class TestRankToleranceGenerated(unittest.TestCase):
+    """I2 — patrol the collapsed band edges the population sits on."""
+
+    @given(
+        world=st.one_of(
+            _edge_straddling_pairs(),
+            st.tuples(
+                st.sampled_from(_BARE_LOSSY_LABELS),
+                _bitrates(),
+                _bitrates(),
+            ),
+        ),
+    )
+    # The three live shapes from the #1145 H2 reproduction.
+    @example(world=("MP3", 192, 191))
+    @example(world=("MP3", 320, 317))
+    @example(world=("MP3", 256, 252))
+    # Exactly on the window, and exactly one past it.
+    @example(world=("MP3", 256, 251))
+    @example(world=("MP3", 256, 250))
+    # The must-still-work control.
+    @example(world=("MP3", 320, 200))
+    def test_a_rank_gap_inside_the_window_is_never_an_upgrade(
+        self, world: tuple[str, int, int],
+    ) -> None:
+        label, new_kbps, existing_kbps = world
+
+        def measurement(kbps: int) -> AudioQualityMeasurement:
+            return AudioQualityMeasurement(
+                min_bitrate_kbps=kbps,
+                avg_bitrate_kbps=kbps,
+                median_bitrate_kbps=kbps,
+                format=label,
+            )
+
+        basis = compare_quality(
+            measurement(new_kbps), measurement(existing_kbps), CFG)
+        violations = rank_tolerance_violations(
+            new_kbps=new_kbps,
+            existing_kbps=existing_kbps,
+            verdict=basis.verdict,
+            branch=basis.branch,
+            tolerance_kbps=CFG.within_rank_tolerance_kbps,
+        )
+        self.assertEqual(violations, [], f"{label}: {basis!r}")
+
+    @given(world=_edge_straddling_pairs())
+    def test_a_gap_past_the_window_across_an_edge_still_decides(
+        self, world: tuple[str, int, int],
+    ) -> None:
+        """Must-still-work: the window must not swallow real upgrades.
+
+        Without this arm the property above passes against a production
+        change that returned ``equivalent`` for every same-family pair.
+        """
+        label, new_kbps, existing_kbps = world
+        if abs(new_kbps - existing_kbps) <= CFG.within_rank_tolerance_kbps:
+            return
+
+        def measurement(kbps: int) -> AudioQualityMeasurement:
+            return AudioQualityMeasurement(
+                min_bitrate_kbps=kbps,
+                avg_bitrate_kbps=kbps,
+                median_bitrate_kbps=kbps,
+                format=label,
+            )
+
+        basis = compare_quality(
+            measurement(new_kbps), measurement(existing_kbps), CFG)
+        expected = "better" if new_kbps > existing_kbps else "worse"
+        self.assertEqual(basis.verdict, expected, repr(basis))
+        self.assertNotEqual(basis.branch, "rank_within_tolerance")
 
 
 class TestComparisonSymmetryGenerated(unittest.TestCase):
@@ -479,6 +634,58 @@ class TestMp3LadderCheckersTripOnViolations(unittest.TestCase):
         )
         self.assertEqual(len(violations), 1, violations)
         self.assertIn("did not route through cfg.mp3", violations[0])
+
+    def test_rank_tolerance_clause_inside_window_not_equivalent(self) -> None:
+        """The defect itself: a 1-kbps gap decided by rank."""
+        violations = rank_tolerance_violations(
+            new_kbps=192, existing_kbps=191,
+            verdict="better", branch="rank", tolerance_kbps=5,
+        )
+        self.assertEqual(len(violations), 1, violations)
+        self.assertIn("inside the 5 kbps window", violations[0])
+
+    def test_rank_tolerance_clause_outside_window_cancelled(self) -> None:
+        """The over-correction: a real gap swallowed by a widened window.
+
+        Reached with the third clause clean (the verdict IS equivalent), so
+        only this clause can fire.
+        """
+        violations = rank_tolerance_violations(
+            new_kbps=256, existing_kbps=200,
+            verdict="equivalent", branch="rank_within_tolerance",
+            tolerance_kbps=5,
+        )
+        self.assertEqual(len(violations), 1, violations)
+        self.assertIn("outside the 5 kbps window", violations[0])
+
+    def test_rank_tolerance_clause_branch_must_mean_equivalent(self) -> None:
+        """Reached with both earlier clauses clean: outside the window, and
+        not an equivalent cancellation — so only the branch clause fires."""
+        violations = rank_tolerance_violations(
+            new_kbps=256, existing_kbps=200,
+            verdict="better", branch="rank_within_tolerance",
+            tolerance_kbps=5,
+        )
+        self.assertEqual(len(violations), 1, violations)
+        self.assertIn("is not a non-difference", violations[0])
+
+    def test_rank_tolerance_checker_is_silent_on_a_lawful_world(self) -> None:
+        """Must-still-work: the checker does not fire on correct behaviour."""
+        self.assertEqual(
+            rank_tolerance_violations(
+                new_kbps=192, existing_kbps=191,
+                verdict="equivalent", branch="rank_within_tolerance",
+                tolerance_kbps=5,
+            ),
+            [],
+        )
+        self.assertEqual(
+            rank_tolerance_violations(
+                new_kbps=320, existing_kbps=200,
+                verdict="better", branch="rank", tolerance_kbps=5,
+            ),
+            [],
+        )
 
     def test_symmetry_clause_unmirrored_verdict(self) -> None:
         violations = comparison_symmetry_violations(
