@@ -2120,6 +2120,59 @@ class TestGetAlbumMbIdentity(unittest.TestCase):
         self.assertEqual(row.item_paths, ())
         self.assertEqual(len(row.refused_paths), 1)
 
+    def test_matches_list_album_mb_identities_for_a_mixed_multi_item_album(
+        self,
+    ) -> None:
+        """N7 (#1142 review) — the narrow single-album read and the
+        whole-library read must agree exactly for a real, non-trivial
+        album: several contained items PLUS a refused (out-of-root) one,
+        beside an unrelated second album that must not leak in."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            library_root = os.path.join(tmpdir, "library")
+            outside_root = os.path.join(tmpdir, "outside")
+            _create_test_db(db_path)
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "INSERT INTO albums (id, mb_albumid, discogs_albumid) "
+                "VALUES (1, 'cccccccc-cccc-cccc-cccc-cccccccccccc', 0)"
+            )
+            conn.execute(
+                "INSERT INTO items (id, album_id, path) "
+                "VALUES (10, 1, 'Artist/Album/01.mp3')",
+            )
+            conn.execute(
+                "INSERT INTO items (id, album_id, path) "
+                "VALUES (11, 1, 'Artist/Album/02.mp3')",
+            )
+            conn.execute(
+                "INSERT INTO items (id, album_id, path) VALUES (12, 1, ?)",
+                (os.path.join(outside_root, "03.mp3").encode(),),
+            )
+            # An unrelated second album — must not leak into album 1's row.
+            conn.execute(
+                "INSERT INTO albums (id, mb_albumid, discogs_albumid) "
+                "VALUES (2, 'dddddddd-dddd-dddd-dddd-dddddddddddd', 0)"
+            )
+            conn.execute(
+                "INSERT INTO items (id, album_id, path) "
+                "VALUES (20, 2, 'Artist/Other/01.mp3')",
+            )
+            conn.commit()
+            conn.close()
+
+            with BeetsDB(db_path, library_root=library_root) as db:
+                single = db.get_album_mb_identity(1)
+                whole = {
+                    row.album_id: row for row in db.list_album_mb_identities()
+                }
+
+        assert single is not None
+        self.assertEqual(single, whole[1])
+        # Genuinely exercised the mixed shape, not a vacuous equality.
+        self.assertEqual(len(single.item_paths), 2)
+        self.assertEqual(len(single.refused_paths), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
