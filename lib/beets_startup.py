@@ -34,9 +34,14 @@ def enforce_beets_startup(
 ) -> CratediggerConfig:
     """Strictly load and admit Beets once for a top-level application.
 
-    The four process entrypoints call this after parsing and logging setup and
-    before their first application effect.  Actions and children inherit that
-    admitted process configuration and deliberately do not call this adapter.
+    Every top-level Beets-dependent process entrypoint calls this after
+    parsing and logging setup and before its first application effect
+    (cratedigger.py, web/server.py, scripts/importer.py,
+    scripts/import_preview_worker.py, scripts/run_retag_divergence_census.py
+    as of #1142 — named here as examples, not an exhaustive count that
+    goes stale the next time one is added). Actions and children inherit
+    that admitted process configuration and deliberately do not call
+    this adapter.
     """
     try:
         cfg = read_runtime_config_strict(config_path, runtime_dir)
