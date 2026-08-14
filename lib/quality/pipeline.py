@@ -124,11 +124,10 @@ def full_pipeline_decision(
     is_flac: bool,
     min_bitrate: int,
     is_cbr: bool,
-    # VBR + avg bitrate for the preimport spectral gate trigger (issue #93).
-    # ``is_vbr`` defaults to ``not is_cbr`` when omitted so legacy callers
-    # retain current behavior. ``avg_bitrate`` gates VBR MP3 through spectral
-    # when below cfg.mp3_vbr.excellent — genuine V0 (~245kbps avg) skips,
-    # fake V0 (~180kbps avg) gets analyzed.
+    # Recorded facts, not gate inputs. Since issue #1145 the preimport
+    # spectral gate reads the codec alone, so neither of these selects
+    # whether a candidate is scanned; ``avg_bitrate`` still feeds the
+    # measured rank and ``is_vbr`` still rides along as a persisted fact.
     is_vbr: bool | None = None,
     avg_bitrate: int | None = None,
     # Spectral analysis
@@ -389,16 +388,12 @@ def full_pipeline_decision(
     ).comparable
 
     # --- Stage 0: Spectral gate trigger (issue #93) ---
-    # Mirrors lib.measurement._needs_spectral_check. Tells the operator
-    # whether the preimport spectral gate would even run on this file,
-    # so a VBR MP3 transcode masquerading as V0 (avg < threshold) is
-    # distinguishable from genuine V0 in simulator output.
+    # Mirrors lib.measurement._needs_spectral_check: codec only, since issue
+    # #1145 retired the VBR skip. The simulator shows the operator whether the
+    # preimport gate fires for this candidate at all — which is now a question
+    # about the codec, not about a declared mode or an average.
     gate = spectral_gate_trigger(
         is_flac=bool(is_flac),
-        is_cbr=is_cbr,
-        is_vbr=is_vbr,
-        avg_bitrate_kbps=avg_bitrate,
-        vbr_threshold_kbps=cfg.mp3_vbr.excellent,
         codec_family=candidate_spectral.codec_family,
     )
     result["stage0_spectral_gate"] = gate

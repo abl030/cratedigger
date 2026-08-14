@@ -988,8 +988,7 @@
       within_rank_tolerance_kbps = ${toString qr.withinRankToleranceKbps}
 
       ${bandSection "opus" qr.bands.opus}
-      ${bandSection "mp3_vbr" qr.bands.mp3Vbr}
-      ${bandSection "mp3_cbr" qr.bands.mp3Cbr}
+      ${bandSection "mp3" qr.bands.mp3}
       ${bandSection "aac" qr.bands.aac}
       ${bandSection "vorbis" qr.bands.vorbis}
       ${bandSection "wma" qr.bands.wma}
@@ -1873,13 +1872,7 @@ in {
           good = 64;
           acceptable = 48;
         };
-        mp3Vbr = mkCodecBands "MP3 VBR" {
-          transparent = 245;
-          excellent = 210;
-          good = 170;
-          acceptable = 130;
-        };
-        mp3Cbr = mkCodecBands "MP3 CBR" {
+        mp3 = mkCodecBands "MP3" {
           transparent = 320;
           excellent = 256;
           good = 192;

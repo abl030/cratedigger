@@ -33,6 +33,7 @@ from lib.measurement import (
     PreimportMeasurement,
 )
 from lib.quality import (
+    CURRENT_EVIDENCE_LINEAGE_VERSION,
     AudioQualityMeasurement,
     AudioToolDiagnostic,
     AudioValidationReport,
@@ -1099,7 +1100,7 @@ class TestImportPreviewPath(unittest.TestCase):
             current = result.evidence
             assert current is not None
             self.assertEqual(current.id, stored.id)
-            self.assertEqual(current.lineage_version, 4)
+            self.assertEqual(current.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
             self.assertEqual(current.measurement.format, "AAC")
             self.assertEqual(current.measurement.avg_bitrate_kbps, 256)
         finally:
@@ -2318,13 +2319,15 @@ class TestImportPreviewPath(unittest.TestCase):
             self.assertEqual(loaded.measurement.format, "FLAC")
             self.assertEqual(loaded.target_format, "opus 128")
             self.assertFalse(loaded.target_is_cbr)
-            self.assertEqual(loaded.lineage_version, 4)
+            self.assertEqual(loaded.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
             wrong_match = db.get_wrong_matches()[0]
             self.assertEqual(
                 wrong_match["evidence_target_format"], "opus 128"
             )
             self.assertFalse(wrong_match["evidence_target_is_cbr"])
-            self.assertEqual(wrong_match["evidence_lineage_version"], 4)
+            self.assertEqual(
+                wrong_match["evidence_lineage_version"],
+                CURRENT_EVIDENCE_LINEAGE_VERSION)
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)
@@ -3369,7 +3372,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         self.assertEqual(current_id, before.id)
         current = db.load_album_quality_evidence_by_id(current_id)
         assert current is not None
-        self.assertEqual(current.lineage_version, 4)
+        self.assertEqual(current.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
         self.assertEqual(db.request(42)["status"], "downloading")
 
         db.update_status(42, "wanted", expected_status="downloading")
@@ -3388,7 +3391,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         self.assertEqual(db.request(42)["status"], "wanted")
         current = db.load_album_quality_evidence_by_id(current_id)
         assert current is not None
-        self.assertEqual(current.lineage_version, 4)
+        self.assertEqual(current.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
         self.assertEqual(current.measurement.format, "AAC")
         self.assertEqual(current.measurement.avg_bitrate_kbps, 256)
 

@@ -42,9 +42,6 @@ DECISION_LOSSLESS_SOURCE_LOCKED = "lossless_source_locked"
 DECISION_VERIFIED_LOSSLESS_LOCKED = "verified_lossless_locked"
 
 
-QUALITY_MIN_BITRATE_KBPS = 210  # V0 floor — below this triggers upgrade
-
-
 # ---------------------------------------------------------------------------
 # MeasurementFailure — U4 wire-boundary type for preview measurement failures
 # ---------------------------------------------------------------------------

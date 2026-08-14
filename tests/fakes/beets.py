@@ -857,7 +857,11 @@ class FakeBeetsDB:
         """Mirror of ``BeetsDB.get_min_bitrate`` (kbps; None = no row).
 
         Production derives this value from the same joined item snapshot as
-        every other current-release lookup; the fake does the same.
+        every other current-release lookup; the fake does the same — and it
+        reduces bps through the production ``kbps_from_bps``, never a copy of
+        the arithmetic. #1144's convergence found three hand-copied
+        reductions in this file that all still floored after production
+        started rounding.
         """
         self.get_min_bitrate_calls.append(mb_release_id)
         if self._locate_queue and self._locate_queue[0].kind != "exact":
@@ -872,7 +876,7 @@ class FakeBeetsDB:
             item.bitrate for item in current.items
             if item.bitrate is not None and item.bitrate > 0
         ]
-        return int(min(bitrates) / 1000) if bitrates else None
+        return kbps_from_bps(min(bitrates)) if bitrates else None
 
     def _album_info_from_resolution(
         self,

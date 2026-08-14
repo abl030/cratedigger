@@ -62,7 +62,7 @@ LAME_LOWPASS = [
 reports the **minimum** per-track estimate (worst-track-wins, always via
 `min` regardless of the configured `bitrate_metric` —
 `docs/quality-ranks.md` § "Bitrate metric"). The CBR band table
-(`mp3_cbr.*`) is explicitly calibrated to line up with these cliff
+(`mp3.*`) is explicitly calibrated to line up with these cliff
 numbers ("a cliff-detected 192 IS a `good`-band reading, by construction").
 
 ## LAME lowpass ladder — CBR

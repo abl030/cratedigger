@@ -18,6 +18,7 @@ from lib.beets_db import (
     CurrentBeetsUnique,
     _reduce_album_format,
 )
+from lib.media_readiness import kbps_from_bps
 from lib.quality import QualityRankConfig
 from lib.release_identity import ReleaseIdentity
 
@@ -86,8 +87,17 @@ def compute_library_rank(
     floor. Pure (moved from ``web/server.py``, which keeps a 2-arg wrapper
     supplying the cached cfg). Returns the lowercase rank name (``lossless`` /
     ``transparent`` / ``excellent`` / ``good`` / ``acceptable`` / ``poor`` /
-    ``unknown``). Treats MP3 as VBR — cratedigger only produces VBR-V0 MP3, and
-    the badge buckets barely care about the VBR/CBR distinction.
+    ``unknown``).
+
+    ``format_str`` is a Beets codec label (``"MP3"``, ``"FLAC"``, …),
+    possibly comma-joined for a multi-codec album, of which the first is
+    taken. It never carries a quality contract: no Beets projection mints
+    one, and issue #1145 deliberately left it that way. So an MP3 badge is
+    the measured band and nothing else — which since #1145 is the only MP3
+    ladder there is. Before it, this call passed ``is_cbr=False`` and so
+    always read the more generous of two tables; that argument is gone
+    along with the table it selected, and dropping it is exactly why an MP3
+    album can band lower here than it did on ``main``.
     """
     if not format_str:
         return BAND_UNKNOWN
@@ -95,14 +105,27 @@ def compute_library_rank(
     if not fmt:
         return BAND_UNKNOWN
     from lib.quality import quality_rank
-    return quality_rank(fmt, bitrate_kbps, is_cbr=False, cfg=cfg).name.lower()
+    return quality_rank(fmt, bitrate_kbps, cfg=cfg).name.lower()
 
 
 def _band_current_unique(
     current: CurrentBeetsUnique,
     cfg: QualityRankConfig,
 ) -> str:
-    """Rank one exact resolution from its coherent item snapshot."""
+    """Rank one exact resolution from its coherent item snapshot.
+
+    The average is reduced by the shared ``kbps_from_bps`` (issue #1144), not
+    the local float truncation this used to do. Beets stores sub-kilobit
+    per-track rates, so an album whose exact average is ``x.5``-or-above
+    floors one kbps low, and at a band edge that is a whole tier — while
+    ``album_info_from_current``, which the importer ranks against, already
+    rounded. Measured on the 2026-08-14 library: seven Opus albums averaging
+    111.59-112.00 kbps banded ``excellent`` on the floor and ``transparent``
+    on the round, matching the importer. Collapsing the MP3 tables (issue
+    #1145) moved MP3's own edges onto 128/192/256/320 and made the same skew
+    reachable for MP3 too, which is what
+    ``tests/test_long_tail_service_generated.py`` now catches.
+    """
     album_format = _reduce_album_format(
         {item.format for item in current.items if item.format},
         cfg,
@@ -113,7 +136,7 @@ def _band_current_unique(
         if item.bitrate is not None and item.bitrate > 0
     ]
     average_kbps = (
-        int(sum(bitrates) / len(bitrates) / 1000)
+        kbps_from_bps(sum(bitrates) // len(bitrates))
         if bitrates else 0
     )
     return compute_library_rank(album_format, average_kbps, cfg)

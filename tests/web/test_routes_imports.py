@@ -1335,7 +1335,10 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(group["current_spectral_grade"], "genuine")
         self.assertEqual(group["format"], "MP3")
         self.assertEqual(group["quality_label"], "MP3 V0")
-        self.assertEqual(group["quality_rank"], "transparent")
+        # 288 kbps: ``excellent`` on the one MP3 ladder (#1145). The
+        # ``quality_label`` above is a separate legacy projection and is
+        # deliberately unchanged.
+        self.assertEqual(group["quality_rank"], "excellent")
 
     def test_group_shows_nothing_on_disk_when_wanted(self):
         """Wanted album: no files in library yet — fields are null, label signals 'not on disk'."""

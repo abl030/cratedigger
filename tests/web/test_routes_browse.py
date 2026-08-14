@@ -983,7 +983,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["releases"][0]["beets_album_id"], 7)
         self.assertEqual(data["releases"][0]["library_min_bitrate"], 194)
         self.assertEqual(data["releases"][0]["library_avg_bitrate"], 288)
-        self.assertEqual(data["releases"][0]["library_rank"], "transparent")
+        self.assertEqual(data["releases"][0]["library_rank"], "excellent")
         self.assertTrue(data["releases"][0]["has_captured_history"])
         self.assertFalse(data["releases"][0]["pipeline_verified_lossless"])
         self.assertTrue(data["releases"][0]["pipeline_provisional"])
@@ -1027,7 +1027,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["beets_album_id"], 7)
         self.assertEqual(data["library_min_bitrate"], 194)
         self.assertEqual(data["library_avg_bitrate"], 288)
-        self.assertEqual(data["library_rank"], "transparent")
+        # 288 kbps lands in ``excellent`` (256-319) on the one MP3
+        # ladder; the retired VBR table read it ``transparent``.
+        self.assertEqual(data["library_rank"], "excellent")
         self.assertEqual(data["pipeline_status"], "wanted")
         self.assertEqual(data["pipeline_id"], 42)
         self.assertIsNone(data["processing_owner"])

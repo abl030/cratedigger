@@ -33,7 +33,7 @@ setsid nix-shell --run "python3 scripts/web_dev_server.py --data live-db \
   --host 127.0.0.1 --port 8096 \
   --beets-db /mnt/virtio/cratedigger/beets-db/beets-library.db \
   --beets-directory /mnt/virtio/Music/Beets \
-  --mb-api http://192.168.1.35:5200/ws/2 \
+  --mb-api http://192.168.1.43:5200/ws/2 \
   --discogs-api https://discogs.ablz.au" \
   > /tmp/devserver.log 2>&1 < /dev/null &
 

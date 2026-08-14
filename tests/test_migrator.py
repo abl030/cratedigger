@@ -27,6 +27,7 @@ from lib.migrator import (
     discover_migrations,
     missing_migration_versions,
 )
+from lib.quality import CURRENT_EVIDENCE_LINEAGE_VERSION
 
 TEST_DSN: str = os.environ.get("TEST_DB_DSN") or ""
 
@@ -3772,6 +3773,80 @@ class TestQualityEvidenceLineageVersionMigration(unittest.TestCase):
                             {LEGACY_UNRECORDED_AUDIO_VALIDATION_SQL}
                         )
                     """)
+        finally:
+            conn.close()
+
+
+@requires_postgres
+class TestCurrentEvidenceLineageMigration(unittest.TestCase):
+    """Migration 078 and ``CURRENT_EVIDENCE_LINEAGE_VERSION`` are one fact.
+
+    The lazy rebuild only converts rows when the Python writers emit a version
+    the schema also accepts and defaults to. Bumping one without the other
+    would either abort every evidence write with a CheckViolation or leave the
+    whole library reporting itself current at the old lineage — the second is
+    silent, which is why this is pinned against real PostgreSQL rather than
+    read off the constant on both sides.
+    """
+
+    def test_schema_default_is_the_version_python_writes(self) -> None:
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    INSERT INTO album_quality_evidence (
+                        mb_release_id, snapshot_fingerprint,
+                        source_path, measured_at, audio_validation
+                    ) VALUES (
+                        'lineage-default-078', 'snapshot-lineage-default-078',
+                        '/lineage-default', NOW(),
+                        {LEGACY_UNRECORDED_AUDIO_VALIDATION_SQL}
+                    )
+                    RETURNING lineage_version
+                """)
+                self.assertEqual(
+                    cur.fetchone(), (CURRENT_EVIDENCE_LINEAGE_VERSION,))
+        finally:
+            conn.close()
+
+    def test_check_admits_the_current_version_and_refuses_the_next(
+        self,
+    ) -> None:
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    INSERT INTO album_quality_evidence (
+                        mb_release_id, snapshot_fingerprint,
+                        source_path, measured_at, lineage_version,
+                        audio_validation
+                    ) VALUES (
+                        'lineage-current-078', 'snapshot-lineage-current-078',
+                        '/lineage-current', NOW(),
+                        {CURRENT_EVIDENCE_LINEAGE_VERSION},
+                        {LEGACY_UNRECORDED_AUDIO_VALIDATION_SQL}
+                    )
+                    RETURNING lineage_version
+                """)
+                self.assertEqual(
+                    cur.fetchone(), (CURRENT_EVIDENCE_LINEAGE_VERSION,))
+            with conn.cursor() as cur, self.assertRaises(
+                psycopg2.errors.CheckViolation
+            ):
+                cur.execute(f"""
+                    INSERT INTO album_quality_evidence (
+                        mb_release_id, snapshot_fingerprint,
+                        source_path, measured_at, lineage_version,
+                        audio_validation
+                    ) VALUES (
+                        'lineage-next-078', 'snapshot-lineage-next-078',
+                        '/lineage-next', NOW(),
+                        {CURRENT_EVIDENCE_LINEAGE_VERSION + 1},
+                        {LEGACY_UNRECORDED_AUDIO_VALIDATION_SQL}
+                    )
+                """)
         finally:
             conn.close()
 

@@ -460,10 +460,20 @@ the old thresholds produced.
    graded, or affirmatively graded but proof-denied — still produces a V0
    source probe and uses the provisional lossless-source comparison lane
    instead of becoming verified (issue #990).
-2. **MP3 downloads (especially CBR 320)**: Run spectral check post-download. Cliff + high deficit = upsampled garbage.
-3. **High-band native VBR MP3**: The named policy may deliberately skip
-   spectral analysis. This is an explicit non-verification lane: bitrate can
-   drive relative rank, but it cannot mint verified-lossless proof.
+2. **MP3 downloads**: Run spectral check post-download, on every MP3. Cliff +
+   high deficit = upsampled garbage.
+3. **Non-MP3 lossy (AAC, Opus, Vorbis, WMA)**: No preimport scan. No cliff
+   policy is calibrated for them, so an analysis would produce a number no
+   decision may consume. This is the explicit non-verification lane: bitrate
+   can drive relative rank, but it cannot mint verified-lossless proof.
+
+   There used to be a fourth lane — a high-average native VBR MP3 skipped the
+   scan on the premise that its bitrate was self-evidence of provenance.
+   Issue #1145 removed it: the declared mode is the encoder's own Xing/Info
+   header, and while the average is genuinely measured, a transcode
+   re-encoded at a high bitrate genuinely has a high one. Neither half of the
+   premise said anything about where the audio came from, so the album that
+   most needed measuring was the one that skipped it.
 
 If a candidate-side required scan is missing or errors, preview records
 `measurement_failed`; if fresh analysis of an installed HAVE is missing or
@@ -1187,18 +1197,31 @@ both carry a `spectral_bitrate_kbps`):
    actually bound turns the branch into a stealth `metric_tiebreak` with no
    `±5kbps` tolerance whenever one (or neither) side is bound, since the
    "clamped" value on an unbound side is just its raw metric.
-2. **CBR/VBR band-table mismatch** (`rank` branch). An MP3 class ladder is
-   calibrated to `QualityRankConfig.mp3_cbr`'s thresholds
-   (128=acceptable, 192=good, 256=excellent, 320=transparent), not
-   `mp3_vbr`'s more generous ones. A side whose clamp is spectral-bound now
-   classifies via CBR bands regardless of that side's own `is_cbr` — but
-   **only when BOTH sides are bound** (another PR #827 review finding)
-   **and only for MP3** (issue #829 Phase 5 PR2b): forcing CBR on one bound
-   side while an unbound side keeps its own (possibly more generous VBR)
-   table mixes a spectral-calibrated number against a raw-metric number
-   under two different band tables, which can itself invert the ordering,
-   and only MP3 routes on `is_cbr` at all. A side whose clamp did NOT bind
-   (raw is the tighter value) always classifies with its own encoding mode.
+2. **CBR/VBR band-table mismatch** (`rank` branch) — **RESOLVED BY REMOVAL,
+   issue #1145.** An MP3 class ladder is drawn from the nominal kbps values
+   128/192/256/320, and the second, more generous MP3 band table those values
+   used to be measured against no longer exists: there is one
+   `QualityRankConfig.mp3` table and a spectral-bound value classifies
+   through it like everything else. `_classify_with_cbr_bands` and its "both
+   sides bound AND the side is MP3" gating are gone with it, along with
+   `quality_rank`'s `is_cbr` parameter.
+
+   `both_spectral_bound` itself survives, for finding 1 above only: the
+   same-rank `spectral_tiebreak` is like-for-like only when both clamped
+   values ARE spectral classes. Its sibling `either_spectral_bound` gates
+   the `rank_within_tolerance` branch below.
+
+3. **A rank cliff on a nominal bitrate** (`rank` branch) — introduced by the
+   collapse itself and fixed in the same issue. Rank is a no-tolerance step
+   function evaluated before the tolerant same-rank tiebreak, so once the MP3
+   edges moved onto 320/256/192/128 a 1-kbps difference started authorising a
+   full replacement. `compare_quality` now applies
+   `within_rank_tolerance_kbps` to the rank comparison for same-family,
+   bare-label pairs where NEITHER side's spectral clamp bound, and records
+   the `rank_within_tolerance` branch. A bound clamp still decides — the gate
+   is "did a clamp bind", not "does a shared clamp exist", so two albums that
+   merely carry spectral evidence without it binding are still compared as
+   the raw metrics they are.
 
 #### The cross-codec domain (issue #829 Phase 5 PR2c)
 

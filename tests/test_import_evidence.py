@@ -24,6 +24,7 @@ from lib.import_evidence import (
     load_current_evidence_for_action,
 )
 from lib.quality import (
+    CURRENT_EVIDENCE_LINEAGE_VERSION,
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
@@ -786,7 +787,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.assertEqual(result.provenance.current_status, "backfilled")
         self.assertIn("lineage_version", result.provenance.fallback_reason or "")
         assert result.evidence is not None
-        self.assertEqual(result.evidence.lineage_version, 4)
+        self.assertEqual(result.evidence.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
         self.assertEqual(result.evidence.measurement.format, "AAC")
         self.assertEqual(result.evidence.measurement.avg_bitrate_kbps, 256)
         self.assertEqual(
@@ -851,7 +852,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
 
         self.assertTrue(result.available)
         assert result.evidence is not None
-        self.assertEqual(result.evidence.lineage_version, 4)
+        self.assertEqual(result.evidence.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
         # A v1 spectral result has no subject metadata, so it cannot be
         # promoted as installed-HAVE authority during the rebuild.  The
         # explicitly source-subject V0 metric remains safe to carry.

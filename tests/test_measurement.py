@@ -784,8 +784,7 @@ class TestMeasurePreimportState(unittest.TestCase):
         cfg = CratediggerConfig(audio_check_mode="off")
         # Precomputed inspection signaling nested layout.
         inspection = LocalFileInspection(
-            filetype="mp3", min_bitrate_bps=320_000,
-            avg_bitrate_bps=320_000, is_vbr=False, has_nested_audio=True,
+            filetype="mp3", min_bitrate_bps=320_000, is_vbr=False, has_nested_audio=True,
         )
         with patch(
                  "lib.measurement._iter_audio_files",

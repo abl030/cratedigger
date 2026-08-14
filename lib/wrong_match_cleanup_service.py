@@ -26,6 +26,7 @@ from lib.quality import (
     classify_full_pipeline_decision,
     comparison_basis_from_decision,
     evidence_decision_name,
+    evidence_is_source_semantic,
     full_pipeline_decision_from_evidence,
     narrow_override_on_lossless_source_lock,
 )
@@ -938,7 +939,8 @@ def _result(
     current_evidence: AlbumQualityEvidence | None = None,
 ) -> WrongMatchCleanupOutcome:
     ambiguous_source_lineage = any(
-        evidence is not None and evidence.lineage_version not in (3, 4)
+        evidence is not None
+        and not evidence_is_source_semantic(evidence.lineage_version)
         for evidence in (candidate_evidence, current_evidence)
     )
     # Migration 050 lineage-v1 measurements may be target projections. A
@@ -954,7 +956,7 @@ def _result(
     ) -> AudioQualityMeasurement | None:
         if evidence is None:
             return None
-        if evidence.lineage_version in (3, 4):
+        if evidence_is_source_semantic(evidence.lineage_version):
             return evidence.measurement
         # Spectral facts were never target projections. Preserve only that
         # valid subset, while an explicit empty measurement makes Recents

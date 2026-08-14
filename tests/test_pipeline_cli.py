@@ -3158,8 +3158,16 @@ class TestCmdQuality(unittest.TestCase):
         self.assertIn("(rank=EXCELLENT)", output)
         self.assertIn("is_cbr=True", output)
 
-    def test_quality_bare_mp3_vbr_transparent_needs_lossless_proof(self):
-        """Live request 8499: transparent genuine VBR narrows lossless-only."""
+    def test_quality_bare_mp3_at_319_needs_upgrade_not_lossless(self):
+        """Live request 8499, and the collapse's operator-visible consequence.
+
+        A genuine-graded 319 kbps MP3 with no explicit label reached
+        TRANSPARENT on the retired VBR ladder (transparent >= 245) and the
+        gate narrowed the search to lossless-only. One ladder puts the same
+        measurement in EXCELLENT (transparent = 320), so the gate now asks
+        for an upgrade instead — the pipeline resumes hunting a record it
+        previously treated as finished, which is the intended direction.
+        """
         from lib.beets_db import AlbumInfo
 
         request_row = make_request_row(
@@ -3190,8 +3198,8 @@ class TestCmdQuality(unittest.TestCase):
             beets_info=vbr_info,
         )
 
-        self.assertIn("Quality gate:  NEEDS LOSSLESS", output)
-        self.assertIn("(rank=TRANSPARENT)", output)
+        self.assertIn("Quality gate:  NEEDS UPGRADE", output)
+        self.assertIn("(rank=EXCELLENT)", output)
         self.assertIn("is_cbr=False", output)
 
     def test_backfill_uses_linked_current_evidence_not_request_scalar(self):

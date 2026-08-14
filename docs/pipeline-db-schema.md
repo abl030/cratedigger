@@ -54,9 +54,15 @@ Key fields:
   `target_format` and `target_is_cbr` NULL rather than guessing a mode.
 - `lineage_version SMALLINT` — `1` marks historical rows whose storage/target
   projection is ambiguous; `3` marks separated source and target facts; `4`
-  adds the two-axis evidence vocabulary. Migration 055 changes the default to
-  4, and every new typed writer persists version 4 explicitly. Version 1/3
-  rows rebuild on their next policy touch instead of being interpreted as v4.
+  adds the two-axis evidence vocabulary; `5` re-derives the MP3 rank against
+  one band table instead of two selected by an inferred mode (issue #1145).
+  4 and 5
+  share the v4 fact vocabulary, which is why every version-gated shape CHECK
+  and every `lineage_version < 4` merge predicate stays at 4 — those mean
+  "predates the two-axis vocabulary", not "predates the current version".
+  Migration 078 changes the default to 5 and every typed writer persists
+  `lib.quality.CURRENT_EVIDENCE_LINEAGE_VERSION` explicitly. Older rows
+  rebuild on their next policy touch instead of being interpreted as current.
 - `min_bitrate_kbps`, `avg_bitrate_kbps`, `median_bitrate_kbps`, `format`,
   `is_cbr`, `spectral_grade`, `spectral_bitrate_kbps`, `spectral_subject`,
   `spectral_provenance`, `was_converted_from` — the wrapped
