@@ -1726,7 +1726,6 @@ def _cleanup_staged_dir(
     work_path: str,
     *,
     cfg: CratediggerConfig | None = None,
-    read_runtime_config_fn: Callable[[], CratediggerConfig] = read_runtime_config,
 ) -> None:
     if not os.path.isdir(work_path):
         return
@@ -1784,7 +1783,7 @@ def _cleanup_staged_dir(
         # prune instead: the worst case is a harmless leftover empty
         # directory, never a deleted shared root.
         try:
-            resolved_cfg = cfg or read_runtime_config_fn()
+            resolved_cfg = cfg or read_runtime_config()
         except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             _log(
                 f"[WARN] staged-dir parent-prune guard could not read "

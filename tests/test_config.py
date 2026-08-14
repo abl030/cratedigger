@@ -392,10 +392,11 @@ class TestReadRuntimeConfig(unittest.TestCase):
 
     The production outcomes are a closed partition, not an open world:
     admitted match, missing (including open-time FileNotFoundError),
-    unreadable leaf, inaccessible ancestor, malformed, and readable
-    valid. Fresh entropy cannot invent a new clause, so this stays an
-    exhaustive deterministic table per the settled #893 policy rather
-    than a manufactured ``@given`` / ``test_*_generated.py`` costume.
+    unreadable leaf, inaccessible ancestor, preserved non-permission
+    OSError, malformed, and readable valid. Fresh entropy cannot invent
+    a new clause, so this stays an exhaustive deterministic table per
+    the settled #893 policy rather than a manufactured ``@given`` /
+    ``test_*_generated.py`` costume.
     """
 
     def test_missing_config_returns_default(self):
@@ -421,6 +422,10 @@ class TestReadRuntimeConfig(unittest.TestCase):
                 os.chmod(config_path, 0o600)
         message = str(caught.exception)
         self.assertIn(config_path, message)
+        self.assertIn("mode", message)
+        self.assertIn("ownership", message)
+        self.assertIn("ancestor", message)
+        self.assertIn("searchable", message)
         self.assertNotIn("configMode", message)
         self.assertNotIn("configGroup", message)
 
@@ -446,8 +451,26 @@ class TestReadRuntimeConfig(unittest.TestCase):
                 os.chmod(parent, 0o700)
         message = str(caught.exception)
         self.assertIn(config_path, message)
+        self.assertIn("mode", message)
+        self.assertIn("ownership", message)
+        self.assertIn("ancestor", message)
+        self.assertIn("searchable", message)
         self.assertNotIn("configMode", message)
         self.assertNotIn("configGroup", message)
+
+    def test_directory_path_returns_default(self) -> None:
+        """Issue #1136: a non-permission OSError keeps the soft fallback.
+
+        ``open()`` on a directory raises ``IsADirectoryError``, an
+        ``OSError`` subclass that is neither ``FileNotFoundError`` nor
+        ``PermissionError``. Deleting or narrowing ``except OSError``
+        would leave the permission-denial pins green. There is no
+        production open-boundary seam for an ``EIO`` injection, so this
+        real directory world is the owned coverage for that catch.
+        """
+        with tempfile.TemporaryDirectory() as root:
+            cfg = read_runtime_config(root)
+        self.assertEqual(cfg.beets_harness_path, "")
 
     def test_malformed_config_returns_default(self) -> None:
         """Issue #1136: a readable but unparseable file stays a soft fallback."""
