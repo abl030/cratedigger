@@ -106,7 +106,19 @@ class TestHashAudioContentTagInvariance(unittest.TestCase):
             shutil.copy(FIXTURE_DIR / "sine_440.mp3", target)
             before = hash_audio_content(target)
 
-            from mutagen.id3 import ID3, TIT2  # type: ignore[import-untyped]
+            # ``TIT2`` comes from its defining module, which is what
+            # pyright's own ``reportPrivateImportUsage`` message asks for:
+            # ``mutagen.id3`` ships ``py.typed`` but re-exports the frame
+            # classes implicitly, so importing ``TIT2`` from there needs a
+            # suppression comment — and whether that comment is REQUIRED or
+            # UNNECESSARY flips with the mutagen version. It was required
+            # here and unnecessary on nixpkgs-unstable, which failed the
+            # 2026-08-15 daily gate's pyright phase (the retired comment
+            # also claimed ``import-untyped``, which was never the
+            # diagnostic). The defining module is clean under both, with
+            # nothing to suppress.
+            from mutagen.id3 import ID3
+            from mutagen.id3._frames import TIT2
             from mutagen.mp3 import MP3
 
             audio = MP3(str(target), ID3=ID3)

@@ -516,6 +516,32 @@ class TestWorldInvariantCheckersTripOnKnownBad(unittest.TestCase):
 
         self.assertEqual(violations, ())
 
+    def test_library_root_containment_trips_on_a_parent_traversal_out_of_root(
+        self,
+    ) -> None:
+        """A folder that only LOOKS like it is under the root — it is
+        spelled with the root as a prefix, then walks back out of it with
+        ``..``. The checker normalizes before comparing, so this is
+        reported exactly like any other album outside the root; a prefix
+        comparison on the raw string would accept it.
+
+        The 2026-08-15 daily gate generated this world into
+        ``test_partially_moved_item_alone_is_rejected``'s "inside" premise
+        and the property failed correctly. The premise was fixed there;
+        the world it found is real, so it is kept here on purpose.
+        """
+        violations = check_library_root_containment((LibraryAlbumSnapshot(
+            album_id=1,
+            release_id="release-a",
+            album_path="/mnt/virtio/Music/Beets/..",
+            item_paths=("/mnt/virtio/Music/Beets/../01.flac",),
+        ),), library_root="/mnt/virtio/Music/Beets")
+
+        self.assertEqual(
+            {v.code for v in violations},
+            {"album_folder_outside_library_root", "album_item_outside_library_root"},
+        )
+
     def test_library_root_containment_fails_closed_when_root_is_unconfigured(
         self,
     ) -> None:

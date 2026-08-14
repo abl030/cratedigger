@@ -49,7 +49,11 @@ from lib.import_preview import (
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_ctx_with_fake_db, make_grab_list_entry
+from tests.helpers import (
+    make_ctx_with_fake_db,
+    make_grab_list_entry,
+    make_socket_file,
+)
 
 
 def assert_publication_invariant(
@@ -180,16 +184,40 @@ class TestAuthorityFailureClassification(unittest.TestCase):
         ``S_ISREG`` check never runs. Classifying by errno alone would
         file a containment-class shape under a storage reason (I3)."""
         with tempfile.TemporaryDirectory() as root:
-            sock = socket.socket(socket.AF_UNIX)
-            try:
-                sock.bind(os.path.join(root, "sock"))
-                with open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
-                    open_regular_relative(root_fd, "sock")
-            finally:
-                sock.close()
+            make_socket_file(os.path.join(root, "sock"))
+            with open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
+                open_regular_relative(root_fd, "sock")
         self.assertEqual(caught.exception.code, "not_regular_file")
         self.assertIn(caught.exception.code, _CONTAINMENT_CODES)
         self.assertIsNone(caught.exception.errno_symbol)
+
+    def test_unix_socket_world_survives_a_path_longer_than_sun_path(self) -> None:
+        """The 2026-08-15 daily-gate defect, pinned end to end.
+
+        Socket worlds used to be planted with ``bind``, which enforces
+        ``sun_path``'s ~107-byte ceiling on a path the filesystem itself
+        accepts. Nothing local exceeded it; the daily gate's deeper scratch
+        root did, so 3 deterministic IDs and 24 fuzz shards died with
+        ``OSError: AF_UNIX path too long`` in a lane no developer runs.
+
+        The control ``bind`` is the load-bearing half: it proves this world
+        is still long enough to have tripped the old code, so shortening
+        the fixture can never quietly retire the regression it pins.
+        """
+        with tempfile.TemporaryDirectory() as root:
+            deep = os.path.join(root, "a" * 40, "b" * 40)
+            os.makedirs(deep)
+            path = os.path.join(deep, "01 track.mp3")
+            self.assertGreater(len(path), 107)
+            with socket.socket(socket.AF_UNIX) as control, self.assertRaises(OSError):
+                control.bind(path)
+
+            make_socket_file(path)
+
+            with open_directory_path(deep) as deep_fd, self.assertRaises(FilesystemAuthorityError) as caught:
+                open_regular_relative(deep_fd, "01 track.mp3")
+        self.assertEqual(caught.exception.code, "not_regular_file")
+        self.assertIn(caught.exception.code, _CONTAINMENT_CODES)
 
     def test_regular_file_used_as_a_directory_is_not_called_a_symlink(self) -> None:
         """ENOTDIR gets its own code: naming it ``unsafe_symlink`` would
@@ -338,13 +366,9 @@ class TestUnreadableEntryCountingAndReasonText(unittest.TestCase):
         """A live Unix-domain socket answers ENXIO at ``open`` (issue
         #868), the second of the two silently-dropped codes #1086 fixes."""
         with tempfile.TemporaryDirectory() as root:
-            sock = socket.socket(socket.AF_UNIX)
-            try:
-                sock.bind(os.path.join(root, "sock"))
-                with open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
-                    open_regular_relative(root_fd, "sock")
-            finally:
-                sock.close()
+            make_socket_file(os.path.join(root, "sock"))
+            with open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
+                open_regular_relative(root_fd, "sock")
         exc = caught.exception
         self.assertEqual(exc.code, "not_regular_file")
         self.assertFalse(errno_proves_absence(exc.code))

@@ -9,6 +9,7 @@ from __future__ import annotations
 import configparser
 import json
 import os
+import stat
 import tempfile
 import types
 from collections.abc import Callable, Generator, Mapping, Sequence
@@ -81,6 +82,33 @@ _DEPLOYED_BEETS_DB_PATHS = frozenset({
     "/mnt/virtio/Music/beets-library.db",
     "/var/lib/cratedigger-beets-db/beets-library.db",
 })
+
+
+def make_socket_file(path: str) -> None:
+    """Plant one Unix-domain socket file at ``path``, at any depth.
+
+    ``socket.socket(AF_UNIX).bind(path)`` is the obvious way to create the
+    ``S_ISSOCK`` inode these worlds need, and it is how this repository kept
+    creating it — but ``bind`` carries ``sun_path``'s ~107-byte ceiling,
+    which has nothing to do with the filesystem's own limits.
+
+    That ceiling is invisible locally and fatal on the daily unstable gate.
+    Its scratch root is ``/run/cratedigger-daily-checks/scratch`` (23 bytes
+    deeper than an interactive run's ``/run/user/<uid>``), so a socket
+    planted inside a generated album folder overran ``sun_path`` THERE and
+    nowhere else: 3 deterministic IDs and 24 fuzz shards failed with
+    ``OSError: AF_UNIX path too long`` while every local run stayed green
+    (2026-08-15 gate; third recurrence of this class, previously patched
+    per-site by shortening one leaf name).
+
+    ``mknod`` creates the same inode with no path ceiling and no descriptor
+    to keep alive: an unprivileged caller may create a socket or a FIFO
+    (only device nodes need ``CAP_MKNOD``), and ``open`` answers ENXIO on
+    it exactly as it does for a bound one — the only property these worlds
+    assert. Use this everywhere a test needs a socket FILE; a test that
+    needs a real LISTENER still binds a real socket.
+    """
+    os.mknod(path, stat.S_IFSOCK | 0o600)
 
 
 @contextmanager

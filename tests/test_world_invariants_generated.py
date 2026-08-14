@@ -51,6 +51,26 @@ _SEGMENT = st.text(
 )
 
 
+def _stays_under_a_root(segment: str) -> bool:
+    """Does joining ``segment`` onto a root leave the result under it?"""
+    root = "/root"
+    joined = os.path.normpath(os.path.join(root, segment))
+    return joined == root or joined.startswith(root + os.sep)
+
+
+#: A segment for composing a path that is genuinely INSIDE a library root.
+#: ``_SEGMENT`` can produce ``".."``, which composes to a path that escapes
+#: the root — a real world, but not the one an "inside" premise names. The
+#: daily gate generated it and ``test_partially_moved_item_alone_is_rejected``
+#: failed correctly: with ``inside_segment=".."`` the album FOLDER is outside
+#: the root too, so the folder clause fires alongside the item clause the
+#: test isolates (2026-08-15). Production is right; the world contradicted
+#: its own premise. The escaping direction keeps its coverage — the
+#: ``outside`` tests own it, and ``..`` under a root is pinned deterministically
+#: in ``tests/test_world_invariants.py``.
+_INSIDE_SEGMENT = _SEGMENT.filter(_stays_under_a_root)
+
+
 def _decision_denylists_for_test(decision: str) -> bool:
     search_action = post_import_search_action_if_known(decision)
     return bool(
@@ -78,6 +98,27 @@ def _unique(release_id: str, album_id: int, folder: str) -> CurrentBeetsUnique:
         ),),
         selectors=(f"mb_albumid:{release_id}",),
     )
+
+
+class TestInsideSegmentPredicate(unittest.TestCase):
+    """The ``_INSIDE_SEGMENT`` guarantee, checked in the SUITE tier.
+
+    Deterministic on purpose: this is test machinery, which never gets a
+    generated property. It exists because of the tier gap — restoring
+    ``_SEGMENT`` on either "inside" test is caught only by the fuzz tier
+    otherwise, stochastically, and the first symptom would again be a red
+    daily gate rather than a red local suite.
+    """
+
+    def test_the_one_escaping_segment_is_rejected(self) -> None:
+        self.assertFalse(_stays_under_a_root(os.pardir))
+
+    def test_ordinary_and_no_op_segments_are_kept(self) -> None:
+        """``"."`` composes back to the root itself, which the checker
+        treats as inside — a legitimate world this must not discard."""
+        self.assertTrue(_stays_under_a_root("Artist - Album [2002]"))
+        self.assertTrue(_stays_under_a_root(os.curdir))
+        self.assertTrue(_stays_under_a_root("..leading-dots"))
 
 
 class TestWorldInvariantGenerated(unittest.TestCase):
@@ -245,7 +286,7 @@ class TestWorldInvariantGenerated(unittest.TestCase):
         self.assertIn("album_folder_outside_library_root", codes)
         self.assertIn("album_item_outside_library_root", codes)
 
-    @given(release_id=_SEGMENT, inside_segment=_SEGMENT)
+    @given(release_id=_SEGMENT, inside_segment=_INSIDE_SEGMENT)
     def test_any_album_wholly_inside_the_library_root_is_accepted(
         self,
         release_id: str,
@@ -266,7 +307,7 @@ class TestWorldInvariantGenerated(unittest.TestCase):
 
     @given(
         release_id=_SEGMENT,
-        inside_segment=_SEGMENT,
+        inside_segment=_INSIDE_SEGMENT,
         outside_segment=_SEGMENT,
     )
     def test_partially_moved_item_alone_is_rejected(

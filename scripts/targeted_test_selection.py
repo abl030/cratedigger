@@ -224,6 +224,10 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_quality_decisions",
         "tests.test_dispatch_core",
         "tests.test_integration_slices",
+        # ``make_socket_file``'s own end-to-end pin, including the
+        # longer-than-``sun_path`` world that the daily gate's deeper
+        # scratch root exposed and no local run reaches.
+        "tests.test_path_authority",
     ),
     "tests/node_jsonl_worker.py": (
         "tests.test_node_jsonl_worker",
