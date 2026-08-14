@@ -9,8 +9,14 @@ import msgspec
 from lib.retag_divergence_audit import (
     parse_after_album_id_cursor,
     scan_retag_divergence_from_borrowed_factory,
+    scan_retag_divergence_single_album_from_borrowed_factory,
 )
-from web.routes._registry import RouteHandler, RouteRegistration, route
+from web.routes._registry import (
+    RouteHandler,
+    RouteRegistration,
+    pattern_route,
+    route,
+)
 from web.routes._server_access import _server
 
 log = logging.getLogger(__name__)
@@ -134,6 +140,56 @@ def get_retag_divergence_audit(h: RouteHandler, params: dict[str, list[str]]) ->
     h._json(payload, status=status_code)
 
 
+def get_retag_divergence_audit_album(
+    h: RouteHandler, params: dict[str, list[str]], album_id_str: str,
+) -> None:
+    """``GET /api/audit/retag-divergence/album/<id>`` (#1142).
+
+    A cheap, explicit per-album recheck — roughly ten file reads,
+    milliseconds — reusing the SAME pure classifier and tag reader as the
+    whole-library census (``lib.retag_divergence_audit.
+    scan_retag_divergence_single_album``), never the whole-library scan
+    itself. No deadline, no cursor, no partial verdict: this either
+    answers for the one named album or it doesn't answer at all.
+
+    Status-code mapping:
+      * 200 — ``found`` (any album class, including ``agrees`` — an
+        explicit per-album check reports agreement too, unlike the
+        whole-library report which only ever lists non-agreeing albums)
+      * 404 — ``not_found`` (no album with this id in Beets)
+      * 503 — ``beets_unavailable`` (Beets DB not configured, or a
+        classified SQLite open/query failure) — same convention as
+        :func:`get_retag_divergence_audit`.
+    """
+    album_id = int(album_id_str)
+    server = _server()
+    try:
+        def beets_factory():
+            beets = server._beets_db()
+            if beets is None:
+                raise FileNotFoundError("Beets DB not configured")
+            return beets
+
+        result = scan_retag_divergence_single_album_from_borrowed_factory(
+            beets_factory, album_id,
+        )
+    except Exception:
+        log.exception("per-album retag divergence check failed unexpectedly")
+        h._json({"error": "Retag divergence check failed"}, status=503)
+        return
+    if result.status == "found":
+        assert result.album is not None
+        h._json(msgspec.to_builtins(result.album))
+        return
+    if result.status == "not_found":
+        h._json({"error": f"No Beets album with id {album_id}"}, status=404)
+        return
+    h._json(
+        {"error": result.unavailable_detail or "Beets DB not available"},
+        status=503,
+    )
+
+
 ROUTES: list[RouteRegistration] = [
     route(
         "GET",
@@ -142,6 +198,15 @@ ROUTES: list[RouteRegistration] = [
         "Read-only census of albums whose Beets DB identity moved (the "
         "retag) but whose installed file tags did not; accepts "
         "?after_album_id=N to resume a truncated scan.",
+        classified=True,
+    ),
+    pattern_route(
+        "GET",
+        r"^/api/audit/retag-divergence/album/(\d+)$",
+        get_retag_divergence_audit_album,
+        "Cheap, explicit per-album retag-divergence recheck — the same "
+        "classifier as the whole-library census, over one album's own "
+        "files only.",
         classified=True,
     ),
 ]

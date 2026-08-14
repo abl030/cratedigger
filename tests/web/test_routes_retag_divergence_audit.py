@@ -284,5 +284,150 @@ class TestApiScanDeadlineConstant(unittest.TestCase):
         )
 
 
+class _PoisonedWholeLibraryBeetsDB(FakeBeetsDB):
+    """#1142 acceptance 6 — the per-album recheck must never invoke the
+    whole-library reader, even when a Beets handle IS available."""
+
+    def list_album_mb_identities(self) -> list[BeetsAlbumIdentityRow]:
+        raise AssertionError(
+            "per-album recheck must not invoke the whole-library "
+            "retag-divergence reader"
+        )
+
+
+class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
+    """``GET /api/audit/retag-divergence/album/<id>`` (#1142) — a cheap,
+    explicit per-album recheck reusing the SAME classifier/tag-reader as
+    the whole-library census, never the whole-library scan itself."""
+
+    def test_agreeing_album_is_200_with_agrees_class(self) -> None:
+        from web import server
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            track_path = Path(tmpdir) / "01.mp3"
+            _make_real_mp3(track_path)
+            media = MediaFile(track_path)
+            media.mb_albumid = SURVIVOR
+            media.save()
+
+            beets = _PoisonedWholeLibraryBeetsDB()
+            beets.set_album_mb_identities([
+                BeetsAlbumIdentityRow(
+                    album_id=1, mb_albumid=SURVIVOR,
+                    item_paths=(str(track_path),),
+                ),
+            ])
+            with patch.object(server, "_beets_db", return_value=beets):
+                status, payload = self._get(
+                    "/api/audit/retag-divergence/album/1",
+                )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["album_id"], 1)
+        self.assertEqual(payload["album_class"], "agrees")
+
+    def test_diverging_album_is_200_with_diverges_class(self) -> None:
+        from web import server
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            track_path = Path(tmpdir) / "01.mp3"
+            _make_real_mp3(track_path)
+            media = MediaFile(track_path)
+            media.mb_albumid = MERGED
+            media.save()
+
+            beets = _PoisonedWholeLibraryBeetsDB()
+            beets.set_album_mb_identities([
+                BeetsAlbumIdentityRow(
+                    album_id=5, mb_albumid=SURVIVOR,
+                    item_paths=(str(track_path),),
+                ),
+            ])
+            with patch.object(server, "_beets_db", return_value=beets):
+                status, payload = self._get(
+                    "/api/audit/retag-divergence/album/5",
+                )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["album_class"], "diverges")
+
+    def test_unknown_album_is_404(self) -> None:
+        from web import server
+
+        beets = _PoisonedWholeLibraryBeetsDB()
+        with patch.object(server, "_beets_db", return_value=beets):
+            status, payload = self._get(
+                "/api/audit/retag-divergence/album/999",
+            )
+
+        self.assertEqual(status, 404)
+        self.assertIn("error", payload)
+
+    def test_missing_beets_is_503(self) -> None:
+        from web import server
+
+        with patch.object(server, "_beets_db", return_value=None):
+            status, payload = self._get(
+                "/api/audit/retag-divergence/album/1",
+            )
+
+        self.assertEqual(status, 503)
+        self.assertIn("error", payload)
+
+    def test_expected_open_failure_is_503(self) -> None:
+        from web import server
+
+        failure = sqlite3.OperationalError("database is locked")
+        failure.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        with patch.object(server, "_beets_db", side_effect=failure):
+            status, payload = self._get(
+                "/api/audit/retag-divergence/album/1",
+            )
+
+        self.assertEqual(status, 503)
+        self.assertIn("error", payload)
+
+    def test_unexpected_failure_is_logged_and_returns_503(self) -> None:
+        from web import server
+
+        with (
+            patch.object(
+                server,
+                "_beets_db",
+                side_effect=RuntimeError("programmer defect"),
+            ),
+            self.assertLogs(
+                "web.routes.retag_divergence_audit", level="ERROR",
+            ) as logs,
+        ):
+            status, _payload = self._get(
+                "/api/audit/retag-divergence/album/1",
+            )
+
+        self.assertEqual(status, 503)
+        self.assertIn(
+            "per-album retag divergence check failed unexpectedly",
+            "\n".join(logs.output),
+        )
+
+    def test_borrowed_beets_handle_is_never_closed(self) -> None:
+        """The route mediates a server-owned handle (like the
+        whole-library route) — it must not close the shared per-thread
+        Beets connection."""
+        from web import server
+
+        beets = _PoisonedWholeLibraryBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(album_id=1, mb_albumid="", item_paths=()),
+        ])
+        with patch.object(server, "_beets_db", return_value=beets):
+            status, _payload = self._get(
+                "/api/audit/retag-divergence/album/1",
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(beets.close_calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

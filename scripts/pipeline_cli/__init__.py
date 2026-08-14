@@ -80,7 +80,11 @@ from scripts.pipeline_cli.api_mutations import (
     cmd_upgrade,
     cmd_wrong_match_converge,
 )
-from scripts.pipeline_cli.audit import cmd_audit_retag_divergence, cmd_audit_world
+from scripts.pipeline_cli.audit import (
+    cmd_audit_retag_divergence,
+    cmd_audit_retag_divergence_album,
+    cmd_audit_world,
+)
 from scripts.pipeline_cli.beets_distance import cmd_beets_distance
 from scripts.pipeline_cli.cli import PipelineDB, main
 from scripts.pipeline_cli.destructive import cmd_ban_source, cmd_library_delete
@@ -134,6 +138,7 @@ __all__ = [
     "PipelineDB",
     "cmd_add",
     "cmd_audit_retag_divergence",
+    "cmd_audit_retag_divergence_album",
     "cmd_audit_world",
     "cmd_ban_source",
     "cmd_beets_distance",
