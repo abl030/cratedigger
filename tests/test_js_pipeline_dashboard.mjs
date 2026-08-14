@@ -513,6 +513,93 @@ console.log('renderRetagDivergenceCensusCard() escapes the db_mb_albumid value')
   });
   assertExcludes(html, '<script>x</script>', 'db_mb_albumid is escaped');
 }
+console.log('renderRetagDivergenceCensusCard() N1 (fresh review) — shows "Showing N of M" when the dashboard route capped the album list');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    albums_shown: 50, albums_listed_total: 57,
+    snapshot: {
+      generated_at: '2026-08-14T09:00:00+00:00',
+      duration_seconds: 1.0,
+      report: {
+        status: 'divergence_found', complete: true,
+        counts: {albums_scanned: 8487},
+        albums: Array.from({length: 50}, (_, i) => ({
+          album_id: i + 1, db_mb_albumid: `mb-${i + 1}`,
+          album_class: 'diverges', item_count: 0, items: [],
+        })),
+      },
+    },
+  });
+  assertContains(html, 'Showing 50 of 57', 'capped state visibly names shown vs. total — no silent cap');
+  assertContains(html, 'Listed (non-agreeing)', 'listed row label still present');
+  assertContains(html, '>57<', 'listed row shows the TRUE total, not the capped shown count');
+}
+console.log('renderRetagDivergenceCensusCard() N1 (fresh review) — no "Showing" text when nothing was capped');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    albums_shown: 1, albums_listed_total: 1,
+    snapshot: {
+      generated_at: '2026-08-14T09:00:00+00:00',
+      duration_seconds: 1.0,
+      report: {
+        status: 'divergence_found', complete: true,
+        counts: {albums_scanned: 8487},
+        albums: [{
+          album_id: 6612, db_mb_albumid: 'd990b8af-0000-0000-0000-000000000000',
+          album_class: 'diverges', item_count: 1, items: [],
+        }],
+      },
+    },
+  });
+  assertExcludes(html, 'Showing', 'uncapped state never mentions "Showing" at all');
+}
+console.log('renderRetagDivergenceAlbumRowInner() N2 (fresh review) — shows each non-agreeing item\'s class + identity + detail');
+{
+  const html = __test__.renderRetagDivergenceAlbumRowInner({
+    album_id: 6612, db_mb_albumid: 'd990b8af-0000-0000-0000-000000000000',
+    album_class: 'diverges', item_count: 3,
+    items: [
+      {
+        path: '/library/Slipknot/01.flac', item_class: 'diverges',
+        file_mb_albumid: 'a6269e96-0000-0000-0000-000000000000', detail: null,
+      },
+      {
+        path: '/library/Slipknot/02.flac', item_class: 'unreadable',
+        file_mb_albumid: null, detail: 'OSError: permission denied',
+      },
+      {
+        path: '/library/Slipknot/03.flac', item_class: 'agrees',
+        file_mb_albumid: 'd990b8af-0000-0000-0000-000000000000', detail: null,
+      },
+    ],
+  });
+  assertContains(html, 'Items', 'item count label rendered');
+  assertContains(html, '>3<', 'total item count rendered');
+  assertContains(html, 'diverges', 'first non-agreeing item class rendered');
+  assertContains(html, 'a6269e96-0000-0000-0000-000000000000', 'first item identity rendered');
+  assertContains(html, 'unreadable', 'second non-agreeing item class rendered');
+  assertContains(html, '(none)', 'a null file_mb_albumid renders as (none)');
+  assertContains(html, 'OSError: permission denied', 'unreadable item detail rendered');
+  assertExcludes(html, '/library/Slipknot/03.flac', 'agreeing item path never rendered — only non-agreeing items are itemized');
+  assertExcludes(html, '/library/Slipknot/01.flac', 'full arbitrary file paths are never rendered, even for non-agreeing items');
+}
+console.log('renderRetagDivergenceAlbumRowInner() N2 (fresh review) — escapes XSS-looking item identity/detail');
+{
+  const html = __test__.renderRetagDivergenceAlbumRowInner({
+    album_id: 1, db_mb_albumid: 'cafef00d',
+    album_class: 'diverges', item_count: 1,
+    items: [{
+      path: '/library/x/01.flac', item_class: 'diverges',
+      file_mb_albumid: '<script>alert(1)</script>',
+      detail: '<img src=x onerror=alert(2)>',
+    }],
+  });
+  assertExcludes(html, '<script>alert(1)</script>', 'file_mb_albumid XSS is escaped');
+  assertExcludes(html, '<img src=x onerror=alert(2)>', 'detail XSS is escaped');
+  assertContains(html, '&lt;script&gt;', 'file_mb_albumid renders as escaped entities');
+}
 console.log('renderRetagDivergenceCensusCard() N1 — an incomplete report with nothing listed never reads green');
 {
   // A world the daily writer itself cannot currently produce (incomplete

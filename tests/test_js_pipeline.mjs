@@ -527,6 +527,37 @@ console.log('recheckRetagDivergenceAlbum() success path GETs, patches the row in
   assertEqual(dom.note.textContent, '', 'success never writes the refusal note');
 }
 
+console.log('recheckRetagDivergenceAlbum() N2 (fresh review) — the patched row shows fresh non-agreeing item detail');
+{
+  const dom = installRetagAlbumDom(6612);
+  const btn = { disabled: false, textContent: 'Recheck' };
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      album_id: 6612, db_mb_albumid: 'd990b8af-0000-0000-0000-000000000000',
+      album_class: 'diverges', item_count: 2,
+      items: [
+        {
+          path: '/library/Slipknot/01.flac', item_class: 'diverges',
+          file_mb_albumid: 'a6269e96-0000-0000-0000-000000000000', detail: null,
+        },
+        {
+          path: '/library/Slipknot/02.flac', item_class: 'agrees',
+          file_mb_albumid: 'd990b8af-0000-0000-0000-000000000000', detail: null,
+        },
+      ],
+    }),
+  });
+
+  await recheckRetagDivergenceAlbum(6612, btn);
+
+  assertContains(dom.container.innerHTML, 'diverges', 'patched row shows the fresh album class');
+  assertContains(dom.container.innerHTML, 'a6269e96-0000-0000-0000-000000000000',
+    'patched row shows the fresh diverging item\'s identity');
+  assertExcludes(dom.container.innerHTML, '/library/Slipknot/01.flac',
+    'patched row never leaks the full item path');
+}
+
 console.log('recheckRetagDivergenceAlbum() never reloads the whole dashboard on success');
 {
   installRetagAlbumDom(6612);

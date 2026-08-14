@@ -357,6 +357,17 @@ function renderRetagDivergenceCensusCard(census) {
   const report = snapshot.report || {};
   const counts = report.counts || {};
   const albums = Array.isArray(report.albums) ? report.albums : [];
+  // The dashboard ROUTE caps how many albums it ever embeds
+  // (web/routes/pipeline_dashboard.py::DASHBOARD_RETAG_CENSUS_ALBUM_CAP)
+  // — albums_shown/albums_listed_total name the cap explicitly rather
+  // than letting the row list silently look like the whole truth
+  // (#1142 fresh review N1). Fall back to albums.length when the
+  // fields are absent (older/synthetic payloads), which is exactly
+  // "nothing was capped".
+  const albumsShown = Number.isFinite(c.albums_shown) ? c.albums_shown : albums.length;
+  const albumsListedTotal = Number.isFinite(c.albums_listed_total)
+    ? c.albums_listed_total : albums.length;
+  const isCapped = albumsListedTotal > albumsShown;
   const statusClass = retagDivergenceStatusTone(report.status);
   // The "Listed" count only ever means "verified clean" when the run
   // itself says `clean` — a non-clean status (e.g. `incomplete`, or a
@@ -364,7 +375,7 @@ function renderRetagDivergenceCensusCard(census) {
   // is NOT the same fact as a clean library, so it must never render
   // the same green as a genuine clean result (#1142 review N1).
   const listedClass = report.status === 'clean' ? 'metric-good'
-    : albums.length ? 'metric-warn' : 'metric-muted';
+    : albumsListedTotal ? 'metric-warn' : 'metric-muted';
   // Albums-scanned is only a trustworthy whole-library count when the
   // scan itself answered in full (`clean`/`divergence_found`); mute it
   // otherwise rather than presenting a possibly-partial number plainly.
@@ -389,7 +400,8 @@ function renderRetagDivergenceCensusCard(census) {
         <div class="metric-row"><span>Duration</span><strong>${formatDuration(snapshot.duration_seconds)}</strong></div>
         <div class="metric-row"><span>Result</span><strong class="${statusClass}">${esc(report.status || 'unknown')}</strong></div>
         <div class="metric-row"><span>Albums scanned</span><strong class="${scannedClass}">${formatCount(counts.albums_scanned)}</strong></div>
-        <div class="metric-row"><span>Listed (non-agreeing)</span><strong class="${listedClass}">${formatCount(albums.length)}</strong></div>
+        <div class="metric-row"><span>Listed (non-agreeing)</span><strong class="${listedClass}">${formatCount(albumsListedTotal)}</strong></div>
+        ${isCapped ? `<div class="metric-row"><span></span><strong class="metric-muted">Showing ${formatCount(albumsShown)} of ${formatCount(albumsListedTotal)}</strong></div>` : ''}
         ${albums.map(a => renderRetagDivergenceAlbumRow(a)).join('')}
       </div>
     </div>
@@ -428,14 +440,40 @@ export function renderRetagDivergenceAlbumRowInner(album) {
     : album.album_class === 'diverges' || album.album_class === 'file_tag_present_db_absent'
       ? 'metric-bad'
       : 'metric-warn';
+  const items = Array.isArray(album.items) ? album.items : [];
   return `
     <div class="metric-row">
       <span>Album #${album.album_id} <code title="${esc(album.db_mb_albumid || '')}">${esc(album.db_mb_albumid || '(none)')}</code></span>
       <strong class="${classClass}">${esc(album.album_class)}</strong>
     </div>
+    <div class="metric-row"><span>Items</span><strong>${formatCount(items.length)}</strong></div>
+    ${items.filter(item => item.item_class !== 'agrees').map(renderRetagDivergenceItemRow).join('')}
     <div class="metric-row drift-row-action">
       <button class="p-btn" onclick="window.recheckRetagDivergenceAlbum(${album.album_id}, this)">Recheck</button>
       <span class="drift-row-note" id="retag-album-note-${album.album_id}"></span>
+    </div>
+  `;
+}
+
+/**
+ * One non-agreeing item's identity mismatch — the core product claim
+ * ("which file tag disagrees"), rendered as class + the file's own
+ * mb_albumid tag (or `(none)`) + any classification detail (#1142
+ * fresh review N2). Deliberately never renders `item.path`: a full
+ * filesystem path is arbitrary-length operator-facing data with no
+ * essential role in showing WHAT disagrees, only WHERE — omitted to
+ * keep the row bounded and avoid echoing raw filesystem structure into
+ * the page.
+ * @param {any} item
+ * @returns {string}
+ */
+function renderRetagDivergenceItemRow(item) {
+  const tone = item.item_class === 'unreadable' ? 'metric-warn' : 'metric-bad';
+  const identity = item.file_mb_albumid ? esc(item.file_mb_albumid) : '(none)';
+  const detail = item.detail ? ` — ${esc(item.detail)}` : '';
+  return `
+    <div class="metric-row retag-item-row">
+      <span>${esc(item.item_class)}: ${identity}${detail}</span>
     </div>
   `;
 }
