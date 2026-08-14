@@ -971,6 +971,22 @@
       --dsn "${pipelineDsn}" "$@"
   '';
 
+  # Daily whole-library retag-divergence census oneshot (#1142) — see
+  # lib/retag_divergence_audit.py and lib/retag_divergence_census_snapshot.py.
+  # Runs the UNBOUNDED whole-library census (~93,700 files / ~200s
+  # measured live) and atomically publishes a snapshot into cfg.stateDir;
+  # the dashboard route reads that persisted snapshot, never a fresh
+  # scan. Beets-only — no pipeline DB dependency, unlike the unfindable
+  # detection oneshot above.
+  retagDivergenceCensusPkg = pkgs.writeShellScriptBin "cratedigger-retag-census" ''
+    export PATH="${runtimePath}:$PATH"
+    ${beetsRuntimeEnvironment}
+    export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
+    exec ${pyRunner} ${src}/scripts/run_retag_divergence_census.py \
+      --config "${configTemplate}" \
+      --runtime-dir "${cfg.stateDir}"
+  '';
+
   # [Quality Ranks] section — declarative mirror of QualityRankConfig.defaults().
   # Pinned by TestQualityRankConfigDefaults in tests/test_quality_decisions.py.
   qualityRanksSection = let
@@ -2496,6 +2512,46 @@ in {
         # postgres autovacuum, etc.). Single-operator install — there
         # is no fleet of NixOS deployments to spread across, the
         # randomisation is purely a local cron-collision avoidance.
+        RandomizedDelaySec = "30min";
+      };
+    };
+
+    # Daily whole-library retag-divergence census oneshot (#1142) — see
+    # retagDivergenceCensusPkg above and lib/retag_divergence_audit.py's
+    # own module docstring. Deliberately its own timer-driven unit,
+    # mirroring cratedigger-unfindable: the ~200s whole-library scan must
+    # never run on the 5-min main loop or at dashboard-render/API-request
+    # time (lib/retag_divergence_census_snapshot.py is the read-only
+    # persistence boundary the dashboard and CLI both read instead).
+    # Beets-only, so — unlike cratedigger-unfindable — this unit has no
+    # cratedigger-db-migrate.service dependency at all.
+    systemd.services.cratedigger-retag-census = {
+      description = "Cratedigger daily retag-divergence census oneshot";
+      after = beetsReadinessUnits;
+      wants = beetsReadinessUnits;
+      restartIfChanged = false;
+      serviceConfig = {
+        Type = "oneshot";
+        User = cfg.user;
+        Group = cfg.group;
+        ExecStart = "${retagDivergenceCensusPkg}/bin/cratedigger-retag-census";
+        WorkingDirectory = cfg.stateDir;
+        # A measured live unbounded whole-library scan (~93,700 files)
+        # took ~196s; generous headroom for a slower night or a larger
+        # library, matching cratedigger-unfindable's own
+        # measured-cost-plus-headroom convention above.
+        TimeoutStartSec = "30min";
+      };
+    };
+
+    systemd.timers.cratedigger-retag-census = {
+      description = "Cratedigger daily retag-divergence census timer";
+      wantedBy = ["timers.target"];
+      timerConfig = {
+        OnCalendar = "daily";
+        Persistent = true;
+        # Same jitter rationale as cratedigger-unfindable's timer above —
+        # avoid colliding with other midnight tasks on doc2.
         RandomizedDelaySec = "30min";
       };
     };

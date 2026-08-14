@@ -2072,13 +2072,18 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
             text.count('export CRATEDIGGER_RUNTIME_CONFIG="${configTemplate}"'),
             1,
         )
-        self.assertEqual(text.count("${beetsRuntimeEnvironment}"), 9)
+        self.assertEqual(text.count("${beetsRuntimeEnvironment}"), 10)
         for wrapper in (
             "cratedigger",
             "cratedigger-importer",
             "cratedigger-import-preview-worker",
             "cratedigger-web",
             "cratedigger-check-beets-config",
+            # #1142 — the daily retag-divergence census oneshot admits the
+            # runtime config the same explicit way (--config/--runtime-dir),
+            # not the env-var-only shape cratedigger-unfindable/pipeline-cli
+            # use.
+            "cratedigger-retag-census",
         ):
             start = text.index(f'writeShellScriptBin "{wrapper}"')
             block = text[start:start + 1800]
