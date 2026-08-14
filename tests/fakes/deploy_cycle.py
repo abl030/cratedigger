@@ -38,6 +38,16 @@ if state["forced_agent_present"] and not agent_disabled:
     raise SystemExit(0)
 
 
+if "systemctl show cratedigger-db-migrate.service" in remote:
+    states = state["migrate_states"]
+    index = min(state["migrate_state_index"], len(states) - 1)
+    current = states[index]
+    state["migrate_state_index"] += 1
+    for key in ("InvocationID", "ActiveState", "SubState", "Result"):
+        print(f"{key}={current.get(key, '')}")
+    save()
+    raise SystemExit(0)
+
 if "systemctl show cratedigger.service" in remote:
     states = state["system_states"]
     index = min(state["system_state_index"], len(states) - 1)
@@ -92,6 +102,10 @@ class FakeDeployCycleCommands:
     OLD_SUCCESSOR = "2" * 32
     TARGET = "3" * 32
     NEXT = "4" * 32
+    # Distinct from every cratedigger.service value on purpose: a migrate-unit
+    # read that actually queried cratedigger.service must not be able to pass.
+    MIGRATE_OLD = "5" * 32
+    MIGRATE_NEXT = "6" * 32
     SOURCE = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-source"
     CURSOR = "s=abc;i=1;b=def;m=2;t=3;x=4"
 
@@ -116,6 +130,24 @@ class FakeDeployCycleCommands:
         sub: str = "start",
         result: str = "success",
     ) -> dict[str, str]:
+        return {
+            "InvocationID": invocation,
+            "ActiveState": active,
+            "SubState": sub,
+            "Result": result,
+        }
+
+    @staticmethod
+    def migrate_state(
+        invocation: str,
+        *,
+        active: str = "active",
+        sub: str = "exited",
+        result: str = "success",
+    ) -> dict[str, str]:
+        """The migrate oneshot's resting shape (#1161): RemainAfterExit keeps
+        it at active/exited/success indefinitely, which is precisely why those
+        three fields cannot distinguish a fresh run from a stale one."""
         return {
             "InvocationID": invocation,
             "ActiveState": active,
@@ -179,8 +211,11 @@ class FakeDeployCycleCommands:
         system_states: list[dict[str, str]],
         journal_snapshots: dict[str, list[list[dict[str, str]]]],
         start_journal_snapshots: list[list[dict[str, str]]] | None = None,
+        migrate_states: list[dict[str, str]] | None = None,
         forced_agent_present: bool = False,
     ) -> None:
+        if migrate_states is None:
+            migrate_states = [self.migrate_state(self.MIGRATE_OLD)]
         self.state_path.write_text(
             json.dumps(
                 {
@@ -189,6 +224,8 @@ class FakeDeployCycleCommands:
                     "forced_command_hits": 0,
                     "system_states": system_states,
                     "system_state_index": 0,
+                    "migrate_states": migrate_states,
+                    "migrate_state_index": 0,
                     "journal_snapshots": journal_snapshots,
                     "journal_indexes": {},
                     "cursor": self.CURSOR,

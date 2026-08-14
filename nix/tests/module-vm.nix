@@ -5599,6 +5599,62 @@ pkgs.testers.nixosTest {
     machine.succeed("systemctl reset-failed cratedigger.service || true")
 
     machine.succeed("cratedigger-metadata-gate start-check")
+
+    # --- issue #1161: a switch must re-run the migrator even when an
+    # unrelated `systemctl start` lands mid-switch ---
+    #
+    # Kept last in this script: the restart below deliberately bounces the
+    # four Requires= dependents, and nothing after it asserts on them.
+    #
+    # The real adapter is the unit FILE switch-to-configuration parses --
+    # X- keys are not systemd properties, so `systemctl show` cannot see
+    # this and only `systemctl cat` can. NixOS renders stopIfChanged = false
+    # as X-StopIfChanged=false, and switch-to-configuration-ng reads that key
+    # from the [Service] section to route a changed unit to its restart list
+    # instead of its stop+start lists.
+    migrate_unit_file = machine.succeed("systemctl cat cratedigger-db-migrate.service")
+    assert "[Service]" in migrate_unit_file, migrate_unit_file
+    migrate_service_section = migrate_unit_file.split("[Service]", 1)[1]
+    assert "X-StopIfChanged=false" in migrate_service_section, migrate_unit_file
+
+    # Behaviour pair proving why that routing is load-bearing. Both commands
+    # are synchronous for a Type=oneshot, so no settling wait is needed.
+    machine.succeed("systemctl start cratedigger-db-migrate.service")
+    migrate_substate = machine.succeed(
+        "systemctl show cratedigger-db-migrate.service --property=SubState --value"
+    ).strip()
+    assert migrate_substate == "exited", migrate_substate
+    migrate_baseline = machine.succeed(
+        "systemctl show cratedigger-db-migrate.service --property=InvocationID --value"
+    ).strip()
+    assert migrate_baseline, "migrate unit should carry an InvocationID"
+
+    # The defect mechanism: a plain start on an already-active RemainAfterExit
+    # oneshot returns -EALREADY, so ExecStart never forks and systemd logs
+    # nothing at all. In #1161 such a start REPLACED the switch's still-queued
+    # stop job, leaving migration 078 unapplied while the unit went on
+    # reporting active/exited/success from a switch 12.5 h earlier.
+    machine.succeed("systemctl start cratedigger-db-migrate.service")
+    migrate_after_start = machine.succeed(
+        "systemctl show cratedigger-db-migrate.service --property=InvocationID --value"
+    ).strip()
+    assert migrate_after_start == migrate_baseline, (
+        "a plain start must be a silent no-op on the active oneshot "
+        f"({migrate_baseline} -> {migrate_after_start})"
+    )
+
+    # The fix: a restart -- what stopIfChanged = false makes the switch issue
+    # -- always re-runs the migrator. systemd's job-merge table collapses
+    # JOB_START into JOB_RESTART, so a concurrent start can no longer swallow
+    # the re-run the way it swallowed the stop+start pair.
+    machine.succeed("systemctl restart cratedigger-db-migrate.service")
+    migrate_after_restart = machine.succeed(
+        "systemctl show cratedigger-db-migrate.service --property=InvocationID --value"
+    ).strip()
+    assert migrate_after_restart and migrate_after_restart != migrate_baseline, (
+        "restart must re-run the migrator "
+        f"({migrate_baseline} -> {migrate_after_restart})"
+    )
     '';
   in ''
     exec(compile(open("${script}", encoding="utf-8").read(), "${script}", "exec"))

@@ -4,6 +4,7 @@ set -euo pipefail
 
 readonly REMOTE_HOST="${CRATEDIGGER_DEPLOY_HOST:-doc2}"
 readonly UNIT='cratedigger.service'
+readonly MIGRATE_UNIT='cratedigger-db-migrate.service'
 readonly -a OPERATOR_SSH=(ssh -o IdentityAgent=none)
 readonly POLL_SECONDS="${CRATEDIGGER_CYCLE_VERIFY_POLL_SECONDS:-5}"
 readonly TIMEOUT_SECONDS="${CRATEDIGGER_CYCLE_VERIFY_TIMEOUT_SECONDS:-1800}"
@@ -24,6 +25,8 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   verify_cratedigger_cycle.sh capture-current
+  verify_cratedigger_cycle.sh capture-migrate
+  verify_cratedigger_cycle.sh verify-migrate-ran <pre-switch-migrate-invocation>
   verify_cratedigger_cycle.sh capture-cursor
   verify_cratedigger_cycle.sh capture-target <baseline-journal-cursor> <expected-source-store>
   verify_cratedigger_cycle.sh verify-exact <target-id> <expected-source-store>
@@ -62,10 +65,11 @@ validate_cursor() {
 }
 
 read_current_state() {
+  local unit=${1:-$UNIT}
   local state
   if ! state=$("${OPERATOR_SSH[@]}" "$REMOTE_HOST" \
-    'systemctl show cratedigger.service --property=InvocationID --property=ActiveState --property=SubState --property=Result'); then
-    die "could not read $REMOTE_HOST $UNIT state"
+    "systemctl show $unit --property=InvocationID --property=ActiveState --property=SubState --property=Result"); then
+    die "could not read $REMOTE_HOST $unit state"
     return 1
   fi
   CURRENT_INVOCATION=$(sed -n 's/^InvocationID=//p' <<<"$state")
@@ -76,7 +80,7 @@ read_current_state() {
     validate_invocation "$CURRENT_INVOCATION"
   fi
   [[ -n "$CURRENT_ACTIVE" && -n "$CURRENT_SUB" ]] \
-    || die "incomplete $UNIT state: $state"
+    || die "incomplete $unit state: $state"
 }
 
 read_invocation_journal() {
@@ -176,12 +180,44 @@ poll_limit_reached() {
 }
 
 capture_current() {
-  read_current_state
+  local unit=${1:-$UNIT}
+  read_current_state "$unit"
   if [[ -n "$CURRENT_INVOCATION" ]]; then
     printf '%s\n' "$CURRENT_INVOCATION"
   else
     printf 'none\n'
   fi
+}
+
+# Issue #1161. The migrate oneshot is RemainAfterExit, so
+# ActiveState=active/SubState=exited/Result=success reads identically whether
+# it ran for THIS switch or succeeded hours ago. Comparing its InvocationID
+# against a value captured before the trigger is what distinguishes them --
+# the same discipline already applied to nixos-upgrade.service and
+# cratedigger.service. A switch that silently skipped the migrator (#1161's
+# replaced stop job) leaves the invocation unchanged and fails here.
+verify_migrate_ran() {
+  local previous=$1
+  [[ -n "$previous" ]] || die "missing pre-switch $MIGRATE_UNIT invocation"
+  if [[ "$previous" != none ]]; then
+    validate_invocation "$previous"
+  fi
+  read_current_state "$MIGRATE_UNIT"
+  if [[ -z "$CURRENT_INVOCATION" ]]; then
+    die "$MIGRATE_UNIT has no InvocationID (state=$CURRENT_ACTIVE/$CURRENT_SUB); it never ran for this switch"
+    return 1
+  fi
+  if [[ "$CURRENT_INVOCATION" == "$previous" ]]; then
+    die "$MIGRATE_UNIT did not run for this switch (InvocationID still $previous; state=$CURRENT_ACTIVE/$CURRENT_SUB result=$CURRENT_RESULT)"
+    return 1
+  fi
+  if [[ "$CURRENT_ACTIVE" != active || "$CURRENT_SUB" != exited \
+    || "$CURRENT_RESULT" != success ]]; then
+    die "$MIGRATE_UNIT ran for this switch but did not succeed (state=$CURRENT_ACTIVE/$CURRENT_SUB result=$CURRENT_RESULT)"
+    return 1
+  fi
+  printf '%s ran for this switch: %s -> %s\n' \
+    "$MIGRATE_UNIT" "$previous" "$CURRENT_INVOCATION"
 }
 
 capture_cursor() {
@@ -341,6 +377,14 @@ main() {
     capture-current)
       (($# == 1)) || usage
       capture_current
+      ;;
+    capture-migrate)
+      (($# == 1)) || usage
+      capture_current "$MIGRATE_UNIT"
+      ;;
+    verify-migrate-ran)
+      (($# == 2)) || usage
+      verify_migrate_ran "$2"
       ;;
     capture-cursor)
       (($# == 1)) || usage

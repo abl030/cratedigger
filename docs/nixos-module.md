@@ -625,7 +625,7 @@ See [`examples/cratedigger.nix`](../examples/cratedigger.nix) for the full worke
 
 ## Systemd units
 
-- `cratedigger-db-migrate.service` — oneshot, `restartIfChanged = true`, `RemainAfterExit = true`. Runs the schema migrator on every `nixos-rebuild switch`. The long-running workers (`cratedigger-web`, `cratedigger-importer`, `cratedigger-import-preview-worker`, `cratedigger-youtube-ingest`) `requires` it, so they cannot start against an un-migrated DB. `cratedigger.service` and `cratedigger-unfindable.service` deliberately do NOT — both are timer-driven with `restartIfChanged = false`, and this unit's `ExecStart` store path changes on every deploy, so a `requires` edge would propagate its every-switch restart as a SIGTERM to a mid-flight cycle; they use `wants`+`after` instead and gate on schema currency themselves at startup (`lib/migrator.py::assert_schema_current`) so a behind/missing schema still aborts them before any work runs. `cratedigger-retag-census.service` (#1142, below) has no relationship to this unit at all — it never touches the pipeline DB, so it neither requires, wants, nor gates on migration state.
+- `cratedigger-db-migrate.service` — oneshot, `restartIfChanged = true`, `stopIfChanged = false`, `RemainAfterExit = true`. Runs the schema migrator on every `nixos-rebuild switch`. **`stopIfChanged = false` is load-bearing — see "A switch must be able to re-run the migrator" below.** The long-running workers (`cratedigger-web`, `cratedigger-importer`, `cratedigger-import-preview-worker`, `cratedigger-youtube-ingest`) `requires` it, so they cannot start against a **failed** migration — though note a `Requires=` on a `RemainAfterExit` oneshot is satisfied by the unit merely being active and therefore cannot force a re-run. `cratedigger.service` and `cratedigger-unfindable.service` deliberately do NOT — both are timer-driven with `restartIfChanged = false`, and this unit's `ExecStart` store path changes on every deploy, so a `requires` edge would propagate its every-switch restart as a SIGTERM to a mid-flight cycle; they use `wants`+`after` instead and gate on schema currency themselves at startup (`lib/migrator.py::assert_schema_current`) so a behind/missing schema still aborts them before any work runs. `cratedigger-retag-census.service` (#1142, below) has no relationship to this unit at all — it never touches the pipeline DB, so it neither requires, wants, nor gates on migration state.
 - `redis-cratedigger.service` — app-owned Redis server for peer cache and web metadata cache. `cratedigger.service` and `cratedigger-web.service` want/after it, but do not require it; runtime Redis failures degrade to cold-cache behavior.
 - `cratedigger.service` — oneshot pipeline run. `restartIfChanged = false` (the timer picks up new code on the next cycle). It orders after and wants external Beets readiness, but deliberately does not require it: restarting readiness must not terminate an active timer-owned cycle.
 - `cratedigger.timer` — starts the next cycle after the previous oneshot exits
@@ -679,6 +679,62 @@ See [`examples/cratedigger.nix`](../examples/cratedigger.nix) for the full worke
   dedicated web access group, and validates Basic runtime material before
   start/reload. The module requires nginx reload support so policy and
   credential changes validate before HUP without stopping unrelated vhosts.
+
+### A switch must be able to re-run the migrator (issue #1161)
+
+`cratedigger-db-migrate.service` ships `stopIfChanged = false`. That is not
+stylistic — it closes a silent schema-skip that produced a live outage on
+2026-08-14, and the same shape can bite anything you build around these units.
+
+**The mechanism.** With NixOS's default (`stopIfChanged = true`),
+`switch-to-configuration` puts a changed unit in its *stop* list and its
+*start* list. The migrate unit's stop job is ordered behind every `Requires=`
+dependent's stop, because `Requires=` + `After=` means dependents must stop
+first. While a slow worker drains — `cratedigger-importer` has
+`KillMode = "mixed"` and a graceful drain that routinely takes seconds — that
+stop job is still sitting in the queue. Any concurrent `systemctl start`
+touching the unit (directly, or via a `Requires=` on it) enqueues a start job
+in the default `replace` job mode, which **replaces the queued stop job**.
+`RemainAfterExit = true` means the unit never left `active (exited)`, so the
+replacement start hits `unit_start()`'s `-EALREADY`: `ExecStart` never forks,
+and systemd writes *no journal entry at all*. The switch log still lists the
+unit under both "stopping" and "starting"; the migration simply never runs,
+and `systemctl show` keeps reporting `active`/`exited`/`success` from the
+previous deploy.
+
+`stopIfChanged = false` routes the unit to switch-to-configuration's *restart*
+list instead. systemd's job-merge table collapses `JOB_START` into
+`JOB_RESTART`, so a concurrent start can no longer swallow the re-run. The
+restart phase also runs after the stop phase and before the start phase, so
+the migration completes before the `Requires=` workers come back up.
+
+**What this means for your configuration.**
+
+- Anything you add that starts cratedigger units on a timer or watchdog can
+  land inside a switch window. The 2026-08-14 trigger was a 60-second
+  reconciler calling `systemctl --no-block start` on a list of cratedigger
+  units, which pulled in the migrate unit through their `Requires=` edges.
+  Guard such a reconciler against running during a rebuild, or accept that it
+  will occasionally fight the switch over unit state. The module's own
+  `stopIfChanged = false` protects the *migration*; it does not stop a
+  reconciler from starting your other units on stale unit definitions if it
+  fires before `switch-to-configuration`'s daemon-reload.
+- If you write your own `RemainAfterExit` oneshot that other units
+  `Requires=`, give it `stopIfChanged = false` for the same reason.
+- Do not rely on a `Requires=` edge to guarantee a dependency *ran*. It
+  guarantees the dependency is **active**, which for a `RemainAfterExit`
+  oneshot can mean "succeeded days ago". It blocks startup on a failed
+  migration, never on a skipped one.
+- When verifying a deploy, compare the migrate unit's `InvocationID` against a
+  value captured before the switch. `ActiveState` / `SubState` / `Result` on a
+  `RemainAfterExit` oneshot cannot distinguish a fresh run from a stale one.
+  `scripts/verify_cratedigger_cycle.sh` implements exactly that check through
+  its `capture-migrate` and `verify-migrate-ran <pre-switch-invocation>`
+  subcommands.
+
+`nix/tests/module-vm.nix` pins the rendered `X-StopIfChanged=false` and the
+behaviour pair it depends on (a plain `start` is a silent no-op on the active
+oneshot; a `restart` genuinely re-runs it).
 
 ### Untrusted-input service sandbox
 

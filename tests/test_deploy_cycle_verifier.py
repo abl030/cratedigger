@@ -372,5 +372,143 @@ class TestDeployCycleVerifier(unittest.TestCase):
                 self.assertIn("env -u SSH_AUTH_SOCK ssh doc2", line)
 
 
+class TestMigrateRanForThisSwitch(unittest.TestCase):
+    """#1161 — the deploy runbook must prove the migrate oneshot ran FOR THIS
+    SWITCH, not merely that it is active.
+
+    `cratedigger-db-migrate.service` is RemainAfterExit, so
+    active/exited/success reads identically whether it ran seconds ago or
+    12.5 hours ago. On 2026-08-14 a concurrent `systemctl start` replaced the
+    switch's still-queued stop job, migration 078 never applied, and every
+    documented state check passed against the stale run."""
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.fake = FakeDeployCycleCommands(Path(self.tempdir.name))
+
+    def _with_migrate(self, *migrate_states: dict[str, str]) -> None:
+        self.fake.write_state(
+            system_states=[self.fake.system_state(self.fake.OLD)],
+            journal_snapshots={},
+            migrate_states=list(migrate_states),
+        )
+
+    def test_capture_migrate_returns_exact_invocation(self) -> None:
+        proc = self.fake.run(SCRIPT, "capture-migrate")
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), self.fake.MIGRATE_OLD)
+
+    def test_capture_migrate_uses_none_for_empty_invocation(self) -> None:
+        self._with_migrate(
+            self.fake.migrate_state("", active="inactive", sub="dead", result="")
+        )
+
+        proc = self.fake.run(SCRIPT, "capture-migrate")
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "none")
+
+    def test_fresh_successful_invocation_verifies(self) -> None:
+        self._with_migrate(self.fake.migrate_state(self.fake.MIGRATE_NEXT))
+
+        proc = self.fake.run(SCRIPT, "verify-migrate-ran", self.fake.MIGRATE_OLD)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(self.fake.MIGRATE_NEXT, proc.stdout)
+
+    def test_unchanged_invocation_fails_even_though_state_is_green(self) -> None:
+        """The exact #1161 world: ActiveState=active, SubState=exited and
+        Result=success all pass, but the unit never ran for this switch."""
+        self._with_migrate(self.fake.migrate_state(self.fake.MIGRATE_OLD))
+
+        proc = self.fake.run(SCRIPT, "verify-migrate-ran", self.fake.MIGRATE_OLD)
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("did not run for this switch", proc.stderr)
+
+    def test_fresh_but_failed_invocation_fails(self) -> None:
+        self._with_migrate(
+            self.fake.migrate_state(
+                self.fake.MIGRATE_NEXT, active="failed", sub="failed", result="exit-code"
+            )
+        )
+
+        proc = self.fake.run(SCRIPT, "verify-migrate-ran", self.fake.MIGRATE_OLD)
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("did not succeed", proc.stderr)
+
+    def test_missing_invocation_fails(self) -> None:
+        self._with_migrate(
+            self.fake.migrate_state("", active="inactive", sub="dead", result="")
+        )
+
+        proc = self.fake.run(SCRIPT, "verify-migrate-ran", self.fake.MIGRATE_OLD)
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("never ran for this switch", proc.stderr)
+
+    def test_first_ever_run_verifies_against_none(self) -> None:
+        """A host with no prior migrate invocation captures `none`; the first
+        real run must still verify."""
+        self._with_migrate(self.fake.migrate_state(self.fake.MIGRATE_NEXT))
+
+        proc = self.fake.run(SCRIPT, "verify-migrate-ran", "none")
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_missing_argument_is_a_usage_error(self) -> None:
+        proc = self.fake.run(SCRIPT, "verify-migrate-ran")
+
+        self.assertEqual(proc.returncode, 64)
+
+    def test_malformed_pre_switch_invocation_is_rejected(self) -> None:
+        proc = self.fake.run(SCRIPT, "verify-migrate-ran", "not-an-invocation")
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("invalid systemd InvocationID", proc.stderr)
+
+    def test_skill_captures_before_the_trigger_and_verifies_after(self) -> None:
+        """The runbook must capture the migrate invocation BEFORE
+        `fleet-deploy` and assert with it after. Capturing after the switch
+        would compare the post-switch value against itself and pass
+        unconditionally — which is the whole failure #1161 describes."""
+        source = SKILL.read_text(encoding="utf-8")
+
+        capture = source.index('verify_cratedigger_cycle.sh" capture-migrate')
+        trigger = source.index("env -u SSH_AUTH_SOCK fleet-deploy doc2")
+        verify = source.index("verify-migrate-ran")
+
+        self.assertLess(capture, trigger)
+        self.assertLess(trigger, verify)
+
+    def test_skill_no_longer_accepts_the_stale_state_triple_alone(self) -> None:
+        """The superseded check read only ActiveState/SubState/Result, which a
+        RemainAfterExit oneshot satisfies indefinitely."""
+        source = SKILL.read_text(encoding="utf-8")
+
+        self.assertNotIn('test "$migration_active" = active', source)
+
+    def test_migrate_reads_never_offer_the_forwarded_agent(self) -> None:
+        """Issue #837's boundary covers the new SSH calls too."""
+        self.fake.write_state(
+            system_states=[self.fake.system_state(self.fake.OLD)],
+            journal_snapshots={},
+            migrate_states=[self.fake.migrate_state(self.fake.MIGRATE_NEXT)],
+            forced_agent_present=True,
+        )
+
+        proc = self.fake.run(SCRIPT, "verify-migrate-ran", self.fake.MIGRATE_OLD)
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.fake.state["forced_command_hits"], 0)
+        ssh_events = self.fake.state["events"]
+        self.assertTrue(ssh_events)
+        for event in ssh_events:
+            self.assertIn("IdentityAgent=none", event)
+
+
 if __name__ == "__main__":
     unittest.main()

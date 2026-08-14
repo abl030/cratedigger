@@ -2359,34 +2359,67 @@ class TestQualityRankBandDefaultsMatchProduction(unittest.TestCase):
         self.assertNotIn("mp3_cbr", rendered)
 
 
+def _attrset_block(source: str, marker: str) -> str:
+    """The next ``{ ... }`` attrset body starting at ``marker``, found via
+    matching brace depth (nested attrsets inside are common — e.g.
+    ``serviceConfig``/``timerConfig``)."""
+    start = source.index(marker)
+    open_brace = source.index("{", start)
+    depth = 0
+    for i in range(open_brace, len(source)):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[open_brace:i + 1]
+    raise AssertionError(f"unterminated block for {marker!r}")
+
+
+class TestMigrateUnitCannotBeSwallowedByAConcurrentStart(unittest.TestCase):
+    """#1161 — the migrate unit must be re-run by every switch even when an
+    unrelated ``systemctl start`` lands mid-switch.
+
+    These are source pins over the module's own attrset. The load-bearing
+    proof is at the real adapter — the systemd unit file NixOS renders and
+    switch-to-configuration actually parses — and lives in
+    ``nix/tests/module-vm.nix`` (``X-StopIfChanged=false``, plus the
+    start-is-a-no-op / restart-re-runs behaviour pair)."""
+
+    def setUp(self) -> None:
+        source = MODULE_NIX.read_text(encoding="utf-8")
+        self.service_block = _attrset_block(
+            source, "systemd.services.cratedigger-db-migrate",
+        )
+
+    def test_switch_restarts_rather_than_stop_and_start(self) -> None:
+        """stopIfChanged = false routes the unit to switch-to-configuration's
+        restart list, whose JOB_RESTART absorbs a concurrent JOB_START instead
+        of being replaced by it."""
+        self.assertIn("stopIfChanged = false;", self.service_block)
+
+    def test_deploys_still_re_run_the_migrator(self) -> None:
+        self.assertIn("restartIfChanged = true;", self.service_block)
+
+    def test_remain_after_exit_is_the_precondition_being_defended(self) -> None:
+        """RemainAfterExit keeps the unit active(exited) between switches,
+        which is exactly why a plain start returns -EALREADY and silently
+        skips ExecStart. Losing it would change the failure mode this pin
+        describes."""
+        self.assertIn("RemainAfterExit = true;", self.service_block)
+
+
 class TestRetagDivergenceCensusServiceShape(unittest.TestCase):
     """#1142 review N8 — the daily retag-divergence census oneshot/timer
     shape, mirroring cratedigger-unfindable's own systemd contract but
     with no pipeline-DB dependency."""
 
-    @staticmethod
-    def _block(source: str, marker: str) -> str:
-        """The next ``{ ... }`` attrset body starting at ``marker``,
-        found via matching brace depth (nested attrsets inside are
-        common — e.g. ``serviceConfig``/``timerConfig``)."""
-        start = source.index(marker)
-        open_brace = source.index("{", start)
-        depth = 0
-        for i in range(open_brace, len(source)):
-            if source[i] == "{":
-                depth += 1
-            elif source[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    return source[open_brace:i + 1]
-        raise AssertionError(f"unterminated block for {marker!r}")
-
     def setUp(self) -> None:
         source = MODULE_NIX.read_text(encoding="utf-8")
-        self.service_block = self._block(
+        self.service_block = _attrset_block(
             source, "systemd.services.cratedigger-retag-census",
         )
-        self.timer_block = self._block(
+        self.timer_block = _attrset_block(
             source, "systemd.timers.cratedigger-retag-census",
         )
 

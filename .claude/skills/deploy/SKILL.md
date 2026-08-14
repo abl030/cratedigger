@@ -94,6 +94,10 @@ PRE_SWITCH_CRATEDIGGER_INVOCATION=$(
 )
 printf 'PRE_SWITCH_CRATEDIGGER_INVOCATION=%s\n' \
   "$PRE_SWITCH_CRATEDIGGER_INVOCATION"
+PRE_SWITCH_MIGRATE_INVOCATION=$(
+  "$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh" capture-migrate
+)
+printf 'PRE_SWITCH_MIGRATE_INVOCATION=%s\n' "$PRE_SWITCH_MIGRATE_INVOCATION"
 before_state=$(env -u SSH_AUTH_SOCK ssh doc2 'systemctl show nixos-upgrade.service \
   --property=InvocationID')
 PREVIOUS_INVOCATION=$(sed -n 's/^InvocationID=//p' <<<"$before_state")
@@ -174,25 +178,24 @@ DEPLOYED_REV=$(env -u SSH_AUTH_SOCK ssh doc2 'sudo cat /var/lib/fleet-update/las
 test "$DEPLOYED_REV" = "$EXPECTED_NIXOSCONFIG_REV"
 ```
 
-5. Verify migration state and the services affected by the change. The migrate
-oneshot uses `RemainAfterExit`, so it must report `ActiveState=active`,
-`SubState=exited`, and `Result=success`. For an ordinary deployment, verify
-long-running workers individually rather than assuming a successful switch
-made them healthy. For a strict held deployment, do not run the ordinary
-active-service check below: `verify-held` deliberately drains those services,
-and the held workflow proves their state at each release boundary instead.
+5. Verify migration state and the services affected by the change. **The
+migrate oneshot uses `RemainAfterExit`, so `ActiveState=active`,
+`SubState=exited` and `Result=success` are satisfied by a run from hours or
+days ago — they are not evidence that it ran for this switch.** Compare its
+`InvocationID` against the value captured in step 3, the same discipline step 3
+applies to `nixos-upgrade.service` and step 6 to `cratedigger.service`. This is
+issue #1161: a concurrent `systemctl start` replaced the switch's still-queued
+stop job, migration 078 never applied, and every state field above still read
+green against the stale run. For an ordinary deployment, verify long-running
+workers individually rather than assuming a successful switch made them
+healthy. For a strict held deployment, do not run the ordinary active-service
+check below: `verify-held` deliberately drains those services, and the held
+workflow proves their state at each release boundary instead. The migrate check
+applies to both — the metadata gate hold never stops the migrate unit.
 ```bash
 set -euo pipefail
-migration_state=$(env -u SSH_AUTH_SOCK ssh doc2 'systemctl show cratedigger-db-migrate.service \
-  --property=ActiveState --property=SubState --property=Result'
-)
-migration_active=$(sed -n 's/^ActiveState=//p' <<<"$migration_state")
-migration_sub=$(sed -n 's/^SubState=//p' <<<"$migration_state")
-migration_result=$(sed -n 's/^Result=//p' <<<"$migration_state")
-printf '%s\n' "$migration_state"
-test "$migration_active" = active
-test "$migration_sub" = exited
-test "$migration_result" = success
+"$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh" \
+  verify-migrate-ran "$PRE_SWITCH_MIGRATE_INVOCATION"
 migration_rows=$(env -u SSH_AUTH_SOCK ssh doc2 'set -euo pipefail; \
   export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
     | grep "^PGPASSWORD=" | cut -d= -f2); \
@@ -631,7 +634,7 @@ receipt -- the reboot recovery path is always `abort` followed by a fresh
 
 ## Database migrations
 
-Schema is managed by versioned files in `migrations/NNN_name.sql`. The `cratedigger-db-migrate.service` oneshot unit runs the migrator (`scripts/migrate_db.py`) on every switch (fleet-update or break-glass rebuild) because `restartIfChanged = true`. `cratedigger-web.service` (and the other long-running workers) `requires` it, so a failed migration blocks them from starting. `cratedigger.service` and `cratedigger-unfindable.service` are timer-driven with `restartIfChanged = false`, so they only `wants`+`after` it (a `requires` edge would let the migrate unit's every-deploy restart SIGTERM a mid-flight cycle) and instead gate on schema currency themselves at startup (`lib/migrator.py::assert_schema_current`).
+Schema is managed by versioned files in `migrations/NNN_name.sql`. The `cratedigger-db-migrate.service` oneshot unit runs the migrator (`scripts/migrate_db.py`) on every switch (fleet-update or break-glass rebuild) because `restartIfChanged = true` and `stopIfChanged = false` (#1161 — the latter routes it to switch-to-configuration's restart list, so a concurrent `systemctl start` can no longer replace its queued stop job and silently skip the run). `cratedigger-web.service` (and the other long-running workers) `requires` it, so a **failed** migration blocks them from starting — note `Requires=` on a `RemainAfterExit` oneshot is satisfied by the unit merely being active, so it cannot force a re-run and never protected against a migration that never ran. `cratedigger.service` and `cratedigger-unfindable.service` are timer-driven with `restartIfChanged = false`, so they only `wants`+`after` it (a `requires` edge would let the migrate unit's every-deploy restart SIGTERM a mid-flight cycle) and instead gate on schema currency themselves at startup (`lib/migrator.py::assert_schema_current`).
 
 To add a schema change:
 1. Create the next-numbered file: `migrations/NNN_describe_change.sql`
@@ -685,6 +688,6 @@ env -u SSH_AUTH_SOCK ssh doc2 'sudo journalctl -u cratedigger-db-migrate.service
 
 ## IMPORTANT
 - `restartIfChanged = false` on `cratedigger.service` — deploys don't restart cratedigger itself. The back-to-back timer picks up new code on the next cycle.
-- `restartIfChanged = true` on `cratedigger-db-migrate.service` — deploys DO re-run the migrator. Fast no-op if nothing changed.
+- `restartIfChanged = true` plus `stopIfChanged = false` on `cratedigger-db-migrate.service` — deploys DO re-run the migrator, via a restart job a concurrent start cannot swallow (#1161). Fast no-op if nothing changed.
 - To force a run: `env -u SSH_AUTH_SOCK ssh doc2 'sudo systemctl start cratedigger --no-block'` (don't block — it's a oneshot)
 - Flake updates MUST happen on doc1 (has the Forgejo token at `/run/secrets/forgejo/nixbot-token` and the signing key). NEVER from doc2 or Windows.
