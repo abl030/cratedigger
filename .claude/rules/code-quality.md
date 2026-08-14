@@ -188,7 +188,11 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   `tests/test_verdict_tiers_generated.py` is the pattern:
   `proof_verdict_from_evidence` and `proof_verdict_from_facts` agree, then
   `web.classify.proof_gate_projection` receives the aliases the browser's
-  render path really gets. PR #973 proved why: the faulty lineage-gated input
+  render path really gets. The adapter is the function production actually
+  calls to read or write the value — not a sibling that happens to answer
+  a similar question (``_matching_album_ids`` is not
+  ``resolve_current_releases``). PR #973 proved why the shared-library
+  stop is insufficient: the faulty lineage-gated input
   shape occurred on 26,503 live rows, but `storage_format` covered it, so the
   measured live verdict impact was zero; a generated counterexample proved the
   potential divergence while the common library functions remained in lockstep.
@@ -240,7 +244,8 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   `fuzz` is not killed for gating purposes — pin that world as an
   `@example` and re-measure. **Standing scope:** a PR adding or changing a
   checker clause audits that checker's clauses as part of the change, and
-  records the kill matrix in the PR. The audit examines test
+  fills the per-diff-site kill matrix in
+  `.github/pull_request_template.md`. The audit examines test
   machinery, so its artifacts are deterministic-only, and its evidence is a
   named world plus a killed mutant — never a scanner inferring reachability
   from source (issue #1094). Procedure: `docs/generated-testing.md`
@@ -252,13 +257,16 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   property's claimed coverage) and run the relevant tests against each. A
   surviving mutant is either a missing invariant (add it) or an entropy
   budget miss (pin the decisive world as an `@example`). The driver is an
-  operator/agent one-shot — never committed (`scope.md`); record the kill
-  matrix in the issue/PR. Canonical run: issue #548, 2026-07-08 — 13
-  mutants, incl. reverting fix `6cf26a4`, led to PR #555. **When you
-  inject at all, cover every site the diff adds, named individually — a
-  killed mutant at one site does not qualify any other** (the "Agree by
-  construction" rule above, generalized from claimed adapters to diff
-  sites). Lesson (#1110): the implementer reported reverting each fix and
+  operator/agent one-shot — never committed (`scope.md`). Record the kill
+  matrix as one row per diff site, not one summary per PR:
+
+  | Site (assertion / clause / constant) | One-line mutant | Test that goes RED | Result |
+  | --- | --- | --- | --- |
+
+  Fill that table in `.github/pull_request_template.md`. A mutant that
+  kills test A does not qualify test B. Canonical run: issue #548,
+  2026-07-08 — 13 mutants, incl. reverting fix `6cf26a4`, led to PR #555.
+  Lesson (#1110): the implementer reported reverting each fix and
   watching its own pin go red — true only of `renderConvergeControls`;
   mutants at the three `deleteWrongMatchGroup` restore paths and at
   `removeWrongMatchEntry` survived every JS assertion, and one recreated
@@ -710,6 +718,8 @@ Before writing any new code, decide which test types you owe and what infrastruc
 
 Routes are the strictest gate: `TestRouteContractAudit` will fail at test time if you add a route to `web/routes/` without classifying it. This is intentional — it prevents shipping endpoints the frontend can rely on without contract coverage.
 
+**Before writing a test, answer:** *What one-line change to production would make this test fail? If the answer is a function this test does not call, the test patrols a bystander.* That question catches agree-by-construction and wrong-reader pins at authoring time (issue #1143).
+
 ## Test Taxonomy
 
 Four categories of tests. Each has different rules for what's acceptable. **All four categories already have established patterns and shared infrastructure in this repo — use them. Do not invent parallel approaches.**
@@ -832,6 +842,9 @@ rationale; never allowlist a pure decision.
   new false claim can hide. Earned four times in one batch (#1101,
   #1102, #1107, #1110); in each, the false claim was caught only by the
   next independent read, never by the round that wrote it.
+- Independent review plants at least two mutants at the named subject of
+  each new or changed test, not only at sites the author's kill matrix
+  already lists (issue #1143 / #1155).
 - Fix everything it finds before committing. This is not optional.
 
 ## Commits & PRs
@@ -839,3 +852,4 @@ rationale; never allowlist a pure decision.
 - Non-trivial work goes on a feature branch with a PR (e.g. `feat/cooldowns`, `fix/spectral-race`)
 - PRs are merged via GitHub **Create a merge commit** (not Rebase-and-merge, not Squash-and-merge). This keeps the PR attached to mainline history while preserving the individual commits, so write them well.
 - Deploy and verify live after merging
+- PR body follows `.github/pull_request_template.md`. The kill matrix is per diff site (assertion / clause / constant → one-line mutant → test that goes RED). A summary is not a matrix.

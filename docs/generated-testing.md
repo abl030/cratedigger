@@ -775,8 +775,9 @@ fuzz entropy** = the deterministic suite budget misses the decisive world, so
 pin it as an `@example`; **survived both tiers** = either a missing invariant
 (add it, with a known-bad self-test) or a world the strategies rarely make
 decisive (again, pin the decisive world). The mutation driver is an
-operator/agent one-shot — never committed (`.claude/rules/scope.md`); record
-the kill matrix in the issue/PR.
+operator/agent one-shot — never committed (`.claude/rules/scope.md`); fill
+the per-diff-site kill matrix in `.github/pull_request_template.md`. A
+summary "planted a mutant, confirmed RED" is not a matrix.
 
 Canonical run (issue #548, 2026-07-08): 13 mutants — including reverting
 fix `6cf26a4`, which the generated lifecycle property killed independently

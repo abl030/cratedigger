@@ -12,6 +12,7 @@ REMOVAL_STABLE_REPO_ROOTS = frozenset({
     ".agents",
     ".claude",
     ".codex",
+    ".github",
     "docs",
     "examples",
     "harness",
