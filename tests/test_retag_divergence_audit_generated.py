@@ -125,7 +125,6 @@ from lib.retag_divergence_audit import (
     RetagDivergenceItem,
     RetagDivergenceItemClass,
     RetagDivergenceReport,
-    album_class_from_items,
     scan_retag_divergence,
     scan_retag_divergence_from_factory,
     scan_retag_divergence_single_album,
@@ -639,9 +638,20 @@ class TestSingleAlbumParityProperty(unittest.TestCase):
     def test_single_album_check_matches_the_whole_library_scan(
         self, albums: list[tuple[str, list[str]]],
     ) -> None:
-        rows, read_tag, expectations = _build_world(albums)
+        rows, read_tag, _expectations = _build_world(albums)
         beets = FakeBeetsDB()
         beets.set_album_mb_identities(rows)
+
+        # #1142 review N6 — call BOTH real adapters over the exact same
+        # world; the property's own expectation is whatever the REAL
+        # whole-library scan computed, never the single-album check's
+        # own output re-derived (that was the tautology: comparing
+        # ``single.album_class`` against ``album_class_from_items(single.
+        # items)`` proves nothing about parity with the OTHER adapter —
+        # ``_build_album`` already guarantees that internal consistency
+        # by construction).
+        whole_report = scan_retag_divergence(beets, read_tag=read_tag)
+        whole_by_id = {album.album_id: album for album in whole_report.albums}
 
         for row in rows:
             single = scan_retag_divergence_single_album(
@@ -652,21 +662,46 @@ class TestSingleAlbumParityProperty(unittest.TestCase):
                     f"album {row.album_id} exists in the seeded world but "
                     "the single-album check reports it missing"
                 )
-            expected_items = expectations[row.album_id]
-            actual_items = [item.item_class for item in single.items]
-            if actual_items != expected_items:
+            whole_album = whole_by_id.get(row.album_id)
+            if whole_album is None:
+                # Not listed by the whole-library scan means the REAL
+                # scan_retag_divergence classified it "agrees" (its own
+                # only listing filter) — the single-album check, asked
+                # about this SAME agreeing album directly, must say so
+                # too, not silently disagree with the adapter that never
+                # mentions it.
+                if single.album_class != "agrees":
+                    raise AssertionError(
+                        f"album {row.album_id}: the whole-library scan "
+                        "did not list it (implying 'agrees'), but the "
+                        f"single-album check says {single.album_class!r}"
+                    )
+                continue
+            single_items = [
+                (item.item_class, item.path, item.file_mb_albumid, item.detail)
+                for item in single.items
+            ]
+            whole_items = [
+                (item.item_class, item.path, item.file_mb_albumid, item.detail)
+                for item in whole_album.items
+            ]
+            if single_items != whole_items:
                 raise AssertionError(
-                    f"album {row.album_id}: single-album check classified "
-                    f"items {actual_items} but the whole-library scan's "
-                    f"own construction expects {expected_items}"
+                    f"album {row.album_id}: single-album items "
+                    f"{single_items} disagree with the whole-library "
+                    f"scan's own items {whole_items} for the same album"
                 )
-            expected_class = album_class_from_items(single.items)
-            if single.album_class != expected_class:
+            if single.album_class != whole_album.album_class:
                 raise AssertionError(
                     f"album {row.album_id}: single-album album_class "
-                    f"{single.album_class!r} disagrees with "
-                    f"album_class_from_items({expected_class!r}) over its "
-                    "own items"
+                    f"{single.album_class!r} disagrees with the "
+                    f"whole-library scan's {whole_album.album_class!r}"
+                )
+            if single.db_mb_albumid != whole_album.db_mb_albumid:
+                raise AssertionError(
+                    f"album {row.album_id}: single-album db_mb_albumid "
+                    f"{single.db_mb_albumid!r} disagrees with the "
+                    f"whole-library scan's {whole_album.db_mb_albumid!r}"
                 )
 
         unknown_id = max((row.album_id for row in rows), default=0) + 1
