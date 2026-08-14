@@ -682,16 +682,26 @@ writer — to `<cfg.stateDir>/retag-divergence-census.json`
 default). Beets-only: this oneshot has no pipeline-DB dependency at all.
 
 Exit codes are distinct from the interactive CLI census above, since this
-is a scheduled job, not an operator-run command: `0` — published a
-snapshot with `report.status` `clean`/`divergence_found`; `1`
-(`EXIT_BEETS_UNAVAILABLE`) — Beets was unreachable this run, but the
-report is still published (a useful, honest failure snapshot, not a
-crash); `2` (`EXIT_CONFIG_ABORT`) — the runtime config/Beets contract was
-rejected before any scan ran, no snapshot attempted; `3`
-(`EXIT_RUN_FAILED`) — an unexpected exception escaped the scan or the
-atomic write. Only the last case writes NOTHING: atomic publication means
-any prior valid snapshot at the path is untouched whenever a run fails to
-produce a fresh one, whichever step failed.
+is a scheduled job, not an operator-run command: `0` — a snapshot WAS
+published, covering every `report.status` the scan itself considers a
+real answer: `clean`, `divergence_found`, **and `incomplete`** (a single
+unreadable file anywhere in the whole-library scan is enough to make the
+report `incomplete` even though nothing truncated or resumed it — the
+daily writer still publishes that report, since it's genuine information
+the dashboard should show). Exit `0` means "the job did its job", not
+"the library is clean" — read the published report's own `status` for
+that. `1` (`EXIT_BEETS_UNAVAILABLE`) — Beets was unreachable this run;
+**nothing is published** — a `beets_unavailable` report never actually
+scanned anything, so publishing it would silently replace yesterday's
+real answer with a fabricated all-zero "nothing wrong" snapshot, which
+is worse than leaving the last real answer in place; `2`
+(`EXIT_CONFIG_ABORT`) — the runtime config/Beets contract was rejected
+before any scan ran, no snapshot attempted; `3` (`EXIT_RUN_FAILED`) — an
+unexpected exception escaped the scan or the atomic write, no snapshot
+written. Every non-zero exit case writes NOTHING: atomic publication
+plus the `beets_unavailable` skip together mean any prior valid snapshot
+at the path is untouched whenever a run does not produce a fresh,
+genuinely-scanned one.
 
 `GET /api/pipeline/dashboard` embeds this persisted snapshot read-only
 under `retag_divergence_census` (`web/routes/pipeline_dashboard.py`) —
@@ -714,8 +724,13 @@ that album's own files: roughly ten file reads, milliseconds, no
 deadline, no cursor. Unlike the whole-library report (which lists only
 non-agreeing albums), an explicit per-album check reports `agrees` too —
 the operator asked about THIS album specifically. Status-code mapping:
-`200` — found (any class); `404` — no album with that id in Beets; `503`
-— Beets unavailable. The dashboard's "Recheck" button patches just that
+`200` — found (any class); `400`/CLI parser rejection — the id is past
+SQLite's signed-64-bit `INTEGER` range (`lib.retag_divergence_audit.
+SQLITE_MAX_INTEGER`) and can never be bound as a query parameter at all —
+rejected before ever reaching Beets, never the misleading 503 an uncaught
+`sqlite3.OverflowError` would otherwise produce; `404` — no album with
+that id in Beets; `503` — Beets unavailable. The dashboard's "Recheck"
+button patches just that
 album's row in place (`recheckRetagDivergenceAlbum` in `web/js/pipeline.js`)
 rather than reloading the whole dashboard.
 

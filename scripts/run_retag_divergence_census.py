@@ -17,12 +17,23 @@ triggers a scan of their own — the ~93,700-file / ~200s cost stays here,
 off the request/render path.
 
 Run-health / exit code:
-  * ``0`` — the census ran to completion and published a snapshot
-    (``report.status`` is ``clean`` or ``divergence_found``).
-  * ``EXIT_BEETS_UNAVAILABLE`` (1) — the census ran and DID publish an
-    honest snapshot, but the report itself says the Beets authority was
-    unavailable this run — an operationally visible outcome, not a
-    crash, still worth failing the systemd unit over so an operator
+  * ``0`` — the census ran to completion and a snapshot WAS published.
+    Covers every `report.status` the scan itself considers a real,
+    computed answer worth persisting: ``clean``, ``divergence_found``,
+    and ``incomplete`` (the last one is real production territory here
+    — an unreadable file anywhere in the library makes the WHOLE-library
+    scan's own status ``incomplete`` even though nothing truncated or
+    resumed it; the daily writer still publishes that report, since it
+    IS a genuine answer the dashboard should show, just not a clean
+    one). Exit 0 says "the job did its job", not "the library is clean"
+    — read the published report's own `status` for that.
+  * ``EXIT_BEETS_UNAVAILABLE`` (1) — the Beets authority was unreachable
+    this run. NOTHING is published (#1142 review B1): a
+    `beets_unavailable` report never actually scanned anything, so
+    publishing it would silently replace yesterday's real answer with a
+    fabricated all-zero "nothing wrong" snapshot — worse than simply
+    leaving the last real answer in place. Still an operationally
+    visible failure worth failing the systemd unit over, so an operator
     notices a stuck/misconfigured Beets authority.
   * ``EXIT_CONFIG_ABORT`` (2) — the runtime config or Beets contract was
     rejected before any scan ran; no snapshot attempted.
@@ -103,18 +114,32 @@ def publish_retag_divergence_census(
     time_fn: Callable[[], float] = time.monotonic,
     now_fn: Callable[[], str] = _default_now_iso,
 ) -> RetagDivergenceCensusSnapshot:
-    """Run the census and atomically publish it at ``path``.
+    """Run the census and atomically publish it at ``path`` — UNLESS the
+    report itself says Beets was unavailable this run (#1142 review B1).
 
-    A raised exception — from the scan itself or from the atomic write —
-    leaves any snapshot already at ``path`` untouched (acceptance
-    criterion 1): `write_retag_divergence_census_snapshot` never writes a
-    partial file, and this function attempts the write only after the
-    scan has fully completed.
+    A ``beets_unavailable`` report never actually scanned anything — its
+    counts are all zero and its album list is empty, which is
+    indistinguishable, on the dashboard, from a genuinely clean
+    93,000-item library. Publishing it would silently replace the last
+    REAL answer with a fabricated "nothing wrong" one, hiding a stuck or
+    misconfigured Beets authority behind a green card. Nothing is
+    written in that case; any snapshot already at ``path`` is left
+    exactly as it was. The RETURNED snapshot still carries the
+    ``beets_unavailable`` report either way, so the caller (``main``) can
+    log the outcome.
+
+    A raised exception — from the scan itself, or from the atomic write
+    when the report WAS publishable — likewise leaves any snapshot
+    already at ``path`` untouched (acceptance criterion 1):
+    `write_retag_divergence_census_snapshot` never writes a partial
+    file, and this function attempts the write only after the scan has
+    fully completed.
     """
     snapshot = run_retag_divergence_census(
         beets_factory, time_fn=time_fn, now_fn=now_fn,
     )
-    write_retag_divergence_census_snapshot(path, snapshot)
+    if snapshot.report.status != "beets_unavailable":
+        write_retag_divergence_census_snapshot(path, snapshot)
     return snapshot
 
 
@@ -166,14 +191,20 @@ def main() -> int:
         return EXIT_RUN_FAILED
 
     report = snapshot.report
+    if report.status == "beets_unavailable":
+        logger.error(
+            "retag_divergence_census: Beets authority unavailable (%s) "
+            "this run; NOT publishing — any prior snapshot at %s is "
+            "preserved",
+            report.unavailable_detail, path,
+        )
+        return EXIT_BEETS_UNAVAILABLE
     logger.info(
         "retag_divergence_census: published status=%s albums_listed=%d "
         "albums_scanned=%d duration=%.1fs -> %s",
         report.status, len(report.albums), report.counts.albums_scanned,
         snapshot.duration_seconds, path,
     )
-    if report.status == "beets_unavailable":
-        return EXIT_BEETS_UNAVAILABLE
     return 0
 
 
