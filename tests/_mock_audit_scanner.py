@@ -497,6 +497,11 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.mbid_replace_service.delete_wrong_match_group': 9,
     'lib.quality.full_pipeline_decision_from_evidence': 1,
     'lib.quarantine_triage_service.os.scandir': 1,
+    # Leaf filesystem boundary, mirroring lib.quarantine_triage_service.os.
+    # scandir above: proves lib.retag_divergence_census_snapshot's atomic
+    # write never touches a prior published snapshot when the final rename
+    # fails (#1142 acceptance 1).
+    'lib.sidecar_service.os.replace': 1,
     'lib.wrong_match_cleanup_service.cleanup_all_wrong_matches': 1,
     'lib.wrong_match_cleanup_service.cleanup_wrong_match_source': 6,
     'lib.wrong_match_cleanup_service.full_pipeline_decision_from_evidence': 7,
