@@ -68,11 +68,25 @@ def _rank_gap_is_within_tolerance(
       is a spectral CLASS, not a measured rate; letting a ±5 window cancel a
       rank the clamp produced would weaken the clamp in both directions —
       suppressing a demotion it earned, or suppressing an upgrade over an
-      album it demoted. The test is ``either`` bound, not "a shared clamp
-      exists": when both sides carry spectral evidence and NEITHER estimate
-      is below its own raw metric, both clamped values simply ARE the raw
-      metrics, and refusing the window there would leave the churn this
-      guard exists to stop alive on exactly those albums.
+      album it demoted.
+
+      The test is ``either`` bound rather than "a shared clamp exists"
+      because those are different questions: when both sides carry spectral
+      evidence and NEITHER estimate falls below its own raw metric, both
+      clamped values simply ARE the raw metrics, and the window is as
+      applicable there as anywhere. **This is fail-closed legislation for a
+      world the corpus does not yet hold, not a live branch.** Measured
+      2026-08-14 by running this function over every candidate/current pair
+      in the rebuilt live corpus (17,096 pairs): 22 ``rank_within_tolerance``
+      firings, all 22 unclamped, **ZERO with a shared clamp**. An independent
+      count over a wider pair enumeration reached 31 firings and the same
+      zero; the total depends on which pairs you admit, the zero does not,
+      and the zero is the load-bearing half. The coarser gate would move no
+      live row today; it is
+      written this way so that a future album carrying spectral evidence on
+      both sides — which the clamp path is steadily making more common — does
+      not silently fall out of the guard for a reason that has nothing to do
+      with why the guard exists.
     * **Same codec family**, so the two numbers mean the same thing. A
       cross-family rank difference is real (``cross_family_same_rank`` only
       ever fires at EQUAL rank).
