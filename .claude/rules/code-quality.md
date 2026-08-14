@@ -188,7 +188,10 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   `tests/test_verdict_tiers_generated.py` is the pattern:
   `proof_verdict_from_evidence` and `proof_verdict_from_facts` agree, then
   `web.classify.proof_gate_projection` receives the aliases the browser's
-  render path really gets. PR #973 proved why: the faulty lineage-gated input
+  render path really gets. The adapter is the function production actually
+  calls to read or write the value — not a sibling that happens to answer
+  a similar question (``_matching_album_ids`` is not
+  ``resolve_current_releases``). PR #973 proved why: the faulty lineage-gated input
   shape occurred on 26,503 live rows, but `storage_format` covered it, so the
   measured live verdict impact was zero; a generated counterexample proved the
   potential divergence while the common library functions remained in lockstep.
@@ -710,6 +713,8 @@ Before writing any new code, decide which test types you owe and what infrastruc
 
 Routes are the strictest gate: `TestRouteContractAudit` will fail at test time if you add a route to `web/routes/` without classifying it. This is intentional — it prevents shipping endpoints the frontend can rely on without contract coverage.
 
+**Before writing a test, answer:** *What one-line change to production would make this test fail? If the answer is a function this test does not call, the test patrols a bystander.* That question catches agree-by-construction and wrong-reader pins at authoring time (issue #1143).
+
 ## Test Taxonomy
 
 Four categories of tests. Each has different rules for what's acceptable. **All four categories already have established patterns and shared infrastructure in this repo — use them. Do not invent parallel approaches.**
@@ -839,3 +844,4 @@ rationale; never allowlist a pure decision.
 - Non-trivial work goes on a feature branch with a PR (e.g. `feat/cooldowns`, `fix/spectral-race`)
 - PRs are merged via GitHub **Create a merge commit** (not Rebase-and-merge, not Squash-and-merge). This keeps the PR attached to mainline history while preserving the individual commits, so write them well.
 - Deploy and verify live after merging
+- **Kill matrix is per-diff-site, not per-PR** (issue #1143). The PR body names every new or changed assertion, checker clause, and constant, and for each, the exact one-line production mutation that makes it fail. A row that cannot name one is the finding. A mutant that kills test A does not qualify test B. A summary "planted a mutant, confirmed RED" is not a matrix.
