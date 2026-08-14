@@ -32,6 +32,7 @@ export function renderPipelineDashboard(navHtml) {
       ${renderRedisCard(redis)}
       ${renderCoverageCard(coverageWithRates)}
       ${renderDiskCoverageCard(data.disk_coverage)}
+      ${renderRetagDivergenceCensusCard(data.retag_divergence_census)}
       ${renderWantedTrendCard(coverageWithRates.wanted_trend || {})}
       ${renderPeersCard(peers)}
       ${renderSearchCard(searches)}
@@ -256,6 +257,225 @@ function renderDriftRow(r) {
           <span>#${r.id} ${esc(r.artist_name || '?')} — ${esc(r.album_title || '?')}</span>
           <strong class="metric-bad">${esc(r.status)}</strong>
         </div>${action}`;
+}
+
+/**
+ * Snapshot age past which the "Last run" reads stale (#1142 review N5)
+ * — a full day past the expected 24h daily cadence, well outside the
+ * timer's own 30min jitter, so ordinary scheduling variance never trips
+ * it; anything past this really has missed at least one scheduled run.
+ * The boundary is EXCLUSIVE: exactly 36h old is still fresh.
+ */
+const RETAG_CENSUS_STALE_AFTER_HOURS = 36;
+
+/**
+ * Hours between `generatedAt` and `nowMs`, or `null` when `generatedAt`
+ * is missing or unparsable — computed client-side, no persisted field
+ * needed (#1142 review N5).
+ * @param {string | null | undefined} generatedAt
+ * @param {number} [nowMs]
+ * @returns {number | null}
+ */
+function retagDivergenceSnapshotAgeHours(generatedAt, nowMs = Date.now()) {
+  if (!generatedAt) return null;
+  const then = Date.parse(generatedAt);
+  if (Number.isNaN(then)) return null;
+  return (nowMs - then) / 3600000;
+}
+
+/**
+ * Whether a snapshot this old counts as stale — see
+ * `RETAG_CENSUS_STALE_AFTER_HOURS` for the exact (exclusive) boundary.
+ * @param {string | null | undefined} generatedAt
+ * @param {number} [nowMs]
+ * @returns {boolean}
+ */
+function retagDivergenceSnapshotIsStale(generatedAt, nowMs = Date.now()) {
+  const ageHours = retagDivergenceSnapshotAgeHours(generatedAt, nowMs);
+  return ageHours != null && ageHours > RETAG_CENSUS_STALE_AFTER_HOURS;
+}
+
+/**
+ * Tone for the census report's own `status` field — `clean` is the
+ * ONLY status that ever reads good; `divergence_found` reads bad;
+ * everything else (`incomplete`, or a defensively-handled
+ * `beets_unavailable` the daily writer no longer actually publishes)
+ * reads warn (#1142 review N1).
+ * @param {string | undefined} status
+ * @returns {string}
+ */
+function retagDivergenceStatusTone(status) {
+  if (status === 'clean') return 'metric-good';
+  if (status === 'divergence_found') return 'metric-bad';
+  return 'metric-warn';
+}
+
+/**
+ * Render the daily whole-library retag-divergence census card (#1142) —
+ * Beets DB identity vs. installed file tags. Deliberately a SEPARATE
+ * card from Disk Coverage above (pipeline-ledger vs. Beets DB): the two
+ * drift questions are independent and must never be conflated in the UI.
+ *
+ * Reads a PERSISTED snapshot (`GET /api/pipeline/dashboard` embeds it
+ * read-only, per `web/routes/pipeline_dashboard.py`) — this module never
+ * triggers a scan. `state` mirrors the route's own three-way honest
+ * split: "missing" (no daily run has published yet), "unreadable" (a
+ * corrupt snapshot file — logged server-side, never a 500), "ok" (a
+ * real published report). Only non-agreeing albums are ever listed
+ * (the whole-library report's own contract), so no artificial
+ * client-side truncation is needed at the live population size this was
+ * built for (single digits) — see the module's own PR body for the
+ * measured live count.
+ * @param {any} census
+ * @returns {string}
+ */
+function renderRetagDivergenceCensusCard(census) {
+  const c = census || {};
+  const state = c.state || 'missing';
+  if (state === 'missing') {
+    return `
+      <div class="dashboard-card dashboard-wide">
+        <div class="dashboard-card-title">Beets DB &harr; File Tags Drift</div>
+        <div class="metric-list">
+          <div class="metric-row"><span>Status</span><strong class="metric-muted">no census published yet</strong></div>
+        </div>
+      </div>
+    `;
+  }
+  if (state === 'unreadable') {
+    return `
+      <div class="dashboard-card dashboard-wide">
+        <div class="dashboard-card-title">Beets DB &harr; File Tags Drift</div>
+        <div class="metric-list">
+          <div class="metric-row"><span>Status</span><strong class="metric-bad">snapshot unreadable</strong></div>
+          <div class="metric-row"><span>Error</span><strong>${esc(c.error || '')}</strong></div>
+        </div>
+      </div>
+    `;
+  }
+  const snapshot = c.snapshot || {};
+  const report = snapshot.report || {};
+  const counts = report.counts || {};
+  const albums = Array.isArray(report.albums) ? report.albums : [];
+  // The dashboard ROUTE caps how many albums it ever embeds
+  // (web/routes/pipeline_dashboard.py::DASHBOARD_RETAG_CENSUS_ALBUM_CAP)
+  // — albums_shown/albums_listed_total name the cap explicitly rather
+  // than letting the row list silently look like the whole truth
+  // (#1142 fresh review N1). Fall back to albums.length when the
+  // fields are absent (older/synthetic payloads), which is exactly
+  // "nothing was capped".
+  const albumsShown = Number.isFinite(c.albums_shown) ? c.albums_shown : albums.length;
+  const albumsListedTotal = Number.isFinite(c.albums_listed_total)
+    ? c.albums_listed_total : albums.length;
+  const isCapped = albumsListedTotal > albumsShown;
+  const statusClass = retagDivergenceStatusTone(report.status);
+  // The "Listed" count only ever means "verified clean" when the run
+  // itself says `clean` — a non-clean status (e.g. `incomplete`, or a
+  // defensively-handled `beets_unavailable`) reading zero listed albums
+  // is NOT the same fact as a clean library, so it must never render
+  // the same green as a genuine clean result (#1142 review N1).
+  const listedClass = report.status === 'clean' ? 'metric-good'
+    : albumsListedTotal ? 'metric-warn' : 'metric-muted';
+  // Albums-scanned is only a trustworthy whole-library count when the
+  // scan itself answered in full (`clean`/`divergence_found`); mute it
+  // otherwise rather than presenting a possibly-partial number plainly.
+  const scannedClass = report.status === 'clean' || report.status === 'divergence_found'
+    ? '' : 'metric-muted';
+  // A retained snapshot from a run that never happened (a missed daily
+  // timer fire, or every recent run failing before publish) must say so
+  // honestly rather than silently presenting yesterday's — or last
+  // week's — report as current (#1142 review N5).
+  const ageHours = retagDivergenceSnapshotAgeHours(snapshot.generated_at);
+  const isStale = retagDivergenceSnapshotIsStale(snapshot.generated_at);
+  const freshnessLabel = ageHours == null ? 'unknown'
+    : isStale ? `stale — ${formatDecimal(ageHours)}h old` : 'fresh';
+  const freshnessClass = ageHours == null ? 'metric-muted'
+    : isStale ? 'metric-warn' : 'metric-good';
+  return `
+    <div class="dashboard-card dashboard-wide">
+      <div class="dashboard-card-title">Beets DB &harr; File Tags Drift</div>
+      <div class="metric-list">
+        <div class="metric-row"><span>Last run</span><strong class="${isStale ? 'metric-warn' : ''}">${snapshot.generated_at ? awstDateTime(snapshot.generated_at) : 'n/a'}</strong></div>
+        <div class="metric-row"><span>Freshness</span><strong class="${freshnessClass}">${esc(freshnessLabel)}</strong></div>
+        <div class="metric-row"><span>Duration</span><strong>${formatDuration(snapshot.duration_seconds)}</strong></div>
+        <div class="metric-row"><span>Result</span><strong class="${statusClass}">${esc(report.status || 'unknown')}</strong></div>
+        <div class="metric-row"><span>Albums scanned</span><strong class="${scannedClass}">${formatCount(counts.albums_scanned)}</strong></div>
+        <div class="metric-row"><span>Listed (non-agreeing)</span><strong class="${listedClass}">${formatCount(albumsListedTotal)}</strong></div>
+        ${isCapped ? `<div class="metric-row"><span></span><strong class="metric-muted">Showing ${formatCount(albumsShown)} of ${formatCount(albumsListedTotal)}</strong></div>` : ''}
+        ${albums.map(a => renderRetagDivergenceAlbumRow(a)).join('')}
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * One retag-divergence album row, wrapped in an id'd container so the
+ * per-album recheck handler (`pipeline.js::recheckRetagDivergenceAlbum`)
+ * can patch just this row's `innerHTML` after a fresh check, instead of
+ * reloading the whole dashboard.
+ * @param {any} album
+ * @returns {string}
+ */
+function renderRetagDivergenceAlbumRow(album) {
+  return `
+    <div class="retag-album-row" id="retag-album-${album.album_id}">
+      ${renderRetagDivergenceAlbumRowInner(album)}
+    </div>
+  `;
+}
+
+/**
+ * The inner content of one retag-divergence album row (classification
+ * line + Recheck button), WITHOUT the outer id'd container
+ * `renderRetagDivergenceAlbumRow` wraps it in. Exported (not just
+ * `__test__`-only) because `pipeline.js::recheckRetagDivergenceAlbum`
+ * calls this for real, to re-render just this row's `innerHTML` in
+ * place after a fresh per-album check — never the outer container,
+ * which already exists in the DOM and must keep its own `id`.
+ * @param {any} album
+ * @returns {string}
+ */
+export function renderRetagDivergenceAlbumRowInner(album) {
+  const classClass = album.album_class === 'agrees' ? 'metric-good'
+    : album.album_class === 'diverges' || album.album_class === 'file_tag_present_db_absent'
+      ? 'metric-bad'
+      : 'metric-warn';
+  const items = Array.isArray(album.items) ? album.items : [];
+  return `
+    <div class="metric-row">
+      <span>Album #${album.album_id} <code title="${esc(album.db_mb_albumid || '')}">${esc(album.db_mb_albumid || '(none)')}</code></span>
+      <strong class="${classClass}">${esc(album.album_class)}</strong>
+    </div>
+    <div class="metric-row"><span>Items</span><strong>${formatCount(items.length)}</strong></div>
+    ${items.filter(item => item.item_class !== 'agrees').map(renderRetagDivergenceItemRow).join('')}
+    <div class="metric-row drift-row-action">
+      <button class="p-btn" onclick="window.recheckRetagDivergenceAlbum(${album.album_id}, this)">Recheck</button>
+      <span class="drift-row-note" id="retag-album-note-${album.album_id}"></span>
+    </div>
+  `;
+}
+
+/**
+ * One non-agreeing item's identity mismatch — the core product claim
+ * ("which file tag disagrees"), rendered as class + the file's own
+ * mb_albumid tag (or `(none)`) + any classification detail (#1142
+ * fresh review N2). Deliberately never renders `item.path`: a full
+ * filesystem path is arbitrary-length operator-facing data with no
+ * essential role in showing WHAT disagrees, only WHERE — omitted to
+ * keep the row bounded and avoid echoing raw filesystem structure into
+ * the page.
+ * @param {any} item
+ * @returns {string}
+ */
+function renderRetagDivergenceItemRow(item) {
+  const tone = item.item_class === 'unreadable' ? 'metric-warn' : 'metric-bad';
+  const identity = item.file_mb_albumid ? esc(item.file_mb_albumid) : '(none)';
+  const detail = item.detail ? ` — ${esc(item.detail)}` : '';
+  return `
+    <div class="metric-row retag-item-row">
+      <span>${esc(item.item_class)}: ${identity}${detail}</span>
+    </div>
+  `;
 }
 
 function renderCoverageCard(coverage) {
@@ -762,9 +982,14 @@ export const __test__ = {
   renderMatchRateChart,
   renderPeerBrowseHeavyQueries,
   renderPeersCard,
+  renderRetagDivergenceAlbumRow,
+  renderRetagDivergenceAlbumRowInner,
+  renderRetagDivergenceCensusCard,
   renderUnfindableBacklogChart,
   renderUnfindableCard,
   renderWantedTrendCard,
   renderWantedTrendChart,
+  retagDivergenceSnapshotAgeHours,
+  retagDivergenceSnapshotIsStale,
   withCoverageMatchRates,
 };

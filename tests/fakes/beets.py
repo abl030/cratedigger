@@ -633,6 +633,14 @@ class FakeBeetsDB:
     def list_album_mb_identities(self) -> list[BeetsAlbumIdentityRow]:
         return list(self._album_mb_identities)
 
+    def get_album_mb_identity(self, album_id: int) -> BeetsAlbumIdentityRow | None:
+        """Mirror of ``BeetsDB.get_album_mb_identity`` (#1142) — derived
+        from the same ``set_album_mb_identities`` seed store."""
+        for row in self._album_mb_identities:
+            if row.album_id == album_id:
+                return row
+        return None
+
     def get_all_album_ids_for_release(self, release_id: str) -> list[int]:
         self.get_all_album_ids_for_release_calls.append(release_id)
         ids = self._album_ids_lookup(release_id)

@@ -286,30 +286,45 @@ class TestEntrypointStartupPlacement(unittest.TestCase):
         runtime_dir = Path(self.tmp.name) / "subprocess-runtime"
         runtime_dir.mkdir()
         before = _snapshot_runtime_tree(Path(self.tmp.name))
+        # Each entrypoint's own OWN documented rejection exit code — NOT
+        # uniformly 1 (#1142 review N9): the retag-divergence census
+        # oneshot returns its own EXIT_CONFIG_ABORT (2), distinct from
+        # the other four real entrypoints' shared BeetsStartupError
+        # exit-1 convention.
         commands = (
             (
                 "main",
                 [sys.executable, "cratedigger.py"],
                 (),
+                1,
             ),
             (
                 "importer",
                 [sys.executable, "scripts/importer.py"],
                 ("--once",),
+                1,
             ),
             (
                 "preview",
                 [sys.executable, "scripts/import_preview_worker.py"],
                 ("--once",),
+                1,
             ),
             (
                 "web",
                 [sys.executable, "web/server.py"],
                 ("--canonical-origin", "https://music.example", "--dev-port", "0"),
+                1,
+            ),
+            (
+                "retag-census",
+                [sys.executable, "scripts/run_retag_divergence_census.py"],
+                (),
+                2,
             ),
         )
 
-        for role, executable, extra in commands:
+        for role, executable, extra, expected_exit_code in commands:
             with self.subTest(role=role):
                 proc = subprocess.run(
                     [
@@ -324,7 +339,7 @@ class TestEntrypointStartupPlacement(unittest.TestCase):
                     capture_output=True,
                     check=False,
                 )
-                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertEqual(proc.returncode, expected_exit_code, proc.stderr)
                 output = proc.stderr + proc.stdout
                 self.assertIn("runtime_config_load_error", output)
                 assert_redacted_load_failure(output, token)

@@ -27,6 +27,15 @@ function assertExcludes(haystack, needle, msg) {
   }
 }
 
+function assert(condition, msg) {
+  if (condition) {
+    passed++;
+  } else {
+    failed++;
+    console.error(`  FAIL: ${msg}`);
+  }
+}
+
 console.log('renderCoverageCard() shows found-enqueue match rates');
 {
   state.pipelineMatchGraphOpen = false;
@@ -359,6 +368,289 @@ console.log('renderDiskCoverageCard() renders no drift rows or buttons when noth
   });
   assertContains(html, 'metric-good">0', 'zero drift renders the good class');
   assertExcludes(html, 'mergeRekeyRequest', 'no button rendered with an empty drift list');
+}
+
+console.log('renderRetagDivergenceCensusCard() honestly shows the missing state');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'missing', error: null, snapshot: null,
+  });
+  assertContains(html, 'Beets DB', 'card title mentions Beets DB');
+  assertContains(html, 'File Tags', 'card title mentions file tags — distinct from Disk Coverage');
+  assertContains(html, 'no census published yet', 'honest missing-state copy');
+  assertExcludes(html, 'Disk Coverage', 'never confused with the ledger-vs-beets Disk Coverage card');
+}
+console.log('renderRetagDivergenceCensusCard() shows the unreadable state without crashing');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'unreadable', error: 'DecodeError: bad json', snapshot: null,
+  });
+  assertContains(html, 'unreadable', 'unreadable state copy rendered');
+  assertContains(html, 'DecodeError: bad json', 'error detail rendered');
+}
+console.log('renderRetagDivergenceCensusCard() renders a clean snapshot with zero listed albums');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    snapshot: {
+      generated_at: '2026-08-14T09:00:00+00:00',
+      duration_seconds: 196.4,
+      report: {
+        status: 'clean', complete: true,
+        counts: {albums_scanned: 93700, items_scanned: 93700},
+        albums: [],
+      },
+    },
+  });
+  assertContains(html, 'metric-good">clean', 'clean status rendered with good class');
+  assertContains(html, '93,700', 'albums_scanned count rendered');
+  assertExcludes(html, 'window.recheckRetagDivergenceAlbum', 'no recheck buttons with nothing listed');
+}
+console.log('retagDivergenceSnapshotAgeHours() computes hours since generated_at');
+{
+  const nowMs = Date.parse('2026-08-16T00:00:00+00:00');
+  assert(
+    __test__.retagDivergenceSnapshotAgeHours('2026-08-15T00:00:00+00:00', nowMs) === 24,
+    '24h old is 24',
+  );
+  assert(
+    __test__.retagDivergenceSnapshotAgeHours(null, nowMs) === null,
+    'missing generated_at is null, not NaN',
+  );
+  assert(
+    __test__.retagDivergenceSnapshotAgeHours('not a date', nowMs) === null,
+    'unparsable generated_at is null',
+  );
+}
+console.log('N5 (#1142 review) — stale boundary is exactly 36h; 36.0h is fresh, 36.01h is stale');
+{
+  const nowMs = Date.parse('2026-08-16T00:00:00+00:00');
+  const atBoundary = new Date(nowMs - 36 * 3600000).toISOString();
+  const justPastBoundary = new Date(nowMs - 36.01 * 3600000).toISOString();
+  assert(
+    __test__.retagDivergenceSnapshotIsStale(atBoundary, nowMs) === false,
+    'exactly 36h old is NOT stale (boundary is exclusive)',
+  );
+  assert(
+    __test__.retagDivergenceSnapshotIsStale(justPastBoundary, nowMs) === true,
+    'just past 36h old IS stale',
+  );
+}
+console.log('renderRetagDivergenceCensusCard() N5 — a fresh snapshot never reads stale');
+{
+  const fresh = new Date(Date.now() - 2 * 3600000).toISOString();
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    snapshot: {
+      generated_at: fresh,
+      duration_seconds: 196.4,
+      report: {
+        status: 'clean', complete: true,
+        counts: {albums_scanned: 93700},
+        albums: [],
+      },
+    },
+  });
+  assertExcludes(html, 'stale', 'a 2h-old snapshot never renders any "stale" text');
+  assertContains(html, 'metric-good">fresh', 'freshness row reads fresh');
+}
+console.log('renderRetagDivergenceCensusCard() N5 — a snapshot older than 36h reads stale with a warn tone');
+{
+  const stale = new Date(Date.now() - 40 * 3600000).toISOString();
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    snapshot: {
+      generated_at: stale,
+      duration_seconds: 196.4,
+      report: {
+        status: 'clean', complete: true,
+        counts: {albums_scanned: 93700},
+        albums: [],
+      },
+    },
+  });
+  assertContains(html, 'metric-warn">stale', 'freshness row reads stale with warn tone');
+  assertContains(html, '40.0h', 'stale label names the exact age');
+}
+console.log('renderRetagDivergenceCensusCard() lists a divergent album with a recheck button');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    snapshot: {
+      generated_at: '2026-08-14T09:00:00+00:00',
+      duration_seconds: 196.4,
+      report: {
+        status: 'divergence_found', complete: true,
+        counts: {albums_scanned: 93700, items_scanned: 93700},
+        albums: [{
+          album_id: 6612, db_mb_albumid: 'd990b8af-0000-0000-0000-000000000000',
+          album_class: 'diverges', item_count: 8, items: [],
+        }],
+      },
+    },
+  });
+  assertContains(html, 'metric-bad">divergence_found', 'divergence status rendered with bad class');
+  assertContains(html, 'id="retag-album-6612"', 'per-album container id rendered for in-place patching');
+  assertContains(html, 'window.recheckRetagDivergenceAlbum(6612, this)', 'recheck button wired with the album id');
+  assertContains(html, 'id="retag-album-note-6612"', 'inline note slot rendered for this album');
+}
+console.log('renderRetagDivergenceCensusCard() escapes the db_mb_albumid value');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    snapshot: {
+      generated_at: '2026-08-14T09:00:00+00:00',
+      duration_seconds: 1.0,
+      report: {
+        status: 'divergence_found', complete: true,
+        counts: {},
+        albums: [{
+          album_id: 1, db_mb_albumid: '<script>x</script>',
+          album_class: 'diverges', item_count: 1, items: [],
+        }],
+      },
+    },
+  });
+  assertExcludes(html, '<script>x</script>', 'db_mb_albumid is escaped');
+}
+console.log('renderRetagDivergenceCensusCard() N1 (fresh review) — shows "Showing N of M" when the dashboard route capped the album list');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    albums_shown: 50, albums_listed_total: 57,
+    snapshot: {
+      generated_at: '2026-08-14T09:00:00+00:00',
+      duration_seconds: 1.0,
+      report: {
+        status: 'divergence_found', complete: true,
+        counts: {albums_scanned: 8487},
+        albums: Array.from({length: 50}, (_, i) => ({
+          album_id: i + 1, db_mb_albumid: `mb-${i + 1}`,
+          album_class: 'diverges', item_count: 0, items: [],
+        })),
+      },
+    },
+  });
+  assertContains(html, 'Showing 50 of 57', 'capped state visibly names shown vs. total — no silent cap');
+  assertContains(html, 'Listed (non-agreeing)', 'listed row label still present');
+  assertContains(html, '>57<', 'listed row shows the TRUE total, not the capped shown count');
+}
+console.log('renderRetagDivergenceCensusCard() N1 (fresh review) — no "Showing" text when nothing was capped');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    albums_shown: 1, albums_listed_total: 1,
+    snapshot: {
+      generated_at: '2026-08-14T09:00:00+00:00',
+      duration_seconds: 1.0,
+      report: {
+        status: 'divergence_found', complete: true,
+        counts: {albums_scanned: 8487},
+        albums: [{
+          album_id: 6612, db_mb_albumid: 'd990b8af-0000-0000-0000-000000000000',
+          album_class: 'diverges', item_count: 1, items: [],
+        }],
+      },
+    },
+  });
+  assertExcludes(html, 'Showing', 'uncapped state never mentions "Showing" at all');
+}
+console.log('renderRetagDivergenceAlbumRowInner() N2 (fresh review) — shows each non-agreeing item\'s class + identity + detail');
+{
+  const html = __test__.renderRetagDivergenceAlbumRowInner({
+    album_id: 6612, db_mb_albumid: 'd990b8af-0000-0000-0000-000000000000',
+    album_class: 'diverges', item_count: 3,
+    items: [
+      {
+        path: '/library/Slipknot/01.flac', item_class: 'diverges',
+        file_mb_albumid: 'a6269e96-0000-0000-0000-000000000000', detail: null,
+      },
+      {
+        path: '/library/Slipknot/02.flac', item_class: 'unreadable',
+        file_mb_albumid: null, detail: 'OSError: permission denied',
+      },
+      {
+        path: '/library/Slipknot/03.flac', item_class: 'agrees',
+        file_mb_albumid: 'd990b8af-0000-0000-0000-000000000000', detail: null,
+      },
+    ],
+  });
+  assertContains(html, 'Items', 'item count label rendered');
+  assertContains(html, '>3<', 'total item count rendered');
+  assertContains(html, 'diverges', 'first non-agreeing item class rendered');
+  assertContains(html, 'a6269e96-0000-0000-0000-000000000000', 'first item identity rendered');
+  assertContains(html, 'unreadable', 'second non-agreeing item class rendered');
+  assertContains(html, '(none)', 'a null file_mb_albumid renders as (none)');
+  assertContains(html, 'OSError: permission denied', 'unreadable item detail rendered');
+  assertExcludes(html, '/library/Slipknot/03.flac', 'agreeing item path never rendered — only non-agreeing items are itemized');
+  assertExcludes(html, '/library/Slipknot/01.flac', 'full arbitrary file paths are never rendered, even for non-agreeing items');
+}
+console.log('renderRetagDivergenceAlbumRowInner() N2 (fresh review) — escapes XSS-looking item identity/detail');
+{
+  const html = __test__.renderRetagDivergenceAlbumRowInner({
+    album_id: 1, db_mb_albumid: 'cafef00d',
+    album_class: 'diverges', item_count: 1,
+    items: [{
+      path: '/library/x/01.flac', item_class: 'diverges',
+      file_mb_albumid: '<script>alert(1)</script>',
+      detail: '<img src=x onerror=alert(2)>',
+    }],
+  });
+  assertExcludes(html, '<script>alert(1)</script>', 'file_mb_albumid XSS is escaped');
+  assertExcludes(html, '<img src=x onerror=alert(2)>', 'detail XSS is escaped');
+  assertContains(html, '&lt;script&gt;', 'file_mb_albumid renders as escaped entities');
+}
+console.log('renderRetagDivergenceCensusCard() N1 — an incomplete report with nothing listed never reads green');
+{
+  // A world the daily writer itself cannot currently produce (incomplete
+  // always implies something listed for an unbounded, cursor-less scan —
+  // see lib/retag_divergence_audit.py), but the frontend must stay
+  // defensively correct on its own terms rather than trusting that
+  // backend invariant to hold forever.
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    snapshot: {
+      generated_at: '2026-08-14T09:00:00+00:00',
+      duration_seconds: 5.0,
+      report: {
+        status: 'incomplete', complete: true,
+        counts: {albums_scanned: 0},
+        albums: [],
+      },
+    },
+  });
+  assertContains(html, 'metric-warn">incomplete', 'incomplete status rendered with warn class');
+  // The Listed row's own tone must not be metric-good when status isn't
+  // clean, regardless of the zero count.
+  const listedRowMatch = html.match(/Listed \(non-agreeing\)<\/span><strong class="([^"]*)">0/);
+  assert(listedRowMatch !== null, 'Listed row with a 0 count is present');
+  assert(listedRowMatch[1] !== 'metric-good',
+    `Listed row must not be metric-good for status=incomplete, got ${listedRowMatch[1]}`);
+  const scannedRowMatch = html.match(/Albums scanned<\/span><strong class="([^"]*)">0/);
+  assert(scannedRowMatch !== null, 'Albums scanned row is present');
+  assert(scannedRowMatch[1] === 'metric-muted',
+    `Albums scanned must read muted (untrustworthy count) for status=incomplete, got ${JSON.stringify(scannedRowMatch[1])}`);
+}
+console.log('renderRetagDivergenceCensusCard() N1 — a clean report keeps Albums scanned unmuted');
+{
+  const html = __test__.renderRetagDivergenceCensusCard({
+    state: 'ok', error: null,
+    snapshot: {
+      generated_at: '2026-08-14T09:00:00+00:00',
+      duration_seconds: 196.4,
+      report: {
+        status: 'clean', complete: true,
+        counts: {albums_scanned: 8487},
+        albums: [],
+      },
+    },
+  });
+  const scannedRowMatch = html.match(/Albums scanned<\/span><strong class="([^"]*)">8,487/);
+  assert(scannedRowMatch !== null, 'Albums scanned row with the real count is present');
+  assert(scannedRowMatch[1] !== 'metric-muted',
+    `Albums scanned must not read muted for a clean, trustworthy status, got ${JSON.stringify(scannedRowMatch[1])}`);
+  const listedRowMatch = html.match(/Listed \(non-agreeing\)<\/span><strong class="([^"]*)">0/);
+  assert(listedRowMatch[1] === 'metric-good', 'clean + zero listed still reads good');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

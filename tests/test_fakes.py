@@ -6278,6 +6278,25 @@ class TestFakeBeetsDB(unittest.TestCase):
         beets.list_album_mb_identities().append(rows[0])
         self.assertEqual(beets.list_album_mb_identities(), rows)
 
+    def test_get_album_mb_identity_looks_up_by_id(self) -> None:
+        """#1142 — the per-album retag recheck's narrow read seam."""
+        from lib.beets_db import BeetsAlbumIdentityRow
+
+        beets = FakeBeetsDB()
+        rows = [
+            BeetsAlbumIdentityRow(
+                album_id=7,
+                mb_albumid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                item_paths=("/library/Artist/Album/01.flac",),
+            ),
+            BeetsAlbumIdentityRow(album_id=8, mb_albumid="", item_paths=()),
+        ]
+        beets.set_album_mb_identities(rows)
+
+        self.assertEqual(beets.get_album_mb_identity(7), rows[0])
+        self.assertEqual(beets.get_album_mb_identity(8), rows[1])
+        self.assertIsNone(beets.get_album_mb_identity(999))
+
     def test_current_resolver_preserves_cardinality_and_topology(self) -> None:
         from lib.beets_db import CurrentBeetsAmbiguous, CurrentBeetsUnique
         from lib.release_identity import ReleaseIdentity

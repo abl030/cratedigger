@@ -4,12 +4,30 @@ Split from web/routes/pipeline.py (#522) — mirrors
 ``web/js/pipeline_dashboard.js`` on the frontend side.
 """
 
+import json
+import logging
+
 import msgspec
 
 from lib.disk_coverage_service import disk_coverage
+from lib.retag_divergence_census_snapshot import (
+    read_retag_divergence_census_snapshot,
+)
 from web import cache as cache_api
 from web.routes._registry import RouteHandler, RouteRegistration, route
 from web.routes._server_access import _server
+
+log = logging.getLogger(__name__)
+
+#: Maximum non-agreeing albums the DASHBOARD route ever embeds in one
+#: response (#1142 fresh review N1). The PERSISTED snapshot on disk is
+#: never touched or truncated — a read-failure-heavy world could
+#: legitimately list every one of the ~8,700 real albums — but this
+#: route's own JSON projection is a dashboard card, not a bulk export,
+#: and must not serialize an unbounded response. ``albums_shown``/
+#: ``albums_listed_total`` in the payload make the cap visible to the
+#: caller rather than a silent truncation.
+DASHBOARD_RETAG_CENSUS_ALBUM_CAP = 50
 
 
 def get_pipeline_dashboard(h: RouteHandler, params: dict[str, list[str]]) -> None:
@@ -18,6 +36,7 @@ def get_pipeline_dashboard(h: RouteHandler, params: dict[str, list[str]]) -> Non
     data = s._db().get_pipeline_dashboard_metrics()
     data["redis"] = cache_api.redis_metrics()
     data["disk_coverage"] = _dashboard_disk_coverage()
+    data["retag_divergence_census"] = _dashboard_retag_divergence_census()
     h._json(data)
 
 
@@ -42,6 +61,85 @@ def _dashboard_disk_coverage() -> dict[str, object] | None:
             for row in (result.off_disk or [])
             if row.status == "imported"
         ],
+    }
+
+
+def _dashboard_retag_divergence_census() -> dict[str, object]:
+    """The persisted daily whole-library retag-divergence census snapshot
+    (#1142) — a distinct Beets-DB-vs-file-tags drift card, NOT the Disk
+    Coverage (pipeline-ledger-vs-Beets-DB) card above. Read-only: this
+    reads the file the daily oneshot published; it never scans, and
+    never touches Beets at all.
+
+    ``state``:
+      * ``"missing"`` — no snapshot path configured, or the daily census
+        has never published one yet (a fresh deploy, or every run so far
+        crashed before completing). Real, honest state — not an error.
+      * ``"ok"`` — a snapshot was read; ``snapshot`` carries the full
+        ``RetagDivergenceCensusSnapshot`` (``generated_at``,
+        ``duration_seconds``, ``report``). The report's OWN ``status``
+        (clean/divergence_found/incomplete/beets_unavailable) is nested
+        inside — this route makes no claim about it. ``report.counts``
+        is always the true, uncapped whole-library numbers — ONLY
+        ``report.albums`` (the per-album listing) is capped at
+        :data:`DASHBOARD_RETAG_CENSUS_ALBUM_CAP`, never silently: the
+        sibling ``albums_shown``/``albums_listed_total`` fields name
+        exactly how many were embedded versus how many the persisted
+        report actually lists (#1142 fresh review N1). The persisted
+        file on disk is never rewritten by this cap.
+      * ``"unreadable"`` — a snapshot file exists but could not be read
+        or decoded: a filesystem-level failure (``OSError`` — denied
+        permissions, the path resolving to a directory, …) or malformed
+        content (bit-rotted or hand-edited outside the atomic publish
+        path — ``UnicodeDecodeError``/``json.JSONDecodeError``/
+        ``msgspec.ValidationError``, matching
+        ``read_retag_divergence_census_snapshot``'s own documented
+        exception contract). Logged; never crashes the whole dashboard
+        route over one card (#1142 review N4) — ``FileNotFoundError`` is
+        NOT in this set: that one is handled inside the read helper and
+        surfaces as the ordinary ``"missing"`` state below, not an
+        error.
+
+    ``albums_shown``/``albums_listed_total`` are always present (``0``
+    for ``missing``/``unreadable``) so the payload shape never branches
+    on state.
+    """
+    s = _server()
+    path = s.retag_census_snapshot_path
+    if path is None:
+        return _empty_retag_divergence_census("missing")
+    try:
+        snapshot = read_retag_divergence_census_snapshot(path)
+    except (
+        OSError, UnicodeDecodeError, json.JSONDecodeError,
+        msgspec.ValidationError,
+    ) as exc:
+        log.exception(
+            "retag divergence census snapshot at %s is unreadable", path,
+        )
+        result = _empty_retag_divergence_census("unreadable")
+        result["error"] = str(exc)
+        return result
+    if snapshot is None:
+        return _empty_retag_divergence_census("missing")
+    snapshot_dict = msgspec.to_builtins(snapshot)
+    report_dict = snapshot_dict["report"]
+    all_albums = report_dict["albums"]
+    albums_listed_total = len(all_albums)
+    report_dict["albums"] = all_albums[:DASHBOARD_RETAG_CENSUS_ALBUM_CAP]
+    return {
+        "state": "ok",
+        "error": None,
+        "snapshot": snapshot_dict,
+        "albums_shown": len(report_dict["albums"]),
+        "albums_listed_total": albums_listed_total,
+    }
+
+
+def _empty_retag_divergence_census(state: str) -> dict[str, object]:
+    return {
+        "state": state, "error": None, "snapshot": None,
+        "albums_shown": 0, "albums_listed_total": 0,
     }
 
 

@@ -89,6 +89,11 @@ class DevConfig:
     beets_directory: str | None = None
     measure_mirror_requests: bool = False
     preview_insecure_warning: bool = False
+    #: Directory to read a retag-divergence census snapshot from (#1142)
+    #: — mirrors the deployed ``cfg.stateDir``/``var_dir`` the daily
+    #: oneshot writes into. ``None`` means the dashboard honestly reports
+    #: "no snapshot published yet", exactly like a fresh deploy.
+    retag_census_runtime_dir: str | None = None
 
     @property
     def badge_text(self) -> str:
@@ -630,6 +635,16 @@ def configure_live_db(
         web_server.beets_library_root = config.beets_directory
     web_server._beets = None
 
+    if config.retag_census_runtime_dir is not None:
+        from lib.retag_divergence_census_snapshot import (
+            retag_divergence_census_snapshot_path,
+        )
+        web_server.retag_census_snapshot_path = (
+            retag_divergence_census_snapshot_path(
+                config.retag_census_runtime_dir,
+            )
+        )
+
     if config.redis_host:
         web_server.cache.init(config.redis_host, config.redis_port)
 
@@ -649,6 +664,9 @@ def build_config(args: argparse.Namespace) -> DevConfig:
         measure_mirror_requests=getattr(args, "measure_mirror_requests", False),
         preview_insecure_warning=getattr(
             args, "preview_insecure_warning", False,
+        ),
+        retag_census_runtime_dir=getattr(
+            args, "retag_census_runtime_dir", None,
         ),
     )
 
@@ -709,6 +727,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--redis-host", default=None)
     parser.add_argument("--redis-port", type=int, default=6379)
+    parser.add_argument(
+        "--retag-census-runtime-dir",
+        default=os.environ.get("RETAG_CENSUS_RUNTIME_DIR"),
+        help=(
+            "live-db only: directory to read a retag-divergence census "
+            "snapshot from (#1142). Unset means the dashboard honestly "
+            "reports no snapshot published yet."
+        ),
+    )
     parser.add_argument(
         "--preview-insecure-warning",
         action="store_true",

@@ -6,13 +6,28 @@ tests/web/_harness.py.
 """
 import os
 import sys
+import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import ClassVar
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from lib.beets_db import BeetsAlbumIdentityRow
+from lib.retag_divergence_audit import (
+    RetagDivergenceAlbum,
+    RetagDivergenceCounts,
+    RetagDivergenceReport,
+    RetagDivergenceStatus,
+)
+from lib.retag_divergence_census_snapshot import (
+    RetagDivergenceCensusSnapshot,
+    read_retag_divergence_census_snapshot,
+    retag_divergence_census_snapshot_path,
+    write_retag_divergence_census_snapshot,
+)
 from tests.fakes import FakeBeetsDB
 from tests.helpers import make_request_row
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
@@ -24,6 +39,7 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
     DASHBOARD_REQUIRED_FIELDS: ClassVar = {
         "generated_at", "redis", "searches", "cycles", "coverage",
         "peers", "plan_readiness", "disk_coverage", "unfindable",
+        "retag_divergence_census",
     }
     DASHBOARD_UNFINDABLE_FIELDS: ClassVar = {
         "recent_runs", "backlog_trend",
@@ -373,6 +389,248 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         )
         self.assertEqual(
             data["unfindable"]["backlog_trend"]["current_backlog"], 686)
+
+
+DASHBOARD_RETAG_DIVERGENCE_CENSUS_FIELDS = {
+    "state", "error", "snapshot", "albums_shown", "albums_listed_total",
+}
+
+
+@contextmanager
+def _retag_census_snapshot_path_set(path):
+    """Plain module-global override + manual restore — mirrors the
+    established ``srv.beets_db_path = ...`` convention
+    (`tests/web/test_routes_library.py`) for a plain config string, not
+    `unittest.mock.patch`: the mock-audit's leaf-seam rule targets
+    Mock/MagicMock stand-ins for collaborators, not direct assignment to
+    a module-level data attribute."""
+    import web.server as srv
+    previous = srv.retag_census_snapshot_path
+    srv.retag_census_snapshot_path = path
+    try:
+        yield
+    finally:
+        srv.retag_census_snapshot_path = previous
+
+
+def _snapshot(
+    status: RetagDivergenceStatus = "clean",
+) -> RetagDivergenceCensusSnapshot:
+    return RetagDivergenceCensusSnapshot(
+        generated_at="2026-08-14T09:00:00+00:00",
+        duration_seconds=196.4,
+        report=RetagDivergenceReport(
+            status=status,
+            complete=True,
+            counts=RetagDivergenceCounts(0, 0, 0, 0, 0, 0, 0, 0),
+            albums=(),
+        ),
+    )
+
+
+class _PoisonedBeetsDB(FakeBeetsDB):
+    """#1142 acceptance 6 — the dashboard's census card reads the
+    persisted snapshot only; it must never invoke the whole-library
+    reader, even when a Beets handle IS available."""
+
+    def list_album_mb_identities(self) -> list[BeetsAlbumIdentityRow]:
+        raise AssertionError(
+            "dashboard must not invoke the whole-library retag-divergence "
+            "reader — it reads the persisted snapshot only"
+        )
+
+
+class TestPipelineDashboardRetagDivergenceCensusContract(_FakeDbWebServerCase):
+    """Contract tests for the ``retag_divergence_census`` dashboard block
+    (#1142) — a distinct Beets-DB-vs-file-tags drift card, never the
+    Disk Coverage (ledger-vs-Beets-DB) one. Read-only: the route reads
+    the persisted daily snapshot, it never scans."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.db.seed_request(make_request_row(id=100, status="wanted"))
+
+    def test_missing_state_when_no_snapshot_path_configured(self) -> None:
+        import web.server as srv
+
+        with patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()):
+            status, data = self._get("/api/pipeline/dashboard")
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data["retag_divergence_census"],
+            DASHBOARD_RETAG_DIVERGENCE_CENSUS_FIELDS,
+            "pipeline dashboard retag divergence census",
+        )
+        self.assertEqual(
+            data["retag_divergence_census"],
+            {
+                "state": "missing", "error": None, "snapshot": None,
+                "albums_shown": 0, "albums_listed_total": 0,
+            },
+        )
+
+    def test_missing_state_when_path_configured_but_file_absent(self) -> None:
+        import web.server as srv
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = retag_divergence_census_snapshot_path(tmpdir)
+            with (
+                _retag_census_snapshot_path_set(path),
+                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+            ):
+                status, data = self._get("/api/pipeline/dashboard")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["retag_divergence_census"]["state"], "missing")
+
+    def test_ok_state_reads_a_published_snapshot(self) -> None:
+        import web.server as srv
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = retag_divergence_census_snapshot_path(tmpdir)
+            snapshot = _snapshot("divergence_found")
+            write_retag_divergence_census_snapshot(path, snapshot)
+            with (
+                _retag_census_snapshot_path_set(path),
+                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+            ):
+                status, data = self._get("/api/pipeline/dashboard")
+
+        self.assertEqual(status, 200)
+        census = data["retag_divergence_census"]
+        self.assertEqual(census["state"], "ok")
+        self.assertIsNone(census["error"])
+        self.assertEqual(census["snapshot"]["generated_at"], snapshot.generated_at)
+        self.assertEqual(
+            census["snapshot"]["duration_seconds"], snapshot.duration_seconds,
+        )
+        self.assertEqual(census["snapshot"]["report"]["status"], "divergence_found")
+        # An uncapped small report — shown equals the true total.
+        self.assertEqual(census["albums_shown"], len(snapshot.report.albums))
+        self.assertEqual(
+            census["albums_listed_total"], len(snapshot.report.albums),
+        )
+
+    def test_ok_state_caps_the_embedded_album_list(self) -> None:
+        """N1 (fresh review) — the PERSISTED snapshot may legitimately
+        list every non-agreeing album (a read-failure-heavy world could
+        mean thousands), but the DASHBOARD route's own JSON projection
+        must never serialize more than
+        ``DASHBOARD_RETAG_CENSUS_ALBUM_CAP`` of them — no silent
+        truncation: albums_shown/albums_listed_total tell the caller
+        exactly what happened. The persisted file on disk is untouched
+        (this route only reads it)."""
+        import web.server as srv
+        from web.routes.pipeline_dashboard import (
+            DASHBOARD_RETAG_CENSUS_ALBUM_CAP,
+        )
+
+        total_albums = DASHBOARD_RETAG_CENSUS_ALBUM_CAP + 7
+        albums = tuple(
+            RetagDivergenceAlbum(
+                album_id=i, db_mb_albumid=f"mb-{i}",
+                album_class="diverges", item_count=0, items=(),
+            )
+            for i in range(1, total_albums + 1)
+        )
+        snapshot = RetagDivergenceCensusSnapshot(
+            generated_at="2026-08-14T09:00:00+00:00",
+            duration_seconds=1.0,
+            report=RetagDivergenceReport(
+                status="divergence_found", complete=True,
+                counts=RetagDivergenceCounts(
+                    total_albums, 0, 0, 0, total_albums, 0, 0, 0,
+                ),
+                albums=albums,
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = retag_divergence_census_snapshot_path(tmpdir)
+            write_retag_divergence_census_snapshot(path, snapshot)
+            with (
+                _retag_census_snapshot_path_set(path),
+                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+            ):
+                status, data = self._get("/api/pipeline/dashboard")
+
+            # The persisted file on disk still has every album — this
+            # route only ever reads it, never rewrites the cap back to
+            # disk. Read back while tmpdir is still alive.
+            read_back = read_retag_divergence_census_snapshot(path)
+
+        self.assertEqual(status, 200)
+        census = data["retag_divergence_census"]
+        self.assertEqual(census["state"], "ok")
+        # Never serializes beyond the cap.
+        self.assertEqual(
+            len(census["snapshot"]["report"]["albums"]),
+            DASHBOARD_RETAG_CENSUS_ALBUM_CAP,
+        )
+        self.assertEqual(census["albums_shown"], DASHBOARD_RETAG_CENSUS_ALBUM_CAP)
+        self.assertEqual(census["albums_listed_total"], total_albums)
+        # The existing honest whole-library counts are untouched by the
+        # projection cap — still the true, uncapped numbers.
+        self.assertEqual(
+            census["snapshot"]["report"]["counts"]["albums_scanned"],
+            total_albums,
+        )
+        self.assertEqual(census["snapshot"]["report"]["status"], "divergence_found")
+        assert read_back is not None
+        self.assertEqual(len(read_back.report.albums), total_albums)
+
+    def test_unreadable_state_on_malformed_snapshot_file(self) -> None:
+        import web.server as srv
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = retag_divergence_census_snapshot_path(tmpdir)
+            with open(path, "wb") as fh:
+                fh.write(b"not json at all")
+            with (
+                _retag_census_snapshot_path_set(path),
+                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+                self.assertLogs(
+                    "web.routes.pipeline_dashboard", level="ERROR",
+                ),
+            ):
+                status, data = self._get("/api/pipeline/dashboard")
+
+        # A corrupt census card must never 500 the whole dashboard.
+        self.assertEqual(status, 200)
+        census = data["retag_divergence_census"]
+        self.assertEqual(census["state"], "unreadable")
+        self.assertIsNone(census["snapshot"])
+        self.assertIsNotNone(census["error"])
+
+    def test_unreadable_state_on_permission_error(self) -> None:
+        """N4 (#1142 review) — a filesystem-level read failure (denied
+        permissions, or the path resolving to a directory) must ALSO
+        never 500 the whole dashboard, not just a content-decode
+        failure."""
+        import web.server as srv
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = retag_divergence_census_snapshot_path(tmpdir)
+            write_retag_divergence_census_snapshot(path, _snapshot("clean"))
+            with (
+                _retag_census_snapshot_path_set(path),
+                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+                patch(
+                    "lib.retag_divergence_census_snapshot.open",
+                    side_effect=PermissionError("denied"),
+                ),
+                self.assertLogs(
+                    "web.routes.pipeline_dashboard", level="ERROR",
+                ),
+            ):
+                status, data = self._get("/api/pipeline/dashboard")
+
+        self.assertEqual(status, 200)
+        census = data["retag_divergence_census"]
+        self.assertEqual(census["state"], "unreadable")
+        self.assertIsNone(census["snapshot"])
+        self.assertIsNotNone(census["error"])
 
 
 if __name__ == "__main__":

@@ -64,6 +64,15 @@ and publish no CORS headers.
 `--beets-directory` when supplied. Wrong Matches does not need either option; only
 beets-backed library badges and lookups do.
 
+`--retag-census-runtime-dir` (#1142) points the dashboard's "Beets DB ↔ File
+Tags Drift" card at a directory to read a persisted
+`retag-divergence-census.json` snapshot from — the same file
+`cratedigger-retag-census.service` publishes into `cfg.stateDir` in
+production. Unset means the card honestly shows "no census published
+yet", exactly like a fresh deploy; point it at a real or hand-constructed
+snapshot directory to preview the card's `ok`/divergent states without
+waiting for (or triggering) the real ~200s whole-library scan.
+
 ## Screenshot verification loop
 
 UI changes are verified visually against this dev server (live-db mode)

@@ -7829,6 +7829,192 @@ class TestRetagDivergenceAuditCLI(unittest.TestCase):
             ])
 
 
+class TestRetagDivergenceAuditAlbumCLI(unittest.TestCase):
+    """`pipeline-cli audit retag-divergence-album <id>` (#1142) — the CLI
+    counterpart of `GET /api/audit/retag-divergence/album/<id>`, wrapping
+    the exact same `scan_retag_divergence_single_album_from_factory`
+    service call (CLI ⇄ API surface symmetry)."""
+
+    def test_found_album_exits_zero(self) -> None:
+        import scripts.pipeline_cli.audit as audit_cli
+        from lib.beets_db import BeetsAlbumIdentityRow
+
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(album_id=1, mb_albumid="", item_paths=()),
+        ])
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", return_value=beets),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence_album(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                    album_id=1,
+                ),
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["status"], "found")
+        self.assertEqual(payload["album"]["album_id"], 1)
+        self.assertEqual(payload["album"]["album_class"], "empty")
+
+    def test_diverging_album_still_exits_zero(self) -> None:
+        """Unlike the whole-library command, exit reflects whether the
+        check ANSWERED — not whether the answer was a divergence — since
+        this is an explicit interactive lookup, not a health-check gate.
+        Mirrors the route's own 200-for-any-found-class contract."""
+        from pathlib import Path
+
+        from mediafile import MediaFile
+
+        import scripts.pipeline_cli.audit as audit_cli
+        from lib.beets_db import BeetsAlbumIdentityRow
+        from tests.test_beets_retag import MERGED, SURVIVOR, _make_real_mp3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            track_path = Path(tmpdir) / "01.mp3"
+            _make_real_mp3(track_path)
+            media = MediaFile(track_path)
+            media.mb_albumid = MERGED
+            media.save()
+
+            beets = FakeBeetsDB()
+            beets.set_album_mb_identities([
+                BeetsAlbumIdentityRow(
+                    album_id=5, mb_albumid=SURVIVOR,
+                    item_paths=(str(track_path),),
+                ),
+            ])
+            output = io.StringIO()
+            with (
+                patch.object(audit_cli, "_open_beets", return_value=beets),
+                redirect_stdout(output),
+            ):
+                rc = pipeline_cli.cmd_audit_retag_divergence_album(
+                    FakePipelineDB(),
+                    argparse.Namespace(
+                        beets_db="unused.db",
+                        beets_directory="/unused/library",
+                        json=True,
+                        album_id=5,
+                    ),
+                )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["album"]["album_class"], "diverges")
+
+    def test_not_found_exits_two(self) -> None:
+        import scripts.pipeline_cli.audit as audit_cli
+
+        beets = FakeBeetsDB()
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", return_value=beets),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence_album(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                    album_id=999,
+                ),
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 2)
+        self.assertEqual(payload["status"], "not_found")
+
+    def test_expected_beets_unavailability_exits_five(self) -> None:
+        import scripts.pipeline_cli.audit as audit_cli
+
+        failure = sqlite3.OperationalError("database is locked")
+        failure.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", side_effect=failure),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence_album(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                    album_id=1,
+                ),
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 5)
+        self.assertEqual(payload["status"], "beets_unavailable")
+
+    def test_unexpected_failure_exits_five(self) -> None:
+        import scripts.pipeline_cli.audit as audit_cli
+
+        output = io.StringIO()
+        with (
+            patch.object(
+                audit_cli,
+                "_open_beets",
+                side_effect=RuntimeError("programmer defect"),
+            ),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_retag_divergence_album(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                    album_id=1,
+                ),
+            )
+
+        self.assertEqual(rc, 5)
+        self.assertEqual(
+            json.loads(output.getvalue())["error"],
+            "retag_divergence_album_check_failed",
+        )
+
+    def test_parser_exposes_nested_audit_retag_divergence_album_command(
+        self,
+    ) -> None:
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        args = parser.parse_args([
+            "audit", "retag-divergence-album", "42", "--json",
+        ])
+
+        self.assertEqual(args.command, "audit")
+        self.assertEqual(args.audit_command, "retag-divergence-album")
+        self.assertEqual(args.album_id, 42)
+        self.assertTrue(args.json)
+
+    def test_oversized_album_id_is_rejected_at_the_parser(self) -> None:
+        """N10 (#1142 review) — same rejection as the HTTP route's 400,
+        at the CLI's own input boundary (CLI ⇄ API surface symmetry):
+        an id past SQLite's signed-64-bit INTEGER range can never be
+        bound as a query parameter, so it must never even reach Beets."""
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args([
+                "audit", "retag-divergence-album",
+                "99999999999999999999999999999",
+            ])
+
+
 class TestRealBrokenPipeHandling(unittest.TestCase):
     """#1093 review round 5, finding 4 — the synthetic ``_BrokenPipeStdout``
     fake above raises on EVERY write, which no real pipe does

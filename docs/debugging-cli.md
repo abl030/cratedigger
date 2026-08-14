@@ -255,6 +255,15 @@ inside socket authorization, never credentials.
   `"divergence_found"`; exit 4 iff `"incomplete"`; exit 5 iff
   `"beets_unavailable"`. Full mapping and rationale: § "Retag divergence
   audit scope" below.
+- `pipeline-cli audit retag-divergence-album` — Cheap, explicit per-album
+  retag-divergence recheck (#1142): the same classifier/tag-reader as
+  `audit retag-divergence`, over exactly one album's own files — no
+  deadline, no cursor, milliseconds not minutes. `<album_id>` positional.
+  Exit 0 iff the album was found (any class, including `agrees` — this is
+  an interactive lookup, not a health-check gate); exit 2 iff no album with
+  that id exists; exit 5 iff Beets is unavailable or an unexpected
+  transport/decode/render defect occurs. Full detail: § "Retag divergence
+  audit scope" below.
 - `pipeline-cli audit world` — Read-only PipelineDB, Beets, evidence, and disk coherence audit.
 - `pipeline-cli ban-source` — Remove a server-resolved bad rip and requeue its request when appropriate.
 - `pipeline-cli beets-distance` — Measure a rejected download against an exact
@@ -655,6 +664,75 @@ once caught, the handler redirects stdout's file descriptor to
 second, uncaught `BrokenPipeError` — `cmd_audit_world` and
 `cmd_audit_retag_divergence` share the identical
 `_handle_broken_pipe_and_exit_cleanly` handler.
+
+### Daily whole-library census snapshot + dashboard card (#1142)
+
+The whole-library census above (~93,700 files / ~200s measured live) is far
+too expensive to run at dashboard render or normal web API request time. A
+separate daily oneshot, `cratedigger-retag-census.service`
+(`scripts/run_retag_divergence_census.py`), scheduled by
+`cratedigger-retag-census.timer` (`OnCalendar=daily`, mirroring
+`cratedigger-unfindable.timer`'s own cadence/jitter), runs the exact same
+unbounded `scan_retag_divergence_from_factory` call as the CLI and
+atomically publishes the result as a `RetagDivergenceCensusSnapshot`
+(`lib/retag_divergence_census_snapshot.py`) — a same-directory temp file
+plus `os.replace`, reusing `lib.sidecar_service`'s already-proven atomic
+writer — to `<cfg.stateDir>/retag-divergence-census.json`
+(`/var/lib/cratedigger/retag-divergence-census.json` in the deployed
+default). Beets-only: this oneshot has no pipeline-DB dependency at all.
+
+Exit codes are distinct from the interactive CLI census above, since this
+is a scheduled job, not an operator-run command: `0` — a snapshot WAS
+published, covering every `report.status` the scan itself considers a
+real answer: `clean`, `divergence_found`, **and `incomplete`** (a single
+unreadable file anywhere in the whole-library scan is enough to make the
+report `incomplete` even though nothing truncated or resumed it — the
+daily writer still publishes that report, since it's genuine information
+the dashboard should show). Exit `0` means "the job did its job", not
+"the library is clean" — read the published report's own `status` for
+that. `1` (`EXIT_BEETS_UNAVAILABLE`) — Beets was unreachable this run;
+**nothing is published** — a `beets_unavailable` report never actually
+scanned anything, so publishing it would silently replace yesterday's
+real answer with a fabricated all-zero "nothing wrong" snapshot, which
+is worse than leaving the last real answer in place; `2`
+(`EXIT_CONFIG_ABORT`) — the runtime config/Beets contract was rejected
+before any scan ran, no snapshot attempted; `3` (`EXIT_RUN_FAILED`) — an
+unexpected exception escaped the scan or the atomic write, no snapshot
+written. Every non-zero exit case writes NOTHING: atomic publication
+plus the `beets_unavailable` skip together mean any prior valid snapshot
+at the path is untouched whenever a run does not produce a fresh,
+genuinely-scanned one.
+
+`GET /api/pipeline/dashboard` embeds this persisted snapshot read-only
+under `retag_divergence_census` (`web/routes/pipeline_dashboard.py`) —
+it never scans. Three honest states: `"missing"` (no snapshot path
+configured, or the daily job has never published one — a fresh deploy or
+every run so far crashed before completing), `"unreadable"` (a snapshot
+file exists but failed to decode — logged server-side, never a 500 for
+the whole dashboard), `"ok"` (a real published snapshot, `generated_at` +
+`duration_seconds` + the full `report`). The web UI renders this as its
+own "Beets DB ↔ File Tags Drift" card, deliberately distinct from the
+Disk Coverage card above it (pipeline-ledger ↔ Beets DB — a different
+question entirely).
+
+For an album the dashboard lists, `GET
+/api/audit/retag-divergence/album/<id>` (CLI: `pipeline-cli audit
+retag-divergence-album <id>`) offers a cheap, explicit per-album
+recheck — reusing the exact SAME pure classifier and tag reader as the
+whole-library census (`scan_retag_divergence_single_album`), over just
+that album's own files: roughly ten file reads, milliseconds, no
+deadline, no cursor. Unlike the whole-library report (which lists only
+non-agreeing albums), an explicit per-album check reports `agrees` too —
+the operator asked about THIS album specifically. Status-code mapping:
+`200` — found (any class); `400`/CLI parser rejection — the id is past
+SQLite's signed-64-bit `INTEGER` range (`lib.retag_divergence_audit.
+SQLITE_MAX_INTEGER`) and can never be bound as a query parameter at all —
+rejected before ever reaching Beets, never the misleading 503 an uncaught
+`sqlite3.OverflowError` would otherwise produce; `404` — no album with
+that id in Beets; `503` — Beets unavailable. The dashboard's "Recheck"
+button patches just that
+album's row in place (`recheckRetagDivergenceAlbum` in `web/js/pipeline.js`)
+rather than reloading the whole dashboard.
 
 ## Live-corpus render differential
 

@@ -156,6 +156,12 @@ db: PipelineDB | None = None
 beets_db_path: str | None = None
 beets_library_root: str = ""
 _beets: BeetsDB | None = None
+# The daily retag-divergence census (#1142) publishes its snapshot into
+# ``admitted_config.var_dir`` — this is that resolved file path, set
+# alongside beets_db_path in main(). Tests/dev inject it directly; unset
+# means "no runtime dir admitted" (never reached in production — routes
+# treat it exactly like a missing snapshot file).
+retag_census_snapshot_path: str | None = None
 # Explicit test/dev dependency-injection seams for the pinned destructive
 # operation. Production leaves both unset and the service selects its real
 # subprocess/notifier implementations.
@@ -760,6 +766,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     global beets_db_path, beets_library_root, canonical_origin
+    global retag_census_snapshot_path
 
     parser = argparse.ArgumentParser(description="Cratedigger Web UI")
     parser.add_argument(
@@ -872,6 +879,12 @@ def main() -> int:
     configure_external_auth_mode(args.external_auth_mode)
     beets_db_path = admitted_config.beets_library_db
     beets_library_root = admitted_config.beets_directory
+    from lib.retag_divergence_census_snapshot import (
+        retag_divergence_census_snapshot_path,
+    )
+    retag_census_snapshot_path = retag_divergence_census_snapshot_path(
+        admitted_config.var_dir,
+    )
     inherited_listener: socket.socket | None = None
     if args.dev_port is None:
         try:

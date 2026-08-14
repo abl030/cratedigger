@@ -184,6 +184,7 @@ def _make_server():
     srv.db = FakePipelineDB()
     srv.beets_db_path = None  # No beets DB in tests
     srv._beets = FakeBeetsDB()
+    srv.retag_census_snapshot_path = None  # No census snapshot in tests
     srv.canonical_origin = CANONICAL_ORIGIN
 
     # Mirror production: ThreadingHTTPServer + the same Handler.

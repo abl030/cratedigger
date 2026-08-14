@@ -13,8 +13,11 @@ import msgspec
 from lib.beets_db import BeetsDB, open_beets_db
 from lib.retag_divergence_audit import (
     RetagDivergenceReport,
+    SingleAlbumRetagCheckResult,
+    is_valid_album_id,
     parse_after_album_id_cursor,
     scan_retag_divergence_from_factory,
+    scan_retag_divergence_single_album_from_factory,
 )
 from lib.world_audit_service import WorldAuditReport, audit_world_from_factory
 
@@ -33,6 +36,13 @@ class _AuditRetagDivergenceArgs(msgspec.Struct, frozen=True):
     beets_directory: str | None = None
     json: bool = False
     after_album_id: int | None = None
+
+
+class _AuditRetagDivergenceAlbumArgs(msgspec.Struct, frozen=True):
+    album_id: int
+    beets_db: str | None = None
+    beets_directory: str | None = None
+    json: bool = False
 
 
 def _open_beets(path: str | None, library_root: str | None) -> BeetsDB:
@@ -90,6 +100,23 @@ def _argparse_after_album_id(text: str) -> int:
         return parse_after_album_id_cursor(text)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _argparse_album_id(text: str) -> int:
+    """``retag-divergence-album``'s positional ``album_id`` type callable
+    — rejects an id past SQLite's signed-64-bit ``INTEGER`` range at the
+    CLI's own input boundary, mirroring the HTTP route's 400 (#1142
+    review N10, CLI ⇄ API Surface Symmetry): such an id can never be
+    bound as a query parameter (``sqlite3`` raises ``OverflowError``
+    before any query runs), so it is rejected before ever reaching
+    Beets rather than surfacing as a confusing exit 5."""
+    try:
+        album_id = parse_after_album_id_cursor(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    if not is_valid_album_id(album_id):
+        raise argparse.ArgumentTypeError(f"album id {album_id} is out of range")
+    return album_id
 
 
 def _add_beets_override_args(parser: argparse.ArgumentParser) -> None:
@@ -261,6 +288,76 @@ def cmd_audit_retag_divergence(db: object, args: object) -> int:
     return 0
 
 
+def _render_retag_divergence_album_text(result: SingleAlbumRetagCheckResult) -> None:
+    print(f"retag divergence album check: {result.status}")
+    if result.unavailable_detail:
+        print(f"unavailable: {result.unavailable_detail}")
+    album = result.album
+    if album is None:
+        return
+    print(
+        f"album {album.album_id} ({album.album_class}): "
+        f"db_mb_albumid={album.db_mb_albumid!r} item_count={album.item_count}"
+    )
+    for item in album.items:
+        detail = f" — {item.detail}" if item.detail else ""
+        print(
+            f"  {item.item_class}: {item.path} "
+            f"(file_mb_albumid={item.file_mb_albumid!r}){detail}"
+        )
+
+
+def cmd_audit_retag_divergence_album(db: object, args: object) -> int:
+    """Cheap, explicit per-album retag-divergence recheck (#1142) — the
+    CLI counterpart of ``GET /api/audit/retag-divergence/album/<id>``.
+    Reuses the SAME classifier/tag-reader as the whole-library census
+    (``scan_retag_divergence_single_album_from_factory``), over exactly
+    one album — never the whole-library scan.
+
+    Read-only over Beets alone — ``db`` (the pipeline DB connection every
+    ``audit`` subcommand's dispatch dict is called with) is unused.
+
+    Exit-code mapping mirrors the HTTP route's status-code mapping (CLI
+    ⇄ API Surface Symmetry): 0 for ``found`` (any album class, including
+    an agreeing album — this is an explicit lookup, not a health-check
+    gate, so the exit code reflects whether the check ANSWERED, not
+    whether it found a problem), 2 for ``not_found`` (matching the
+    route's 404), 5 for ``beets_unavailable`` (matching the route's 503)
+    or an unexpected transport/decode/render defect — the whole body
+    runs inside the try, mirroring ``cmd_audit_retag_divergence``'s own
+    shape.
+    """
+    del db
+    try:
+        typed_args = msgspec.convert(
+            vars(args), type=_AuditRetagDivergenceAlbumArgs,
+        )
+        result = scan_retag_divergence_single_album_from_factory(
+            lambda: _open_beets(
+                typed_args.beets_db, typed_args.beets_directory,
+            ),
+            typed_args.album_id,
+        )
+        if typed_args.json:
+            print(json.dumps(msgspec.to_builtins(result), indent=2))
+        else:
+            _render_retag_divergence_album_text(result)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        return _handle_broken_pipe_and_exit_cleanly()
+    except Exception as exc:  # noqa: BLE001 - transport boundary, not typed B
+        print(json.dumps({
+            "error": "retag_divergence_album_check_failed",
+            "detail": str(exc),
+        }))
+        return 5
+    if result.status == "not_found":
+        return 2
+    if result.status == "beets_unavailable":
+        return 5
+    return 0
+
+
 def cmd_audit_world(db: WorldAuditPipelineDB, args: object) -> int:
     """Run the shared world invariant bank without mutating either store.
 
@@ -344,10 +441,23 @@ def add_audit_subparser(
             "(see next_after_album_id in a prior --json report)."
         ),
     )
+    retag_divergence_album = operations.add_parser(
+        "retag-divergence-album",
+        help=(
+            "Cheap, explicit per-album retag-divergence recheck — the "
+            "same classifier as retag-divergence, over one album's own "
+            "files only (#1142)."
+        ),
+    )
+    retag_divergence_album.add_argument(
+        "album_id", type=_argparse_album_id, help="Beets album id to recheck.",
+    )
+    _add_beets_override_args(retag_divergence_album)
 
 
 __all__ = [
     "add_audit_subparser",
     "cmd_audit_retag_divergence",
+    "cmd_audit_retag_divergence_album",
     "cmd_audit_world",
 ]
