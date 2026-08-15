@@ -18,7 +18,7 @@ class TestDailyBeetsTipUpdateScript(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.fake = FakeDailyFlakeUpdateCommands(Path(self.tempdir.name))
 
-    def test_green_tip_canary_updates_only_its_lock_and_pushes(self) -> None:
+    def test_green_tip_canary_proves_the_suite_and_publishes_nothing(self) -> None:
         proc = self.fake.run(SCRIPT)
         state = self.fake.state
 
@@ -35,47 +35,42 @@ class TestDailyBeetsTipUpdateScript(unittest.TestCase):
         # target list it replaced could not fail on a test nobody had
         # remembered to name.
         self.assertEqual(state["stages"], ["tip-suite"])
-        self.assertEqual(state["commit_count"], 1)
-        self.assertEqual(state["push_count"], 1)
-        self.assertEqual(state["push_ref"], "HEAD:refs/heads/main")
-        self.assertEqual(state["commit_args"][-2:], ["--", "flake.lock"])
-        self.assertIn("Refs #992", state["commit_args"])
         self.assertIsNone(state["stage_env"]["tip-suite"]["TEST_DB_DSN"])
         for node in ("beets-tip", "mutagen-tip", "mediafile-tip"):
             self.assertEqual(
                 state["lock_after_update"]["nodes"][node]["locked"]["rev"],
                 f"new-{node}",
-                f"{node} must advance with the canary",
+                f"{node} must advance for the run",
             )
         self.assertEqual(
             state["lock_after_update"]["nodes"]["nixpkgs"],
             state["lock_before"]["nodes"]["nixpkgs"],
         )
-        self.assertEqual(state["lock_at_commit"], state["lock_after_update"])
+        # The canary's product is the signal, not a stored revision. It
+        # re-resolves every tip input at the START of each run, so a
+        # published value would be overwritten before anything read it —
+        # and publishing was the sole reason an unrelated merge landing
+        # mid-run could reject the push and report someone else's merge as
+        # a red canary (observed live, 2026-08-15).
+        self.assertEqual(state["commit_count"], 0)
+        self.assertEqual(state["push_count"], 0)
+        self.assertIn("nothing published", proc.stdout)
 
-    def test_concurrent_branch_push_is_rebased_onto_not_reported_as_failure(
-        self,
-    ) -> None:
-        """A merge landing on main while the canary runs its suite is
-        ordinary. Before the rebase the runner pushed unconditionally and
-        Git rejected it non-fast-forward, turning someone else's merge into
-        a red canary and an RCA alert (observed live, 2026-08-15)."""
+    def test_a_moved_branch_cannot_reach_the_canary_at_all(self) -> None:
+        """The fake refuses a push whenever the branch has moved. A canary
+        that publishes nothing never reaches that refusal, so this world is
+        indistinguishable from the ordinary one — which is the whole point
+        of not publishing."""
         self.fake.update_state(remote_moved=True)
 
         proc = self.fake.run(SCRIPT)
         state = self.fake.state
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(state["pull_count"], 1)
-        self.assertEqual(state["push_count"], 1)
-        events = [event[:2] for event in state["events"]]
-        self.assertLess(
-            events.index(["git", "pull"]),
-            events.index(["git", "push"]),
-            "the rebase must precede the push",
-        )
+        self.assertEqual(state["stages"], ["tip-suite"])
+        self.assertEqual(state["push_count"], 0)
 
-    def test_failed_canary_never_commits_or_pushes(self) -> None:
+    def test_failed_canary_reports_the_failure(self) -> None:
         self.fake.update_state(fault="tip-suite")
 
         proc = self.fake.run(SCRIPT)
@@ -85,8 +80,12 @@ class TestDailyBeetsTipUpdateScript(unittest.TestCase):
         self.assertEqual(state["stages"], ["tip-suite"])
         self.assertEqual(state["commit_count"], 0)
         self.assertEqual(state["push_count"], 0)
+        self.assertNotIn("nothing published", proc.stdout)
 
-    def test_unchanged_tip_lock_still_proves_the_canary(self) -> None:
+    def test_unmoved_upstream_still_gets_a_full_suite_run(self) -> None:
+        """The canary never short-circuits on the lock — it does not
+        consult it. An upstream that has not moved since yesterday is still
+        proved today, because the suite around it changed."""
         self.fake.update_state(lock_changed=False)
 
         proc = self.fake.run(SCRIPT)
@@ -96,7 +95,6 @@ class TestDailyBeetsTipUpdateScript(unittest.TestCase):
         self.assertEqual(state["stages"], ["tip-suite"])
         self.assertEqual(state["commit_count"], 0)
         self.assertEqual(state["push_count"], 0)
-        self.assertIn("flake.lock already current", proc.stdout)
 
 
 if __name__ == "__main__":

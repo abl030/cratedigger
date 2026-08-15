@@ -38,10 +38,15 @@ reference only. Deployment continues to supply the production package, exact
 interpreter, immutable `BEETSDIR`, external state, library, catalogue, secrets,
 and plain operator `beet`; Cratedigger validates that capability but never
 selects it. `beets-tip`, `mutagen-tip` and `mediafile-tip` are checks-only
-advance-warning inputs advanced together by one canary (they are one package
-set: mutagen is a dependency of mediafile and music-tag, mediafile of Beets,
-so a partial advance would test a combination no environment can hold), while
-the reviewed 730-day manifest runs disposable harness/delete contracts for
+advance-warning inputs. One canary advances all three together in a
+disposable clone and publishes nothing: they are one package set (mutagen is a
+dependency of mediafile and music-tag, mediafile of Beets, so a partial
+advance would test a combination no environment can hold), and the canary
+re-resolves each to its branch HEAD at the start of every run, so a committed
+revision would be overwritten before anything read it. The locked tip
+revisions in `flake.lock` therefore record where a human last set them, not
+what was last proven green — the signal is the run itself. Meanwhile the
+reviewed 730-day manifest runs disposable harness/delete contracts for
 each final release. These checks do not establish live-catalog upgrade or downgrade
 safety. LRCLIB and unrelated external plugin behaviour are deployment-owned
 configuration, outside the compatibility promise.
