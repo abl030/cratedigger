@@ -65,14 +65,18 @@ with state_path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
         raise SystemExit(0)
 
     if command == "nix":
-        if args in (["flake", "update", "nixpkgs"], ["flake", "update", "beets-tip"]):
+        if args[:2] == ["flake", "update"] and args[2:]:
+            targets = args[2:]
+            unknown = [t for t in targets if t not in state["seed_lock"]["nodes"]]
+            if unknown:
+                fail(f"unexpected flake update targets: {unknown!r}")
             if state.get("fault") == "update":
                 fail("fake flake update failed")
             if state["lock_changed"]:
-                target = args[2]
                 lock_path = Path.cwd().joinpath("flake.lock")
                 lock = json.loads(lock_path.read_text(encoding="utf-8"))
-                lock["nodes"][target]["locked"]["rev"] = "new-" + target
+                for target in targets:
+                    lock["nodes"][target]["locked"]["rev"] = "new-" + target
                 lock_path.write_text(json.dumps(lock, sort_keys=True), encoding="utf-8")
                 state["lock_after_update"] = lock
             save()
@@ -84,23 +88,13 @@ with state_path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
         ]:
             stage = "stable-candidate"
         elif args == [
-            "build",
-            ".#checks.x86_64-linux.beetsTipBuild",
-            "--print-build-logs",
+            "develop",
+            ".#tip",
+            "--command",
+            "bash",
+            "scripts/run_tests.sh",
         ]:
-            stage = "tip-build"
-        elif args == [
-            "build",
-            ".#checks.x86_64-linux.beetsTipContract",
-            "--print-build-logs",
-        ]:
-            stage = "tip-contract"
-        elif args == [
-            "build",
-            ".#checks.x86_64-linux.beetsTipPyright",
-            "--print-build-logs",
-        ]:
-            stage = "tip-pyright"
+            stage = "tip-suite"
         else:
             fail(f"unexpected nix argv: {args!r}")
     elif command == "nix-shell":
@@ -186,9 +180,18 @@ class FakeDailyFlakeUpdateCommands:
                 "push_ref": None,
                 "seed_lock": {
                     "nodes": {
-                        "root": {"inputs": {"nixpkgs": "nixpkgs", "beets-tip": "beets-tip"}},
+                        "root": {
+                            "inputs": {
+                                "nixpkgs": "nixpkgs",
+                                "beets-tip": "beets-tip",
+                                "mutagen-tip": "mutagen-tip",
+                                "mediafile-tip": "mediafile-tip",
+                            }
+                        },
                         "nixpkgs": {"locked": {"rev": "old-nixpkgs"}},
                         "beets-tip": {"locked": {"rev": "old-beets-tip"}},
+                        "mutagen-tip": {"locked": {"rev": "old-mutagen-tip"}},
+                        "mediafile-tip": {"locked": {"rev": "old-mediafile-tip"}},
                     },
                     "root": "root",
                     "version": 7,

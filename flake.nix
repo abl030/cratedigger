@@ -7,9 +7,21 @@
       url = "github:beetbox/beets/master";
       flake = false;
     };
+    # The audio-authority libraries the suite actually asserts against:
+    # mutagen reads every tag and stream fact, mediafile is Beets' tag layer.
+    # Checks-only, exactly like beets-tip. Note the branch names differ —
+    # mutagen releases from `main`, the beetbox repositories from `master`.
+    mutagen-tip = {
+      url = "github:quodlibet/mutagen/main";
+      flake = false;
+    };
+    mediafile-tip = {
+      url = "github:beetbox/mediafile/master";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, beets-tip }:
+  outputs = { self, nixpkgs, beets-tip, mutagen-tip, mediafile-tip }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
@@ -49,6 +61,26 @@
     in {
       devShells = forAllSystems ({ pkgs, ... }: {
         default = import ./nix/shell.nix { inherit pkgs; };
+        # The same dev shell, with Beets/mutagen/mediafile at upstream tip.
+        # Deliberately built by handing overridden `pkgs` to the ONE shell
+        # definition rather than by forking it: the canary must run the
+        # environment developers and the daily gate run, differing only in
+        # the three packages under test. `nix/beets.nix` and
+        # `nix/package.nix` both resolve through `pkgs.python3*`, so they
+        # pick up the tip set without knowing it exists.
+        tip = import ./nix/shell.nix {
+          pkgs = pkgs.extend (_final: prev: let
+            tipPython = import ./nix/tip-python.nix {
+              pkgs = prev;
+              beetsSrc = beets-tip;
+              mutagenSrc = mutagen-tip;
+              mediafileSrc = mediafile-tip;
+            };
+          in {
+            python3 = tipPython;
+            python3Packages = tipPython.pkgs;
+          });
+        };
       });
 
       packages = forAllSystems ({ pkgs, ... }: let
@@ -95,7 +127,7 @@
           hash = entry.narHash;
         };
         compatPackage = entry: import ./nix/beets-compat-package.nix {
-          inherit pkgs;
+          python = pkgs.python3Packages;
           version = entry.version;
           buildBackend = entry.buildBackend;
           src = compatSource entry;
@@ -107,21 +139,21 @@
             "mbsync, discogs, fetchart, embedart, lyrics, lastgenre, scrub, info, missing, duplicates, edit, fromfilename, ftintitle, the, inline, permissions"
           else
             "musicbrainz, mbsync, discogs, fetchart, embedart, lyrics, lastgenre, scrub, info, missing, duplicates, edit, fromfilename, ftintitle, the, inline, permissions";
-          # Only the tip leg — not the 19-leg historical matrix, whose
-          # releases lib/beets_distance.py was never written or verified
-          # against. This is what actually exercises the modern
-          # (>= era #6681) branch of _beets_match_distance for real:
-          # without it, that branch's arity was type-erased to
-          # Callable[..., Distance] for pyright, so a wrong adaptation
-          # would fail soft into "distance_failed" with the canary staying
-          # green (issue #1088 review finding 2).
+          # The historical matrix keeps a hand-picked list because a 19-leg
+          # sweep of old releases cannot run the modern suite. The tip leg
+          # no longer uses this function at all: it runs the whole
+          # deterministic suite in the `tip` devShell, so
+          # `tests.test_beets_distance.TestBeetsDistanceIntegrationSlice` —
+          # named here explicitly for the tip leg after #1088 review
+          # finding 2, because a wrong `_beets_match_distance` adaptation
+          # would otherwise fail soft into "distance_failed" with the canary
+          # green — is now reached as an ordinary suite member, along with
+          # every other test a curated list could omit.
           testTargets = [
             "tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_help_stays_on_normal_stdout_and_protocol_is_private"
             "tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_beets_import_library_and_duplicate_action"
             "tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_incremental_import_uses_external_statefile_only"
             "tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_harness_pretend_keeps_source_manifest_unchanged"
-          ] ++ nixpkgs.lib.optionals (name == "beets-tip") [
-            "tests.test_beets_distance.TestBeetsDistanceIntegrationSlice"
           ];
           authority = pkgs.runCommand "cratedigger-${name}-matrix-authority" { } ''
             mkdir -p "$out/beets" "$out/secrets"
@@ -226,7 +258,7 @@ EOF
           touch "$out"
         '';
         tipPackage = import ./nix/beets-compat-package.nix {
-          inherit pkgs;
+          python = pkgs.python3Packages;
           version = "2.13.1";
           buildBackend = "hatchling";
           src = beets-tip;
@@ -243,33 +275,14 @@ EOF
         # `nix flake check` must build the CLI bundle (U8): a stranger's
         # `nix run .#pipeline-cli` is only as green as this check.
         packageDefault = self.packages.${system}.default;
-        beetsTipBuild = tipPackage;
-        beetsTipContract = contract "beets-tip" tipPackage;
-        beetsTipPyright = let
-          cratedigger = import ./nix/package.nix { inherit pkgs; beetsPackage = tipPackage; };
-          python = pkgs.python3.withPackages (ps: cratedigger.pythonPackages ps ++ [
-            ps.coverage
-            ps.hypothesis
-            ps.tree-sitter
-            ps.tree-sitter-javascript
-            ps.vulture
-          ]);
-          source = pkgs.runCommand "cratedigger-beets-tip-pyright-source" { } ''
-            cp -R ${self}/. "$out"
-            chmod -R u+w "$out"
-            ln -s ${python} "$out/.pyright-venv"
-          '';
-        in pkgs.runCommand "cratedigger-beets-tip-pyright" { nativeBuildInputs = [ pkgs.pyright ]; } ''
-          export HOME="$TMPDIR/home"
-          mkdir -p "$HOME"
-          cd ${source}
-          pyright_threads="$(${pkgs.coreutils}/bin/nproc)"
-          if (( pyright_threads > 8 )); then
-            pyright_threads=8
-          fi
-          ${pkgs.pyright}/bin/pyright --threads "$pyright_threads"
-          touch "$out"
-        '';
+        # No beetsTip* checks: scripts/daily_beets_tip_update.sh now runs the
+        # whole deterministic suite in the `tip` devShell, which subsumes all
+        # three (the build is a prerequisite of entering the shell, the
+        # harness contract tests are suite members, and the suite's own
+        # pyright phase resolves against the tip interpreter through the
+        # shellHook's .pyright-venv pin). `tipPackage` itself stays: the
+        # topology check and beetsStableCandidate both assert against its
+        # derivation path.
 
         # Execute the installed configuration checker, rather than merely
         # inspecting its wrapper source. A caller-controlled PYTHONPATH

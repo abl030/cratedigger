@@ -37,9 +37,12 @@ The locked Nixpkgs package is this repository's standalone package/dev-shell
 reference only. Deployment continues to supply the production package, exact
 interpreter, immutable `BEETSDIR`, external state, library, catalogue, secrets,
 and plain operator `beet`; Cratedigger validates that capability but never
-selects it. `beets-tip` is a checks-only advance-warning input, while the
-reviewed 730-day manifest runs disposable harness/delete contracts for each
-final release. These checks do not establish live-catalog upgrade or downgrade
+selects it. `beets-tip`, `mutagen-tip` and `mediafile-tip` are checks-only
+advance-warning inputs advanced together by one canary (they are one package
+set: mutagen is a dependency of mediafile and music-tag, mediafile of Beets,
+so a partial advance would test a combination no environment can hold), while
+the reviewed 730-day manifest runs disposable harness/delete contracts for
+each final release. These checks do not establish live-catalog upgrade or downgrade
 safety. LRCLIB and unrelated external plugin behaviour are deployment-owned
 configuration, outside the compatibility promise.
 
@@ -58,14 +61,16 @@ computation (the Replace picker + YouTube resolver) reuses the SAME detected
 era rather than probing `distance()`'s shape a second time. Both/neither
 attribute present fails closed. The admitted production package remains
 pre-#6681 (`cur_artist`/`cur_album`, the 3-arg `distance()`); the modern era is
-exercised only by the `beets-tip` checks above — `task_description` through the
-harness `choose_match`/`resolve_duplicate` contract assertions, and the modern
-branch of `_beets_match_distance` through
-`tests.test_beets_distance.TestBeetsDistanceIntegrationSlice`, which the tip
-leg of the shared `contract` function in `flake.nix` runs in addition to the
-harness contract tests (the
-19-leg historical matrix does not run it — those releases were never a target
-of `lib/beets_distance.py`). One older-release wrinkle the
+exercised only by the tip canary — which runs Cratedigger's WHOLE
+deterministic suite in the `tip` devShell (`nix develop .#tip`), whose Beets,
+mutagen and mediafile are all at upstream tip. `task_description` is covered
+through the harness `choose_match`/`resolve_duplicate` contract assertions and
+the modern branch of `_beets_match_distance` through
+`tests.test_beets_distance.TestBeetsDistanceIntegrationSlice`, both now reached
+as ordinary suite members rather than by name. The 19-leg historical matrix
+still runs the hand-picked `contract` function instead, because those releases
+cannot run the modern suite — and they were never a target of
+`lib/beets_distance.py` anyway. One older-release wrinkle the
 cheap `hasattr(ImportTask, "cur_artist")` class-level check alone cannot see:
 v2.1.0/v2.2.0 assign `cur_artist`/`cur_album` only inside `ImportTask.__init__`,
 never as a class attribute (v2.3.0 added the class-level declaration), so the

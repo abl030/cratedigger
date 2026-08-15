@@ -17,6 +17,40 @@
         "type": "github"
       }
     },
+    "mediafile-tip": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1782758427,
+        "narHash": "sha256-c21+ECCnHO7J4j+zhwt+S/o1lhz6qhTP99yFcI1S3Yk=",
+        "owner": "beetbox",
+        "repo": "mediafile",
+        "rev": "faaf7444f1c58d6a39f0ba51dad8ea43a71fdf3a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "beetbox",
+        "ref": "master",
+        "repo": "mediafile",
+        "type": "github"
+      }
+    },
+    "mutagen-tip": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1783925026,
+        "narHash": "sha256-I9NZBGQYOmqeguOrlT92KqPwSX+x8jthtuy0SNmnASo=",
+        "owner": "quodlibet",
+        "repo": "mutagen",
+        "rev": "8b11398c473a4337c095b5fba8e4a041a0e40129",
+        "type": "github"
+      },
+      "original": {
+        "owner": "quodlibet",
+        "ref": "main",
+        "repo": "mutagen",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1786384358,
@@ -36,6 +70,8 @@
     "root": {
       "inputs": {
         "beets-tip": "beets-tip",
+        "mediafile-tip": "mediafile-tip",
+        "mutagen-tip": "mutagen-tip",
         "nixpkgs": "nixpkgs"
       }
     }

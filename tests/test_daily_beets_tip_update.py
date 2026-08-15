@@ -23,20 +23,30 @@ class TestDailyBeetsTipUpdateScript(unittest.TestCase):
         state = self.fake.state
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn(["nix", "flake", "update", "beets-tip"], state["events"])
-        self.assertEqual(
-            state["stages"], ["tip-build", "tip-contract", "tip-pyright"]
+        self.assertIn(
+            [
+                "nix", "flake", "update",
+                "beets-tip", "mutagen-tip", "mediafile-tip",
+            ],
+            state["events"],
         )
+        # One run of the whole deterministic suite, against a shell whose
+        # Beets, mutagen and mediafile are all at tip. The hand-picked
+        # target list it replaced could not fail on a test nobody had
+        # remembered to name.
+        self.assertEqual(state["stages"], ["tip-suite"])
         self.assertEqual(state["commit_count"], 1)
         self.assertEqual(state["push_count"], 1)
         self.assertEqual(state["push_ref"], "HEAD:refs/heads/main")
         self.assertEqual(state["commit_args"][-2:], ["--", "flake.lock"])
         self.assertIn("Refs #992", state["commit_args"])
-        self.assertIsNone(state["stage_env"]["tip-contract"]["TEST_DB_DSN"])
-        self.assertEqual(
-            state["lock_after_update"]["nodes"]["beets-tip"]["locked"]["rev"],
-            "new-beets-tip",
-        )
+        self.assertIsNone(state["stage_env"]["tip-suite"]["TEST_DB_DSN"])
+        for node in ("beets-tip", "mutagen-tip", "mediafile-tip"):
+            self.assertEqual(
+                state["lock_after_update"]["nodes"][node]["locked"]["rev"],
+                f"new-{node}",
+                f"{node} must advance with the canary",
+            )
         self.assertEqual(
             state["lock_after_update"]["nodes"]["nixpkgs"],
             state["lock_before"]["nodes"]["nixpkgs"],
@@ -44,13 +54,13 @@ class TestDailyBeetsTipUpdateScript(unittest.TestCase):
         self.assertEqual(state["lock_at_commit"], state["lock_after_update"])
 
     def test_failed_canary_never_commits_or_pushes(self) -> None:
-        self.fake.update_state(fault="tip-contract")
+        self.fake.update_state(fault="tip-suite")
 
         proc = self.fake.run(SCRIPT)
         state = self.fake.state
 
         self.assertNotEqual(proc.returncode, 0)
-        self.assertEqual(state["stages"], ["tip-build", "tip-contract"])
+        self.assertEqual(state["stages"], ["tip-suite"])
         self.assertEqual(state["commit_count"], 0)
         self.assertEqual(state["push_count"], 0)
 
@@ -61,9 +71,7 @@ class TestDailyBeetsTipUpdateScript(unittest.TestCase):
         state = self.fake.state
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(
-            state["stages"], ["tip-build", "tip-contract", "tip-pyright"]
-        )
+        self.assertEqual(state["stages"], ["tip-suite"])
         self.assertEqual(state["commit_count"], 0)
         self.assertEqual(state["push_count"], 0)
         self.assertIn("flake.lock already current", proc.stdout)
