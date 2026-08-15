@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from lib.import_execution import CancellationToken, ExecutionCancelled
+from lib.processing_paths import bounded_staged_filename
 
 if TYPE_CHECKING:
     from lib.grab_list import DownloadFile, GrabListEntry
@@ -23,11 +24,16 @@ def _checkpoint(cancellation_token: CancellationToken | None) -> None:
 
 
 def staged_filename(file: DownloadFile) -> str:
-    """Return the local filename used once a track is under album staging."""
+    """Return the local filename used once a track is under album staging.
+
+    The remote basename is peer-controlled and may exceed the local
+    filesystem's 255-byte name cap, so the assembled name is bounded last —
+    after the disc prefix, which is part of what has to fit.
+    """
     filename = file.filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     if file.disk_no is not None and file.disk_count is not None and file.disk_count > 1:
-        return f"Disk {file.disk_no} - {filename}"
-    return filename
+        filename = f"Disk {file.disk_no} - {filename}"
+    return bounded_staged_filename(filename)
 
 
 @dataclass

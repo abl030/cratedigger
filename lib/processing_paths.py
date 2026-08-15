@@ -14,6 +14,7 @@ POST_VALIDATION_STAGING_SUBDIR = "post-validation"
 DUPLICATE_REMOVE_GUARD_SUBDIR = "duplicate-remove-guard"
 MAX_PATH_COMPONENT_BYTES = 255
 _TRUNCATED_COMPONENT_HASH_CHARS = 12
+_MAX_PRESERVED_EXTENSION_BYTES = 16
 
 
 class CanonicalFolderFile(Protocol):
@@ -61,31 +62,69 @@ def sanitize_processing_folder_name(folder_name: str) -> str:
     return re.sub(r'[<>:."/\\|?*]', "", folder_name).strip()
 
 
-def _bounded_processing_component(value: str, *, suffix: str = "") -> str:
-    """Fit one sanitized staging component within ext4's byte limit.
+def _bounded_component_bytes(value: str, *, suffix: str = "") -> str:
+    """Fit ``value`` plus ``suffix`` within one filesystem name.
 
     Truncation works on UTF-8 bytes and decodes with ``errors="ignore"`` so
     it never cuts a multibyte code point in half. A digest of the complete
-    sanitized value prevents two long names with the same retained prefix
-    from collapsing onto one directory. ``suffix`` is reserved verbatim for
-    request ownership markers such as `` [request-42]``.
+    ``value`` prevents two long names with the same retained prefix from
+    collapsing onto one entry, and guarantees a non-empty result even when
+    the retained prefix strips away entirely. ``suffix`` is reserved
+    verbatim.
     """
-    sanitized = sanitize_processing_folder_name(value)
-    complete = f"{sanitized}{suffix}"
+    complete = f"{value}{suffix}"
     if len(complete.encode("utf-8")) <= MAX_PATH_COMPONENT_BYTES:
         return complete
 
-    digest = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()[
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[
         :_TRUNCATED_COMPONENT_HASH_CHARS
     ]
     reserved = f"~{digest}{suffix}"
     max_prefix_bytes = MAX_PATH_COMPONENT_BYTES - len(reserved.encode("utf-8"))
     if max_prefix_bytes < 0:
         raise ValueError("processing path suffix exceeds filesystem limit")
-    prefix = sanitized.encode("utf-8")[:max_prefix_bytes].decode(
+    prefix = value.encode("utf-8")[:max_prefix_bytes].decode(
         "utf-8", errors="ignore",
     ).rstrip()
     return f"{prefix}{reserved}"
+
+
+def _bounded_processing_component(value: str, *, suffix: str = "") -> str:
+    """Fit one sanitized staging component within ext4's byte limit.
+
+    ``suffix`` is reserved verbatim for request ownership markers such as
+    `` [request-42]``.
+    """
+    return _bounded_component_bytes(
+        sanitize_processing_folder_name(value), suffix=suffix,
+    )
+
+
+def bounded_staged_filename(name: str) -> str:
+    """Fit one untrusted remote basename within ext4's byte limit.
+
+    A peer names its own files and is free to exceed the local 255-byte cap,
+    which otherwise fails the copy into the canonical processing album with
+    ``OSError: [Errno 36] File name too long`` — request 8867's tracks were
+    372-555 bytes. Unlike a folder component the extension has to survive,
+    because beets and the quality pipeline both key on it, so it is reserved
+    rather than sanitized away.
+
+    ``name`` must already be a basename; bounding only shortens and appends,
+    so it can never introduce a separator or a traversal segment, but it
+    does not remove one either. Names already within the cap are returned
+    byte-identical, which is load-bearing: ``_canonical_manifest_complete``
+    recomputes these names and compares them against the published album's
+    own directory listing.
+    """
+    stem, dot, extension = name.rpartition(".")
+    if (
+        dot
+        and stem
+        and len(extension.encode("utf-8")) <= _MAX_PRESERVED_EXTENSION_BYTES
+    ):
+        return _bounded_component_bytes(stem, suffix=f"{dot}{extension}")
+    return _bounded_component_bytes(name)
 
 
 def normalize_source_dirs(values: Sequence[object]) -> list[str]:
