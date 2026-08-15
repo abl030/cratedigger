@@ -853,6 +853,16 @@ pkgs.testers.nixosTest {
         enableInsecure = lib.mkForce true;
       };
     };
+    # Issue #1161. A real activation target whose ONLY difference is the
+    # migrate unit's own rendered unit file, so switch-to-configuration
+    # classifies exactly that unit as changed and we can observe which list it
+    # routes it into. restartTriggers is the least invasive way to change the
+    # unit file without touching its semantics.
+    specialisation.cratedigger-migrate-bump.configuration = {
+      systemd.services.cratedigger-db-migrate.restartTriggers = [
+        "issue-1161-routing-probe"
+      ];
+    };
     specialisation.cratedigger-basic-alternate.configuration = {
       services.cratedigger.web = {
         basicAuthFile = lib.mkForce
@@ -5614,8 +5624,37 @@ pkgs.testers.nixosTest {
     # instead of its stop+start lists.
     migrate_unit_file = machine.succeed("systemctl cat cratedigger-db-migrate.service")
     assert "[Service]" in migrate_unit_file, migrate_unit_file
-    migrate_service_section = migrate_unit_file.split("[Service]", 1)[1]
+    # Bounded at the next section header -- an unbounded split would run to EOF
+    # and also span [Install], which would not prove "in [Service]" at all.
+    migrate_service_section = (
+        migrate_unit_file.split("[Service]", 1)[1].split("\n[", 1)[0]
+    )
     assert "X-StopIfChanged=false" in migrate_service_section, migrate_unit_file
+
+    # The outermost real adapter: switch-to-configuration itself. The unit-file
+    # pin above proves we EMIT the key; this proves the switch HONOURS it, and
+    # is what fails if a future nixpkgs bump changes that handling (this repo
+    # updates nixpkgs daily, so silently losing the protection is a real risk).
+    # dry-activate only prints its plan, so it cannot disturb the VM.
+    migrate_bump_system = machine.succeed(
+        "readlink -f /run/current-system/specialisation/cratedigger-migrate-bump"
+    ).strip()
+    routing_plan = machine.succeed(
+        f"{migrate_bump_system}/bin/switch-to-configuration dry-activate 2>&1"
+    )
+
+    def _planned(verb):
+        prefix = f"would {verb} the following units: "
+        for line in routing_plan.splitlines():
+            if line.startswith(prefix):
+                return [u.strip() for u in line[len(prefix):].split(",")]
+        return []
+
+    assert "cratedigger-db-migrate.service" in _planned("restart"), routing_plan
+    # And specifically NOT in the stop+start pair, which is the routing that
+    # let a concurrent start replace the queued stop in #1161.
+    assert "cratedigger-db-migrate.service" not in _planned("stop"), routing_plan
+    assert "cratedigger-db-migrate.service" not in _planned("start"), routing_plan
 
     # Behaviour pair proving why that routing is load-bearing. Both commands
     # are synchronous for a Type=oneshot, so no settling wait is needed.
@@ -5643,10 +5682,15 @@ pkgs.testers.nixosTest {
         f"({migrate_baseline} -> {migrate_after_start})"
     )
 
-    # The fix: a restart -- what stopIfChanged = false makes the switch issue
-    # -- always re-runs the migrator. systemd's job-merge table collapses
-    # JOB_START into JOB_RESTART, so a concurrent start can no longer swallow
-    # the re-run the way it swallowed the stop+start pair.
+    # The other half of that premise: a restart -- which the dry-activate probe
+    # above proves the switch now issues for this unit -- does re-run the
+    # migrator. NOTE this pair tests generic Type=oneshot + RemainAfterExit
+    # systemd semantics, NOT our fix: `systemctl start`/`restart` never consult
+    # X-StopIfChanged, so reverting stopIfChanged = false leaves both
+    # assertions green. The routing probe above is what fails on that revert.
+    # This pair earns its place as evidence that the -EALREADY world in the
+    # #1161 RCA is real rather than asserted, and it is the only assertion here
+    # that dies if RemainAfterExit is removed.
     machine.succeed("systemctl restart cratedigger-db-migrate.service")
     migrate_after_restart = machine.succeed(
         "systemctl show cratedigger-db-migrate.service --property=InvocationID --value"

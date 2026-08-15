@@ -402,7 +402,7 @@ class TestMigrateRanForThisSwitch(unittest.TestCase):
 
     def test_capture_migrate_uses_none_for_empty_invocation(self) -> None:
         self._with_migrate(
-            self.fake.migrate_state("", active="inactive", sub="dead", result="")
+            self.fake.migrate_state("", active="inactive", sub="dead")
         )
 
         proc = self.fake.run(SCRIPT, "capture-migrate")
@@ -440,9 +440,52 @@ class TestMigrateRanForThisSwitch(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("did not succeed", proc.stderr)
 
+    def test_still_running_migration_is_not_accepted(self) -> None:
+        """A PRODUCIBLE world the state triple must reject. The runbook reads
+        after an asynchronous fleet trigger, so it can catch the migrator
+        mid-run: `activating`/`start`/`success` with a FRESH InvocationID
+        passes the invocation comparison and must still fail closed. This is
+        the world that makes the ActiveState and SubState clauses
+        load-bearing — the all-fields-wrong world below cannot distinguish
+        them."""
+        self._with_migrate(
+            self.fake.migrate_state(
+                self.fake.MIGRATE_NEXT, active="activating", sub="start"
+            )
+        )
+
+        proc = self.fake.run(SCRIPT, "verify-migrate-ran", self.fake.MIGRATE_OLD)
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("did not succeed", proc.stderr)
+
+    def test_empty_pre_switch_invocation_is_rejected(self) -> None:
+        proc = self.fake.run(SCRIPT, "verify-migrate-ran", "")
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("missing pre-switch", proc.stderr)
+
+    def test_unreadable_state_names_the_migrate_unit(self) -> None:
+        """The diagnostic must name the unit actually queried. Before the unit
+        parameter existed these messages were hardcoded to cratedigger.service,
+        which would misdirect an operator debugging a migrate read."""
+        self._with_migrate(
+            {
+                "InvocationID": self.fake.MIGRATE_NEXT,
+                "ActiveState": "",
+                "SubState": "",
+                "Result": "success",
+            }
+        )
+
+        proc = self.fake.run(SCRIPT, "verify-migrate-ran", self.fake.MIGRATE_OLD)
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("incomplete cratedigger-db-migrate.service state", proc.stderr)
+
     def test_missing_invocation_fails(self) -> None:
         self._with_migrate(
-            self.fake.migrate_state("", active="inactive", sub="dead", result="")
+            self.fake.migrate_state("", active="inactive", sub="dead")
         )
 
         proc = self.fake.run(SCRIPT, "verify-migrate-ran", self.fake.MIGRATE_OLD)
@@ -479,7 +522,11 @@ class TestMigrateRanForThisSwitch(unittest.TestCase):
 
         capture = source.index('verify_cratedigger_cycle.sh" capture-migrate')
         trigger = source.index("env -u SSH_AUTH_SOCK fleet-deploy doc2")
-        verify = source.index("verify-migrate-ran")
+        # The executable invocation, not the bare token — prose mentioning the
+        # subcommand must not be able to satisfy this ordering assertion.
+        verify = source.index(
+            'verify-migrate-ran "$PRE_SWITCH_MIGRATE_INVOCATION"'
+        )
 
         self.assertLess(capture, trigger)
         self.assertLess(trigger, verify)

@@ -211,6 +211,17 @@ verify_migrate_ran() {
     die "$MIGRATE_UNIT did not run for this switch (InvocationID still $previous; state=$CURRENT_ACTIVE/$CURRENT_SUB result=$CURRENT_RESULT)"
     return 1
   fi
+  # One fail-closed conjunction, not three independently reachable clauses.
+  # A RemainAfterExit oneshot only ever reports inactive/dead,
+  # activating/start, active/exited, failed/failed or deactivating/stop, so no
+  # producible world isolates a single comparison here (there is no
+  # active/not-exited, and no active/exited with a non-success Result). Two
+  # producible worlds do exercise the conjunction and are both pinned: a
+  # migration still running when we read (activating/start/success, reachable
+  # because the runbook reads after an asynchronous fleet trigger) and a failed
+  # one (failed/failed/exit-code). The individual comparisons are retained as
+  # fail-closed legislation for a future writer who changes this unit's type or
+  # exit handling.
   if [[ "$CURRENT_ACTIVE" != active || "$CURRENT_SUB" != exited \
     || "$CURRENT_RESULT" != success ]]; then
     die "$MIGRATE_UNIT ran for this switch but did not succeed (state=$CURRENT_ACTIVE/$CURRENT_SUB result=$CURRENT_RESULT)"

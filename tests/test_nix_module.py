@@ -2362,7 +2362,15 @@ class TestQualityRankBandDefaultsMatchProduction(unittest.TestCase):
 def _attrset_block(source: str, marker: str) -> str:
     """The next ``{ ... }`` attrset body starting at ``marker``, found via
     matching brace depth (nested attrsets inside are common — e.g.
-    ``serviceConfig``/``timerConfig``)."""
+    ``serviceConfig``/``timerConfig``).
+
+    Comment lines are stripped from the result. Without that, every
+    ``assertIn`` over this block is satisfied by the attribute appearing in a
+    ``#`` comment — so commenting an attribute out, the single most likely way
+    one of these gets disabled, would leave the pins green (issue #1161
+    review). Brace matching still runs over the raw source, since a comment
+    could legally contain an unbalanced brace character.
+    """
     start = source.index(marker)
     open_brace = source.index("{", start)
     depth = 0
@@ -2372,7 +2380,11 @@ def _attrset_block(source: str, marker: str) -> str:
         elif source[i] == "}":
             depth -= 1
             if depth == 0:
-                return source[open_brace:i + 1]
+                block = source[open_brace:i + 1]
+                return "\n".join(
+                    line for line in block.splitlines()
+                    if not line.lstrip().startswith("#")
+                )
     raise AssertionError(f"unterminated block for {marker!r}")
 
 

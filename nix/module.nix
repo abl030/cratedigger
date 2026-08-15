@@ -2389,9 +2389,19 @@ in {
       # stop phase and before the start phase, so the migration completes
       # before the Requires= workers come back up.
       #
-      # Requires= dependents are still bounced by the restart -- same as
-      # before, since they all restartIfChanged = true and the switch stops
-      # them anyway.
+      # Effect on the Requires= dependents, precisely: on a full switch they
+      # are NOT bounced by this restart -- they were already stopped in the
+      # stop phase, so the propagated try-restart collapses to a no-op and
+      # they come back in the start phase as before. On a switch where this
+      # unit is the ONLY thing that changed, they ARE try-restarted, which is
+      # what an operator running `systemctl restart cratedigger-db-migrate`
+      # already sees today.
+      #
+      # One further delta: if the migration FAILS, the start phase's workers
+      # pull a fresh start job for this unit through their Requires=, so a
+      # failing migrator now runs twice per switch deterministically (it was
+      # nondeterministic before). Harmless -- the migrator is version-tracked
+      # and idempotent -- but worth knowing when reading the journal.
       stopIfChanged = false;
       serviceConfig = {
         Type = "oneshot";

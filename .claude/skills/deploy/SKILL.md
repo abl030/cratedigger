@@ -156,7 +156,16 @@ if [[ "$deploy_complete" != 1 ]]; then
   env -u SSH_AUTH_SOCK ssh doc2 'journalctl -u nixos-upgrade.service -n 100 --no-pager' || true
   exit 1
 fi
+"$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh" \
+  verify-migrate-ran "$PRE_SWITCH_MIGRATE_INVOCATION"
 ```
+The migrate assertion lives in this block deliberately: it needs the
+pre-trigger value captured above, and every numbered step is an independent
+shell. **`ActiveState=active`, `SubState=exited` and `Result=success` on
+`cratedigger-db-migrate.service` are satisfied by a run from days ago**, so
+they are not evidence it ran for this switch — only a changed `InvocationID`
+is (issue #1161). The check applies to ordinary and strict-held deploys alike;
+the metadata gate hold never stops the migrate unit.
 The printed `PRE_SWITCH_CRATEDIGGER_INVOCATION` is audit evidence only. Do not
 use it as the post-switch cycle baseline: timer cycles can roll while the
 asynchronous fleet build is still running.
@@ -178,20 +187,14 @@ DEPLOYED_REV=$(env -u SSH_AUTH_SOCK ssh doc2 'sudo cat /var/lib/fleet-update/las
 test "$DEPLOYED_REV" = "$EXPECTED_NIXOSCONFIG_REV"
 ```
 
-5. Verify migration state and the services affected by the change. **The
-migrate oneshot uses `RemainAfterExit`, so `ActiveState=active`,
-`SubState=exited` and `Result=success` are satisfied by a run from hours or
-days ago — they are not evidence that it ran for this switch.** Compare its
-`InvocationID` against the value captured in step 3, the same discipline step 3
-applies to `nixos-upgrade.service` and step 6 to `cratedigger.service`. This is
-issue #1161: a concurrent `systemctl start` replaced the switch's still-queued
-stop job, migration 078 never applied, and every state field above still read
-green against the stale run. For an ordinary deployment, verify long-running
-workers individually rather than assuming a successful switch made them
-healthy. For a strict held deployment, do not run the ordinary active-service
-check below: `verify-held` deliberately drains those services, and the held
-workflow proves their state at each release boundary instead. The migrate check
-applies to both — the metadata gate hold never stops the migrate unit.
+5. Verify the applied schema and the services affected by the change. That the
+migrate unit actually RAN for this switch was already proven at the end of
+step 3 (`verify-migrate-ran`); this step reads what it applied. For an ordinary
+deployment, verify long-running workers individually rather than assuming a
+successful switch made them healthy. For a strict held deployment, do not run
+the ordinary active-service check below: `verify-held` deliberately drains
+those services, and the held workflow proves their state at each release
+boundary instead.
 ```bash
 set -euo pipefail
 "$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh" \

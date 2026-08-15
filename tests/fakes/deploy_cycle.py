@@ -38,13 +38,22 @@ if state["forced_agent_present"] and not agent_disabled:
     raise SystemExit(0)
 
 
+def show_properties(current):
+    """Emit only the properties the command actually asked for, in the order
+    real `systemctl show` uses. Printing all four unconditionally would let a
+    dropped `--property=` survive every test while breaking every real deploy
+    (the caller's sed would yield an empty value)."""
+    for key in ("ActiveState", "SubState", "InvocationID", "Result"):
+        if f"--property={key}" in remote:
+            print(f"{key}={current.get(key, '')}")
+
+
 if "systemctl show cratedigger-db-migrate.service" in remote:
     states = state["migrate_states"]
     index = min(state["migrate_state_index"], len(states) - 1)
     current = states[index]
     state["migrate_state_index"] += 1
-    for key in ("InvocationID", "ActiveState", "SubState", "Result"):
-        print(f"{key}={current.get(key, '')}")
+    show_properties(current)
     save()
     raise SystemExit(0)
 
@@ -53,8 +62,7 @@ if "systemctl show cratedigger.service" in remote:
     index = min(state["system_state_index"], len(states) - 1)
     current = states[index]
     state["system_state_index"] += 1
-    for key in ("InvocationID", "ActiveState", "SubState", "Result"):
-        print(f"{key}={current.get(key, '')}")
+    show_properties(current)
     save()
     raise SystemExit(0)
 
@@ -104,8 +112,11 @@ class FakeDeployCycleCommands:
     NEXT = "4" * 32
     # Distinct from every cratedigger.service value on purpose: a migrate-unit
     # read that actually queried cratedigger.service must not be able to pass.
-    MIGRATE_OLD = "5" * 32
-    MIGRATE_NEXT = "6" * 32
+    # They also share a 24-character prefix, so a comparison that truncated the
+    # InvocationID instead of comparing it whole would see them as equal and
+    # fail the tests rather than silently passing.
+    MIGRATE_OLD = "5" * 24 + "1" * 8
+    MIGRATE_NEXT = "5" * 24 + "2" * 8
     SOURCE = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-source"
     CURSOR = "s=abc;i=1;b=def;m=2;t=3;x=4"
 

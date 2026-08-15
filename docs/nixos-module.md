@@ -713,14 +713,21 @@ the migration completes before the `Requires=` workers come back up.
 - Anything you add that starts cratedigger units on a timer or watchdog can
   land inside a switch window. The 2026-08-14 trigger was a 60-second
   reconciler calling `systemctl --no-block start` on a list of cratedigger
-  units, which pulled in the migrate unit through their `Requires=` edges.
+  units, which pulled in the migrate unit through their own edges to it. Note
+  `Wants=` pulls in a start job just as `Requires=` does, so
+  `cratedigger.service` — which only `wants` the migrate unit — is equally
+  capable of triggering this.
   Guard such a reconciler against running during a rebuild, or accept that it
   will occasionally fight the switch over unit state. The module's own
   `stopIfChanged = false` protects the *migration*; it does not stop a
   reconciler from starting your other units on stale unit definitions if it
   fires before `switch-to-configuration`'s daemon-reload.
 - If you write your own `RemainAfterExit` oneshot that other units
-  `Requires=`, give it `stopIfChanged = false` for the same reason.
+  `Requires=`, `Wants=`, or merely order themselves `After=`, give it
+  `stopIfChanged = false` for the same reason. Ordering alone is enough to
+  create the queue window: anything that must stop *after* other units makes
+  its own stop job wait behind theirs. Whether that window is exploitable
+  then depends only on whether something can start the unit concurrently.
 - Do not rely on a `Requires=` edge to guarantee a dependency *ran*. It
   guarantees the dependency is **active**, which for a `RemainAfterExit`
   oneshot can mean "succeeded days ago". It blocks startup on a failed
