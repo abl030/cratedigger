@@ -46,4 +46,10 @@ if git diff --quiet -- flake.lock; then
     exit 0
 fi
 git commit --only -m "chore(beets): refresh tip canary lock" -m "Refs #992" -- flake.lock
+# Rebase the one-file lock commit onto whatever the branch is NOW. The canary
+# clones, then works for minutes; any push that lands meanwhile made the old
+# unconditional push fail non-fast-forward and reported an ordinary concurrent
+# merge as a canary failure. A lock-only commit rebases cleanly, and a genuine
+# conflict (someone else moved the same lock nodes) still fails loudly.
+git pull --rebase origin "$branch"
 git push origin "HEAD:refs/heads/$branch"

@@ -98,6 +98,23 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         for stage, stage_env in state["stage_env"].items():
             self.assertIsNone(stage_env["TEST_DB_DSN"], stage)
 
+    def test_concurrent_branch_push_is_rebased_onto_not_reported_as_failure(
+        self,
+    ) -> None:
+        """This runner's clone-to-push window is the whole candidate gate,
+        so an unrelated merge landing meanwhile is likelier here than in the
+        tip canary — and used to lose the whole night's green lock to a
+        non-fast-forward rejection."""
+        self.fake.update_state(remote_moved=True)
+
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(state["pull_count"], 1)
+        self.assertEqual(state["push_count"], 1)
+        self.assertIn("pushed updated flake.lock", proc.stdout)
+
     def test_failed_gate_runs_later_gates_and_pushes_nothing(self) -> None:
         self.fake.update_state(fault="world")
 

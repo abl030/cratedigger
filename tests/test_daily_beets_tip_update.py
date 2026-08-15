@@ -53,6 +53,28 @@ class TestDailyBeetsTipUpdateScript(unittest.TestCase):
         )
         self.assertEqual(state["lock_at_commit"], state["lock_after_update"])
 
+    def test_concurrent_branch_push_is_rebased_onto_not_reported_as_failure(
+        self,
+    ) -> None:
+        """A merge landing on main while the canary runs its suite is
+        ordinary. Before the rebase the runner pushed unconditionally and
+        Git rejected it non-fast-forward, turning someone else's merge into
+        a red canary and an RCA alert (observed live, 2026-08-15)."""
+        self.fake.update_state(remote_moved=True)
+
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(state["pull_count"], 1)
+        self.assertEqual(state["push_count"], 1)
+        events = [event[:2] for event in state["events"]]
+        self.assertLess(
+            events.index(["git", "pull"]),
+            events.index(["git", "push"]),
+            "the rebase must precede the push",
+        )
+
     def test_failed_canary_never_commits_or_pushes(self) -> None:
         self.fake.update_state(fault="tip-suite")
 

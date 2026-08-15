@@ -54,9 +54,22 @@ with state_path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
             state["lock_at_commit"] = json.loads(
                 Path.cwd().joinpath("flake.lock").read_text(encoding="utf-8")
             )
+        elif args[:2] == ["pull", "--rebase"]:
+            if state.get("fault") == "pull":
+                fail("fake rebase failed")
+            # A concurrent push to the branch is ordinary, not a canary
+            # failure: the runner rebases its lock-only commit onto it and
+            # the push that follows fast-forwards.
+            state["pull_count"] += 1
+            state["remote_moved"] = False
         elif args[:2] == ["push", "origin"]:
             if state.get("fault") == "push":
                 fail("fake push failed")
+            if state["remote_moved"]:
+                fail(
+                    "fake push rejected: remote contains work you do not have "
+                    "(the runner must rebase onto the branch before pushing)"
+                )
             state["push_count"] += 1
             state["push_ref"] = args[2]
         else:
@@ -178,6 +191,11 @@ class FakeDailyFlakeUpdateCommands:
                 "commit_args": [],
                 "push_count": 0,
                 "push_ref": None,
+                "pull_count": 0,
+                # Set by a test to model another push landing on the branch
+                # while the runner was busy. The fake's push then refuses
+                # until a rebase clears it, exactly as Git does.
+                "remote_moved": False,
                 "seed_lock": {
                     "nodes": {
                         "root": {
