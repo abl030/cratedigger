@@ -371,10 +371,12 @@ entry-time headroom check (`scripts/test_tmpfs.sh`) runs BEFORE this lock is
 even reached, a naive second suite would still die at shell entry under
 contention with the old unnamed message instead of queueing — so every
 automated launcher of the canonical suite (`scripts/test.sh`,
-`scripts/run_final_gate.sh`, and `scripts/daily_flake_update.sh`'s
-`deterministic_suite` stage — the complete set as of issue #1111 review
-MAJOR-1, grepped for every `nix-shell --run .*run_tests.sh` invocation) sets
-`CRATEDIGGER_SUITE_OWNS_HEADROOM=1` before its own `nix-shell` invocation,
+`scripts/run_final_gate.sh`, `scripts/daily_flake_update.sh`'s
+`deterministic_suite` stage, and `scripts/daily_beets_tip_update.sh`, which
+runs the same suite through `nix develop .#tip` — grep for BOTH
+`nix-shell --run .*run_tests.sh` and `nix develop .* run_tests.sh`, since the
+tip canary enters its shell the flake way) sets
+`CRATEDIGGER_SUITE_OWNS_HEADROOM=1` before its own shell invocation,
 which tells that shellHook check to skip only its free-bytes refusal
 (everything else in `setup_cratedigger_test_tmpfs` still runs); `run_suite`'s
 own post-lock headroom precondition is then the single enforcement point for
@@ -398,8 +400,9 @@ a full Nix evaluation per call for zero additional capability. The six
 calls now invoke `sys.executable` directly, so no test currently spawns a
 NESTED `nix-shell` — but this is not dead machinery: the top-level
 free-bytes skip itself is taken on EVERY suite run launched by
-`scripts/test.sh`, `scripts/run_final_gate.sh`, and
-`scripts/daily_flake_update.sh`, and is pinned by
+`scripts/test.sh`, `scripts/run_final_gate.sh`,
+`scripts/daily_flake_update.sh`, and `scripts/daily_beets_tip_update.sh`,
+and is pinned by
 `tests/test_test_tmpfs.py::test_suite_owns_headroom_skips_only_the_free_bytes_refusal`.
 Only the nested-shell-inherits-the-var form has no current example — the
 mechanism remains in `scripts/test_tmpfs.sh` for the next test that

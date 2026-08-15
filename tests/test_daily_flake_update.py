@@ -85,10 +85,12 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
             state["lock_after_update"]["nodes"]["nixpkgs"]["locked"]["rev"],
             "new-nixpkgs",
         )
-        self.assertEqual(
-            state["lock_after_update"]["nodes"]["beets-tip"],
-            state["lock_before"]["nodes"]["beets-tip"],
-        )
+        for node in ("beets-tip", "mutagen-tip", "mediafile-tip"):
+            self.assertEqual(
+                state["lock_after_update"]["nodes"][node],
+                state["lock_before"]["nodes"][node],
+                f"the nixpkgs candidate must not advance {node}",
+            )
         self.assertEqual(state["lock_at_commit"], state["lock_after_update"])
 
         clone_path = Path(state["clone_path"])
@@ -277,16 +279,17 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertRegex(stdout, r"status=(?:valid|invalid) ")
 
     def test_red_tip_canary_cannot_block_green_nixpkgs_candidate(self) -> None:
-        # The fake recognises tip-contract as a fault only if a runner invokes
-        # that named canary check. The stable updater deliberately does not.
-        self.fake.update_state(fault="tip-contract")
+        # The fault must name the canary's CURRENT stage, or this test
+        # passes for the wrong reason: a fault nothing can trigger proves
+        # nothing about which runner ran what.
+        self.fake.update_state(fault="tip-suite")
 
         proc = self.fake.run(SCRIPT)
         state = self.fake.state
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("stable-candidate", state["stages"])
-        self.assertNotIn("tip-contract", state["stages"])
+        self.assertNotIn("tip-suite", state["stages"])
         self.assertEqual(state["commit_count"], 1)
 
     def test_shared_flock_serializes_nixpkgs_and_tip_processes(self) -> None:
@@ -309,7 +312,9 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
             index for index, event in enumerate(state["events"])
             if event[:2] == ["git", "push"]
         )
-        update_tip = state["events"].index(["nix", "flake", "update", "beets-tip"])
+        update_tip = state["events"].index(
+            ["nix", "flake", "update", "beets-tip", "mutagen-tip", "mediafile-tip"]
+        )
         self.assertLess(update_nixpkgs, daily_push)
         self.assertLess(daily_push, update_tip)
 

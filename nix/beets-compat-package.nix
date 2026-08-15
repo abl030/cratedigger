@@ -1,10 +1,16 @@
-{ pkgs, src, version, buildBackend }:
+{ python, src, version, buildBackend }:
 
 # Checks-only historical/tip Beets package.  Production consumes the
 # deployment-selected runtime package through nix/module.nix; this builder is
 # deliberately not available to packages, shells, or the exported module.
+#
+# ``python`` is a Python PACKAGE SET (``pkgs.python3Packages``, or the ``prev``
+# set inside a ``packageOverrides`` overlay) rather than ``pkgs``. The overlay
+# case is why: the tip devShell rebuilds Beets INSIDE a set whose own mutagen
+# and mediafile are already at tip, and reaching back through ``pkgs`` there
+# would resolve the un-overridden set — silently pairing tip Beets with pinned
+# tag libraries, which is the one combination the canary must never test.
 let
-  python = pkgs.python3Packages;
   backend = if buildBackend == "hatchling" then python.hatchling
     else if buildBackend == "poetry-core" then python.poetry-core
     else throw "unsupported Beets compatibility build backend: ${buildBackend}";
