@@ -2370,6 +2370,39 @@ in {
       after = optional cfg.pipelineDb.createLocally "postgresql-setup.service";
       requires = optional cfg.pipelineDb.createLocally "postgresql-setup.service";
       restartIfChanged = true;
+      # Issue #1161: a switch must re-run the migrator even when something
+      # else starts this unit concurrently. With the NixOS default
+      # (stopIfChanged = true) switch-to-configuration puts us in its stop
+      # list AND its start list. Our stop job is ordered behind every
+      # Requires= dependent's stop (reverse After=), so while a slow worker
+      # drains, that stop job is still queued -- and any concurrent
+      # `systemctl start` (mode "replace") REPLACES it. RemainAfterExit
+      # leaves us active(exited) throughout, so the replacement start hits
+      # unit_start()'s -EALREADY: ExecStart never forks and systemd logs
+      # nothing at all. The migration is silently skipped while the unit
+      # still reports active/exited/success from hours earlier.
+      #
+      # stopIfChanged = false moves us to switch-to-configuration's restart
+      # list, which issues a JOB_RESTART. systemd's job-merge table collapses
+      # JOB_START into JOB_RESTART (restart wins), so a concurrent start can
+      # no longer swallow the re-run. The restart phase also runs after the
+      # stop phase and before the start phase, so the migration completes
+      # before the Requires= workers come back up.
+      #
+      # Effect on the Requires= dependents, precisely: on a full switch they
+      # are NOT bounced by this restart -- they were already stopped in the
+      # stop phase, so the propagated try-restart collapses to a no-op and
+      # they come back in the start phase as before. On a switch where this
+      # unit is the ONLY thing that changed, they ARE try-restarted, which is
+      # what an operator running `systemctl restart cratedigger-db-migrate`
+      # already sees today.
+      #
+      # One further delta: if the migration FAILS, the start phase's workers
+      # pull a fresh start job for this unit through their Requires=, so a
+      # failing migrator now runs twice per switch deterministically (it was
+      # nondeterministic before). Harmless -- the migrator is version-tracked
+      # and idempotent -- but worth knowing when reading the journal.
+      stopIfChanged = false;
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;

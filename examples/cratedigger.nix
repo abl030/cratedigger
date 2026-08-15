@@ -262,6 +262,19 @@ in
       "cratedigger-import-preview-worker.service"
       "cratedigger-web.service"
     ];
+    # Issue #1161. This is a RemainAfterExit oneshot that cratedigger-web,
+    # cratedigger-importer and cratedigger-import-preview-worker all
+    # `Requires=` (via beets.runtime.readinessUnits above) -- the same shape
+    # as cratedigger-db-migrate.service, and exposed to the same silent skip.
+    # Under the NixOS default, a switch stops and starts this unit, its stop
+    # job queues behind those dependents' stops, and any concurrent
+    # `systemctl start` replaces that queued stop; RemainAfterExit then makes
+    # the replacement start a no-op that logs nothing, so an updated
+    # beetsRuntimeReady never runs. stopIfChanged = false makes the switch
+    # issue a restart instead, which a concurrent start cannot swallow.
+    # See docs/nixos-module.md § "A switch must be able to re-run the
+    # migrator (issue #1161)".
+    stopIfChanged = false;
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;

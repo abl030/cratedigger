@@ -853,6 +853,16 @@ pkgs.testers.nixosTest {
         enableInsecure = lib.mkForce true;
       };
     };
+    # Issue #1161. A real activation target whose ONLY difference is the
+    # migrate unit's own rendered unit file, so switch-to-configuration
+    # classifies exactly that unit as changed and we can observe which list it
+    # routes it into. restartTriggers is the least invasive way to change the
+    # unit file without touching its semantics.
+    specialisation.cratedigger-migrate-bump.configuration = {
+      systemd.services.cratedigger-db-migrate.restartTriggers = [
+        "issue-1161-routing-probe"
+      ];
+    };
     specialisation.cratedigger-basic-alternate.configuration = {
       services.cratedigger.web = {
         basicAuthFile = lib.mkForce
@@ -5599,6 +5609,96 @@ pkgs.testers.nixosTest {
     machine.succeed("systemctl reset-failed cratedigger.service || true")
 
     machine.succeed("cratedigger-metadata-gate start-check")
+
+    # --- issue #1161: a switch must re-run the migrator even when an
+    # unrelated `systemctl start` lands mid-switch ---
+    #
+    # Kept last in this script: the restart below deliberately bounces the
+    # four Requires= dependents, and nothing after it asserts on them.
+    #
+    # The real adapter is the unit FILE switch-to-configuration parses --
+    # X- keys are not systemd properties, so `systemctl show` cannot see
+    # this and only `systemctl cat` can. NixOS renders stopIfChanged = false
+    # as X-StopIfChanged=false, and switch-to-configuration-ng reads that key
+    # from the [Service] section to route a changed unit to its restart list
+    # instead of its stop+start lists.
+    migrate_unit_file = machine.succeed("systemctl cat cratedigger-db-migrate.service")
+    assert "[Service]" in migrate_unit_file, migrate_unit_file
+    # Bounded at the next section header -- an unbounded split would run to EOF
+    # and also span [Install], which would not prove "in [Service]" at all.
+    migrate_service_section = (
+        migrate_unit_file.split("[Service]", 1)[1].split("\n[", 1)[0]
+    )
+    assert "X-StopIfChanged=false" in migrate_service_section, migrate_unit_file
+
+    # The outermost real adapter: switch-to-configuration itself. The unit-file
+    # pin above proves we EMIT the key; this proves the switch HONOURS it, and
+    # is what fails if a future nixpkgs bump changes that handling (this repo
+    # updates nixpkgs daily, so silently losing the protection is a real risk).
+    # dry-activate only prints its plan, so it cannot disturb the VM.
+    migrate_bump_system = machine.succeed(
+        "readlink -f /run/current-system/specialisation/cratedigger-migrate-bump"
+    ).strip()
+    routing_plan = machine.succeed(
+        f"{migrate_bump_system}/bin/switch-to-configuration dry-activate 2>&1"
+    )
+
+    def _planned(verb):
+        prefix = f"would {verb} the following units: "
+        for line in routing_plan.splitlines():
+            if line.startswith(prefix):
+                return [u.strip() for u in line[len(prefix):].split(",")]
+        return []
+
+    assert "cratedigger-db-migrate.service" in _planned("restart"), routing_plan
+    # And specifically NOT in the stop+start pair, which is the routing that
+    # let a concurrent start replace the queued stop in #1161.
+    assert "cratedigger-db-migrate.service" not in _planned("stop"), routing_plan
+    assert "cratedigger-db-migrate.service" not in _planned("start"), routing_plan
+
+    # Behaviour pair proving why that routing is load-bearing. Both commands
+    # are synchronous for a Type=oneshot, so no settling wait is needed.
+    machine.succeed("systemctl start cratedigger-db-migrate.service")
+    migrate_substate = machine.succeed(
+        "systemctl show cratedigger-db-migrate.service --property=SubState --value"
+    ).strip()
+    assert migrate_substate == "exited", migrate_substate
+    migrate_baseline = machine.succeed(
+        "systemctl show cratedigger-db-migrate.service --property=InvocationID --value"
+    ).strip()
+    assert migrate_baseline, "migrate unit should carry an InvocationID"
+
+    # The defect mechanism: a plain start on an already-active RemainAfterExit
+    # oneshot returns -EALREADY, so ExecStart never forks and systemd logs
+    # nothing at all. In #1161 such a start REPLACED the switch's still-queued
+    # stop job, leaving migration 078 unapplied while the unit went on
+    # reporting active/exited/success from a switch 12.5 h earlier.
+    machine.succeed("systemctl start cratedigger-db-migrate.service")
+    migrate_after_start = machine.succeed(
+        "systemctl show cratedigger-db-migrate.service --property=InvocationID --value"
+    ).strip()
+    assert migrate_after_start == migrate_baseline, (
+        "a plain start must be a silent no-op on the active oneshot "
+        f"({migrate_baseline} -> {migrate_after_start})"
+    )
+
+    # The other half of that premise: a restart -- which the dry-activate probe
+    # above proves the switch now issues for this unit -- does re-run the
+    # migrator. NOTE this pair tests generic Type=oneshot + RemainAfterExit
+    # systemd semantics, NOT our fix: `systemctl start`/`restart` never consult
+    # X-StopIfChanged, so reverting stopIfChanged = false leaves both
+    # assertions green. The routing probe above is what fails on that revert.
+    # This pair earns its place as evidence that the -EALREADY world in the
+    # #1161 RCA is real rather than asserted, and it is the only assertion here
+    # that dies if RemainAfterExit is removed.
+    machine.succeed("systemctl restart cratedigger-db-migrate.service")
+    migrate_after_restart = machine.succeed(
+        "systemctl show cratedigger-db-migrate.service --property=InvocationID --value"
+    ).strip()
+    assert migrate_after_restart and migrate_after_restart != migrate_baseline, (
+        "restart must re-run the migrator "
+        f"({migrate_baseline} -> {migrate_after_restart})"
+    )
     '';
   in ''
     exec(compile(open("${script}", encoding="utf-8").read(), "${script}", "exec"))
