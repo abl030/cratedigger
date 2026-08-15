@@ -255,6 +255,30 @@ mandatory. If conversion follows, the installed evidence carries this proof
 as source provenance: it continues to describe the FLAC/ALAC source, never the
 derivative bytes.
 
+Because measurement skips the spectral gate outright for these bytes, no
+re-measurement can ever advance a CD-rip-proven candidate row's spectral
+generation. Action-time admission therefore does not demand a current spectral
+generation from a row carrying a **measured** `cd_rip_verification`: demanding
+one is unsatisfiable, and the requeue-to-preview it triggers cannot change its
+own precondition, so the importer and preview livelock (issue #1162 — 2,463
+requeue passes over 39.2 hours on request 712, then 238 more on its successor).
+`carried` provenance is excluded: every writer that puts a CD-rip fact on an
+installed/converted row rewrites it to `carried`, and that row's source-subject
+grade describes the pre-conversion bytes, which must never reach candidate
+policy. Only a proof measured from these exact bytes witnesses the producer's
+own bypass. Admission is not policy — the verified-lossless proof already
+outranks a stale spectral estimate at the decider, so nothing reaches a
+decision here that the proof does not already dominate. Measured over 32 real
+decision worlds, admitting a stale grade alongside the proof produces zero
+outcome flips.
+
+This exemption is deliberately limited to the CD-rip instance.
+`_needs_spectral_check` also skips every codec that is neither MP3 nor a
+lossless candidate, stranding a stale grade the same way — but there the grade
+is decision-relevant, since the dominating proof that makes admission safe
+above exists only on lossless bytes. Those rows need the unusable grade
+cleared rather than admitted; see issue #1167.
+
 ### 1. VBR V0 source probe (implemented)
 
 After lossless-to-V0 conversion, the resulting bitrate reveals source quality:

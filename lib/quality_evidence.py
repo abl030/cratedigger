@@ -1992,7 +1992,39 @@ def _load_candidate_evidence_for_source(
         )
         and not spectral_measurement_generation_is_current(measurement)
     )
-    if spectral_generation_stale and not (
+    # A measured CD-rip bit verification makes the PRODUCER skip the spectral
+    # gate outright (``lib/measurement.py``: `if cd_rip_verification is None
+    # and _needs_spectral_check(...)`), so no re-measurement of these bytes can
+    # ever advance this row's spectral generation. Demanding a current one is
+    # unsatisfiable by construction, and the requeue it triggers cannot change
+    # its own precondition: the importer requeues to preview, preview declines
+    # to re-grade, and the pair never converges (#1162 — job 60635 ran 2,463
+    # passes over 39.2 h, its successor another 238, both ended from outside).
+    # Admitting it is also safe rather than merely expedient: the proof is
+    # strictly stronger evidence than the spectral estimate it displaces, and
+    # the decider already lets it outrank a stale grade, so nothing reaches
+    # policy here that the verified-lossless proof does not already dominate.
+    # ``carried`` provenance is deliberately excluded: every writer that puts a
+    # CD-rip fact on an installed/converted row rewrites it to ``carried``
+    # (``evidence_from_album_info``), and that row's source-subject grade
+    # describes the PRE-CONVERSION bytes, which must never reach candidate
+    # policy. Only a proof measured from these exact bytes witnesses the
+    # producer's own bypass.
+    #
+    # This closes the CD-rip instance ONLY. ``_needs_spectral_check`` also
+    # skips every codec that is neither MP3 nor a lossless candidate
+    # (AAC/Vorbis/Opus/WMA), stranding a stale grade the same way — but there
+    # the grade is decision-relevant, because the dominating proof that makes
+    # admission safe here exists only on lossless bytes. Bypassing it for a
+    # lossy candidate would trade a livelock for a silent wrong reject, so
+    # that instance needs the unusable grade cleared rather than admitted and
+    # is tracked separately (#1167).
+    cd_rip_bypasses_spectral = (
+        evidence.cd_rip_verification is not None
+        and evidence.cd_rip_verification.provenance
+        == EVIDENCE_PROVENANCE_MEASURED
+    )
+    if spectral_generation_stale and not cd_rip_bypasses_spectral and not (
         admission == "decision"
         and preimport_fact is not None
     ):
