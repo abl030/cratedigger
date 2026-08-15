@@ -471,7 +471,6 @@ import beets
 from beets import config as bconfig
 from beets import plugins as bplugins
 from beets.library import Album, Library
-from beets.util import functemplate
 
 consumer = json.loads(os.environ["AUNIQUE_CONSUMER_CONFIG"])
 TEMPLATE = consumer["template"]
@@ -496,9 +495,17 @@ def find_collisions(lib, template, worlds):
     (Passenger, 2026-07-18)."""
     import re as _re
 
-    tmpl = functemplate.template(template)
-    stem_tmpl = functemplate.template(
-        _re.sub(r"%aunique\{[^}]*\}", "", template))
+    # Hand ``evaluate_template`` the template STRING, never a compiled
+    # ``Template``. Both Beets APIs this probe used moved at upstream tip:
+    # ``functemplate.template`` was removed, and ``evaluate_template`` now
+    # compiles internally through a hashing cache that raises
+    # ``TypeError: unhashable type: 'Template'`` on a pre-compiled object.
+    # A string is accepted by every Beets this repository tests, so the
+    # probe no longer depends on either moving part. Both breaks were found
+    # by the tip canary's full-suite run, which reaches this test; the
+    # canary's older hand-picked target list did not.
+    tmpl = template
+    stem_tmpl = _re.sub(r"%aunique\{[^}]*\}", "", template)
     bad = []
     for a, b in worlds:
         da = a.evaluate_template(tmpl, True).rsplit("/", 1)[0]
