@@ -164,6 +164,12 @@ if ! git commit --only \
     echo "daily unstable gate: lock commit failed" >&2
     exit 1
 fi
+# Same rebase as the tip canary, and this runner needs it more: its window
+# between clone and push is the whole candidate gate, tens of minutes.
+if ! git pull --rebase origin "$branch"; then
+    echo "daily unstable gate: lock rebase failed; verify the remote branch state" >&2
+    exit 1
+fi
 if ! git push origin "HEAD:refs/heads/$branch"; then
     echo "daily unstable gate: push failed; verify the remote branch state" >&2
     exit 1

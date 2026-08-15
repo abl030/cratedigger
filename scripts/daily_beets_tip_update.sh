@@ -41,9 +41,16 @@ nix flake update beets-tip mutagen-tip mediafile-tip
 export CRATEDIGGER_SUITE_OWNS_HEADROOM=1
 nix develop .#tip --command bash scripts/run_tests.sh
 
-if git diff --quiet -- flake.lock; then
-    echo "beets tip canary: flake.lock already current"
-    exit 0
-fi
-git commit --only -m "chore(beets): refresh tip canary lock" -m "Refs #992" -- flake.lock
-git push origin "HEAD:refs/heads/$branch"
+# Deliberately no lock commit or push. The canary's product is the signal,
+# not a stored revision: it re-resolves every tip input to its branch HEAD at
+# the START of each run, so a committed value is overwritten before anything
+# reads it. The inputs are checks-only besides — flake.nix references
+# `tipPackage` only for its derivation-path string, in assertions that hold
+# for any revision and build nothing. Publishing was therefore one noise
+# commit per day recording a number nobody consumes, and the sole reason an
+# unrelated merge landing mid-run could reject the push and report an
+# ordinary concurrent merge as a red canary.
+#
+# `scripts/daily_flake_update.sh` does still publish, because there the
+# nixpkgs lock IS the deliverable.
+echo "beets tip canary: green against upstream tip (checks-only, nothing published)"
