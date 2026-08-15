@@ -8545,6 +8545,23 @@ class FakePipelineDB:
             if r.local_path is not None
         }
 
+    def get_abandoned_owned_local_paths(self) -> set[str]:
+        """Mirror the real join: owned paths whose request sits at ``wanted``
+        with no ``active_download_state``, i.e. holds no reference to them."""
+        abandoned: set[str] = set()
+        for row in self._transfer_ledger.values():
+            if row.local_path is None:
+                continue
+            request = self._requests.get(row.request_id)
+            if request is None:
+                continue
+            if (
+                request.get("status") == "wanted"
+                and request.get("active_download_state") is None
+            ):
+                abandoned.add(row.local_path)
+        return abandoned
+
     def prune_transfer_ledger(self, older_than: datetime) -> int:
         """Mirror strict age pruning: pending intents ignore request status;
         accepted rows retain active wanted/downloading protection."""
