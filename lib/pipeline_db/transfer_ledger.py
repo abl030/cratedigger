@@ -173,6 +173,34 @@ class _TransferLedgerMixin(_PipelineDBBase):
         )
         return {r["local_path"] for r in cur.fetchall()}
 
+    def get_abandoned_owned_local_paths(self) -> set[str]:
+        """Owned ``local_path`` values whose attempt is provably abandoned.
+
+        A request sitting at ``wanted`` with no ``active_download_state``
+        holds no reference to any file: its attempt ended, and the next
+        cycle re-derives from scratch. The files that attempt completed are
+        still ledger-owned, so the reaper may take them — but under
+        ``ORPHAN_MIN_AGE_DAYS`` it would wait seven days, while the retry
+        arrives in minutes and re-downloads to a byte-identical path. slskd
+        then resolves that collision by appending to the name, which for a
+        cap-length name overflows and strands the transfer.
+
+        Deliberately keyed on ``wanted`` alone. ``downloading`` is already
+        covered by the active-protection half of the model, and
+        ``processing`` must never enter a reaper status set
+        (``.claude/rules/pipeline-db.md``) — materialization holds open
+        descriptors on exactly these files.
+        """
+        cur = self._execute(
+            "SELECT l.local_path "
+            "FROM slskd_transfer_ledger AS l "
+            "JOIN album_requests AS r ON r.id = l.request_id "
+            "WHERE l.local_path IS NOT NULL "
+            "AND r.status = 'wanted' "
+            "AND r.active_download_state IS NULL",
+        )
+        return {r["local_path"] for r in cur.fetchall()}
+
     def prune_transfer_ledger(self, older_than: datetime) -> int:
         """Hard-delete rows strictly older than ``older_than`` (T3).
 

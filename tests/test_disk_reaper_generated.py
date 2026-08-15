@@ -643,6 +643,69 @@ class TestDiskReaperDeterministicPins(unittest.TestCase):
             self.assertEqual(summary.removed, 0)
             self.assertEqual(summary.skipped_young, 1)
 
+    def _seed_abandoned(self, fake_db, root, *, status="wanted",
+                        active_download_state=None):
+        """Plant one young, owned, unprotected file for ``request 3``."""
+        fake_db.seed_request(make_request_row(
+            id=3, status=status,
+            active_download_state=active_download_state))
+        path = os.path.join(root, "Weird Folder", "stray.flac")
+        pair = ("op", "op\\stray.flac")
+        _ledger_seed(
+            fake_db, request_id=3, file_pairs=[pair],
+            local_paths={pair: path}, with_fingerprint=False)
+        _write_aged_file(path, age_days=_YOUNG_DAYS)
+        return path
+
+    def test_abandoned_attempt_is_reaped_without_waiting_for_the_age_gate(self):
+        """A request back at ``wanted`` holding no download state references
+        nothing, so its completed files are dead weight. Waiting the full
+        age gate lets the retry collide with them on disk."""
+        with tempfile.TemporaryDirectory() as root:
+            fake_db = FakePipelineDB()
+            path = self._seed_abandoned(fake_db, root)
+
+            summary = reap_disk_orphans(_make_ctx(root, fake_db=fake_db))
+
+            self.assertFalse(os.path.exists(path))
+            self.assertEqual(summary.removed, 1)
+            self.assertEqual(summary.skipped_young, 0)
+
+    def test_wanted_request_still_holding_download_state_keeps_the_age_gate(self):
+        """``active_download_state`` is a live reference — not abandoned."""
+        with tempfile.TemporaryDirectory() as root:
+            fake_db = FakePipelineDB()
+            path = self._seed_abandoned(
+                fake_db, root, active_download_state={"files": []})
+
+            summary = reap_disk_orphans(_make_ctx(root, fake_db=fake_db))
+
+            self.assertTrue(os.path.exists(path))
+            self.assertEqual(summary.removed, 0)
+            self.assertEqual(summary.skipped_young, 1)
+
+    def test_non_wanted_statuses_keep_the_age_gate(self):
+        """Only ``wanted`` is age-exempt. ``processing`` must never enter a
+        reaper status set — materialization holds open descriptors on
+        exactly these files.
+
+        ``downloading`` is deliberately absent: it is covered by the active
+        -protection half of the model, and seeding one here without a
+        decodable ``active_download_state`` trips the fail-closed abort, so
+        the file would survive for a reason that has nothing to do with the
+        age gate this test is about.
+        """
+        for status in ("imported", "processing", "unsearchable"):
+            with self.subTest(status=status), \
+                    tempfile.TemporaryDirectory() as root:
+                fake_db = FakePipelineDB()
+                path = self._seed_abandoned(fake_db, root, status=status)
+
+                summary = reap_disk_orphans(_make_ctx(root, fake_db=fake_db))
+
+                self.assertTrue(os.path.exists(path), status)
+                self.assertEqual(summary.removed, 0, status)
+
     def test_same_request_retry_old_stamp_reaped_new_stamp_protected(self):
         """A retry protects only its current exact event stamp."""
         with tempfile.TemporaryDirectory() as root:
@@ -1559,6 +1622,95 @@ class TestDiskReaperCheckerTripsOnViolations(unittest.TestCase):
 # ============================================================================
 # Reaper authority wiring: exact event stamps, never canonical folders
 # ============================================================================
+
+def abandonment_violations(
+    *, status: str, has_state: bool, aged: bool, removed: bool,
+) -> list[str]:
+    """Collect every way age-exemption departed from its contract.
+
+    An owned, unprotected file is reaped when it is aged (the ordinary
+    threshold) OR when its attempt is provably abandoned — ``wanted`` with
+    no ``active_download_state``. Accumulating rather than short-circuiting
+    so each clause stays independently reachable.
+    """
+    violations: list[str] = []
+    abandoned = status == "wanted" and not has_state
+    expected = aged or abandoned
+    if expected and not removed:
+        violations.append(
+            f"kept a file it should have reaped (status={status!r} "
+            f"has_state={has_state} aged={aged})"
+        )
+    if removed and not expected:
+        violations.append(
+            f"reaped a file that was neither aged nor abandoned "
+            f"(status={status!r} has_state={has_state})"
+        )
+    return violations
+
+
+def assert_abandonment_contract(
+    *, status: str, has_state: bool, aged: bool, removed: bool,
+) -> None:
+    """Check the age-exemption contract for one reaper run."""
+    violations = abandonment_violations(
+        status=status, has_state=has_state, aged=aged, removed=removed)
+    if violations:
+        raise AssertionError("; ".join(violations))
+
+
+class TestGeneratedAbandonmentAgeExemption(unittest.TestCase):
+    """Patrol which owned, unprotected files skip the age threshold.
+
+    ``downloading`` is excluded deliberately: it is covered by the
+    active-protection half of the model, and a row seeded here without a
+    decodable ``active_download_state`` trips the fail-closed abort, which
+    would settle the outcome for a reason unrelated to age-exemption.
+    """
+
+    @given(
+        status=st.sampled_from(
+            ["wanted", "imported", "processing", "unsearchable"]),
+        has_state=st.booleans(),
+        aged=st.booleans(),
+    )
+    @example(status="wanted", has_state=False, aged=False)
+    @example(status="processing", has_state=False, aged=False)
+    def test_only_abandoned_attempts_skip_the_age_threshold(
+        self, status: str, has_state: bool, aged: bool,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            fake_db = FakePipelineDB()
+            fake_db.seed_request(make_request_row(
+                id=3, status=status,
+                active_download_state={"files": []} if has_state else None))
+            path = os.path.join(root, "Weird Folder", "stray.flac")
+            pair = ("op", "op\\stray.flac")
+            _ledger_seed(
+                fake_db, request_id=3, file_pairs=[pair],
+                local_paths={pair: path}, with_fingerprint=False)
+            _write_aged_file(
+                path, age_days=_OLD_DAYS if aged else _YOUNG_DAYS)
+
+            reap_disk_orphans(_make_ctx(root, fake_db=fake_db))
+
+            assert_abandonment_contract(
+                status=status, has_state=has_state, aged=aged,
+                removed=not os.path.exists(path))
+
+
+class TestAbandonmentCheckerTripsOnViolations(unittest.TestCase):
+    def test_trips_when_an_expected_reap_did_not_happen(self):
+        with self.assertRaisesRegex(AssertionError, "should have reaped"):
+            assert_abandonment_contract(
+                status="wanted", has_state=False, aged=False, removed=False)
+
+    def test_trips_when_a_protected_file_was_reaped(self):
+        with self.assertRaisesRegex(
+                AssertionError, "neither aged nor abandoned"):
+            assert_abandonment_contract(
+                status="imported", has_state=False, aged=False, removed=True)
+
 
 def assert_exact_stamp_protected(
     stamp_path: str,

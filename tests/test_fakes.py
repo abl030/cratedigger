@@ -8449,6 +8449,47 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
             "p0", "a.flac", "/downloads/a.flac")
         self.assertEqual(db.get_owned_local_paths(), {"/downloads/a.flac"})
 
+    def test_get_abandoned_owned_local_paths_selects_only_wanted_without_state(self):
+        from tests.helpers import make_request_row
+
+        cases = [
+            ("wanted, no state -> abandoned", "wanted", None, True),
+            ("wanted, holding state", "wanted", {"files": []}, False),
+            ("imported", "imported", None, False),
+            ("processing", "processing", None, False),
+            ("downloading", "downloading", None, False),
+        ]
+        for desc, status, state, expected in cases:
+            with self.subTest(desc=desc):
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(
+                    id=1, status=status, active_download_state=state))
+                db.record_transfer_enqueue([
+                    TransferLedgerRow(
+                        request_id=1, username="p0", filename="a.flac"),
+                ])
+                db.confirm_transfer_enqueue("p0", "a.flac")
+                db.stamp_transfer_completion(
+                    "p0", "a.flac", "/downloads/a.flac")
+
+                paths = db.get_abandoned_owned_local_paths()
+
+                self.assertEqual(
+                    paths, {"/downloads/a.flac"} if expected else set())
+
+    def test_get_abandoned_owned_local_paths_ignores_unstamped_rows(self):
+        from tests.helpers import make_request_row
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="wanted", active_download_state=None))
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        db.confirm_transfer_enqueue("p0", "a.flac")
+
+        self.assertEqual(db.get_abandoned_owned_local_paths(), set())
+
     def test_get_owned_transfer_keys_empty_before_any_record(self):
         self.assertEqual(FakePipelineDB().get_owned_transfer_keys(), set())
 

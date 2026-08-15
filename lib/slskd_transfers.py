@@ -1082,6 +1082,21 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
             "— fail-closed")
         return DiskReapSummary(aborted=True)
     _owned_dirs, owned_files = _owned_paths_from_ledger(root, db)
+    try:
+        abandoned_files: set[str] = {
+            normalize_processing_path(str(p))
+            for p in db.get_abandoned_owned_local_paths()
+            if path_is_within_root(normalize_processing_path(str(p)), root)
+        }
+    except Exception:
+        # Age-exemption is an optimisation over the ordinary threshold; if
+        # it cannot be established, fall back to waiting rather than
+        # widening what may be deleted.
+        logger.warning(
+            "DISK-REAP: could not read abandoned-attempt paths; every owned "
+            "file keeps the ordinary age threshold this cycle",
+            exc_info=True)
+        abandoned_files = set()
 
     threshold = time.time() - ORPHAN_MIN_AGE_DAYS * 86400
     removed = 0
@@ -1122,7 +1137,7 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
                 mtime = os.path.getmtime(full_path)
             except OSError:
                 continue
-            if mtime >= threshold:
+            if mtime >= threshold and norm_path not in abandoned_files:
                 skipped_young += 1
                 continue
             try:
@@ -1140,8 +1155,12 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
             removed_bytes += size
             touched_dirs.add(dirpath)
             logger.info(
-                "DISK-REAP removed %s (age>=%dd, %d bytes)",
-                full_path, ORPHAN_MIN_AGE_DAYS, size)
+                "DISK-REAP removed %s (%s, %d bytes)",
+                full_path,
+                "abandoned attempt"
+                if norm_path in abandoned_files
+                else f"age>={ORPHAN_MIN_AGE_DAYS}d",
+                size)
 
     pruned = 0
     for touched_dir in touched_dirs:

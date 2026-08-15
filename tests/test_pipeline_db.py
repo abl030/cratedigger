@@ -16387,6 +16387,45 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             self.db.get_owned_transfer_keys(), fake.get_owned_transfer_keys())
         self.assertEqual(
             self.db.get_owned_local_paths(), fake.get_owned_local_paths())
+        # The seeded request is ``wanted`` with no active_download_state,
+        # i.e. the abandoned shape — both sides must agree it is reapable.
+        self.assertEqual(
+            self.db.get_abandoned_owned_local_paths(),
+            fake.get_abandoned_owned_local_paths())
+        self.assertEqual(
+            self.db.get_abandoned_owned_local_paths(), {"/downloads/a.flac"})
+
+    def test_abandoned_owned_local_paths_selects_only_wanted_without_state(self):
+        """Real-PG contract for the reaper's age-exemption predicate: a
+        request parked at ``wanted`` holding no ``active_download_state``
+        references nothing, so its stamped files are reap-eligible now."""
+        cases = [
+            ("wanted, no state", "wanted", False, True),
+            ("wanted, holding state", "wanted", True, False),
+            ("imported", "imported", False, False),
+            ("downloading", "downloading", False, False),
+        ]
+        for index, (desc, status, with_state, expected) in enumerate(cases):
+            with self.subTest(desc=desc):
+                rid = self._seed_request(status)
+                path = f"/downloads/{index}.flac"
+                self.db.record_transfer_enqueue([
+                    TransferLedgerRow(
+                        request_id=rid, username=f"u{index}",
+                        filename=f"{index}.flac"),
+                ])
+                self.db.confirm_transfer_enqueue(f"u{index}", f"{index}.flac")
+                self.db.stamp_transfer_completion(
+                    f"u{index}", f"{index}.flac", path)
+                if with_state:
+                    self.db._execute(
+                        "UPDATE album_requests SET active_download_state = "
+                        "%s::jsonb WHERE id = %s",
+                        ('{"files": []}', rid))
+
+                paths = self.db.get_abandoned_owned_local_paths()
+
+                self.assertEqual(path in paths, expected, desc)
 
     def test_prune_removes_old_inactive_accepted_rows(self):
         active = self._seed_request("downloading")
