@@ -99,8 +99,57 @@ ULTRASONIC_DEFICIT_SLICE_FREQS = [20500, 21000, 21500]
 
 # Bumped whenever the measurement this module produces changes shape.
 # Rows measured by this code carry ``spectral_measurement_version=2``;
-# legacy rows (measured before this capture shipped) stay NULL and keep
-# their old semantics — forward-only, no backfill (scope.md).
+# rows measured by an earlier generation keep their old stamp (NULL for
+# rows predating the stamp itself).
+#
+# BUMPING THIS CONSTANT OWES AN OPERATOR ONE-SHOT IN THE SAME DEPLOY.
+#
+# A bump makes every persisted spectral grade generation-stale at once, and
+# action-time admission refuses stale evidence. Almost every row heals by
+# itself on the next measurement, by one of three routes: the HAVE side
+# re-analyses an installed album whatever its codec (``lib/measurement.py``
+# fills HAVE outside the ``_needs_spectral_check`` gate); a row below
+# ``lineage_version`` 4 has its spectral pair replaced wholesale by the
+# upsert's ON CONFLICT guard; and MP3/lossless candidates are re-graded
+# normally.
+#
+# Exactly one shape cannot heal: a CANDIDATE-only row (not linked as any
+# request's ``current_evidence_id``) at ``lineage_version >= 4`` whose codec
+# the candidate gate skips — AAC/Vorbis/Opus/WMA, which have no calibrated
+# cliff policy. Preview never re-grades it, so the incoming grade is NULL
+# and the ON CONFLICT guard preserves the stale one forever, while
+# admission keeps refusing it. That is an unsatisfiable demand whose
+# requeue cannot change its own precondition: the importer and preview
+# livelock at ~55 s/pass until someone intervenes (#1162 — 2,463 passes
+# over 39.2 hours, no Beets launch and no download_log row the entire
+# time). This is the one place the ordinary forward-only, no-backfill rule
+# (scope.md) does not hold, because "the next write fixes it" is false for
+# these rows by construction.
+#
+# So a bump is two operations, not one. After deploying the new generation,
+# clear the stranded shape (agent/operator one-shot per scope.md — never a
+# committed script). It is idempotent — the predicate requires a non-NULL
+# grade, so a second run matches nothing — and was 9 rows (6 AAC, 3 Vorbis)
+# at the bump that introduced generation 2:
+#
+#   UPDATE album_quality_evidence AS e
+#      SET spectral_grade = NULL, spectral_bitrate_kbps = NULL,
+#          spectral_subject = NULL, spectral_provenance = NULL,
+#          cliff_hz = NULL, codec_family = NULL,
+#          ultrasonic_deficit_db = NULL, spectral_measurement_version = NULL
+#    WHERE e.spectral_grade IS NOT NULL
+#      AND e.spectral_measurement_version IS DISTINCT FROM <new version>
+#      AND e.lineage_version >= 4
+#      AND e.storage_format NOT ILIKE '%mp3%'
+#      AND lower(e.storage_format) NOT IN ('flac','wav','alac')
+#      AND NOT EXISTS (SELECT 1 FROM album_requests r
+#                       WHERE r.current_evidence_id = e.id)
+#      AND EXISTS (SELECT 1 FROM download_log d
+#                   WHERE d.candidate_evidence_id = e.id);
+#
+# Clearing is correct rather than admitting the stale grade past the gate:
+# for a lossy candidate that grade IS decision-relevant, so admitting it
+# would trade the livelock for a silent wrong reject (#1167).
 SPECTRAL_MEASUREMENT_VERSION = 2
 
 # Extension-only, extension-based codec family classification (issue #829
