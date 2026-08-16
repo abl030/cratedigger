@@ -10,6 +10,7 @@ would scramble the post-deploy lookup.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import tempfile
@@ -151,10 +152,7 @@ class TestSnapshotFingerprintFormula(unittest.TestCase):
 
 
 class TestFingerprintAlbumPath(unittest.TestCase):
-    """#1089 NOTE-H / NOTE-I (review round 3): the ONE canonical
-    ``snapshot_audio_files`` + ``snapshot_fingerprint`` composition, shared
-    by ``lib.world_audit_service`` and ``lib.merge_rekey_service`` — never a
-    second, textually-duplicated formula."""
+    """The one canonical album-path fingerprint composition."""
 
     def test_matches_the_manual_composition_for_a_real_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -192,6 +190,24 @@ class TestFingerprintAlbumPath(unittest.TestCase):
             )
             with self.assertRaises(SnapshotAudioFilesError):
                 fingerprint_album_path(tmp_dir)
+
+
+class TestFingerprintAlbumPathConsumerWiring(unittest.TestCase):
+    """The two quality-critical consumers delegate their path witness."""
+
+    def test_consumers_use_the_helper_not_the_primitives(self) -> None:
+        from lib.import_preview import persist_exact_current_spectral_from_attempt
+        from lib.sidecar_service import write_sidecar_for_request
+
+        for consumer in (
+            persist_exact_current_spectral_from_attempt,
+            write_sidecar_for_request,
+        ):
+            with self.subTest(consumer=consumer.__name__):
+                source = inspect.getsource(consumer)
+                self.assertIn("fingerprint_album_path(", source)
+                self.assertNotIn("snapshot_audio_files(", source)
+                self.assertNotIn("snapshot_fingerprint(", source)
 
 
 if __name__ == "__main__":

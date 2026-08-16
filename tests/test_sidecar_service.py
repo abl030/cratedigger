@@ -275,6 +275,47 @@ class TestWriteSidecarSkips(_SidecarServiceCase):
             self.db, self.beets, REQUEST_ID, mb_release_id=MBID
         )
         self.assertEqual(result.outcome, "skipped_no_album_path")
+        self.assertFalse(
+            os.path.exists(os.path.join(self.album_path, SIDECAR_FILENAME))
+        )
+
+    def test_empty_album_is_stale_not_an_empty_digest_witness(self):
+        for name in os.listdir(self.album_path):
+            os.unlink(os.path.join(self.album_path, name))
+        self._seed_current_evidence(make_album_quality_evidence(
+            mb_release_id=MBID,
+            files=[],
+            measurement=_verified_lossless_measurement(),
+            storage_format="FLAC",
+            verified_lossless_proof=_proof(),
+        ))
+
+        result = write_sidecar_for_request(
+            self.db, self.beets, REQUEST_ID, mb_release_id=MBID
+        )
+
+        self.assertEqual(result.outcome, "skipped_evidence_stale")
+        self.assertFalse(
+            os.path.exists(os.path.join(self.album_path, SIDECAR_FILENAME))
+        )
+
+    def test_snapshot_error_skips_without_publishing_a_sidecar(self):
+        self._seed_current_evidence(self._verified_lossless_evidence())
+        for name in os.listdir(self.album_path):
+            os.unlink(os.path.join(self.album_path, name))
+        os.symlink(
+            os.path.join(self.album_path, "vanished.flac"),
+            os.path.join(self.album_path, "01 - First.flac"),
+        )
+
+        result = write_sidecar_for_request(
+            self.db, self.beets, REQUEST_ID, mb_release_id=MBID
+        )
+
+        self.assertEqual(result.outcome, "skipped_no_album_path")
+        self.assertFalse(
+            os.path.exists(os.path.join(self.album_path, SIDECAR_FILENAME))
+        )
 
     def test_skips_when_evidence_stale_vs_disk(self):
         # Verified-lossless evidence describing files that are NOT on disk —

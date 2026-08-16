@@ -1418,6 +1418,164 @@ class TestImportPreviewPath(unittest.TestCase):
             shutil.rmtree(source, ignore_errors=True)
             shutil.rmtree(other, ignore_errors=True)
 
+    def test_attempt_scan_empty_path_is_stale_not_an_empty_digest_match(self):
+        db = self._db()
+        source = tempfile.mkdtemp()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=[],
+            )
+            db.upsert_album_quality_evidence(evidence)
+            current = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert current is not None and current.id is not None
+            db.set_request_current_evidence(42, current.id)
+
+            result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=42,
+                current_evidence=current,
+                measured_existing=SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="genuine",
+                    bitrate_kbps=96,
+                    spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+                ),
+                measured_existing_path=source,
+            )
+
+            self.assertEqual(result.status, "stale")
+            self.assertEqual(
+                result.reason,
+                "attempt HAVE path does not match current evidence fingerprint",
+            )
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_attempt_scan_missing_path_is_stale(self):
+        db = self._db()
+        source = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=snapshot_audio_files(source),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            current = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert current is not None and current.id is not None
+            db.set_request_current_evidence(42, current.id)
+
+            result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=42,
+                current_evidence=current,
+                measured_existing=SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="genuine",
+                    bitrate_kbps=96,
+                    spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+                ),
+                measured_existing_path=os.path.join(source, "missing"),
+            )
+
+            self.assertEqual(result.status, "stale")
+            self.assertEqual(
+                result.reason,
+                "attempt HAVE path does not match current evidence fingerprint",
+            )
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_attempt_scan_mismatched_path_is_stale(self):
+        db = self._db()
+        source = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=snapshot_audio_files(source),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            current = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert current is not None and current.id is not None
+            db.set_request_current_evidence(42, current.id)
+            with open(os.path.join(source, "02.mp3"), "wb") as handle:
+                handle.write(b"different snapshot")
+
+            result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=42,
+                current_evidence=current,
+                measured_existing=SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="genuine",
+                    bitrate_kbps=96,
+                    spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+                ),
+                measured_existing_path=source,
+            )
+
+            self.assertEqual(result.status, "stale")
+            self.assertEqual(
+                result.reason,
+                "attempt HAVE path does not match current evidence fingerprint",
+            )
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_attempt_scan_snapshot_error_is_failed_with_its_detail(self):
+        db = self._db()
+        source = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=snapshot_audio_files(source),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            current = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert current is not None and current.id is not None
+            db.set_request_current_evidence(42, current.id)
+            os.unlink(os.path.join(source, "01.mp3"))
+            os.symlink(
+                os.path.join(source, "vanished.mp3"),
+                os.path.join(source, "01.mp3"),
+            )
+
+            result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=42,
+                current_evidence=current,
+                measured_existing=SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="genuine",
+                    bitrate_kbps=96,
+                    spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+                ),
+                measured_existing_path=source,
+            )
+
+            self.assertEqual(result.status, "failed")
+            self.assertTrue((result.reason or "").startswith(
+                "SnapshotAudioFilesError: could not stat audio file "
+            ))
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
     def test_fresh_have_failure_overrides_stored_spectral_success(self):
         db = self._db()
         source = self._source_dir()

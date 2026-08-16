@@ -109,12 +109,12 @@ from lib.quality_evidence import (
     current_evidence_rebuild_reasons,
     current_spectral_evidence_policy_usable,
     evidence_from_measurement,
+    fingerprint_album_path,
     load_or_backfill_current_evidence,
     neutral_v0_metric_from_probe,
     persist_candidate_evidence_from_import_result,
     persist_candidate_evidence_from_measurement,
     snapshot_audio_files,
-    snapshot_fingerprint,
     spectral_measurement_generation_is_current,
 )
 from lib.v0_probe import probe_installed_album_as_v0
@@ -786,7 +786,7 @@ def persist_exact_current_spectral_from_attempt(
             "attempt did not resolve a current Beets path",
         )
     try:
-        measured_files = snapshot_audio_files(measured_existing_path)
+        measured_fingerprint = fingerprint_album_path(measured_existing_path)
     except OSError as exc:
         return EvidenceBuildResult(
             current_evidence,
@@ -794,9 +794,7 @@ def persist_exact_current_spectral_from_attempt(
             f"{type(exc).__name__}: {exc}",
         )
     if (
-        not measured_files
-        or snapshot_fingerprint(measured_files)
-            != current_evidence.snapshot_fingerprint
+        measured_fingerprint != current_evidence.snapshot_fingerprint
     ):
         return EvidenceBuildResult(
             current_evidence,
