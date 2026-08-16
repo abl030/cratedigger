@@ -27,8 +27,7 @@ from lib.quality import QualityRankConfig
 from lib.quality_evidence import (
     QualityEvidenceDB,
     SnapshotAudioFilesError,
-    snapshot_audio_files,
-    snapshot_fingerprint,
+    fingerprint_album_path,
 )
 from lib.sidecar import SIDECAR_FILENAME, build_sidecar, should_write_sidecar
 
@@ -115,13 +114,12 @@ def write_sidecar_for_request(
     # bytes next to it. If the current evidence no longer matches the on-disk
     # audio — e.g. the post-import evidence refresh failed and
     # current_evidence_id still points at a prior row — skip rather than
-    # publish a stale payload. snapshot_fingerprint mirrors how
-    # propagate_candidate_evidence_to_current derived the row's fingerprint.
+    # publish a stale payload.
     try:
-        on_disk = snapshot_audio_files(album_path)
+        on_disk_fingerprint = fingerprint_album_path(album_path)
     except SnapshotAudioFilesError:
         return SidecarWriteResult(OUTCOME_SKIPPED_NO_ALBUM_PATH)
-    if snapshot_fingerprint(on_disk) != evidence.snapshot_fingerprint:
+    if on_disk_fingerprint != evidence.snapshot_fingerprint:
         return SidecarWriteResult(OUTCOME_SKIPPED_EVIDENCE_STALE)
 
     sidecar = build_sidecar(
