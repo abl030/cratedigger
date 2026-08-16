@@ -89,6 +89,7 @@
 - [Never remove a subagent's worktree](feedback_never_remove_a_subagents_worktree.md) — a live background agent holds no process between turns; ps/git-status "evidence" that it died is worthless
 - [Agents idle-waiting at gates die](feedback_agents_idle_wait_die_at_gates.md) — never let a subagent end its turn to wait on a background suite; brief poll loops, watch final-gate receipts, resume via SendMessage
 - [#1106/#1111/#1112 batch COMPLETE](project_1106_1111_1112_batch.md) — 2026-08-13 six PRs live+closed; five correction rounds each minted a false claim; #1111 item-2 premise false; #1130 filed (moduleVm)
-- [Heavy gates: serial, on epi](feedback_heavy_gates_serial_on_epi.md) — doc1 OOM from suite+VM concurrency; epi wake/ssh/unshallow/linger recipe; subagent gates run foreground
+- [Heavy gates: serial, never on epi](feedback_heavy_gates_serial_on_epi.md) — doc1 OOM from suite+VM concurrency; epi is unstable under load, not a test host; gates stay serial on doc1
 - [#1122/#1127 series COMPLETE](project_1122_1127_series_complete.md) — 2026-08-13 PRs #1132/#1133/#1135 deployed+verified, issues #1119/#1122/#1127 closed (hardening declined); every review win was assumption-layer; residuals #1136
-- [#1089 slice 1 merge-rekey shipped](project_1089_slice1_merge_rekey_shipped.md) — 2026-08-13 button live, 316/8832 rekeyed, drift 3→1; Frozen ghost + Slipknot slices remain
+- [#1089 slice 1 merge-rekey shipped](project_1089_slice1_merge_rekey_shipped.md) — 2026-08-13 COMPLETE+CLOSED: both slices live, Frozen+Slipknot dupes removed, daily gate GREEN (58/58 reconciled); Slipknot RCA = June already_in_beets miss (#1067/#1138 lineage)
+- [#1131 suite optimisation](project_1131_suite_optimisation.md) — 2026-08-14 7 PRs, suite ~30% faster on doc1; poles were ceremony subprocesses; raising workers FIRST made it worse; nohup breaks signal fixtures

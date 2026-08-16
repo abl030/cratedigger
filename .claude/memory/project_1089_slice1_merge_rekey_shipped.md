@@ -22,3 +22,18 @@ minted ≥1 false claim, caught only by the next fresh reviewer (4 rounds, fresh
 each time; round-1 reviewer prescribing fixes means rounds 2+ need NEW reviewers).
 Merged-tree re-gate caught main sitting RED on the 32 KiB adapter limit (two green
 PRs exceeded it combined) — residuals filed as #1140.
+
+SLICE 2 SHIPPED 2026-08-13 (PR #1146, deployed 9cec6d42): recovery-side beets
+crash-debris removal (operator grant, metadata-only delete-child mode, zero
+denylist writes, wired into all three producers), library-root bucket-C
+invariant (0 live firings / 8,488 albums), graceful importer drain
+(KillMode=mixed + TimeoutStopSec=10min — R1 BLOCKING: without mixed, the drain
+routed the incident world around the fix). False-claim streak: 7-for-7
+correction rounds across both slices minted ≥1, all caught by next fresh
+reviewer. Issue #1089 now open ONLY for the Slipknot #8792 decision.
+
+CLOSED 2026-08-13: Slipknot dupe (album 6612, 8-track bonus-disc partial) removed
+after title-containment check (one apparent miss = "Vermillion" tag misspelling);
+real RCA was the June force import's already_in_beets=false miss (request-keyed
+resolution lineage, fixed #1067, residual #1138) — replace machinery never engaged.
+Tracked audit PASS, new_members=0, state shrank 641→619. First green gate since 08-08.
