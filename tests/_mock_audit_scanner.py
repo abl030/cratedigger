@@ -33,8 +33,10 @@ The scanner returns a dict ``{relpath: {finding_key: count}}``.
 from __future__ import annotations
 
 import ast
+import io
 import os
 import re
+import tokenize
 from collections import Counter, defaultdict
 
 TESTS_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -483,7 +485,7 @@ _LEAF_SEAM_PATTERNS = [
 # the evasion now: any new multiline owned-function patch fails, and every
 # removal must shrink this baseline. New code gets no allowance.
 MULTILINE_PATCH_BASELINE: dict[str, int] = {
-    'lib.beets_distance.compute_beets_distance': 3,
+    'lib.beets_distance.compute_beets_distance': 4,
     'lib.convergence.import_module': 1,
     'lib.dispatch.dispatch_import_from_db': 12,
     'lib.dispatch.entry_points.ensure_candidate_evidence_for_action': 3,
@@ -494,13 +496,18 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.import_evidence.ensure_current_evidence_for_action': 6,
     'lib.import_evidence.load_or_backfill_current_evidence': 1,
     'lib.matching._browse_directories': 1,
+    'lib.mbid_replace_service.MbidReplaceService.replace_request_mbid': 3,
     'lib.mbid_replace_service.delete_wrong_match_group': 9,
+    'lib.merge_rekey_service.MergeRekeyService.rekey_request': 1,
     'lib.quality.full_pipeline_decision_from_evidence': 1,
     'lib.quarantine_triage_service.os.scandir': 1,
     # Leaf filesystem boundary: proves the dashboard's census card reads
     # OSError (denied permissions, IsADirectoryError, ...) as "unreadable"
     # rather than 500ing the whole dashboard (#1142 review N4).
     'lib.retag_divergence_census_snapshot.open': 1,
+    'lib.search_plan_service.SearchPlanService.advance_for_request': 5,
+    'lib.search_plan_service.SearchPlanService.generate_for_request': 5,
+    'lib.search_plan_service.SearchPlanService.history_for_request': 5,
     # Leaf filesystem boundary, mirroring lib.quarantine_triage_service.os.
     # scandir above: proves lib.retag_divergence_census_snapshot's atomic
     # write never touches a prior published snapshot when the final rename
@@ -512,6 +519,7 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.wrong_match_cleanup_service.load_current_evidence_for_action': 1,
     'lib.wrong_match_delete_service.delete_wrong_match': 1,
     'lib.wrong_match_delete_service.delete_wrong_match_group': 1,
+    'lib.youtube_ingest_service.YoutubeIngestService.submit': 5,
     'scripts.import_preview_worker.measure_and_persist_candidate_evidence': 13,
     'scripts.pipeline_cli.youtube._RedisYoutubeCache': 2,
     'scripts.pipeline_cli.youtube._build_youtube_client': 2,
@@ -545,6 +553,53 @@ def _is_repo_target(target: str) -> bool:
     )
 
 
+def _patch_call_names(tree: ast.AST) -> frozenset[str]:
+    """Return the narrowly admitted call names for this source file."""
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "unittest.mock"
+            and any(
+                name.name == "patch" and name.asname == "_patch"
+                for name in node.names
+            )
+        ):
+            return frozenset(("patch", "_patch"))
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "_patch"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "patch"
+        ):
+            return frozenset(("patch", "_patch"))
+    return frozenset(("patch",))
+
+
+def _patch_targets_by_line(source: str, call_name: str) -> dict[int, list[str]]:
+    """Return literal bare-patch targets keyed by their physical line."""
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except tokenize.TokenError:
+        return {}
+    targets: dict[int, list[str]] = defaultdict(list)
+    for index, token in enumerate(tokens[:-2]):
+        if token.type != tokenize.NAME or token.string != call_name:
+            continue
+        if index and tokens[index - 1].string == ".":
+            continue
+        if tokens[index + 1].string != "(":
+            continue
+        first_arg = tokens[index + 2]
+        if first_arg.type != tokenize.STRING:
+            continue
+        value = ast.literal_eval(first_arg.string)
+        if isinstance(value, str):
+            targets[token.start[0]].append(value)
+    return dict(targets)
+
+
 def find_multiline_patch_targets(source: str) -> list[str]:
     """Return dotted targets from bare ``patch`` calls spanning lines.
 
@@ -552,11 +607,15 @@ def find_multiline_patch_targets(source: str) -> list[str]:
     remain outside this heuristic just as they are outside ``_PATCH_RE``.
     """
     tree = ast.parse(source)
+    patch_call_names = _patch_call_names(tree)
     targets: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        if not isinstance(node.func, ast.Name) or node.func.id != "patch":
+        if (
+            not isinstance(node.func, ast.Name)
+            or node.func.id not in patch_call_names
+        ):
             continue
         if node.end_lineno == node.lineno or not node.args:
             continue
@@ -585,7 +644,16 @@ def scan_multiline_patch_targets() -> dict[str, int]:
 def scan_source(source: str, *, web_file: bool) -> dict[str, int]:
     """Return grouped mock-audit findings for one source string."""
     counts: dict[str, int] = defaultdict(int)
-    for line in source.splitlines():
+    try:
+        patch_call_names = _patch_call_names(ast.parse(source))
+    except SyntaxError:
+        patch_call_names = frozenset(("patch",))
+    alias_targets_by_line = (
+        _patch_targets_by_line(source, "_patch")
+        if "_patch" in patch_call_names
+        else {}
+    )
+    for line_number, line in enumerate(source.splitlines(), start=1):
         if _STATEFUL_ASSIGN_RE.match(line):
             # Group findings by assigned name so the failure identifies
             # the stateful collaborator shape.
@@ -599,6 +667,13 @@ def scan_source(source: str, *, web_file: bool) -> dict[str, int]:
             if _is_leaf_seam(target):
                 continue
             counts[f"patch:{target}"] += 1
+        if "_patch" in patch_call_names:
+            for target in alias_targets_by_line.get(line_number, []):
+                if not _is_repo_target(target):
+                    continue
+                if _is_leaf_seam(target):
+                    continue
+                counts[f"patch:{target}"] += 1
         # patch.object(MODULE_REF, "name", ...) form — the first arg
         # is an identifier (typically a module alias from imports);
         # we resolve it against _ALIAS_TO_CANONICAL to recover the

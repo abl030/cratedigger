@@ -118,7 +118,144 @@ with patch(
             ["lib.owned.orchestration"],
         )
 
-    def test_multiline_patch_target_counts_match_baseline(self) -> None:
+    def test_bare_patch_keeps_line_and_multiline_parity(self) -> None:
+        source = '''
+from unittest.mock import patch
+
+with patch(
+    "lib.owned.orchestration",
+):
+    pass
+
+with patch("lib.owned.line_call"):
+    pass
+'''
+        self.assertEqual(
+            find_multiline_patch_targets(source),
+            ["lib.owned.orchestration"],
+        )
+        self.assertEqual(
+            scan_source(source, web_file=False),
+            {"patch:lib.owned.line_call": 1},
+        )
+
+    def test_exact_import_patch_alias_is_scanned(self) -> None:
+        source = '''
+from unittest.mock import patch as _patch
+
+with _patch("lib.owned.line_call"):
+    pass
+
+with _patch(
+    "lib.owned.multiline_call",
+):
+    pass
+'''
+        self.assertEqual(
+            scan_source(source, web_file=False),
+            {"patch:lib.owned.line_call": 1},
+        )
+        self.assertEqual(
+            find_multiline_patch_targets(source),
+            ["lib.owned.multiline_call"],
+        )
+
+    def test_exact_assignment_patch_alias_is_scanned(self) -> None:
+        source = '''
+from unittest.mock import patch
+
+_patch = patch
+with _patch("lib.owned.line_call"):
+    pass
+
+with _patch(
+    "lib.owned.multiline_call",
+):
+    pass
+'''
+        self.assertEqual(
+            scan_source(source, web_file=False),
+            {"patch:lib.owned.line_call": 1},
+        )
+        self.assertEqual(
+            find_multiline_patch_targets(source),
+            ["lib.owned.multiline_call"],
+        )
+
+    def test_unrelated_patch_named_alias_is_ignored(self) -> None:
+        source = '''
+def _patch(target):
+    return target
+
+with _patch("lib.owned.line_call"):
+    pass
+
+with _patch(
+    "lib.owned.multiline_call",
+):
+    pass
+'''
+        self.assertEqual(scan_source(source, web_file=False), {})
+        self.assertEqual(find_multiline_patch_targets(source), [])
+
+    def test_near_miss_patch_alias_bindings_are_ignored(self) -> None:
+        bindings = (
+            "from unittest.mock import patch",
+            "from any_module import patch as _patch",
+            "_patch = other",
+        )
+        for binding in bindings:
+            with self.subTest(binding=binding):
+                source = f'''\
+{binding}
+
+with _patch("lib.owned.line_call"):
+    pass
+
+with _patch(
+    "lib.owned.multiline_call",
+):
+    pass
+'''
+                self.assertEqual(scan_source(source, web_file=False), {})
+                self.assertEqual(find_multiline_patch_targets(source), [])
+
+    def test_alias_adjacent_literal_is_not_a_call(self) -> None:
+        source = '''
+from unittest.mock import patch as _patch
+
+example = '_patch("lib.owned.string")'
+not_a_call = 'example: _patch("lib.owned.other_string")'
+'''
+        self.assertEqual(scan_source(source, web_file=False), {})
+        self.assertEqual(find_multiline_patch_targets(source), [])
+
+    def test_alias_shaped_text_in_multiline_literal_is_not_a_call(self) -> None:
+        source = '''
+from unittest.mock import patch as _patch
+
+example = """
+_patch("lib.owned.string")
+"""
+'''
+        self.assertEqual(scan_source(source, web_file=False), {})
+        self.assertEqual(find_multiline_patch_targets(source), [])
+
+    def test_one_line_alias_leaf_seams_remain_admitted(self) -> None:
+        source = '''
+from unittest.mock import patch as _patch
+
+with _patch("web.mb.urllib.request.urlopen"):
+    pass
+with _patch("web.discogs.urllib.request.urlopen"):
+    pass
+'''
+        self.assertEqual(scan_source(source, web_file=False), {})
+        self.assertEqual(find_multiline_patch_targets(source), [])
+
+    def test_multiline_patch_target_counts_are_an_exact_add_remove_ratchet(
+        self,
+    ) -> None:
         current = scan_multiline_patch_targets()
         self.assertEqual(
             current,
@@ -127,7 +264,6 @@ with patch(
             "are forbidden; when removing legacy patches, shrink "
             "MULTILINE_PATCH_BASELINE in tests/_mock_audit_scanner.py.",
         )
-
 
 class TestSysPathAudit(unittest.TestCase):
     """Ban every sys.path mutation that can shadow a real package.
