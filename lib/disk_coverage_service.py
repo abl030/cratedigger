@@ -1,15 +1,21 @@
 """Pipeline-vs-beets disk coverage reporting.
 
-Answers the operator question "which active pipeline rows are not actually
-present in beets?" without treating ``album_requests.status`` as disk state.
+Answers the operator question "which active pipeline rows are not uniquely
+present in Beets?" without treating ``album_requests.status`` as disk state.
 """
 
 from collections import Counter
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import msgspec
 
+from lib.beets_db import (
+    CurrentBeetsAmbiguityReason,
+    CurrentBeetsAmbiguous,
+    CurrentBeetsResolution,
+    CurrentBeetsUnique,
+)
 from lib.release_identity import ReleaseIdentity
 
 if TYPE_CHECKING:
@@ -38,6 +44,23 @@ class DiskCoverageRow(msgspec.Struct, kw_only=True):
     #: refuses (``from_fields`` picks ``mb_release_id`` without checking
     #: for a conflict; ``from_strict_fields`` fails closed to ``None``).
     source: str | None
+    resolution: (
+        "DiskCoverageMissingResolution | DiskCoverageAmbiguousResolution"
+    )
+
+
+class DiskCoverageMissingResolution(msgspec.Struct, kw_only=True):
+    """No exact current Beets album was observed for the request."""
+
+    kind: Literal["missing"] = "missing"
+
+
+class DiskCoverageAmbiguousResolution(msgspec.Struct, kw_only=True):
+    """Exact Beets membership exists but cannot name one current album."""
+
+    kind: Literal["ambiguous"] = "ambiguous"
+    album_ids: tuple[int, ...]
+    reason: CurrentBeetsAmbiguityReason
 
 
 class BeetsUntrackedAlbum(msgspec.Struct, kw_only=True):
@@ -82,7 +105,10 @@ def _release_ids_for_beets_album(row: dict[str, Any]) -> set[str]:
     return ids
 
 
-def _request_row(row: Mapping[str, Any]) -> DiskCoverageRow:
+def _request_row(
+    row: Mapping[str, Any],
+    resolution: DiskCoverageMissingResolution | DiskCoverageAmbiguousResolution,
+) -> DiskCoverageRow:
     identity = ReleaseIdentity.from_strict_fields(
         row.get("mb_release_id"), row.get("discogs_release_id"),
     )
@@ -100,6 +126,7 @@ def _request_row(row: Mapping[str, Any]) -> DiskCoverageRow:
             if row.get("discogs_release_id") is not None else None
         ),
         source=identity.source if identity is not None else None,
+        resolution=resolution,
     )
 
 
@@ -132,7 +159,10 @@ class DiskCoverageBeetsDB(Protocol):
     BeetsDB-side protocol; ``BeetsDB`` and ``FakeBeetsDB`` satisfy it
     structurally."""
 
-    def check_mbids(self, mbids: list[str]) -> set[str]: ...
+    def resolve_current_releases(
+        self,
+        identities: list[ReleaseIdentity],
+    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]: ...
 
     def list_release_identities(self) -> list[dict[str, object]]: ...
 
@@ -147,20 +177,28 @@ def disk_coverage(
     """Return exact-ID disk coverage for non-replaced pipeline rows.
 
     ``album_requests.status`` is intentionally ignored except for grouping.
-    Presence is determined by exact beets identity: MB UUIDs in
-    ``albums.mb_albumid`` and Discogs numerics in either ``discogs_albumid``
-    or legacy ``mb_albumid`` via ``BeetsDB.check_mbids``.
+    Presence is determined by one batched
+    :meth:`BeetsDB.resolve_current_releases` observation of strict exact
+    identities. A unique resolver result is on disk; missing and ambiguous
+    results both remain in the historical off-disk count, with emitted rows
+    retaining their distinct resolution evidence.
     """
     rows = pipeline_db.list_non_replaced_requests()
     request_ids: dict[int, set[str]] = {}
-    all_release_ids: list[str] = []
+    request_identities: dict[int, ReleaseIdentity | None] = {}
+    identities: list[ReleaseIdentity] = []
     for row in rows:
         release_ids = _release_ids_for_request(row)
         request_ids[int(row["id"])] = set(release_ids)
-        all_release_ids.extend(release_ids)
+        identity = ReleaseIdentity.from_strict_fields(
+            row.get("mb_release_id"), row.get("discogs_release_id"),
+        )
+        request_identities[int(row["id"])] = identity
+        if identity is not None:
+            identities.append(identity)
 
-    matched_ids = (
-        set(beets_db.check_mbids(all_release_ids)) if beets_db else set[str]()
+    resolutions = (
+        beets_db.resolve_current_releases(identities) if beets_db else {}
     )
 
     by_status: Counter[str] = Counter()
@@ -172,14 +210,26 @@ def disk_coverage(
     for row in rows:
         status = str(row.get("status") or "")
         by_status[status] += 1
-        on_disk = bool(request_ids[int(row["id"])] & matched_ids)
-        if on_disk:
+        identity = request_identities[int(row["id"])]
+        current = resolutions.get(identity) if identity is not None else None
+        if isinstance(current, CurrentBeetsUnique):
             on_disk_total += 1
             on_disk_by_status[status] += 1
         else:
             off_disk_by_status[status] += 1
             if include_rows:
-                off_disk_rows.append(_request_row(row))
+                resolution: (
+                    DiskCoverageMissingResolution
+                    | DiskCoverageAmbiguousResolution
+                )
+                if isinstance(current, CurrentBeetsAmbiguous):
+                    resolution = DiskCoverageAmbiguousResolution(
+                        album_ids=current.album_ids,
+                        reason=current.reason,
+                    )
+                else:
+                    resolution = DiskCoverageMissingResolution()
+                off_disk_rows.append(_request_row(row, resolution))
 
     inverse_rows: list[BeetsUntrackedAlbum] | None = None
     if include_inverse:

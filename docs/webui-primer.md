@@ -257,10 +257,11 @@ depends on.
   on Browse's unified artist/release rows, while diagnostic API/CLI routes
   remain available.
 - **Dashboard Disk Coverage drift panel — "Follow MB merge" button (#1089)** —
-  each `imported`-but-off-disk drift row (`imported` on the pipeline ledger,
-  but `BeetsDB.check_mbids` no longer resolves the stored id against the
-  current library — a MusicBrainz merge is only ONE of several possible
-  causes) shown for an MB-sourced row (`source === 'musicbrainz'`, a field
+  each `imported` row that is not uniquely present in Beets (`imported` on
+  the pipeline ledger, but the strict exact identity resolves as either
+  `missing` or `ambiguous` against the current library — a MusicBrainz merge
+  is only ONE of several possible causes) shown for an MB-sourced row
+  (`source === 'musicbrainz'`, a field
   the dashboard route derives server-side from the VALUE's shape via
   `ReleaseIdentity.from_strict_fields` — the SAME strict, conflict-failing
   derivation `MergeRekeyService.rekey_request`'s own admission test uses

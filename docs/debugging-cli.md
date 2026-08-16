@@ -300,7 +300,7 @@ inside socket authorization, never credentials.
   and read. That matches what the Wrong Matches file explorer reports for
   the same on-disk entry (both ends ask
   `lib.fs_authority.errno_proves_absence`).
-- `pipeline-cli disk-coverage` — Compare active pipeline rows with Beets library coverage.
+- `pipeline-cli disk-coverage` — Compare active pipeline rows with Beets library coverage; each off-disk row reports whether its exact identity is `missing` or `ambiguous`.
 - `pipeline-cli force-import` — Queue a rejected download for the importer lane.
 - `pipeline-cli import-job-recovery show` — Show read-only exact evidence for one import job.
 - `pipeline-cli import-jobs` — List import queue jobs.

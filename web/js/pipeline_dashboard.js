@@ -203,8 +203,8 @@ function renderDiskCoverageCard(dc) {
       <div class="dashboard-card-title">Disk Coverage</div>
       <div class="metric-list">
         <div class="metric-row"><span>On disk</span><strong>${formatCount(c.on_disk_total)} / ${formatCount(c.active_total)}</strong></div>
-        <div class="metric-row"><span>Wanted (not yet acquired)</span><strong class="metric-muted">${formatCount(wantedOffDisk)}</strong></div>
-        <div class="metric-row"><span>Drift (imported, missing from beets)</span><strong class="${driftClass}">${formatCount(drift.length)}</strong></div>
+        <div class="metric-row"><span>Wanted, not uniquely in Beets</span><strong class="metric-muted">${formatCount(wantedOffDisk)}</strong></div>
+        <div class="metric-row"><span>Imported, not uniquely in Beets</span><strong class="${driftClass}">${formatCount(drift.length)}</strong></div>
         ${driftRowsHtml}
       </div>
     </div>
@@ -213,8 +213,8 @@ function renderDiskCoverageCard(dc) {
 
 /**
  * One Disk Coverage drift row: an `imported` request the dashboard cannot
- * currently match against Beets. `drift_rows` carries every off-disk
- * `imported` row regardless of cause or source (#1089 MINOR-3) — a
+ * uniquely resolve against Beets. `drift_rows` carries every not-uniquely-
+ * present `imported` row regardless of cause or source (#1089 MINOR-3) — a
  * MusicBrainz merge is only ONE reason a row can drift, so the "Follow MB
  * merge" button renders only when `r.source === 'musicbrainz'` (#1089
  * MAJOR-A, review round 3). This is NOT the same as `r.mb_release_id`
@@ -245,6 +245,11 @@ function renderDiskCoverageCard(dc) {
  * @returns {string}
  */
 function renderDriftRow(r) {
+  const ambiguousAlbumCount = Array.isArray(r.resolution?.album_ids)
+    ? r.resolution.album_ids.length : 0;
+  const resolution = r.resolution?.kind === 'ambiguous'
+    ? `ambiguous (${formatCount(ambiguousAlbumCount)} ${ambiguousAlbumCount === 1 ? 'album' : 'albums'})`
+    : 'missing';
   const action = r.source === 'musicbrainz'
     ? `
         <div class="metric-row drift-row-action">
@@ -255,7 +260,7 @@ function renderDriftRow(r) {
   return `
         <div class="metric-row">
           <span>#${r.id} ${esc(r.artist_name || '?')} — ${esc(r.album_title || '?')}</span>
-          <strong class="metric-bad">${esc(r.status)}</strong>
+          <strong class="metric-bad">${resolution}</strong>
         </div>${action}`;
 }
 

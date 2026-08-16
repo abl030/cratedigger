@@ -3,25 +3,49 @@ from typing import TYPE_CHECKING
 
 import msgspec
 
-from lib.disk_coverage_service import disk_coverage
+from lib.beets_db import CurrentBeetsResolution
+from lib.disk_coverage_service import (
+    DiskCoverageAmbiguousResolution,
+    disk_coverage,
+)
+from lib.release_identity import ReleaseIdentity
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 
 
 class TestDiskCoverageService(unittest.TestCase):
-    def test_counts_off_disk_active_rows_by_exact_beets_identity(self) -> None:
+    def test_classifies_exact_identities_in_one_batched_resolution(self) -> None:
         db = FakePipelineDB()
         db.seed_request(make_request_row(
-            id=1, status="imported", mb_release_id="mbid-on-disk"))
+            id=1, status="imported",
+            mb_release_id="00000000-0000-4000-8000-000000000001",
+        ))
         db.seed_request(make_request_row(
-            id=2, status="wanted", mb_release_id="mbid-missing"))
+            id=2, status="wanted",
+            mb_release_id="00000000-0000-4000-8000-000000000002",
+        ))
         db.seed_request(make_request_row(
-            id=3, status="downloading", mb_release_id=None,
-            discogs_release_id="12856590"))
+            id=3, status="downloading", mb_release_id="12856590",
+            discogs_release_id="12856590",
+        ))
         db.seed_request(make_request_row(
-            id=4, status="replaced", mb_release_id="old-mbid"))
-        beets = FakeBeetsDB()
-        beets.set_album_exists("mbid-on-disk", True)
+            id=4, status="replaced",
+            mb_release_id="00000000-0000-4000-8000-000000000004",
+        ))
+
+        class RecordingBeetsDB(FakeBeetsDB):
+            def __init__(self) -> None:
+                super().__init__()
+                self.batch_calls: list[list[ReleaseIdentity]] = []
+
+            def resolve_current_releases(
+                self, identities: list[ReleaseIdentity],
+            ) -> dict[ReleaseIdentity, CurrentBeetsResolution]:
+                self.batch_calls.append(identities)
+                return super().resolve_current_releases(identities)
+
+        beets = RecordingBeetsDB()
+        beets.set_album_exists("00000000-0000-4000-8000-000000000001", True)
         beets.set_album_exists("12856590", True)
 
         result = disk_coverage(db, beets)
@@ -38,9 +62,56 @@ class TestDiskCoverageService(unittest.TestCase):
         assert result.off_disk is not None
         self.assertEqual([row.id for row in result.off_disk], [2])
         self.assertEqual(
-            beets.check_mbids_calls,
-            [["mbid-on-disk", "mbid-missing", "12856590"]],
+            [identity.release_id for identity in beets.batch_calls[0]],
+            [
+                "00000000-0000-4000-8000-000000000001",
+                "00000000-0000-4000-8000-000000000002",
+                "12856590",
+            ],
         )
+        self.assertEqual(len(beets.batch_calls), 1)
+
+    def test_off_disk_rows_preserve_missing_and_ambiguous_resolutions(self) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="imported",
+            mb_release_id="00000000-0000-4000-8000-000000000001",
+        ))
+        db.seed_request(make_request_row(
+            id=2, status="wanted",
+            mb_release_id="00000000-0000-4000-8000-000000000002",
+        ))
+        db.seed_request(make_request_row(
+            id=3, status="imported",
+            mb_release_id="00000000-0000-4000-8000-000000000003",
+        ))
+        db.seed_request(make_request_row(
+            id=4, status="imported",
+            mb_release_id="00000000-0000-4000-8000-000000000004",
+            discogs_release_id="42",
+        ))
+        beets = FakeBeetsDB()
+        beets.set_album_exists("00000000-0000-4000-8000-000000000001", True)
+        beets.set_album_ids_for_release(
+            "00000000-0000-4000-8000-000000000003", [77, 91],
+        )
+
+        result = disk_coverage(db, beets)
+
+        self.assertEqual(result.counts.on_disk_total, 1)
+        self.assertEqual(result.counts.off_disk_total, 3)
+        self.assertEqual(result.counts.off_disk_by_status, {
+            "imported": 2, "wanted": 1,
+        })
+        assert result.off_disk is not None
+        by_id = {row.id: row for row in result.off_disk}
+        self.assertEqual(by_id[2].resolution.kind, "missing")
+        self.assertEqual(by_id[4].resolution.kind, "missing")
+        self.assertIsNone(by_id[4].source)
+        ambiguous = by_id[3].resolution
+        assert isinstance(ambiguous, DiskCoverageAmbiguousResolution)
+        self.assertEqual(ambiguous.album_ids, (77, 91))
+        self.assertEqual(ambiguous.reason, "multiple_matches")
 
     def test_off_disk_rows_carry_the_real_exact_release_source(self) -> None:
         """#1089 MAJOR-A (review round 3): ``source`` is derived from the
@@ -98,7 +169,9 @@ class TestDiskCoverageService(unittest.TestCase):
 
     def test_counts_only_suppresses_rows(self) -> None:
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=1, mb_release_id="missing"))
+        db.seed_request(make_request_row(
+            id=1, mb_release_id="00000000-0000-4000-8000-000000000001",
+        ))
         beets = FakeBeetsDB()
 
         result = disk_coverage(db, beets, include_rows=False)
@@ -108,31 +181,35 @@ class TestDiskCoverageService(unittest.TestCase):
 
     def test_include_inverse_lists_beets_albums_without_active_pipeline_row(self) -> None:
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=1, mb_release_id="tracked-mbid"))
         db.seed_request(make_request_row(
-            id=2, status="replaced", mb_release_id="old-mbid"))
+            id=1, mb_release_id="00000000-0000-4000-8000-000000000001",
+        ))
+        db.seed_request(make_request_row(
+            id=2, status="replaced",
+            mb_release_id="00000000-0000-4000-8000-000000000002",
+        ))
         beets = FakeBeetsDB()
-        beets.set_album_exists("tracked-mbid", True)
+        beets.set_album_exists("00000000-0000-4000-8000-000000000001", True)
         beets.set_release_identities([
             {
                 "id": 10,
                 "album": "Tracked",
                 "albumartist": "Artist",
-                "mb_albumid": "tracked-mbid",
+                "mb_albumid": "00000000-0000-4000-8000-000000000001",
                 "discogs_albumid": None,
             },
             {
                 "id": 11,
                 "album": "Long Tail",
                 "albumartist": "Artist",
-                "mb_albumid": "untracked-mbid",
+                "mb_albumid": "00000000-0000-4000-8000-000000000003",
                 "discogs_albumid": None,
             },
             {
                 "id": 12,
                 "album": "Old",
                 "albumartist": "Artist",
-                "mb_albumid": "old-mbid",
+                "mb_albumid": "00000000-0000-4000-8000-000000000002",
                 "discogs_albumid": None,
             },
         ])
@@ -145,7 +222,9 @@ class TestDiskCoverageService(unittest.TestCase):
 
     def test_result_is_json_serializable(self) -> None:
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=1, mb_release_id="missing"))
+        db.seed_request(make_request_row(
+            id=1, mb_release_id="00000000-0000-4000-8000-000000000001",
+        ))
 
         payload = msgspec.to_builtins(disk_coverage(db, FakeBeetsDB()))
 
