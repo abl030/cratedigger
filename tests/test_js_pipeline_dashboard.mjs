@@ -310,10 +310,11 @@ console.log('renderDriftRow() renders the operator merge-rekey button for MB-sou
     id: 8792, artist_name: 'Slipknot', album_title: 'Vol. 3: (The Subliminal Verses)',
     status: 'imported', mb_release_id: 'd990b8af-0000-0000-0000-000000000000',
     discogs_release_id: null, source: 'musicbrainz',
+    resolution: {kind: 'missing'},
   });
   assertContains(html, '#8792 Slipknot', 'row names the request id and artist');
   assertContains(html, 'Vol. 3: (The Subliminal Verses)', 'row names the album title');
-  assertContains(html, 'metric-bad">imported', 'row shows the drift status');
+  assertContains(html, 'metric-bad">missing', 'row truthfully names the missing resolution');
   assertContains(html, 'window.mergeRekeyRequest(8792, this)', 'button wires the window binding with its request id');
   assertContains(html, 'Follow MB merge', 'button label rendered');
   assertContains(html, 'id="drift-note-8792"', 'inline refusal-note slot rendered for this request');
@@ -328,10 +329,10 @@ console.log('renderDriftRow() withholds the button for non-MB-sourced rows (#108
   const html = __test__.renderDriftRow({
     id: 1870, artist_name: 'Some Artist', album_title: 'Some Album',
     status: 'imported', mb_release_id: '1870', discogs_release_id: '1870',
-    source: 'discogs',
+    source: 'discogs', resolution: {kind: 'missing'},
   });
   assertContains(html, '#1870 Some Artist', 'row still names the request');
-  assertContains(html, 'metric-bad">imported', 'row still shows the drift status');
+  assertContains(html, 'metric-bad">missing', 'row still shows its resolution');
   assertExcludes(html, 'window.mergeRekeyRequest', 'no merge-rekey button for a non-MB-sourced row');
   assertExcludes(html, 'Follow MB merge', 'no button label for a non-MB-sourced row');
   assertExcludes(html, 'drift-note-1870', 'no inline note slot without a button to write into');
@@ -341,9 +342,20 @@ console.log('renderDriftRow() escapes artist/album HTML');
   const html = __test__.renderDriftRow({
     id: 1, artist_name: '<script>x</script>', album_title: 'A & B', status: 'imported',
     mb_release_id: 'd990b8af-0000-0000-0000-000000000000', source: 'musicbrainz',
+    resolution: {kind: 'missing'},
   });
   assertExcludes(html, '<script>x</script>', 'artist name is escaped');
   assertContains(html, 'A &amp; B', 'album title is escaped');
+}
+console.log('renderDriftRow() distinguishes ambiguity from missing by exact album cardinality');
+{
+  const html = __test__.renderDriftRow({
+    id: 2, artist_name: 'Ambiguous Artist', album_title: 'Two Albums',
+    status: 'imported', source: 'musicbrainz',
+    resolution: {kind: 'ambiguous', album_ids: [7, 9], reason: 'multiple_matches'},
+  });
+  assertContains(html, 'ambiguous (2 albums)', 'ambiguity includes exact album cardinality');
+  assertExcludes(html, 'metric-bad">missing', 'ambiguity never masquerades as missing');
 }
 console.log('renderDiskCoverageCard() composes one drift row per off-disk request');
 {
@@ -351,14 +363,27 @@ console.log('renderDiskCoverageCard() composes one drift row per off-disk reques
     counts: {on_disk_total: 9, active_total: 11, off_disk_by_status: {wanted: 1}},
     drift_rows: [
       {id: 316, artist_name: 'Rebecca Black', album_title: 'Sing It', status: 'imported',
-       mb_release_id: 'd990b8af-0000-0000-0000-000000000001', source: 'musicbrainz'},
+       mb_release_id: 'd990b8af-0000-0000-0000-000000000001', source: 'musicbrainz',
+       resolution: {kind: 'missing'}},
       {id: 8832, artist_name: 'Kim Petras', album_title: 'Detour', status: 'imported',
-       mb_release_id: 'd990b8af-0000-0000-0000-000000000002', source: 'musicbrainz'},
+       mb_release_id: 'd990b8af-0000-0000-0000-000000000002', source: 'musicbrainz',
+       resolution: {kind: 'ambiguous', album_ids: [8, 9, 10], reason: 'multiple_matches'}},
     ],
   });
-  assertContains(html, 'Drift (imported, missing from beets)', 'drift metric label rendered');
+  assertContains(html, 'Imported, not uniquely in Beets', 'neutral drift metric label rendered');
+  assertContains(html, 'missing', 'missing resolution rendered');
+  assertContains(html, 'ambiguous (3 albums)', 'ambiguous resolution rendered');
   assertContains(html, 'window.mergeRekeyRequest(316, this)', 'first drift row gets its own button');
   assertContains(html, 'window.mergeRekeyRequest(8832, this)', 'second drift row gets its own button');
+}
+console.log('renderDiskCoverageCard() keeps wanted coverage neutral when a wanted row is ambiguous');
+{
+  const html = __test__.renderDiskCoverageCard({
+    counts: {on_disk_total: 9, active_total: 10, off_disk_by_status: {wanted: 1}},
+    drift_rows: [],
+  });
+  assertContains(html, 'Wanted, not uniquely in Beets', 'wanted count does not claim missing membership');
+  assertExcludes(html, 'Wanted (not yet acquired)', 'stale wanted-missing claim removed');
 }
 console.log('renderDiskCoverageCard() renders no drift rows or buttons when nothing has drifted');
 {

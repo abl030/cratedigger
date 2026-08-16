@@ -44,11 +44,11 @@ def _dashboard_disk_coverage() -> dict[str, object] | None:
     """Pipeline-vs-beets coverage block for the dashboard, or None when
     no beets DB is configured.
 
-    Only ``imported`` claims beets presence, so ``drift_rows`` carries
-    off-disk ``imported`` rows only (a release that vanished from beets
-    is the Lucksmiths-class out-of-band drift signal). Off-disk wanted
-    (not yet acquired), downloading (in flight), and unsearchable
-    (operator search stop) rows are lifecycle-normal, not drift."""
+    Only ``imported`` claims unique Beets presence, so ``drift_rows`` carries
+    imported rows that are missing or ambiguous only (a release that vanished
+    from Beets is the Lucksmiths-class out-of-band drift signal). Wanted,
+    downloading, and unsearchable rows that are not uniquely present are
+    lifecycle-normal, not drift."""
     s = _server()
     beets = s._beets_db()
     if beets is None:

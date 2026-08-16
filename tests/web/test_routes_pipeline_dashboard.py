@@ -130,7 +130,7 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
     }
     DISK_COVERAGE_ROW_FIELDS: ClassVar = {
         "id", "status", "artist_name", "album_title", "mb_release_id",
-        "discogs_release_id", "source",
+        "discogs_release_id", "source", "resolution",
     }
 
     def setUp(self) -> None:
@@ -139,6 +139,7 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         # a real success download row, plus one wanted request.
         self.db.seed_request(make_request_row(
             id=100, status="imported", min_bitrate=320,
+            mb_release_id="00000000-0000-4000-8000-000000000100",
         ))
         self.db.set_tracks(100, [
             {"disc_number": 1, "track_number": 1, "title": "Track",
@@ -152,29 +153,42 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         )
         self.db.seed_request(make_request_row(
             id=101, status="wanted", source="request",
+            mb_release_id="00000000-0000-4000-8000-000000000101",
         ))
 
     def test_pipeline_dashboard_disk_coverage_contract(self):
         import web.server as srv
 
         self.db.seed_request(make_request_row(
-            id=9101, status="imported", mb_release_id="dash-on-disk",
+            id=9101, status="imported",
+            mb_release_id="00000000-0000-4000-8000-000000009101",
         ))
         self.db.seed_request(make_request_row(
-            id=9102, status="imported", mb_release_id="dash-drifted",
+            id=9102, status="imported",
+            mb_release_id="00000000-0000-4000-8000-000000009102",
             artist_name="Drift Artist", album_title="Drift Album",
         ))
         self.db.seed_request(make_request_row(
-            id=9103, status="wanted", mb_release_id="dash-not-yet",
+            id=9103, status="wanted",
+            mb_release_id="00000000-0000-4000-8000-000000009103",
         ))
         self.db.seed_request(make_request_row(
-            id=9104, status="downloading", mb_release_id="dash-in-flight",
+            id=9104, status="downloading",
+            mb_release_id="00000000-0000-4000-8000-000000009104",
         ))
         self.db.seed_request(make_request_row(
-            id=9105, status="unsearchable", mb_release_id="dash-stopped",
+            id=9105, status="unsearchable",
+            mb_release_id="00000000-0000-4000-8000-000000009105",
+        ))
+        self.db.seed_request(make_request_row(
+            id=9106, status="imported",
+            mb_release_id="00000000-0000-4000-8000-000000009106",
         ))
         beets = FakeBeetsDB()
-        beets.set_album_exists("dash-on-disk", True)
+        beets.set_album_exists("00000000-0000-4000-8000-000000009101", True)
+        beets.set_album_ids_for_release(
+            "00000000-0000-4000-8000-000000009106", [71, 72],
+        )
         # The class setUp baseline (id=100, imported) must read as
         # on-disk so it doesn't pollute the drift assertion below.
         beets.set_album_exists(self.db.request(100)["mb_release_id"], True)
@@ -190,13 +204,20 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(
             self, dc["counts"], self.DISK_COVERAGE_COUNT_FIELDS,
             "pipeline dashboard disk coverage counts")
-        # Only off-disk `imported` rows are drift — wanted (not yet
-        # acquired), downloading (in flight), and unsearchable (operator
-        # search stop) are all expected to be absent from beets.
-        self.assertEqual([r["id"] for r in dc["drift_rows"]], [9102])
+        # Only imported rows that are not uniquely resolvable in Beets are
+        # drift — wanted, downloading, and unsearchable lifecycle rows can
+        # legitimately be missing or ambiguous.
+        self.assertEqual([r["id"] for r in dc["drift_rows"]], [9102, 9106])
         _assert_required_fields(
             self, dc["drift_rows"][0], self.DISK_COVERAGE_ROW_FIELDS,
             "pipeline dashboard drift row")
+        self.assertEqual(dc["drift_rows"][0]["resolution"], {
+            "kind": "missing",
+        })
+        self.assertEqual(dc["drift_rows"][1]["resolution"], {
+            "kind": "ambiguous", "album_ids": [71, 72],
+            "reason": "multiple_matches",
+        })
 
     def test_pipeline_dashboard_disk_coverage_null_without_beets(self):
         from web import server

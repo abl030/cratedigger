@@ -9,8 +9,8 @@ id, and Beets has since been retagged onto the survivor out of band (an
 operator's own ``beet modify``, or a later re-import that landed there). The
 pipeline ledger is the only thing still naming the old id, so the request
 →Beets join silently breaks: the dashboard's disk-coverage drift panel
-(``lib/disk_coverage_service.py``) reports the row as off-disk forever,
-because ``BeetsDB.check_mbids`` can never again match the stored id.
+(``lib/disk_coverage_service.py``) reports the row as missing forever,
+because the authoritative exact resolver no longer finds the stored id.
 
 **Request-ledger-only.** This service NEVER mutates Beets — that is the
 settled operator correction on this slice. For every row it can legitimately

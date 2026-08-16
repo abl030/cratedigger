@@ -138,7 +138,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
     }
     DISK_COVERAGE_ROW_FIELDS: ClassVar = {
         "id", "status", "artist_name", "album_title", "mb_release_id",
-        "discogs_release_id",
+        "discogs_release_id", "resolution",
     }
     DISK_COVERAGE_INVERSE_FIELDS: ClassVar = {
         "id", "album", "albumartist", "mb_albumid", "discogs_albumid",
@@ -1313,7 +1313,8 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         import web.server as srv
 
         self.db.seed_request(make_request_row(
-            id=9001, status="wanted", mb_release_id="disk-missing-mbid",
+            id=9001, status="wanted",
+            mb_release_id="00000000-0000-4000-8000-000000009001",
             artist_name="Missing Artist", album_title="Missing Album",
         ))
         beets = FakeBeetsDB()
@@ -1329,8 +1330,14 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             self, data["counts"], self.DISK_COVERAGE_COUNT_FIELDS,
             "disk coverage counts")
         _assert_required_fields(
-            self, data["off_disk"][0], self.DISK_COVERAGE_ROW_FIELDS,
+            self,
+            next(row for row in data["off_disk"] if row["id"] == 9001),
+            self.DISK_COVERAGE_ROW_FIELDS,
             "disk coverage off-disk row")
+        row = next(row for row in data["off_disk"] if row["id"] == 9001)
+        self.assertEqual(row["resolution"], {
+            "kind": "missing",
+        })
 
     def test_disk_coverage_inverse_contract(self):
         import web.server as srv

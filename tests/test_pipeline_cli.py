@@ -6776,9 +6776,10 @@ class TestPipelineCliDiskCoverage(unittest.TestCase):
     def test_disk_coverage_prints_json_from_shared_service(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
-            id=1, status="wanted", mb_release_id="missing-mbid"))
-        # "missing-mbid" is not seeded as a beets album, so check_mbids
-        # returns it as off-disk.
+            id=1, status="wanted",
+            mb_release_id="00000000-0000-4000-8000-000000000001",
+        ))
+        # This valid strict identity is not seeded as a Beets album.
         beets = FakeBeetsDB()
 
         args = MagicMock(
@@ -6794,7 +6795,9 @@ class TestPipelineCliDiskCoverage(unittest.TestCase):
         payload = json.loads(out.getvalue())
         self.assertEqual(payload["counts"]["off_disk_total"], 1)
         self.assertEqual(payload["off_disk"][0]["id"], 1)
-        self.assertEqual(beets.check_mbids_calls, [["missing-mbid"]])
+        self.assertEqual(payload["off_disk"][0]["resolution"], {
+            "kind": "missing",
+        })
 
 class TestCmdYoutubeRescue(unittest.TestCase):
     """``pipeline-cli youtube-rescue`` wraps
