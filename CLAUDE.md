@@ -118,20 +118,9 @@ SQL
 
 ## Repository layout
 
-```
-cratedigger.py    — Main loop + thin wrappers; delegates to lib/
-album_source.py   — AlbumRecord, DatabaseSource abstraction
-web/              — Web UI (server.py, routes/, mb.py, discogs.py, js/)
-lib/              — Pipeline modules (quality/ package = pure decisions, split by concern; pipeline_db.py = PG CRUD + advisory locks)
-harness/          — beets_harness.py (JSON protocol), import_one.py
-migrations/       — Versioned SQL (NNN_name.sql), run by lib/migrator.py
-scripts/          — pipeline_cli/ (operator CLI package, split by command family) + dev/ops scripts
-tests/            — shared infra in fakes.py + helpers.py
-nix/              — package.nix, beets.nix, shell.nix, module.nix, VM check
-examples/         — sample consumer + mirror NixOS configs
-docs/             — subsystem docs; docs/solutions/ = compounding lessons (grep when debugging)
-.claude/rules/    — shared rules (Claude auto-loads; Codex reads as directed below)
-```
+`ls` shows the tree. The two non-obvious directories: `docs/solutions/` holds
+compounding lessons (grep it when debugging), and `.claude/rules/` holds the
+shared rules (Claude auto-loads them; Codex reads as directed below).
 
 `lib/config.py`/`lib/context.py` hold the typed `CratediggerConfig`/`CratediggerContext` — never construct a partial config; always `CratediggerConfig.from_ini()`.
 
@@ -170,13 +159,11 @@ Push cratedigger (GitHub) → `nix flake update cratedigger-src` on doc1 → sig
 
 ## Database migrations
 
-Schema lives in `migrations/NNN_name.sql`; the migrate oneshot runs them on every switch. `cratedigger-web` and other long-running workers `requires` the migrate unit and start after it; `cratedigger` and `cratedigger-unfindable` are timer-driven (`restartIfChanged = false`) so they only `wants`+`after` it — a `requires` edge would let the migrate unit's every-deploy restart SIGTERM a mid-flight cycle — and instead gate on schema currency themselves at startup (`lib/migrator.py::assert_schema_current`). Add a numbered SQL file — no manual psql, **never** edit a shipped migration, **never** add DDL inside `PipelineDB` methods. Full workflow in `.claude/rules/deploy.md`.
+Schema lives in `migrations/NNN_name.sql`; the migrate oneshot runs them on every switch. Add a numbered SQL file — no manual psql, **never** edit a shipped migration, **never** add DDL inside `PipelineDB` methods. The unit-ordering contract (why `cratedigger`/`cratedigger-unfindable` only `wants`+`after` the migrate unit and gate on `assert_schema_current` instead) and the full workflow are in `.claude/rules/deploy.md` § "Database migrations".
 
 ## Running tests
 
-Choose validation timing and depth during development using engineering
-judgment based on the change, current evidence, and concrete risk. Always use
-`nix-shell --run` for Python:
+Always use `nix-shell --run` for Python:
 
 ```bash
 bash scripts/test.sh tests.test_X                       # explicit target + adjacent/ambient gates
@@ -185,41 +172,16 @@ nix-shell --run "python3 -m unittest tests.test_X -v"    # isolated test debuggi
 nix-shell --run "bash scripts/run_tests.sh"              # exhaustive suite
 ```
 
-Use `scripts/test.sh` for normal development validation. It adds the selected
-test's deterministic/generated sibling, tests adjacent to changed production
-surfaces, every repository audit and ratchet, JavaScript checks, both Pyright
-contracts, Ruff, and Vulture to one failure bundle. Use direct `unittest` only
-to debug an isolated failure, not as local convergence evidence. Exit code 2
-with no phase output at all means a changed shared `tests/**.py` module has no
-mapping in `scripts/targeted_test_selection.py` — map it there (or record it
-in `SHARED_MODULES_WITHOUT_COVERAGE` if it genuinely has no consuming test —
-`tests/test_negative_coverage_audit.py` mechanically enforces that no module
-under `tests/` imports it),
-not a failure in your change.
+`scripts/test.sh` is normal development validation; direct `unittest` is for
+debugging an isolated failure, never local convergence evidence; the `check`
+skill owns the one receipt-backed canonical-suite confirmation before
+independent-review handoff.
 
-Direct runs are development feedback; before independent-review handoff, use
-the `check` skill on the converged, clean, committed tree for the one
-receipt-backed canonical-suite confirmation. Reuse that receipt before push if
-the reviewed commit remains unchanged. The complete operational contract —
-suite bundle, specialized evidence, generated/fuzz testing, no-skips policy,
-and hooks — is in `.claude/rules/code-quality.md` § "Test execution, evidence,
-and hooks".
-
-**The shared host's test RAM root is a fixed-size tmpfs with no other admission
-control, so every `run_suite` invocation admits one at a time** (issue #1111):
-an advisory lock, stale-scratch reaping, and a headroom precondition all run
-before any phase. This covers BOTH the canonical suite AND `scripts/test.sh`
-targeted runs — `scripts/run_targeted_tests.py` calls the identical
-`run_suite` with no override, so it shares the same lock (#1111's own
-incident record includes a `scripts/test.sh` collision; excluding them would
-leave that case unprotected). Only the `nix-shell` shellHook entry level is
-excluded, since gating it would also serialize interactive dev shells that
-never call `run_suite`. A second concurrent `run_suite` call waits, bounded,
-instead of colliding with the first one's roughly a dozen ephemeral
-PostgreSQL clusters. Full mechanism — holder
-identity, the shellHook's deferral via `CRATEDIGGER_SUITE_OWNS_HEADROOM`, the
-collapsed `test RAM root exhausted` failure entry, and stated residuals — is
-in `.claude/rules/code-quality.md` § "Test execution, evidence, and hooks".
+The complete operational contract — selection rules and the exit-code-2 refusal,
+suite bundle, the `check` receipt, the shared-tmpfs admission lock (#1111),
+specialized evidence, generated/fuzz testing, no-skips policy, and hooks — is in
+`.claude/rules/code-quality.md` § "Test execution, evidence, and hooks", which
+is always loaded alongside this file. Do not restate it here.
 
 ## Shared AI surfaces
 
@@ -272,7 +234,7 @@ Codex consumes its generated adapter. Always use HTTPS (HTTP times out).
 
 ## Hunting production bugs — generated-first (the house method)
 
-**Production bugs are hunted with generated tests, not log-trawling.** Write down the invariant the symptom violates, probe the cheapest suspicious seam with real production functions, then build a generated harness (`tests/test_*_generated.py`) that drives the REAL code path over generated worlds and let Hypothesis find + shrink the reproduction — RED → fix → GREEN in one PR, with the shrunk world pinned forever. Test runners, selectors, fixtures, audits, and other test infrastructure are deterministic-only; never schedule generated tests of the test machinery. Proven on #550: a live bug static analysis and disk forensics could not reproduce fell to this method in one session. Full workflow: `.claude/rules/code-quality.md` § "Production Bug Hunting — Generated-First" + `docs/generated-testing.md`.
+**Production bugs are hunted with generated tests, not log-trawling** — write the invariant down, drive the REAL code path over generated worlds, let Hypothesis find and shrink the reproduction, ship RED → fix → GREEN in one PR with the shrunk world pinned forever. Test infrastructure is deterministic-only. Proven on #550. Full workflow: `.claude/rules/code-quality.md` § "Production Bug Hunting — Generated-First" + `docs/generated-testing.md`.
 
 For quality-decision bugs the simulator is the tool within the method: `pipeline-cli show / quality / debug-download / search-plan show / query` are the diagnostic entry points; add the failing scenario to the album test set and verify against real albums in the live DB. Command reference + triage signals in `docs/debugging-cli.md`.
 
