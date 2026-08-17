@@ -63,6 +63,51 @@ def make_should_resume():
     return json.dumps({"type": "should_resume", "path": "/test/path"})
 
 
+def make_coverage_choose_match_msg(
+    release_id: str,
+    *,
+    mapped_paths: list[str],
+    extra_paths: list[str],
+    data_source: str = "Discogs",
+) -> str:
+    items = [{"path": path} for path in [
+        "01 Space Oddity.flac",
+        "02 Unwashed And Somewhat Slightly Dazed.flac",
+        "03 Don't Sit Down.flac",
+    ]]
+    mapping = [
+        {"item": {"path": path}, "track": {"title": path}}
+        for path in mapped_paths
+    ]
+    return json.dumps({
+        "type": "choose_match",
+        "task_id": 0,
+        "path": "/test/path",
+        "item_count": len(items),
+        "items": items,
+        "candidates": [{
+            "index": 0,
+            "distance": 0.01,
+            "artist": "David Bowie",
+            "album": "David Bowie",
+            "album_id": release_id,
+            "data_source": data_source,
+            "track_count": len(mapping),
+            "mapping": mapping,
+            "extra_items": [{"path": path} for path in extra_paths],
+        }],
+    })
+
+
+def make_validation_proc(message: str) -> MagicMock:
+    proc = MagicMock()
+    proc.stdout = iter([message + "\n", make_session_end() + "\n"])
+    proc.stdin = MagicMock()
+    proc.wait.return_value = 0
+    proc.stderr.read.return_value = ""
+    return proc
+
+
 class TestBeetsValidate(unittest.TestCase):
     """Test beets_validate() function with mocked subprocess.
 
@@ -76,6 +121,90 @@ class TestBeetsValidate(unittest.TestCase):
     """
 
     HARNESS = "/fake/harness.sh"
+
+    @patch("lib.beets.sp.Popen")
+    def test_discogs_bowie_retries_flat_subtracks_for_complete_mapping(
+        self,
+        mock_popen,
+    ):
+        release_id = "2823685"
+        default = make_validation_proc(make_coverage_choose_match_msg(
+            release_id,
+            mapped_paths=[
+                "01 Space Oddity.flac",
+                "02 Unwashed And Somewhat Slightly Dazed.flac",
+            ],
+            extra_paths=["03 Don't Sit Down.flac"],
+        ))
+        expanded = make_validation_proc(make_coverage_choose_match_msg(
+            release_id,
+            mapped_paths=[
+                "01 Space Oddity.flac",
+                "02 Unwashed And Somewhat Slightly Dazed.flac",
+                "03 Don't Sit Down.flac",
+            ],
+            extra_paths=[],
+        ))
+        mock_popen.side_effect = [default, expanded]
+
+        result = beets_validate(self.HARNESS, "/test/album", release_id, 0.15)
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.scenario, "strong_match")
+        self.assertEqual(len(result.candidates[0].mapping), 3)
+        self.assertEqual(mock_popen.call_count, 2)
+        second_cmd = mock_popen.call_args_list[1].args[0]
+        self.assertIn("--preserve-discogs-flat-subtracks", second_cmd)
+
+    @patch("lib.beets.sp.Popen")
+    def test_force_distance_override_cannot_bypass_incomplete_mapping(
+        self,
+        mock_popen,
+    ):
+        release_id = "2823685"
+        default = make_validation_proc(make_coverage_choose_match_msg(
+            release_id,
+            mapped_paths=[
+                "01 Space Oddity.flac",
+                "02 Unwashed And Somewhat Slightly Dazed.flac",
+            ],
+            extra_paths=["03 Don't Sit Down.flac"],
+        ))
+        still_incomplete = make_validation_proc(make_coverage_choose_match_msg(
+            release_id,
+            mapped_paths=[
+                "01 Space Oddity.flac",
+                "02 Unwashed And Somewhat Slightly Dazed.flac",
+            ],
+            extra_paths=["03 Don't Sit Down.flac"],
+        ))
+        mock_popen.side_effect = [default, still_incomplete]
+
+        result = beets_validate(self.HARNESS, "/test/album", release_id, 999.0)
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.scenario, "unmapped_audio")
+        self.assertIn("Don't Sit Down", result.detail or "")
+
+    @patch("lib.beets.sp.Popen")
+    def test_non_discogs_incomplete_mapping_fails_without_retry(self, mock_popen):
+        release_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        proc = make_validation_proc(make_coverage_choose_match_msg(
+            release_id,
+            mapped_paths=[
+                "01 Space Oddity.flac",
+                "02 Unwashed And Somewhat Slightly Dazed.flac",
+            ],
+            extra_paths=["03 Don't Sit Down.flac"],
+            data_source="MusicBrainz",
+        ))
+        mock_popen.return_value = proc
+
+        result = beets_validate(self.HARNESS, "/test/album", release_id, 0.15)
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.scenario, "unmapped_audio")
+        self.assertEqual(mock_popen.call_count, 1)
 
     @patch("lib.beets.sp.Popen")
     def test_good_match(self, mock_popen):

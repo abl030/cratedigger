@@ -193,16 +193,10 @@ def _guard_force_import_audio_manifest(
         return None
 
     if manifest:
-        if expected_count is not None and len(manifest) != expected_count:
-            if len(manifest) > expected_count:
-                return extra(
-                    "Origin validation manifest has "
-                    f"{len(manifest)} audio files but the request expects "
-                    f"{expected_count}; refusing force import")
-            return incomplete(
-                "Origin validation manifest has "
-                f"{len(manifest)} audio files but the request expects "
-                f"{expected_count}; source is missing audio")
+        # The validation manifest is physical-file authority. Discogs may
+        # describe multiple indexed components that legitimately occupy one
+        # complete composite file, so request metadata count is not comparable
+        # here. Keep it only as the no-manifest fallback below (#1183).
         check = check_audio_manifest(failed_path, manifest)
         if check.ok:
             return None

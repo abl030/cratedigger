@@ -11,9 +11,11 @@ from typing import Final
 
 import msgspec
 
+from lib.beets_candidate_coverage import candidate_audio_coverage
 from lib.quality import (
     CandidateSummary,
     ChooseMatchMessage,
+    HarnessItem,
     HarnessSessionEvidence,
     ValidationResult,
 )
@@ -151,6 +153,8 @@ def apply_candidate_scenario(
     result: ValidationResult,
     candidate: CandidateSummary,
     distance_threshold: float,
+    *,
+    admitted_items: list[HarnessItem] | None = None,
 ) -> None:
     """Turn ONE matched candidate into the result's exact-release scenario.
 
@@ -169,11 +173,22 @@ def apply_candidate_scenario(
     result.mbid_found = True
     result.target_mbid = candidate.mbid
     result.distance = candidate.distance
+    if admitted_items is None:
+        admitted_items = msgspec.convert(result.items, type=list[HarnessItem])
     n_extra = len(candidate.extra_tracks)
     if n_extra > 0:
         result.valid = False
         result.scenario = "extra_tracks"
         result.detail = f"MB has {n_extra} more tracks than local files"
+    elif not (
+        coverage := candidate_audio_coverage(admitted_items, candidate)
+    ).complete:
+        result.valid = False
+        result.scenario = "unmapped_audio"
+        result.detail = (
+            "candidate mapping would discard admitted audio: "
+            f"{coverage.detail()}"
+        )
     elif candidate.distance <= distance_threshold:
         result.valid = True
         result.scenario = "strong_match"
@@ -184,11 +199,13 @@ def apply_candidate_scenario(
         result.detail = f"distance={candidate.distance}"
 
 
-def beets_validate(
+def _beets_validate_once(
     harness_path: str,
     album_path: str,
     mb_release_id: str,
     distance_threshold: float = 0.15,
+    *,
+    preserve_discogs_flat_subtracks: bool = False,
 ) -> ValidationResult:
     """Dry-run beets import with specific MBID. Returns ValidationResult.
 
@@ -211,8 +228,10 @@ def beets_validate(
     The last two carry ``harness_session`` evidence. Callers rely on the
     invariant and must not invent a placeholder scenario of their own.
     """
-    cmd = [harness_path, "--pretend", "--noincremental",
-           "--search-id", mb_release_id, album_path]
+    cmd = [harness_path, "--pretend", "--noincremental"]
+    if preserve_discogs_flat_subtracks:
+        cmd.append("--preserve-discogs-flat-subtracks")
+    cmd.extend(["--search-id", mb_release_id, album_path])
     result = ValidationResult(target_mbid=mb_release_id)
 
     logger.info(f"BEETS_VALIDATE: path={album_path}, target_mbid={mb_release_id}, "
@@ -318,7 +337,10 @@ def beets_validate(
                 for cand in cm.candidates:
                     if cand.mbid == mb_release_id:
                         apply_candidate_scenario(
-                            result, cand, distance_threshold,
+                            result,
+                            cand,
+                            distance_threshold,
+                            admitted_items=list(cm.items),
                         )
                         break
                 if not result.mbid_found:
@@ -354,6 +376,10 @@ def beets_validate(
             proc.wait(timeout=10)
         except sp.TimeoutExpired:
             proc.kill()
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
 
     if stderr_out:
         # Log the full stderr — truncating loses the actual exception line
@@ -372,3 +398,46 @@ def beets_validate(
 
     logger.info(f"BEETS_VALIDATE: result valid={result.valid}, scenario={result.scenario}")
     return result
+
+
+def beets_validate(
+    harness_path: str,
+    album_path: str,
+    mb_release_id: str,
+    distance_threshold: float = 0.15,
+) -> ValidationResult:
+    """Validate one exact release, preserving split Discogs audio if needed.
+
+    The default Beets representation remains authoritative when it covers the
+    admitted manifest. Only a Discogs target whose candidate would discard a
+    local item earns one second, still-observational harness pass that keeps
+    flat indexed subtracks separate. The second result is final: distance and
+    every coverage rule are evaluated again, including for force imports.
+    """
+
+    result = _beets_validate_once(
+        harness_path,
+        album_path,
+        mb_release_id,
+        distance_threshold,
+    )
+    if result.scenario != "unmapped_audio":
+        return result
+    target = next(
+        (candidate for candidate in result.candidates if candidate.is_target),
+        None,
+    )
+    if target is None or target.data_source.casefold() != "discogs":
+        return result
+    logger.info(
+        "BEETS_VALIDATE: retrying Discogs target %s with flat indexed "
+        "subtracks preserved after incomplete default mapping",
+        mb_release_id,
+    )
+    return _beets_validate_once(
+        harness_path,
+        album_path,
+        mb_release_id,
+        distance_threshold,
+        preserve_discogs_flat_subtracks=True,
+    )

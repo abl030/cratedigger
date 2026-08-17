@@ -45,6 +45,7 @@ on anything spelled but unclassified.
 | scenario | producer | denylist | artifact destination | worklist visible | cleanup-lane admission | requeue |
 |---|---|---|---|---|---|---|
 | `extra_tracks` | `lib/beets.py:175` (`choose_match` handler) | yes | `wrong_matches/` (curated move — see "The curated move's actual residue behavior (B1)" below) | yes | **yes** (allowlist) | yes → `wanted` |
+| `unmapped_audio` | `lib/beets.py::apply_candidate_scenario` (selected candidate does not cover every admitted local audio path exactly once, after the one Discogs flat-subtrack retry when applicable) | yes | `wrong_matches/` (curated) | yes | no — a manifest-integrity failure is not a pressing-match cleanup authorization | yes → `wanted` |
 | `high_distance` | `lib/beets.py:183` | yes | `wrong_matches/` (curated) | yes | **yes** (allowlist) | yes → `wanted` |
 | `mbid_not_found` | `lib/beets.py:325` | yes | `wrong_matches/` (curated) | yes | **yes** (allowlist) | yes → `wanted` |
 | `no_choose_match` | `lib/beets.py:124` (`NO_CHOOSE_MATCH_SCENARIO`) | yes | `wrong_matches/` (curated) | yes | **yes** (allowlist) | yes → `wanted` |
@@ -240,7 +241,7 @@ consumption. Because the reducer is only ever reached for the
 **cleanup-lane-admission allowlist** (`rejection_scenario_is_delete_eligible`
 — `extra_tracks` / `high_distance` / `mbid_not_found` / `no_choose_match`,
 D6), every OTHER worklist-visible scenario in the events table above —
-`untracked_audio`, `validation_error`, `request_missing_mbid`,
+`unmapped_audio`, `untracked_audio`, `validation_error`, `request_missing_mbid`,
 `request_missing_request_id`, `incomplete_fileset`, `unverifiable_source` —
 never gets a `wrong_match_triage` block, past or present. This was always
 true; issue #1077 widens which of those rows are worklist-visible in the

@@ -9,6 +9,8 @@ from lib.dispatch import (
     DispatchOutcome,
     dispatch_import_from_db,
 )
+from lib.dispatch.manifest_guard import _guard_force_import_audio_manifest
+from lib.dispatch.types import ImportAttemptResult
 from lib.grab_list import DownloadFile
 from lib.import_execution import ExecutionCancelled
 from lib.import_manifest import (
@@ -478,7 +480,13 @@ class TestForceImportManifestGuard(unittest.TestCase):
         # Operator's folder choice, not the peer's fault — never denylist.
         self.assertEqual(len(db.denylist), 0)
 
-    def test_force_import_rejects_origin_manifest_with_extra_items(self):
+    def test_force_import_trusts_exact_origin_manifest_over_metadata_count(self):
+        """One physical composite may represent multiple Discogs components.
+
+        The validation-time audio manifest is the file authority. Request
+        metadata counts logical release components and therefore must remain
+        only the no-manifest fallback.
+        """
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
@@ -501,24 +509,16 @@ class TestForceImportManifestGuard(unittest.TestCase):
                     ],
                 },
             )
-            job_id = self._claimed_job(db, root, download_log_id=log_id)
-
-            outcome = dispatch_import_from_db(
+            outcome = _guard_force_import_audio_manifest(
                 cast(Any, db),
                 request_id=42,
                 failed_path=root,
-                import_job_id=job_id,
                 download_log_id=log_id,
+                source_username=None,
+                attempt_result=ImportAttemptResult(None),
             )
 
-        self._persist_deferred_terminal(db, outcome)
-        self.assertFalse(outcome.success)
-        self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
-        self.assertIn("manifest has 2 audio files", outcome.message)
-        self.assertEqual(db.request(42)["status"], "unsearchable")
-        outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
-        self.assertIn(("rejected", "untracked_audio"), outcomes)
-        self.assertEqual(len(db.denylist), 0)
+        self.assertIsNone(outcome)
 
     def test_force_import_without_origin_manifest_rejects_track_count_mismatch(self):
         db = FakePipelineDB()

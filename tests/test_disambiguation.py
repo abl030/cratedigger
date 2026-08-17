@@ -7,6 +7,8 @@ Covers:
 """
 
 import json
+import os
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -35,6 +37,158 @@ def _make_harness_proc(messages: list[dict]) -> MagicMock:
 
 TARGET_MBID = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
 OTHER_MBID = "cccccccc-4444-5555-6666-dddddddddddd"
+
+
+def _coverage_message(
+    *,
+    mapped_paths: list[str],
+    extra_paths: list[str],
+    distance: float = 0.01,
+    data_source: str = "Discogs",
+) -> dict:
+    admitted = ["A1.flac", "A2.1.flac", "A2.2.flac"]
+    return {
+        "type": "choose_match",
+        "task_id": 0,
+        "path": "/tmp/test",
+        "item_count": len(admitted),
+        "items": [{"path": path} for path in admitted],
+        "candidates": [{
+            "album_id": "2823685",
+            "distance": distance,
+            "artist": "David Bowie",
+            "album": "David Bowie",
+            "data_source": data_source,
+            "mapping": [
+                {"item": {"path": path}, "track": {"title": path}}
+                for path in mapped_paths
+            ],
+            "extra_items": [{"path": path} for path in extra_paths],
+        }],
+    }
+
+
+class TestRunImportAudioCoverage(unittest.TestCase):
+    @patch("harness.import_one.select.select", return_value=([99], [], []))
+    @patch("harness.import_one.subprocess.Popen")
+    def test_action_inventory_catches_audio_beets_did_not_admit(
+        self,
+        mock_popen,
+        _mock_select,
+    ):
+        from harness import import_one
+
+        with tempfile.TemporaryDirectory() as album:
+            for name in ("A1.flac", "A2.flac"):
+                open(os.path.join(album, name), "wb").close()
+            message = _coverage_message(
+                mapped_paths=["A1.flac"],
+                extra_paths=[],
+                data_source="MusicBrainz",
+            )
+            message["path"] = album
+            message["item_count"] = 1
+            message["items"] = [{"path": "A1.flac"}]
+            proc = _make_harness_proc([message])
+            mock_popen.return_value = proc
+
+            outcome = import_one.run_import(album, "2823685")
+
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertIn("A2.flac", outcome.failure_reason or "")
+        writes = "".join(call.args[0] for call in proc.stdin.write.call_args_list)
+        self.assertNotIn('"apply"', writes)
+
+    @patch("harness.import_one.select.select", return_value=([99], [], []))
+    @patch("harness.import_one.subprocess.Popen")
+    def test_bowie_retries_then_applies_complete_flat_mapping(
+        self,
+        mock_popen,
+        _mock_select,
+    ):
+        from harness import import_one
+
+        default = _make_harness_proc([_coverage_message(
+            mapped_paths=["A1.flac", "A2.1.flac"],
+            extra_paths=["A2.2.flac"],
+        )])
+        expanded = _make_harness_proc([_coverage_message(
+            mapped_paths=["A1.flac", "A2.1.flac", "A2.2.flac"],
+            extra_paths=[],
+        )])
+        mock_popen.side_effect = [default, expanded]
+
+        outcome = import_one.run_import("/tmp/test", "2823685")
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(outcome.admitted_audio_count, 3)
+        self.assertEqual(outcome.applied_audio_count, 3)
+        self.assertIn(
+            '"skip"',
+            "".join(call.args[0] for call in default.stdin.write.call_args_list),
+        )
+        self.assertIn(
+            '"apply"',
+            "".join(call.args[0] for call in expanded.stdin.write.call_args_list),
+        )
+        second_cmd = mock_popen.call_args_list[1].args[0]
+        self.assertIn("--preserve-discogs-flat-subtracks", second_cmd)
+
+    @patch("harness.import_one.select.select", return_value=([99], [], []))
+    @patch("harness.import_one.subprocess.Popen")
+    def test_force_distance_override_still_rejects_discarded_audio(
+        self,
+        mock_popen,
+        _mock_select,
+    ):
+        from harness import import_one
+
+        default = _make_harness_proc([_coverage_message(
+            mapped_paths=["A1.flac", "A2.1.flac"],
+            extra_paths=["A2.2.flac"],
+            distance=900.0,
+        )])
+        expanded = _make_harness_proc([_coverage_message(
+            mapped_paths=["A1.flac", "A2.1.flac"],
+            extra_paths=["A2.2.flac"],
+            distance=900.0,
+        )])
+        mock_popen.side_effect = [default, expanded]
+
+        with patch.object(import_one, "max_distance", 999.0):
+            outcome = import_one.run_import("/tmp/test", "2823685")
+
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertIn("discard admitted audio", outcome.failure_reason or "")
+        writes = "".join(
+            call.args[0]
+            for proc in (default, expanded)
+            for call in proc.stdin.write.call_args_list
+        )
+        self.assertNotIn('"apply"', writes)
+
+    @patch("harness.import_one.select.select", return_value=([99], [], []))
+    @patch("harness.import_one.subprocess.Popen")
+    def test_non_discogs_incomplete_mapping_never_retries_or_applies(
+        self,
+        mock_popen,
+        _mock_select,
+    ):
+        from harness import import_one
+
+        proc = _make_harness_proc([_coverage_message(
+            mapped_paths=["A1.flac", "A2.1.flac"],
+            extra_paths=["A2.2.flac"],
+            data_source="MusicBrainz",
+        )])
+        mock_popen.return_value = proc
+
+        outcome = import_one.run_import("/tmp/test", "2823685")
+
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertEqual(mock_popen.call_count, 1)
+        writes = "".join(call.args[0] for call in proc.stdin.write.call_args_list)
+        self.assertNotIn('"apply"', writes)
 
 
 class TestRunImportDuplicateGuard(unittest.TestCase):

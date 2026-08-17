@@ -76,6 +76,7 @@ _PRODUCER_FILES: tuple[str, ...] = (
 # manifest guard's own two reject labels, distinct producer from the
 # automation lane's ``untracked_audio``) share the same routing.
 VISIBLE_NOT_DELETE_ELIGIBLE: frozenset[str] = frozenset({
+    "unmapped_audio",
     "untracked_audio",
     "request_missing_mbid",
     "request_missing_request_id",

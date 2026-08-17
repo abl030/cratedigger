@@ -194,6 +194,13 @@ class PostflightInfo(msgspec.Struct):
     """
     beets_id: int | None = None
     track_count: int | None = None
+    # Issue #1183 accounting receipt. ``admitted`` and ``applied`` come from
+    # the exact typed choose_match that crossed the mutation boundary;
+    # ``catalogued`` is the surviving exact-release item count read back from
+    # Beets. New successful imports require all three to agree.
+    admitted_audio_count: int | None = None
+    applied_audio_count: int | None = None
+    catalogued_audio_count: int | None = None
     imported_path: str | None = None
     bad_extensions: list[str] = []  # files with non-audio extensions
     # Legacy issue #127 / #132 fields. New imports do not run post-import

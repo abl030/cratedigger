@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import TYPE_CHECKING, Protocol, TypeGuard
 
+import msgspec
 from beets import library
 
 if TYPE_CHECKING:
@@ -20,6 +21,110 @@ if TYPE_CHECKING:
 
 class BeetsCapabilityError(RuntimeError):
     """The loaded Beets does not expose one complete supported capability set."""
+
+
+_discogs_original_subtrack_position: Callable[..., object] | None = None
+_discogs_original_merge_subtracks: Callable[..., object] | None = None
+
+
+def _discogs_duration_seconds(value: object) -> int | None:
+    """Parse Discogs' bounded ``M:SS`` duration without version internals."""
+
+    if not isinstance(value, str):
+        return None
+    pieces = value.split(":")
+    if len(pieces) != 2:
+        return None
+    try:
+        minutes, seconds = (int(piece) for piece in pieces)
+    except ValueError:
+        return None
+    if minutes < 0 or not 0 <= seconds < 60:
+        return None
+    return minutes * 60 + seconds
+
+
+def configure_discogs_subtracks(*, preserve_flat: bool) -> None:
+    """Install Cratedigger's narrow Discogs physical-track compatibility.
+
+    Upstream intentionally coalesces consecutive flat ``A2.1``/``A2.2``
+    entries because they can describe one physical track. Its merge retains
+    only the first component's duration, however, so a genuine one-file
+    composite is matched against an incomplete program. Always sum complete
+    component durations.
+
+    When a default candidate would leave admitted audio unmapped, controllers
+    rerun one safe observational pass with ``preserve_flat=True``. That mode
+    keeps flat indexed entries separate while leaving nested ``IndexTrack``
+    handling on Beets' original path. The patch is process-local and is
+    installed before plugin loading in the harness child.
+    """
+
+    module = _required_module("beetsplug.discogs")
+    plugin_class = _class(module, "DiscogsPlugin")
+    if plugin_class is None:
+        raise BeetsCapabilityError("Beets Discogs plugin lacks DiscogsPlugin")
+
+    global _discogs_original_subtrack_position
+    global _discogs_original_merge_subtracks
+    if _discogs_original_subtrack_position is None:
+        original = getattr(plugin_class, "_subtrack_position", None)
+        if not callable(original):
+            raise BeetsCapabilityError(
+                "Beets Discogs plugin lacks callable _subtrack_position"
+            )
+        _discogs_original_subtrack_position = original
+    if _discogs_original_merge_subtracks is None:
+        original = getattr(plugin_class, "_merge_subtracks", None)
+        if not callable(original):
+            raise BeetsCapabilityError(
+                "Beets Discogs plugin lacks callable _merge_subtracks"
+            )
+        _discogs_original_merge_subtracks = original
+
+    original_merge = _discogs_original_merge_subtracks
+
+    def merge_complete_program(
+        subtracks: list[dict[str, object]],
+    ) -> dict[str, object]:
+        merged_value = original_merge(subtracks)
+        if not isinstance(merged_value, dict):
+            raise BeetsCapabilityError(
+                "Beets Discogs _merge_subtracks returned a non-dict"
+            )
+        merged = msgspec.convert(merged_value, type=dict[str, object])
+        seconds = [
+            _discogs_duration_seconds(track.get("duration"))
+            for track in subtracks
+        ]
+        if len(seconds) > 1 and all(value is not None for value in seconds):
+            total = sum(value for value in seconds if value is not None)
+            merged["duration"] = f"{total // 60}:{total % 60:02d}"
+        return merged
+
+    type.__setattr__(
+        plugin_class,
+        "_merge_subtracks",
+        staticmethod(merge_complete_program),
+    )
+    if preserve_flat:
+        def keep_flat_entries_separate(
+            _self: object,
+            _track: dict[str, object],
+        ) -> None:
+            return None
+
+        type.__setattr__(
+            plugin_class,
+            "_subtrack_position",
+            keep_flat_entries_separate,
+        )
+    else:
+        type.__setattr__(
+            plugin_class,
+            "_subtrack_position",
+            _discogs_original_subtrack_position,
+        )
 
 
 class _ConfigValue(Protocol):
