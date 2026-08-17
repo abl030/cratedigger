@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import unittest
 
-from beetsplug.discogs import DiscogsPlugin
-from beetsplug.discogs.types import AudioTrack, IndexTrack, Track
+from beets import config
+from beetsplug.discogs import ArtistState, DiscogsPlugin
+from beetsplug.discogs.types import Artist, AudioTrack, IndexTrack, Track
 
-from harness.beets_compat import configure_discogs_subtracks
+from harness.beets_compat import (
+    configure_discogs_subtracks,
+    discogs_indexed_component_count,
+)
 
 
 def _audio(position: str, title: str, duration: str) -> AudioTrack:
@@ -50,6 +54,39 @@ class TestDiscogsSubtrackCompatibility(unittest.TestCase):
         )
         self.assertEqual(tracks[1]["duration"], "6:48")
         self.assertEqual(plugin.get_track_length(tracks[1]["duration"]), 408)
+        configured_plugin = object.__new__(DiscogsPlugin)
+        configured_plugin.config = config["discogs"]
+        configured_plugin.config.add({
+            "index_tracks": False,
+            "strip_disambiguation": True,
+            "featured_string": "Feat.",
+            "anv": {
+                "artist_credit": True,
+                "artist": False,
+                "album_artist": False,
+            },
+        })
+        artist: Artist = {
+            "id": "1",
+            "name": "David Bowie",
+            "anv": "",
+            "join": "",
+            "role": "",
+            "tracks": "",
+            "resource_url": "",
+        }
+        artist_info = ArtistState.from_config(
+            configured_plugin.config,
+            [artist],
+        )
+        track_infos = configured_plugin.get_tracks(
+            _BOWIE_TRACKLIST,
+            artist_info,
+        )
+        self.assertEqual(
+            discogs_indexed_component_count(track_infos[1]),
+            2,
+        )
 
     def test_flat_preservation_keeps_bowie_a2_components_separate(self) -> None:
         configure_discogs_subtracks(preserve_flat=True)

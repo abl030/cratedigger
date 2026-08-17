@@ -1477,6 +1477,7 @@ def _run_import_once(
                             and bool(
                                 coverage.unmapped_paths
                                 or coverage.reported_extra_paths
+                                or coverage.incomplete_composite_paths
                             )
                         )
                         return RunImportOutcome(

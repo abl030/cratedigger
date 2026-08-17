@@ -15,6 +15,8 @@ from dataclasses import dataclass
 
 from lib.quality import CandidateSummary, HarnessItem
 
+_COMPOSITE_DURATION_TOLERANCE_SECONDS = 10.0
+
 
 def _normalized_path(path: str) -> str:
     return os.path.normpath(path).replace("\\", os.sep)
@@ -30,6 +32,7 @@ class CandidateAudioCoverage:
     duplicate_mapped_paths: tuple[str, ...]
     reported_extra_paths: tuple[str, ...]
     unmatched_track_count: int
+    incomplete_composite_paths: tuple[str, ...]
 
     @property
     def complete(self) -> bool:
@@ -40,6 +43,7 @@ class CandidateAudioCoverage:
             self.duplicate_mapped_paths,
             self.reported_extra_paths,
             self.unmatched_track_count,
+            self.incomplete_composite_paths,
         ))
 
     def detail(self) -> str:
@@ -71,6 +75,11 @@ class CandidateAudioCoverage:
             parts.append(
                 f"beets extra_tracks: {self.unmatched_track_count}"
             )
+        if self.incomplete_composite_paths:
+            parts.append(
+                "incomplete indexed composite audio: "
+                + ", ".join(self.incomplete_composite_paths)
+            )
         return "; ".join(parts)
 
 
@@ -100,6 +109,18 @@ def candidate_audio_coverage(
     reported_extra = tuple(sorted({
         _normalized_path(item.path) for item in candidate.extra_items
     }))
+    incomplete_composites = tuple(sorted(
+        (
+            f"{_normalized_path(mapping.item.path)} "
+            f"(local={mapping.item.length:.1f}s, "
+            f"indexed_program={mapping.track.length:.1f}s)"
+        )
+        for mapping in candidate.mapping
+        if mapping.track.discogs_indexed_component_count > 1
+        and mapping.track.length > 0
+        and mapping.item.length + _COMPOSITE_DURATION_TOLERANCE_SECONDS
+        < mapping.track.length
+    ))
     return CandidateAudioCoverage(
         admitted_count=len(admitted),
         mapped_count=len(mapped),
@@ -109,4 +130,5 @@ def candidate_audio_coverage(
         duplicate_mapped_paths=_duplicates(mapped),
         reported_extra_paths=reported_extra,
         unmatched_track_count=len(candidate.extra_tracks),
+        incomplete_composite_paths=incomplete_composites,
     )

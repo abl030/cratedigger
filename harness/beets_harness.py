@@ -153,6 +153,9 @@ def _serialize_track_info(ti: TrackInfo) -> dict[str, object]:
         "track_alt": getattr(ti, "track_alt", None),
         "disctitle": getattr(ti, "disctitle", None),
         "data_source": getattr(ti, "data_source", None) or "",
+        "discogs_indexed_component_count": (
+            beets_compat.discogs_indexed_component_count(ti)
+        ),
     }
 
 

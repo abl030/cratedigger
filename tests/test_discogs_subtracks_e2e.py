@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from harness import import_one
-from lib.beets import beets_validate
+from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD, beets_validate
 from lib.beets_db import BeetsDB
 from lib.quality import AUDIO_EXTENSIONS_DOTTED, QualityRankConfig
 
@@ -70,10 +70,12 @@ def _install():
     def _album():
         from beets.autotag.hooks import AlbumInfo, TrackInfo
         from beetsplug.discogs import DiscogsPlugin
+        from harness.beets_compat import register_discogs_indexed_component_count
 
+        duration_by_position = {{"A2.1": "0:06", "A2.2": "0:12"}}
         raw = [
             {{"type_": "track", "position": position, "title": title,
-             "duration": "0:01"}}
+             "duration": duration_by_position.get(position, "0:01")}}
             for position, title in {list(_TRACKS)!r}
         ]
         plugin = object.__new__(DiscogsPlugin)
@@ -81,7 +83,7 @@ def _install():
         tracks = []
         for index, track in enumerate(physical, start=1):
             position = track["position"]
-            tracks.append(TrackInfo(
+            track_info = TrackInfo(
                 title=track["title"], artist="David Bowie",
                 track_id=f"{_RELEASE_ID}-{{position}}",
                 release_track_id=f"{_RELEASE_ID}-{{position}}",
@@ -89,7 +91,15 @@ def _install():
                 medium_total=len(physical),
                 length=plugin.get_track_length(track["duration"]),
                 track_alt=position, data_source="Discogs",
-            ))
+            )
+            register_discogs_indexed_component_count(
+                track_info,
+                track.get(
+                    "_cratedigger_discogs_indexed_component_count",
+                    1,
+                ),
+            )
+            tracks.append(track_info)
         return AlbumInfo(
             album="David Bowie", artist="David Bowie",
             album_id={int(_RELEASE_ID)}, tracks=tracks,
@@ -174,7 +184,12 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
                 _write_audio(
                     source / f"{index:02d} - {filename_title}.flac",
                     title,
-                    duration=2 if position == "A2" else 1,
+                    duration=(
+                        18 if position == "A2"
+                        else 6 if position == "A2.1"
+                        else 12 if position == "A2.2"
+                        else 1
+                    ),
                 )
 
             database = library / "library.db"
@@ -203,6 +218,8 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
                 "BEETSDIR": str(beets_dir),
                 "PYTHONPATH": (
                     str(shim)
+                    + os.pathsep
+                    + str(Path(__file__).resolve().parent.parent)
                     + os.pathsep
                     + os.environ.get("PYTHONPATH", "")
                 ),
@@ -263,6 +280,96 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
 
     def test_complete_composite_remains_one_physical_file(self) -> None:
         self._exercise_manifest(split_subtracks=False)
+
+    def test_incomplete_composite_fails_closed_even_with_force_distance(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="cratedigger-discogs-subtracks-force-e2e-",
+        ) as raw_root:
+            root = Path(raw_root)
+            source = root / "source"
+            library = root / "library"
+            beets_dir = root / "beets"
+            shim = root / "shim"
+            receipt = root / "candidate-receipt.json"
+            source.mkdir()
+            library.mkdir()
+            beets_dir.mkdir()
+
+            local_tracks = list(_TRACKS)
+            local_tracks[1:3] = [(
+                "A2",
+                "Unwashed And Somewhat Slightly Dazed",
+            )]
+            for index, (position, title) in enumerate(local_tracks, start=1):
+                _write_audio(
+                    source / f"{index:02d} - {title}.flac",
+                    title,
+                    duration=6 if position == "A2" else 1,
+                )
+
+            database = library / "library.db"
+            (beets_dir / "config.yaml").write_text(
+                "\n".join((
+                    f"library: {database}",
+                    f"directory: {library}",
+                    "plugins: []",
+                    "import:",
+                    "  autotag: yes",
+                    "  copy: no",
+                    "  move: yes",
+                    "  write: yes",
+                    "  incremental: no",
+                    "paths:",
+                    "  default: $albumartist/$album/$track $title",
+                    "",
+                )),
+                encoding="utf-8",
+            )
+            _write_discogs_candidate_shim(shim, receipt)
+            env = {
+                "BEETSDIR": str(beets_dir),
+                "PYTHONPATH": (
+                    str(shim)
+                    + os.pathsep
+                    + str(Path(__file__).resolve().parent.parent)
+                    + os.pathsep
+                    + os.environ.get("PYTHONPATH", "")
+                ),
+            }
+
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(
+                    import_one,
+                    "max_distance",
+                    FORCE_IMPORT_DISTANCE_THRESHOLD,
+                ),
+            ):
+                validation = beets_validate(
+                    os.path.join(
+                        os.path.dirname(import_one.__file__),
+                        "run_beets_harness.sh",
+                    ),
+                    str(source),
+                    _RELEASE_ID,
+                    FORCE_IMPORT_DISTANCE_THRESHOLD,
+                )
+                self.assertFalse(validation.valid, validation.to_json())
+                outcome = import_one.run_import(
+                    str(source),
+                    _RELEASE_ID,
+                    beets_config_dir=str(beets_dir),
+                    beets_python=os.environ.get("CRATEDIGGER_BEETS_PYTHON"),
+                    beets_library_db_path=str(database),
+                    beets_library_root=str(library),
+                )
+
+            self.assertEqual(outcome.exit_code, 2)
+            self.assertIn("candidate mapping would discard", outcome.failure_reason or "")
+            self.assertEqual(len(_audio_files(source)), 9)
+            self.assertEqual(_audio_files(library), [])
 
 
 if __name__ == "__main__":

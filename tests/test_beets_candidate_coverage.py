@@ -23,8 +23,8 @@ from lib.quality import (
 )
 
 
-def _item(path: str) -> HarnessItem:
-    return HarnessItem(path=path)
+def _item(path: str, *, length: float = 0.0) -> HarnessItem:
+    return HarnessItem(path=path, length=length)
 
 
 def _track(title: str) -> HarnessTrackInfo:
@@ -36,12 +36,31 @@ def _candidate(
     mapped_paths: list[str],
     extra_items: list[str] | None = None,
     extra_tracks: list[str] | None = None,
+    composite_path: str | None = None,
+    composite_length: float = 0.0,
+    component_count: int = 1,
 ) -> CandidateSummary:
     return CandidateSummary(
         mbid="2823685",
         data_source="Discogs",
         mapping=[
-            TrackMapping(item=_item(path), track=_track(f"track-{idx}"))
+            TrackMapping(
+                item=_item(
+                    path,
+                    length=(
+                        composite_length if path == composite_path else 0.0
+                    ),
+                ),
+                track=HarnessTrackInfo(
+                    title=f"track-{idx}",
+                    length=(
+                        408.0 if path == composite_path else 0.0
+                    ),
+                    discogs_indexed_component_count=(
+                        component_count if path == composite_path else 1
+                    ),
+                ),
+            )
             for idx, path in enumerate(mapped_paths, start=1)
         ],
         extra_items=[_item(path) for path in (extra_items or [])],
@@ -103,6 +122,39 @@ class TestCandidateAudioCoverage(unittest.TestCase):
 
         self.assertFalse(coverage.complete)
         self.assertEqual(coverage.unmatched_track_count, 1)
+
+    def test_force_cannot_treat_first_component_as_complete_composite(self) -> None:
+        path = "02 Unwashed And Somewhat Slightly Dazed.flac"
+        coverage = candidate_audio_coverage(
+            [_item(path, length=369.0)],
+            _candidate(
+                mapped_paths=[path],
+                composite_path=path,
+                composite_length=369.0,
+                component_count=2,
+            ),
+        )
+
+        self.assertFalse(coverage.complete)
+        self.assertEqual(
+            coverage.incomplete_composite_paths,
+            (f"{path} (local=369.0s, indexed_program=408.0s)",),
+        )
+        self.assertIn("incomplete indexed composite audio", coverage.detail())
+
+    def test_complete_composite_program_is_covered(self) -> None:
+        path = "02 Unwashed And Somewhat Slightly Dazed + Don't Sit Down.flac"
+        coverage = candidate_audio_coverage(
+            [_item(path, length=407.0)],
+            _candidate(
+                mapped_paths=[path],
+                composite_path=path,
+                composite_length=407.0,
+                component_count=2,
+            ),
+        )
+
+        self.assertTrue(coverage.complete)
 
 
 _PATHS = tuple(f"track-{idx}.flac" for idx in range(6))
