@@ -1548,7 +1548,7 @@ def _classify(
     # ``lib.failure_presentation`` owns the wording (issue #868).
     if entry.outcome == "measurement_failed":
         return _Classification(
-            "Measurement failed", "badge-failed", "#a33",
+            "Measurement failed", "badge-warn", "#a86f20",
             failure.verdict or "Measurement failed",
         )
 
@@ -1571,7 +1571,7 @@ def _classify(
             or _quality_verdict_from_import_result(entry)
             or "Import error"
         )
-        return _Classification("Failed", "badge-failed", "#a33", verdict)
+        return _Classification("Failed", "badge-warn", "#a86f20", verdict)
 
     # --- Force import ---
     if entry.outcome == "force_import":

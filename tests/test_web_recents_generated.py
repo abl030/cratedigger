@@ -29,6 +29,7 @@ from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
 from web.download_history_view import (
     _project_current_library_have,
     _project_linked_import_evidence,
+    build_recents_download_log_rows,
 )
 
 REJECT_SCENARIOS = (
@@ -403,7 +404,7 @@ def _raw_download_log_row(
     read seam receives BEFORE ``_overlay_evidence_onto_download_log_row``
     adjudicates them.
     """
-    entry = _entry(outcome="success", beets_scenario="strong_match", **columns)
+    entry = _entry(beets_scenario="strong_match", **columns)
     return {
         **entry.to_json_dict(),
         "verified_lossless_classifier": None,
@@ -1585,6 +1586,39 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         )
         self.assertEqual(items[0]["materialized_min_bitrate"], materialized_min)
         self.assertEqual(items[0]["materialized_avg_bitrate"], materialized_avg)
+
+class TestGeneratedBrokenWorldHistoryStyle(unittest.TestCase):
+    @given(
+        outcome=st.sampled_from((
+            "measurement_failed",
+            "failed",
+            "have_analysis_error",
+            "timeout",
+            "rejected",
+            "user_offline",
+            "curator_ban",
+        )),
+    )
+    @example(outcome="measurement_failed")
+    @example(outcome="have_analysis_error")
+    @example(outcome="timeout")
+    @example(outcome="curator_ban")
+    def test_broken_world_history_style_is_distinct_from_rejection(
+        self,
+        outcome: str,
+    ) -> None:
+        row = _raw_download_log_row(
+            lineage=None,
+            classifier=None,
+            outcome=outcome,
+        )
+        result = build_recents_download_log_rows([row])[0]
+        if outcome in ("measurement_failed", "failed", "have_analysis_error"):
+            self.assertEqual(result["badge_class"], "badge-warn")
+            self.assertEqual(result["border_color"], "#a86f20")
+        else:
+            self.assertIn(result["badge_class"], ("badge-failed", "badge-rejected"))
+            self.assertEqual(result["border_color"], "#a33")
 
 
 if __name__ == "__main__":
