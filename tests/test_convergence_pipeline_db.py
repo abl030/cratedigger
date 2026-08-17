@@ -22,6 +22,81 @@ from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 
 
 @requires_postgres
+class TestConvergenceIndexesExistInTheRealSchema(unittest.TestCase):
+    """#1186. Migration 071's three partial indexes keep convergence reads off
+    a multi-million-row ``download_log``.
+
+    Until now nothing checked they EXIST. ``test_convergence_query_shape``
+    pins their names in the migration's frozen text, which proves what the
+    file once said, not what the database has — a triage mutant commenting
+    out the whole ``CREATE INDEX idx_download_log_convergence_candidates``
+    statement left both that text pin and every behavioural convergence test
+    green. A later migration dropping one would be equally invisible, and
+    text-level pinning cannot see it at all: only the live catalog can.
+    """
+
+    EXPECTED_INDEXES = (
+        "idx_download_log_candidate_evidence_attribution",
+        "idx_import_jobs_candidate_evidence_attribution",
+        "idx_download_log_convergence_candidates",
+    )
+
+    def test_every_convergence_index_is_present_and_partial(self) -> None:
+        db = make_db()
+        try:
+            cur = db._execute(
+                "SELECT indexname, indexdef FROM pg_indexes "
+                "WHERE indexname = ANY(%s)",
+                (list(self.EXPECTED_INDEXES),),
+            )
+            definitions = {
+                str(row["indexname"]): str(row["indexdef"]) for row in cur.fetchall()
+            }
+        finally:
+            db.close()
+
+        self.assertEqual(
+            sorted(definitions), sorted(self.EXPECTED_INDEXES),
+            "a convergence index is missing from the live schema",
+        )
+        for name, definition in definitions.items():
+            # Partial is the whole point: a full index over download_log would
+            # be the cost these exist to avoid.
+            self.assertIn("WHERE", definition, name)
+
+    def test_the_candidate_index_keeps_its_selective_predicate(self) -> None:
+        """The predicate is what excludes cross-walked, non-Soulseek,
+        non-exact and high-distance rows. An index of the same name with a
+        widened predicate would satisfy a name-only check while quietly
+        reintroducing the scan."""
+        db = make_db()
+        try:
+            row = db._execute(
+                "SELECT indexdef FROM pg_indexes WHERE indexname = %s",
+                ("idx_download_log_convergence_candidates",),
+            ).fetchone()
+        finally:
+            db.close()
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        definition = str(row["indexdef"])
+        # Written against the catalog's OWN rendering, not the migration's
+        # text: PostgreSQL normalises the predicate (adding casts and
+        # parentheses), so `beets_distance <= 0.15` in the source file comes
+        # back as `beets_distance <= (0.15)::double precision`. Asserting the
+        # source spelling here would be the same mistake this class exists to
+        # correct — believing the file over the database.
+        for clause in (
+            "candidate_evidence_direct IS TRUE",
+            "source = 'slskd'::text",
+            "beets_scenario = 'strong_match'::text",
+            "beets_distance <= (0.15)::double precision",
+        ):
+            self.assertIn(clause, definition)
+
+
+@requires_postgres
 class TestConvergencePipelineDB(unittest.TestCase):
     def setUp(self) -> None:
         self.db = make_db()
