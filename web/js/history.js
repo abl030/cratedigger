@@ -143,10 +143,9 @@ function withWas(value, wasValue) {
  * min(metric, spectral class) rather than the named statistic. True for
  * both sides of the `rank` branch and `spectral_tiebreak` (issue #813
  * Finding 1: the same-rank tiebreak also decides on clamped values when
- * they differ), and for the CANDIDATE ONLY on `spectral_candidate_bound`
- * (issue #911 — that branch bounds the candidate by its own class while
- * the HAVE keeps its real raw metric). Labelling any of them with the raw
- * metric name would lie, which is what the basis exists to prevent.
+ * they differ), and for the class-owning side of the one-sided spectral
+ * branches. A decision-grade class follows its encode whether it is the
+ * candidate or the HAVE. Labelling it with the raw metric name would lie.
  * @param {Object} basis - comparison_basis dict from the API
  * @param {'new'|'existing'} side
  * @returns {boolean}
@@ -154,7 +153,8 @@ function withWas(value, wasValue) {
 function basisUsesClampedValue(basis, side) {
   if (!basis || !basis.spectral_clamped) return false;
   if (basis.branch === 'rank' || basis.branch === 'spectral_tiebreak') return true;
-  return basis.branch === 'spectral_candidate_bound' && side === 'new';
+  return (basis.branch === 'spectral_candidate_bound' && side === 'new')
+    || (basis.branch === 'spectral_existing_bound' && side === 'existing');
 }
 
 /**
@@ -228,6 +228,14 @@ function avgMinPhrase(avg, median, min) {
 }
 
 function comparisonMetricPhrase(avg, median, min, basis, side) {
+  // A one-sided spectral class belongs to its encode, regardless of whether
+  // that encode is IN or HAVE. Checking raw VBR stats first would relabel
+  // that class as its inflated average.
+  if ((basis?.branch === 'spectral_candidate_bound'
+       || basis?.branch === 'spectral_existing_bound')
+      && basisUsesClampedValue(basis, side)) {
+    return basisValuePhrase(basis, side);
+  }
   if (avg != null || median != null) return avgMinPhrase(avg, median, min);
   if (!basis) return avgMinPhrase(null, null, min);
 

@@ -1078,8 +1078,8 @@ COMPARISON_BASIS_BRANCHES: frozenset[str] = frozenset({
     "cross_family_same_rank",      # same rank, different codec family
     "label_contract_same_rank",    # same rank, explicit label is authoritative
     "spectral_tiebreak",           # same rank, differing clamped spectral values decide
-    "spectral_candidate_bound",    # transcode candidate bounded by its own class
-                                   # against a known-clean HAVE; rank alone decides
+    "spectral_candidate_bound",    # candidate class vs known-clean HAVE raw metric
+    "spectral_existing_bound",     # known-clean candidate raw metric vs HAVE class
     "metric_tiebreak",             # same rank, raw metric delta vs tolerance
     "metric_missing",              # same rank, a side has no classifiable value
     "transcode_rank_regression",   # transcode-grade candidate regresses real rank
@@ -1097,4 +1097,13 @@ grades must leave the container bitrate untouched — a genuine lo-fi file
 (e.g. Mountain Goats boombox) can produce a low spectral cliff estimate that
 is NOT a quality signal and would falsely drag the import comparison down.
 See issue #61 for the motivating incident.
+"""
+
+
+SPECTRAL_AFFIRMATIVE_GRADES: frozenset[str] = frozenset({"genuine", "marginal"})
+"""Spectral grades that positively establish a non-transcode encode.
+
+These are deliberately narrower than "not transcode": an absent, failed, or
+unknown measurement cannot license a one-sided spectral comparison against a
+classed encode.
 """

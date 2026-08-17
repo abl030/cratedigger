@@ -4004,11 +4004,10 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         while the candidate is bounded by its OWN class 160 — so the genuine
         copy is kept and the search continues.
 
-        Since #1145 both of those land in the single MP3 table's
-        ``acceptable`` band (128-191), where 172 used to be ``good`` on the
-        VBR table. The bound therefore ties instead of losing, and the
-        comparison reads ``equivalent`` rather than ``worse``. The DECIDED
-        outcome is unchanged and is what this test is really about: the
+        Since #1157 the two commensurate effective values use the ordinary
+        same-family comparison. The 12k gap is outside tolerance, so the
+        classed candidate is now explicitly ``worse`` rather than only tied
+        by the coarse rank band. The decided outcome is unchanged: the
         transcode still does not displace the genuine copy.
 
         The must-still-work direction is
@@ -4034,7 +4033,7 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         )
 
         basis = compare_quality(new, existing, CFG)
-        self.assertEqual(basis.verdict, "equivalent")
+        self.assertEqual(basis.verdict, "worse")
         self.assertEqual(basis.branch, "spectral_candidate_bound")
         self.assertEqual(basis.new_value_kbps, 160)
         # The consequence, not the intermediate verdict: the transcode is

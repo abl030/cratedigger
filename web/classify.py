@@ -1741,17 +1741,14 @@ def _verdict_from_basis(basis: QualityComparisonBasis) -> str:
     # Which SIDE's displayed value is a clamped min(metric, spectral class)
     # rather than the named statistic. spectral_tiebreak (issue #813
     # Finding 1) clamps both sides exactly like the rank branch, so the
-    # metric label would lie on both. spectral_candidate_bound (issue #911)
-    # is the asymmetric one: only the CANDIDATE is bounded by its own class
-    # — the HAVE keeps its real raw metric — so a single flag would print
-    # the candidate's class under the HAVE's metric name, or the HAVE's
-    # honest average as an unlabelled "~". Per-side is the only truthful
-    # shape here.
+    # metric label would lie on both. The one-sided spectral branches keep
+    # their side-specific provenance: a decision-grade class belongs to its
+    # encode whether that encode is the candidate or the HAVE.
     new_clamped = basis.spectral_clamped and basis.branch in (
         "rank", "spectral_tiebreak", "spectral_candidate_bound",
     )
     existing_clamped = basis.spectral_clamped and basis.branch in (
-        "rank", "spectral_tiebreak",
+        "rank", "spectral_tiebreak", "spectral_existing_bound",
     )
     new_val = _basis_value_phrase(
         basis.new_metric, basis.new_value_kbps, new_clamped)
@@ -1782,12 +1779,21 @@ def _verdict_from_basis(basis: QualityComparisonBasis) -> str:
         core = f"{new_fmt} vs {ex_fmt} — label contract, both {basis.new_rank}"
     elif basis.branch == "metric_missing":
         core = "bitrate unmeasurable"
-    elif basis.branch == "spectral_candidate_bound":
-        # The candidate's own spectral class, against the HAVE's real
-        # metric. Naming both ranks would be redundant (equivalent means
-        # they matched), but the two sides are measured differently and the
-        # phrase has to keep saying so.
-        core = f"{new_fmt} {new_val} vs {ex_val} — both {basis.new_rank}"
+    elif basis.branch in (
+        "spectral_candidate_bound", "spectral_existing_bound",
+    ):
+        # One decision-grade class against the other encode's known-clean raw
+        # metric. A tolerance can make adjacent ranks equivalent, so collapse
+        # them to one ``both`` label only when they genuinely match.
+        tol = (f" (within {basis.tolerance_kbps}k)"
+               if basis.tolerance_kbps is not None else "")
+        if basis.new_rank == basis.existing_rank:
+            core = f"{new_fmt} {new_val} vs {ex_val} — both {basis.new_rank}{tol}"
+        else:
+            tolerance = (f" — within {basis.tolerance_kbps}k"
+                         if basis.tolerance_kbps is not None else "")
+            core = (f"{new_fmt} {new_val} ({basis.new_rank}) vs {ex_val} "
+                    f"({basis.existing_rank}){tolerance}")
     else:  # metric_tiebreak / rank_within_tolerance
         # Both are "these two bitrates are inside the configured window", so
         # they read identically; ``rank_within_tolerance`` (issue #1145) is

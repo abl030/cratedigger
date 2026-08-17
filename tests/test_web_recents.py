@@ -2503,7 +2503,7 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         self.assertNotIn("235", c.verdict)
 
     def test_spectral_candidate_bound_clamps_only_the_candidate(self):
-        """Issue #911's bound is asymmetric — the rendering must be too.
+        """The candidate-side one-class branch preserves its provenance.
 
         The candidate is bounded by its OWN spectral class (160, from a
         16.5 kHz cliff) while the HAVE keeps its real raw metric. The
@@ -2537,8 +2537,101 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         self.assertNotIn("avg 320k", verdict)
         self.assertNotIn("~160k vs ~160k", verdict)
 
+    def test_spectral_existing_bound_clamps_only_the_existing_copy(self):
+        """Issue #1157: the same class stays clamped after installation.
+
+        The raw VBR 275k remains evidence, but the comparison and renderer
+        must show the installed encode's 192k decision-grade class. Its
+        known-clean candidate at 190k is inside tolerance, not a replacement.
+        """
+        basis = self._basis_dict(
+            {"min_bitrate_kbps": 190, "avg_bitrate_kbps": 190,
+             "format": "MP3", "is_cbr": False, "spectral_grade": "genuine",
+             "spectral_subject": "source", "spectral_provenance": "measured"},
+            {"min_bitrate_kbps": 275, "avg_bitrate_kbps": 275,
+             "format": "MP3", "is_cbr": False,
+             "spectral_grade": "likely_transcode", "spectral_bitrate_kbps": 192,
+             "spectral_subject": "installed", "spectral_provenance": "measured"},
+        )
+        self.assertEqual(basis["branch"], "spectral_existing_bound")
+        self.assertEqual(basis["verdict"], "equivalent")
+        from web.classify import _verdict_from_basis
+        verdict = _verdict_from_basis(
+            msgspec.convert(basis, type=QualityComparisonBasis))
+        self.assertEqual(
+            verdict,
+            "Equivalent: MP3 avg 190k (acceptable) vs ~192k (good) — within 5k",
+        )
+        self.assertNotIn("avg 275k", verdict)
+        self.assertNotIn("avg 192k", verdict)
+
+    def test_spectral_bounds_with_adjacent_ranks_render_each_side(self):
+        """Issue #1157's 192k/190k tie tells the full truth in both roles.
+
+        The real comparison deliberately treats the adjacent ``good`` and
+        ``acceptable`` ranks as equivalent inside its 5k tolerance.  That is
+        not permission for the renderer to claim that both sides share either
+        rank: the persisted basis retains one rank per effective value.
+        """
+        from web.classify import _verdict_from_basis
+
+        cases = (
+            (
+                "candidate-bound class",
+                {
+                    "min_bitrate_kbps": 275, "avg_bitrate_kbps": 275,
+                    "format": "MP3", "is_cbr": False,
+                    "spectral_grade": "likely_transcode",
+                    "spectral_bitrate_kbps": 192,
+                    "spectral_subject": "source",
+                    "spectral_provenance": "measured",
+                },
+                {
+                    "min_bitrate_kbps": 190, "avg_bitrate_kbps": 190,
+                    "format": "MP3", "is_cbr": False,
+                    "spectral_grade": "genuine",
+                    "spectral_subject": "installed",
+                    "spectral_provenance": "measured",
+                },
+                "spectral_candidate_bound",
+                "Equivalent: MP3 ~192k (good) vs avg 190k (acceptable) — within 5k",
+            ),
+            (
+                "existing-bound class",
+                {
+                    "min_bitrate_kbps": 190, "avg_bitrate_kbps": 190,
+                    "format": "MP3", "is_cbr": False,
+                    "spectral_grade": "genuine",
+                    "spectral_subject": "source",
+                    "spectral_provenance": "measured",
+                },
+                {
+                    "min_bitrate_kbps": 275, "avg_bitrate_kbps": 275,
+                    "format": "MP3", "is_cbr": False,
+                    "spectral_grade": "likely_transcode",
+                    "spectral_bitrate_kbps": 192,
+                    "spectral_subject": "installed",
+                    "spectral_provenance": "measured",
+                },
+                "spectral_existing_bound",
+                "Equivalent: MP3 avg 190k (acceptable) vs ~192k (good) — within 5k",
+            ),
+        )
+
+        for description, new_kw, existing_kw, branch, expected in cases:
+            with self.subTest(description):
+                basis = self._basis_dict(new_kw, existing_kw)
+                self.assertEqual(basis["branch"], branch)
+                self.assertEqual(basis["verdict"], "equivalent")
+                self.assertEqual(basis["tolerance_kbps"], 5)
+                self.assertEqual(
+                    _verdict_from_basis(
+                        msgspec.convert(basis, type=QualityComparisonBasis)),
+                    expected,
+                )
+
     def test_spectral_candidate_bound_upgrade_reaches_the_log_renderer(self):
-        """The same asymmetry through classify_log_entry's success path.
+        """The candidate-side branch through classify_log_entry's success path.
 
         A bounded candidate whose class (256) really is a rank above the
         genuine HAVE imports, so this is the reachable entry shape where a

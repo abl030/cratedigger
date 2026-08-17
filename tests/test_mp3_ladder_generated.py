@@ -472,6 +472,50 @@ class TestComparisonSymmetryGenerated(unittest.TestCase):
         self.assertEqual(violations, [], f"{left!r} vs {right!r}")
 
 
+class TestOneSidedSpectralComparisonGenerated(unittest.TestCase):
+    """A decision-grade class follows its MP3 encode across a side swap."""
+
+    @given(
+        class_is_new=st.booleans(),
+        spectral_class=st.sampled_from(_PRODUCIBLE_CLASSES),
+        delta=st.integers(min_value=-5, max_value=5),
+    )
+    @example(class_is_new=True, spectral_class=192, delta=-2)
+    @example(class_is_new=False, spectral_class=192, delta=-2)
+    def test_same_family_tolerance_is_role_neutral(
+        self,
+        class_is_new: bool,
+        spectral_class: int,
+        delta: int,
+    ) -> None:
+        classed = _spectral_measurement(
+            "MP3", 320, spectral_class, "likely_transcode")
+        clean = AudioQualityMeasurement(
+            min_bitrate_kbps=spectral_class + delta,
+            avg_bitrate_kbps=spectral_class + delta,
+            median_bitrate_kbps=spectral_class + delta,
+            format="MP3",
+            spectral_grade="genuine",
+        )
+        new, existing = (classed, clean) if class_is_new else (clean, classed)
+        forward = compare_quality(new, existing, CFG)
+        reverse = compare_quality(existing, new, CFG)
+
+        self.assertEqual(forward.verdict, "equivalent", repr(forward))
+        self.assertEqual(reverse.verdict, "equivalent", repr(reverse))
+        self.assertEqual(
+            forward.branch,
+            "spectral_candidate_bound" if class_is_new
+            else "spectral_existing_bound",
+        )
+        violations = comparison_symmetry_violations(
+            forward=forward.verdict,
+            reverse=reverse.verdict,
+            identical_audio=False,
+        )
+        self.assertEqual(violations, [], f"{new!r} vs {existing!r}")
+
+
 def _spectral_measurement(
     label: str, raw: int, spectral_class: int, grade: str,
 ) -> AudioQualityMeasurement:
@@ -748,7 +792,8 @@ class TestMp3LadderCheckersTripOnViolations(unittest.TestCase):
     def test_tiebreak_checker_is_silent_on_every_other_branch(self) -> None:
         """Must-still-work: the checker judges its own branch and no other."""
         for branch in ("rank", "metric_tiebreak", "label_contract_same_rank",
-                       "cross_family_same_rank", "spectral_candidate_bound"):
+                       "cross_family_same_rank", "spectral_candidate_bound",
+                       "spectral_existing_bound"):
             with self.subTest(branch=branch):
                 self.assertEqual(
                     spectral_tiebreak_violations(

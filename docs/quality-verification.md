@@ -1128,13 +1128,15 @@ under `docs/research/`.
 
 Every `compare_quality()` call returns a `QualityComparisonBasis`
 (`lib/quality/evidence_types.py`): the verdict plus which branch fired
-(`rank`, `spectral_tiebreak`, `spectral_candidate_bound`, `metric_tiebreak`,
+(`rank`, `spectral_tiebreak`, `spectral_candidate_bound`,
+`spectral_existing_bound`, `metric_tiebreak`,
 `label_contract_same_rank`,
 `cross_family_same_rank`, `lossless_same_rank`, `metric_missing`,
 `transcode_rank_regression`), the per-side ranks, the values that decided
 that branch (spectral-clamped values on a clamped rank comparison or
-`spectral_tiebreak`, the candidate's own class against the HAVE's raw
-metric on `spectral_candidate_bound`, raw configured-metric values on
+`spectral_tiebreak`, or one decision-grade class against the other encode's
+known-clean raw metric on `spectral_candidate_bound` /
+`spectral_existing_bound`; raw configured-metric values on
 `metric_tiebreak`), and
 the per-side statistic actually classified (`min`/`avg`/`median` — the
 configured metric falls back to min when unmeasured). An explicit codec
@@ -1175,19 +1177,19 @@ albums are not clamped at all and their raw metrics decide. This resolves
 an inconsistency rather than adding one: the two mechanisms disagreed about
 the grade before.
 
-**One asymmetric bound exists: `spectral_candidate_bound`** (issue #911,
-request 8902 Iron & Wine *Fall 2007*). When a candidate carries a
-decision-grade transcode class and the current copy is KNOWN non-transcode
-with no class of its own, the candidate is bounded by its own class and the
-verdict is decided on **rank alone** — imported only when the bounded rank
-is strictly better than the current raw rank. Without it, a fake CBR 320
-whose measured cliff puts its real content at 160 manufactures a
-`transparent` rank, displaces a genuine 160, and is displaced back forever.
-Five gates keep it narrow (accusation-capable decision-grade candidate;
-bare measured codec label, not a contract; HAVE with an affirmative
-non-transcode grade; HAVE with no class; and the bound must actually bind).
-The branch clamps only the CANDIDATE's displayed value — the HAVE keeps its
-real measured statistic, and the renderers are per-side accordingly.
+**One-class comparison is role-neutral** (issue #911's *Fall 2007* guard,
+and #1157). When exactly one encode has an accusation-capable decision-grade
+class and the other is a `genuine`/`marginal` bare measurement in the same codec
+family, the class follows the encode in either role. The effective class and
+raw metric pass through the ordinary rank and same-family tolerance rules,
+so 192 versus 190 is equivalent in both directions while 256 versus 172
+still imports. The narrow gates withhold for an unmeasured raw side, explicit
+labels, inadmissible codecs, cross-family comparisons, any raw grade other
+than `genuine`/`marginal`, or an unbound class. `spectral_candidate_bound` and
+`spectral_existing_bound` record which side supplied the class, allowing the
+renderers to show only that side as a spectral-clamped value. This preserves
+the *Fall 2007* fixed point: fake CBR 320/class 160 versus genuine 160 is
+equivalent in both directions, so neither copy re-displaces the other.
 
 ### Stage 1 / Stage 2 parity (issue #813 Finding 1)
 
@@ -1306,9 +1308,11 @@ Note for anyone re-reading the older scoping: `cross_family_same_rank`
 returning `"equivalent"` unconditionally is a fact about **that branch**,
 not about cross-codec worlds. That branch only fires at the *same* rank; a
 cross-codec pair at different ranks takes `rank`, and
-`spectral_candidate_bound` and `metric_tiebreak` are reachable cross-codec
-too — all three can emit `"better"`. The negative is a code fact rather
-than a sample: only `cross_family_same_rank` hardcodes `"equivalent"`.
+`metric_tiebreak` is reachable cross-codec too — both can emit `"better"`.
+The one-class spectral branches are deliberately same-family only; their
+tolerance never compares different codec families. The negative is a code
+fact rather than a sample: only `cross_family_same_rank` hardcodes
+`"equivalent"`.
 Measured over a 46,286-world sweep of MP3-candidate worlds with the
 pre-PR2b Stage-1 seam simulated, 1,142 worlds flipped Stage 1 to
 `"reject"` and 326 of those carried a Stage-2 `"better"`.
