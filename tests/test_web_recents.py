@@ -750,7 +750,7 @@ class TestClassifyBadge(unittest.TestCase):
         """Raw enum outcomes must not leak underscores into the badge."""
         result = classify_log_entry(_entry(outcome="measurement_failed"))
         self.assertEqual(result.badge, "Measurement failed")
-        self.assertEqual(result.badge_class, "badge-failed")
+        self.assertEqual(result.badge_class, "badge-warn")
 
     def test_new_import(self):
         """First-time import, nothing on disk before."""
@@ -944,6 +944,7 @@ class TestClassifyBadge(unittest.TestCase):
             outcome="curator_ban", soulseek_username="H@rco"))
         self.assertEqual(result.badge, "Bad rip")
         self.assertEqual(result.badge_class, "badge-rejected")
+        self.assertEqual(result.border_color, "#a33")
         self.assertIn("H@rco", result.verdict)
         self.assertIn("Marked bad rip", result.verdict)
         # The summary keeps its trailing peer attribution: this verdict
@@ -956,12 +957,13 @@ class TestClassifyBadge(unittest.TestCase):
         result = classify_log_entry(_entry(
             outcome="curator_ban", soulseek_username=None))
         self.assertEqual(result.badge, "Bad rip")
+        self.assertEqual(result.border_color, "#a33")
         self.assertEqual(result.verdict, "Marked bad rip")
 
     def test_failed(self):
         result = classify_log_entry(_entry(outcome="failed", beets_scenario="exception"))
         self.assertEqual(result.badge, "Failed")
-        self.assertEqual(result.badge_class, "badge-failed")
+        self.assertEqual(result.badge_class, "badge-warn")
 
     def test_abandoned_auto_import_failed_row_uses_readable_error(self):
         result = classify_log_entry(_entry(
@@ -1005,6 +1007,19 @@ class TestClassifyBadge(unittest.TestCase):
 
 class TestClassifyBorderColor(unittest.TestCase):
 
+    def test_broken_world_history_uses_environment_failure_style(self):
+        """Broken operational worlds are distinct from rejected media."""
+        for outcome, badge in (
+            ("measurement_failed", "Measurement failed"),
+            ("failed", "Failed"),
+            ("have_analysis_error", "Environment failure"),
+        ):
+            with self.subTest(outcome=outcome):
+                result = classify_log_entry(_entry(outcome=outcome))
+                self.assertEqual(result.badge, badge)
+                self.assertEqual(result.badge_class, "badge-warn")
+                self.assertEqual(result.border_color, "#a86f20")
+
     def test_success_green_border(self):
         result = classify_log_entry(_entry(outcome="success"))
         self.assertIn(result.border_color, ("#3a6", "#1a4a2a"))
@@ -1012,6 +1027,12 @@ class TestClassifyBorderColor(unittest.TestCase):
     def test_rejected_red_border(self):
         result = classify_log_entry(_entry(
             outcome="rejected", beets_scenario="quality_downgrade"))
+        self.assertEqual(result.border_color, "#a33")
+
+    def test_timeout_stays_a_failed_red_history_row(self):
+        result = classify_log_entry(_entry(outcome="timeout"))
+        self.assertEqual(result.badge, "Failed")
+        self.assertEqual(result.badge_class, "badge-failed")
         self.assertEqual(result.border_color, "#a33")
 
     def test_transcode_amber_border(self):
@@ -1425,8 +1446,8 @@ class TestExceptionVerdicts(unittest.TestCase):
             beets_detail="generic measurement failure",
         ))
         self.assertEqual(result.badge, "Measurement failed")
-        self.assertEqual(result.badge_class, "badge-failed")
-        self.assertEqual(result.border_color, "#a33")
+        self.assertEqual(result.badge_class, "badge-warn")
+        self.assertEqual(result.border_color, "#a86f20")
         self.assertEqual(
             result.verdict,
             "Measurement failed: ffmpeg decode failed on track 05",

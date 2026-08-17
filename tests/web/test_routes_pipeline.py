@@ -271,7 +271,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         expected = {
             "rejected": ("Rejected", "badge-rejected", "#a33"),
             "timeout": ("Failed", "badge-failed", "#a33"),
-            "failed": ("Failed", "badge-failed", "#a33"),
+            "failed": ("Failed", "badge-warn", "#a86f20"),
             "force_import": ("Force imported", "badge-force", "#46a"),
         }
         for outcome, display in expected.items():
@@ -469,8 +469,8 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         item = next(row for row in data["log"] if row["id"] == log_id)
         self.assertEqual(item["badge"], "Measurement failed")
-        self.assertEqual(item["badge_class"], "badge-failed")
-        self.assertEqual(item["border_color"], "#a33")
+        self.assertEqual(item["badge_class"], "badge-warn")
+        self.assertEqual(item["border_color"], "#a86f20")
         self.assertEqual(item["error_message"], diagnostic)
         self.assertEqual(item["verdict"], f"Measurement failed: {diagnostic}")
         self.assertEqual(item["summary"], f"Measurement failed: {diagnostic}")
@@ -487,6 +487,25 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         )
         self.assertEqual(rejected_status, 200)
         self.assertIn(log_id, {row["id"] for row in rejected_data["log"]})
+
+    def test_pipeline_log_failed_uses_environment_failure_style(self):
+        diagnostic = "beets importer exited 1"
+        log_id = self.db.log_download(
+            100,
+            outcome="failed",
+            soulseek_username="testuser",
+            error_message=diagnostic,
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertEqual(item["badge"], "Failed")
+        self.assertEqual(item["badge_class"], "badge-warn")
+        self.assertEqual(item["border_color"], "#a86f20")
+        self.assertEqual(item["verdict"], f"Import error: {diagnostic}")
+        self.assertEqual(item["summary"], f"Import error: {diagnostic} · testuser")
 
     def test_kept_would_import_uses_complete_canonical_current_have(self):
         import web.server as srv
