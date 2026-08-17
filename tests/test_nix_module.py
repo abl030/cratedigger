@@ -26,6 +26,7 @@ failure depends on Nix option assertion evaluation.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -41,6 +42,117 @@ PACKAGE_NIX = REPO_ROOT / "nix" / "package.nix"
 BEETS_NIX = REPO_ROOT / "nix" / "beets.nix"
 SHELL_NIX = REPO_ROOT / "nix" / "shell.nix"
 MODULE_VM_NIX = REPO_ROOT / "nix" / "tests" / "module-vm.nix"
+
+
+def _strip_comment_lines(source: str) -> str:
+    """``source`` with every full-line ``#`` comment removed.
+
+    Only whole comment lines go; a trailing comment after code is left alone,
+    since the code on that line is real. Nix has no block-comment form we use
+    here, and ``nix/`` carries no shebang lines — if one ever appears inside an
+    embedded script, note that ``#!`` is stripped along with everything else.
+    """
+    return "\n".join(
+        line for line in source.splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+
+def _nix_source(path: Path) -> str:
+    """A Nix file's source with full-line comments removed.
+
+    Every source pin in this module reads through here. Issue #1172: pinning
+    against raw text means the single most likely way an attribute gets
+    disabled — commenting it out — leaves the pin green, because the attribute
+    is still present as comment text. That was confirmed with a planted mutant:
+    ``# after = optional cfg.pipelineDb.createLocally "postgresql-setup.service";``
+    left ``TestCreateLocallyContract`` passing, so the guard that keeps a
+    stranger's first boot from racing NixOS role/database provisioning could be
+    disabled with one ``#`` and nothing noticed.
+
+    #1161 fixed this shape for the migrate-unit pins by stripping comments
+    inside :func:`_attrset_block`; the whole-file pins were out of that PR's
+    scope. Stripping once at read time covers both, so a pin cannot opt out.
+    """
+    return _strip_comment_lines(path.read_text(encoding="utf-8"))
+
+
+# The only two places allowed to read a Nix file's raw source: the helper that
+# does the stripping, and the mutant fixture below, which needs raw text in
+# order to comment a line out in the first place.
+_RAW_NIX_READ_ALLOWED = frozenset({
+    "_nix_source",
+    "test_commenting_out_a_real_attribute_defeats_its_pin",
+})
+
+
+class TestSourcePinsCannotBeSatisfiedByCommentText(unittest.TestCase):
+    """#1172 item 1. Every pin in this module reads through
+    :func:`_nix_source`, so a commented-out attribute cannot satisfy one."""
+
+    def test_commenting_out_a_real_attribute_defeats_its_pin(self) -> None:
+        """The exact planted mutant from the issue, driven over the real file.
+
+        ``TestCreateLocallyContract.test_migrate_ordered_after_local_postgres_setup``
+        asserts this attribute. Commenting it out left that test green: the
+        module was equivalent to having no ordering at all, so a stranger's
+        first boot could race NixOS role/database provisioning.
+        """
+        attribute = (
+            'after = optional cfg.pipelineDb.createLocally '
+            '"postgresql-setup.service";'
+        )
+        raw = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn(f"      {attribute}", raw)
+
+        commented_out = raw.replace(f"      {attribute}", f"      # {attribute}", 1)
+        # The defect: the attribute is still there, as comment text.
+        self.assertIn(attribute, commented_out)
+        # The fix: it is not there in what the pins actually read.
+        self.assertNotIn(attribute, _strip_comment_lines(commented_out))
+
+    def test_a_trailing_comment_after_code_keeps_its_code(self) -> None:
+        """Only whole comment lines go — the code before a trailing ``#`` is
+        real and must stay pinnable."""
+        source = "NoNewPrivileges = true; # install/grep/chmod as root\n"
+        self.assertIn("NoNewPrivileges = true;", _strip_comment_lines(source))
+
+    def test_indented_comment_lines_are_stripped(self) -> None:
+        """Nix attributes are nested, so a commented-out one is almost always
+        indented rather than at column zero."""
+        self.assertEqual(_strip_comment_lines("      # stopIfChanged = false;"), "")
+
+    def test_every_nix_read_in_this_module_is_comment_stripped(self) -> None:
+        """A deliberately narrow syntactic audit: no ``<NAME>_NIX.read_text``
+        call outside the two allowed functions.
+
+        Converting the existing call sites is only worth doing if the next one
+        cannot quietly reintroduce the defect. This checks one local fact — a
+        ``read_text`` call on a module-level ``*_NIX`` constant — and infers
+        nothing about the source being read.
+        """
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        offenders: list[str] = []
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if func.name in _RAW_NIX_READ_ALLOWED:
+                continue
+            offenders.extend(
+                f"{func.name} (line {node.lineno})"
+                for node in ast.walk(func)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "read_text"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id.endswith("_NIX")
+            )
+        self.assertEqual(
+            offenders,
+            [],
+            "read Nix source through _nix_source(): a raw read lets a "
+            "commented-out attribute satisfy the pin (#1172)",
+        )
 
 
 class TestPythonPathCarriesOnlyRepoRoot(unittest.TestCase):
@@ -64,7 +176,7 @@ class TestPythonPathCarriesOnlyRepoRoot(unittest.TestCase):
     FORBIDDEN = re.compile(r'PYTHONPATH=.*\$\{src\}/(lib|web)')
 
     def test_no_wrapper_leaks_subdir(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         hits: list[tuple[int, str]] = []
         for lineno, line in enumerate(text.splitlines(), start=1):
             # Skip comments — comments are explanation, not code.
@@ -88,7 +200,7 @@ class TestPipelineCliWrapperContract(unittest.TestCase):
     """API-backed CLI commands use the module-owned Unix listener."""
 
     def _wrapper(self) -> str:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         wrapper_start = text.index('writeShellScriptBin "pipeline-cli"')
         wrapper_end = text.index('writeShellScriptBin "pipeline-migrate"')
         return text[wrapper_start:wrapper_end]
@@ -114,7 +226,7 @@ class TestDecisionDifferentialWrapperContract(unittest.TestCase):
     """The read-only differential always runs deployed source and Python."""
 
     def test_wrapper_uses_the_module_source_and_safe_python(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         start = text.index('writeShellScriptBin "decision-differential"')
         end = text.index('writeShellScriptBin "cratedigger-importer"', start)
         wrapper = text[start:end]
@@ -1448,7 +1560,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         )
 
     def test_socket_activation_and_access_group_are_explicit(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn(
             'webRuntimeDirectory = "/run/cratedigger-web";',
             text,
@@ -1472,7 +1584,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         )
 
     def test_gateway_is_exact_host_loopback_and_default_reject(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertNotIn("cfg.web.port", text)
         self.assertIn("services.nginx.virtualHosts", text)
         self.assertIn('addr = "127.0.0.1";', text)
@@ -1487,7 +1599,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         self.assertIn("limit_except GET", text)
 
     def test_gateway_reconstructs_only_reviewed_backend_headers(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn("proxy_pass_request_headers off;", text)
         self.assertIn("proxy_set_header Host ${webHostName};", text)
         self.assertIn(
@@ -1507,7 +1619,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         self.assertIn("Cross-Origin-Resource-Policy", text)
 
     def test_web_wrapper_uses_exact_canonical_https_origin(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         web_start = text.index('writeShellScriptBin "cratedigger-web"')
         web_end = text.index(
             'writeShellScriptBin "cratedigger-youtube-ingest"', web_start
@@ -1521,7 +1633,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
     def test_web_wrapper_passes_insecure_flag_only_for_explicit_mode(
         self,
     ) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         web_start = text.index('writeShellScriptBin "cratedigger-web"')
         web_end = text.index(
             'writeShellScriptBin "cratedigger-youtube-ingest"', web_start
@@ -1537,7 +1649,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
     def test_web_wrapper_passes_external_flag_only_for_external_mode(
         self,
     ) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         web_start = text.index('writeShellScriptBin "cratedigger-web"')
         web_end = text.index(
             'writeShellScriptBin "cratedigger-youtube-ingest"', web_start
@@ -1557,7 +1669,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         arm, so a descriptor can never select a policy nginx would not have
         been configured for.
         """
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         read_policy = text[
             text.index("webGatewayReadPolicy = ''") :
             text.index("webGatewayAssertPolicyUnchanged = ''")
@@ -1571,7 +1683,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         )
 
     def test_external_auth_option_is_declared_and_documented(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn("externalAuth = mkOption", text)
         options = text[
             text.index("externalAuth = mkOption") :
@@ -1583,7 +1695,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
     def test_basic_secret_is_runtime_only_and_checked_before_nginx_start(
         self,
     ) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn("basicAuthFile = mkOption", text)
         self.assertNotIn("basicAuth = ", text)
         self.assertIn(
@@ -1688,7 +1800,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
     def test_nginx_effective_identity_is_checked_before_gateway_readiness(
         self,
     ) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         identity_start = text.index(
             '"cratedigger-web-nginx-effective-identity"'
         )
@@ -1712,7 +1824,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
     def test_vm_tls_private_key_is_generated_outside_tracked_source(
         self,
     ) -> None:
-        text = MODULE_VM_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_VM_NIX)
         self.assertNotRegex(
             text,
             r"-----BEGIN (?:EC |RSA |)PRIVATE KEY-----",
@@ -1729,7 +1841,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
 
 class TestModuleVmPerformanceContract(unittest.TestCase):
     def test_guest_reads_the_nix_store_from_a_local_image(self) -> None:
-        text = MODULE_VM_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_VM_NIX)
         self.assertIn("virtualisation.useNixStoreImage = true;", text)
         self.assertIn("virtualisation.writableStore = true;", text)
 
@@ -1747,7 +1859,7 @@ class TestModuleVmPerformanceContract(unittest.TestCase):
         it, so a value change here should be a deliberate, re-verified
         decision under the real VM check, not a silent drift.
         """
-        text = MODULE_VM_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_VM_NIX)
         match = re.search(r"virtualisation\.cores\s*=\s*(\d+)\s*;", text)
         self.assertIsNotNone(match, "virtualisation.cores must be set explicitly")
         assert match is not None
@@ -1756,7 +1868,7 @@ class TestModuleVmPerformanceContract(unittest.TestCase):
 
 class TestImporterServiceContract(unittest.TestCase):
     def test_importer_wrapper_and_service_are_defined(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn('writeShellScriptBin "cratedigger-importer"', text)
         self.assertIn("${src}/scripts/importer.py", text)
         self.assertIn("systemd.services.cratedigger-importer", text)
@@ -1772,7 +1884,7 @@ class TestImporterServiceContract(unittest.TestCase):
         Launch-fence recovery handles mid-job kills at startup; leaving a worker
         dead after switch-to-configuration is worse than restarting it.
         """
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         # Find the importer service block and assert restartIfChanged=true
         # appears within it (not just somewhere in the file).
         importer_block_start = text.index("systemd.services.cratedigger-importer")
@@ -1792,7 +1904,7 @@ class TestImporterServiceContract(unittest.TestCase):
         the child actually finish before the bounded ``TimeoutStopSec``
         escalates to a cgroup-wide SIGKILL.
         """
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         importer_block_start = text.index("systemd.services.cratedigger-importer")
         importer_block_end = text.index(
             "systemd.services.cratedigger-import-preview-worker"
@@ -1807,7 +1919,7 @@ class TestImporterServiceContract(unittest.TestCase):
         requeue_stale_import_preview_jobs handles mid-measurement kills at
         startup; deploy should not leave the preview worker dead.
         """
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         preview_block_start = text.index(
             "systemd.services.cratedigger-import-preview-worker"
         )
@@ -1817,13 +1929,13 @@ class TestImporterServiceContract(unittest.TestCase):
         self.assertIn("restartIfChanged = true", preview_block)
 
     def test_services_consume_one_immutable_runtime_config(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn('configTemplate = pkgs.writeText "cratedigger-config.ini"', text)
         self.assertNotIn("renderConfigScript", text)
         self.assertNotIn("systemd.services.cratedigger-config-render", text)
 
     def test_preview_worker_wrapper_service_and_worker_count_are_defined(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn('writeShellScriptBin "cratedigger-import-preview-worker"', text)
         self.assertIn("${src}/scripts/import_preview_worker.py", text)
         self.assertIn("systemd.services.cratedigger-import-preview-worker", text)
@@ -1842,7 +1954,7 @@ class TestImporterServiceContract(unittest.TestCase):
 
 class TestSearchSchedulerConfigContract(unittest.TestCase):
     def test_page_size_preserves_capacity_for_both_cohorts(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn(
             "cfg.searchSettings.numberOfAlbumsToGrab >= 2",
             text,
@@ -1867,13 +1979,13 @@ class TestPinnedPackageSetContract(unittest.TestCase):
     """
 
     def test_module_builds_package_from_packageSet(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn("packageSet = mkOption", text)
         self.assertIn("cratedigger = cfg.packageSet.callPackage ./package.nix", text)
         self.assertNotIn("pkgs.callPackage ./package.nix", text)
 
     def test_flake_export_pins_packageSet_to_own_lock(self) -> None:
-        text = FLAKE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(FLAKE_NIX)
         self.assertIn("nixosModules.default", text)
         self.assertIn("imports = [ ./nix/module.nix ];", text)
         self.assertIn(
@@ -1885,7 +1997,7 @@ class TestPinnedPackageSetContract(unittest.TestCase):
 
     def test_moduleVm_consumes_the_wrapped_export(self) -> None:
         """The VM gate must exercise what consumers actually import."""
-        text = FLAKE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(FLAKE_NIX)
         self.assertIn("cratediggerModule = self.nixosModules.default;", text)
 
 
@@ -2047,7 +2159,7 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
         for role in ("main", "preview", "census"):
             self.assertNotIn("/srv/music", typed_units[role]["readWritePaths"], role)
             self.assertNotIn("/srv/beets", typed_units[role]["readWritePaths"], role)
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn('missingOkExternalPath = path: map (value: "-${value}")', text)
         self.assertIn(
             'BindPaths = missingOkExternalPath cfg.beets.runtime.expectedStateFile;',
@@ -2055,9 +2167,9 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
         )
 
     def test_closure_config_environment_and_removal_ratchets(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
-        package = PACKAGE_NIX.read_text(encoding="utf-8")
-        shell = SHELL_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
+        package = _nix_source(PACKAGE_NIX)
+        shell = _nix_source(SHELL_NIX)
         self.assertIn("beetsPackage = cfg.beets.runtime.package;", text)
         self.assertIn(
             "cratedigger = cfg.packageSet.callPackage ./package.nix { inherit beetsPackage; };",
@@ -2131,7 +2243,7 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
 
 class TestJellyfinNotifierConfigContract(unittest.TestCase):
     def test_library_id_is_nullable_and_only_rendered_when_configured(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         jellyfin_options = text[text.index("jellyfin = {"):]
         self.assertIn("libraryId = mkOption {", jellyfin_options)
         self.assertIn("type = types.nullOr types.nonEmptyStr;", jellyfin_options)
@@ -2148,7 +2260,7 @@ class TestCreateLocallyContract(unittest.TestCase):
     socket DSN default, migrate unit ordered after NixOS setup completes."""
 
     def test_provisioning_block(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn("services.postgresql = mkIf cfg.pipelineDb.createLocally", text)
         self.assertIn("ensureDatabases = [ cfg.user ];", text)
         self.assertIn("name = cfg.user;", text)
@@ -2156,7 +2268,7 @@ class TestCreateLocallyContract(unittest.TestCase):
         self.assertIn('lib.mkDefault "postgresql:///${cfg.user}?host=/run/postgresql"', text)
 
     def test_migrate_ordered_after_local_postgres_setup(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn(
             'after = optional cfg.pipelineDb.createLocally "postgresql-setup.service";',
             text,
@@ -2167,7 +2279,7 @@ class TestCreateLocallyContract(unittest.TestCase):
         )
 
     def test_dsn_guard_gives_actionable_error(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn("pipelineDsn =", text)
         self.assertIn("pipelineDb.createLocally = true", text)
         # No unit interpolates the raw nullable option.
@@ -2181,13 +2293,13 @@ class TestApiBaseThreading(unittest.TestCase):
     mirror-required with no public default (R13)."""
 
     def test_config_ini_renders_api_bases(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn("[MusicBrainz]", text)
         self.assertIn("api_base = ${cfg.musicbrainz.apiBase}", text)
         self.assertIn("[Discogs]", text)
 
     def test_mb_default_is_public_and_discogs_has_none(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn('default = "https://musicbrainz.org";', text)
         # discogs.apiBase: nullOr with null default — mirror-required.
         idx = text.index("discogs = {")
@@ -2203,7 +2315,7 @@ class TestApiBaseThreading(unittest.TestCase):
         themselves stay on web/server.py for a manual dev-only override,
         and a comment nearby is allowed to
         mention them by name — only the invocation argv is asserted here."""
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         web_start = text.index('writeShellScriptBin "cratedigger-web"')
         exec_start = text.index("exec ${pyRunner} ${src}/web/server.py", web_start)
         exec_end = text.index("'';", exec_start)
@@ -2212,14 +2324,14 @@ class TestApiBaseThreading(unittest.TestCase):
         self.assertNotIn("--discogs-api", exec_block)
 
     def test_api_base_does_not_derive_external_beets_config(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertNotIn("services.cratedigger.beets.config", text)
         self.assertNotIn("mbHost = lib.removePrefix", text)
 
 
 class TestOwnedRedisContract(unittest.TestCase):
     def test_cratedigger_owns_local_redis_server_by_default(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn("redis = {", text)
         self.assertIn('default = true;', text)
         self.assertIn("services.redis.servers.cratedigger", text)
@@ -2231,7 +2343,7 @@ class TestOwnedRedisContract(unittest.TestCase):
         self.assertIn('"maxmemory-policy" = "allkeys-lru"', text)
 
     def test_peer_cache_config_is_rendered(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn("[Peer Cache]", text)
         self.assertIn("redis_host = ${cfg.redis.host}", text)
         self.assertIn("redis_port = ${toString cfg.redis.port}", text)
@@ -2241,7 +2353,7 @@ class TestOwnedRedisContract(unittest.TestCase):
         self.assertIn("redis_operation_timeout_ms = ${toString cfg.peerCache.redisOperationTimeoutMs}", text)
 
     def test_pipeline_and_web_are_ordered_after_owned_redis(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn('redisServiceUnits = optional cfg.redis.enable "redis-cratedigger.service";', text)
         self.assertGreaterEqual(
             text.count("++ redisServiceUnits ++ beetsReadinessUnits"),
@@ -2250,15 +2362,15 @@ class TestOwnedRedisContract(unittest.TestCase):
         self.assertGreaterEqual(text.count("wants = redisServiceUnits;"), 1)
 
     def test_pipeline_wrapper_passes_redis_host_and_port(self) -> None:
-        text = MODULE_NIX.read_text(encoding="utf-8")
+        text = _nix_source(MODULE_NIX)
         self.assertIn('--redis-host "${cfg.redis.host}"', text)
         self.assertIn("--redis-port ${toString cfg.redis.port}", text)
 
 
 class TestStandaloneCheckerPackageIdentity(unittest.TestCase):
     def test_wrapper_requires_and_threads_the_admitted_beets_package(self) -> None:
-        wrappers = WRAPPERS_NIX.read_text(encoding="utf-8")
-        flake = FLAKE_NIX.read_text(encoding="utf-8")
+        wrappers = _nix_source(WRAPPERS_NIX)
+        flake = _nix_source(FLAKE_NIX)
         self.assertIn("{ pkgs, beetsPackage,", wrappers)
         self.assertNotIn("beetsPackage ?", wrappers)
         self.assertIn("./package.nix { inherit beetsPackage; }", wrappers)
@@ -2266,8 +2378,8 @@ class TestStandaloneCheckerPackageIdentity(unittest.TestCase):
         self.assertIn("inherit pkgs version beetsPackage;", flake)
 
     def test_wrapper_drops_inherited_pythonpath_and_flake_executes_checker(self) -> None:
-        wrappers = WRAPPERS_NIX.read_text(encoding="utf-8")
-        flake = FLAKE_NIX.read_text(encoding="utf-8")
+        wrappers = _nix_source(WRAPPERS_NIX)
+        flake = _nix_source(FLAKE_NIX)
         self.assertIn('export PYTHONPATH="${src}"', wrappers)
         self.assertNotIn('PYTHONPATH="${src}\'\'${PYTHONPATH', wrappers)
         self.assertIn("checkBeetsConfigPackageBoundary", flake)
@@ -2319,7 +2431,7 @@ class TestQualityRankBandDefaultsMatchProduction(unittest.TestCase):
     def test_every_band_default_equals_the_dataclass(self) -> None:
         from lib.quality import QualityRankConfig
 
-        source = MODULE_NIX.read_text(encoding="utf-8")
+        source = _nix_source(MODULE_NIX)
         defaults = QualityRankConfig.defaults()
         for nix_name, attr in self._CODECS.items():
             with self.subTest(codec=nix_name):
@@ -2343,7 +2455,7 @@ class TestQualityRankBandDefaultsMatchProduction(unittest.TestCase):
         """
         from lib.quality import QualityRankConfig
 
-        source = MODULE_NIX.read_text(encoding="utf-8")
+        source = _nix_source(MODULE_NIX)
         bands_block = re.search(
             r"^      bands = \{(?P<body>.*?)^      \};",
             source, re.DOTALL | re.MULTILINE)
@@ -2368,8 +2480,12 @@ def _attrset_block(source: str, marker: str) -> str:
     ``assertIn`` over this block is satisfied by the attribute appearing in a
     ``#`` comment — so commenting an attribute out, the single most likely way
     one of these gets disabled, would leave the pins green (issue #1161
-    review). Brace matching still runs over the raw source, since a comment
-    could legally contain an unbalanced brace character.
+    review).
+
+    Callers now pass :func:`_nix_source`, which has already stripped comments,
+    so brace matching runs over comment-free text and the old hazard of a
+    comment carrying an unbalanced brace is gone. The strip here is retained
+    and idempotent, so the helper stays correct if handed raw source.
     """
     start = source.index(marker)
     open_brace = source.index("{", start)
@@ -2380,11 +2496,7 @@ def _attrset_block(source: str, marker: str) -> str:
         elif source[i] == "}":
             depth -= 1
             if depth == 0:
-                block = source[open_brace:i + 1]
-                return "\n".join(
-                    line for line in block.splitlines()
-                    if not line.lstrip().startswith("#")
-                )
+                return _strip_comment_lines(source[open_brace:i + 1])
     raise AssertionError(f"unterminated block for {marker!r}")
 
 
@@ -2399,7 +2511,7 @@ class TestMigrateUnitCannotBeSwallowedByAConcurrentStart(unittest.TestCase):
     start-is-a-no-op / restart-re-runs behaviour pair)."""
 
     def setUp(self) -> None:
-        source = MODULE_NIX.read_text(encoding="utf-8")
+        source = _nix_source(MODULE_NIX)
         self.service_block = _attrset_block(
             source, "systemd.services.cratedigger-db-migrate",
         )
@@ -2427,7 +2539,7 @@ class TestRetagDivergenceCensusServiceShape(unittest.TestCase):
     with no pipeline-DB dependency."""
 
     def setUp(self) -> None:
-        source = MODULE_NIX.read_text(encoding="utf-8")
+        source = _nix_source(MODULE_NIX)
         self.service_block = _attrset_block(
             source, "systemd.services.cratedigger-retag-census",
         )
