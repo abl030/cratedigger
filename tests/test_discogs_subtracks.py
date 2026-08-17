@@ -136,6 +136,17 @@ class TestDiscogsSubtrackCompatibility(unittest.TestCase):
         ):
             _discogs_subtrack_methods(PartialDiscogsPlugin)
 
+    def test_partial_legacy_discogs_coalescing_seam_fails_closed(self) -> None:
+        class PartialLegacyDiscogsPlugin:
+            def _coalesce_tracks(self) -> list[object]:
+                return []
+
+        with self.assertRaisesRegex(
+            BeetsCapabilityError,
+            "lacks callable _add_merged_subtracks",
+        ):
+            _discogs_subtrack_methods(PartialLegacyDiscogsPlugin)
+
     def test_flat_preservation_keeps_bowie_a2_components_separate(self) -> None:
         configure_discogs_subtracks(preserve_flat=True)
         plugin = object.__new__(DiscogsPlugin)

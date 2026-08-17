@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
-from itertools import groupby
 from types import ModuleType
 from typing import TYPE_CHECKING, Protocol, TypeGuard
 
@@ -26,6 +26,8 @@ class BeetsCapabilityError(RuntimeError):
 
 _discogs_original_subtrack_position: Callable[..., object] | None = None
 _discogs_original_merge_subtracks: Callable[..., object] | None = None
+_discogs_original_coalesce_tracks: Callable[..., object] | None = None
+_discogs_original_add_merged_subtracks: Callable[..., object] | None = None
 _discogs_original_get_tracks: Callable[..., object] | None = None
 @dataclass(frozen=True)
 class DiscogsIndexedProgram:
@@ -107,10 +109,33 @@ def _discogs_duration_seconds(value: object) -> int | None:
     return minutes * 60 + seconds
 
 
+def _mark_discogs_indexed_program(
+    track: dict[str, object],
+    subtracks: list[dict[str, object]],
+) -> None:
+    """Attach complete physical-program evidence to one normalized track."""
+
+    if len(subtracks) < 2:
+        return
+    seconds = [
+        _discogs_duration_seconds(subtrack.get("duration"))
+        for subtrack in subtracks
+    ]
+    duration_complete = all(
+        value is not None and value > 0
+        for value in seconds
+    )
+    if duration_complete:
+        total = sum(value for value in seconds if value is not None)
+        track["duration"] = f"{total // 60}:{total % 60:02d}"
+    track[DISCOGS_INDEXED_COMPONENT_COUNT_ATTR] = len(subtracks)
+    track[DISCOGS_INDEXED_DURATION_COMPLETE_ATTR] = duration_complete
+
+
 def _discogs_subtrack_methods(
     plugin_class: type[object],
-) -> tuple[Callable[..., object], Callable[..., object]] | None:
-    """Resolve the optional flat-subtrack seam as one structural cohort."""
+) -> tuple[str, Callable[..., object], Callable[..., object]] | None:
+    """Resolve one complete flat-subtrack seam without version checks."""
 
     current_subtrack_position = getattr(
         plugin_class,
@@ -122,17 +147,54 @@ def _discogs_subtrack_methods(
         "_merge_subtracks",
         None,
     )
-    if current_subtrack_position is None and current_merge_subtracks is None:
+    modern_present = (
+        current_subtrack_position is not None
+        or current_merge_subtracks is not None
+    )
+    if modern_present:
+        if not callable(current_subtrack_position):
+            raise BeetsCapabilityError(
+                "Beets Discogs plugin lacks callable _subtrack_position"
+            )
+        if not callable(current_merge_subtracks):
+            raise BeetsCapabilityError(
+                "Beets Discogs plugin lacks callable _merge_subtracks"
+            )
+        return (
+            "modern",
+            current_subtrack_position,
+            current_merge_subtracks,
+        )
+
+    current_coalesce_tracks = getattr(
+        plugin_class,
+        "_coalesce_tracks",
+        None,
+    )
+    current_add_merged_subtracks = getattr(
+        plugin_class,
+        "_add_merged_subtracks",
+        None,
+    )
+    legacy_present = (
+        current_coalesce_tracks is not None
+        or current_add_merged_subtracks is not None
+    )
+    if not legacy_present:
         return None
-    if not callable(current_subtrack_position):
+    if not callable(current_coalesce_tracks):
         raise BeetsCapabilityError(
-            "Beets Discogs plugin lacks callable _subtrack_position"
+            "Beets Discogs plugin lacks callable _coalesce_tracks"
         )
-    if not callable(current_merge_subtracks):
+    if not callable(current_add_merged_subtracks):
         raise BeetsCapabilityError(
-            "Beets Discogs plugin lacks callable _merge_subtracks"
+            "Beets Discogs plugin lacks callable _add_merged_subtracks"
         )
-    return current_subtrack_position, current_merge_subtracks
+    return (
+        "legacy",
+        current_coalesce_tracks,
+        current_add_merged_subtracks,
+    )
 
 
 def configure_discogs_subtracks(*, preserve_flat: bool) -> None:
@@ -158,18 +220,16 @@ def configure_discogs_subtracks(*, preserve_flat: bool) -> None:
 
     methods = _discogs_subtrack_methods(plugin_class)
     if methods is None:
-        # Older supported Beets releases do not coalesce flat indexed
-        # subtracks through this seam, so there is nothing to patch.
+        # Releases without either complete normalization seam do not collapse
+        # flat indexed subtracks, so there is nothing to adapt.
         return
-    current_subtrack_position, current_merge_subtracks = methods
+    cohort, first_method, second_method = methods
 
     global _discogs_original_subtrack_position
     global _discogs_original_merge_subtracks
+    global _discogs_original_coalesce_tracks
+    global _discogs_original_add_merged_subtracks
     global _discogs_original_get_tracks
-    if _discogs_original_subtrack_position is None:
-        _discogs_original_subtrack_position = current_subtrack_position
-    if _discogs_original_merge_subtracks is None:
-        _discogs_original_merge_subtracks = current_merge_subtracks
     if _discogs_original_get_tracks is None:
         original = getattr(plugin_class, "get_tracks", None)
         if not callable(original):
@@ -178,38 +238,93 @@ def configure_discogs_subtracks(*, preserve_flat: bool) -> None:
             )
         _discogs_original_get_tracks = original
 
-    original_merge = _discogs_original_merge_subtracks
     original_get_tracks = _discogs_original_get_tracks
-    original_subtrack_position = _discogs_original_subtrack_position
     _discogs_indexed_programs.clear()
 
-    def merge_complete_program(
-        subtracks: list[dict[str, object]],
-    ) -> dict[str, object]:
-        merged_value = original_merge(subtracks)
-        if not isinstance(merged_value, dict):
-            raise BeetsCapabilityError(
-                "Beets Discogs _merge_subtracks returned a non-dict"
-            )
-        merged = msgspec.convert(merged_value, type=dict[str, object])
-        seconds = [
-            _discogs_duration_seconds(track.get("duration"))
-            for track in subtracks
-        ]
-        duration_complete = (
-            len(seconds) > 1
-            and all(
-                value is not None and value > 0
-                for value in seconds
-            )
+    if cohort == "modern":
+        if _discogs_original_subtrack_position is None:
+            _discogs_original_subtrack_position = first_method
+        if _discogs_original_merge_subtracks is None:
+            _discogs_original_merge_subtracks = second_method
+        original_merge = _discogs_original_merge_subtracks
+
+        def merge_complete_program(
+            subtracks: list[dict[str, object]],
+        ) -> dict[str, object]:
+            merged_value = original_merge(subtracks)
+            if not isinstance(merged_value, dict):
+                raise BeetsCapabilityError(
+                    "Beets Discogs _merge_subtracks returned a non-dict"
+                )
+            merged = msgspec.convert(merged_value, type=dict[str, object])
+            _mark_discogs_indexed_program(merged, subtracks)
+            return merged
+
+        type.__setattr__(
+            plugin_class,
+            "_merge_subtracks",
+            staticmethod(merge_complete_program),
         )
-        if duration_complete:
-            total = sum(value for value in seconds if value is not None)
-            merged["duration"] = f"{total // 60}:{total % 60:02d}"
-        if len(subtracks) > 1:
-            merged[DISCOGS_INDEXED_COMPONENT_COUNT_ATTR] = len(subtracks)
-            merged[DISCOGS_INDEXED_DURATION_COMPLETE_ATTR] = duration_complete
-        return merged
+        if preserve_flat:
+            def keep_flat_entries_separate(
+                _self: object,
+                _track: dict[str, object],
+            ) -> None:
+                return None
+
+            type.__setattr__(
+                plugin_class,
+                "_subtrack_position",
+                keep_flat_entries_separate,
+            )
+        else:
+            type.__setattr__(
+                plugin_class,
+                "_subtrack_position",
+                _discogs_original_subtrack_position,
+            )
+    elif cohort == "legacy":
+        if _discogs_original_coalesce_tracks is None:
+            _discogs_original_coalesce_tracks = first_method
+        if _discogs_original_add_merged_subtracks is None:
+            _discogs_original_add_merged_subtracks = second_method
+        original_coalesce = _discogs_original_coalesce_tracks
+        original_add_merged = _discogs_original_add_merged_subtracks
+
+        def add_complete_or_split_program(
+            self: object,
+            tracklist: list[dict[str, object]],
+            subtracks: list[dict[str, object]],
+        ) -> None:
+            nested_index = bool(
+                tracklist and not tracklist[-1].get("position")
+            )
+            if preserve_flat and not nested_index:
+                tracklist.extend(subtracks)
+                return
+            original_add_merged(self, tracklist, subtracks)
+            if nested_index or len(subtracks) < 2:
+                return
+            if not tracklist:
+                raise BeetsCapabilityError(
+                    "Beets Discogs _add_merged_subtracks produced no track"
+                )
+            _mark_discogs_indexed_program(tracklist[-1], subtracks)
+
+        type.__setattr__(
+            plugin_class,
+            "_coalesce_tracks",
+            original_coalesce,
+        )
+        type.__setattr__(
+            plugin_class,
+            "_add_merged_subtracks",
+            add_complete_or_split_program,
+        )
+    else:
+        raise BeetsCapabilityError(
+            f"unsupported Beets Discogs subtrack cohort: {cohort}"
+        )
 
     def retain_component_counts(
         self: object,
@@ -218,33 +333,47 @@ def configure_discogs_subtracks(*, preserve_flat: bool) -> None:
     ) -> object:
         programs_by_position: dict[str, DiscogsIndexedProgram] = {}
         if not preserve_flat:
-            for position, grouped in groupby(
-                tracklist,
-                key=lambda track: original_subtrack_position(
-                    self,
-                    track,
-                ),
-            ):
-                if position is None:
-                    continue
-                components = [
-                    track
-                    for track in grouped
-                    if track.get("type_") == "track"
-                ]
-                if len(components) > 1:
-                    first_position = str(components[0].get("position", ""))
-                    seconds = [
-                        _discogs_duration_seconds(track.get("duration"))
-                        for track in components
-                    ]
-                    programs_by_position[first_position] = (
+            coalesce = getattr(self, "_coalesce_tracks", None)
+            if not callable(coalesce):
+                raise BeetsCapabilityError(
+                    "Beets Discogs plugin lacks callable _coalesce_tracks"
+                )
+            normalized_value = coalesce(deepcopy(tracklist))
+            if not _is_object_list(normalized_value):
+                raise BeetsCapabilityError(
+                    "Beets Discogs _coalesce_tracks returned a non-list"
+                )
+            for raw_track in normalized_value:
+                if not isinstance(raw_track, dict):
+                    raise BeetsCapabilityError(
+                        "Beets Discogs _coalesce_tracks returned a non-dict track"
+                    )
+                track = msgspec.convert(
+                    raw_track,
+                    type=dict[str, object],
+                )
+                component_count = track.get(
+                    DISCOGS_INDEXED_COMPONENT_COUNT_ATTR,
+                    1,
+                )
+                duration_complete = track.get(
+                    DISCOGS_INDEXED_DURATION_COMPLETE_ATTR,
+                    True,
+                )
+                if (
+                    not isinstance(component_count, int)
+                    or isinstance(component_count, bool)
+                    or component_count < 1
+                    or not isinstance(duration_complete, bool)
+                ):
+                    raise BeetsCapabilityError(
+                        "Beets Discogs indexed program marker is invalid"
+                    )
+                if component_count > 1:
+                    programs_by_position[str(track.get("position", ""))] = (
                         DiscogsIndexedProgram(
-                            component_count=len(components),
-                            duration_complete=all(
-                                value is not None and value > 0
-                                for value in seconds
-                            ),
+                            component_count=component_count,
+                            duration_complete=duration_complete,
                         )
                     )
 
@@ -268,30 +397,7 @@ def configure_discogs_subtracks(*, preserve_flat: bool) -> None:
             )
         return result
 
-    type.__setattr__(
-        plugin_class,
-        "_merge_subtracks",
-        staticmethod(merge_complete_program),
-    )
     type.__setattr__(plugin_class, "get_tracks", retain_component_counts)
-    if preserve_flat:
-        def keep_flat_entries_separate(
-            _self: object,
-            _track: dict[str, object],
-        ) -> None:
-            return None
-
-        type.__setattr__(
-            plugin_class,
-            "_subtrack_position",
-            keep_flat_entries_separate,
-        )
-    else:
-        type.__setattr__(
-            plugin_class,
-            "_subtrack_position",
-            _discogs_original_subtrack_position,
-        )
 
 
 class _ConfigValue(Protocol):

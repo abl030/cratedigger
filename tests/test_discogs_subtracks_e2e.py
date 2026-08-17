@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -166,6 +168,23 @@ def _audio_files(root: Path) -> list[Path]:
     )
 
 
+def _write_harness_wrapper(root: Path) -> str:
+    """Use the pinned shell directly, including inside a pure Nix build."""
+
+    bash = shutil.which("bash")
+    if bash is None:
+        raise RuntimeError("bash is required for the real harness e2e")
+    harness = Path(import_one.__file__).parent / "run_beets_harness.sh"
+    wrapper = root / "run-beets-harness"
+    wrapper.write_text(
+        f"#!{bash}\nexec {shlex.quote(bash)} "
+        f"{shlex.quote(str(harness))} \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    return str(wrapper)
+
+
 class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
     def _exercise_manifest(
         self,
@@ -186,6 +205,7 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
             source.mkdir()
             library.mkdir()
             beets_dir.mkdir()
+            harness_path = _write_harness_wrapper(root)
 
             local_tracks = list(_TRACKS)
             if not split_subtracks:
@@ -243,12 +263,12 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
                 ),
             }
 
-            with patch.dict(os.environ, env, clear=False):
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(import_one, "HARNESS", harness_path),
+            ):
                 validation = beets_validate(
-                    os.path.join(
-                        os.path.dirname(import_one.__file__),
-                        "run_beets_harness.sh",
-                    ),
+                    harness_path,
                     str(source),
                     _RELEASE_ID,
                     0.15,
@@ -323,6 +343,7 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
             source.mkdir()
             library.mkdir()
             beets_dir.mkdir()
+            harness_path = _write_harness_wrapper(root)
 
             local_tracks = list(_TRACKS)
             local_tracks[1:3] = [(
@@ -383,12 +404,10 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
                     "max_distance",
                     FORCE_IMPORT_DISTANCE_THRESHOLD,
                 ),
+                patch.object(import_one, "HARNESS", harness_path),
             ):
                 validation = beets_validate(
-                    os.path.join(
-                        os.path.dirname(import_one.__file__),
-                        "run_beets_harness.sh",
-                    ),
+                    harness_path,
                     str(source),
                     _RELEASE_ID,
                     FORCE_IMPORT_DISTANCE_THRESHOLD,

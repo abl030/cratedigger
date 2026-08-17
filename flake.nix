@@ -154,6 +154,8 @@
             "tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_beets_import_library_and_duplicate_action"
             "tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_incremental_import_uses_external_statefile_only"
             "tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_harness_pretend_keeps_source_manifest_unchanged"
+          ] ++ nixpkgs.lib.optionals (name == "beets-release-2.12.0") [
+            "tests.test_discogs_subtracks_e2e.TestDiscogsSubtracksEndToEnd.test_bowie_ten_file_manifest_survives_real_match_apply_and_catalogue"
           ];
           authority = pkgs.runCommand "cratedigger-${name}-matrix-authority" { } ''
             mkdir -p "$out/beets" "$out/secrets"
