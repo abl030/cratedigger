@@ -608,6 +608,27 @@ console.log('renderEvidenceStrip() keeps converted source bare in collapsed rows
   assertExcludes(strip, 'OPUS 128', 'target/output contract is not labelled as source bitrate');
 }
 
+console.log('renderEvidenceStrip() labels an installed spectral-bound class truthfully');
+{
+  const strip = renderEvidenceFixture({
+    source_format: 'MP3', actual_min_bitrate: 190,
+    source_avg_bitrate: 190, source_min_bitrate: 190,
+    existing_avg_bitrate: 275, existing_min_bitrate: 275,
+    comparison_basis: {
+      verdict: 'equivalent', branch: 'spectral_existing_bound',
+      new_rank: 'acceptable', existing_rank: 'good',
+      new_metric: 'avg', existing_metric: 'avg',
+      new_value_kbps: 190, existing_value_kbps: 192,
+      new_format: 'MP3', existing_format: 'MP3',
+      spectral_clamped: true, tolerance_kbps: 5,
+      verified_lossless_bypass: false,
+    },
+  });
+  assertContains(strip, '190k avg', 'known-clean candidate keeps its raw metric');
+  assertContains(strip, '~192k', 'installed class renders as a spectral floor');
+  assertExcludes(strip, 'avg 275k', 'installed raw VBR average does not relabel its class');
+}
+
 console.log('renderEvidenceStrip() renders canonical candidate evidence as ordinary IN');
 {
   const strip = renderEvidenceFixture({

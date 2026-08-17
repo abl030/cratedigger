@@ -248,9 +248,9 @@ def _shared_spectral_bitrates(
     Still deliberately *narrow*: a stale estimate on only one side
     (Springsteen shape: existing CBR 320 genuine+96, new MP3 V0 240 no
     spectral) keeps the container comparison — the rule that
-    ``test_springsteen_genuine_but_96kbps`` pins. The one asymmetric case
-    that does bind is ``_candidate_spectral_bound`` below, which exists for
-    the opposite shape.
+    ``test_springsteen_genuine_but_96kbps`` pins. The separate one-class
+    comparison below may bind only when the other side is affirmatively
+    known-clean, and it follows its classed encode in either role.
 
     NO LONGER grade-tolerant, and that is a deliberate reversal. This clamp
     used to fire on any two estimates, on the theory that two independent
@@ -309,7 +309,7 @@ def _shared_spectral_bitrates(
     return new_value, existing_value, new_bound, existing_bound
 
 
-def _candidate_spectral_bound(
+def _one_sided_spectral_bitrates(
     new: AudioQualityMeasurement,
     existing: AudioQualityMeasurement,
     cfg: QualityRankConfig,
@@ -318,8 +318,8 @@ def _candidate_spectral_bound(
     new_v0_probe: V0ProbeEvidence | None,
     new_spectral: SpectralInterpretation,
     existing_spectral: SpectralInterpretation,
-) -> int | None:
-    """Bound a transcode candidate by its own class against a known-clean HAVE.
+) -> tuple[int | None, int | None, str] | None:
+    """Compare one transcode class against a known-clean raw measurement.
 
     The Fall 2007 anti-loop (issue #911, folded into #829 Phase 5 PR2b —
     request 8902, Iron & Wine *Fall 2007*, evidence id 34219). A candidate
@@ -329,56 +329,60 @@ def _candidate_spectral_bound(
     that has no spectral bitrate at all. Later the genuine 160 displaces it
     back, and the request loops forever.
 
-    ``_shared_spectral_bitrates`` cannot reach this: the clean HAVE has no
-    class (a ``genuine`` verdict authorizes none), so there is nothing to
-    compare symmetrically. ``_transcode_candidate_real_rank_regresses``
-    cannot reach it either: the candidate's RAW rank is *higher*, which is
-    exactly the manufactured claim. So this is the one asymmetric bound in
-    the comparison — narrowly gated:
+    The class belongs to its encode, not to the candidate role. A classed
+    candidate versus a known-clean current copy and the mirror (known-clean
+    candidate versus a classed current copy) therefore use the same effective
+    values. Raw VBR metrics remain persisted diagnostic evidence; only this
+    comparison normalizes them.
 
-    * the candidate's interpretation is decision-grade AND supports a
-      transcode accusation (an invertible ladder whose album verdict
-      authorized a spectral finding). AAC, Opus and HE-AAC can never
-      satisfy this, by construction in ``interpret_spectral_cliff``;
-    * the current copy is KNOWN non-transcode — it has an affirmative
-      spectral grade that is not a transcode grade. A HAVE that was never
-      measured is not "known clean" and keeps today's container comparison;
-    * the current copy contributes no class of its own (implied by the
-      grade, asserted anyway so the symmetric clamp always wins);
-    * the candidate's format is a bare measured codec, not an explicit
-      contract label — a contract's rank ignores measured bitrate entirely,
-      so a bound would be a claim the rank never consumes;
-    * the bound actually binds (``class <= raw metric``).
+    ``_shared_spectral_bitrates`` still owns two decision-grade classes. This
+    helper is exactly-one-class only and preserves the Fall 2007 safeguards:
+    the raw side is affirmatively known non-transcode, both sides are bare
+    measurements in one codec family, and the class actually bounds its own
+    raw metric. Unmeasured, explicit-label, inadmissible-codec, cross-family,
+    and non-clean worlds withhold this comparison.
 
-    Returns the bounded value, or None when any gate declines. The caller
-    then decides on RANK ALONE — see ``compare_quality``.
+    Returns effective new/existing values and their truthful branch name, or
+    None when a gate declines. The caller applies ordinary rank and
+    same-family tolerance comparison to those commensurate values.
     """
-    if not (new_spectral.decision_grade and new_spectral.supports_transcode_accusation):
-        return None
-    if _is_explicit_label(new_format):
-        return None
-    # The HAVE's grade is read RAW, deliberately. For an AAC this PR
-    # declares the grade meaningless as a CLASS — its cliff is native
-    # behaviour — yet a ``genuine`` AAC still counts as "known non-transcode"
-    # here. That asymmetry is a choice, not leftover codec-blindness:
-    # tightening it (demanding the HAVE's own interpretation admit an
-    # accusation) would make this bound fire MORE often, i.e. reject more
-    # candidates, and the conservative direction is to keep the bound narrow.
-    # A ``genuine`` verdict is also the one thing the grade says that no
-    # codec calibration contradicts — the calibration says AAC cliffs cannot
-    # convict, never that they falsely acquit.
-    existing_grade = existing.spectral_grade
-    if existing_grade is None or existing_grade in SPECTRAL_TRANSCODE_GRADES:
-        return None
-    if decision_class_kbps(existing_spectral) is not None:
-        return None
     new_class = decision_class_kbps(new_spectral)
-    if new_class is None:
+    existing_class = decision_class_kbps(existing_spectral)
+    if (new_class is None) == (existing_class is None):
+        return None
+    class_is_new = new_class is not None
+    raw_measurement = existing if class_is_new else new
+    class_spectral = new_spectral if class_is_new else existing_spectral
+    raw_spectral = existing_spectral if class_is_new else new_spectral
+    class_format = new_format if class_is_new else existing.format
+    raw_format = existing.format if class_is_new else new_format
+    if not class_spectral.supports_transcode_accusation:
+        return None
+    if _is_explicit_label(class_format) or _is_explicit_label(raw_format):
+        return None
+    class_family = _codec_family_of(class_format)
+    if class_family != _codec_family_of(raw_format):
+        return None
+    # The known-clean grade is intentionally read raw. An AAC cliff cannot
+    # produce a class, but an affirmative ``genuine`` verdict can still be
+    # the safe raw half of this narrow comparison.
+    if (raw_measurement.spectral_grade is None
+            or raw_measurement.spectral_grade in SPECTRAL_TRANSCODE_GRADES):
+        return None
+    if decision_class_kbps(raw_spectral) is not None:
         return None
     new_br = _selected_quality_bitrate_with_source(new, cfg, new_v0_probe)[0]
-    if new_br is not None and new_class > new_br:
+    existing_br = _selected_bitrate(existing, cfg)
+    class_value = new_class if class_is_new else existing_class
+    assert class_value is not None  # exactly-one-class gate above
+    class_raw = new_br if class_is_new else existing_br
+    if class_raw is not None and class_value > class_raw:
         return None
-    return new_class
+    return (
+        class_value if class_is_new else new_br,
+        existing_br if class_is_new else class_value,
+        "spectral_candidate_bound" if class_is_new else "spectral_existing_bound",
+    )
 
 
 def _transcode_candidate_real_rank_regresses(
@@ -575,44 +579,31 @@ def compare_quality(
         new_spectral=new_spectral,
         existing_spectral=existing_spectral,
     )
+    one_sided_branch: str | None = None
     if shared is None:
-        # Fall 2007 anti-loop (issue #911): a transcode candidate whose own
-        # class is decision-grade, weighed against a known-clean HAVE that
-        # carries no class. The bound decides on RANK ALONE — the raw
-        # same-rank tiebreak below would re-admit the very container bitrate
-        # the class has already contradicted, which is the loop. Import only
-        # when the bounded rank is STRICTLY better than the current raw rank.
-        bounded_new_br = _candidate_spectral_bound(
+        one_sided = _one_sided_spectral_bitrates(
             new, existing, cfg,
             new_format=new_format,
             new_v0_probe=new_v0_probe,
             new_spectral=new_spectral,
             existing_spectral=existing_spectral,
         )
-        if bounded_new_br is not None:
-            bound_new_rank = quality_rank(new_format, bounded_new_br, cfg)
-            bound_existing_rank = measurement_rank(existing, cfg)
-            if bound_new_rank > bound_existing_rank:
-                bound_verdict = "better"
-            elif bound_new_rank < bound_existing_rank:
-                bound_verdict = "worse"
-            else:
-                bound_verdict = "equivalent"
-            return _basis(
-                bound_verdict, "spectral_candidate_bound",
-                bound_new_rank, bound_existing_rank,
-                new_value=bounded_new_br, existing_value=existing_br,
-                spectral_clamped=True,
+        if one_sided is None:
+            new_rank = measurement_rank(
+                new,
+                cfg,
+                target_contract=new_target_contract,
+                v0_probe=new_v0_probe,
             )
-        new_rank = measurement_rank(
-            new,
-            cfg,
-            target_contract=new_target_contract,
-            v0_probe=new_v0_probe,
-        )
-        existing_rank = measurement_rank(existing, cfg)
-        rank_new_value, rank_existing_value = new_br, existing_br
-        spectral_clamped = False
+            existing_rank = measurement_rank(existing, cfg)
+            rank_new_value, rank_existing_value = new_br, existing_br
+            spectral_clamped = False
+        else:
+            rank_new_value, rank_existing_value, one_sided_branch = one_sided
+            new_rank = quality_rank(new_format, rank_new_value, cfg)
+            existing_rank = quality_rank(
+                existing.format, rank_existing_value, cfg)
+            spectral_clamped = True
         both_spectral_bound = False
         either_spectral_bound = False
     else:
@@ -643,7 +634,8 @@ def compare_quality(
         cfg=cfg,
     ):
         return _basis(
-            "equivalent", "rank_within_tolerance", new_rank, existing_rank,
+            "equivalent", one_sided_branch or "rank_within_tolerance",
+            new_rank, existing_rank,
             new_value=rank_new_value, existing_value=rank_existing_value,
             spectral_clamped=spectral_clamped,
             tolerance_kbps=cfg.within_rank_tolerance_kbps,
@@ -651,13 +643,13 @@ def compare_quality(
 
     if new_rank > existing_rank:
         return _basis(
-            "better", "rank", new_rank, existing_rank,
+            "better", one_sided_branch or "rank", new_rank, existing_rank,
             new_value=rank_new_value, existing_value=rank_existing_value,
             spectral_clamped=spectral_clamped,
         )
     if new_rank < existing_rank:
         return _basis(
-            "worse", "rank", new_rank, existing_rank,
+            "worse", one_sided_branch or "rank", new_rank, existing_rank,
             new_value=rank_new_value, existing_value=rank_existing_value,
             spectral_clamped=spectral_clamped,
         )
@@ -735,6 +727,29 @@ def compare_quality(
             verdict, "spectral_tiebreak", new_rank, existing_rank,
             new_value=rank_new_value, existing_value=rank_existing_value,
             spectral_clamped=spectral_clamped,
+        )
+
+    if one_sided_branch is not None:
+        if rank_new_value is None or rank_existing_value is None:
+            return _basis(
+                "equivalent", "metric_missing", new_rank, existing_rank,
+                new_value=rank_new_value, existing_value=rank_existing_value,
+                spectral_clamped=spectral_clamped,
+            )
+        delta = rank_new_value - rank_existing_value
+        verdict = (
+            "equivalent" if abs(delta) <= cfg.within_rank_tolerance_kbps
+            else ("better" if delta > 0 else "worse")
+        )
+        return _basis(
+            verdict, one_sided_branch, new_rank, existing_rank,
+            new_value=rank_new_value, existing_value=rank_existing_value,
+            spectral_clamped=True,
+            tolerance_kbps=(
+                cfg.within_rank_tolerance_kbps
+                if rank_new_value != rank_existing_value
+                and abs(delta) <= cfg.within_rank_tolerance_kbps else None
+            ),
         )
 
     # Both bare codec names — compare the chosen raw metric with tolerance.

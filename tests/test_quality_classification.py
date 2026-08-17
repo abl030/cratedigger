@@ -221,6 +221,63 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertFalse(r["imported"])
         self.assertTrue(r["keep_searching"])
 
+    def test_request_3182_spectral_class_stays_with_the_encode(self):
+        """Request 3182 / evidence 6233 vs 342: role cannot change quality.
+
+        The candidate's VBR container averages 275k but its decision-grade
+        class is 192k.  The genuine installed MP3 averages 190k.  Those
+        effective values are inside the configured tolerance, so neither
+        direction authorizes a replacement.  Raw persisted evidence remains
+        275k for diagnosis; only the comparison is normalized.
+        """
+        from lib.quality import SpectralCodecContext
+
+        forward = full_pipeline_decision(
+            is_flac=False, min_bitrate=275, avg_bitrate=275, is_cbr=False,
+            new_format="MP3",
+            spectral_grade="likely_transcode", spectral_bitrate=192,
+            candidate_spectral_context=SpectralCodecContext(
+                codec_family="mp3", filetype_band="mp3"),
+            existing_min_bitrate=190, existing_avg_bitrate=190,
+            existing_format="MP3", existing_is_cbr=False,
+            existing_spectral_grade="genuine",
+        )
+        reverse = full_pipeline_decision(
+            is_flac=False, min_bitrate=190, avg_bitrate=190, is_cbr=False,
+            new_format="MP3", spectral_grade="genuine",
+            existing_min_bitrate=275, existing_avg_bitrate=275,
+            existing_format="MP3", existing_is_cbr=False,
+            existing_spectral_grade="likely_transcode",
+            existing_spectral_bitrate=192,
+            existing_spectral_context=SpectralCodecContext(
+                codec_family="mp3", filetype_band="mp3"),
+        )
+
+        self.assertEqual(forward["stage2_import"], "downgrade")
+        self.assertFalse(forward["imported"])
+        self.assertEqual(reverse["stage2_import"], "downgrade")
+        self.assertFalse(reverse["imported"])
+        self.assertEqual(
+            forward["comparison_basis"]["branch"],
+            "spectral_candidate_bound",
+        )
+        self.assertEqual(
+            reverse["comparison_basis"]["branch"],
+            "spectral_existing_bound",
+        )
+        self.assertEqual(
+            (forward["comparison_basis"]["new_value_kbps"],
+             forward["comparison_basis"]["existing_value_kbps"]),
+            (192, 190),
+        )
+        self.assertEqual(
+            (reverse["comparison_basis"]["new_value_kbps"],
+             reverse["comparison_basis"]["existing_value_kbps"]),
+            (190, 192),
+        )
+        self.assertEqual(forward["comparison_basis"]["tolerance_kbps"], 5)
+        self.assertEqual(reverse["comparison_basis"]["tolerance_kbps"], 5)
+
     def test_deerhunter_rhapsody_original_identical_transcode_not_upgrade(self):
         """BUG: an identical transcode scored as an upgrade via a one-sided clamp.
 
@@ -894,12 +951,12 @@ class TestFall2007AntiLoop(unittest.TestCase):
     """Issue #911 folded into #829 Phase 5 PR2b — request 8902, Iron & Wine
     *Fall 2007*, live and looping.
 
-    Authority: "when a candidate has a decision-grade transcode MP3 inferred
-    class and a known non-transcode current copy has no spectral bitrate,
-    compare using the candidate bound; import only when that bounded rank is
-    strictly better than the current raw rank; 320/spectral-128 versus
-    genuine-160 is equivalent / not an import" —
-    https://github.com/abl030/cratedigger/issues/829#issuecomment-5089731485
+    Authority: #829's accepted Fall 2007 case records that a fake
+    320/spectral-128 versus genuine-160 is equivalent / not an import —
+    https://github.com/abl030/cratedigger/issues/829#issuecomment-5098696861
+
+    Issue #1157 keeps that fixed point while making the one-class comparison
+    role-neutral and applying its same-family tolerance to effective values.
 
     The fake side is evidence id 34219: ``codec='mp3'``, ``format='MP3'``,
     ``spectral_grade='likely_transcode'``, ``spectral_bitrate_kbps=128``,
@@ -1061,8 +1118,8 @@ class TestSpectralLandmineDecisionConsequence(unittest.TestCase):
         # Issue #829 Phase 5 PR2b moved WHERE that reject is made. A
         # ``genuine`` album verdict authorizes no spectral class at all, so
         # Stage 1 has nothing to compare and withholds; the protection is now
-        # Stage 2's candidate bound, which weighs the fake's OWN class (128)
-        # against the genuine HAVE's real rank instead of weighing two
+        # Stage 2's one-class comparison, which weighs the fake's OWN class
+        # (128) against the genuine HAVE's real metric instead of weighing two
         # cliff estimates. Strictly more evidence, same outcome — and it is
         # the same mechanism that breaks the Fall 2007 loop (issue #911).
         r = self._decide("genuine", 160)
@@ -1222,6 +1279,54 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
     # generated parity property in tests/test_quality_generated.py.
     _build_candidate = staticmethod(build_parity_candidate_evidence)
     _build_current = staticmethod(build_parity_current_evidence)
+
+    def test_request_3182_spectral_class_stays_with_the_encode_via_evidence(self):
+        """Parity twin of the 6233/342 role-invariance reproduction.
+
+        The importer receives these evidence rows, not simulator kwargs:
+        a likely-transcode VBR MP3 whose raw average is 275k but whose
+        decision-grade class is 192k, and a genuine 190k VBR MP3. Swapping
+        their roles must preserve the no-replacement result while recording
+        which encode supplied the effective spectral value.
+        """
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        classed_candidate = self._build_candidate(
+            is_flac=False, min_bitrate=275, avg_bitrate=275, is_cbr=False,
+            spectral_grade="likely_transcode", spectral_bitrate=192,
+            codec_family="mp3", filetype_band="mp3",
+        )
+        genuine_current = self._build_current(
+            min_bitrate=190, avg_bitrate=190, format="MP3", is_cbr=False,
+            spectral_grade="genuine",
+        )
+        forward = full_pipeline_decision_from_evidence(
+            classed_candidate, genuine_current)
+
+        genuine_candidate = self._build_candidate(
+            is_flac=False, min_bitrate=190, avg_bitrate=190, is_cbr=False,
+            spectral_grade="genuine",
+        )
+        classed_current = self._build_current(
+            min_bitrate=275, avg_bitrate=275, format="MP3", is_cbr=False,
+            spectral_grade="likely_transcode", spectral_bitrate=192,
+            codec_family="mp3", filetype_band="mp3",
+        )
+        reverse = full_pipeline_decision_from_evidence(
+            genuine_candidate, classed_current)
+
+        for decision in (forward, reverse):
+            self.assertEqual(decision["stage2_import"], "downgrade")
+            self.assertFalse(decision["imported"])
+            self.assertEqual(decision["comparison_basis"]["tolerance_kbps"], 5)
+        self.assertEqual(
+            forward["comparison_basis"]["branch"],
+            "spectral_candidate_bound",
+        )
+        self.assertEqual(
+            reverse["comparison_basis"]["branch"],
+            "spectral_existing_bound",
+        )
 
     def test_mountain_goats_flux_provisional_lossless_via_evidence(self):
         """Request 4514 shape, but routed through the production decider."""

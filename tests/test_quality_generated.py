@@ -1569,9 +1569,9 @@ def stage_parity_worlds(draw) -> StageParityWorld:
     cross-codec world CAN trip ``assert_stage1_never_contradicts_stage2``.
     The negative is a code fact, not a sample: ``cross_family_same_rank``
     hardcodes ``"equivalent"`` in ``lib/quality/compare.py``, so that
-    branch alone can never disagree — while ``rank``,
-    ``spectral_candidate_bound`` and ``metric_tiebreak`` all can, and are
-    all reachable cross-codec. Measured over a 46,286-world sweep of
+    branch alone can never disagree — while ``rank`` and ``metric_tiebreak``
+    can, and are both reachable cross-codec. The one-class spectral branches
+    are deliberately same-family only. Measured over a 46,286-world sweep of
     MP3-candidate worlds simulating the pre-PR2b Stage-1 seam: 1,142 worlds
     flipped Stage 1 to ``"reject"`` and 326 of those carried a Stage-2
     ``"better"``, predominantly through ``rank``. That domain is patrolled by

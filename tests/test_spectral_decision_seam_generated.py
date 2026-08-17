@@ -24,10 +24,10 @@ self-test proving the checker trips on a planted violation:
 2. An uncalibrated codec never produces a spectral rejection, a transcode
    bound, or a claim that production's gate would have measured it.
 3. The comparison is spectrally clamped ONLY when the two classes are
-   comparable, or when the one licensed asymmetric bound applies.
+   comparable, or when the one licensed role-neutral bound applies.
 4. The Fall 2007 fixed point: a transcode-classed copy and a known-clean
-   copy never mutually displace each other, and a displacement requires a
-   strictly better bounded rank.
+   copy never mutually displace each other; each one-class verdict agrees
+   with its effective values and configured same-family tolerance.
 5. A lossless container's decision is invariant under every codec-capture
    field. Its cliff is the fake-lossless detector, driven by the GRADE;
    PR2b derives no kbps class for it and must not weaken that in either
@@ -68,6 +68,7 @@ from lib.quality import (
     measurement_rank,
     spectral_classes_comparable,
 )
+from lib.quality.ranks import _codec_family_of
 from tests.helpers import (
     build_parity_candidate_evidence,
     build_parity_current_evidence,
@@ -447,45 +448,41 @@ class TestUncalibratedCodecNeverAccuses(unittest.TestCase):
 # Invariant 3 — the clamp requires comparability
 # ===========================================================================
 
-def _candidate_bound_licence_failures(
-    new: AudioQualityMeasurement,
-    existing: AudioQualityMeasurement,
-    new_spectral: SpectralInterpretation,
-    existing_spectral: SpectralInterpretation,
+def _one_sided_bound_licence_failures(
+    classed: AudioQualityMeasurement,
+    raw: AudioQualityMeasurement,
+    classed_spectral: SpectralInterpretation,
+    raw_spectral: SpectralInterpretation,
 ) -> list[str]:
-    """Every gate ``_candidate_spectral_bound`` applies, restated here.
+    """Every role-neutral one-sided spectral-bound gate, restated here.
 
-    All FIVE, deliberately — an incomplete restatement is how a checker
+    Every gate, deliberately — an incomplete restatement is how a checker
     silently stops patrolling a gate (PR2b review S3: encoding only two of
     them let a mutant that dropped the transcode-HAVE refusal survive a
     6,000-example burst). Each returns its own name so a failure says which
     gate the production code stopped applying.
 
-    ``new.format`` stands in for ``compare_quality``'s ``new_format``: the
-    property drives ``compare_quality`` without a target contract, which is
-    exactly when the two are the same value.
+    The property drives ``compare_quality`` without a target contract, so
+    ``classed.format`` is the production comparison hint.
     """
     failures: list[str] = []
-    if not new_spectral.decision_grade:
-        failures.append("candidate is not decision-grade")
-    if not new_spectral.supports_transcode_accusation:
-        failures.append("candidate cannot support a transcode accusation")
-    if _is_explicit_label(new.format):
-        failures.append("candidate carries an explicit contract label")
-    if existing.spectral_grade is None:
-        failures.append("HAVE has no spectral verdict at all")
-    elif existing.spectral_grade in SPECTRAL_TRANSCODE_GRADES:
-        failures.append("HAVE is itself transcode-graded, so not known clean")
-    # Implied by the gate above (a non-transcode verdict authorizes no
-    # class), so a mutant deleting it in production is EQUIVALENT and
-    # nothing here can kill it. Restated anyway: the implication is a
-    # property of _grade_authorizes, not of this bound, and if that
-    # ever loosens this is the line that notices.
-    if decision_class_kbps(existing_spectral) is not None:
-        failures.append("HAVE carries a class of its own")
-    new_class = decision_class_kbps(new_spectral)
-    new_br = _selected_bitrate(new, CFG)
-    if new_class is not None and new_br is not None and new_class > new_br:
+    if not classed_spectral.decision_grade:
+        failures.append("classed encode is not decision-grade")
+    if not classed_spectral.supports_transcode_accusation:
+        failures.append("classed encode cannot support a transcode accusation")
+    if _is_explicit_label(classed.format) or _is_explicit_label(raw.format):
+        failures.append("a side carries an explicit contract label")
+    if _codec_family_of(classed.format) != _codec_family_of(raw.format):
+        failures.append("sides are not in one codec family")
+    if raw.spectral_grade is None:
+        failures.append("raw encode has no spectral verdict at all")
+    elif raw.spectral_grade in SPECTRAL_TRANSCODE_GRADES:
+        failures.append("raw encode is itself transcode-graded, so not known clean")
+    if decision_class_kbps(raw_spectral) is not None:
+        failures.append("raw encode carries a class of its own")
+    class_value = decision_class_kbps(classed_spectral)
+    class_raw = _selected_bitrate(classed, CFG)
+    if class_value is not None and class_raw is not None and class_value > class_raw:
         failures.append("the bound does not bind (class above the raw metric)")
     return failures
 
@@ -502,19 +499,25 @@ def assert_clamp_requires_comparability(
     Exactly two licences exist. The symmetric one requires
     ``spectral_classes_comparable`` — both sides decision-grade, the same
     derivation basis, and either the same codec or a ``cliff_hz`` basis.
-    The asymmetric one is the Fall 2007 candidate bound, whose five gates
-    are restated in full by ``_candidate_bound_licence_failures``.
+    The one-sided licence is role-neutral: its class owns the spectral value
+    whether it is the candidate or the HAVE, and its gates are restated in
+    full by ``_one_sided_bound_licence_failures``.
     """
     if not basis.spectral_clamped:
         return
     new_spectral = interpret_measurement(new)
     existing_spectral = interpret_measurement(existing)
-    if basis.branch == "spectral_candidate_bound":
-        failures = _candidate_bound_licence_failures(
-            new, existing, new_spectral, existing_spectral)
+    if basis.branch in ("spectral_candidate_bound", "spectral_existing_bound"):
+        class_is_new = basis.branch == "spectral_candidate_bound"
+        failures = _one_sided_bound_licence_failures(
+            new if class_is_new else existing,
+            existing if class_is_new else new,
+            new_spectral if class_is_new else existing_spectral,
+            existing_spectral if class_is_new else new_spectral,
+        )
         if failures:
             raise AssertionError(
-                f"unlicensed candidate bound ({context}): "
+                f"unlicensed one-sided bound ({context}): "
                 + "; ".join(failures)
                 + f" | new={new_spectral!r} existing={existing_spectral!r}")
         return
@@ -568,7 +571,28 @@ class TestClampComparabilityCheckerSelfTest(unittest.TestCase):
         with self.assertRaises(AssertionError) as caught:
             assert_clamp_requires_comparability(
                 planted, mp3, unmeasured, context="planted")
-        self.assertIn("unlicensed candidate bound", str(caught.exception))
+        self.assertIn("unlicensed one-sided bound", str(caught.exception))
+
+    def test_unlicensed_existing_bound_trips(self):
+        classed = AudioQualityMeasurement(
+            min_bitrate_kbps=320, avg_bitrate_kbps=320, format="MP3",
+            is_cbr=True, spectral_grade="likely_transcode",
+            spectral_bitrate_kbps=128, spectral_subject="installed",
+            spectral_provenance="measured", codec_family="mp3",
+        )
+        unmeasured = AudioQualityMeasurement(
+            min_bitrate_kbps=160, avg_bitrate_kbps=160, format="MP3",
+            is_cbr=True,
+        )
+        planted = QualityComparisonBasis(
+            verdict="equivalent", branch="spectral_existing_bound",
+            new_rank="acceptable", existing_rank="acceptable",
+            spectral_clamped=True,
+        )
+        with self.assertRaises(AssertionError) as caught:
+            assert_clamp_requires_comparability(
+                planted, unmeasured, classed, context="planted")
+        self.assertIn("unlicensed one-sided bound", str(caught.exception))
 
     def test_unclamped_basis_is_always_fine(self):
         m = AudioQualityMeasurement(min_bitrate_kbps=192, format="MP3")
@@ -710,34 +734,36 @@ def assert_no_mutual_displacement(
 
     That state IS the loop: request 8902 spent its life alternating between
     a fake 320 and a genuine 160, each "upgrading" over the other. Pinning
-    one direction alone cannot rule it out.
+    one direction alone cannot rule it out. Authority: #829's accepted
+    Fall 2007 case —
+    https://github.com/abl030/cratedigger/issues/829#issuecomment-5098696861
     """
     if forward.get("imported") and backward.get("imported"):
         raise AssertionError(
             f"both directions import — the pair oscillates ({context})")
 
 
-def assert_bound_import_needs_strictly_better_rank(
+def assert_bound_verdict_uses_effective_values(
     basis: QualityComparisonBasis,
     *,
     context: str,
 ) -> None:
-    """A bounded transcode imports only on a strictly better rank.
-
-    Authority: "import only when that bounded rank is strictly better than
-    the current raw rank" —
-    https://github.com/abl030/cratedigger/issues/829#issuecomment-5089731485
-    """
-    if basis.branch != "spectral_candidate_bound":
+    """A one-sided bound compares its class and raw metric with tolerance."""
+    if basis.branch not in ("spectral_candidate_bound", "spectral_existing_bound"):
         return
-    ranks = ("unknown", "poor", "acceptable", "good", "excellent",
-             "transparent", "lossless")
-    better = basis.verdict == "better"
-    strictly_higher = ranks.index(basis.new_rank) > ranks.index(basis.existing_rank)
-    if better != strictly_higher:
+    if basis.new_value_kbps is None or basis.existing_value_kbps is None:
+        return
+    delta = basis.new_value_kbps - basis.existing_value_kbps
+    tolerance = basis.tolerance_kbps or 0
+    expected = (
+        "equivalent" if abs(delta) <= tolerance
+        else ("better" if delta > 0 else "worse")
+    )
+    if basis.verdict != expected:
         raise AssertionError(
-            f"bounded verdict {basis.verdict!r} does not match the rank "
-            f"order {basis.new_rank!r} vs {basis.existing_rank!r} ({context})")
+            f"bounded verdict {basis.verdict!r} does not match effective "
+            f"values {basis.new_value_kbps} vs {basis.existing_value_kbps} "
+            f"({context})")
 
 
 class TestFixedPointCheckerSelfTest(unittest.TestCase):
@@ -751,20 +777,24 @@ class TestFixedPointCheckerSelfTest(unittest.TestCase):
         assert_no_mutual_displacement(
             {"imported": True}, {"imported": False}, context="planted")
 
-    def test_bound_import_without_a_rank_jump_trips(self):
+    def test_bound_verdict_against_its_effective_values_trips(self):
         with self.assertRaises(AssertionError) as caught:
-            assert_bound_import_needs_strictly_better_rank(
+            assert_bound_verdict_uses_effective_values(
                 QualityComparisonBasis(
                     verdict="better", branch="spectral_candidate_bound",
-                    new_rank="acceptable", existing_rank="acceptable"),
+                    new_rank="acceptable", existing_rank="acceptable",
+                    new_value_kbps=160, existing_value_kbps=160,
+                    tolerance_kbps=5),
                 context="planted")
-        self.assertIn("does not match the rank order", str(caught.exception))
+        self.assertIn("does not match effective values", str(caught.exception))
 
-    def test_bound_equivalent_on_equal_ranks_passes(self):
-        assert_bound_import_needs_strictly_better_rank(
+    def test_bound_equivalent_on_equal_effective_values_passes(self):
+        assert_bound_verdict_uses_effective_values(
             QualityComparisonBasis(
                 verdict="equivalent", branch="spectral_candidate_bound",
-                new_rank="acceptable", existing_rank="acceptable"),
+                new_rank="acceptable", existing_rank="acceptable",
+                new_value_kbps=160, existing_value_kbps=160,
+                tolerance_kbps=5),
             context="planted")
 
 
@@ -879,7 +909,7 @@ class TestFall2007FixedPoint(unittest.TestCase):
             # stored bucket, so both directions compute exactly what they
             # computed before). Asserting it here would claim this PR fixed
             # something it did not. The worlds are still generated because
-            # the licensing and strict-rank-jump properties below need the
+            # the licensing and effective-value properties below need the
             # bound's grade is None gate exercised.
             return
         forward = full_pipeline_decision_from_evidence(
@@ -897,14 +927,14 @@ class TestFall2007FixedPoint(unittest.TestCase):
         clean_container=160, clean_grade="genuine",
     ))
     @given(world=fall_2007_worlds())
-    def test_a_bounded_import_needs_a_strict_rank_jump(self, world):
+    def test_a_bounded_verdict_uses_its_effective_values(self, world):
         decision = full_pipeline_decision_from_evidence(
             self._fake_candidate(world),
             self._clean_have(world))
         raw = decision.get("comparison_basis")
         if not isinstance(raw, dict):
             return
-        assert_bound_import_needs_strictly_better_rank(
+        assert_bound_verdict_uses_effective_values(
             msgspec.convert(raw, type=QualityComparisonBasis),
             context=repr(world))
 
