@@ -391,8 +391,8 @@ def classify_import_job_display(
     if job.status == "recovery_required":
         return ImportJobDisplay(
             badge="Recovery required",
-            badge_class="badge-failed",
-            border_color="#a33",
+            badge_class="badge-warn",
+            border_color="#a86f20",
             summary=(job.message or job.error or "Automatic replay refused"),
         )
     if job.status == "running":

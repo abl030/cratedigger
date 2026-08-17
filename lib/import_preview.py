@@ -1446,7 +1446,7 @@ def _authorize_current_evidence_for_preview(
             preloaded=preloaded_evidence is not None,
             beets_library_root=beets_library_root,
         )
-    except Exception:
+    except Exception as exc:
         logger.warning(
             "Unable to load/backfill preview HAVE evidence for request %s",
             request_id,
@@ -1455,7 +1455,8 @@ def _authorize_current_evidence_for_preview(
         return EvidenceBuildResult(
             None,
             "failed",
-            "current Beets authority resolution raised",
+            "current evidence preparation failed: "
+            f"{type(exc).__name__}: {_diagnostic_from_stderr(str(exc))}",
         )
     if load_result.status != "ready" or load_result.evidence is None:
         return load_result

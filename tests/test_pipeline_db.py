@@ -1518,6 +1518,20 @@ class TestImportJobQueueAPI(unittest.TestCase):
             message="requeue UPDATE failed",
         )
 
+        # The terminal retry-budget bail removes only its private action
+        # copy; it must never be replayed as a Wrong Matches decision.
+        failed_requeue_exhausted = _force_job("failed-requeue-exhausted")
+        self.db.mark_import_job_failed(
+            failed_requeue_exhausted.id,
+            error="preview/import requeue budget exhausted",
+            result={
+                "success": False, "message": "budget exhausted",
+                "deferred": False, "code": "requeue_exhausted",
+                "post_commit_wrong_match_scenario": None,
+            },
+            message="budget exhausted",
+        )
+
         # Marker present, receipt missing, but ``deferred`` — e.g.
         # release-lock contention. The live cleanup helper IS called but
         # its own first line skips the decision immediately, so no
@@ -1580,6 +1594,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertIn(failed_failed_receipt.id, selected)
         self.assertNotIn(failed_successful_receipt.id, selected)
         self.assertNotIn(failed_requeue.id, selected)
+        self.assertNotIn(failed_requeue_exhausted.id, selected)
         self.assertNotIn(failed_deferred.id, selected)
         self.assertNotIn(historical_completed.id, selected)
         self.assertNotIn(historical_failed.id, selected)
@@ -3657,19 +3672,49 @@ class TestRequeueImportJobForPreview(unittest.TestCase):
         self.assertEqual(updated.attempts, prior_attempts)
         self.assertEqual(updated.preview_attempts, prior_preview_attempts)
 
-    def test_requeued_row_is_claimable_by_preview(self):
+    def test_requeued_row_waits_for_growing_preview_backoff(self):
         claimed = self._enqueue_claimed_job()
         self.db.requeue_import_job_for_preview(
             claimed.id,
             reason="incomplete",
         )
 
+        self.assertIsNone(claim_next_import_preview_job(
+            self.db, worker_id="preview-too-soon"))
+        self.db._execute("""
+            UPDATE import_jobs
+            SET updated_at = NOW() - INTERVAL '61 seconds'
+            WHERE id = %s
+        """, (claimed.id,))
         preview = claim_next_import_preview_job(self.db, worker_id="preview-1")
         assert preview is not None
         self.assertEqual(preview.id, claimed.id)
         self.assertEqual(preview.preview_status, "running")
         # Preview's claim clears its own diagnostics.
         self.assertIsNone(preview.preview_message)
+
+    def test_requeued_row_caps_preview_backoff_at_thirty_minutes(self):
+        claimed = self._enqueue_claimed_job()
+        self.db.requeue_import_job_for_preview(
+            claimed.id,
+            reason="incident-scale retained attempts",
+        )
+        self.db._execute("""
+            UPDATE import_jobs
+            SET attempts = 2454, updated_at = NOW() - INTERVAL '1799 seconds'
+            WHERE id = %s
+        """, (claimed.id,))
+
+        self.assertIsNone(claim_next_import_preview_job(
+            self.db, worker_id="preview-1799"))
+        self.db._execute("""
+            UPDATE import_jobs
+            SET updated_at = NOW() - INTERVAL '1801 seconds'
+            WHERE id = %s
+        """, (claimed.id,))
+        preview = claim_next_import_preview_job(self.db, worker_id="preview-1801")
+        assert preview is not None
+        self.assertEqual(preview.id, claimed.id)
 
     def test_idempotent_when_already_requeued(self):
         claimed = self._enqueue_claimed_job()

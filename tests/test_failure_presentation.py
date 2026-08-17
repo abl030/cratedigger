@@ -1316,9 +1316,12 @@ _OWN_MESSAGE_TRIGGERS: tuple[_Trigger, ...] = (
 
 _MEASUREMENT_TRIGGERS: tuple[_Trigger, ...] = (
     _Trigger(
+        # Old terminal rows are immutable audit evidence. This historical
+        # diagnostic is still rendered, but current preview code must not
+        # recreate it after its broad exception path became truthful.
         trigger="current beets authority resolution raised",
-        produced_by="lib/import_preview.py",
-        evidence="current Beets authority resolution raised",
+        produced_by="",
+        evidence="",
         probe="failed: current Beets authority resolution raised",
         expect="could not read the installed library copy",
         outcome="measurement_failed",

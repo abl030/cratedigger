@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal
 
 import msgspec
@@ -21,6 +21,40 @@ IMPORT_JOB_AUTOMATION = "automation_import"
 # beets distance, wrong-matches OR auto-import, ``mark_imported_with_rescue``).
 IMPORT_JOB_YOUTUBE = "youtube_import"
 IMPORT_JOB_RECOVERY_REQUIRED = "recovery_required"
+IMPORT_PREVIEW_REQUEUE_INITIAL_DELAY = timedelta(minutes=1)
+IMPORT_PREVIEW_REQUEUE_MAX_DELAY = timedelta(minutes=30)
+IMPORT_PREVIEW_REQUEUE_MAX_AGE = timedelta(hours=1)
+
+
+def _import_preview_requeue_max_exponent() -> int:
+    """Cap before exponentiation at the first doubling that reaches the cap."""
+    initial_seconds = int(IMPORT_PREVIEW_REQUEUE_INITIAL_DELAY.total_seconds())
+    maximum_seconds = int(IMPORT_PREVIEW_REQUEUE_MAX_DELAY.total_seconds())
+    if maximum_seconds <= initial_seconds:
+        return 0
+    ceiling_ratio = (
+        maximum_seconds + initial_seconds - 1
+    ) // initial_seconds
+    return (ceiling_ratio - 1).bit_length()
+
+
+IMPORT_PREVIEW_REQUEUE_MAX_EXPONENT = _import_preview_requeue_max_exponent()
+
+
+def import_preview_requeue_delay(attempts: int) -> timedelta:
+    """Return the growing delay before a requeued job may enter preview."""
+    if attempts <= 0:
+        return timedelta()
+    exponent = min(attempts - 1, IMPORT_PREVIEW_REQUEUE_MAX_EXPONENT)
+    return min(
+        IMPORT_PREVIEW_REQUEUE_INITIAL_DELAY * (2 ** exponent),
+        IMPORT_PREVIEW_REQUEUE_MAX_DELAY,
+    )
+
+
+def import_preview_requeue_exhausted(created_at: datetime, now: datetime) -> bool:
+    """Whether the end-to-end requeue cycle has reached its one-hour budget."""
+    return now - created_at >= IMPORT_PREVIEW_REQUEUE_MAX_AGE
 
 IMPORT_JOB_TYPES = frozenset({
     IMPORT_JOB_FORCE,

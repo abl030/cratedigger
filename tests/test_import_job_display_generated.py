@@ -86,6 +86,8 @@ class TestGeneratedImportJobDisplay(unittest.TestCase):
             self.assertEqual(display.summary, text)
         if status == "recovery_required":
             self.assertEqual(display.badge, "Recovery required")
+            self.assertEqual(display.badge_class, "badge-warn")
+            self.assertEqual(display.border_color, "#a86f20")
             self.assertEqual(display.summary, text)
 
     def test_contract_checker_rejects_the_old_tuple_shape(self) -> None:

@@ -2602,6 +2602,20 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["jobs"][0]["artist_name"],
                          self.db.request(100)["artist_name"])
 
+    def test_import_jobs_timeline_surfaces_recovery_as_environment_failure(self):
+        job_id = self._enqueue_force_job()
+        row = next(row for row in self.db._import_jobs if row["id"] == job_id)
+        row.update(status="recovery_required", message="exact owner replay failed")
+
+        status, data = self._get("/api/import-jobs/timeline")
+
+        self.assertEqual(status, 200)
+        item = data["jobs"][0]
+        self.assertEqual(item["badge"], "Recovery required")
+        self.assertEqual(item["badge_class"], "badge-warn")
+        self.assertEqual(item["border_color"], "#a86f20")
+        self.assertEqual(item["summary"], "exact owner replay failed")
+
     def test_import_jobs_timeline_caps_at_50(self):
         """The route hardcodes limit=50 — seed 51 jobs, count the page."""
         for i in range(51):

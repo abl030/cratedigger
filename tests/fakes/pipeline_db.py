@@ -76,6 +76,7 @@ from lib.import_queue import (
     YoutubeImportPayload,
     automation_import_dedupe_key,
     automation_import_payload,
+    import_preview_requeue_delay,
     validate_job_type,
     validate_payload,
     validate_preview_failure_status,
@@ -1587,7 +1588,10 @@ class FakePipelineDB:
         return [ImportJob.from_row(copy.deepcopy(row)) for row in rows]
 
     def list_terminal_force_wrong_match_cleanup_jobs(self) -> list[ImportJob]:
-        from lib.dispatch import DISPATCH_CODE_REQUEUE_FAILED
+        from lib.dispatch import (
+            DISPATCH_CODE_REQUEUE_EXHAUSTED,
+            DISPATCH_CODE_REQUEUE_FAILED,
+        )
 
         rows = []
         for row in self._import_jobs:
@@ -1629,6 +1633,8 @@ class FakePipelineDB:
                     _jsonb_scalar_text(success) != "true"
                     and _jsonb_scalar_text(result_dict.get("code"))
                         != DISPATCH_CODE_REQUEUE_FAILED
+                    and _jsonb_scalar_text(result_dict.get("code"))
+                        != DISPATCH_CODE_REQUEUE_EXHAUSTED
                     and _jsonb_scalar_text(result_dict.get("deferred"))
                         != "true"
                 ):
@@ -2467,10 +2473,14 @@ class FakePipelineDB:
         *,
         execution_lease: ExecutionLeaseSnapshot | None = None,
     ) -> list[dict[str, object]]:
+        now = _utcnow()
         queued = [
             row for row in self._import_jobs
             if row.get("status") == "queued"
             and row.get("preview_status") == "waiting"
+            and _as_datetime(row.get("updated_at")) <= (
+                now - import_preview_requeue_delay(int(row.get("attempts") or 0))
+            )
             and (
                 row.get("job_type") not in (
                     IMPORT_JOB_AUTOMATION,

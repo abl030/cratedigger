@@ -4349,7 +4349,11 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(updated.attempts, prior_attempts)
         self.assertEqual(updated.preview_attempts, prior_preview_attempts)
 
-        # Now claimable by preview.
+        # Candidate selection owns the requeue delay.
+        self.assertIsNone(claim_next_import_preview_job(
+            db, worker_id="preview-too-soon"))
+        row = next(row for row in db._import_jobs if row["id"] == claimed.id)
+        row["updated_at"] -= timedelta(seconds=61)
         preview = claim_next_import_preview_job(db, worker_id="preview-1")
         assert preview is not None
         self.assertEqual(preview.id, claimed.id)
@@ -5278,6 +5282,18 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             message="requeue UPDATE failed",
         )
 
+        failed_requeue_exhausted = _force_job("failed-requeue-exhausted")
+        db.mark_import_job_failed(
+            failed_requeue_exhausted.id,
+            error="preview/import requeue budget exhausted",
+            result={
+                "success": False, "message": "budget exhausted",
+                "deferred": False, "code": "requeue_exhausted",
+                "post_commit_wrong_match_scenario": None,
+            },
+            message="budget exhausted",
+        )
+
         failed_deferred = _force_job("failed-deferred")
         db.mark_import_job_failed(
             failed_deferred.id,
@@ -5330,6 +5346,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertIn(failed_failed_receipt.id, selected)
         self.assertNotIn(failed_successful_receipt.id, selected)
         self.assertNotIn(failed_requeue.id, selected)
+        self.assertNotIn(failed_requeue_exhausted.id, selected)
         self.assertNotIn(failed_deferred.id, selected)
         self.assertNotIn(historical_completed.id, selected)
         self.assertNotIn(historical_failed.id, selected)
