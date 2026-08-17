@@ -33,11 +33,12 @@ MAIN_TIMER = "cratedigger.timer"
 UNFINDABLE_TIMER = "cratedigger-unfindable.timer"
 WATCHDOG_TIMER = "cratedigger-metadata-gate-watchdog.timer"
 TIMER_UNITS = (MAIN_TIMER, UNFINDABLE_TIMER, WATCHDOG_TIMER)
-# cratedigger-retag-census.timer (#1142) is DELIBERATELY absent from this
-# tuple, not an oversight: the daily census oneshot it drives has no
+# cratedigger-retag-census.timer (#1142) and
+# cratedigger-library-completeness-census.timer (#1149) are DELIBERATELY
+# absent from this tuple, not an oversight: their daily census oneshots have no
 # pipeline-DB dependency at all (unlike UNFINDABLE_TIMER's own service,
 # which writes unfindable_run_metrics) and never mutates Beets either —
-# it only reads Beets and writes its own unrelated JSON snapshot file
+# They only read Beets/source mirrors/files and write unrelated JSON snapshots
 # under cfg.stateDir. It touches nothing this hold exists to quiesce
 # (PostgreSQL migration safety, Beets mutation lanes), so leaving its
 # timer running through a strict hold is safe by construction, not by

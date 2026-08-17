@@ -1,0 +1,531 @@
+"""Read-only exact-source / Beets / filesystem completeness census (#1149).
+
+This deliberately answers only whether an installed exact pressing is
+complete.  It does not repair files, mutate Beets, or use pipeline request
+tracks as a source of truth.  Source components, Beets item paths, and the
+audio files in the album directory remain three independent observations.
+"""
+from __future__ import annotations
+
+import importlib
+import json
+import os
+import stat
+import urllib.error
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import Literal, Protocol
+
+import msgspec
+
+from lib.beets_db import beets_authority_availability_category
+from lib.mb_canonical import CanonicalReleaseRedirected, TaggedCanonicalReleaseFn
+from lib.quality import AUDIO_EXTENSIONS_DOTTED
+from lib.release_identity import ReleaseIdentity
+
+SourceKind = Literal["audio", "non_audio"]
+CompletenessStatus = Literal["complete", "incomplete", "unknown", "beets_unavailable"]
+
+
+class SourceManifestError(ValueError):
+    """Expected raw-source shape/identity failure; callers publish unknown."""
+
+
+class AudioTagReadError(RuntimeError):
+    """Expected corrupt/unreadable audio-tag boundary failure."""
+
+
+class SourceComponent(msgspec.Struct, frozen=True):
+    """One source-declared release component; ``key`` is source-native."""
+    key: str
+    title: str
+    kind: SourceKind
+    recording_id: str | None = None
+
+
+class SourceManifest(msgspec.Struct, frozen=True):
+    source: Literal["musicbrainz", "discogs"]
+    release_id: str
+    components: tuple[SourceComponent, ...]
+
+
+class CompletenessFinding(msgspec.Struct, frozen=True):
+    kind: Literal["missing_source_audio", "catalog_drift", "non_audio_omitted", "unknown"]
+    detail: str
+
+
+class CompletenessAlbum(msgspec.Struct, frozen=True):
+    album_id: int
+    artist: str
+    title: str
+    release_id: str
+    findings: tuple[CompletenessFinding, ...]
+    source_audio_components: int
+    physical_audio_files: int
+    catalog_items: int
+
+
+class CompletenessCounts(msgspec.Struct, frozen=True):
+    albums_scanned: int
+    audio_complete: int
+    missing_source_audio: int
+    catalog_drift: int
+    non_audio_omitted: int
+    unknown: int
+
+
+class CompletenessReport(msgspec.Struct, frozen=True):
+    status: CompletenessStatus
+    counts: CompletenessCounts
+    albums: tuple[CompletenessAlbum, ...]
+    unavailable_detail: str | None = None
+
+
+class CatalogItem(msgspec.Struct, frozen=True):
+    path: str
+    source_key: str
+    recording_id: str
+    title: str = ""
+    track: int | None = None
+
+
+@dataclass(frozen=True)
+class LibraryAlbum:
+    album_id: int
+    artist: str
+    title: str
+    identity: ReleaseIdentity | None
+    directory: str
+    catalog_items: tuple[CatalogItem, ...]
+    refused_paths: tuple[str, ...] = ()
+
+
+class CompletenessBeets(Protocol):
+    def list_library_completeness_albums(self) -> list[LibraryAlbum]: ...
+
+
+def _raw_list(value: object, detail: str) -> list[object]:
+    if not isinstance(value, list):
+        raise SourceManifestError(detail)
+    return msgspec.convert(value, type=list[object])
+
+
+def _raw_mapping(value: object, detail: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise SourceManifestError(detail)
+    try:
+        return msgspec.convert(value, type=dict[str, object])
+    except msgspec.ValidationError as exc:
+        raise SourceManifestError(detail) from exc
+
+
+def musicbrainz_manifest(
+    release_id: str, raw: Mapping[str, object], *,
+    resolve_redirect: TaggedCanonicalReleaseFn | None = None,
+) -> SourceManifest:
+    """Normalize raw MB media without losing release-track/recording identity.
+
+    A release track id is the primary source key.  ``recording.video`` is
+    source authority for a non-audio extra, so an omitted video can be visible
+    without falsely claiming audio incompleteness.
+    """
+    raw_release_id = raw.get("id")
+    if not isinstance(raw_release_id, str):
+        raise SourceManifestError("MusicBrainz raw release identity is unavailable or mismatched")
+    redirect = (
+        resolve_redirect(release_id)
+        if raw_release_id != release_id and resolve_redirect else None
+    )
+    if raw_release_id != release_id and (
+        not isinstance(redirect, CanonicalReleaseRedirected)
+        or redirect.survivor != raw_release_id
+    ):
+        # ``web.mb`` follows a 301 before returning its raw body. A body ID
+        # alone is not proof that it represents this installed release: the
+        # canonical resolver separately observes the transport redirect and
+        # names its survivor. Discogs has no equivalent identity pathway.
+        raise SourceManifestError("MusicBrainz raw release identity is unavailable or mismatched")
+    components: list[SourceComponent] = []
+    media = _raw_list(raw.get("media"), "MusicBrainz raw release has no media list")
+    for raw_medium in media:
+        medium = _raw_mapping(raw_medium, "MusicBrainz medium is not an object")
+        tracks = _raw_list(medium.get("tracks"), "MusicBrainz medium has no tracks list")
+        # MusicBrainz treats a pregap as a real release-track component.
+        entries: list[object] = []
+        pregap = medium.get("pregap")
+        if pregap is not None:
+            entries.append(pregap)
+        entries.extend(tracks)
+        for raw_track in entries:
+            track = _raw_mapping(raw_track, "MusicBrainz track is not an object")
+            key = track.get("id")
+            raw_recording = track.get("recording")
+            if not isinstance(key, str) or not key:
+                raise SourceManifestError("MusicBrainz track lacks release-track identity")
+            recording = _raw_mapping(raw_recording, "MusicBrainz track lacks release-track identity")
+            recording_id = recording.get("id")
+            if not isinstance(recording_id, str) or not recording_id:
+                raise SourceManifestError("MusicBrainz track lacks recording identity")
+            video = recording.get("video")
+            if not isinstance(video, bool):
+                raise SourceManifestError("MusicBrainz recording lacks video boolean")
+            name = track.get("title")
+            title = name if isinstance(name, str) else ""
+            components.append(SourceComponent(
+                key=key, title=title, kind="non_audio" if video else "audio",
+                recording_id=recording_id,
+            ))
+    return _valid_manifest("musicbrainz", release_id, components)
+
+
+def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManifest:
+    """Normalize raw Discogs tracks using literal positions (incl. A2.1)."""
+    raw_release_id = raw.get("id")
+    if (isinstance(raw_release_id, bool)
+            or not isinstance(raw_release_id, (int, str))
+            or str(raw_release_id) != release_id):
+        raise SourceManifestError("Discogs raw release identity is unavailable or mismatched")
+    tracks = _raw_list(raw.get("tracks"), "Discogs raw release has no tracks list")
+    components: list[SourceComponent] = []
+
+    def visit(entries: Iterable[object]) -> None:
+        for raw_entry in entries:
+            entry = _raw_mapping(raw_entry, "Discogs track is not an object")
+            subtracks = entry.get("sub_tracks")
+            if subtracks is not None:
+                # A parent with subtracks is an index/header, not another
+                # playable component. Counting both invents an extra source
+                # track; preserve each child literal position instead.
+                visit(_raw_list(subtracks, "Discogs sub_tracks is not a list"))
+                continue
+            position = entry.get("position")
+            duration = entry.get("duration")
+            # The deployed mirror flattens Discogs' index/side headings into
+            # ordinary rows. A literal empty position AND empty duration is
+            # that non-playable header shape; an absent/nonempty duration is
+            # ambiguous and must not be silently discarded.
+            if position == "" and duration == "":
+                continue
+            if not isinstance(position, str) or not position:
+                raise SourceManifestError("Discogs track lacks literal position")
+            title = entry.get("title")
+            components.append(SourceComponent(
+                key=f"{release_id}-{position}",
+                title=title if isinstance(title, str) else "", kind="audio",
+            ))
+    visit(tracks)
+    return _valid_manifest("discogs", release_id, components)
+
+
+def _valid_manifest(
+    source: Literal["musicbrainz", "discogs"], release_id: str,
+    components: list[SourceComponent],
+) -> SourceManifest:
+    if not release_id or any(not component.key for component in components):
+        raise SourceManifestError("source manifest has blank identity")
+    keys = [component.key for component in components]
+    if len(keys) != len(set(keys)):
+        raise SourceManifestError("source manifest has duplicate identity")
+    if not components:
+        raise SourceManifestError("source manifest has no playable components")
+    return SourceManifest(source=source, release_id=release_id, components=tuple(components))
+
+
+def read_audio_tag_identities(
+    path: str, *,
+    media_file_factory: Callable[[str], object] | None = None,
+    mediafile_error_type: type[BaseException] | None = None,
+) -> tuple[str, str]:
+    """Read the exact release-track and recording tags of one audio file."""
+    # mediafile has no type stubs. Resolve the concrete error class from its
+    # exceptions module—not the package root—while confining the untyped
+    # boundary to these two accesses.
+    factory: Callable[[str], object]
+    error_type: type[BaseException]
+    if media_file_factory is None:
+        factory = getattr(  # noqa: B009 - untyped third-party module
+            importlib.import_module("mediafile"), "MediaFile",
+        )
+    else:
+        factory = media_file_factory
+    if mediafile_error_type is None:
+        error_type = getattr(  # noqa: B009 - untyped third-party module
+            importlib.import_module("mediafile.exceptions"), "MediaFileError",
+        )
+    else:
+        error_type = mediafile_error_type
+    try:
+        media = factory(path)
+        release_track = getattr(media, "mb_releasetrackid", "") or ""
+        recording = getattr(media, "mb_trackid", "") or ""
+        if not isinstance(release_track, str) or not isinstance(recording, str):
+            raise TypeError("audio tag identity is not text")
+        return release_track, recording
+    except (OSError, ValueError, TypeError) as exc:
+        # mediafile's corrupt/unsupported-file branch is not an OSError.
+        # Keep all other programmer/import defects loud.
+        raise AudioTagReadError(str(exc)) from exc
+    except Exception as exc:
+        if isinstance(exc, error_type):
+            raise AudioTagReadError(str(exc)) from exc
+        raise
+
+
+def enumerate_audio_files(directory: str) -> tuple[str, ...]:
+    """Exact recursive physical audio inventory; no inferred track arithmetic."""
+    if not os.path.isdir(directory):
+        raise FileNotFoundError(f"album directory is unavailable: {directory}")
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    paths: list[str] = []
+    for root, _dirs, names in os.walk(directory, onerror=raise_walk_error):
+        for name in names:
+            path = os.path.join(root, name)
+            if os.path.splitext(name)[1].lower() in AUDIO_EXTENSIONS_DOTTED:
+                if not stat.S_ISREG(os.lstat(path).st_mode):
+                    raise OSError(f"audio inventory entry is not a regular file: {path}")
+                paths.append(path)
+    return tuple(sorted(paths))
+
+
+def classify_album(
+    album: LibraryAlbum, manifest: SourceManifest,
+    *, enumerate_files: Callable[[str], tuple[str, ...]] = enumerate_audio_files,
+    tag_reader: Callable[[str], tuple[str, str]] = read_audio_tag_identities,
+) -> CompletenessAlbum:
+    """Classify one album with independent source/catalog/filesystem evidence.
+
+    The finding list is intentionally nonexclusive.  Any malformed source,
+    containment refusal, directory error, or unreadable noncatalogued audio
+    turns the answer into ``unknown`` rather than guessing missingness.
+    """
+    findings: list[CompletenessFinding] = []
+    if album.identity is None or album.identity.release_id != manifest.release_id:
+        return _unknown(album, manifest, "exact release identity unavailable or mismatched")
+    if album.identity.source != manifest.source:
+        return _unknown(album, manifest, "source pathway mismatched")
+    source_keys = [component.key for component in manifest.components]
+    if not source_keys or any(not key for key in source_keys) or len(source_keys) != len(set(source_keys)):
+        return _unknown(album, manifest, "source manifest has unsafe component identities")
+    if album.refused_paths:
+        return _unknown(album, manifest, "catalog path refused by library containment")
+    try:
+        physical = enumerate_files(album.directory)
+    except OSError as exc:
+        return _unknown(album, manifest, f"physical inventory unreadable: {exc}")
+    catalog_paths = {item.path for item in album.catalog_items}
+    physical_paths = set(physical)
+    if catalog_paths != physical_paths:
+        findings.append(CompletenessFinding(
+            kind="catalog_drift",
+            detail=(f"uncatalogued={len(physical_paths - catalog_paths)} "
+                    f"catalogued_missing={len(catalog_paths - physical_paths)}"),
+        ))
+
+    audio = [component for component in manifest.components if component.kind == "audio"]
+    non_audio = [component for component in manifest.components if component.kind == "non_audio"]
+    audio_keys = {component.key for component in audio}
+    components_by_key = {component.key: component for component in manifest.components}
+
+    def current_component_key(source_key: str, recording_id: str) -> str | None:
+        """Return the one current source component this identity safely names."""
+        if source_key in components_by_key:
+            return source_key
+        if recording_id:
+            matches = [component.key for component in manifest.components
+                       if component.recording_id == recording_id]
+            if len(matches) == 1:
+                return matches[0]
+        return None
+
+    existing_catalog = [item for item in album.catalog_items if item.path in physical_paths]
+    known_component_keys: set[str] = set()
+    unmatched_mb_witnesses = 0
+    for item in existing_catalog:
+        key = current_component_key(item.source_key, item.recording_id)
+        if key:
+            known_component_keys.add(key)
+        elif manifest.source == "musicbrainz":
+            # A physically present Beets item with historical MB entities can
+            # still be the current missing source component. It is not proof
+            # of absence unless the complete program fallback vouches for it.
+            unmatched_mb_witnesses += 1
+
+    unknown_extra = False
+    for path in physical_paths - catalog_paths:
+        try:
+            release_track, recording = tag_reader(path)
+        except AudioTagReadError as exc:
+            unknown_extra = True
+            findings.append(CompletenessFinding("unknown", f"unreadable uncatalogued audio: {exc}"))
+            continue
+        if manifest.source == "discogs":
+            matching_keys = {
+                identity for identity in (release_track, recording)
+                if identity in components_by_key
+            }
+            if len(matching_keys) == 1:
+                known_component_keys.update(matching_keys)
+            elif len(matching_keys) > 1:
+                unknown_extra = True
+                findings.append(CompletenessFinding(
+                    "unknown", "uncatalogued audio has conflicting exact Discogs identities",
+                ))
+            elif not release_track and not recording:
+                unknown_extra = True
+                findings.append(CompletenessFinding(
+                    "unknown", "uncatalogued audio lacks exact source identity",
+                ))
+        elif manifest.source == "musicbrainz":
+            key = current_component_key(release_track, recording)
+            if key:
+                known_component_keys.add(key)
+            elif release_track or recording:
+                # Current MB track/recording entities can churn. A readable
+                # stale extra is therefore an uncertainty witness, not an
+                # unrelated file that permits a definite missing verdict.
+                unmatched_mb_witnesses += 1
+            else:
+                unknown_extra = True
+                findings.append(CompletenessFinding(
+                    "unknown", "uncatalogued audio lacks exact source identity",
+                ))
+    # A catalogued missing path is already catalog drift.  It cannot satisfy
+    # source audio, but is not unreadable physical evidence either.
+    missing: set[str] = audio_keys - known_component_keys
+    # Historical MB track entities can be replaced upstream while the exact
+    # release/program is unchanged (the Moana Deluxe live control). IDs are
+    # still preferred, but a *whole* one-to-one program may vouch safely when
+    # Beets' global track ordinals and nonblank titles agree in source order.
+    # A partial or titleless sequence remains unknown rather than positional
+    # invention.
+    if (manifest.source == "musicbrainz" and missing
+            and _safe_program_fallback(audio, existing_catalog, physical_paths)):
+        known_component_keys.update(audio_keys)
+        missing = set()
+    if missing and not unknown_extra and not unmatched_mb_witnesses:
+        labels = [component.title or component.key for component in audio if component.key in missing]
+        findings.append(CompletenessFinding("missing_source_audio", ", ".join(labels)))
+    elif missing:
+        if unknown_extra:
+            detail = "unreadable extra audio could satisfy missing source component"
+        else:
+            detail = ("current MusicBrainz identities do not match "
+                      f"{unmatched_mb_witnesses} installed audio component(s)")
+        findings.append(CompletenessFinding("unknown", detail))
+    # An omitted source-declared non-audio component is informative, never an
+    # audio defect. Exact release-track identity is enough to observe it.
+    non_audio_keys = {component.key for component in non_audio}
+    if non_audio_keys - known_component_keys:
+        findings.append(CompletenessFinding("non_audio_omitted", str(len(non_audio_keys - known_component_keys))))
+    return CompletenessAlbum(
+        album_id=album.album_id, artist=album.artist, title=album.title,
+        release_id=manifest.release_id, findings=tuple(findings),
+        source_audio_components=len(audio), physical_audio_files=len(physical),
+        catalog_items=len(album.catalog_items),
+    )
+
+
+def _safe_program_fallback(
+    source_audio: Sequence[SourceComponent], catalog_items: Sequence[CatalogItem],
+    physical_paths: set[str],
+) -> bool:
+    """Whether IDs churned but the complete exact-release program agrees."""
+    if len(source_audio) != len(catalog_items) or len(catalog_items) != len(physical_paths):
+        return False
+    ordered = sorted(catalog_items, key=lambda item: item.track if item.track is not None else -1)
+    if any(item.track is None or not item.title or not component.title
+           for item, component in zip(ordered, source_audio, strict=True)):
+        return False
+    corroborated = [
+        item.track == index and _titles_corrobate(item.title, component.title)
+        for index, (item, component) in enumerate(zip(ordered, source_audio, strict=True), 1)
+    ]
+    if all(corroborated):
+        return True
+    # The live 59-track Moana Deluxe release has one current-source display
+    # title variant while every global coordinate and other title agrees. A
+    # single mismatch in a long program is corroboration, not fuzzy matching:
+    # short programs and two mismatches remain unknown.
+    return len(corroborated) >= 50 and sum(corroborated) >= len(corroborated) - 1
+
+
+def _titles_corrobate(left: str, right: str) -> bool:
+    """Conservative title corroboration tolerant of source suffix churn."""
+    def words(value: str) -> tuple[str, ...]:
+        return tuple(
+            token for part in value.casefold().split()
+            if (token := "".join(ch for ch in part if ch.isalnum()))
+        )
+    a, b = words(left), words(right)
+    shortest = min(len(a), len(b))
+    return shortest >= 1 and a[:shortest] == b[:shortest]
+
+
+def _unknown(album: LibraryAlbum, manifest: SourceManifest, detail: str) -> CompletenessAlbum:
+    return CompletenessAlbum(album.album_id, album.artist, album.title, manifest.release_id,
+                             (CompletenessFinding("unknown", detail),), 0, 0,
+                             len(album.catalog_items))
+
+
+def scan_library_completeness(
+    beets: CompletenessBeets,
+    *, fetch_musicbrainz_raw: Callable[[str], dict[str, object]],
+    fetch_discogs_raw: Callable[[str], dict[str, object]],
+    enumerate_files: Callable[[str], tuple[str, ...]] = enumerate_audio_files,
+    tag_reader: Callable[[str], tuple[str, str]] = read_audio_tag_identities,
+    resolve_musicbrainz_redirect: TaggedCanonicalReleaseFn | None = None,
+    max_workers: int = 4,
+) -> CompletenessReport:
+    """Run the full, read-only census. Per-album uncertainty is published."""
+    try:
+        albums = beets.list_library_completeness_albums()
+    except Exception as exc:
+        category = beets_authority_availability_category(exc)
+        if category is None:
+            raise
+        return CompletenessReport("beets_unavailable", CompletenessCounts(0, 0, 0, 0, 0, 0), (), category)
+    if max_workers < 1:
+        raise ValueError("max_workers must be positive")
+
+    def classify_one(album: LibraryAlbum) -> CompletenessAlbum:
+        if album.identity is None:
+            return _unknown(album, SourceManifest("musicbrainz", "", ()), "unclassifiable Beets release identity")
+        try:
+            raw = (fetch_musicbrainz_raw(album.identity.release_id)
+                   if album.identity.source == "musicbrainz"
+                   else fetch_discogs_raw(album.identity.release_id))
+            manifest = (musicbrainz_manifest(
+                            album.identity.release_id, raw,
+                            resolve_redirect=resolve_musicbrainz_redirect,
+                        )
+                        if album.identity.source == "musicbrainz"
+                        else discogs_manifest(album.identity.release_id, raw))
+            return classify_album(album, manifest, enumerate_files=enumerate_files, tag_reader=tag_reader)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError,
+                json.JSONDecodeError, UnicodeDecodeError, SourceManifestError,
+                msgspec.ValidationError) as exc:
+            return _unknown(album, SourceManifest(album.identity.source, album.identity.release_id, ()), f"source unreadable: {exc}")
+
+    # ``map`` yields input order despite concurrent fetching. Web clients
+    # enforce their mirror-specific semaphores; this outer bound prevents the
+    # census itself from making unbounded filesystem/network work.
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(classify_one, albums))
+    exceptional: list[CompletenessAlbum] = []
+    complete = missing = drift = non_audio = unknown = 0
+    for result in results:
+        kinds = {finding.kind for finding in result.findings}
+        missing += "missing_source_audio" in kinds
+        drift += "catalog_drift" in kinds
+        non_audio += "non_audio_omitted" in kinds
+        unknown += "unknown" in kinds
+        if not {"missing_source_audio", "unknown"} & kinds:
+            complete += 1
+        if result.findings:
+            exceptional.append(result)
+    status: CompletenessStatus = "unknown" if unknown else "incomplete" if missing else "complete"
+    return CompletenessReport(status, CompletenessCounts(len(albums), complete, missing, drift, non_audio, unknown), tuple(exceptional))

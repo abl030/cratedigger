@@ -162,6 +162,9 @@ _beets: BeetsDB | None = None
 # means "no runtime dir admitted" (never reached in production — routes
 # treat it exactly like a missing snapshot file).
 retag_census_snapshot_path: str | None = None
+# Daily library completeness snapshot. Set at startup from the same admitted
+# runtime directory as the writer; routes only read it.
+library_completeness_snapshot_path: str | None = None
 # Explicit test/dev dependency-injection seams for the pinned destructive
 # operation. Production leaves both unset and the service selects its real
 # subprocess/notifier implementations.
@@ -766,7 +769,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     global beets_db_path, beets_library_root, canonical_origin
-    global retag_census_snapshot_path
+    global retag_census_snapshot_path, library_completeness_snapshot_path
 
     parser = argparse.ArgumentParser(description="Cratedigger Web UI")
     parser.add_argument(
@@ -883,6 +886,12 @@ def main() -> int:
         retag_divergence_census_snapshot_path,
     )
     retag_census_snapshot_path = retag_divergence_census_snapshot_path(
+        admitted_config.var_dir,
+    )
+    from lib.library_completeness_snapshot import (
+        library_completeness_snapshot_path as completeness_snapshot_path,
+    )
+    library_completeness_snapshot_path = completeness_snapshot_path(
         admitted_config.var_dir,
     )
     inherited_listener: socket.socket | None = None

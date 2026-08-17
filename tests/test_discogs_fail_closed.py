@@ -26,6 +26,14 @@ PUBLIC_CACHED_DISCOGS_ADAPTERS = (
     "get_label",
     "get_label_releases",
 )
+# The raw source adapter caches through its focused private helper rather than
+# dispatching ``memoize_meta`` itself, but it has the same public admission
+# obligation as the browse adapters above.
+PUBLIC_RAW_CACHE_DISCOGS_ADAPTERS = ("get_release_raw",)
+PUBLIC_FAIL_CLOSED_DISCOGS_ADAPTERS = (
+    *PUBLIC_CACHED_DISCOGS_ADAPTERS,
+    *PUBLIC_RAW_CACHE_DISCOGS_ADAPTERS,
+)
 
 
 class _JsonResponse:
@@ -123,6 +131,8 @@ def call_public_cached_adapter(
         return discogs.get_master_releases(entity_id)
     if surface == "get_release":
         return discogs.get_release(entity_id)
+    if surface == "get_release_raw":
+        return discogs.get_release_raw(entity_id)
     if surface == "get_artist_name":
         return discogs.get_artist_name(entity_id)
     if surface == "search_labels":
@@ -173,7 +183,7 @@ class TestPublicCachedDiscogsAdaptersFailClosed(unittest.TestCase):
     def test_every_adapter_rejects_before_returning_its_warm_cache_entry(
         self,
     ) -> None:
-        for surface in PUBLIC_CACHED_DISCOGS_ADAPTERS:
+        for surface in PUBLIC_FAIL_CLOSED_DISCOGS_ADAPTERS:
             with self.subTest(surface=surface):
                 mirror = LeafDiscogsMirror()
                 cache._redis = FakeRedis()

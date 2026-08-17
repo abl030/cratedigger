@@ -322,6 +322,12 @@ class TestEntrypointStartupPlacement(unittest.TestCase):
                 (),
                 2,
             ),
+            (
+                "library-completeness-census",
+                [sys.executable, "scripts/run_library_completeness_census.py"],
+                (),
+                2,
+            ),
         )
 
         for role, executable, extra, expected_exit_code in commands:

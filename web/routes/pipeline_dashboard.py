@@ -10,6 +10,7 @@ import logging
 import msgspec
 
 from lib.disk_coverage_service import disk_coverage
+from lib.library_completeness_snapshot import read_library_completeness_snapshot
 from lib.retag_divergence_census_snapshot import (
     read_retag_divergence_census_snapshot,
 )
@@ -28,6 +29,7 @@ log = logging.getLogger(__name__)
 #: ``albums_listed_total`` in the payload make the cap visible to the
 #: caller rather than a silent truncation.
 DASHBOARD_RETAG_CENSUS_ALBUM_CAP = 50
+DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP = 50
 
 
 def get_pipeline_dashboard(h: RouteHandler, params: dict[str, list[str]]) -> None:
@@ -37,6 +39,7 @@ def get_pipeline_dashboard(h: RouteHandler, params: dict[str, list[str]]) -> Non
     data["redis"] = cache_api.redis_metrics()
     data["disk_coverage"] = _dashboard_disk_coverage()
     data["retag_divergence_census"] = _dashboard_retag_divergence_census()
+    data["library_completeness"] = _dashboard_library_completeness()
     h._json(data)
 
 
@@ -143,11 +146,42 @@ def _empty_retag_divergence_census(state: str) -> dict[str, object]:
     }
 
 
+def _dashboard_library_completeness() -> dict[str, object]:
+    """Read the daily source/catalog/filesystem census without rescanning."""
+    s = _server()
+    path = s.library_completeness_snapshot_path
+    if path is None:
+        return _empty_library_completeness("missing")
+    try:
+        snapshot = read_library_completeness_snapshot(path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, msgspec.ValidationError) as exc:
+        log.exception("library completeness snapshot at %s is unreadable", path)
+        result = _empty_library_completeness("unreadable")
+        result["error"] = str(exc)
+        return result
+    if snapshot is None:
+        return _empty_library_completeness("missing")
+    snapshot_dict = msgspec.to_builtins(snapshot)
+    report = snapshot_dict["report"]
+    albums = report["albums"]
+    total = len(albums)
+    report["albums"] = albums[:DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP]
+    return {
+        "state": "ok", "error": None, "snapshot": snapshot_dict,
+        "albums_shown": len(report["albums"]), "albums_listed_total": total,
+    }
+
+
+def _empty_library_completeness(state: str) -> dict[str, object]:
+    return {"state": state, "error": None, "snapshot": None,
+            "albums_shown": 0, "albums_listed_total": 0}
+
+
 ROUTES: list[RouteRegistration] = [
     route(
         "GET", "/api/pipeline/dashboard", get_pipeline_dashboard,
-        "Operational metrics for the dashboard subtab (searches, "
-        "cycles, redis).",
+        "Operational metrics for the dashboard subtab (searches, cycles, "
+        "redis, read-only library census snapshots).",
         classified=True,
     ),
 ]

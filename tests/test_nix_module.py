@@ -2191,7 +2191,7 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
             text.count('export CRATEDIGGER_RUNTIME_CONFIG="${configTemplate}"'),
             1,
         )
-        self.assertEqual(text.count("${beetsRuntimeEnvironment}"), 10)
+        self.assertEqual(text.count("${beetsRuntimeEnvironment}"), 11)
         for wrapper in (
             "cratedigger",
             "cratedigger-importer",
@@ -2203,6 +2203,7 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
             # not the env-var-only shape cratedigger-unfindable/pipeline-cli
             # use.
             "cratedigger-retag-census",
+            "cratedigger-library-completeness-census",
         ):
             start = text.index(f'writeShellScriptBin "{wrapper}"')
             block = text[start:start + 1800]
@@ -2581,6 +2582,33 @@ class TestRetagDivergenceCensusServiceShape(unittest.TestCase):
         self.assertIn(
             "BindReadOnlyPaths = beetsObserverReadOnlyPaths;", self.service_block,
         )
+
+
+class TestLibraryCompletenessCensusServiceShape(unittest.TestCase):
+    """#1149 is independently scheduled/read-only, not pipeline work."""
+
+    def setUp(self) -> None:
+        source = _nix_source(MODULE_NIX)
+        self.service_block = _attrset_block(
+            source, "systemd.services.cratedigger-library-completeness-census",
+        )
+        self.timer_block = _attrset_block(
+            source, "systemd.timers.cratedigger-library-completeness-census",
+        )
+
+    def test_service_is_read_only_beets_oneshot_with_public_fallback_headroom(self) -> None:
+        self.assertIn('Type = "oneshot";', self.service_block)
+        self.assertIn("restartIfChanged = false;", self.service_block)
+        self.assertIn("BindReadOnlyPaths = beetsObserverReadOnlyPaths;", self.service_block)
+        self.assertIn('TimeoutStartSec = "4h";', self.service_block)
+        self.assertNotIn("cratedigger-db-migrate", self.service_block)
+        self.assertNotIn("PIPELINE_DB_DSN", self.service_block)
+
+    def test_timer_is_daily_persistent_and_jittered(self) -> None:
+        self.assertIn('wantedBy = ["timers.target"];', self.timer_block)
+        self.assertIn('OnCalendar = "daily";', self.timer_block)
+        self.assertIn("Persistent = true;", self.timer_block)
+        self.assertIn("RandomizedDelaySec = ", self.timer_block)
 
 
 if __name__ == "__main__":

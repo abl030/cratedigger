@@ -50,6 +50,7 @@ from web.discogs import (
     get_label_releases,
     get_master_releases,
     get_release,
+    get_release_raw,
     search_artists,
     search_labels,
     search_releases,
@@ -157,6 +158,35 @@ class TestGetRelease(unittest.TestCase):
         self.assertEqual(track0["disc_number"], 1)
         self.assertEqual(track0["track_number"], 1)
         self.assertEqual(track0["length_seconds"], 284.0)
+
+    def test_raw_release_preserves_literal_positions_and_subtracks(self):
+        raw_data = {
+            **self.RELEASE_DATA,
+            "tracks": [{"position": "A2", "title": "Index", "sub_tracks": [
+                {"position": "A2.1", "title": "Part One", "duration": "1:00"},
+                {"position": "A2.2", "title": "Part Two", "duration": "2:00"},
+            ]}],
+        }
+        with _mock_urlopen(raw_data):
+            raw = get_release_raw(83182, fresh=True)
+        tracks = raw["tracks"]
+        assert _is_list(tracks)
+        row = tracks[0]
+        assert _is_dict(row)
+        self.assertEqual(row["position"], "A2")
+        children = row["sub_tracks"]
+        assert _is_list(children)
+        child = children[1]
+        assert _is_dict(child)
+        self.assertEqual(child["position"], "A2.2")
+        with _mock_urlopen(raw_data):
+            slim = get_release(83182, fresh=True)
+        slim_tracks = slim["tracks"]
+        assert _is_list(slim_tracks)
+        self.assertEqual(slim_tracks[0], {
+            "disc_number": 1, "track_number": 2, "title": "Index",
+            "length_seconds": None,
+        })
 
 
 class TestGetMasterReleases(unittest.TestCase):

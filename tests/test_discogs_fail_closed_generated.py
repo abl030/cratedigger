@@ -10,7 +10,7 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from tests.test_discogs_fail_closed import (
-    PUBLIC_CACHED_DISCOGS_ADAPTERS,
+    PUBLIC_FAIL_CLOSED_DISCOGS_ADAPTERS,
     LeafDiscogsMirror,
     assert_missing_discogs_blocks,
     call_public_cached_adapter,
@@ -41,7 +41,7 @@ class TestGeneratedPublicDiscogsFailClosed(unittest.TestCase):
     def test_missing_configuration_precedes_every_arbitrary_warm_cache_entry(
         self, query: str, entity_id: int,
     ) -> None:
-        for surface in PUBLIC_CACHED_DISCOGS_ADAPTERS:
+        for surface in PUBLIC_FAIL_CLOSED_DISCOGS_ADAPTERS:
             mirror = LeafDiscogsMirror()
             cache._redis = FakeRedis()
             discogs.DISCOGS_API_BASE = "https://discogs-mirror.test"

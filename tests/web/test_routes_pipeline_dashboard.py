@@ -16,6 +16,18 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from lib.beets_db import BeetsAlbumIdentityRow
+from lib.library_completeness import (
+    CompletenessAlbum,
+    CompletenessCounts,
+    CompletenessFinding,
+    CompletenessReport,
+)
+from lib.library_completeness_snapshot import (
+    LibraryCompletenessSnapshot,
+    library_completeness_snapshot_path,
+    read_library_completeness_snapshot,
+    write_library_completeness_snapshot,
+)
 from lib.retag_divergence_audit import (
     RetagDivergenceAlbum,
     RetagDivergenceCounts,
@@ -40,6 +52,7 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         "generated_at", "redis", "searches", "cycles", "coverage",
         "peers", "plan_readiness", "disk_coverage", "unfindable",
         "retag_divergence_census",
+        "library_completeness",
     }
     DASHBOARD_UNFINDABLE_FIELDS: ClassVar = {
         "recent_runs", "backlog_trend",
@@ -415,6 +428,7 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
 DASHBOARD_RETAG_DIVERGENCE_CENSUS_FIELDS = {
     "state", "error", "snapshot", "albums_shown", "albums_listed_total",
 }
+DASHBOARD_LIBRARY_COMPLETENESS_FIELDS = DASHBOARD_RETAG_DIVERGENCE_CENSUS_FIELDS
 
 
 @contextmanager
@@ -432,6 +446,17 @@ def _retag_census_snapshot_path_set(path):
         yield
     finally:
         srv.retag_census_snapshot_path = previous
+
+
+@contextmanager
+def _library_completeness_snapshot_path_set(path):
+    import web.server as srv
+    previous = srv.library_completeness_snapshot_path
+    srv.library_completeness_snapshot_path = path
+    try:
+        yield
+    finally:
+        srv.library_completeness_snapshot_path = previous
 
 
 def _snapshot(
@@ -458,6 +483,11 @@ class _PoisonedBeetsDB(FakeBeetsDB):
         raise AssertionError(
             "dashboard must not invoke the whole-library retag-divergence "
             "reader — it reads the persisted snapshot only"
+        )
+
+    def list_library_completeness_albums(self):
+        raise AssertionError(
+            "dashboard must not invoke the whole-library completeness reader",
         )
 
 
@@ -623,6 +653,69 @@ class TestPipelineDashboardRetagDivergenceCensusContract(_FakeDbWebServerCase):
         self.assertEqual(census["state"], "unreadable")
         self.assertIsNone(census["snapshot"])
         self.assertIsNotNone(census["error"])
+
+
+class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.db.seed_request(make_request_row(id=100, status="wanted"))
+
+    def test_snapshot_is_capped_without_changing_persisted_totals(self) -> None:
+        import web.server as srv
+        from web.routes.pipeline_dashboard import (
+            DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP,
+        )
+        count = DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP + 3
+        snapshot = LibraryCompletenessSnapshot(
+            "2026-08-17T00:00:00+00:00", 2.0,
+            CompletenessReport("incomplete", CompletenessCounts(count, 0, count, 0, 0, 0), tuple(
+                CompletenessAlbum(i, "Artist", f"Album {i}", "release", (CompletenessFinding("missing_source_audio", "track"),), 1, 0, 0)
+                for i in range(count)
+            )),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = library_completeness_snapshot_path(tmpdir)
+            write_library_completeness_snapshot(path, snapshot)
+            with (
+                _library_completeness_snapshot_path_set(path),
+                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+            ):
+                status, data = self._get("/api/pipeline/dashboard")
+            persisted = read_library_completeness_snapshot(path)
+        self.assertEqual(status, 200)
+        block = data["library_completeness"]
+        _assert_required_fields(self, block, DASHBOARD_LIBRARY_COMPLETENESS_FIELDS, "library completeness")
+        self.assertEqual(block["state"], "ok")
+        self.assertEqual(block["albums_shown"], DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP)
+        self.assertEqual(block["albums_listed_total"], count)
+        self.assertEqual(block["snapshot"]["report"]["counts"]["missing_source_audio"], count)
+        assert persisted is not None
+        self.assertEqual(len(persisted.report.albums), count)
+
+    def test_missing_snapshot_never_scans_beets(self) -> None:
+        import web.server as srv
+        with patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()):
+            status, data = self._get("/api/pipeline/dashboard")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["library_completeness"], {
+            "state": "missing", "error": None, "snapshot": None,
+            "albums_shown": 0, "albums_listed_total": 0,
+        })
+
+    def test_unreadable_snapshot_is_in_band_error(self) -> None:
+        import web.server as srv
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = library_completeness_snapshot_path(tmpdir)
+            with open(path, "wb") as fh:
+                fh.write(b"broken")
+            with (
+                _library_completeness_snapshot_path_set(path),
+                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+                self.assertLogs("web.routes.pipeline_dashboard", level="ERROR"),
+            ):
+                status, data = self._get("/api/pipeline/dashboard")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["library_completeness"]["state"], "unreadable")
 
     def test_unreadable_state_on_permission_error(self) -> None:
         """N4 (#1142 review) — a filesystem-level read failure (denied

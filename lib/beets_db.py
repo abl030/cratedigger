@@ -34,6 +34,7 @@ from lib.release_identity import (
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
+    from lib.library_completeness import LibraryAlbum
     from lib.quality import QualityRankConfig
 
 
@@ -1333,7 +1334,9 @@ class BeetsDB:
             os.path.abspath(decoded) if os.path.isabs(decoded)
             else os.path.abspath(os.path.join(root, decoded))
         )
-        if os.path.commonpath((root, candidate)) != root:
+        root_real = os.path.realpath(root)
+        candidate_real = os.path.realpath(candidate)
+        if os.path.commonpath((root_real, candidate_real)) != root_real:
             return (candidate, True)
         return (candidate, False)
 
@@ -1388,6 +1391,86 @@ class BeetsDB:
             )
             for album_id in order
         ]
+
+    def list_library_completeness_albums(self) -> "list[LibraryAlbum]":
+        """Bulk, read-only projection for the whole-library completeness census.
+
+        This is intentionally a single SQLite projection: album pressing
+        identity, exact item tag identities, and stored paths arrive from one
+        Beets snapshot.  Filesystem/source reads happen in the classifier and
+        remain independent observations.
+        """
+        from lib.library_completeness import CatalogItem, LibraryAlbum
+
+        rows = self._conn.execute(
+            "SELECT a.id, a.albumartist, a.album, a.mb_albumid, "
+            "a.discogs_albumid, i.path, i.mb_releasetrackid, i.mb_trackid, "
+            "i.title, i.track "
+            "FROM albums a LEFT JOIN items i ON i.album_id = a.id "
+            "ORDER BY a.id ASC, i.id ASC"
+        ).fetchall()
+        artists: dict[int, str] = {}
+        titles: dict[int, str] = {}
+        identities: dict[int, ReleaseIdentity | None] = {}
+        items_by_album: dict[int, list[CatalogItem]] = {}
+        refused_by_album: dict[int, list[str]] = {}
+        directories_by_album: dict[int, set[str]] = {}
+        order: list[int] = []
+        for (raw_album_id, raw_artist, raw_title, raw_mb, raw_discogs,
+             raw_path, raw_release_track, raw_recording, raw_item_title,
+             raw_track) in rows:
+            album_id = int(raw_album_id)
+            if album_id not in identities:
+                # The completeness audit needs one independently fetched raw
+                # source. A row tagged with BOTH a UUID and Discogs id has no
+                # source-issued equivalence proof here, so fail closed rather
+                # than silently choosing the canonical display preference.
+                mb = ReleaseIdentity.from_id(raw_mb)
+                discogs = ReleaseIdentity.from_id(raw_discogs)
+                identity = mb if discogs is None else discogs if mb is None else (
+                    mb if mb == discogs else None
+                )
+                artists[album_id] = self._decode_path(raw_artist) if raw_artist else ""
+                titles[album_id] = self._decode_path(raw_title) if raw_title else ""
+                identities[album_id] = identity
+                items_by_album[album_id] = []
+                refused_by_album[album_id] = []
+                directories_by_album[album_id] = set()
+                order.append(album_id)
+            if raw_path is None:
+                continue
+            resolved, refused = self._contained_or_refused(raw_path)
+            if refused:
+                refused_by_album[album_id].append(resolved)
+                continue
+            item_identity = identities[album_id]
+            # Discogs writes its exact synthetic release-position identity in
+            # mb_trackid.  MusicBrainz must instead use release-track first;
+            # its mb_trackid is only the recording-id fallback.
+            source_key = (
+                normalize_release_id(raw_recording)
+                if item_identity is not None and item_identity.source == "discogs"
+                else normalize_release_id(raw_release_track)
+            )
+            items_by_album[album_id].append(CatalogItem(
+                path=resolved,
+                source_key=source_key,
+                recording_id=normalize_release_id(raw_recording),
+                title=self._decode_path(raw_item_title) if raw_item_title else "",
+                track=int(raw_track) if isinstance(raw_track, int) else None,
+            ))
+            directories_by_album[album_id].add(os.path.dirname(resolved))
+        result: list[LibraryAlbum] = []
+        for album_id in order:
+            dirs = directories_by_album[album_id]
+            # A split/no-item album is deliberately unclassifiable. The
+            # classifier reports it unknown rather than walking a guessed dir.
+            directory = next(iter(dirs)) if len(dirs) == 1 else ""
+            result.append(LibraryAlbum(
+                album_id, artists[album_id], titles[album_id], identities[album_id], directory,
+                tuple(items_by_album[album_id]), tuple(refused_by_album[album_id]),
+            ))
+        return result
 
     def get_album_mb_identity(self, album_id: int) -> "BeetsAlbumIdentityRow | None":
         """Narrow single-album counterpart of :meth:`list_album_mb_identities`

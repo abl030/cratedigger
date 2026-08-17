@@ -488,9 +488,10 @@ invariant is enforceable at the systemd level; refusing it because storage
 is unavailable would violate that invariant at the one place it is
 currently guaranteed.
 
-`cratedigger-retag-census.service` (#1142) is likewise **never gated** by
+`cratedigger-retag-census.service` (#1142) and
+`cratedigger-library-completeness-census.service` (#1149) are likewise **never gated** by
 this probe — it never calls `probe_startup_paths`/`web_required_paths` at
-all. It touches only `cfg.stateDir` (its own `WorkingDirectory`, always
+all. They touch only `cfg.stateDir` (their own `WorkingDirectory`, always
 provisioned by the same `systemd.tmpfiles.rules` entry every other unit
 relies on) and the external Beets authority (already validated by
 `enforce_beets_startup` before any scan runs); a write failure there
@@ -516,6 +517,7 @@ when a unit refuses at startup:
 | `cratedigger-youtube-ingest` | — | `youtubeIngest.tempDir`; validation staging root (unconditionally required whenever this unit is enabled — the module's own assertion guarantees it is set) |
 | `cratedigger-unfindable` | never gated | never gated |
 | `cratedigger-retag-census` | never gated | never gated |
+| `cratedigger-library-completeness-census` | never gated | never gated |
 
 `cratedigger-web` deliberately excludes `slskd.downloadDir` from write:
 web only ever deletes from its own `wrong_matches`/`failed_imports`
@@ -626,6 +628,10 @@ See [`examples/cratedigger.nix`](../examples/cratedigger.nix) for the full worke
 ## Systemd units
 
 - `cratedigger-db-migrate.service` — oneshot, `restartIfChanged = true`, `stopIfChanged = false`, `RemainAfterExit = true`. Runs the schema migrator on every `nixos-rebuild switch`. **`stopIfChanged = false` is load-bearing — see "A switch must be able to re-run the migrator" below.** The long-running workers (`cratedigger-web`, `cratedigger-importer`, `cratedigger-import-preview-worker`, `cratedigger-youtube-ingest`) `requires` it, so they cannot start against a **failed** migration — though note a `Requires=` on a `RemainAfterExit` oneshot is satisfied by the unit merely being active and therefore cannot force a re-run. `cratedigger.service` and `cratedigger-unfindable.service` deliberately do NOT — both are timer-driven with `restartIfChanged = false`, and this unit's `ExecStart` store path changes on every deploy, so a `requires` edge would propagate its every-switch restart as a SIGTERM to a mid-flight cycle; they use `wants`+`after` instead and gate on schema currency themselves at startup (`lib/migrator.py::assert_schema_current`) so a behind/missing schema still aborts them before any work runs. `cratedigger-retag-census.service` (#1142, below) has no relationship to this unit at all — it never touches the pipeline DB, so it neither requires, wants, nor gates on migration state.
+  `cratedigger-library-completeness-census.service` (#1149) has the same
+  deliberate non-relationship: it has no pipeline-DB dependency, so it
+  neither requires, wants, nor gates on migration state.
+
 - `redis-cratedigger.service` — app-owned Redis server for peer cache and web metadata cache. `cratedigger.service` and `cratedigger-web.service` want/after it, but do not require it; runtime Redis failures degrade to cold-cache behavior.
 - `cratedigger.service` — oneshot pipeline run. `restartIfChanged = false` (the timer picks up new code on the next cycle). It orders after and wants external Beets readiness, but deliberately does not require it: restarting readiness must not terminate an active timer-owned cycle.
 - `cratedigger.timer` — starts the next cycle after the previous oneshot exits
@@ -668,6 +674,16 @@ See [`examples/cratedigger.nix`](../examples/cratedigger.nix) for the full worke
 - `cratedigger-retag-census.timer` — `OnCalendar=daily`, `Persistent=true`,
   `RandomizedDelaySec=30min`, mirroring `cratedigger-unfindable.timer`'s
   own cadence/jitter rationale above.
+- `cratedigger-library-completeness-census.service` (#1149) — a separate
+  read-only daily oneshot that compares each exact Beets pressing against raw
+  MusicBrainz/Discogs components, Beets items, and physical audio files. It
+  atomically writes `library-completeness.json` in `cfg.stateDir`; the Pipeline
+  Dashboard only reads that snapshot. It never opens the pipeline DB or mutates
+  Beets/files. `TimeoutStartSec=4h` keeps public MusicBrainz (1 req/s) a
+  supported fallback; mirror clients and the census use bounded concurrency.
+- `cratedigger-library-completeness-census.timer` — `OnCalendar=daily`,
+  `Persistent=true`, `RandomizedDelaySec=30min`, independent of the five-minute
+  pipeline and the retag census.
 - `cratedigger-web.socket` — systemd-owned AF_UNIX listener at
   `/run/cratedigger-web/web.sock`, node `root:<web.accessGroup> 0660` beneath a
   separately managed `root:<web.accessGroup> 0750` directory.
@@ -750,7 +766,8 @@ Exactly four long-running units receive the shared systemd sandbox:
 `cratedigger-import-preview-worker.service`, and
 `cratedigger-youtube-ingest.service`. The timer-driven
 `cratedigger.service`/`cratedigger-unfindable.service`/
-`cratedigger-retag-census.service` (#1142) and the migration oneshot
+`cratedigger-retag-census.service` (#1142)/
+`cratedigger-library-completeness-census.service` (#1149) and the migration oneshot
 deliberately remain outside this boundary.
 
 Every sandboxed unit has `NoNewPrivileges=yes`, `PrivateTmp=yes`,
