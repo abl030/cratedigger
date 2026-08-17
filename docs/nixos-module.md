@@ -816,6 +816,14 @@ sops-nix's `key = "..."` does NOT actually extract a single value from a multi-k
 ```nix
 systemd.services.cratedigger-secrets-split = {
   before = ["cratedigger.service" "cratedigger-web.service" "cratedigger-db-migrate.service"];
+  # Required, not cosmetic (#1172 item 4). A RemainAfterExit oneshot ordered
+  # Before= the workers has its stop job queued behind theirs on a switch;
+  # with the NixOS default it is in both the stop and start lists, so a
+  # concurrent `systemctl start` replaces that queued stop, hits -EALREADY,
+  # and skips ExecStart silently — leaving these files stale after a
+  # rotation. See #1161 for the same shape on the migrate unit.
+  stopIfChanged = false;
+  serviceConfig.RemainAfterExit = true;
   serviceConfig.ExecStart = pkgs.writeShellScript "cratedigger-secrets-split" ''
     set -euo pipefail
     install -d -m 0700 /run/cratedigger-secrets

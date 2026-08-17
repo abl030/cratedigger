@@ -256,6 +256,14 @@ elif args[:2] == ["commit", "-m"]:
             }
             else "good"
         ),
+        # A correctly signed pin commit that also carries a module change --
+        # the world verify_pin_commit's changed-paths guard exists to reject
+        # as definitively invalid (#1172 item 2).
+        "changed_paths": (
+            ["flake.lock", "modules/nixos/services/cratedigger.nix"]
+            if state.get("fault") == "extra_changed_paths"
+            else ["flake.lock"]
+        ),
     }
     state["worktree_head"] = revision
     if state.get("worktree_attached_ref") == (
@@ -321,7 +329,16 @@ elif args[:3] == ["show-ref", "--verify", "--hash"]:
         save()
         raise SystemExit(1)
 elif args[:4] == ["diff-tree", "--no-commit-id", "--name-only", "-r"]:
-    print("flake.lock")
+    # Answer for the revision actually asked about. Printing "flake.lock"
+    # unconditionally made verify_pin_revision's "changes paths other than
+    # flake.lock" rejection unreachable from every test -- a pin commit that
+    # smuggled in a module change alongside the lock bump could not be
+    # modelled at all (#1172 item 2).
+    revision = args[4]
+    commit = captured_object(revision)
+    if commit is None:
+        fail(f"uncaptured fake revision: {revision}")
+    print("\n".join(commit.get("changed_paths") or ["flake.lock"]))
 elif args[:1] == ["show"] and args[1].endswith(":flake.lock"):
     revision = args[1].split(":", 1)[0]
     commit = captured_object(revision)

@@ -465,6 +465,43 @@ class TestMigrateRanForThisSwitch(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("missing pre-switch", proc.stderr)
 
+    def _failing_ssh(self, *fragments: str) -> None:
+        self.fake.write_state(
+            system_states=[self.fake.system_state(self.fake.OLD)],
+            journal_snapshots={},
+            ssh_failures=list(fragments),
+        )
+
+    def test_failed_migrate_read_fails_closed_and_names_the_unit(self) -> None:
+        """#1172 item 6. Until the fake could fail an ssh at all, the
+        ``could not read ... state`` branch was unreachable from every test in
+        this file, so a regression there — swallowing the failure and
+        proceeding with an empty state — would have been invisible.
+
+        Failing closed matters here specifically: an empty read yields an empty
+        InvocationID, and the verifier must call that "never ran for this
+        switch" rather than compare emptiness against the pre-switch value.
+        """
+        self._failing_ssh("systemctl show cratedigger-db-migrate.service")
+
+        proc = self.fake.run(SCRIPT, "verify-migrate-ran", self.fake.MIGRATE_OLD)
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("could not read", proc.stderr)
+        self.assertIn("cratedigger-db-migrate.service", proc.stderr)
+
+    def test_failed_cratedigger_read_names_the_main_unit(self) -> None:
+        """The same branch, reached through the other unit — proof the
+        diagnostic is parameterised rather than hardcoded to either name."""
+        self._failing_ssh("systemctl show cratedigger.service")
+
+        proc = self.fake.run(SCRIPT, "capture-current")
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("could not read", proc.stderr)
+        self.assertIn("cratedigger.service", proc.stderr)
+        self.assertNotIn("cratedigger-db-migrate.service", proc.stderr)
+
     def test_unreadable_state_names_the_migrate_unit(self) -> None:
         """The diagnostic must name the unit actually queried. Before the unit
         parameter existed these messages were hardcoded to cratedigger.service,

@@ -710,6 +710,15 @@ Before writing any new code, decide which test types you owe and what infrastruc
 
 Routes are the strictest gate: `TestRouteContractAudit` will fail at test time if you add a route to `web/routes/` without classifying it. This is intentional — it prevents shipping endpoints the frontend can rely on without contract coverage.
 
+**CLAUDE.md has a hard 32 KiB budget** — Codex's instruction limit, enforced by
+`tools/generate-ai-adapters.py` and surfaced as a `tests.test_ai_portability`
+failure, which is how you normally discover it: as a late, confusing red. New
+always-loaded material therefore defaults to `.claude/rules/` (loaded anyway,
+unbudgeted), and CLAUDE.md keeps only what earns a slot there. #1161 had to
+revert its CLAUDE.md addition outright to stay green; the 2026-08-16
+compaction pass bought roughly 3 KiB of headroom, not a reprieve. Check
+`wc -c CLAUDE.md` before adding to it, and condense in the same PR if you do.
+
 **Before writing a test, answer:** *What one-line change to production would make this test fail? If the answer is a function this test does not call, the test patrols a bystander.* That question catches agree-by-construction and wrong-reader pins at authoring time (issue #1143).
 
 ## Test Taxonomy
