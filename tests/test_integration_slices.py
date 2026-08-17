@@ -16,6 +16,7 @@ import tempfile
 import unittest
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, Never, Self, cast
 from unittest.mock import MagicMock, patch
@@ -6016,6 +6017,7 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
             self.assertIsNone(row["worker_id"])
 
             # Step 4: preview claims the requeued row.
+            row["updated_at"] -= timedelta(seconds=61)
             preview_claimed = claim_next_import_preview_job(db, worker_id="preview-1")
             assert preview_claimed is not None
             self.assertEqual(preview_claimed.id, job.id)

@@ -136,14 +136,14 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "(issue #835, issue #829 PR4, the source-semantic proof gate, and "
         "issue #1077 F2's column removal above each shifted this line only)"
     ),
-    ("lib/pipeline_db/import_jobs.py", 587, "ecf3d1844c67f653"): (
+    ("lib/pipeline_db/import_jobs.py", 590, "ecf3d1844c67f653"): (
         "optional job filter is a fixed literal WHERE clause "
         "(issue #1089's automation_recovery_debris import, review round 2's "
         "_default_force_action_copy_path helper, and review round 3's "
         "RecoveryDebrisReport import, above each shifted this line only — "
         "fingerprint unchanged, confirming the SQL itself is untouched)"
     ),
-    ("lib/pipeline_db/import_jobs.py", 647, "d020bd0235c95c4a"): (
+    ("lib/pipeline_db/import_jobs.py", 650, "d020bd0235c95c4a"): (
         "claim exclusion predicate is assembled from fixed literal clauses "
         "(issue #1089's automation_recovery_debris import, review round 2's "
         "_default_force_action_copy_path helper, and review round 3's "
@@ -263,7 +263,7 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "against the target row version after any lock wait while CASing "
         "wanted to the reversible unsearchable state"
     ),
-    ("lib/pipeline_db/import_jobs.py", 512, "71e0271f65123747"): (
+    ("lib/pipeline_db/import_jobs.py", 515, "71e0271f65123747"): (
         "atomic download-to-processing handoff CASes the immutable download "
         "witness while installing the exact automation owner "
         "(issue #1089's automation_recovery_debris import, review round 2's "

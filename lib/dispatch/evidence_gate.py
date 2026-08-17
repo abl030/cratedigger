@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from lib.dispatch.types import (
+    DISPATCH_CODE_REQUEUE_EXHAUSTED,
     DISPATCH_CODE_REQUEUE_FAILED,
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
     DispatchOutcome,
@@ -38,6 +40,10 @@ from lib.import_evidence import (
     CurrentEvidenceActionResult,
     ensure_candidate_evidence_for_action,
     load_current_evidence_for_action,
+)
+from lib.import_queue import (
+    import_preview_requeue_delay,
+    import_preview_requeue_exhausted,
 )
 from lib.quality import (
     DownloadInfo,
@@ -111,6 +117,21 @@ def _requeue_import_job_to_preview(
             message=detail + " (no import_job_id; cannot requeue)",
             code=DISPATCH_CODE_REQUEUE_FAILED,
         )
+    current = db.get_import_job(import_job_id)
+    if current is not None and current.created_at is not None:
+        now = datetime.now(UTC)
+        age = now - current.created_at
+        if import_preview_requeue_exhausted(current.created_at, now):
+            return DispatchOutcome(
+                success=False,
+                message=(
+                    f"{detail}; preview/import requeue budget exhausted "
+                    f"(attempts={current.attempts}, preview_attempts="
+                    f"{current.preview_attempts}, age_seconds="
+                    f"{int(age.total_seconds())})"
+                ),
+                code=DISPATCH_CODE_REQUEUE_EXHAUSTED,
+            )
     try:
         updated = db.requeue_import_job_for_preview(
             import_job_id,
@@ -143,7 +164,10 @@ def _requeue_import_job_to_preview(
         )
     return DispatchOutcome(
         success=False,
-        message=detail + "; requeued for preview",
+        message=(
+            f"{detail}; requeued for preview after "
+            f"{int(import_preview_requeue_delay(updated.attempts).total_seconds())}s"
+        ),
         code=DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
     )
 

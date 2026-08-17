@@ -52,6 +52,10 @@ DISPATCH_CODE_REQUEUED_FOR_PREVIEW = "requeued_for_preview"
 # leaves the job in ``running`` for conservative startup recovery on next
 # worker boot to recover. NEVER write terminal failure on this code.
 DISPATCH_CODE_REQUEUE_FAILED = "requeue_failed"
+# The action-time gate found another evidence miss after the bounded
+# preview/import retry window. This is a world failure, not a candidate
+# quality rejection; the automation owner must self-heal to ``wanted``.
+DISPATCH_CODE_REQUEUE_EXHAUSTED = "requeue_exhausted"
 # U4: programmer-error code returned by ``dispatch_import_from_db`` when
 # neither ``import_job_id`` nor ``download_log_id`` is supplied. After U3
 # the only production caller (``scripts/importer.py``) always supplies

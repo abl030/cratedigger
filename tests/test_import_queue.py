@@ -34,6 +34,7 @@ from lib.beets_delete import (
 from lib.config import CratediggerConfig
 from lib.dispatch import (
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
+    DISPATCH_CODE_REQUEUE_EXHAUSTED,
     DISPATCH_CODE_REQUEUE_FAILED,
     DispatchOutcome,
 )
@@ -57,12 +58,15 @@ from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_YOUTUBE,
+    IMPORT_PREVIEW_REQUEUE_MAX_AGE,
     AutomationImportPayload,
     ForceImportPayload,
     ImportJob,
     YoutubeImportPayload,
     force_import_dedupe_key,
     force_import_payload,
+    import_preview_requeue_delay,
+    import_preview_requeue_exhausted,
     validate_payload,
 )
 from lib.pipeline_db._core import OwnerSessionLost
@@ -98,6 +102,20 @@ from tests.test_automation_startup_recovery import (
 
 _HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
 _HERMETIC_BEETS_PAIR: tuple[str, str] | None = None
+
+
+class TestImportPreviewRequeuePolicy(unittest.TestCase):
+    def test_backoff_and_budget_boundaries_match_the_incident_shape(self) -> None:
+        now = datetime(2026, 8, 17, tzinfo=UTC)
+        self.assertEqual(import_preview_requeue_delay(1), timedelta(minutes=1))
+        self.assertEqual(import_preview_requeue_delay(6), timedelta(minutes=30))
+        self.assertEqual(import_preview_requeue_delay(2454), timedelta(minutes=30))
+        self.assertFalse(import_preview_requeue_exhausted(
+            now - IMPORT_PREVIEW_REQUEUE_MAX_AGE + timedelta(seconds=1), now,
+        ))
+        self.assertTrue(import_preview_requeue_exhausted(
+            now - IMPORT_PREVIEW_REQUEUE_MAX_AGE, now,
+        ))
 
 
 def _preview_execution_lease(
@@ -2678,6 +2696,50 @@ class TestImporterWorker(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_startup_replay_never_runs_wrong_match_cleanup_for_requeue_exhausted(
+        self,
+    ) -> None:
+        """The terminal retry budget never invents a source-cleanup receipt."""
+        from scripts import importer
+
+        db = FakePipelineDB()
+        root, source = _make_failed_import_source()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                ),
+            )
+            db.mark_import_job_failed(
+                job.id,
+                error="preview/import requeue budget exhausted",
+                result={
+                    "success": False,
+                    "message": "preview/import requeue budget exhausted",
+                    "deferred": False,
+                    "code": DISPATCH_CODE_REQUEUE_EXHAUSTED,
+                    "post_commit_wrong_match_scenario": None,
+                },
+                message="preview/import requeue budget exhausted",
+            )
+
+            importer.recover_abandoned_running_jobs(db)
+
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            converged = db.get_import_job(job.id)
+            assert converged is not None
+            self.assertNotIn("cleanup", self._result(converged))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_startup_replay_never_runs_wrong_match_cleanup_for_deferred_failure(
         self,
     ) -> None:
@@ -4410,6 +4472,87 @@ class TestImportPreviewWorker(unittest.TestCase):
             codec="mp3",
             container="mp3",
             storage_format="MP3",
+        )
+
+    def test_preview_check_violation_reaches_terminal_audit_and_recents(self):
+        """A failed evidence write stays truthful through the worker boundary."""
+        from psycopg2.errors import CheckViolation
+
+        from lib.beets_db import AlbumInfo
+        from scripts import import_preview_worker
+        from web.download_history_view import build_recents_download_log_rows
+
+        with _force_preview_source() as (source, cfg):
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            class CheckViolationDB(FakePipelineDB):
+                def set_request_current_evidence(
+                    self,
+                    request_id: int,
+                    evidence_id: int | None,
+                    *,
+                    expected_status: str | None = None,
+                ) -> bool:
+                    del request_id, evidence_id, expected_status
+                    raise CheckViolation("evidence write blocked")
+
+            db = CheckViolationDB()
+            download_log_id = _force_download_log(db, 42, source)
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
+            assert claimed is not None
+            beets = FakeBeetsDB(library_root=source)
+            beets.set_album_info("test-mbid-0042", AlbumInfo(
+                album_id=42,
+                track_count=1,
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                is_cbr=True,
+                album_path=source,
+                format="MP3",
+            ))
+
+            with patch("lib.beets_db.BeetsDB", lambda **_kwargs: beets):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                    runtime_config=cfg,
+                )
+
+        assert updated is not None
+        self.assertEqual((updated.status, updated.preview_status), (
+            "failed", "measurement_failed",
+        ))
+        terminal = next(
+            row for row in db.get_download_history(42)
+            if row["outcome"] == "measurement_failed"
+        )
+        terminal_diagnostic = (
+            "failed: current evidence preparation failed: CheckViolation: "
+            "evidence write blocked"
+        )
+        presentation_diagnostic = (
+            "current evidence preparation failed: CheckViolation: "
+            "evidence write blocked"
+        )
+        self.assertEqual(terminal["error_message"], terminal_diagnostic)
+
+        item = build_recents_download_log_rows([terminal])[0]
+        self.assertEqual(item["badge"], "Measurement failed")
+        self.assertEqual(item["badge_class"], "badge-warn")
+        self.assertEqual(item["border_color"], "#a86f20")
+        self.assertEqual(
+            item["summary"], f"Measurement failed: {presentation_diagnostic}",
         )
 
     def test_force_job_preview_would_import_marks_importable(self):
@@ -9465,6 +9608,44 @@ class TestAutomationWorldFailureNeverParks(unittest.TestCase):
             diagnostic="preview requeue UPDATE failed",
         )
 
+    def test_requeue_budget_exhaustion_self_heals_with_its_audit_reason(self) -> None:
+        """Shrunk 60635-shaped world bails through the real requeue helper."""
+        from lib.dispatch.evidence_gate import _requeue_import_job_to_preview
+
+        db, _canonical, claimed, lease = self._launch(
+            capture_completion=False,
+            authorize_launch=False,
+        )
+        row = next(row for row in db._import_jobs if row["id"] == claimed.id)
+        row["created_at"] -= timedelta(hours=1, seconds=1)
+        row["attempts"] = 2454
+        row["preview_attempts"] = 2463
+        outcome = _requeue_import_job_to_preview(
+            db,  # pyright: ignore[reportArgumentType]
+            import_job_id=claimed.id,
+            reason="candidate evidence missing",
+            expected_execution_lease=lease,
+        )
+        self.assertEqual(outcome.code, DISPATCH_CODE_REQUEUE_EXHAUSTED)
+        self.assertIn("attempts=2454", outcome.message)
+        self.assertIn("preview_attempts=2463", outcome.message)
+
+        updated, escaped = self._run(
+            db,
+            claimed,
+            lease,
+            _fixed_outcome_execute_fn(DispatchOutcome(
+                False,
+                outcome.message,
+                code=DISPATCH_CODE_REQUEUE_EXHAUSTED,
+            )),
+        )
+
+        self._assert_returned_to_search_pool(
+            db, claimed, updated, escaped,
+            label="preview_requeue_budget_exhausted", diagnostic=outcome.message,
+        )
+
     # -- must-still-work guards ---------------------------------------------
 
     def test_a_successful_import_still_terminalizes_as_imported(self) -> None:
@@ -10612,4 +10793,3 @@ class TestTerminalStageInvariantCheckersTripOnViolations(unittest.TestCase):
         )
         assert violation is not None
         self.assertIn("released the owner", violation)
-

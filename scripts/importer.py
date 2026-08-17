@@ -31,6 +31,7 @@ from lib.config import (
     resolve_startup_config_paths,
 )
 from lib.dispatch import (
+    DISPATCH_CODE_REQUEUE_EXHAUSTED,
     DISPATCH_CODE_REQUEUE_FAILED,
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
     DispatchOutcome,
@@ -1787,10 +1788,16 @@ def process_claimed_job(
             and outcome.terminal_outcome is None
             and (
                 outcome.deferred
-                or outcome.code == DISPATCH_CODE_REQUEUE_FAILED
+                or outcome.code in (
+                    DISPATCH_CODE_REQUEUE_FAILED,
+                    DISPATCH_CODE_REQUEUE_EXHAUSTED,
+                )
             )
         ):
-            if outcome.code == DISPATCH_CODE_REQUEUE_FAILED:
+            if outcome.code in (
+                DISPATCH_CODE_REQUEUE_FAILED,
+                DISPATCH_CODE_REQUEUE_EXHAUSTED,
+            ):
                 return _self_heal_automation_world_failure(
                     db,
                     current,
@@ -1998,6 +2005,17 @@ def process_claimed_job(
             job.request_id,
             outcome.message,
         )
+        failed = _terminalize_non_automation_failure(
+            db,
+            job,
+            error=outcome.message,
+            message=outcome.message,
+            result=result,
+        )
+        return _record_terminal_force_action_cleanup(db, job, failed)
+    if outcome.code == DISPATCH_CODE_REQUEUE_EXHAUSTED:
+        # A retry-budget bail does not adjudicate candidate quality, so keep
+        # it out of wrong-match cleanup while recording the terminal audit.
         failed = _terminalize_non_automation_failure(
             db,
             job,

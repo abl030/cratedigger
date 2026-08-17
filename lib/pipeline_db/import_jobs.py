@@ -24,6 +24,9 @@ from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_PREVIEW_WAITING,
+    IMPORT_PREVIEW_REQUEUE_INITIAL_DELAY,
+    IMPORT_PREVIEW_REQUEUE_MAX_DELAY,
+    IMPORT_PREVIEW_REQUEUE_MAX_EXPONENT,
     AutomationHandoffResult,
     ImportJob,
     automation_import_dedupe_key,
@@ -790,7 +793,7 @@ class _ImportJobsMixin(
            'true'``) rather than the presence check this method used
            before the fix.
 
-        Two exclusions remain in the failure arm. Both rows carry the era
+        Three exclusions remain in the failure arm. All carry the era
         marker (``_job_result`` computed their ``result`` before the branch
         below), but the live path still never reaches a wrong-match
         decision for them, so replay must not either:
@@ -799,6 +802,10 @@ class _ImportJobsMixin(
           calls ``_cleanup_failed_force_import`` for this code — the
           requeue UPDATE itself failed (a DB transient), not a verdict
           about the candidate.
+        - ``code = 'requeue_exhausted'``: the bounded preview/import retry
+          window ended without adjudicating candidate quality. The live path
+          removes only its private action copy, never the Wrong Matches
+          source, so restart must not invent that cleanup receipt.
         - ``deferred = true`` (e.g. release-lock contention —
           ``lib/dispatch/core.py``'s ``"Another import is already in
           progress"`` outcome): ``_cleanup_failed_force_import`` IS called
@@ -819,6 +826,7 @@ class _ImportJobsMixin(
                   (status = 'failed'
                    AND result #>> '{cleanup,success}' IS DISTINCT FROM 'true'
                    AND result ->> 'code' IS DISTINCT FROM 'requeue_failed'
+                   AND result ->> 'code' IS DISTINCT FROM 'requeue_exhausted'
                    AND result ->> 'deferred' IS DISTINCT FROM 'true')
               )
             ORDER BY created_at ASC, id ASC
@@ -1992,6 +2000,14 @@ class _ImportJobsMixin(
             WHERE job.status = 'queued'
               AND job.preview_status = 'waiting'
               AND (
+                  job.attempts = 0
+                  OR job.updated_at <= NOW() - make_interval(
+                      secs => LEAST(%s, %s * POWER(
+                          2, LEAST(GREATEST(job.attempts - 1, 0), %s)
+                      ))
+                  )
+              )
+              AND (
                   job.job_type NOT IN (
                       'automation_import',
                       'force_import'
@@ -2012,7 +2028,12 @@ class _ImportJobsMixin(
             ORDER BY job.created_at ASC, job.id ASC
             LIMIT %s
             OFFSET %s
-        """, (lease[0], limit, offset))
+        """, (
+            int(IMPORT_PREVIEW_REQUEUE_MAX_DELAY.total_seconds()),
+            int(IMPORT_PREVIEW_REQUEUE_INITIAL_DELAY.total_seconds()),
+            IMPORT_PREVIEW_REQUEUE_MAX_EXPONENT,
+            lease[0], limit, offset,
+        ))
         return [
             ImportJob.from_row(dict(candidate))
             for candidate in candidate_cur.fetchall()

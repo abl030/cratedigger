@@ -76,6 +76,16 @@ class TestImportJobDisplay(unittest.TestCase):
         self.assertEqual(display.border_color, "#36c")
         self.assertEqual(display.summary, "Importer owns this job")
 
+    def test_recovery_required_is_an_environment_failure(self) -> None:
+        display = classify_import_job_display(
+            _job(status="recovery_required", message="lease vanished"),
+            queue_position=0,
+        )
+        self.assertEqual(display.badge, "Recovery required")
+        self.assertEqual(display.badge_class, "badge-warn")
+        self.assertEqual(display.border_color, "#a86f20")
+        self.assertEqual(display.summary, "lease vanished")
+
     def test_measurement_failure_is_one_server_classified_contract(self) -> None:
         display = classify_import_job_display(
             _job(
