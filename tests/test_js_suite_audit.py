@@ -23,6 +23,9 @@ import glob
 import os
 import re
 import unittest
+from pathlib import Path
+
+from tests._source_pins import pinned_source
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_TESTS_SH = os.path.join(REPO_ROOT, "scripts", "run_tests.sh")
@@ -90,12 +93,9 @@ class TestJsSuiteAudit(unittest.TestCase):
     """Every tests/test_js_*.mjs file must run every scripts/run_tests.sh pass."""
 
     def setUp(self) -> None:
-        with open(RUN_TESTS_SH, encoding="utf-8") as f:
-            self.wrapper_text = f.read()
-        with open(RUN_TEST_SUITE, encoding="utf-8") as f:
-            self.coordinator_text = f.read()
-        with open(RUN_JS_CHECKS, encoding="utf-8") as f:
-            self.script_text = f.read()
+        self.wrapper_text = pinned_source(Path(RUN_TESTS_SH))
+        self.coordinator_text = pinned_source(Path(RUN_TEST_SUITE))
+        self.script_text = pinned_source(Path(RUN_JS_CHECKS))
 
     def test_every_js_suite_on_disk_is_covered(self) -> None:
         suite_names = _js_suite_names_on_disk()

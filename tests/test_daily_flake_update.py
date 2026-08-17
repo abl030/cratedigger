@@ -11,6 +11,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from tests._source_pins import pinned_source
 from tests.fakes.daily_flake_update import FakeDailyFlakeUpdateCommands
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -226,7 +227,7 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         tests/test_targeted_test_selection.py's scripts/test.sh pin, so
         deleting just this var (not some other CRATEDIGGER_SUITE_OWNS_
         HEADROOM occurrence) fails this test."""
-        source = SCRIPT.read_text(encoding="utf-8")
+        source = pinned_source(SCRIPT)
 
         self.assertIn(
             'run_stage deterministic_suite "deterministic full suite" \\\n'

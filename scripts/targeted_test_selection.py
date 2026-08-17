@@ -159,6 +159,31 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "tests/_mock_audit_scanner.py": (
         "tests.test_mock_audit",
     ),
+    "tests/_source_pins.py": (
+        # tests.test_source_pins covers the reader exhaustively, but a
+        # behaviour change here (stripping too much, or too little) surfaces
+        # as a pin failing in a consumer, so every consumer is listed. The
+        # module decides what a whole-file source pin can SEE — silently
+        # widening it puts every one of these back where #1172/#1186 found
+        # them, satisfied by commented-out text.
+        "tests.test_source_pins",
+        "tests.test_daily_flake_update",
+        "tests.test_deploy_cycle_verifier",
+        "tests.test_deploy_hold",
+        "tests.test_deploy_pin_script",
+        "tests.test_docs_audit",
+        "tests.test_fuzz_burst",
+        "tests.test_issue_573_boundaries",
+        "tests.test_issue_633_boundaries",
+        "tests.test_js_suite_audit",
+        "tests.test_nix_module",
+        "tests.test_parallel_test_runner",
+        "tests.test_startup_write_probe_generated",
+        "tests.test_targeted_test_selection",
+        "tests.test_test_tmpfs",
+        "tests.test_unused_import_audit",
+        "tests.test_world_model_burst",
+    ),
     "tests/_tests_typing_ratchet_baseline.py": (
         "tests.test_typing_ratchet",
     ),

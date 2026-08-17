@@ -12,6 +12,8 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path
 
+from tests._source_pins import pinned_source
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TMPFS_SETUP = REPO_ROOT / "scripts" / "test_tmpfs.sh"
 NIX_SHELL = REPO_ROOT / "nix" / "shell.nix"
@@ -280,7 +282,7 @@ class TestTmpfsSetup(unittest.TestCase):
         self.assertEqual(completed.returncode, 7, completed.stderr)
 
     def test_nix_shell_activates_tmpfs_before_dev_commands(self) -> None:
-        source = NIX_SHELL.read_text(encoding="utf-8")
+        source = pinned_source(NIX_SHELL)
 
         self.assertIn("scripts/test_tmpfs.sh", source)
         self.assertIn("setup_cratedigger_test_tmpfs", source)

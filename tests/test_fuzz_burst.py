@@ -34,6 +34,7 @@ from scripts.run_python_tests import (
     STRATEGY_SPACE_EXHAUSTED,
     HypothesisPropertyStats,
 )
+from tests._source_pins import pinned_source
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNNER = REPO_ROOT / "scripts" / "run_fuzz_tests.py"
@@ -1268,7 +1269,7 @@ class TestFuzzRunnerProcess(unittest.TestCase):
         )
 
     def test_wrapper_delegates_to_the_exact_coverage_runner(self) -> None:
-        source = WRAPPER.read_text(encoding="utf-8")
+        source = pinned_source(WRAPPER)
 
         self.assertIn("python3 scripts/run_fuzz_tests.py", source)
 

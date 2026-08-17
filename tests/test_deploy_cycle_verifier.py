@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests._source_pins import pinned_source
 from tests.fakes.deploy_cycle import FakeDeployCycleCommands
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -334,7 +335,7 @@ class TestDeployCycleVerifier(unittest.TestCase):
         self.assertIn("source", proc.stderr)
 
     def test_skill_calls_tracked_verifier_for_successor_cycle(self) -> None:
-        source = SKILL.read_text(encoding="utf-8")
+        source = pinned_source(SKILL)
         self.assertIn("scripts/verify_cratedigger_cycle.sh", source)
         self.assertIn("capture-current", source)
         self.assertIn("capture-cursor", source)
@@ -364,7 +365,7 @@ class TestDeployCycleVerifier(unittest.TestCase):
         self.assertLess(post_switch_capture, target_capture)
 
     def test_skill_runs_fleet_trigger_without_the_shared_agent(self) -> None:
-        source = SKILL.read_text(encoding="utf-8")
+        source = pinned_source(SKILL)
 
         self.assertIn("env -u SSH_AUTH_SOCK fleet-deploy doc2", source)
         for line in source.splitlines():
@@ -555,7 +556,7 @@ class TestMigrateRanForThisSwitch(unittest.TestCase):
         `fleet-deploy` and assert with it after. Capturing after the switch
         would compare the post-switch value against itself and pass
         unconditionally — which is the whole failure #1161 describes."""
-        source = SKILL.read_text(encoding="utf-8")
+        source = pinned_source(SKILL)
 
         capture = source.index('verify_cratedigger_cycle.sh" capture-migrate')
         trigger = source.index("env -u SSH_AUTH_SOCK fleet-deploy doc2")
@@ -571,7 +572,7 @@ class TestMigrateRanForThisSwitch(unittest.TestCase):
     def test_skill_no_longer_accepts_the_stale_state_triple_alone(self) -> None:
         """The superseded check read only ActiveState/SubState/Result, which a
         RemainAfterExit oneshot satisfies indefinitely."""
-        source = SKILL.read_text(encoding="utf-8")
+        source = pinned_source(SKILL)
 
         self.assertNotIn('test "$migration_active" = active', source)
 
