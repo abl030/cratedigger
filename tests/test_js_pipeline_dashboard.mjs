@@ -497,7 +497,7 @@ console.log('renderRetagDivergenceCensusCard() N5 — a snapshot older than 36h 
   assertContains(html, 'metric-warn">stale', 'freshness row reads stale with warn tone');
   assertContains(html, '40.0h', 'stale label names the exact age');
 }
-console.log('renderLibraryCompletenessCard() renders freshness, truthful totals, and finding detail');
+console.log('renderLibraryCompletenessCard() groups findings into collapsed, honestly capped categories');
 {
   const stale = new Date(Date.now() - 40 * 3600000).toISOString();
   const html = __test__.renderLibraryCompletenessCard({
@@ -506,7 +506,7 @@ console.log('renderLibraryCompletenessCard() renders freshness, truthful totals,
       generated_at: stale, duration_seconds: 2.5,
       report: {
         status: 'incomplete',
-        counts: {albums_scanned: 8498, audio_complete: 8496, missing_source_audio: 2, catalog_drift: 2, non_audio_omitted: 16, unknown: 0},
+        counts: {albums_scanned: 8498, audio_complete: 8496, missing_source_audio: 2, catalog_drift: 2, unknown: 0},
         albums: [{album_id: 11782, artist: 'David Bowie', title: 'David Bowie', findings: [
           {kind: 'missing_source_audio', detail: "Don't Sit Down"},
           {kind: 'catalog_drift', detail: 'uncatalogued=1 catalogued_missing=0'},
@@ -518,17 +518,22 @@ console.log('renderLibraryCompletenessCard() renders freshness, truthful totals,
   assertContains(html, '8,496 / 8,498', 'audio complete uses whole-library denominator');
   assertContains(html, 'Don&#39;t Sit Down', 'missing-source detail is rendered and escaped');
   assertContains(html, 'uncatalogued=1', 'catalog-drift detail is rendered');
-  assertContains(html, 'Missing source audio:', 'missing finding label is humanized');
-  assertContains(html, 'Catalog drift:', 'drift finding label is humanized');
-  assertExcludes(html, 'missing_source_audio', 'raw missing enum is never rendered');
-  assertExcludes(html, 'catalog_drift', 'raw drift enum is never rendered');
-  assertContains(html, '1 / 2', 'capped exceptional rows remain honest');
+  assertContains(html, '<summary><span>Missing source audio</span><strong class="metric-bad">2</strong></summary>', 'missing category is expandable');
+  assertContains(html, '<summary><span>Catalog drift</span><strong class="metric-warn">2</strong></summary>', 'drift category is expandable');
+  assertContains(html, '<summary><span>Unknown</span><strong class="metric-muted">0</strong></summary>', 'unknown category is expandable even when empty');
+  assertExcludes(html, '<details open', 'all finding categories start collapsed');
+  assert((html.match(/#11782/g) || []).length === 2, 'an album with two findings appears in both relevant categories');
+  assert((html.match(/Showing 1 of 2/g) || []).length === 2, 'each capped category names its own shown and total counts');
+  assertExcludes(html, 'Exceptional albums', 'the redundant flat exceptional total is gone');
+  assertExcludes(html, 'Non-audio omitted', 'non-audio omissions are not a dashboard category');
+  assertExcludes(html, 'non_audio_omitted', 'the removed raw category is not rendered');
+  assertExcludes(html, '1 / 2', 'uncapped-style fractions are not shown');
 }
 console.log('renderLibraryCompletenessCard() keeps zero defect observations neutral');
 {
   const html = __test__.renderLibraryCompletenessCard({
     state: 'ok', snapshot: {generated_at: new Date().toISOString(), duration_seconds: 1,
-      report: {status: 'complete', counts: {albums_scanned: 1, audio_complete: 1, missing_source_audio: 0, catalog_drift: 0, non_audio_omitted: 0, unknown: 0}, albums: []}},
+      report: {status: 'complete', counts: {albums_scanned: 1, audio_complete: 1, missing_source_audio: 0, catalog_drift: 0, unknown: 0}, albums: []}},
   });
   assertContains(html, 'metric-muted">0</strong>', 'zero defect counts are neutral, not celebratory');
   assertExcludes(html, 'metric-good">0</strong>', 'zero defect counts never use good tone');

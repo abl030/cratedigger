@@ -27,7 +27,7 @@ from scripts.run_library_completeness_census import publish_library_completeness
 def _snapshot() -> LibraryCompletenessSnapshot:
     return LibraryCompletenessSnapshot(
         "2026-08-17T00:00:00+00:00", 1.0,
-        CompletenessReport("complete", CompletenessCounts(0, 0, 0, 0, 0, 0), ()),
+        CompletenessReport("complete", CompletenessCounts(0, 0, 0, 0, 0), ()),
     )
 
 
@@ -63,7 +63,7 @@ class TestLibraryCompletenessSnapshot(unittest.TestCase):
             write_library_completeness_snapshot(path, prior)
             newer = LibraryCompletenessSnapshot(
                 "2026-08-18T00:00:00+00:00", 2.0,
-                CompletenessReport("unknown", CompletenessCounts(1, 0, 0, 0, 0, 1), ()),
+                CompletenessReport("unknown", CompletenessCounts(1, 0, 0, 0, 1), ()),
             )
 
             # A real directory permission failure exercises the

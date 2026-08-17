@@ -479,6 +479,19 @@
   .metric-row strong { color: #ddd; font-weight: 600; text-align: right; }
   .metric-row.metric-clickable { cursor: pointer; border-radius: 3px; padding: 2px 4px; margin: -2px -4px; }
   .metric-row.metric-clickable:hover, .metric-row.metric-open { background: #202820; color: #aaa; }
+  .completeness-category { border-top: 1px solid #242424; padding-top: 4px; }
+  .completeness-category summary { display: flex; align-items: center; gap: 7px; color: #888; cursor: pointer; font-size: 0.82em; list-style: none; user-select: none; }
+  .completeness-category summary::-webkit-details-marker { display: none; }
+  .completeness-category summary::before { content: '▸'; color: #6a9; }
+  .completeness-category[open] summary::before { content: '▾'; }
+  .completeness-category summary:hover { color: #bbb; }
+  .completeness-category summary span { flex: 1; }
+  .completeness-category-body { display: flex; flex-direction: column; gap: 4px; padding: 5px 0 2px 15px; }
+  .completeness-album-row { align-items: flex-start; }
+  .completeness-album-row span { min-width: 0; }
+  .completeness-album-row strong { max-width: 50%; overflow-wrap: anywhere; }
+  .completeness-category-empty, .completeness-category-limit { color: #666; font-size: 0.76em; }
+  .completeness-category-limit { text-align: right; }
   .metric-good { color: #6d6 !important; }
   .metric-warn { color: #da6 !important; }
   .metric-bad { color: #d66 !important; }

@@ -668,7 +668,7 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
         count = DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP + 3
         snapshot = LibraryCompletenessSnapshot(
             "2026-08-17T00:00:00+00:00", 2.0,
-            CompletenessReport("incomplete", CompletenessCounts(count, 0, count, 0, 0, 0), tuple(
+            CompletenessReport("incomplete", CompletenessCounts(count, 0, count, 0, 0), tuple(
                 CompletenessAlbum(i, "Artist", f"Album {i}", "release", (CompletenessFinding("missing_source_audio", "track"),), 1, 0, 0)
                 for i in range(count)
             )),
@@ -689,6 +689,9 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
         self.assertEqual(block["albums_shown"], DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP)
         self.assertEqual(block["albums_listed_total"], count)
         self.assertEqual(block["snapshot"]["report"]["counts"]["missing_source_audio"], count)
+        self.assertNotIn(
+            "non_audio_omitted", block["snapshot"]["report"]["counts"],
+        )
         assert persisted is not None
         self.assertEqual(len(persisted.report.albums), count)
 
