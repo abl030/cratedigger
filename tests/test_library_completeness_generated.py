@@ -24,7 +24,7 @@ from lib.release_identity import ReleaseIdentity
 
 def completeness_invariant_violations(
     kinds: set[str], *, expect_drift: bool, expect_missing: bool,
-    expect_video_non_audio: bool, expect_unknown: bool,
+    expect_video_ignored: bool, expect_unknown: bool,
 ) -> list[str]:
     """Independent checker clauses exercised by properties and self-tests."""
     violations: list[str] = []
@@ -32,8 +32,8 @@ def completeness_invariant_violations(
         violations.append("catalog drift must be symmetric between catalog and disk")
     if ("missing_source_audio" in kinds) != expect_missing:
         violations.append("missing source audio must require exact readable evidence")
-    if expect_video_non_audio and ("non_audio_omitted" not in kinds or "missing_source_audio" in kinds):
-        violations.append("video omission must remain non-audio, never missing audio")
+    if expect_video_ignored and kinds:
+        violations.append("video omission must not create a completeness finding")
     if expect_unknown and ("unknown" not in kinds or "missing_source_audio" in kinds):
         violations.append("unreadable extra audio must fail closed as unknown")
     return violations
@@ -59,11 +59,11 @@ def _discogs_world(positions: tuple[str, ...], *, catalog_positions: tuple[str, 
 def _property_catalog_disk_symmetry(positions: list[str]) -> None:
     all_positions = tuple(positions)
     complete = _discogs_world(all_positions, catalog_positions=all_positions, physical_positions=all_positions)
-    assert not completeness_invariant_violations({f.kind for f in complete.findings}, expect_drift=False, expect_missing=False, expect_video_non_audio=False, expect_unknown=False)
+    assert not completeness_invariant_violations({f.kind for f in complete.findings}, expect_drift=False, expect_missing=False, expect_video_ignored=False, expect_unknown=False)
     disk_missing = _discogs_world(all_positions, catalog_positions=all_positions, physical_positions=all_positions[1:])
-    assert not completeness_invariant_violations({f.kind for f in disk_missing.findings}, expect_drift=True, expect_missing=True, expect_video_non_audio=False, expect_unknown=False)
+    assert not completeness_invariant_violations({f.kind for f in disk_missing.findings}, expect_drift=True, expect_missing=True, expect_video_ignored=False, expect_unknown=False)
     extra = _discogs_world(all_positions, catalog_positions=all_positions, physical_positions=all_positions + ("extra",))
-    assert not completeness_invariant_violations({f.kind for f in extra.findings}, expect_drift=True, expect_missing=False, expect_video_non_audio=False, expect_unknown=False)
+    assert not completeness_invariant_violations({f.kind for f in extra.findings}, expect_drift=True, expect_missing=False, expect_video_ignored=False, expect_unknown=False)
 
 
 @given(st.lists(st.text(alphabet="ABC123", min_size=1, max_size=4), min_size=2, max_size=7, unique=True))
@@ -72,7 +72,7 @@ def _property_nonexclusive_missing_and_drift(positions: list[str]) -> None:
     # First is physically present but deliberately untracked; second is absent.
     result = _discogs_world(all_positions, catalog_positions=all_positions[2:], physical_positions=(all_positions[0],) + all_positions[2:])
     kinds = {f.kind for f in result.findings}
-    assert not completeness_invariant_violations(kinds, expect_drift=True, expect_missing=True, expect_video_non_audio=False, expect_unknown=False)
+    assert not completeness_invariant_violations(kinds, expect_drift=True, expect_missing=True, expect_video_ignored=False, expect_unknown=False)
     assert {"catalog_drift", "missing_source_audio"} <= kinds
 
 
@@ -84,13 +84,13 @@ def _property_video_never_means_missing_audio(token: str) -> None:
     ]}]}
     album = LibraryAlbum(1, "a", "b", ReleaseIdentity("musicbrainz", "release"), "/album", (CatalogItem("/album/a.flac", "audio", "audio-rec"),))
     result = classify_album(album, musicbrainz_manifest("release", raw), enumerate_files=lambda _: ("/album/a.flac",), tag_reader=lambda _: ("", ""))
-    assert not completeness_invariant_violations({f.kind for f in result.findings}, expect_drift=False, expect_missing=False, expect_video_non_audio=True, expect_unknown=False)
+    assert not completeness_invariant_violations({f.kind for f in result.findings}, expect_drift=False, expect_missing=False, expect_video_ignored=True, expect_unknown=False)
 
 
 @given(st.lists(st.text(alphabet="ABC123", min_size=1, max_size=4), min_size=1, max_size=6, unique=True))
 def _property_unreadable_extra_is_unknown_not_missing(positions: list[str]) -> None:
     result = _discogs_world(tuple(positions), catalog_positions=(), physical_positions=("extra",), unreadable_extra=True)
-    assert not completeness_invariant_violations({f.kind for f in result.findings}, expect_drift=True, expect_missing=False, expect_video_non_audio=False, expect_unknown=True)
+    assert not completeness_invariant_violations({f.kind for f in result.findings}, expect_drift=True, expect_missing=False, expect_video_ignored=False, expect_unknown=True)
 
 
 class TestLibraryCompletenessGenerated(unittest.TestCase):
@@ -110,16 +110,16 @@ class TestLibraryCompletenessGenerated(unittest.TestCase):
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Named known-bad self-tests, one per checker clause."""
     def test_catalog_drift_clause(self) -> None:
-        self.assertIn("catalog drift must be symmetric between catalog and disk", completeness_invariant_violations(set(), expect_drift=True, expect_missing=False, expect_video_non_audio=False, expect_unknown=False))
+        self.assertIn("catalog drift must be symmetric between catalog and disk", completeness_invariant_violations(set(), expect_drift=True, expect_missing=False, expect_video_ignored=False, expect_unknown=False))
 
     def test_missing_exactness_clause(self) -> None:
-        self.assertIn("missing source audio must require exact readable evidence", completeness_invariant_violations(set(), expect_drift=False, expect_missing=True, expect_video_non_audio=False, expect_unknown=False))
+        self.assertIn("missing source audio must require exact readable evidence", completeness_invariant_violations(set(), expect_drift=False, expect_missing=True, expect_video_ignored=False, expect_unknown=False))
 
     def test_video_clause(self) -> None:
-        self.assertIn("video omission must remain non-audio, never missing audio", completeness_invariant_violations({"missing_source_audio"}, expect_drift=False, expect_missing=False, expect_video_non_audio=True, expect_unknown=False))
+        self.assertIn("video omission must not create a completeness finding", completeness_invariant_violations({"missing_source_audio"}, expect_drift=False, expect_missing=False, expect_video_ignored=True, expect_unknown=False))
 
     def test_unknown_clause(self) -> None:
-        self.assertIn("unreadable extra audio must fail closed as unknown", completeness_invariant_violations({"missing_source_audio"}, expect_drift=False, expect_missing=False, expect_video_non_audio=False, expect_unknown=True))
+        self.assertIn("unreadable extra audio must fail closed as unknown", completeness_invariant_violations({"missing_source_audio"}, expect_drift=False, expect_missing=False, expect_video_ignored=False, expect_unknown=True))
 
 
 if __name__ == "__main__":

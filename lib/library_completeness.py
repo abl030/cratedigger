@@ -51,7 +51,7 @@ class SourceManifest(msgspec.Struct, frozen=True):
 
 
 class CompletenessFinding(msgspec.Struct, frozen=True):
-    kind: Literal["missing_source_audio", "catalog_drift", "non_audio_omitted", "unknown"]
+    kind: Literal["missing_source_audio", "catalog_drift", "unknown"]
     detail: str
 
 
@@ -71,7 +71,6 @@ class CompletenessCounts(msgspec.Struct, frozen=True):
     audio_complete: int
     missing_source_audio: int
     catalog_drift: int
-    non_audio_omitted: int
     unknown: int
 
 
@@ -127,8 +126,7 @@ def musicbrainz_manifest(
     """Normalize raw MB media without losing release-track/recording identity.
 
     A release track id is the primary source key.  ``recording.video`` is
-    source authority for a non-audio extra, so an omitted video can be visible
-    without falsely claiming audio incompleteness.
+    source authority for excluding a non-audio component from completeness.
     """
     raw_release_id = raw.get("id")
     if not isinstance(raw_release_id, str):
@@ -326,7 +324,6 @@ def classify_album(
         ))
 
     audio = [component for component in manifest.components if component.kind == "audio"]
-    non_audio = [component for component in manifest.components if component.kind == "non_audio"]
     audio_keys = {component.key for component in audio}
     components_by_key = {component.key: component for component in manifest.components}
 
@@ -416,11 +413,6 @@ def classify_album(
             detail = ("current MusicBrainz identities do not match "
                       f"{unmatched_mb_witnesses} installed audio component(s)")
         findings.append(CompletenessFinding("unknown", detail))
-    # An omitted source-declared non-audio component is informative, never an
-    # audio defect. Exact release-track identity is enough to observe it.
-    non_audio_keys = {component.key for component in non_audio}
-    if non_audio_keys - known_component_keys:
-        findings.append(CompletenessFinding("non_audio_omitted", str(len(non_audio_keys - known_component_keys))))
     return CompletenessAlbum(
         album_id=album.album_id, artist=album.artist, title=album.title,
         release_id=manifest.release_id, findings=tuple(findings),
@@ -487,7 +479,7 @@ def scan_library_completeness(
         category = beets_authority_availability_category(exc)
         if category is None:
             raise
-        return CompletenessReport("beets_unavailable", CompletenessCounts(0, 0, 0, 0, 0, 0), (), category)
+        return CompletenessReport("beets_unavailable", CompletenessCounts(0, 0, 0, 0, 0), (), category)
     if max_workers < 1:
         raise ValueError("max_workers must be positive")
 
@@ -515,17 +507,20 @@ def scan_library_completeness(
     # census itself from making unbounded filesystem/network work.
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         results = list(executor.map(classify_one, albums))
-    exceptional: list[CompletenessAlbum] = []
-    complete = missing = drift = non_audio = unknown = 0
+    listed: list[CompletenessAlbum] = []
+    complete = missing = drift = unknown = 0
     for result in results:
         kinds = {finding.kind for finding in result.findings}
         missing += "missing_source_audio" in kinds
         drift += "catalog_drift" in kinds
-        non_audio += "non_audio_omitted" in kinds
         unknown += "unknown" in kinds
         if not {"missing_source_audio", "unknown"} & kinds:
             complete += 1
         if result.findings:
-            exceptional.append(result)
+            listed.append(result)
     status: CompletenessStatus = "unknown" if unknown else "incomplete" if missing else "complete"
-    return CompletenessReport(status, CompletenessCounts(len(albums), complete, missing, drift, non_audio, unknown), tuple(exceptional))
+    return CompletenessReport(
+        status,
+        CompletenessCounts(len(albums), complete, missing, drift, unknown),
+        tuple(listed),
+    )

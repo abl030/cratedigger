@@ -116,7 +116,7 @@ class TestLiveIncidentPins(unittest.TestCase):
         kinds = self._classify(album, _mb_raw(rows), tags=paths)
         self.assertEqual(kinds, {"catalog_drift"})
 
-    def test_omitted_mb_video_is_non_audio_not_missing_audio(self) -> None:
+    def test_omitted_mb_video_is_ignored_not_missing_audio(self) -> None:
         release = "video-release"
         paths = {"/album/audio.flac": ("audio-rt", "audio-rec")}
         album = LibraryAlbum(7, "Artist", "Video album", ReleaseIdentity("musicbrainz", release), "/album",
@@ -125,7 +125,7 @@ class TestLiveIncidentPins(unittest.TestCase):
             ("audio-rt", "audio-rec", "Audio", False),
             ("video-rt", "video-rec", "Video", True),
         ]), tags=paths)
-        self.assertEqual(kinds, {"non_audio_omitted"})
+        self.assertEqual(kinds, set())
 
     def test_whole_program_mb_identity_churn_uses_safe_global_coordinate_control(self) -> None:
         release = "d87dbe79-82f7-4055-b9d4-379cef3f9bdd"

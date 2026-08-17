@@ -225,16 +225,31 @@ function renderLibraryCompletenessCard(census) {
   const report = snapshot.report || {};
   const counts = report.counts || {};
   const rows = Array.isArray(report.albums) ? report.albums : [];
-  const findingLabels = {
-    missing_source_audio: 'Missing source audio',
-    catalog_drift: 'Catalog drift',
-    non_audio_omitted: 'Non-audio omitted',
-    unknown: 'Unknown',
+  const categories = [
+    {kind: 'missing_source_audio', label: 'Missing source audio', tone: 'metric-bad'},
+    {kind: 'catalog_drift', label: 'Catalog drift', tone: 'metric-warn'},
+    {kind: 'unknown', label: 'Unknown', tone: 'metric-warn'},
+  ];
+  const renderCategory = ({kind, label, tone}) => {
+    const categoryRows = rows.map(row => ({
+      row,
+      details: (Array.isArray(row.findings) ? row.findings : [])
+        .filter(finding => finding.kind === kind)
+        .map(finding => finding.detail || ''),
+    })).filter(entry => entry.details.length > 0);
+    const total = Number.isFinite(Number(counts[kind])) ? Number(counts[kind]) : categoryRows.length;
+    const countTone = total > 0 ? tone : 'metric-muted';
+    return `<details class="completeness-category">
+      <summary><span>${label}</span><strong class="${countTone}">${formatCount(total)}</strong></summary>
+      <div class="completeness-category-body">
+        ${categoryRows.map(({row, details}) => `<div class="metric-row completeness-album-row"><span>#${esc(String(row.album_id ?? '?'))} ${esc(row.artist || '?')} — ${esc(row.title || '?')}</span><strong>${esc(details.join('; '))}</strong></div>`).join('')}
+        ${categoryRows.length === 0 ? '<div class="completeness-category-empty">No albums</div>' : ''}
+        ${categoryRows.length < total ? `<div class="completeness-category-limit">Showing ${formatCount(categoryRows.length)} of ${formatCount(total)}</div>` : ''}
+      </div>
+    </details>`;
   };
   const stale = retagDivergenceSnapshotIsStale(snapshot.generated_at);
   const statusClass = stale ? 'metric-warn' : report.status === 'complete' ? 'metric-good' : report.status === 'unknown' ? 'metric-warn' : 'metric-bad';
-  const shown = Number.isFinite(c.albums_shown) ? c.albums_shown : rows.length;
-  const total = Number.isFinite(c.albums_listed_total) ? c.albums_listed_total : rows.length;
   return `
     <div class="dashboard-card dashboard-wide">
       <div class="dashboard-card-title">Library Completeness</div>
@@ -242,12 +257,7 @@ function renderLibraryCompletenessCard(census) {
         <div class="metric-row"><span>Status</span><strong class="${statusClass}">${esc(stale ? `${report.status || 'unknown'} (stale)` : report.status || 'unknown')}</strong></div>
         <div class="metric-row"><span>Last run</span><strong>${snapshot.generated_at ? awstDateTime(snapshot.generated_at) : 'n/a'} (${formatDuration(snapshot.duration_seconds)})</strong></div>
         <div class="metric-row"><span>Audio complete</span><strong>${formatCount(counts.audio_complete)} / ${formatCount(counts.albums_scanned)}</strong></div>
-        <div class="metric-row"><span>Missing source audio</span><strong class="${Number(counts.missing_source_audio) ? 'metric-bad' : 'metric-muted'}">${formatCount(counts.missing_source_audio)}</strong></div>
-        <div class="metric-row"><span>Catalog drift</span><strong class="${Number(counts.catalog_drift) ? 'metric-warn' : 'metric-muted'}">${formatCount(counts.catalog_drift)}</strong></div>
-        <div class="metric-row"><span>Non-audio omitted</span><strong>${formatCount(counts.non_audio_omitted)}</strong></div>
-        <div class="metric-row"><span>Unknown</span><strong class="${Number(counts.unknown) ? 'metric-warn' : 'metric-muted'}">${formatCount(counts.unknown)}</strong></div>
-        <div class="metric-row"><span>Exceptional albums</span><strong>${formatCount(shown)} / ${formatCount(total)}</strong></div>
-        ${rows.map(row => `<div class="metric-row"><span>#${row.album_id} ${esc(row.artist || '?')} — ${esc(row.title || '?')}</span><strong>${esc((row.findings || []).map(f => `${findingLabels[f.kind] || 'Unknown'}: ${f.detail || ''}`).join('; '))}</strong></div>`).join('')}
+        ${categories.map(renderCategory).join('')}
       </div>
     </div>`;
 }
