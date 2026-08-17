@@ -228,10 +228,11 @@ function avgMinPhrase(avg, median, min) {
 }
 
 function comparisonMetricPhrase(avg, median, min, basis, side) {
-  // An installed one-sided spectral class is the decision's effective HAVE
-  // value, even when its raw average is present for diagnosis. Checking raw
-  // stats first would relabel that class as its inflated VBR average.
-  if (basis?.branch === 'spectral_existing_bound'
+  // A one-sided spectral class belongs to its encode, regardless of whether
+  // that encode is IN or HAVE. Checking raw VBR stats first would relabel
+  // that class as its inflated average.
+  if ((basis?.branch === 'spectral_candidate_bound'
+       || basis?.branch === 'spectral_existing_bound')
       && basisUsesClampedValue(basis, side)) {
     return basisValuePhrase(basis, side);
   }

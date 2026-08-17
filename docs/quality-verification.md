@@ -1179,13 +1179,13 @@ the grade before.
 
 **One-class comparison is role-neutral** (issue #911's *Fall 2007* guard,
 and #1157). When exactly one encode has an accusation-capable decision-grade
-class and the other is a known-clean bare measurement in the same codec
+class and the other is a `genuine`/`marginal` bare measurement in the same codec
 family, the class follows the encode in either role. The effective class and
 raw metric pass through the ordinary rank and same-family tolerance rules,
 so 192 versus 190 is equivalent in both directions while 256 versus 172
 still imports. The narrow gates withhold for an unmeasured raw side, explicit
-labels, inadmissible codecs, cross-family comparisons, a non-clean raw side,
-or an unbound class. `spectral_candidate_bound` and
+labels, inadmissible codecs, cross-family comparisons, any raw grade other
+than `genuine`/`marginal`, or an unbound class. `spectral_candidate_bound` and
 `spectral_existing_bound` record which side supplied the class, allowing the
 renderers to show only that side as a spectral-clamped value. This preserves
 the *Fall 2007* fixed point: fake CBR 320/class 160 versus genuine 160 is

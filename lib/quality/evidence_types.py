@@ -1098,3 +1098,12 @@ grades must leave the container bitrate untouched — a genuine lo-fi file
 is NOT a quality signal and would falsely drag the import comparison down.
 See issue #61 for the motivating incident.
 """
+
+
+SPECTRAL_AFFIRMATIVE_GRADES: frozenset[str] = frozenset({"genuine", "marginal"})
+"""Spectral grades that positively establish a non-transcode encode.
+
+These are deliberately narrower than "not transcode": an absent, failed, or
+unknown measurement cannot license a one-sided spectral comparison against a
+classed encode.
+"""

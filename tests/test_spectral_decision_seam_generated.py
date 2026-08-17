@@ -51,7 +51,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.quality import (
-    SPECTRAL_TRANSCODE_GRADES,
+    SPECTRAL_AFFIRMATIVE_GRADES,
     AlbumQualityEvidence,
     AudioQualityMeasurement,
     CodecFamily,
@@ -474,10 +474,8 @@ def _one_sided_bound_licence_failures(
         failures.append("a side carries an explicit contract label")
     if _codec_family_of(classed.format) != _codec_family_of(raw.format):
         failures.append("sides are not in one codec family")
-    if raw.spectral_grade is None:
-        failures.append("raw encode has no spectral verdict at all")
-    elif raw.spectral_grade in SPECTRAL_TRANSCODE_GRADES:
-        failures.append("raw encode is itself transcode-graded, so not known clean")
+    if raw.spectral_grade not in SPECTRAL_AFFIRMATIVE_GRADES:
+        failures.append("raw encode is not affirmatively known clean")
     if decision_class_kbps(raw_spectral) is not None:
         failures.append("raw encode carries a class of its own")
     class_value = decision_class_kbps(classed_spectral)

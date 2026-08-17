@@ -1328,6 +1328,38 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
             "spectral_existing_bound",
         )
 
+    def test_error_grade_candidate_does_not_bound_a_classed_have(self):
+        """An errored candidate is not affirmatively known-clean.
+
+        A raw 224k MP3 whose spectral measurement errored must not use an
+        installed VBR transcode's 160k class as its comparison value. That
+        would turn the real 224k-vs-320k downgrade into an import; only
+        ``genuine`` and ``marginal`` authorize the narrow one-class lane.
+        """
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=224, avg_bitrate=224, is_cbr=False,
+            spectral_grade="error",
+        )
+        current = self._build_current(
+            min_bitrate=320, avg_bitrate=320, format="MP3", is_cbr=False,
+            spectral_grade="likely_transcode", spectral_bitrate=160,
+            codec_family="mp3", filetype_band="mp3",
+        )
+
+        decision = full_pipeline_decision_from_evidence(candidate, current)
+
+        self.assertEqual(decision["stage2_import"], "downgrade")
+        self.assertFalse(decision["imported"])
+        self.assertEqual(decision["comparison_basis"]["branch"], "rank")
+        self.assertFalse(decision["comparison_basis"]["spectral_clamped"])
+        self.assertEqual(
+            (decision["comparison_basis"]["new_value_kbps"],
+             decision["comparison_basis"]["existing_value_kbps"]),
+            (224, 320),
+        )
+
     def test_mountain_goats_flux_provisional_lossless_via_evidence(self):
         """Request 4514 shape, but routed through the production decider."""
         from lib.quality import (

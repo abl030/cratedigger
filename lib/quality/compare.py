@@ -6,6 +6,7 @@ Pure move: every definition is AST-identical to the original.
 
 
 from lib.quality.evidence_types import (
+    SPECTRAL_AFFIRMATIVE_GRADES,
     SPECTRAL_TRANSCODE_GRADES,
     AudioQualityMeasurement,
     QualityComparisonBasis,
@@ -365,9 +366,10 @@ def _one_sided_spectral_bitrates(
         return None
     # The known-clean grade is intentionally read raw. An AAC cliff cannot
     # produce a class, but an affirmative ``genuine`` verdict can still be
-    # the safe raw half of this narrow comparison.
-    if (raw_measurement.spectral_grade is None
-            or raw_measurement.spectral_grade in SPECTRAL_TRANSCODE_GRADES):
+    # the safe raw half of this narrow comparison. Anything else, including
+    # an ``error`` result, withholds the class rather than treating absence of
+    # an accusation as evidence of cleanliness.
+    if raw_measurement.spectral_grade not in SPECTRAL_AFFIRMATIVE_GRADES:
         return None
     if decision_class_kbps(raw_spectral) is not None:
         return None
