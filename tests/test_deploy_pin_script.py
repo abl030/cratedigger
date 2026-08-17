@@ -173,6 +173,32 @@ class TestDeployPinScript(unittest.TestCase):
         self.assertFalse(any(event[0] == "push" for event in state["events"]))
         self.assertIsNone(state["worktree"])
 
+    def test_pin_commit_carrying_more_than_the_lock_is_definitively_invalid(
+        self,
+    ) -> None:
+        """#1172 item 2. ``verify_pin_commit`` rejects a pin revision whose
+        tree changes anything besides ``flake.lock``, and returns 2 —
+        "definitively invalid", which discards the pending candidate rather
+        than leaving it to be recovered on the next run.
+
+        Until the fake's ``diff-tree`` consulted the revision it was asked
+        about, it answered ``flake.lock`` for every commit, so this guard was
+        unreachable from all 47 tests in this file and its generated sibling.
+        A correctly signed commit that smuggled a module change in alongside
+        the lock bump would have been pinned and deployed.
+        """
+        self.fake.update_state(fault="extra_changed_paths")
+
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("changes paths other than flake.lock", proc.stderr)
+        self.assertIn("modules/nixos/services/cratedigger.nix", proc.stderr)
+        # Definitively invalid: not left pending, never pushed, never a receipt.
+        self.assertIsNone(state["receipt_rev"])
+        self.assertFalse(any(event[0] == "push" for event in state["events"]))
+
     def test_post_commit_failures_recover_one_exact_signed_commit(self) -> None:
         for fault in (
             "post_commit_rev_parse",

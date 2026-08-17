@@ -18,9 +18,22 @@ from web import discogs
 
 
 class _DiscogsMirror:
-    def __init__(self, *, delay: float = 0, fail_masters: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        delay: float = 0,
+        fail_masters: bool = False,
+        handler_exit_delay: float = 0,
+    ) -> None:
         self.delay = delay
         self.fail_masters = fail_masters
+        # Issue #1175. Stands in for the scheduling gap full-suite load opens
+        # between a handler finishing its response and its thread being
+        # scheduled again to tear down. The client has already read the body
+        # and released its semaphore slot by then, so anything still counted
+        # during this window is measuring handler lifetime rather than the
+        # window the cap governs.
+        self.handler_exit_delay = handler_exit_delay
         self.active = 0
         self.max_active = 0
         self.lock = threading.Lock()
@@ -32,8 +45,27 @@ class _DiscogsMirror:
                 with mirror.lock:
                     mirror.active += 1
                     mirror.max_active = max(mirror.max_active, mirror.active)
+                counted = True
+
+                def leave() -> None:
+                    # Closes the counted window at the last moment before this
+                    # response becomes readable by the client. Everything after
+                    # it -- writing bytes, this thread being descheduled, the
+                    # handler returning -- happens while the client may already
+                    # have read the body and released its semaphore slot, so
+                    # counting it would measure handler lifetime instead of the
+                    # window the cap governs (#1175). Idempotent, so the
+                    # ``finally`` below still guarantees exactly one decrement
+                    # on the paths that raise before reaching a response.
+                    nonlocal counted
+                    if counted:
+                        counted = False
+                        with mirror.lock:
+                            mirror.active -= 1
+
                 try:
                     if masters and mirror.fail_masters:
+                        leave()
                         self.send_response(500)
                         self.end_headers()
                         return
@@ -42,14 +74,16 @@ class _DiscogsMirror:
                     body = json.dumps({
                         "results": [], "total": 0, "page": 1, "per_page": 1,
                     }).encode()
+                    leave()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
                 finally:
-                    with mirror.lock:
-                        mirror.active -= 1
+                    if mirror.handler_exit_delay:
+                        time.sleep(mirror.handler_exit_delay)
+                    leave()
 
             def log_message(self, format: str, *_args: object) -> None:
                 pass
@@ -69,13 +103,17 @@ class _DiscogsMirror:
 
 
 def assert_discogs_cap(max_active: int) -> None:
-    if max_active > 2:
+    """The budget is read from the production constant, not re-typed here — a
+    hand-written literal would pin a number rather than the invariant that the
+    mirror's configured budget is honoured."""
+    cap = discogs._DISCOGS_ARTIST_CONCURRENCY
+    if max_active > cap:
         raise AssertionError(f"Discogs mirror cap exceeded: {max_active}")
 
 
 class TestDiscogsArtistGlobalConcurrency(unittest.TestCase):
-    def _run_calls(self, calls: int) -> _DiscogsMirror:
-        mirror = _DiscogsMirror(delay=0.03)
+    def _run_calls(self, calls: int, *, handler_exit_delay: float = 0) -> _DiscogsMirror:
+        mirror = _DiscogsMirror(delay=0.03, handler_exit_delay=handler_exit_delay)
         with mirror as base, patch.object(discogs, "DISCOGS_API_BASE", base), patch(
             "web.discogs._cache.memoize_meta", side_effect=lambda _key, fetch: fetch(),
         ), concurrent.futures.ThreadPoolExecutor(max_workers=calls) as executor:
@@ -94,8 +132,25 @@ class TestDiscogsArtistGlobalConcurrency(unittest.TestCase):
 
     def test_three_top_level_artist_reads_share_one_two_request_budget(self) -> None:
         mirror = self._run_calls(3)
+        # Saturation AND the cap in one assertion: with the budget honoured the
+        # only value three concurrent readers can produce is the budget itself.
+        # A degenerate counted window (reading 1) fails here just as a breached
+        # cap does.
+        self.assertEqual(mirror.max_active, discogs._DISCOGS_ARTIST_CONCURRENCY)
+
+    def test_slow_handler_teardown_does_not_inflate_the_measured_window(self) -> None:
+        """#1175: the counter must measure the window the client's semaphore
+        hold governs, not handler lifetime.
+
+        A handler descheduled after writing its response has already released
+        the client's slot — the client read the body and left ``_get``'s
+        ``with`` block. Counting that trailing window let a third reader be
+        observed while the client-side cap of two was never breached, which is
+        why this failed intermittently under full-suite load and passed in
+        isolation.
+        """
+        mirror = self._run_calls(3, handler_exit_delay=0.02)
         assert_discogs_cap(mirror.max_active)
-        self.assertGreater(mirror.max_active, 1)
 
     @settings(max_examples=8)
     @given(calls=st.integers(min_value=1, max_value=5))

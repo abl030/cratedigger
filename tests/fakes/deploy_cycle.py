@@ -38,6 +38,18 @@ if state["forced_agent_present"] and not agent_disabled:
     raise SystemExit(0)
 
 
+# A real read can fail outright: an unreachable host, a systemctl that exits
+# non-zero. The verifier's `die "could not read ..."` branches exist for that
+# world, so the fake has to be able to produce it -- otherwise those branches
+# are unreachable from every test and a regression there is invisible (#1172
+# item 6). Exit 255 is ssh's own transport-failure code.
+for fragment in state["ssh_failures"]:
+    if fragment in remote:
+        print(f"ssh: connect to host: {fragment}", file=sys.stderr)
+        save()
+        raise SystemExit(255)
+
+
 def show_properties(current):
     """Emit only the properties the command actually asked for, in the order
     real `systemctl show` uses. Printing all four unconditionally would let a
@@ -224,7 +236,10 @@ class FakeDeployCycleCommands:
         start_journal_snapshots: list[list[dict[str, str]]] | None = None,
         migrate_states: list[dict[str, str]] | None = None,
         forced_agent_present: bool = False,
+        ssh_failures: list[str] | None = None,
     ) -> None:
+        """``ssh_failures`` holds command fragments the fake ssh must fail on,
+        reproducing an unreachable host or a non-zero ``systemctl``."""
         if migrate_states is None:
             migrate_states = [self.migrate_state(self.MIGRATE_OLD)]
         self.state_path.write_text(
@@ -242,6 +257,7 @@ class FakeDeployCycleCommands:
                     "cursor": self.CURSOR,
                     "start_journal_snapshots": start_journal_snapshots or [[]],
                     "start_journal_index": 0,
+                    "ssh_failures": ssh_failures or [],
                 },
                 sort_keys=True,
             ),
