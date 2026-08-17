@@ -11,8 +11,9 @@ this module never creates a second one — it reports the survivor, and the
 sweep acts on that answer immediately: retag the installed Beets album onto
 the survivor first (Beets keys album duplicate detection on ``mb_albumid``, so
 rekeying first would land a second album), then rekey the request. Nothing is
-persisted as an alternate identity, and no PASSIVE read/render path ever calls
-this.
+persisted as an alternate identity. No request-render path calls this; the
+daily read-only completeness census is the bounded observational exception,
+and invokes it only when a raw source body names a different release ID.
 
 That placement is the whole lesson of the earlier attempts (PR #1056, and the
 six-PR series reverted by PR #1074): resolving at the point of use put a
@@ -22,11 +23,13 @@ IDs as simultaneous identities never reached the import-time match, which is
 where a merged request actually fails. One sweep, one question, one current
 ID.
 
-The one deliberate exception (#1089) is the operator merge-rekey web route: a
-single explicit, operator-initiated button click, not a read/render path
-behind an arbitrary consumer count — the exact shape the #1056/#1074 lesson
-warns against. It asks this module exactly once per click, at request time,
-and never during dashboard render.
+The one deliberate mutation exception (#1089) is the operator merge-rekey web
+route: a single explicit, operator-initiated button click, not a read/render
+path behind an arbitrary consumer count — the exact shape the #1056/#1074
+lesson warns against. It asks this module exactly once per click, at request
+time, and never during dashboard render. The completeness census does not
+mutate or follow this answer beyond admitting the already-fetched raw source
+body for classification.
 
 **Fail-open by contract, with two answer shapes.** :func:`canonical_release_id`
 collapses every non-redirect world into ``None`` — a non-MusicBrainz identity,
@@ -137,12 +140,20 @@ def _fetch_json(url: str) -> object:
     The body is read under a byte cap: a broken or hostile mirror must not
     be able to stream unbounded bytes into the sweep process.
     """
+    # The daily completeness census can need this narrow merge proof for
+    # many historically tagged releases. Reuse the MB client's slot and
+    # public-etiquette clock rather than giving canonical redirects a second,
+    # unpaced HTTP lane.
+    from web.mb import _mirror_semaphore, _wait_for_public_musicbrainz
+
     request = urllib.request.Request(url)
     request.add_header("User-Agent", _USER_AGENT)
     request.add_header("Connection", "close")
-    with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
-        body = response.read(_MAX_RESPONSE_BYTES + 1)
-        final_url = response.url
+    with _mirror_semaphore(url):
+        _wait_for_public_musicbrainz(url)
+        with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
+            body = response.read(_MAX_RESPONSE_BYTES + 1)
+            final_url = response.url
     if len(body) > _MAX_RESPONSE_BYTES:
         raise ValueError(
             f"MusicBrainz release document exceeded {_MAX_RESPONSE_BYTES} bytes"
@@ -350,13 +361,14 @@ def configure_canonical_release_lookup(cfg: CratediggerConfig) -> None:
     """Point MusicBrainz merge-survivor resolution at the operator's mirror.
 
     This module starts inert, and an unwired process does not fail loudly —
-    it reports "no redirect" forever and looks perfectly healthy. Two
-    processes reach a merge seam and must both call this at startup: the
+    it reports "no redirect" forever and looks perfectly healthy. Three
+    processes reach a merge seam and must all call this at startup: the
     importer (``lib.download_validation._follow_merged_release``, draining
-    automation/force jobs) and the web server (the operator merge-rekey
-    route, #1089, reached from ``MergeRekeyService``). Sharing ONE
-    implementation is what keeps those two callers from silently drifting
-    apart — see CLAUDE.md's "No Parallel Code Paths".
+    automation/force jobs), the web server (the operator merge-rekey route,
+    #1089, reached from ``MergeRekeyService``), and the daily completeness
+    census (which must prove a redirected raw source body before using it).
+    Sharing ONE implementation is what keeps those callers from silently
+    drifting apart — see CLAUDE.md's "No Parallel Code Paths".
 
     A blank base leaves resolution inert rather than silently reaching out to
     public MusicBrainz from a deployment that configured a mirror on purpose.

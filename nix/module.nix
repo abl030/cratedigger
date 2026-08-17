@@ -988,6 +988,19 @@
       --runtime-dir "${cfg.stateDir}"
   '';
 
+  # Daily whole-library source/catalog/files completeness census (#1149).
+  # Separate from both the five-minute pipeline and retag census: it reads
+  # mirrors, Beets and files, then atomically publishes its own snapshot.
+  libraryCompletenessCensusPkg = pkgs.writeShellScriptBin "cratedigger-library-completeness-census" ''
+    export PATH="${runtimePath}:$PATH"
+    ${beetsRuntimeEnvironment}
+    export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
+    exec ${pyRunner} ${src}/scripts/run_library_completeness_census.py \
+      "$@" \
+      --config "${configTemplate}" \
+      --runtime-dir "${cfg.stateDir}"
+  '';
+
   # [Quality Ranks] section — declarative mirror of QualityRankConfig.defaults().
   # Pinned by TestQualityRankConfigDefaults in tests/test_quality_decisions.py.
   qualityRanksSection = let
@@ -2597,6 +2610,37 @@ in {
         Persistent = true;
         # Same jitter rationale as cratedigger-unfindable's timer above —
         # avoid colliding with other midnight tasks on doc2.
+        RandomizedDelaySec = "30min";
+      };
+    };
+
+    systemd.services.cratedigger-library-completeness-census = {
+      description = "Cratedigger daily whole-library completeness census";
+      after = beetsReadinessUnits;
+      wants = beetsReadinessUnits;
+      restartIfChanged = false;
+      serviceConfig = {
+        Type = "oneshot";
+        User = cfg.user;
+        Group = cfg.group;
+        BindReadOnlyPaths = beetsObserverReadOnlyPaths;
+        ExecStart = "${libraryCompletenessCensusPkg}/bin/cratedigger-library-completeness-census";
+        WorkingDirectory = cfg.stateDir;
+        # Public MusicBrainz remains a supported (1 request/sec) posture:
+        # a full 8k-release source census alone needs roughly 2.25h there.
+        # The classifier has bounded concurrent workers and mirror clients
+        # enforce their own semaphores, but public etiquette is deliberately
+        # serial, so leave measured headroom instead of guaranteeing timeout.
+        TimeoutStartSec = "4h";
+      };
+    };
+
+    systemd.timers.cratedigger-library-completeness-census = {
+      description = "Cratedigger daily library completeness census timer";
+      wantedBy = ["timers.target"];
+      timerConfig = {
+        OnCalendar = "daily";
+        Persistent = true;
         RandomizedDelaySec = "30min";
       };
     };

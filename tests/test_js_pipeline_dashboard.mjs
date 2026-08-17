@@ -497,6 +497,42 @@ console.log('renderRetagDivergenceCensusCard() N5 — a snapshot older than 36h 
   assertContains(html, 'metric-warn">stale', 'freshness row reads stale with warn tone');
   assertContains(html, '40.0h', 'stale label names the exact age');
 }
+console.log('renderLibraryCompletenessCard() renders freshness, truthful totals, and finding detail');
+{
+  const stale = new Date(Date.now() - 40 * 3600000).toISOString();
+  const html = __test__.renderLibraryCompletenessCard({
+    state: 'ok', albums_shown: 1, albums_listed_total: 2,
+    snapshot: {
+      generated_at: stale, duration_seconds: 2.5,
+      report: {
+        status: 'incomplete',
+        counts: {albums_scanned: 8498, audio_complete: 8496, missing_source_audio: 2, catalog_drift: 2, non_audio_omitted: 16, unknown: 0},
+        albums: [{album_id: 11782, artist: 'David Bowie', title: 'David Bowie', findings: [
+          {kind: 'missing_source_audio', detail: "Don't Sit Down"},
+          {kind: 'catalog_drift', detail: 'uncatalogued=1 catalogued_missing=0'},
+        ]}],
+      },
+    },
+  });
+  assertContains(html, 'incomplete (stale)', 'stale completeness status is explicit');
+  assertContains(html, '8,496 / 8,498', 'audio complete uses whole-library denominator');
+  assertContains(html, 'Don&#39;t Sit Down', 'missing-source detail is rendered and escaped');
+  assertContains(html, 'uncatalogued=1', 'catalog-drift detail is rendered');
+  assertContains(html, 'Missing source audio:', 'missing finding label is humanized');
+  assertContains(html, 'Catalog drift:', 'drift finding label is humanized');
+  assertExcludes(html, 'missing_source_audio', 'raw missing enum is never rendered');
+  assertExcludes(html, 'catalog_drift', 'raw drift enum is never rendered');
+  assertContains(html, '1 / 2', 'capped exceptional rows remain honest');
+}
+console.log('renderLibraryCompletenessCard() keeps zero defect observations neutral');
+{
+  const html = __test__.renderLibraryCompletenessCard({
+    state: 'ok', snapshot: {generated_at: new Date().toISOString(), duration_seconds: 1,
+      report: {status: 'complete', counts: {albums_scanned: 1, audio_complete: 1, missing_source_audio: 0, catalog_drift: 0, non_audio_omitted: 0, unknown: 0}, albums: []}},
+  });
+  assertContains(html, 'metric-muted">0</strong>', 'zero defect counts are neutral, not celebratory');
+  assertExcludes(html, 'metric-good">0</strong>', 'zero defect counts never use good tone');
+}
 console.log('renderRetagDivergenceCensusCard() lists a divergent album with a recheck button');
 {
   const html = __test__.renderRetagDivergenceCensusCard({

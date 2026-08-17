@@ -32,6 +32,7 @@ export function renderPipelineDashboard(navHtml) {
       ${renderRedisCard(redis)}
       ${renderCoverageCard(coverageWithRates)}
       ${renderDiskCoverageCard(data.disk_coverage)}
+      ${renderLibraryCompletenessCard(data.library_completeness)}
       ${renderRetagDivergenceCensusCard(data.retag_divergence_census)}
       ${renderWantedTrendCard(coverageWithRates.wanted_trend || {})}
       ${renderPeersCard(peers)}
@@ -209,6 +210,46 @@ function renderDiskCoverageCard(dc) {
       </div>
     </div>
   `;
+}
+
+/** Render the persisted read-only source/catalog/files census. */
+function renderLibraryCompletenessCard(census) {
+  const c = census || {};
+  if (c.state === 'missing') {
+    return `<div class="dashboard-card dashboard-wide"><div class="dashboard-card-title">Library Completeness</div><div class="metric-list"><div class="metric-row"><span>Status</span><strong class="metric-muted">no census published yet</strong></div></div></div>`;
+  }
+  if (c.state === 'unreadable') {
+    return `<div class="dashboard-card dashboard-wide"><div class="dashboard-card-title">Library Completeness</div><div class="metric-list"><div class="metric-row"><span>Status</span><strong class="metric-bad">snapshot unreadable</strong></div><div class="metric-row"><span>Error</span><strong>${esc(c.error || '')}</strong></div></div></div>`;
+  }
+  const snapshot = c.snapshot || {};
+  const report = snapshot.report || {};
+  const counts = report.counts || {};
+  const rows = Array.isArray(report.albums) ? report.albums : [];
+  const findingLabels = {
+    missing_source_audio: 'Missing source audio',
+    catalog_drift: 'Catalog drift',
+    non_audio_omitted: 'Non-audio omitted',
+    unknown: 'Unknown',
+  };
+  const stale = retagDivergenceSnapshotIsStale(snapshot.generated_at);
+  const statusClass = stale ? 'metric-warn' : report.status === 'complete' ? 'metric-good' : report.status === 'unknown' ? 'metric-warn' : 'metric-bad';
+  const shown = Number.isFinite(c.albums_shown) ? c.albums_shown : rows.length;
+  const total = Number.isFinite(c.albums_listed_total) ? c.albums_listed_total : rows.length;
+  return `
+    <div class="dashboard-card dashboard-wide">
+      <div class="dashboard-card-title">Library Completeness</div>
+      <div class="metric-list">
+        <div class="metric-row"><span>Status</span><strong class="${statusClass}">${esc(stale ? `${report.status || 'unknown'} (stale)` : report.status || 'unknown')}</strong></div>
+        <div class="metric-row"><span>Last run</span><strong>${snapshot.generated_at ? awstDateTime(snapshot.generated_at) : 'n/a'} (${formatDuration(snapshot.duration_seconds)})</strong></div>
+        <div class="metric-row"><span>Audio complete</span><strong>${formatCount(counts.audio_complete)} / ${formatCount(counts.albums_scanned)}</strong></div>
+        <div class="metric-row"><span>Missing source audio</span><strong class="${Number(counts.missing_source_audio) ? 'metric-bad' : 'metric-muted'}">${formatCount(counts.missing_source_audio)}</strong></div>
+        <div class="metric-row"><span>Catalog drift</span><strong class="${Number(counts.catalog_drift) ? 'metric-warn' : 'metric-muted'}">${formatCount(counts.catalog_drift)}</strong></div>
+        <div class="metric-row"><span>Non-audio omitted</span><strong>${formatCount(counts.non_audio_omitted)}</strong></div>
+        <div class="metric-row"><span>Unknown</span><strong class="${Number(counts.unknown) ? 'metric-warn' : 'metric-muted'}">${formatCount(counts.unknown)}</strong></div>
+        <div class="metric-row"><span>Exceptional albums</span><strong>${formatCount(shown)} / ${formatCount(total)}</strong></div>
+        ${rows.map(row => `<div class="metric-row"><span>#${row.album_id} ${esc(row.artist || '?')} — ${esc(row.title || '?')}</span><strong>${esc((row.findings || []).map(f => `${findingLabels[f.kind] || 'Unknown'}: ${f.detail || ''}`).join('; '))}</strong></div>`).join('')}
+      </div>
+    </div>`;
 }
 
 /**
@@ -982,6 +1023,7 @@ export const __test__ = {
   renderDailyMatchRateChart,
   renderCoverageCard,
   renderDiskCoverageCard,
+  renderLibraryCompletenessCard,
   renderDriftRow,
   renderHourlyMatchRateChart,
   renderMatchRateChart,

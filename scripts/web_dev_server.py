@@ -94,6 +94,7 @@ class DevConfig:
     #: oneshot writes into. ``None`` means the dashboard honestly reports
     #: "no snapshot published yet", exactly like a fresh deploy.
     retag_census_runtime_dir: str | None = None
+    library_completeness_runtime_dir: str | None = None
 
     @property
     def badge_text(self) -> str:
@@ -635,6 +636,10 @@ def configure_live_db(
         web_server.beets_library_root = config.beets_directory
     web_server._beets = None
 
+    # ``configure_live_db`` is reusable in test/dev processes; a later
+    # configuration without a snapshot directory must not inherit one.
+    web_server.retag_census_snapshot_path = None
+    web_server.library_completeness_snapshot_path = None
     if config.retag_census_runtime_dir is not None:
         from lib.retag_divergence_census_snapshot import (
             retag_divergence_census_snapshot_path,
@@ -642,6 +647,15 @@ def configure_live_db(
         web_server.retag_census_snapshot_path = (
             retag_divergence_census_snapshot_path(
                 config.retag_census_runtime_dir,
+            )
+        )
+    if config.library_completeness_runtime_dir is not None:
+        from lib.library_completeness_snapshot import (
+            library_completeness_snapshot_path,
+        )
+        web_server.library_completeness_snapshot_path = (
+            library_completeness_snapshot_path(
+                config.library_completeness_runtime_dir,
             )
         )
 
@@ -668,6 +682,9 @@ def build_config(args: argparse.Namespace) -> DevConfig:
         retag_census_runtime_dir=getattr(
             args, "retag_census_runtime_dir", None,
         ),
+        library_completeness_runtime_dir=getattr(
+            args, "library_completeness_runtime_dir", None,
+        ),
     )
 
 
@@ -692,6 +709,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("fixture", "prod-api", "live-db"),
         default="fixture",
         help="API data source",
+    )
+    parser.add_argument(
+        "--library-completeness-runtime-dir",
+        default=os.environ.get("LIBRARY_COMPLETENESS_RUNTIME_DIR"),
+        help="live-db only: directory containing the read-only completeness snapshot",
     )
     parser.add_argument(
         "--scenario",

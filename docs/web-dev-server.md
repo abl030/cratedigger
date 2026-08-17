@@ -73,6 +73,10 @@ yet", exactly like a fresh deploy; point it at a real or hand-constructed
 snapshot directory to preview the card's `ok`/divergent states without
 waiting for (or triggering) the real ~200s whole-library scan.
 
+`--library-completeness-runtime-dir` similarly reads the daily
+`library-completeness.json` snapshot for the read-only Library Completeness
+card. It never starts a source, Beets, or filesystem census from the dev server.
+
 ## Screenshot verification loop
 
 UI changes are verified visually against this dev server (live-db mode)

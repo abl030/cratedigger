@@ -313,6 +313,12 @@ class WebDevServerTest(unittest.TestCase):
 
                 self.assertIs(config.preview_insecure_warning, expected)
 
+    def test_library_completeness_snapshot_cli_flag_maps_through_config(self) -> None:
+        config = build_config(build_parser().parse_args([
+            "--library-completeness-runtime-dir", "/tmp/completeness",
+        ]))
+        self.assertEqual(config.library_completeness_runtime_dir, "/tmp/completeness")
+
     def test_serves_fixture_api_scenario(self):
         payload = self.get_json("/api/pipeline/dashboard")
 
@@ -993,7 +999,8 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
         self._saved = (
             web_server._db_dsn, web_server.db, web_server._try_reconnect_db,
             web_server.beets_db_path, web_server.beets_library_root,
-            web_server._beets,
+            web_server._beets, web_server.retag_census_snapshot_path,
+            web_server.library_completeness_snapshot_path,
         )
 
     def tearDown(self) -> None:
@@ -1004,7 +1011,9 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
             except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
                 pass
         (ws._db_dsn, ws.db, ws._try_reconnect_db,
-         ws.beets_db_path, ws.beets_library_root, ws._beets) = self._saved
+         ws.beets_db_path, ws.beets_library_root, ws._beets,
+         ws.retag_census_snapshot_path,
+         ws.library_completeness_snapshot_path) = self._saved
 
     def test_live_db_session_rejects_writes_through_db_accessor(self):
         import psycopg2
@@ -1038,6 +1047,24 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
                 "INSERT INTO album_requests (artist_name, album_title, source)"
                 " VALUES ('ro', 'ro', 'request')"
             )
+
+    def test_live_db_wires_and_resets_completeness_snapshot_path(self):
+        from lib.library_completeness_snapshot import library_completeness_snapshot_path
+        from scripts.web_dev_server import configure_live_db
+
+        configured = DevConfig(
+            data="live-db", scenario="peers", prod_base_url="https://music.ablz.au",
+            dsn=self.dsn, beets_db=None, mb_api=None, discogs_api=None,
+            redis_host=None, redis_port=6379,
+            library_completeness_runtime_dir="/tmp/completeness",
+        )
+        configure_live_db(configured)
+        self.assertEqual(
+            self.web_server.library_completeness_snapshot_path,
+            library_completeness_snapshot_path("/tmp/completeness"),
+        )
+        configure_live_db(replace(configured, library_completeness_runtime_dir=None))
+        self.assertIsNone(self.web_server.library_completeness_snapshot_path)
 
     def test_internal_reconnect_restores_read_only_session_default(self):
         from scripts.web_dev_server import configure_live_db

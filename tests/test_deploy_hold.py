@@ -73,6 +73,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TEST_DSN = os.environ["TEST_DB_DSN"]
 
 
+class TestIndependentDailyCensusTimer(unittest.TestCase):
+    def test_completeness_timer_is_not_deployment_held(self) -> None:
+        self.assertNotIn(
+            "cratedigger-library-completeness-census.timer", TIMER_UNITS,
+        )
+
+
 def _acquire_hold_pre_1078_order(backend: DeployHoldBackend) -> None:
     """Known-bad fixture: the exact pre-#1078 acquire order.
 

@@ -689,6 +689,33 @@ def get_master_releases(master_id: int) -> dict[str, object]:
     return _cache.memoize_meta(f"discogs:master:v2:{master_id}", _fetch)
 
 
+def _request_release_raw(release_id: int) -> _DiscogsReleaseDetailJSON:
+    """Fetch one literal mirror release payload."""
+    api_base = require_mirror_configured()
+    return _get(f"{api_base}/api/releases/{release_id}")
+
+
+def _fetch_release_raw(
+    release_id: int, *, fresh: bool = False,
+) -> _DiscogsReleaseDetailJSON:
+    """Raw cache path for source-audit consumers."""
+
+    def _fetch() -> _DiscogsReleaseDetailJSON:
+        return _request_release_raw(release_id)
+
+    return _cache.memoize_meta(
+        f"discogs:release_raw:{release_id}", _fetch, fresh=fresh,
+    )
+
+
+def get_release_raw(release_id: int, *, fresh: bool = False) -> dict[str, object]:
+    """Raw Discogs release JSON, preserving literal track positions."""
+    # Configuration admission precedes the cache lookup: a warm entry must
+    # never turn an unavailable mirror into a silently usable source.
+    require_mirror_configured()
+    return dict(_fetch_release_raw(release_id, fresh=fresh))
+
+
 def get_release(release_id: int, *, fresh: bool = False) -> dict[str, object]:
     """Get full release details with tracks. Mirrors mb.get_release().
 
@@ -697,10 +724,12 @@ def get_release(release_id: int, *, fresh: bool = False) -> dict[str, object]:
     pipeline DB — a 24h cache hit would silently write stale
     artist/title/track data into `album_requests` / `request_tracks`.
     """
-    api_base = require_mirror_configured()
+    # Keep the established public cache boundary fail-closed even on a warm
+    # slim browse payload; _request_release_raw performs the real fetch.
+    require_mirror_configured()
 
     def _fetch() -> dict[str, object]:
-        data: _DiscogsReleaseDetailJSON = _get(f"{api_base}/api/releases/{release_id}")
+        data = _request_release_raw(release_id)
         artists = data.get("artists", [])
         artist_name = _primary_artist_name(artists)
         artist_id = _primary_artist_id(artists)

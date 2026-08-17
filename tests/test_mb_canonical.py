@@ -42,9 +42,10 @@ import threading
 import unittest
 import urllib.error
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import ClassVar
+from unittest.mock import patch
 
 from lib.mb_canonical import (
     _MAX_RESPONSE_BYTES,
@@ -468,6 +469,20 @@ class TestRealFetchProducesTheEnvelope(unittest.TestCase):
             envelope = _fetch_json(self._url(base, CURRENT))
 
         self.assertEqual(envelope, _not_redirected(CURRENT))
+
+    def test_real_fetch_reuses_the_musicbrainz_client_request_admission(self) -> None:
+        """Daily redirect proofs share the public-MB pacing/slot policy."""
+        with _mirror() as base:
+            url = self._url(base, CURRENT)
+            with (
+                patch("web.mb._mirror_semaphore", return_value=nullcontext()) as slot,
+                patch("web.mb._wait_for_public_musicbrainz") as pace,
+            ):
+                envelope = _fetch_json(url)
+
+        self.assertEqual(envelope, _not_redirected(CURRENT))
+        slot.assert_called_once_with(url)
+        pace.assert_called_once_with(url)
 
     def test_an_oversized_body_is_refused_by_the_byte_cap(self) -> None:
         with _mirror() as base, self.assertRaises(ValueError) as caught:
