@@ -39,6 +39,7 @@ def _candidate(
     composite_path: str | None = None,
     composite_length: float = 0.0,
     component_count: int = 1,
+    duration_complete: bool = True,
 ) -> CandidateSummary:
     return CandidateSummary(
         mbid="2823685",
@@ -58,6 +59,9 @@ def _candidate(
                     ),
                     discogs_indexed_component_count=(
                         component_count if path == composite_path else 1
+                    ),
+                    discogs_indexed_duration_complete=(
+                        duration_complete if path == composite_path else True
                     ),
                 ),
             )
@@ -145,16 +149,53 @@ class TestCandidateAudioCoverage(unittest.TestCase):
     def test_complete_composite_program_is_covered(self) -> None:
         path = "02 Unwashed And Somewhat Slightly Dazed + Don't Sit Down.flac"
         coverage = candidate_audio_coverage(
-            [_item(path, length=407.0)],
+            [_item(path, length=408.0)],
             _candidate(
                 mapped_paths=[path],
                 composite_path=path,
-                composite_length=407.0,
+                composite_length=408.0,
                 component_count=2,
             ),
         )
 
         self.assertTrue(coverage.complete)
+
+    def test_short_indexed_component_cannot_hide_inside_tolerance(self) -> None:
+        path = "A2 incomplete composite.flac"
+        coverage = candidate_audio_coverage(
+            [_item(path, length=399.0)],
+            _candidate(
+                mapped_paths=[path],
+                composite_path=path,
+                composite_length=399.0,
+                component_count=2,
+            ),
+        )
+
+        self.assertFalse(coverage.complete)
+        self.assertEqual(
+            coverage.incomplete_composite_paths,
+            (f"{path} (local=399.0s, indexed_program=408.0s)",),
+        )
+
+    def test_unknown_component_duration_fails_closed(self) -> None:
+        path = "A2 unprovable composite.flac"
+        coverage = candidate_audio_coverage(
+            [_item(path, length=500.0)],
+            _candidate(
+                mapped_paths=[path],
+                composite_path=path,
+                composite_length=500.0,
+                component_count=2,
+                duration_complete=False,
+            ),
+        )
+
+        self.assertFalse(coverage.complete)
+        self.assertEqual(
+            coverage.incomplete_composite_paths,
+            (f"{path} (indexed component duration evidence incomplete)",),
+        )
 
 
 _PATHS = tuple(f"track-{idx}.flac" for idx in range(6))

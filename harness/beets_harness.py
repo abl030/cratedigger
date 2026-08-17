@@ -156,6 +156,9 @@ def _serialize_track_info(ti: TrackInfo) -> dict[str, object]:
         "discogs_indexed_component_count": (
             beets_compat.discogs_indexed_component_count(ti)
         ),
+        "discogs_indexed_duration_complete": (
+            beets_compat.discogs_indexed_duration_complete(ti)
+        ),
     }
 
 

@@ -60,8 +60,17 @@ def _write_audio(path: Path, title: str, *, duration: int = 1) -> None:
     )
 
 
-def _write_discogs_candidate_shim(shim: Path, receipt: Path) -> None:
+def _write_discogs_candidate_shim(
+    shim: Path,
+    receipt: Path,
+    *,
+    unknown_component_duration: bool = False,
+) -> None:
     shim.mkdir()
+    duration_by_position = {
+        "A2.1": "0:06",
+        "A2.2": "" if unknown_component_duration else "0:12",
+    }
     source = f'''\
 import json
 
@@ -70,9 +79,9 @@ def _install():
     def _album():
         from beets.autotag.hooks import AlbumInfo, TrackInfo
         from beetsplug.discogs import DiscogsPlugin
-        from harness.beets_compat import register_discogs_indexed_component_count
+        from harness.beets_compat import register_discogs_indexed_program
 
-        duration_by_position = {{"A2.1": "0:06", "A2.2": "0:12"}}
+        duration_by_position = {duration_by_position!r}
         raw = [
             {{"type_": "track", "position": position, "title": title,
              "duration": duration_by_position.get(position, "0:01")}}
@@ -92,11 +101,15 @@ def _install():
                 length=plugin.get_track_length(track["duration"]),
                 track_alt=position, data_source="Discogs",
             )
-            register_discogs_indexed_component_count(
+            register_discogs_indexed_program(
                 track_info,
                 track.get(
                     "_cratedigger_discogs_indexed_component_count",
                     1,
+                ),
+                duration_complete=track.get(
+                    "_cratedigger_discogs_indexed_duration_complete",
+                    True,
                 ),
             )
             tracks.append(track_info)
@@ -158,6 +171,7 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
         self,
         *,
         split_subtracks: bool,
+        unknown_component_duration: bool = False,
     ) -> None:
         expected_count = 10 if split_subtracks else 9
         with tempfile.TemporaryDirectory(
@@ -213,7 +227,11 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
                 )),
                 encoding="utf-8",
             )
-            _write_discogs_candidate_shim(shim, receipt)
+            _write_discogs_candidate_shim(
+                shim,
+                receipt,
+                unknown_component_duration=unknown_component_duration,
+            )
             env = {
                 "BEETSDIR": str(beets_dir),
                 "PYTHONPATH": (
@@ -281,8 +299,17 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
     def test_complete_composite_remains_one_physical_file(self) -> None:
         self._exercise_manifest(split_subtracks=False)
 
-    def test_incomplete_composite_fails_closed_even_with_force_distance(
+    def test_split_manifest_survives_unknown_indexed_duration(self) -> None:
+        self._exercise_manifest(
+            split_subtracks=True,
+            unknown_component_duration=True,
+        )
+
+    def _exercise_force_rejection(
         self,
+        *,
+        composite_duration: int,
+        duplicate_component: bool,
     ) -> None:
         with tempfile.TemporaryDirectory(
             prefix="cratedigger-discogs-subtracks-force-e2e-",
@@ -302,11 +329,21 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
                 "A2",
                 "Unwashed And Somewhat Slightly Dazed",
             )]
+            if duplicate_component:
+                # The physical A2 composite already contains both indexed
+                # components. This separately admitted file has matching
+                # A2.2 metadata but must not authorize a flat reinterpretation.
+                local_tracks.append(("EXTRA", "Don't Sit Down"))
             for index, (position, title) in enumerate(local_tracks, start=1):
                 _write_audio(
                     source / f"{index:02d} - {title}.flac",
                     title,
-                    duration=6 if position == "A2" else 1,
+                    duration=(
+                        composite_duration
+                        if position == "A2"
+                        else 12 if position == "EXTRA"
+                        else 1
+                    ),
                 )
 
             database = library / "library.db"
@@ -368,8 +405,27 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
 
             self.assertEqual(outcome.exit_code, 2)
             self.assertIn("candidate mapping would discard", outcome.failure_reason or "")
-            self.assertEqual(len(_audio_files(source)), 9)
+            self.assertEqual(
+                len(_audio_files(source)),
+                10 if duplicate_component else 9,
+            )
             self.assertEqual(_audio_files(library), [])
+
+    def test_incomplete_composite_fails_closed_even_with_force_distance(
+        self,
+    ) -> None:
+        self._exercise_force_rejection(
+            composite_duration=6,
+            duplicate_component=False,
+        )
+
+    def test_complete_composite_plus_extra_cannot_be_flattened_under_force(
+        self,
+    ) -> None:
+        self._exercise_force_rejection(
+            composite_duration=18,
+            duplicate_component=True,
+        )
 
 
 if __name__ == "__main__":

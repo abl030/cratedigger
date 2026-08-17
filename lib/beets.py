@@ -409,8 +409,8 @@ def beets_validate(
     """Validate one exact release, preserving split Discogs audio if needed.
 
     The default Beets representation remains authoritative when it covers the
-    admitted manifest. Only a Discogs target whose candidate would discard a
-    local item earns one second, still-observational harness pass that keeps
+    admitted manifest. Only a Discogs target with a proved-incomplete default
+    composite earns one second, still-observational harness pass that keeps
     flat indexed subtracks separate. The second result is final: distance and
     every coverage rule are evaluated again, including for force imports.
     """
@@ -428,6 +428,10 @@ def beets_validate(
         None,
     )
     if target is None or target.data_source.casefold() != "discogs":
+        return result
+    admitted_items = msgspec.convert(result.items, type=list[HarnessItem])
+    coverage = candidate_audio_coverage(admitted_items, target)
+    if not coverage.incomplete_composite_paths:
         return result
     logger.info(
         "BEETS_VALIDATE: retrying Discogs target %s with flat indexed "

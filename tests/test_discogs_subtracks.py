@@ -9,8 +9,11 @@ from beetsplug.discogs import ArtistState, DiscogsPlugin
 from beetsplug.discogs.types import Artist, AudioTrack, IndexTrack, Track
 
 from harness.beets_compat import (
+    BeetsCapabilityError,
+    _discogs_subtrack_methods,
     configure_discogs_subtracks,
     discogs_indexed_component_count,
+    discogs_indexed_duration_complete,
 )
 
 
@@ -87,6 +90,51 @@ class TestDiscogsSubtrackCompatibility(unittest.TestCase):
             discogs_indexed_component_count(track_infos[1]),
             2,
         )
+        self.assertTrue(discogs_indexed_duration_complete(track_infos[1]))
+
+    def test_missing_or_zero_component_duration_is_incomplete_evidence(
+        self,
+    ) -> None:
+        configure_discogs_subtracks(preserve_flat=False)
+        plugin = object.__new__(DiscogsPlugin)
+
+        for unproved_duration in ("", "0:00"):
+            with self.subTest(duration=unproved_duration):
+                merged = plugin._merge_subtracks([
+                    _audio("A2.1", "Part One", "4:00"),
+                    _audio("A2.2", "Part Two", unproved_duration),
+                ])
+
+                merged_fields: dict[str, object] = dict(merged)
+                self.assertEqual(
+                    merged_fields.get(
+                        "_cratedigger_discogs_indexed_component_count"
+                    ),
+                    2,
+                )
+                self.assertFalse(
+                    merged_fields.get(
+                        "_cratedigger_discogs_indexed_duration_complete"
+                    )
+                )
+
+    def test_older_discogs_plugin_without_coalescing_seam_is_noop(self) -> None:
+        class LegacyDiscogsPlugin:
+            def get_tracks(self) -> list[object]:
+                return []
+
+        self.assertIsNone(_discogs_subtrack_methods(LegacyDiscogsPlugin))
+
+    def test_partial_discogs_coalescing_seam_fails_closed(self) -> None:
+        class PartialDiscogsPlugin:
+            def _subtrack_position(self) -> None:
+                return None
+
+        with self.assertRaisesRegex(
+            BeetsCapabilityError,
+            "lacks callable _merge_subtracks",
+        ):
+            _discogs_subtrack_methods(PartialDiscogsPlugin)
 
     def test_flat_preservation_keeps_bowie_a2_components_separate(self) -> None:
         configure_discogs_subtracks(preserve_flat=True)

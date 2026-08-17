@@ -69,14 +69,48 @@ def make_coverage_choose_match_msg(
     mapped_paths: list[str],
     extra_paths: list[str],
     data_source: str = "Discogs",
+    composite_path: str | None = None,
+    composite_local_length: float = 0.0,
+    composite_program_length: float = 0.0,
+    composite_duration_complete: bool = True,
 ) -> str:
-    items = [{"path": path} for path in [
+    item_paths = [
         "01 Space Oddity.flac",
         "02 Unwashed And Somewhat Slightly Dazed.flac",
         "03 Don't Sit Down.flac",
-    ]]
+    ]
+    items = [
+        {
+            "path": path,
+            "length": (
+                composite_local_length if path == composite_path else 0.0
+            ),
+        }
+        for path in item_paths
+    ]
     mapping = [
-        {"item": {"path": path}, "track": {"title": path}}
+        {
+            "item": {
+                "path": path,
+                "length": (
+                    composite_local_length if path == composite_path else 0.0
+                ),
+            },
+            "track": {
+                "title": path,
+                "length": (
+                    composite_program_length if path == composite_path else 0.0
+                ),
+                "discogs_indexed_component_count": (
+                    2 if path == composite_path else 1
+                ),
+                "discogs_indexed_duration_complete": (
+                    composite_duration_complete
+                    if path == composite_path
+                    else True
+                ),
+            },
+        }
         for path in mapped_paths
     ]
     return json.dumps({
@@ -135,6 +169,9 @@ class TestBeetsValidate(unittest.TestCase):
                 "02 Unwashed And Somewhat Slightly Dazed.flac",
             ],
             extra_paths=["03 Don't Sit Down.flac"],
+            composite_path="02 Unwashed And Somewhat Slightly Dazed.flac",
+            composite_local_length=369.0,
+            composite_program_length=408.0,
         ))
         expanded = make_validation_proc(make_coverage_choose_match_msg(
             release_id,
@@ -169,6 +206,9 @@ class TestBeetsValidate(unittest.TestCase):
                 "02 Unwashed And Somewhat Slightly Dazed.flac",
             ],
             extra_paths=["03 Don't Sit Down.flac"],
+            composite_path="02 Unwashed And Somewhat Slightly Dazed.flac",
+            composite_local_length=369.0,
+            composite_program_length=408.0,
         ))
         still_incomplete = make_validation_proc(make_coverage_choose_match_msg(
             release_id,
@@ -177,6 +217,9 @@ class TestBeetsValidate(unittest.TestCase):
                 "02 Unwashed And Somewhat Slightly Dazed.flac",
             ],
             extra_paths=["03 Don't Sit Down.flac"],
+            composite_path="02 Unwashed And Somewhat Slightly Dazed.flac",
+            composite_local_length=369.0,
+            composite_program_length=408.0,
         ))
         mock_popen.side_effect = [default, still_incomplete]
 
@@ -185,6 +228,32 @@ class TestBeetsValidate(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertEqual(result.scenario, "unmapped_audio")
         self.assertIn("Don't Sit Down", result.detail or "")
+
+    @patch("lib.beets.sp.Popen")
+    def test_complete_composite_plus_extra_audio_does_not_retry_flat(
+        self,
+        mock_popen,
+    ):
+        release_id = "2823685"
+        proc = make_validation_proc(make_coverage_choose_match_msg(
+            release_id,
+            mapped_paths=[
+                "01 Space Oddity.flac",
+                "02 Unwashed And Somewhat Slightly Dazed.flac",
+            ],
+            extra_paths=["03 Don't Sit Down.flac"],
+            composite_path="02 Unwashed And Somewhat Slightly Dazed.flac",
+            composite_local_length=408.0,
+            composite_program_length=408.0,
+        ))
+        mock_popen.return_value = proc
+
+        result = beets_validate(self.HARNESS, "/test/album", release_id, 999.0)
+
+        self.assertFalse(result.valid)
+        self.assertEqual(result.scenario, "unmapped_audio")
+        self.assertIn("beets extra_items", result.detail or "")
+        self.assertEqual(mock_popen.call_count, 1)
 
     @patch("lib.beets.sp.Popen")
     def test_non_discogs_incomplete_mapping_fails_without_retry(self, mock_popen):

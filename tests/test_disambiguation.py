@@ -47,12 +47,23 @@ def _coverage_message(
     data_source: str = "Discogs",
 ) -> dict:
     admitted = ["A1.flac", "A2.1.flac", "A2.2.flac"]
+    composite_path = (
+        "A2.1.flac"
+        if data_source == "Discogs" and "A2.2.flac" in extra_paths
+        else None
+    )
     return {
         "type": "choose_match",
         "task_id": 0,
         "path": "/tmp/test",
         "item_count": len(admitted),
-        "items": [{"path": path} for path in admitted],
+        "items": [
+            {
+                "path": path,
+                "length": 6.0 if path == composite_path else 0.0,
+            }
+            for path in admitted
+        ],
         "candidates": [{
             "album_id": "2823685",
             "distance": distance,
@@ -60,7 +71,19 @@ def _coverage_message(
             "album": "David Bowie",
             "data_source": data_source,
             "mapping": [
-                {"item": {"path": path}, "track": {"title": path}}
+                {
+                    "item": {
+                        "path": path,
+                        "length": 6.0 if path == composite_path else 0.0,
+                    },
+                    "track": {
+                        "title": path,
+                        "length": 18.0 if path == composite_path else 0.0,
+                        "discogs_indexed_component_count": (
+                            2 if path == composite_path else 1
+                        ),
+                    },
+                }
                 for path in mapped_paths
             ],
             "extra_items": [{"path": path} for path in extra_paths],

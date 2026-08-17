@@ -13,9 +13,7 @@ import os
 from collections import Counter
 from dataclasses import dataclass
 
-from lib.quality import CandidateSummary, HarnessItem
-
-_COMPOSITE_DURATION_TOLERANCE_SECONDS = 10.0
+from lib.quality import CandidateSummary, HarnessItem, TrackMapping
 
 
 def _normalized_path(path: str) -> str:
@@ -88,6 +86,26 @@ def _duplicates(paths: list[str]) -> tuple[str, ...]:
     return tuple(sorted(path for path, count in counts.items() if count > 1))
 
 
+def _incomplete_composite_detail(mapping: TrackMapping) -> str | None:
+    track = mapping.track
+    if track.discogs_indexed_component_count <= 1:
+        return None
+    path = _normalized_path(mapping.item.path)
+    if (
+        not track.discogs_indexed_duration_complete
+        or track.length <= 0
+    ):
+        return f"{path} (indexed component duration evidence incomplete)"
+    if mapping.item.length <= 0:
+        return f"{path} (local audio duration unavailable)"
+    if mapping.item.length < track.length:
+        return (
+            f"{path} (local={mapping.item.length:.1f}s, "
+            f"indexed_program={track.length:.1f}s)"
+        )
+    return None
+
+
 def candidate_audio_coverage(
     admitted_items: list[HarnessItem],
     candidate: CandidateSummary,
@@ -110,16 +128,9 @@ def candidate_audio_coverage(
         _normalized_path(item.path) for item in candidate.extra_items
     }))
     incomplete_composites = tuple(sorted(
-        (
-            f"{_normalized_path(mapping.item.path)} "
-            f"(local={mapping.item.length:.1f}s, "
-            f"indexed_program={mapping.track.length:.1f}s)"
-        )
+        detail
         for mapping in candidate.mapping
-        if mapping.track.discogs_indexed_component_count > 1
-        and mapping.track.length > 0
-        and mapping.item.length + _COMPOSITE_DURATION_TOLERANCE_SECONDS
-        < mapping.track.length
+        if (detail := _incomplete_composite_detail(mapping)) is not None
     ))
     return CandidateAudioCoverage(
         admitted_count=len(admitted),

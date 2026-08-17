@@ -781,12 +781,15 @@ missing path, a duplicated path, or an unmatched release track fails closed as
 Discogs flat indexed entries such as `A2.1` / `A2.2` are ambiguous: they may
 describe one physical composite file or separate files. The default Beets
 representation stays in place when it covers the inventory, and Cratedigger
-sums every component duration for that composite. If the default mapping would
-leave admitted audio behind, validation and action each retry once with flat
-indexed entries preserved separately. Nested Discogs index containers retain
-Beets' original coalescing semantics. After apply, the importer records and
-requires equality across admitted, applied, and catalogued audio counts before
-source cleanup or terminal success.
+sums every component duration for that composite. A composite is complete only
+when every indexed component has positive parseable duration evidence and the
+local file is at least that long. Only a proved-incomplete default composite
+authorizes validation and action to retry once with flat indexed entries
+preserved separately; an unrelated extra file does not. Older supported Beets
+releases without the upstream flat-coalescing seam are left unchanged. Nested
+Discogs index containers retain Beets' original coalescing semantics. After
+apply, the importer records and requires equality across admitted, applied,
+and catalogued audio counts before source cleanup or terminal success.
 
 ## Trusted operator Beets commands
 

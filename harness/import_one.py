@@ -1474,11 +1474,7 @@ def _run_import_once(
                         retry_flat = (
                             not preserve_discogs_flat_subtracks
                             and typed_candidate.data_source.casefold() == "discogs"
-                            and bool(
-                                coverage.unmapped_paths
-                                or coverage.reported_extra_paths
-                                or coverage.incomplete_composite_paths
-                            )
+                            and bool(coverage.incomplete_composite_paths)
                         )
                         return RunImportOutcome(
                             2,
