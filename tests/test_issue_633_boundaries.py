@@ -6,6 +6,8 @@ import ast
 import unittest
 from pathlib import Path
 
+from tests._source_pins import pinned_source
+
 
 def _annotation(node: ast.expr | None) -> str | None:
     return ast.unparse(node) if node is not None else None
@@ -97,7 +99,7 @@ class TestProcessAlbumProtocolBoundary(unittest.TestCase):
         self.assertEqual(_annotation(call.returns), _annotation(production.returns))
 
     def test_production_function_has_pyright_conformance_binding(self) -> None:
-        source = Path("lib/download_processing.py").read_text(encoding="utf-8")
+        source = pinned_source(Path("lib/download_processing.py"))
         self.assertIn(
             "_process_completed_album_conformance: ProcessAlbumFn = "
             "process_completed_album",
@@ -105,12 +107,12 @@ class TestProcessAlbumProtocolBoundary(unittest.TestCase):
         )
 
     def test_download_seam_has_no_ellipsis_callable_escape(self) -> None:
-        source = Path("lib/download.py").read_text(encoding="utf-8")
+        source = pinned_source(Path("lib/download.py"))
         self.assertNotIn("Callable[..., CompletionResult]", source)
         self.assertIn("process_album_fn: ProcessAlbumFn | None", source)
 
     def test_test_double_is_protocol_checked_without_broad_splats(self) -> None:
-        fake_source = Path("tests/fakes/download.py").read_text(encoding="utf-8")
+        fake_source = pinned_source(Path("tests/fakes/download.py"))
         self.assertIn(
             "_recorder_conformance: ProcessAlbumFn = RecordingProcessAlbum()",
             fake_source,

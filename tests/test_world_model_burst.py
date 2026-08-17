@@ -7,6 +7,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from tests._source_pins import pinned_source
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "world_model_burst.sh"
 RUN_TESTS_SCRIPT = REPO_ROOT / "scripts" / "run_tests.sh"
@@ -51,7 +53,7 @@ class TestWorldModelBurstScript(unittest.TestCase):
         self.assertIn("root_seed=", result.stdout)
 
     def test_wrapper_delegates_to_dedicated_coordinator(self) -> None:
-        script = SCRIPT.read_text(encoding="utf-8")
+        script = pinned_source(SCRIPT)
 
         self.assertIn("scripts/run_world_model_burst.py", script)
         self.assertNotIn("python3 -m unittest", script)
@@ -115,11 +117,11 @@ class TestWorldModelBurstScript(unittest.TestCase):
         self.assertIn("randomized real-storage lifecycle hammer", result.stdout)
 
     def test_standard_suite_runs_only_the_deterministic_world_budget(self) -> None:
-        script = RUN_TESTS_SCRIPT.read_text(encoding="utf-8")
+        script = pinned_source(RUN_TESTS_SCRIPT)
         coordinator = (
             REPO_ROOT / "scripts" / "run_test_suite.py"
         ).read_text(encoding="utf-8")
-        runner = PYTHON_RUNNER.read_text(encoding="utf-8")
+        runner = pinned_source(PYTHON_RUNNER)
 
         self.assertIn("scripts/run_test_suite.py", script)
         self.assertIn('("python3", "scripts/run_python_tests.py")', coordinator)

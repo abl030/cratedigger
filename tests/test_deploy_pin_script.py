@@ -7,6 +7,7 @@ import time
 import unittest
 from pathlib import Path
 
+from tests._source_pins import pinned_source
 from tests.fakes.deploy_pin import FakeDeployPinCommands
 from tests.structural_audits.deploy_pin import find_shell_contract_violations
 
@@ -38,7 +39,7 @@ class TestDeployPinShellContractAudit(unittest.TestCase):
         )
 
     def test_skill_invokes_entrypoint_instead_of_copying_state_machine(self) -> None:
-        source = SKILL.read_text(encoding="utf-8")
+        source = pinned_source(SKILL)
         self.assertIn("scripts/pin_nixosconfig.sh", source)
         self.assertNotIn("worktree add --detach", source)
         self.assertNotIn("GIT_CONFIG_VALUE_0", source)

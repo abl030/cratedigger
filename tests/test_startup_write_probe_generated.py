@@ -57,6 +57,7 @@ from lib.startup_write_probe import (
     web_required_paths,
     youtube_ingest_required_paths,
 )
+from tests._source_pins import pinned_source
 from tests.finite_domain import finite_generated_domain
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -419,9 +420,7 @@ class TestStartupWriteProbeBrokenPathGenerated(unittest.TestCase):
 
 class TestUnfindableNeverWired(unittest.TestCase):
     def test_run_unfindable_detection_never_imports_the_probe(self) -> None:
-        source = (
-            REPO_ROOT / "scripts" / "run_unfindable_detection.py"
-        ).read_text(encoding="utf-8")
+        source = pinned_source(REPO_ROOT / "scripts" / "run_unfindable_detection.py")
         self.assertNotIn("startup_write_probe", source)
         self.assertNotIn("probe_startup_paths", source)
 

@@ -7,6 +7,8 @@ import importlib
 import unittest
 from pathlib import Path
 
+from tests._source_pins import pinned_source
+
 EXPECTED_VULTURE_SOURCE_ROOTS = (
     "lib",
     "web",
@@ -60,7 +62,7 @@ class TestDispatchImportCoreCallBoundary(unittest.TestCase):
             "lib/dispatch/entry_points.py",
             "lib/download_validation.py",
         ):
-            source = Path(relative_path).read_text(encoding="utf-8")
+            source = pinned_source(Path(relative_path))
             tree = ast.parse(source, filename=relative_path)
             self.assertNotIn("core_kwargs", source, relative_path)
             if relative_path == "lib/download_validation.py":
@@ -80,7 +82,7 @@ class TestDispatchImportCoreCallBoundary(unittest.TestCase):
                 })
 
     def test_production_callable_has_a_pyright_conformance_binding(self) -> None:
-        source = Path("lib/dispatch/__init__.py").read_text(encoding="utf-8")
+        source = pinned_source(Path("lib/dispatch/__init__.py"))
         self.assertIn(
             "_dispatch_core_conformance: DispatchCoreFn = dispatch_import_core",
             source,
@@ -89,7 +91,7 @@ class TestDispatchImportCoreCallBoundary(unittest.TestCase):
 
 class TestDownloadCompletionOwnership(unittest.TestCase):
     def test_processing_is_only_the_completion_orchestrator(self) -> None:
-        source = Path("lib/download_processing.py").read_text(encoding="utf-8")
+        source = pinned_source(Path("lib/download_processing.py"))
         assert_completion_orchestrator_responsibilities(source)
         self.assertIn("from lib import download_validation", source)
 
@@ -103,7 +105,7 @@ class TestDownloadCompletionOwnership(unittest.TestCase):
             self.assertFalse(hasattr(processing, moved_name), moved_name)
 
     def test_validation_functions_have_executable_protocol_bindings(self) -> None:
-        source = Path("lib/download_validation.py").read_text(encoding="utf-8")
+        source = pinned_source(Path("lib/download_validation.py"))
         self.assertIn(
             "_validate_conformance: ValidateFn = _process_beets_validation",
             source,

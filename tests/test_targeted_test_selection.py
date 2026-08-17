@@ -33,6 +33,7 @@ from scripts.targeted_test_selection import (
     assert_selection_complete,
     expand_test_selection,
 )
+from tests._source_pins import pinned_source
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 #: The runner's own --pattern default (scripts/run_python_tests.py), sourced
@@ -360,7 +361,7 @@ class TestTargetedSuiteWiring(unittest.TestCase):
         )
 
     def test_shell_entrypoint_forwards_every_selector_to_targeted_runner(self) -> None:
-        source = (REPO_ROOT / "scripts" / "test.sh").read_text(encoding="utf-8")
+        source = pinned_source(REPO_ROOT / "scripts" / "test.sh")
 
         self.assertIn("scripts/run_targeted_tests.py", source)
         self.assertIn('"$@"', source)
@@ -372,7 +373,7 @@ class TestTargetedSuiteWiring(unittest.TestCase):
         scripts/test.sh's own nix-shell invocation would leave every other
         test green while M2 silently reverts to the old shell-entry-dies-
         under-contention shape."""
-        source = (REPO_ROOT / "scripts" / "test.sh").read_text(encoding="utf-8")
+        source = pinned_source(REPO_ROOT / "scripts" / "test.sh")
 
         self.assertIn(
             "env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 nix-shell", source

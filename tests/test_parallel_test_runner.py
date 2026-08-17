@@ -69,6 +69,7 @@ from scripts.run_test_suite import (
     TEST_RAM_ROOT_EXHAUSTED,
     CheckFailureMarker,
 )
+from tests._source_pins import pinned_source
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNNER = REPO_ROOT / "scripts" / "run_python_tests.py"
@@ -1549,8 +1550,8 @@ class TestHypothesisStatsRecorder(unittest.TestCase):
 
 class TestRunTestsWiring(unittest.TestCase):
     def test_full_suite_uses_parallel_python_runner(self) -> None:
-        shell_source = RUN_TESTS_SH.read_text(encoding="utf-8")
-        coordinator_source = RUN_SUITE.read_text(encoding="utf-8")
+        shell_source = pinned_source(RUN_TESTS_SH)
+        coordinator_source = pinned_source(RUN_SUITE)
         self.assertIn("exec python3 scripts/run_test_suite.py", shell_source)
         self.assertIn('("python3", "scripts/run_python_tests.py")', coordinator_source)
         self.assertNotIn("python3 -m unittest discover", coordinator_source)

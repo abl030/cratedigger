@@ -12,6 +12,8 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
+from tests._source_pins import pinned_source
+
 EXPECTED_PRODUCTION_ROOTS = (
     "lib",
     "web",
@@ -435,7 +437,7 @@ class TestUnusedImportAudit(unittest.TestCase):
             .splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         )
-        script = Path("scripts/find_dead_code.sh").read_text(encoding="utf-8")
+        script = pinned_source(Path("scripts/find_dead_code.sh"))
 
         self.assertEqual(roots, EXPECTED_PRODUCTION_ROOTS)
         self.assertNotIn("tests", roots)
@@ -444,9 +446,9 @@ class TestUnusedImportAudit(unittest.TestCase):
         self.assertIn('vulture "${VULTURE_ARGS[@]}" "${SOURCES[@]}"', script)
 
     def test_full_suite_calls_the_canonical_repo_wide_ruff_gate(self) -> None:
-        suite = Path("scripts/run_tests.sh").read_text(encoding="utf-8")
-        coordinator = Path("scripts/run_test_suite.py").read_text(encoding="utf-8")
-        runner = Path("scripts/run_ruff.sh").read_text(encoding="utf-8")
+        suite = pinned_source(Path("scripts/run_tests.sh"))
+        coordinator = pinned_source(Path("scripts/run_test_suite.py"))
+        runner = pinned_source(Path("scripts/run_ruff.sh"))
 
         self.assertIn("scripts/run_test_suite.py", suite)
         self.assertIn('("bash", "scripts/run_ruff.sh")', coordinator)
@@ -499,7 +501,7 @@ class TestUnusedImportAudit(unittest.TestCase):
         config = tomllib.loads(
             Path("ruff.toml").read_text(encoding="utf-8")
         )
-        shell = Path("nix/shell.nix").read_text(encoding="utf-8")
+        shell = pinned_source(Path("nix/shell.nix"))
 
         self.assertEqual(result.returncode, 0, result.stderr)
         version = tuple(

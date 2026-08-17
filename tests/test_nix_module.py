@@ -34,6 +34,8 @@ import unittest
 from pathlib import Path
 from typing import ClassVar
 
+from tests._source_pins import strip_line_comments
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODULE_NIX = REPO_ROOT / "nix" / "module.nix"
 FLAKE_NIX = REPO_ROOT / "flake.nix"
@@ -47,15 +49,11 @@ MODULE_VM_NIX = REPO_ROOT / "nix" / "tests" / "module-vm.nix"
 def _strip_comment_lines(source: str) -> str:
     """``source`` with every full-line ``#`` comment removed.
 
-    Only whole comment lines go; a trailing comment after code is left alone,
-    since the code on that line is real. Nix has no block-comment form we use
-    here, and ``nix/`` carries no shebang lines — if one ever appears inside an
-    embedded script, note that ``#!`` is stripped along with everything else.
+    Thin alias for the shared reader so this module keeps one local name for
+    the operation; the implementation is shared with every other pinning
+    module (#1186) rather than duplicated here.
     """
-    return "\n".join(
-        line for line in source.splitlines()
-        if not line.lstrip().startswith("#")
-    )
+    return strip_line_comments(source, ("#",))
 
 
 def _nix_source(path: Path) -> str:

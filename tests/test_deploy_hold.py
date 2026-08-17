@@ -65,6 +65,7 @@ from scripts.cratedigger_deploy_hold import (
     verify_held,
 )
 from scripts.pipeline_cli.query import _render_query_table
+from tests._source_pins import pinned_source
 from tests.fakes.deploy_hold import FakeDeployHoldBackend
 
 INVOCATION = "a" * 32
@@ -2008,7 +2009,7 @@ class TestFixedAuthoritySurface(unittest.TestCase):
         helper = REPO_ROOT / "scripts" / "cratedigger_deploy_hold.py"
         skill = REPO_ROOT / ".claude" / "skills" / "deploy" / "SKILL.md"
         helper_source = helper.read_text(encoding="utf-8")
-        skill_source = skill.read_text(encoding="utf-8")
+        skill_source = pinned_source(skill)
 
         self.assertEqual(helper_source.splitlines()[0], "#!/usr/bin/env python3")
         self.assertIn("cratedigger_deploy_hold.py", skill_source)
