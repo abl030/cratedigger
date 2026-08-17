@@ -1783,11 +1783,17 @@ def _verdict_from_basis(basis: QualityComparisonBasis) -> str:
         "spectral_candidate_bound", "spectral_existing_bound",
     ):
         # One decision-grade class against the other encode's known-clean raw
-        # metric. Naming both ranks would be redundant; the per-side value
-        # labels retain which side was spectral-bound.
+        # metric. A tolerance can make adjacent ranks equivalent, so collapse
+        # them to one ``both`` label only when they genuinely match.
         tol = (f" (within {basis.tolerance_kbps}k)"
                if basis.tolerance_kbps is not None else "")
-        core = f"{new_fmt} {new_val} vs {ex_val} — both {basis.new_rank}{tol}"
+        if basis.new_rank == basis.existing_rank:
+            core = f"{new_fmt} {new_val} vs {ex_val} — both {basis.new_rank}{tol}"
+        else:
+            tolerance = (f" — within {basis.tolerance_kbps}k"
+                         if basis.tolerance_kbps is not None else "")
+            core = (f"{new_fmt} {new_val} ({basis.new_rank}) vs {ex_val} "
+                    f"({basis.existing_rank}){tolerance}")
     else:  # metric_tiebreak / rank_within_tolerance
         # Both are "these two bitrates are inside the configured window", so
         # they read identically; ``rank_within_tolerance`` (issue #1145) is
