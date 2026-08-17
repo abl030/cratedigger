@@ -194,6 +194,13 @@ def choose_match_line(
     extra_tracks: int = 0,
 ) -> str:
     """One well-formed ``choose_match`` message, as the harness emits it."""
+    items = [
+        {
+            "path": f"/staged/Artist - Album/{index:02d} Track.flac",
+            "title": f"Track {index}",
+        }
+        for index in range(item_count)
+    ]
     candidate: dict[str, object] = {
         "index": 0,
         "distance": distance,
@@ -205,6 +212,13 @@ def choose_match_line(
         "extra_tracks": [
             {"title": f"Bonus {index}"} for index in range(extra_tracks)
         ],
+        "mapping": [
+            {
+                "item": item,
+                "track": {"title": item["title"]},
+            }
+            for item in items
+        ],
     }
     return msgspec.json.encode({
         "type": "choose_match",
@@ -213,9 +227,7 @@ def choose_match_line(
         "cur_artist": "Artist",
         "cur_album": "Album",
         "item_count": item_count,
-        "items": [
-            {"title": f"Track {index}"} for index in range(item_count)
-        ],
+        "items": items,
         "recommendation": "strong",
         "candidates": [candidate],
     }).decode()

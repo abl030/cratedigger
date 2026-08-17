@@ -153,6 +153,12 @@ def _serialize_track_info(ti: TrackInfo) -> dict[str, object]:
         "track_alt": getattr(ti, "track_alt", None),
         "disctitle": getattr(ti, "disctitle", None),
         "data_source": getattr(ti, "data_source", None) or "",
+        "discogs_indexed_component_count": (
+            beets_compat.discogs_indexed_component_count(ti)
+        ),
+        "discogs_indexed_duration_complete": (
+            beets_compat.discogs_indexed_duration_complete(ti)
+        ),
     }
 
 
@@ -801,6 +807,14 @@ def main() -> None:
         action="store_true",
         help="Use upstream musicbrainz.org instead of local mirror (for newly-seeded releases)",
     )
+    parser.add_argument(
+        "--preserve-discogs-flat-subtracks",
+        action="store_true",
+        help=(
+            "Keep flat Discogs indexed entries such as A2.1/A2.2 as "
+            "separate physical tracks"
+        ),
+    )
     args = parser.parse_args()
 
     # argparse --help exits above with ordinary stdout intact. Every normal
@@ -818,6 +832,10 @@ def _run_protocol(args: argparse.Namespace) -> None:
 
     # Load beets configuration
     config.read()
+
+    beets_compat.configure_discogs_subtracks(
+        preserve_flat=args.preserve_discogs_flat_subtracks,
+    )
 
     _install_release_id_duplicate_lookup()
 

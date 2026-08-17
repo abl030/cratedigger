@@ -772,6 +772,25 @@ The pipeline uses 0.15 as the threshold for auto-staging redownloads and 0.50 as
 - **Artist/album name differences** — proportional to edit distance
 - **Missing tracks** — `extra_tracks > 0` means MB has more tracks than local files
 
+Distance is never permission to discard audio. Before either automatic or
+force import applies a candidate, Cratedigger requires the selected mapping to
+cover the complete action-time audio inventory exactly once. `extra_items`, a
+missing path, a duplicated path, or an unmatched release track fails closed as
+`unmapped_audio`; force changes only the distance threshold.
+
+Discogs flat indexed entries such as `A2.1` / `A2.2` are ambiguous: they may
+describe one physical composite file or separate files. The default Beets
+representation stays in place when it covers the inventory, and Cratedigger
+sums every component duration for that composite. A composite is complete only
+when every indexed component has positive parseable duration evidence and the
+local file is at least that long. Only a proved-incomplete default composite
+authorizes validation and action to retry once with flat indexed entries
+preserved separately; an unrelated extra file does not. Older supported Beets
+releases without the upstream flat-coalescing seam are left unchanged. Nested
+Discogs index containers retain Beets' original coalescing semantics. After
+apply, the importer records and requires equality across admitted, applied,
+and catalogued audio counts before source cleanup or terminal success.
+
 ## Trusted operator Beets commands
 
 These are deployment-owned plain `beet` commands. Run them with the same

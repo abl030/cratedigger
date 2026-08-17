@@ -78,6 +78,14 @@ class HarnessTrackInfo(msgspec.Struct):
     track_alt: str | None = None
     disctitle: str | None = None
     data_source: str = ""
+    # Cratedigger's Discogs compatibility layer sets this only when Beets
+    # coalesces multiple flat indexed entries into one physical-track slot.
+    # It lets the import boundary distinguish complete composite audio from
+    # a file that contains only the first indexed component (#1183).
+    discogs_indexed_component_count: int = 1
+    # False when any indexed component lacks a positive parseable duration.
+    # A coalesced physical file cannot prove complete-program coverage then.
+    discogs_indexed_duration_complete: bool = True
 
 
 class TrackMapping(msgspec.Struct):

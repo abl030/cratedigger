@@ -51,8 +51,10 @@ _bootstrap_import_paths()
 
 from lib import transitions
 from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
+from lib.beets_candidate_coverage import candidate_audio_coverage
 from lib.beets_db import AlbumInfo, BeetsDB, validate_beets_storage_pair
 from lib.config import CratediggerConfig, read_runtime_config
+from lib.import_manifest import audio_relative_paths
 from lib.media_readiness import (
     MediaReadinessError,
     media_facts_for_path,
@@ -78,10 +80,12 @@ from lib.quality import (
     AudioToolDiagnostic,
     AudioToolDiagnosticCategory,
     AudioValidationReport,
+    ChooseMatchMessage,
     CodecFamily,
     ConversionInfo,
     DuplicateRemoveCandidate,
     DuplicateRemoveGuardInfo,
+    HarnessItem,
     ImportResult,
     MeasuredImportDecisionInput,
     PostflightInfo,
@@ -338,6 +342,39 @@ class RunImportOutcome:
     # degenerates the operator-facing message to "Harness returned rc=N"
     # (issue #865).
     failure_reason: str | None = None
+    # Exact candidate-application receipt. A successful production harness
+    # run sets both counts from the same typed choose_match message whose
+    # candidate crossed the apply boundary. Postflight reconciles them with
+    # the surviving Beets item count before source cleanup (#1183).
+    admitted_audio_count: int | None = None
+    applied_audio_count: int | None = None
+    # Internal one-shot control signal: the default Discogs representation
+    # left admitted audio unmapped, so the outer controller may retry once
+    # with flat indexed subtracks preserved. Never emitted to ImportResult.
+    retry_discogs_flat_subtracks: bool = False
+
+
+def _postflight_audio_accounting_error(
+    outcome: RunImportOutcome,
+    catalogued_audio_count: int,
+) -> str | None:
+    """Require one complete receipt from candidate admission to Beets DB."""
+
+    admitted = outcome.admitted_audio_count
+    applied = outcome.applied_audio_count
+    if admitted is None or applied is None:
+        return (
+            "Post-flight audio accounting is missing candidate application "
+            f"receipt: admitted={admitted}, applied={applied}, "
+            f"catalogued={catalogued_audio_count}"
+        )
+    if admitted != applied or applied != catalogued_audio_count:
+        return (
+            "Post-flight audio accounting mismatch: "
+            f"admitted={admitted}, applied={applied}, "
+            f"catalogued={catalogued_audio_count}"
+        )
+    return None
 
 
 def preflight_decision(already_in_beets: bool, path_exists: bool) -> StageResult:
@@ -1233,7 +1270,14 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
 # Beets harness controller (JSON protocol)
 # ---------------------------------------------------------------------------
 
-def run_import(
+def _close_harness_process_streams(proc: subprocess.Popen[str]) -> None:
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+
+
+def _run_import_once(
     path: str,
     mb_release_id: str,
     *,
@@ -1241,6 +1285,7 @@ def run_import(
     beets_python: str | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
+    preserve_discogs_flat_subtracks: bool = False,
 ) -> RunImportOutcome:
     """Drive the beets harness to import one album.
 
@@ -1249,7 +1294,10 @@ def run_import(
     Guarded Beets-owned replacement answers ``remove`` only when Beets
     reports exactly one duplicate whose release identity matches the target.
     """
-    cmd = [HARNESS, "--noincremental", "--search-id", mb_release_id, path]
+    cmd = [HARNESS, "--noincremental"]
+    if preserve_discogs_flat_subtracks:
+        cmd.append("--preserve-discogs-flat-subtracks")
+    cmd.extend(["--search-id", mb_release_id, path])
     print(f"  [HARNESS] {' '.join(cmd)}", file=sys.stderr)
 
     proc = subprocess.Popen(
@@ -1269,6 +1317,8 @@ def run_import(
 
     applied = False
     applied_distance: float | None = None
+    admitted_audio_count: int | None = None
+    applied_audio_count: int | None = None
     beets_owned_replacement = False
     replaced_albums: list[DuplicateRemoveCandidate] = []
     timeout = HARNESS_TIMEOUT
@@ -1280,6 +1330,7 @@ def run_import(
                 print(f"  [TIMEOUT] No output for {timeout}s", file=sys.stderr)
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 proc.wait()
+                _close_harness_process_streams(proc)
                 return RunImportOutcome(
                     2, [], replaced_albums=replaced_albums,
                     applied_distance=applied_distance,
@@ -1327,6 +1378,7 @@ def run_import(
                     )
                     if proc.poll() is None:
                         proc.wait()
+                    _close_harness_process_streams(proc)
                     return RunImportOutcome(
                         DUPLICATE_REMOVE_GUARD_EXIT_CODE,
                         [],
@@ -1367,6 +1419,7 @@ def run_import(
                           file=sys.stderr)
                     if proc.poll() is None:
                         proc.wait()
+                    _close_harness_process_streams(proc)
                     return RunImportOutcome(
                         4, [], replaced_albums=replaced_albums,
                         failure_reason=(
@@ -1376,6 +1429,67 @@ def run_import(
 
                 cand = candidates_raw[matched_idx]
                 assert _as_json_dict(cand)
+                if msg_type == "choose_match":
+                    try:
+                        choose_match = msgspec.convert(
+                            msg,
+                            type=ChooseMatchMessage,
+                        )
+                    except msgspec.ValidationError as exc:
+                        proc.stdin.write(json.dumps({"action": "skip"}) + "\n")
+                        proc.stdin.flush()
+                        if proc.poll() is None:
+                            proc.wait()
+                        _close_harness_process_streams(proc)
+                        return RunImportOutcome(
+                            2,
+                            [],
+                            replaced_albums=replaced_albums,
+                            failure_reason=(
+                                "beets choose_match schema violation before "
+                                f"apply: {exc}"
+                            ),
+                        )
+                    typed_candidate = choose_match.candidates[matched_idx]
+                    admitted_items = list(choose_match.items)
+                    if os.path.isdir(path):
+                        # The canonical action-time filesystem is stronger
+                        # than Beets' task inventory: an extension/parser
+                        # regression must not make a real audio file disappear
+                        # from both ``items`` and the candidate mapping.
+                        admitted_items = [
+                            HarnessItem(path=relative_path)
+                            for relative_path in audio_relative_paths(path)
+                        ]
+                    coverage = candidate_audio_coverage(
+                        admitted_items,
+                        typed_candidate,
+                    )
+                    if not coverage.complete:
+                        proc.stdin.write(json.dumps({"action": "skip"}) + "\n")
+                        proc.stdin.flush()
+                        if proc.poll() is None:
+                            proc.wait()
+                        _close_harness_process_streams(proc)
+                        retry_flat = (
+                            not preserve_discogs_flat_subtracks
+                            and typed_candidate.data_source.casefold() == "discogs"
+                            and bool(coverage.incomplete_composite_paths)
+                        )
+                        return RunImportOutcome(
+                            2,
+                            [],
+                            replaced_albums=replaced_albums,
+                            admitted_audio_count=coverage.admitted_count,
+                            applied_audio_count=coverage.mapped_count,
+                            retry_discogs_flat_subtracks=retry_flat,
+                            failure_reason=(
+                                "candidate mapping would discard admitted "
+                                f"audio: {coverage.detail()}"
+                            ),
+                        )
+                    admitted_audio_count = coverage.admitted_count
+                    applied_audio_count = coverage.mapped_count
                 dist = cand.get("distance", 1.0)
                 assert isinstance(dist, (int, float))
 
@@ -1385,6 +1499,7 @@ def run_import(
                     print(f"  [REJECT] distance={dist:.4f} > {max_distance}", file=sys.stderr)
                     if proc.poll() is None:
                         proc.wait()
+                    _close_harness_process_streams(proc)
                     return RunImportOutcome(
                         2, [], replaced_albums=replaced_albums,
                         applied_distance=float(dist),
@@ -1406,6 +1521,7 @@ def run_import(
     proc_rc = proc.wait() if proc.poll() is None else proc.poll()
 
     stderr_out = proc.stderr.read() if proc.stderr else ""
+    _close_harness_process_streams(proc)
     beets_lines: list[str] = []
     for raw_line in stderr_out.splitlines():
         line = raw_line.strip()
@@ -1432,11 +1548,50 @@ def run_import(
         beets_owned_replacement=beets_owned_replacement,
         replaced_albums=replaced_albums,
         applied_distance=applied_distance,
+        admitted_audio_count=admitted_audio_count,
+        applied_audio_count=applied_audio_count,
         failure_reason=(
             "beets harness ended without applying requested release "
             f"{mb_release_id}"
             if not applied else None
         ),
+    )
+
+
+def run_import(
+    path: str,
+    mb_release_id: str,
+    *,
+    beets_config_dir: str | None = None,
+    beets_python: str | None = None,
+    beets_library_db_path: str | None = None,
+    beets_library_root: str | None = None,
+) -> RunImportOutcome:
+    """Import one exact release with at most one safe Discogs retry."""
+
+    outcome = _run_import_once(
+        path,
+        mb_release_id,
+        beets_config_dir=beets_config_dir,
+        beets_python=beets_python,
+        beets_library_db_path=beets_library_db_path,
+        beets_library_root=beets_library_root,
+    )
+    if not outcome.retry_discogs_flat_subtracks:
+        return outcome
+    print(
+        "  [RETRY] Default Discogs mapping omitted admitted audio; "
+        "preserving flat indexed subtracks",
+        file=sys.stderr,
+    )
+    return _run_import_once(
+        path,
+        mb_release_id,
+        beets_config_dir=beets_config_dir,
+        beets_python=beets_python,
+        beets_library_db_path=beets_library_db_path,
+        beets_library_root=beets_library_root,
+        preserve_discogs_flat_subtracks=True,
     )
 
 
@@ -1957,11 +2112,35 @@ def _run_quality_evidence_authorized_import(
         beets.close()
         _emit_and_exit(r)
 
+    accounting_error = _postflight_audio_accounting_error(
+        import_outcome,
+        pf_info.track_count,
+    )
+    if accounting_error is not None:
+        r.exit_code = 2
+        r.decision = "import_failed"
+        r.error = accounting_error
+        r.postflight = PostflightInfo(
+            beets_id=pf_info.album_id,
+            track_count=pf_info.track_count,
+            admitted_audio_count=import_outcome.admitted_audio_count,
+            applied_audio_count=import_outcome.applied_audio_count,
+            catalogued_audio_count=pf_info.track_count,
+            imported_path=pf_info.album_path,
+            replaced_albums=import_outcome.replaced_albums,
+        )
+        _log(f"[ERROR] {r.error}")
+        beets.close()
+        _emit_and_exit(r)
+
     r.materialized_measurement = _materialized_measurement_from_album_info(
         pf_info, r,
     )
     r.postflight = PostflightInfo(beets_id=pf_info.album_id,
                                   track_count=pf_info.track_count,
+                                  admitted_audio_count=import_outcome.admitted_audio_count,
+                                  applied_audio_count=import_outcome.applied_audio_count,
+                                  catalogued_audio_count=pf_info.track_count,
                                   imported_path=pf_info.album_path,
                                   replaced_albums=import_outcome.replaced_albums)
     album_path = pf_info.album_path
@@ -2876,11 +3055,35 @@ def main():
         beets.close()
         _emit_and_exit(r)
 
+    accounting_error = _postflight_audio_accounting_error(
+        import_outcome,
+        pf_info.track_count,
+    )
+    if accounting_error is not None:
+        r.exit_code = 2
+        r.decision = "import_failed"
+        r.error = accounting_error
+        r.postflight = PostflightInfo(
+            beets_id=pf_info.album_id,
+            track_count=pf_info.track_count,
+            admitted_audio_count=import_outcome.admitted_audio_count,
+            applied_audio_count=import_outcome.applied_audio_count,
+            catalogued_audio_count=pf_info.track_count,
+            imported_path=pf_info.album_path,
+            replaced_albums=import_outcome.replaced_albums,
+        )
+        _log(f"[ERROR] {r.error}")
+        beets.close()
+        _emit_and_exit(r)
+
     r.materialized_measurement = _materialized_measurement_from_album_info(
         pf_info, r,
     )
     r.postflight = PostflightInfo(beets_id=pf_info.album_id,
                                    track_count=pf_info.track_count,
+                                   admitted_audio_count=import_outcome.admitted_audio_count,
+                                   applied_audio_count=import_outcome.applied_audio_count,
+                                   catalogued_audio_count=pf_info.track_count,
                                    imported_path=pf_info.album_path,
                                    replaced_albums=import_outcome.replaced_albums)
     album_path = pf_info.album_path

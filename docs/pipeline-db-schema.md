@@ -603,7 +603,7 @@ Payloads that genuinely omit those envelope keys, such as
 `beets_validate` always names a scenario — exactly one of three (issue #888):
 
 - a `choose_match` was decoded and decided: `strong_match` / `high_distance` /
-  `extra_tracks` / `mbid_not_found`;
+  `extra_tracks` / `unmapped_audio` / `mbid_not_found`;
 - no error was recorded and none was ever offered: `no_choose_match`;
 - an error was recorded first — the harness would not start, the strict wire
   decode refused a `choose_match`, the read loop raised, or the 120s timeout
@@ -1005,7 +1005,7 @@ admission** (`rejection_scenario_is_delete_eligible`) is a separate, narrower
 explicit allowlist — exactly `extra_tracks`, `high_distance`,
 `mbid_not_found`, `no_choose_match` may reach the reducer
 (`lib.wrong_match_cleanup_service.cleanup_wrong_match`) at all. World
-failures with a reviewable folder (`untracked_audio`,
+failures with a reviewable folder (`unmapped_audio`, `untracked_audio`,
 `request_missing_mbid`, `request_missing_request_id`) are kept, banned, and
 shown, but the reducer never even looks at them — nor does any unknown or
 novel scenario string, nor `None`. Kept ⟺ its contributing peers are

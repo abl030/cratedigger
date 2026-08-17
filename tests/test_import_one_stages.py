@@ -135,6 +135,57 @@ class TestHarnessFailureError(unittest.TestCase):
                     _harness_failure_error(outcome, rc), expected)
 
 
+class TestPostflightAudioAccounting(unittest.TestCase):
+    def test_exact_admitted_applied_and_catalogued_counts_pass(self) -> None:
+        from harness.import_one import (
+            RunImportOutcome,
+            _postflight_audio_accounting_error,
+        )
+
+        outcome = RunImportOutcome(
+            0,
+            [],
+            admitted_audio_count=10,
+            applied_audio_count=10,
+        )
+
+        self.assertIsNone(_postflight_audio_accounting_error(outcome, 10))
+
+    def test_catalogue_drop_fails_with_all_three_counts(self) -> None:
+        from harness.import_one import (
+            RunImportOutcome,
+            _postflight_audio_accounting_error,
+        )
+
+        outcome = RunImportOutcome(
+            0,
+            [],
+            admitted_audio_count=10,
+            applied_audio_count=10,
+        )
+
+        error = _postflight_audio_accounting_error(outcome, 9)
+
+        self.assertEqual(
+            error,
+            "Post-flight audio accounting mismatch: admitted=10, "
+            "applied=10, catalogued=9",
+        )
+
+    def test_missing_apply_receipt_fails_closed(self) -> None:
+        from harness.import_one import (
+            RunImportOutcome,
+            _postflight_audio_accounting_error,
+        )
+
+        error = _postflight_audio_accounting_error(
+            RunImportOutcome(0, []),
+            9,
+        )
+
+        self.assertIn("missing candidate application receipt", error or "")
+
+
 class TestTerminalCrashAcknowledgement(unittest.TestCase):
     def test_invalid_partial_result_emits_fresh_terminal_crash(self):
         """Live #1022 result validation failure must still acknowledge once."""
@@ -1527,7 +1578,9 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                  patch("harness.import_one.BeetsDB", return_value=beets), \
                  patch("harness.import_one.run_import",
                        return_value=import_one.RunImportOutcome(
-                           0, [], applied_distance=0.3359)) as mock_run_import, \
+                           0, [], applied_distance=0.3359,
+                           admitted_audio_count=3,
+                           applied_audio_count=3)) as mock_run_import, \
                  patch("harness.import_one.fix_library_modes"), \
                  patch("harness.import_one._get_folder_bitrates",
                        side_effect=measurement_error), \
@@ -1568,6 +1621,68 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             )
             self.assertEqual(result["postflight"]["beets_id"], 77)
             self.assertEqual(result["apply_beets_distance"], 0.3359)
+
+    def test_postflight_count_drop_fails_before_source_cleanup(self):
+        from harness import import_one
+        from lib.beets_db import AlbumInfo, ReleaseLocation
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            imported = os.path.join(tmpdir, "library", "album")
+            os.makedirs(album)
+            os.makedirs(imported)
+            with open(os.path.join(album, "01 - Track.mp3"), "wb") as handle:
+                handle.write(b"not real audio")
+            action_path = os.path.join(tmpdir, "action.json")
+            self._write_payload(self._payload_for_album(album), action_path)
+
+            beets = FakeBeetsDB()
+            beets.set_album_exists("mbid-123", False)
+            beets.set_album_ids_for_release("mbid-123", [77])
+            beets.set_album_info("mbid-123", AlbumInfo(
+                album_id=77,
+                track_count=9,
+                min_bitrate_kbps=245,
+                is_cbr=False,
+                album_path=imported,
+                avg_bitrate_kbps=252,
+                median_bitrate_kbps=250,
+                format="MP3",
+            ))
+            beets.queue_locate_results([
+                ReleaseLocation(kind="absent", album_id=None, selectors=()),
+            ])
+
+            stdout = io.StringIO()
+            argv = [
+                "import_one.py",
+                album,
+                "mbid-123",
+                "--quality-evidence-action-file",
+                action_path,
+            ]
+            with patch.object(sys, "argv", argv), \
+                 patch("sys.stdout", stdout), \
+                 patch("harness.import_one.BeetsDB", return_value=beets), \
+                 patch("harness.import_one.run_import",
+                       return_value=import_one.RunImportOutcome(
+                           0, [], admitted_audio_count=10,
+                           applied_audio_count=10)), \
+                 self.assertRaises(SystemExit) as cm:
+                import_one.main()
+
+            self.assertEqual(cm.exception.code, 2)
+            self.assertTrue(os.path.isdir(album))
+            sentinel = stdout.getvalue().strip().splitlines()[-1]
+            result = json.loads(sentinel.removeprefix("__IMPORT_RESULT__"))
+            self.assertEqual(result["decision"], "import_failed")
+            self.assertEqual(
+                result["error"],
+                "Post-flight audio accounting mismatch: admitted=10, "
+                "applied=10, catalogued=9",
+            )
+            self.assertEqual(result["postflight"]["admitted_audio_count"], 10)
+            self.assertEqual(result["postflight"]["catalogued_audio_count"], 9)
 
     def test_evidence_backed_import_emits_candidate_proof(self):
         """The authorized import must carry the candidate row's
@@ -1627,7 +1742,9 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                  patch("sys.stdout", stdout), \
                  patch("harness.import_one.BeetsDB", return_value=beets), \
                  patch("harness.import_one.run_import",
-                       return_value=import_one.RunImportOutcome(0, [])), \
+                       return_value=import_one.RunImportOutcome(
+                           0, [], admitted_audio_count=3,
+                           applied_audio_count=3)), \
                  patch("harness.import_one.fix_library_modes"), \
                  self.assertRaises(SystemExit) as cm:
                 import_one.main()
@@ -1794,7 +1911,9 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                  patch("harness.import_one.BeetsDB", return_value=beets), \
                  patch("harness.import_one.run_import",
                        return_value=import_one.RunImportOutcome(
-                           0, [], replaced_albums=replaced)), \
+                           0, [], replaced_albums=replaced,
+                           admitted_audio_count=3,
+                           applied_audio_count=3)), \
                  patch("harness.import_one.fix_library_modes"), \
                  self.assertRaises(SystemExit) as cm:
                 import_one.main()
