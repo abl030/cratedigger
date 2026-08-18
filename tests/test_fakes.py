@@ -8640,8 +8640,63 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
 
         self.assertEqual(conflicting, {99})
 
+    def test_get_conflicting_transfer_request_ids_scopes_to_current_attempt(self):
+        """#1178 PR2 review F2: an abandoned earlier attempt's accepted
+        row must not block; the current attempt's row still does."""
+        from tests.helpers import make_request_row
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=99, status="downloading"))
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=99, username="OLD", filename="old.flac"),
+        ])
+        db.confirm_transfer_enqueue("OLD", "old.flac")
+        old_id = next(
+            fid for fid, r in db._transfer_ledger.items()
+            if r.username == "OLD")
+        db._transfer_ledger[old_id].enqueued_at = (
+            datetime.now(UTC) - timedelta(days=30))
+
+        db.request(99)["active_download_state"] = {
+            "filetype": "flac", "enqueued_at": datetime.now(UTC).isoformat(),
+            "files": [],
+        }
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=99, username="NEW", filename="new.flac"),
+        ])
+        db.confirm_transfer_enqueue("NEW", "new.flac")
+
+        self.assertEqual(
+            db.get_conflicting_transfer_request_ids(
+                [("OLD", "old.flac")], exclude_request_id=1),
+            set(),
+            "abandoned attempt must not block",
+        )
+        self.assertEqual(
+            db.get_conflicting_transfer_request_ids(
+                [("NEW", "new.flac")], exclude_request_id=1),
+            {99},
+            "current attempt must still block",
+        )
+
+    def test_get_conflicting_transfer_request_ids_null_state_fails_closed(self):
+        """No active_download_state at all (never seeded) -- every
+        accepted row for the 'downloading' owner still blocks."""
+        db = FakePipelineDB()
+        self._seed_accepted_row(
+            db, request_id=99, status="downloading",
+            username="p0", filename="a.flac")
+
+        conflicting = db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=1)
+
+        self.assertEqual(conflicting, {99})
+
     def test_get_conflicting_transfer_request_ids_status_filter(self):
-        for status in ("wanted", "imported", "replaced"):
+        # 'processing' included specifically to kill the
+        # status-filter-widened mutant (#1178 PR2 review F1); every other
+        # status here already happened to leave it unreachable.
+        for status in ("wanted", "imported", "replaced", "processing"):
             with self.subTest(status=status):
                 db = FakePipelineDB()
                 self._seed_accepted_row(

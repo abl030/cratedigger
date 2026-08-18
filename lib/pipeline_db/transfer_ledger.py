@@ -212,7 +212,8 @@ class _TransferLedgerMixin(_PipelineDBBase):
         Returns every OTHER request id that already holds ACCEPTED
         ownership (``accepted_at IS NOT NULL``) of any ``(username,
         filename)`` pair in ``keys``, while that owner's request is
-        CURRENTLY ``downloading`` -- never any other status.
+        CURRENTLY ``downloading`` on its CURRENT attempt -- never any
+        other status, and never a stale abandoned attempt.
 
         The status filter is deliberately the single value
         ``'downloading'``, never ``'processing'``
@@ -224,8 +225,25 @@ class _TransferLedgerMixin(_PipelineDBBase):
         is left to the requeue self-heal (#898), not to this guard. A
         ``'replaced'`` owner (Replace-lineage attempt sharing, e.g.
         requests 8781/8846) or a ``'wanted'``/``'imported'`` owner
-        (already moved on) must NEVER block -- only an owner still
-        actively ``downloading`` the SAME keys is a live conflict.
+        (already moved on) must NEVER block.
+
+        **Attempt scoping (#1178 PR2 review F2).** A ``'downloading'``
+        request can carry MANY historical accepted ledger rows: live-DB
+        measurement found 80.3% of accepted rows belong to a
+        non-current attempt, up to 76 distinct accepted attempt
+        fingerprints for one request. Without scoping, an owner actively
+        downloading a fresh peer's files would falsely block a sibling
+        on a queue key from that SAME owner's OWN abandoned attempt from
+        30 days earlier. The join is therefore additionally scoped to
+        rows enqueued at or after the owner's CURRENT attempt boundary --
+        ``active_download_state ->> 'enqueued_at'``, the same witness
+        the poll path already uses as ``not_before=state.enqueued_at``
+        (``lib/download.py``) to scope reconciliation to one attempt.
+        ``COALESCE(..., '-infinity')`` makes a NULL/missing
+        ``active_download_state`` fail CLOSED: every accepted row for
+        that 'downloading' owner counts as in-scope (blocks) rather than
+        none of them (would silently stop protecting a request whose
+        state we can't currently read).
         """
         if not keys:
             return set()
@@ -249,6 +267,10 @@ class _TransferLedgerMixin(_PipelineDBBase):
             WHERE l.accepted_at IS NOT NULL
               AND r.status = 'downloading'
               AND l.request_id != %s
+              AND l.enqueued_at >= COALESCE(
+                  (r.active_download_state ->> 'enqueued_at')::timestamptz,
+                  '-infinity'
+              )
             """,
             (usernames, filenames, exclude_request_id),
         )

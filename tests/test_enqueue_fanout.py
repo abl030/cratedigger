@@ -37,6 +37,7 @@ from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.download_ownership import DownloadOwnershipWriter
 from lib.enqueue import (
+    ClaimedQueueKeysRegistry,
     _WorkerPipelineDBSource,
     get_album_tracks,
     prepare_find_download_context,
@@ -133,12 +134,18 @@ def _ctx_with_download_ownership(
     cfg: CratediggerConfig,
     db: FakePipelineDB,
     slskd: FakeSlskdAPI | None = None,
+    registry: ClaimedQueueKeysRegistry | None = None,
 ) -> CratediggerContext:
     ctx = _make_ctx(cfg, user_upload_speed={"u00": 10_000, "u01": 9_999})
     ctx.slskd = slskd if slskd is not None else FakeSlskdAPI()
     ctx.pipeline_db_source = FakePipelineDBSource(db)
     ctx.current_album_cache[1] = _album_with_request(1)
     ctx.download_ownership = DownloadOwnershipWriter(db_factory=lambda: db)
+    # A fresh registry per call by default (one cycle == one registry);
+    # cross-request tests pass a SHARED instance to model two candidates
+    # evaluated within the same cycle (issue #1178 PR2 review F7).
+    ctx.claimed_queue_keys_registry = (
+        registry if registry is not None else ClaimedQueueKeysRegistry())
     return ctx
 
 
@@ -2613,12 +2620,10 @@ class TestCrossRequestEnqueueGuard(unittest.TestCase):
     seam (matching, the guard, claim, the write-ahead ledger) against one
     shared FakePipelineDB and one shared DownloadOwnershipWriter,
     mirroring #1178's real-world composition (17 shared keys from peer
-    TheBun, 240ms apart) with a smaller representative key set."""
-
-    def setUp(self):
-        from lib.enqueue import _reset_claimed_queue_keys_for_tests
-        self.addCleanup(_reset_claimed_queue_keys_for_tests)
-        _reset_claimed_queue_keys_for_tests()
+    TheBun, 240ms apart) with a smaller representative key set. Each test
+    that models "two candidates in one cycle" constructs one
+    ``ClaimedQueueKeysRegistry`` and passes it to both contexts -- a
+    cycle-scoped object, not a module global (issue #1178 PR2 review F7)."""
 
     @staticmethod
     def _shared_candidate(file_dir: str, filenames: list[str]):
@@ -2665,8 +2670,11 @@ class TestCrossRequestEnqueueGuard(unittest.TestCase):
         file_dir = "Music\\TheBun\\Album"
         filenames = [f"{file_dir}\\0{i}.flac" for i in (1, 2, 3)]
         slskd, match = self._shared_candidate(file_dir, filenames)
-        ctx1 = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
-        ctx2 = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        registry = ClaimedQueueKeysRegistry()
+        ctx1 = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=slskd, registry=registry)
+        ctx2 = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=slskd, registry=registry)
         ctx2.current_album_cache[2] = _album_with_request(2)
         results = {"TheBun": {"flac": [file_dir]}}
         tracks1 = _make_tracks()
@@ -2702,7 +2710,14 @@ class TestCrossRequestEnqueueGuard(unittest.TestCase):
         """Same pin, through the try_multi_enqueue call site (issue #1178
         PR2 wires the guard at BOTH seams -- try_enqueue and
         try_multi_enqueue each call _claim_initial_download_ownership
-        independently)."""
+        independently). Unlike try_enqueue's per-user wave loop,
+        try_multi_enqueue takes the FIRST match per disc
+        (``next(_iter_wave_matches(...))``) rather than iterating
+        candidates -- a guard hit here skips the WHOLE multi-disc
+        candidate (the request keeps searching next cycle), not just one
+        peer. This is accepted, documented behaviour (review F4), not a
+        bug: multi-disc candidates are already scarce and per-peer
+        fallback would multiply the disc-matching cost combinatorially."""
         cfg = _make_cfg(browse_top_k=20)
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, status="wanted"))
@@ -2710,8 +2725,11 @@ class TestCrossRequestEnqueueGuard(unittest.TestCase):
         file_dir = "Music\\TheBun\\Album"
         filenames = [f"{file_dir}\\0{i}.flac" for i in (1, 2)]
         slskd, match = self._shared_candidate(file_dir, filenames)
-        ctx1 = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
-        ctx2 = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        registry = ClaimedQueueKeysRegistry()
+        ctx1 = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=slskd, registry=registry)
+        ctx2 = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=slskd, registry=registry)
         ctx2.current_album_cache[2] = _album_with_request(2)
         results = {"TheBun": {"flac": [file_dir]}}
         release = MagicMock()
@@ -2741,20 +2759,122 @@ class TestCrossRequestEnqueueGuard(unittest.TestCase):
             log_ctx.output,
         )
 
+    def test_conflicted_peer_falls_through_to_next_peer(self):
+        """#1178 PR2 review F4: a guard hit means "try the next peer", not
+        "give up". Two eligible peers match in the same wave (u00 ranked
+        first by upload speed); u00's candidate conflicts with a key
+        another request already holds this cycle, so try_enqueue must
+        fall through and claim u01's (unconflicted) candidate instead of
+        reporting matched=False."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        registry = ClaimedQueueKeysRegistry()
+        # A DIFFERENT request (99) already holds u00's key this cycle --
+        # no DB row needed, the same-cycle registry never consults one.
+        registry.register_or_conflicting_owners(
+            [("u00", "Music\\u00\\Album\\01.flac")], request_id=99)
+
+        users = ["u00", "u01"]
+        results = _make_results(users)
+
+        def fake_match(tracks, allowed_filetype, file_dirs, username, ctx):
+            file_dir = f"Music\\{username}\\Album"
+            return MatchResult(
+                matched=True,
+                directory={
+                    "directory": file_dir,
+                    "files": [{"filename": "01.flac", "size": 123}],
+                },
+                file_dir=file_dir,
+                candidates=[],
+            )
+
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "u01",
+            "directories": [{
+                "directory": "Music\\u01\\Album",
+                "files": [
+                    {"filename": "Music\\u01\\Album\\01.flac", "id": "tid-1"},
+                ],
+            }],
+        }])
+        ctx = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=slskd, registry=registry)
+
+        with self.assertLogs("cratedigger", level="INFO") as log_ctx, \
+             patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("time.sleep"):
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=fake_match,
+            )
+
+        self.assertTrue(attempt.matched)
+        self.assertFalse(attempt.enqueue_failed)
+        downloads = attempt.downloads or []
+        self.assertTrue(downloads)
+        self.assertEqual({d.username for d in downloads}, {"u01"})
+        self.assertEqual(db.request(1)["status"], "downloading")
+        self.assertTrue(
+            any("#1178" in line and "request(s) [99]" in line
+                for line in log_ctx.output),
+            log_ctx.output,
+        )
+
+    def test_claim_refused_releases_registry_for_sibling(self):
+        """#1178 PR2 review F5: request 1's row has drifted to
+        'unsearchable' since it was picked up as a candidate (e.g. an
+        operator search-stop landed concurrently), so its guard-cleared
+        claim (a wanted -> downloading CAS) is refused. Those
+        already-registered keys must be released, or request 2's
+        IDENTICAL candidate -- evaluated a moment later in the SAME cycle
+        -- would be wrongly blocked by a claim that was never actually
+        granted."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="unsearchable"))
+        db.seed_request(make_request_row(id=2, status="wanted"))
+        file_dir = "Music\\TheBun\\Album"
+        filenames = [f"{file_dir}\\01.flac"]
+        slskd, match = self._shared_candidate(file_dir, filenames)
+        registry = ClaimedQueueKeysRegistry()
+        ctx1 = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=slskd, registry=registry)
+        ctx2 = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=slskd, registry=registry)
+        ctx2.current_album_cache[2] = _album_with_request(2)
+        results = {"TheBun": {"flac": [file_dir]}}
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("time.sleep"):
+            attempt1 = try_enqueue(
+                _make_tracks(), results, "flac", ctx1,
+                match_fn=_const_match(match),
+            )
+            attempt2 = try_enqueue(
+                _make_tracks(album_id=2), results, "flac", ctx2,
+                match_fn=_const_match(match),
+            )
+
+        self.assertFalse(attempt1.matched)
+        self.assertTrue(attempt1.enqueue_failed)
+        self.assertEqual(db.request(1)["status"], "unsearchable")
+        self.assertTrue(attempt2.matched)
+        self.assertFalse(attempt2.enqueue_failed)
+        rows = db.record_transfer_enqueue_calls
+        self.assertEqual({r.request_id for r in rows}, {2})
+
 
 class TestCrossRequestEnqueueGuardCrossCycle(unittest.TestCase):
     """Cross-cycle pin: no same-cycle in-process claim exists (a fresh
-    registry, simulating a new process), but the transfer ledger already
-    holds an accepted row for these queue keys from a PRIOR cycle. The
-    owner's CURRENT status decides: 'downloading' blocks (the owner is
-    still actively working the same files); 'replaced' (Replace-lineage
-    attempt sharing, e.g. requests 8781/8846), 'wanted', and 'imported'
-    (already moved on) must never block."""
-
-    def setUp(self):
-        from lib.enqueue import _reset_claimed_queue_keys_for_tests
-        self.addCleanup(_reset_claimed_queue_keys_for_tests)
-        _reset_claimed_queue_keys_for_tests()
+    ``ClaimedQueueKeysRegistry``, simulating a new process/cycle -- each
+    ``_run`` call builds its own via ``_ctx_with_download_ownership``'s
+    default), but the transfer ledger already holds an accepted row for
+    these queue keys from a PRIOR cycle. The owner's CURRENT status
+    decides: 'downloading' blocks (the owner is still actively working
+    the same files); 'replaced' (Replace-lineage attempt sharing, e.g.
+    requests 8781/8846), 'wanted', and 'imported' (already moved on) must
+    never block."""
 
     def _run(self, owner_status: str) -> bool:
         cfg = _make_cfg(browse_top_k=20)
@@ -2798,53 +2918,70 @@ class TestCrossRequestEnqueueGuardCrossCycle(unittest.TestCase):
     def test_replaced_wanted_imported_owners_do_not_block(self):
         for status in ("replaced", "wanted", "imported"):
             with self.subTest(status=status):
-                from lib.enqueue import _reset_claimed_queue_keys_for_tests
-                _reset_claimed_queue_keys_for_tests()
                 self.assertTrue(self._run(status))
 
 
 class TestClaimedQueueKeysRegistry(unittest.TestCase):
     """Unit-level pins for the same-cycle registry
-    (``lib.enqueue._register_or_conflicting_owners``): same-request
-    re-claims never self-block (poll-loop / multi-wave retries), and the
-    check-then-register step is atomic under concurrent same-key claims
-    (issue #1178 PR2 m3: TOCTOU)."""
-
-    def setUp(self):
-        from lib.enqueue import _reset_claimed_queue_keys_for_tests
-        self.addCleanup(_reset_claimed_queue_keys_for_tests)
-        _reset_claimed_queue_keys_for_tests()
+    (``lib.enqueue.ClaimedQueueKeysRegistry``): same-request re-claims
+    never self-block (poll-loop / multi-wave retries), the check-then-
+    register step is atomic under concurrent same-key claims (issue #1178
+    PR2 m3: TOCTOU), and ``release`` only removes keys still owned by the
+    releasing request (review F5)."""
 
     def test_same_request_reclaiming_its_own_keys_never_conflicts(self):
-        from lib.enqueue import _register_or_conflicting_owners
-
+        registry = ClaimedQueueKeysRegistry()
         keys = [("p0", "a.flac"), ("p0", "b.flac")]
-        first = _register_or_conflicting_owners(keys, request_id=1)
-        second = _register_or_conflicting_owners(keys, request_id=1)
+
+        first = registry.register_or_conflicting_owners(keys, request_id=1)
+        second = registry.register_or_conflicting_owners(keys, request_id=1)
 
         self.assertEqual(first, set())
         self.assertEqual(second, set())
 
     def test_different_request_conflicts_on_shared_key(self):
-        from lib.enqueue import _register_or_conflicting_owners
-
-        _register_or_conflicting_owners(
+        registry = ClaimedQueueKeysRegistry()
+        registry.register_or_conflicting_owners(
             [("p0", "a.flac")], request_id=1)
 
-        conflicting = _register_or_conflicting_owners(
+        conflicting = registry.register_or_conflicting_owners(
             [("p0", "a.flac"), ("p0", "b.flac")], request_id=2)
 
         self.assertEqual(conflicting, {1})
         # A conflicting attempt must not partially register its OTHER,
         # unconflicted keys either -- the whole key set is atomic.
-        from lib.enqueue import _claimed_queue_keys
-        self.assertNotIn(("p0", "b.flac"), _claimed_queue_keys)
+        self.assertNotIn(("p0", "b.flac"), registry._keys)
+
+    def test_release_removes_only_keys_still_owned_by_the_releaser(self):
+        """#1178 PR2 review F5: release is a no-op for a key this request
+        never actually won (e.g. it conflicted at registration time and
+        another request legitimately owns it), and removes exactly the
+        keys it DID win."""
+        registry = ClaimedQueueKeysRegistry()
+        registry.register_or_conflicting_owners(
+            [("p0", "a.flac"), ("p0", "b.flac")], request_id=1)
+        # Request 2 never actually won "a.flac" (it's owned by 1) -- its
+        # release call must not touch request 1's real claim.
+        registry.release([("p0", "a.flac")], request_id=2)
+        self.assertEqual(
+            registry.register_or_conflicting_owners(
+                [("p0", "a.flac")], request_id=3),
+            {1},
+        )
+        # Request 1 releasing its OWN keys actually frees them.
+        registry.release([("p0", "a.flac"), ("p0", "b.flac")], request_id=1)
+        self.assertEqual(
+            registry.register_or_conflicting_owners(
+                [("p0", "a.flac"), ("p0", "b.flac")], request_id=3),
+            set(),
+        )
 
     def test_concurrent_same_key_claims_never_both_win(self):
         """TOCTOU proof: N threads race to claim the SAME key set under
-        DIFFERENT request ids. Exactly one must win (empty conflict set);
-        every other thread must observe a conflict naming the winner.
-        A check-then-register split (rather than one atomic
+        DIFFERENT request ids, against ONE shared registry (modelling one
+        cycle's ThreadPoolExecutor). Exactly one must win (empty conflict
+        set); every other thread must observe a conflict naming the
+        winner. A check-then-register split (rather than one atomic
         lock-held check-and-register) would let more than one thread
         observe "unclaimed" and both win. ``sys.setswitchinterval`` is
         lowered for the race window only: CPython's GIL rarely preempts
@@ -2854,16 +2991,16 @@ class TestClaimedQueueKeysRegistry(unittest.TestCase):
         was real -- a shorter interval makes a real gap reproducible
         without weakening the assertion the correct (single-lock) code
         must satisfy regardless of scheduling."""
-        from lib.enqueue import _register_or_conflicting_owners
-
+        registry = ClaimedQueueKeysRegistry()
         keys = [("p0", "race.flac")]
         n = 64
-        results: list[set[int]] = [set()] * n
+        results: list[set[int]] = [set() for _ in range(n)]
         barrier = threading.Barrier(n)
 
         def worker(i: int) -> None:
             barrier.wait()
-            results[i] = _register_or_conflicting_owners(keys, request_id=i)
+            results[i] = registry.register_or_conflicting_owners(
+                keys, request_id=i)
 
         threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
         old_interval = sys.getswitchinterval()

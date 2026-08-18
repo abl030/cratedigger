@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from cratedigger import TrackRecord
     from lib.config import CratediggerConfig
+    from lib.enqueue import ClaimedQueueKeysRegistry
 
 
 @runtime_checkable
@@ -67,6 +68,13 @@ class CratediggerContext:
     slskd: Any  # lib.slskd_client.SlskdClient — Any so tests can wire FakeSlskdAPI
     pipeline_db_source: PipelineDBSource
     download_ownership: Any = None
+    # One instance is constructed per cycle (cratedigger.py's _module_ctx)
+    # and threaded into every find-download worker context by reference,
+    # the same pattern as download_ownership above (issue #1178 PR2 review
+    # F7 -- was a module-global dict). Real-typed via the TYPE_CHECKING
+    # import above (lib.enqueue never imports lib.context at runtime, only
+    # under its own TYPE_CHECKING guard, so this carries no import cycle).
+    claimed_queue_keys_registry: ClaimedQueueKeysRegistry | None = None
 
     # --- Runtime caches (reset each cycle) ---
     search_cache: dict[int, Any] = field(
