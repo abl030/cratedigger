@@ -131,6 +131,14 @@ class TestTargetedTestSelection(unittest.TestCase):
         for unmapped ``tests/`` modules) never catches the resulting
         under-selection either. A diff touching only this file previously
         selected zero of its real behavior coverage.
+
+        The six-module set is qualified by fault injection (a ``raise
+        RuntimeError`` planted as the first statement of
+        ``dispatch_import_from_db``, run against each module — see the
+        registry's own comment). ``tests.test_force_import_gates`` is
+        deliberately absent: an #1196 review round found it kills nothing
+        (its only references to this module are docstring lines saying
+        coverage MOVED OUT after the U4 importer-never-measures refactor).
         """
         selected = expand_test_selection(
             (),
@@ -141,11 +149,14 @@ class TestTargetedTestSelection(unittest.TestCase):
         self.assertTrue(
             {
                 "tests.test_dispatch_from_db",
-                "tests.test_force_import_gates",
                 "tests.test_force_import_merge_redirect",
                 "tests.test_integration_slices",
+                "tests.test_import_manifest",
+                "tests.test_import_queue",
+                "tests.test_issue_573_boundaries",
             }.issubset(selected)
         )
+        self.assertNotIn("tests.test_force_import_gates", selected)
 
     def test_unknown_explicit_selector_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown test selector"):

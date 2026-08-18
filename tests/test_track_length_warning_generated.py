@@ -39,9 +39,20 @@ legitimately coalesced Discogs composite file can overshoot its declared
 summed program by any margin — so ``_track_length_warning`` skips any
 pair whose track carries ``discogs_indexed_component_count > 1``
 regardless of its deviation. A pair's role only counts toward "over" when
-its own component count is <= 1 (1, or a missing key on a historical
-row — modelled here by the Struct default, since ``HarnessTrackInfo``
-always defaults the field to 1).
+its own component count is <= 1. This module's strategy plants only the
+explicit values 1-4 (``HarnessTrackInfo(discogs_indexed_component_count=…)``
+via the real Struct, then ``msgspec.to_builtins``) — a TRULY MISSING key is
+unreachable from here: msgspec always encodes the field's declared default,
+so there is no world this strategy (or any encoding of the real Struct) can
+produce without the key present. The missing-key historical-row world is
+instead pinned deterministically at the route adapter
+(``tests/web/test_routes_pipeline.py::test_track_length_warning_still_fires_when_component_count_key_is_absent``),
+which builds the documented ``ValidationResult.to_json()`` wire shape by
+hand with the key omitted — confirmed load-bearing there and NOT here: an
+inverted default (missing key also skips) survives this entire generated
+module untouched (verified live) but is killed by that one deterministic
+pin (#1196 review round; see that test's own docstring for the measured
+live-corpus stake).
 
 Invariant: given ``outcome == "success"``, the rendered warning is present
 iff at least one planted ``"over"`` pair with ``component_count <= 1``

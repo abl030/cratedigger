@@ -597,7 +597,24 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         keeps ``candidates``/``mapping`` as raw untyped dicts for exactly
         this reason). The composite skip's default-to-1 read must not
         silently swallow the original #1178 warning on every historical
-        row."""
+        row.
+
+        This is the load-bearing pin, not a courtesy control: the
+        generated property in
+        ``tests/test_track_length_warning_generated.py`` can never
+        construct a truly-missing key (msgspec always encodes the real
+        ``HarnessTrackInfo`` Struct's declared default), so an inverted
+        default — a missing key ALSO skipping, silently disabling the
+        whole warning — passes that entire module untouched and is caught
+        ONLY here (#1196 review round; verified live: planting the
+        inversion left all 7 generated-module tests green). Measured
+        stake on the live corpus (doc2, every ``download_log.
+        validation_result`` candidate mapping pair, all outcomes, all
+        candidates, 2026-08-18): 310,463 of 310,685 mapping pairs (28,939
+        of 28,959 rows) carry NO ``discogs_indexed_component_count`` key
+        at all, versus 222 pairs (20 rows) carrying it explicitly as 1
+        and zero carrying a value above 1 — 99.93% of the historical
+        population depends on the missing-key default this pin protects."""
         self.db.seed_request(make_request_row(id=910, status="imported"))
         log_id = self.db.log_download(
             910, outcome="success",
