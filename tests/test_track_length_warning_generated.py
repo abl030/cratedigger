@@ -3,7 +3,7 @@
 
 Deterministic adapter-level pins (the exact #1178 world, the pregap skip,
 the under-bound world, the non-success outcome, the non-target-sibling
-world, and the no-candidates world) live in
+world, the no-candidates world, and the #1196 composite exemption) live in
 ``tests/web/test_routes_pipeline.py``, driven through the FULL outermost
 adapter (the real ``/api/pipeline/log`` route). This module patrols the
 derivation's world space by calling ``classify_log_entry`` directly — the
@@ -32,10 +32,22 @@ generates a list of candidates with exactly one ``is_target=True`` at a
 randomized position; the checker's expectation is read from that target
 candidate's own planted pairs ONLY, never from any sibling's.
 
+**Third round (issue #1196 item 3): each planted pair now also carries a
+COMPONENT-COUNT dimension.** #1183's composite acceptance
+(``lib/beets_candidate_coverage.py``) is deliberately unbounded above — a
+legitimately coalesced Discogs composite file can overshoot its declared
+summed program by any margin — so ``_track_length_warning`` skips any
+pair whose track carries ``discogs_indexed_component_count > 1``
+regardless of its deviation. A pair's role only counts toward "over" when
+its own component count is <= 1 (1, or a missing key on a historical
+row — modelled here by the Struct default, since ``HarnessTrackInfo``
+always defaults the field to 1).
+
 Invariant: given ``outcome == "success"``, the rendered warning is present
-iff at least one planted ``"over"`` pair exists among the SELECTED
-(``is_target=True``) candidate's own mapping — a non-target sibling
-candidate's pairs, however extreme, never count.
+iff at least one planted ``"over"`` pair with ``component_count <= 1``
+exists among the SELECTED (``is_target=True``) candidate's own mapping —
+a non-target sibling candidate's pairs, however extreme, never count, and
+neither does a composite pair's overshoot, however extreme.
 """
 
 from __future__ import annotations
@@ -66,21 +78,27 @@ ROLE_UNKNOWN = "unknown"
 
 _BOUND = TRACK_LENGTH_WARNING_BOUND_SECONDS
 
-#: One planted pair: (role, track_length, item_length).
-_PlantedPair = tuple[str, float, float]
+#: One planted pair: (role, track_length, item_length, component_count).
+_PlantedPair = tuple[str, float, float, int]
 #: One planted candidate: (is_target, its own planted pairs).
 _PlantedCandidate = tuple[bool, list[_PlantedPair]]
 
 
 @st.composite
 def _planted_pair(draw: st.DrawFn) -> _PlantedPair:
-    """One ``(role, track_length, item_length)`` triple.
+    """One ``(role, track_length, item_length, component_count)`` tuple.
 
     ``"unknown"`` plants one side at 0 (no declared/measured length) and
     the OTHER side at a deliberately huge value — a broken missing-length
     skip would otherwise see a massive deviation and warn.
+
+    ``component_count`` is drawn independently of role/deviation: 1 is
+    "not a composite" (the harness's own default), 2-4 are composite
+    values that must suppress an "over" role regardless of how extreme
+    the planted deviation is.
     """
     role = draw(st.sampled_from([ROLE_UNDER, ROLE_OVER, ROLE_UNKNOWN]))
+    component_count = draw(st.integers(min_value=1, max_value=4))
     if role == ROLE_UNKNOWN:
         huge = draw(st.floats(
             min_value=100.0, max_value=1000.0,
@@ -89,7 +107,7 @@ def _planted_pair(draw: st.DrawFn) -> _PlantedPair:
         track_first = draw(st.booleans())
         track_length = 0.0 if track_first else huge
         item_length = huge if track_first else 0.0
-        return role, track_length, item_length
+        return role, track_length, item_length, component_count
 
     base = draw(st.floats(
         min_value=5.0, max_value=300.0,
@@ -110,8 +128,8 @@ def _planted_pair(draw: st.DrawFn) -> _PlantedPair:
     # deviation mutant).
     item_longer = draw(st.booleans())
     if item_longer:
-        return role, base, base + deviation
-    return role, base + deviation, base
+        return role, base, base + deviation, component_count
+    return role, base + deviation, base, component_count
 
 
 @st.composite
@@ -147,9 +165,12 @@ def _candidate_summary_from_pairs(
         TrackMapping(
             item=HarnessItem(path=f"{mbid}-track-{index}.flac", length=item_length),
             track=HarnessTrackInfo(
-                title=f"{mbid} Track {index}", length=track_length),
+                title=f"{mbid} Track {index}", length=track_length,
+                discogs_indexed_component_count=component_count,
+            ),
         )
-        for index, (_role, track_length, item_length) in enumerate(pairs)
+        for index, (_role, track_length, item_length, component_count)
+        in enumerate(pairs)
     ]
     return CandidateSummary(
         mbid=mbid, distance=0.05, is_target=is_target, mapping=mapping,
@@ -196,8 +217,15 @@ def assert_warning_matches_planted_roles(
     pass a sibling's roles in here, so this function has no notion of
     ``is_target`` itself; the candidate-list world's job is choosing which
     pairs count as ``planted`` before calling this.
+
+    A pair only counts toward "over" when its own ``component_count`` is
+    <= 1 — issue #1196 item 3's composite exemption. A composite pair's
+    deviation, however extreme, never flips ``expected``.
     """
-    expected = any(role == ROLE_OVER for role, _, _ in planted)
+    expected = any(
+        role == ROLE_OVER and component_count <= 1
+        for role, _, _, component_count in planted
+    )
     if expected and warning is None:
         raise AssertionError(
             "a planted 'over' pair exists but no warning was rendered"
@@ -214,28 +242,28 @@ class TestTrackLengthWarningGenerated(unittest.TestCase):
     @example(world=([(True, [])], []))
     @example(
         world=(
-            [(True, [(ROLE_OVER, 15.0, 237.633167)])],
-            [(ROLE_OVER, 15.0, 237.633167)],
+            [(True, [(ROLE_OVER, 15.0, 237.633167, 1)])],
+            [(ROLE_OVER, 15.0, 237.633167, 1)],
         ),
     )  # #1178 shape, single candidate
     @example(
         world=(
-            [(True, [(ROLE_UNKNOWN, 0.0, 500.0)])],
-            [(ROLE_UNKNOWN, 0.0, 500.0)],
+            [(True, [(ROLE_UNKNOWN, 0.0, 500.0, 1)])],
+            [(ROLE_UNKNOWN, 0.0, 500.0, 1)],
         ),
     )
     @example(
         world=(
-            [(True, [(ROLE_UNKNOWN, 500.0, 0.0)])],
-            [(ROLE_UNKNOWN, 500.0, 0.0)],
+            [(True, [(ROLE_UNKNOWN, 500.0, 0.0, 1)])],
+            [(ROLE_UNKNOWN, 500.0, 0.0, 1)],
         ),
     )
     @example(
         world=(
             [(True, [
-                (ROLE_UNDER, 100.0, 105.0), (ROLE_OVER, 100.0, 200.0),
+                (ROLE_UNDER, 100.0, 105.0, 1), (ROLE_OVER, 100.0, 200.0, 1),
             ])],
-            [(ROLE_UNDER, 100.0, 105.0), (ROLE_OVER, 100.0, 200.0)],
+            [(ROLE_UNDER, 100.0, 105.0, 1), (ROLE_OVER, 100.0, 200.0, 1)],
         ),
     )
     # F9: a deviation of EXACTLY the bound (60.0) is not a mismatch — the
@@ -245,8 +273,12 @@ class TestTrackLengthWarningGenerated(unittest.TestCase):
     # ``_planted_pair``), so only a pinned example reaches this world.
     @example(
         world=(
-            [(True, [(ROLE_UNDER, 100.0, 100.0 + TRACK_LENGTH_WARNING_BOUND_SECONDS)])],
-            [(ROLE_UNDER, 100.0, 100.0 + TRACK_LENGTH_WARNING_BOUND_SECONDS)],
+            [(True, [
+                (ROLE_UNDER, 100.0,
+                 100.0 + TRACK_LENGTH_WARNING_BOUND_SECONDS, 1),
+            ])],
+            [(ROLE_UNDER, 100.0,
+              100.0 + TRACK_LENGTH_WARNING_BOUND_SECONDS, 1)],
         ),
     )
     # F1: the target candidate is CLEAN (no over pair); a non-target
@@ -254,10 +286,10 @@ class TestTrackLengthWarningGenerated(unittest.TestCase):
     @example(
         world=(
             [
-                (False, [(ROLE_OVER, 15.0, 237.633167)]),
-                (True, [(ROLE_UNDER, 100.0, 105.0)]),
+                (False, [(ROLE_OVER, 15.0, 237.633167, 1)]),
+                (True, [(ROLE_UNDER, 100.0, 105.0, 1)]),
             ],
-            [(ROLE_UNDER, 100.0, 105.0)],
+            [(ROLE_UNDER, 100.0, 105.0, 1)],
         ),
     )
     # F1: same, sibling AFTER the target — position must not matter.
@@ -265,9 +297,40 @@ class TestTrackLengthWarningGenerated(unittest.TestCase):
         world=(
             [
                 (True, []),
-                (False, [(ROLE_OVER, 500.0, 15.0)]),
+                (False, [(ROLE_OVER, 500.0, 15.0, 1)]),
             ],
             [],
+        ),
+    )
+    # #1196 item 3: a genuinely coalesced composite pair overshooting its
+    # declared summed program by a huge margin, on the target candidate
+    # itself. Must NOT warn despite the extreme raw deviation.
+    @example(
+        world=(
+            [(True, [(ROLE_OVER, 100.0, 700.0, 3)])],
+            [(ROLE_OVER, 100.0, 700.0, 3)],
+        ),
+    )
+    # #1196 item 3: a composite over-pair does not mask an INDEPENDENT
+    # genuine (non-composite) over pair in the same target mapping.
+    @example(
+        world=(
+            [(True, [
+                (ROLE_OVER, 100.0, 700.0, 3),
+                (ROLE_OVER, 50.0, 300.0, 1),
+            ])],
+            [
+                (ROLE_OVER, 100.0, 700.0, 3),
+                (ROLE_OVER, 50.0, 300.0, 1),
+            ],
+        ),
+    )
+    # #1196 item 3: the smallest composite value (2) is still exempt —
+    # the gate is "> 1", not some higher threshold.
+    @example(
+        world=(
+            [(True, [(ROLE_OVER, 50.0, 300.0, 2)])],
+            [(ROLE_OVER, 50.0, 300.0, 2)],
         ),
     )
     def test_warning_matches_target_candidates_own_planted_roles(
@@ -290,7 +353,7 @@ class TestCheckerTripsOnViolations(unittest.TestCase):
             "a planted 'over' pair exists but no warning was rendered",
         ):
             assert_warning_matches_planted_roles(
-                [(ROLE_OVER, 15.0, 237.6)], None,
+                [(ROLE_OVER, 15.0, 237.6, 1)], None,
             )
 
     def test_clause_2_false_positive_trips(self) -> None:
@@ -299,11 +362,25 @@ class TestCheckerTripsOnViolations(unittest.TestCase):
             "no planted 'over' pair exists but a warning was rendered",
         ):
             assert_warning_matches_planted_roles(
-                [(ROLE_UNDER, 100.0, 105.0)], "fabricated warning",
+                [(ROLE_UNDER, 100.0, 105.0, 1)], "fabricated warning",
+            )
+
+    def test_clause_2_composite_over_pair_does_not_count_as_over(self) -> None:
+        """#1196 item 3's composite exemption folds into clause 2: a
+        composite pair (``component_count > 1``) whose raw deviation looks
+        massively 'over' must still compute ``expected=False`` — feeding a
+        fabricated positive warning must trip clause 2, not pass silently
+        as if the composite pair counted."""
+        with self.assertRaisesRegex(
+            AssertionError,
+            "no planted 'over' pair exists but a warning was rendered",
+        ):
+            assert_warning_matches_planted_roles(
+                [(ROLE_OVER, 100.0, 700.0, 3)], "fabricated warning",
             )
 
     def test_a_classified_world_passes(self) -> None:
-        planted = [(ROLE_OVER, 15.0, 237.633167)]
+        planted = [(ROLE_OVER, 15.0, 237.633167, 1)]
         entry = _entry_for_planted_pairs(planted)
         classified = classify_log_entry(entry)
         assert_warning_matches_planted_roles(
@@ -318,7 +395,7 @@ class TestCheckerTripsOnViolations(unittest.TestCase):
         classify clean, and the checker (fed the target's true empty
         pairs) must not raise."""
         candidates: list[_PlantedCandidate] = [
-            (False, [(ROLE_OVER, 15.0, 237.633167)]),
+            (False, [(ROLE_OVER, 15.0, 237.633167, 1)]),
             (True, []),
         ]
         entry = _entry_for_candidate_world(candidates)
@@ -326,6 +403,19 @@ class TestCheckerTripsOnViolations(unittest.TestCase):
         self.assertIsNone(classified.track_length_warning)
         assert_warning_matches_planted_roles(
             [], classified.track_length_warning,
+        )
+
+    def test_a_composite_over_pair_does_not_trip_the_checker(self) -> None:
+        """#1196 item 3: a genuinely coalesced composite pair overshooting
+        its declared program by well over the bound must render no
+        warning through the REAL production adapter, and the checker (fed
+        the planted composite pair) must not raise."""
+        planted: list[_PlantedPair] = [(ROLE_OVER, 100.0, 700.0, 3)]
+        entry = _entry_for_planted_pairs(planted)
+        classified = classify_log_entry(entry)
+        self.assertIsNone(classified.track_length_warning)
+        assert_warning_matches_planted_roles(
+            planted, classified.track_length_warning,
         )
 
 

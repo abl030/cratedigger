@@ -525,6 +525,117 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         item = next(row for row in data["log"] if row["id"] == log_id)
         self.assertIsNone(item["track_length_warning"])
 
+    def test_track_length_warning_skips_a_coalesced_composite_overshoot(
+        self,
+    ) -> None:
+        """Issue #1196 item 3: #1183's composite acceptance is deliberately
+        unbounded above (``item.length >= track.length``, no cap), so a
+        legitimately coalesced Discogs composite file overshooting its
+        declared summed program by well over the bound must never render
+        the warning."""
+        self.db.seed_request(make_request_row(id=908, status="imported"))
+        log_id = self.db.log_download(
+            908, outcome="success",
+            validation_result=_validation_result_blob(mappings=[
+                TrackMapping(
+                    item=HarnessItem(path="01.flac", length=700.0),
+                    track=HarnessTrackInfo(
+                        title="Composite", length=100.0,
+                        discogs_indexed_component_count=3,
+                    ),
+                ),
+            ]),
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertIsNone(item["track_length_warning"])
+
+    def test_track_length_warning_still_fires_with_component_count_one(
+        self,
+    ) -> None:
+        """Must-still-work control for the #1196 composite skip: a pair
+        explicitly carrying ``discogs_indexed_component_count=1`` is not a
+        composite and must still warn exactly as before."""
+        self.db.seed_request(make_request_row(id=909, status="imported"))
+        log_id = self.db.log_download(
+            909, outcome="success",
+            validation_result=_validation_result_blob(mappings=[
+                TrackMapping(
+                    item=HarnessItem(
+                        path="00 - Hidden Track.flac", length=237.6),
+                    track=HarnessTrackInfo(
+                        title="Lost Weekend", length=15.0,
+                        discogs_indexed_component_count=1,
+                    ),
+                ),
+            ]),
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertEqual(
+            item["track_length_warning"],
+            "Track length contradicts the matched release: "
+            "'00 - Hidden Track.flac' is 237.6s where the release "
+            "declares 15.0s for 'Lost Weekend'",
+        )
+
+    def test_track_length_warning_still_fires_when_component_count_key_is_absent(
+        self,
+    ) -> None:
+        """Historical rows predate ``discogs_indexed_component_count``
+        entirely — it cannot be produced by encoding today's
+        ``HarnessTrackInfo`` (whose default always emits it as 1), so this
+        pin builds the documented ``ValidationResult.to_json()`` wire shape
+        directly with the key omitted, modelling the pre-#1183 format
+        (``lib/validation_envelope.py``'s own ``ValidationResultEnvelope``
+        keeps ``candidates``/``mapping`` as raw untyped dicts for exactly
+        this reason). The composite skip's default-to-1 read must not
+        silently swallow the original #1178 warning on every historical
+        row."""
+        self.db.seed_request(make_request_row(id=910, status="imported"))
+        log_id = self.db.log_download(
+            910, outcome="success",
+            validation_result={
+                "valid": True, "scenario": "strong_match", "distance": 0.05,
+                "mbid_found": True,
+                "target_mbid": "rel-track-length-warning",
+                "candidates": [{
+                    "album_id": "rel-track-length-warning",
+                    "distance": 0.05,
+                    "is_target": True,
+                    "mapping": [{
+                        "item": {
+                            "path": "00 - Hidden Track.flac",
+                            "length": 237.6,
+                        },
+                        "track": {
+                            "title": "Lost Weekend",
+                            "length": 15.0,
+                            # discogs_indexed_component_count deliberately
+                            # absent — pre-#1183 wire shape.
+                        },
+                    }],
+                }],
+            },
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertEqual(
+            item["track_length_warning"],
+            "Track length contradicts the matched release: "
+            "'00 - Hidden Track.flac' is 237.6s where the release "
+            "declares 15.0s for 'Lost Weekend'",
+        )
+
     def test_have_analysis_error_copy_respects_operator_stop(self):
         classified = classify_log_entry(LogEntry(
             outcome="have_analysis_error",
