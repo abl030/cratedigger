@@ -353,8 +353,12 @@ class ClassifiedEntry(msgspec.Struct):
     # ``validation_result`` JSONB when it exceeds
     # ``TRACK_LENGTH_WARNING_BOUND_SECONDS``. Purely a surfacing fact —
     # nothing about the pipeline changed to produce it, and nothing acts
-    # on it. ``None`` on every rejected/force/manual row and on any
-    # imported row whose mapping never exceeds the bound.
+    # on it. ``None`` on every rejected/force/manual row, on any imported
+    # row whose mapping never exceeds the bound, and (#1196 item 3) on any
+    # pair whose track is a coalesced Discogs composite
+    # (``discogs_indexed_component_count > 1``, #1183) — that acceptance
+    # is deliberately unbounded above, so an overshoot there is not a
+    # mismatch.
     track_length_warning: str | None = None
 
 
@@ -1513,6 +1517,13 @@ def _track_length_warning(entry: LogEntry) -> str | None:
     local file against MB track 17's declared 15.0s at beets distance
     0.1441 — legitimate by beets' own 30s track-length distance clamp,
     invisible anywhere else in the pipeline.
+
+    Issue #1196 item 3: a pair whose track carries
+    ``discogs_indexed_component_count > 1`` (a coalesced Discogs
+    composite, #1183) is skipped regardless of its deviation — that
+    acceptance is deliberately unbounded above, so a legitimate composite
+    overshooting its declared summed program is not a mismatch. A missing
+    key (every historical row predating the field) means 1.
     """
     if entry.outcome != "success":
         return None
@@ -1537,6 +1548,17 @@ def _track_length_warning(entry: LogEntry) -> str | None:
             item = pair.get("item")
             track = pair.get("track")
             if not is_str_object_dict(item) or not is_str_object_dict(track):
+                continue
+            # #1196 item 3: #1183's composite acceptance
+            # (lib/beets_candidate_coverage.py) is deliberately unbounded
+            # above — a coalesced Discogs composite file legitimately
+            # overshoots its declared summed program by any margin. A
+            # missing key (every row predating the field) means 1, i.e.
+            # not a composite, matching the harness's own
+            # ``HarnessTrackInfo.discogs_indexed_component_count`` default.
+            component_count = _as_int(
+                track.get("discogs_indexed_component_count"))
+            if component_count is not None and component_count > 1:
                 continue
             item_length = _as_float(item.get("length"))
             track_length = _as_float(track.get("length"))

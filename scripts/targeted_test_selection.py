@@ -301,6 +301,71 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_slskd_searches",
         "tests.test_search_exec",
     ),
+    # lib/dispatch/entry_points.py lives under lib/ so
+    # _direct_test_candidates fires, but it only ever probes
+    # tests.test_entry_points (derived from the basename, not the full
+    # path) — which does not exist. Because the file is under lib/, not
+    # tests/, the fail-closed check at the bottom of
+    # _changed_path_neighbours (which only fires for an unmapped tests/
+    # module) never catches the resulting under-selection either, so a
+    # diff touching only this file silently selected zero of its real
+    # behavior coverage (issue #1196 item 4, noticed during PR1 review for
+    # #1178 but moot there after a redesign).
+    #
+    # Every listed module below was qualified by fault injection, not grep
+    # alone: a ``raise RuntimeError`` planted as the first executable
+    # statement of ``dispatch_import_from_db`` was run against each one.
+    # ``tests.test_force_import_gates`` was the false positive that started
+    # this correction (#1196 review round) — its only references to this
+    # module are docstring lines saying its dispatch-via-legacy-branch
+    # coverage MOVED OUT after the U4 importer-never-measures refactor
+    # (2026-05-15-002); the planted mutant survives its full 29-test run
+    # untouched, so it is NOT listed here.
+    #
+    # Killed by the planted mutant (real dynamic-execution coverage):
+    # tests.test_dispatch_from_db is entry_points.py's own dedicated test
+    # module (imports it directly as ``dispatch_entry_points_module``);
+    # tests.test_force_import_merge_redirect and tests.test_import_manifest
+    # import ``dispatch_import_from_db`` from ``lib.dispatch``'s re-export
+    # and call it directly (test_import_manifest at 5 call sites);
+    # tests.test_integration_slices and tests.test_import_queue exercise it
+    # through a real dispatch/executor path — test_import_queue's
+    # ``TestImporterWorker`` end-to-end tests
+    # (test_corrupt_force_action_bans_and_deletes_wrong_match_source,
+    # test_force_action_manifest_drift_requeues_before_terminal_audit,
+    # test_force_import_extra_audio_keeps_wm_and_operator_status_end_to_end,
+    # ...) drive a real worker/executor loop against the real function; the
+    # file's many ``patch("lib.dispatch.dispatch_import_from_db", ...)``
+    # targets belong to OTHER, unit-level test classes in the same file
+    # that bypass it deliberately.
+    #
+    # tests.test_issue_573_boundaries is a genuine consumer — it parses
+    # this file's own AST and pins the exact keyword-argument shape of its
+    # call to ``dispatch_import_core`` — but it is a STATIC structural
+    # audit that never executes ``dispatch_import_from_db``, so the planted
+    # runtime mutant does NOT kill it (confirmed: exit 0, all 9 tests pass
+    # with the mutant live). Kept here anyway because it is still real,
+    # valuable coverage of a different regression class at this exact call
+    # site (a dropped/positional-ised kwarg), not because it substitutes
+    # for the dynamic-execution coverage above.
+    #
+    # Verified-but-expensive consumers deliberately excluded from this list
+    # for selection cost (each independently confirmed to kill the same
+    # planted mutant, so the exclusion is a cost decision, not a coverage
+    # gap): tests.test_pipeline_db (real-PostgreSQL, 563 tests),
+    # tests.test_spectral_attempt_audit_generated, tests.test_merge_rekey_generated
+    # (indirectly, via tests.test_force_import_merge_redirect.force_dispatch),
+    # and tests.world_model.state_machine (indirectly, via
+    # tests/world_model/support.py's LifecycleWorld.force_import_request,
+    # real-PostgreSQL + real Beets, ~33s).
+    "lib/dispatch/entry_points.py": (
+        "tests.test_dispatch_from_db",
+        "tests.test_force_import_merge_redirect",
+        "tests.test_integration_slices",
+        "tests.test_import_manifest",
+        "tests.test_import_queue",
+        "tests.test_issue_573_boundaries",
+    ),
 }
 
 #: Shared tests/ modules with NO real consuming test today — an admitted,
