@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from lib import transitions
@@ -47,6 +47,12 @@ class DownloadOwnershipDB(transitions.TransitionsDB, Protocol):
     def confirm_transfer_enqueue(
         self, username: str, filename: str,
     ) -> int: ...
+
+    def get_conflicting_transfer_request_ids(
+        self,
+        keys: Sequence[tuple[str, str]],
+        exclude_request_id: int,
+    ) -> set[int]: ...
 
     def close(self) -> None: ...
 
@@ -207,5 +213,27 @@ class DownloadOwnershipWriter:
                 db.confirm_transfer_enqueue(username, filename)
                 for filename in filenames
             )
+        finally:
+            self._close_db(db)
+
+    def get_conflicting_transfer_request_ids(
+        self,
+        keys: Sequence[tuple[str, str]],
+        exclude_request_id: int,
+    ) -> set[int]:
+        """Cross-cycle read for the #1178 cross-request enqueue guard,
+        using a fresh DB handle -- same worker-safety rationale as every
+        other method here: find_download workers cannot reach the owner
+        thread's cached ``pipeline_db_source`` connection
+        (``lib.enqueue._WorkerPipelineDBSource`` raises on access), so
+        this read goes through the same per-operation handle the claim
+        writes already use.
+        """
+        if not keys:
+            return set()
+        db = self._open_db()
+        try:
+            return db.get_conflicting_transfer_request_ids(
+                keys, exclude_request_id)
         finally:
             self._close_db(db)

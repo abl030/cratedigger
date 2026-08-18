@@ -16548,6 +16548,124 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.assertEqual(self.db.prune_transfer_ledger(boundary), 0)
         self.assertEqual(len(self._ledger_rows(rid)), 1)
 
+    def _seed_accepted_row(
+        self, *, status: str, username: str, filename: str,
+    ) -> int:
+        rid = self._seed_request(status)
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username=username, filename=filename),
+        ])
+        self.db.confirm_transfer_enqueue(username, filename)
+        return rid
+
+    def test_get_conflicting_transfer_request_ids_downloading_owner_conflicts(self):
+        """#1178 PR2 cross-cycle guard: an accepted row owned by a request
+        CURRENTLY downloading the same key is a live conflict."""
+        owner = self._seed_accepted_row(
+            status="downloading", username="TheBun", filename="01.flac")
+        candidate = self._seed_request("wanted")
+
+        conflicting = self.db.get_conflicting_transfer_request_ids(
+            [("TheBun", "01.flac")], exclude_request_id=candidate)
+
+        self.assertEqual(conflicting, {owner})
+
+    def test_get_conflicting_transfer_request_ids_status_filter(self):
+        """Replace-lineage attempt sharing (8781/8846) and an owner that
+        already moved on must NEVER block -- only 'downloading' does. The
+        filter is deliberately the single value 'downloading', never
+        'processing' (CLAUDE.md critical invariant 10)."""
+        for status in ("replaced", "wanted", "imported"):
+            with self.subTest(status=status):
+                owner = self._seed_accepted_row(
+                    status=status, username=f"peer-{status}",
+                    filename=f"{status}.flac")
+                candidate = self._seed_request("wanted")
+
+                conflicting = self.db.get_conflicting_transfer_request_ids(
+                    [(f"peer-{status}", f"{status}.flac")],
+                    exclude_request_id=candidate)
+
+                self.assertEqual(conflicting, set(), (status, owner))
+
+    def test_get_conflicting_transfer_request_ids_excludes_self(self):
+        rid = self._seed_accepted_row(
+            status="downloading", username="p0", filename="a.flac")
+
+        conflicting = self.db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=rid)
+
+        self.assertEqual(conflicting, set())
+
+    def test_get_conflicting_transfer_request_ids_ignores_pending_intent(self):
+        owner = self._seed_request("downloading")
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=owner, username="p0", filename="a.flac"),
+        ])  # never confirmed -- accepted_at stays NULL
+        candidate = self._seed_request("wanted")
+
+        conflicting = self.db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=candidate)
+
+        self.assertEqual(conflicting, set())
+
+    def test_get_conflicting_transfer_request_ids_ignores_unrelated_keys(self):
+        self._seed_accepted_row(
+            status="downloading", username="p0", filename="a.flac")
+        candidate = self._seed_request("wanted")
+
+        conflicting = self.db.get_conflicting_transfer_request_ids(
+            [("p0", "b.flac")], exclude_request_id=candidate)
+
+        self.assertEqual(conflicting, set())
+
+    def test_get_conflicting_transfer_request_ids_empty_keys_is_a_noop(self):
+        candidate = self._seed_request("wanted")
+
+        self.assertEqual(
+            self.db.get_conflicting_transfer_request_ids(
+                [], exclude_request_id=candidate),
+            set(),
+        )
+
+    def test_get_conflicting_transfer_request_ids_matches_fake(self):
+        """The fake must mirror the real join's semantics exactly
+        (test-fidelity.md Rule A pattern applied to a read method)."""
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        cases = [
+            ("owner-downloading", "downloading"),
+            ("owner-wanted", "wanted"),
+            ("owner-imported", "imported"),
+            ("owner-replaced", "replaced"),
+        ]
+        candidate = self._seed_request("wanted")
+        fake.seed_request({
+            "id": candidate, "status": "wanted",
+            "artist_name": "Artist", "album_title": "Album", "year": None,
+        })
+        keys: list[tuple[str, str]] = []
+        for username, status in cases:
+            rid = self._seed_request(status)
+            fake.seed_request({
+                "id": rid, "status": status,
+                "artist_name": "Artist", "album_title": "Album", "year": None,
+            })
+            row = TransferLedgerRow(
+                request_id=rid, username=username, filename="a.flac")
+            for db in (self.db, fake):
+                db.record_transfer_enqueue([row])
+                db.confirm_transfer_enqueue(username, "a.flac")
+            keys.append((username, "a.flac"))
+
+        self.assertEqual(
+            self.db.get_conflicting_transfer_request_ids(
+                keys, exclude_request_id=candidate),
+            fake.get_conflicting_transfer_request_ids(
+                keys, exclude_request_id=candidate),
+        )
+
 @requires_postgres
 class TestReadProjectionParity(unittest.TestCase):
     """#481 item 2 — fake<->production READ-projection parity gate.

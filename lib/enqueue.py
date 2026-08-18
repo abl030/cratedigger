@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
@@ -500,6 +501,120 @@ def _state_json_for_entry(
         enqueued_at=enqueued_at,
         last_progress_at=enqueued_at,
     ).to_json()
+
+
+# --- Cross-request enqueue guard (issue #1178) --------------------------
+#
+# Two concurrent requests for different pressings of the same album can
+# both browse to the SAME peer directory and both accept the SAME
+# (username, filename) queue keys: nothing anywhere previously asked "is
+# this queue key already held by another request" before claiming
+# ownership. The first import's materialize/unlink then consumes the
+# second request's world (event_path_gone_from_disk), which re-downloads
+# the whole album from scratch.
+#
+# Cross-cycle layer FIRST: lib.download_ownership.DownloadOwnershipWriter's
+# get_conflicting_transfer_request_ids reads the transfer ledger for a
+# PRIOR cycle's accepted ownership whose owner is still 'downloading'. A
+# read-only check with no side effect, so a conflict here reports without
+# ever touching the same-cycle registry below.
+#
+# Same-cycle layer SECOND (and last): cratedigger.py's find-download
+# ThreadPoolExecutor runs every album concurrently within ONE process per
+# cycle, so a process-local registry -- checked and updated atomically
+# under one lock -- catches a same-cycle race before either side has
+# written anything durable. Registration happens ONLY once the cross-cycle
+# check has already cleared, so an attempt the cross-cycle layer vetoes
+# never "poisons" the registry for its OTHER, otherwise-free keys -- that
+# poisoning is a real bug the generated property in
+# tests/test_cross_request_enqueue_guard_generated.py found empirically
+# when registration ran first (a same-cycle sibling later legitimately
+# wanting one of those keys was wrongly blocked by a claim that was never
+# actually granted). One cycle is one process (systemd oneshot); process
+# exit is the reset, so this carries no TTL/cleanup machinery.
+
+_claimed_queue_keys_lock = threading.Lock()
+_claimed_queue_keys: dict[tuple[str, str], int] = {}
+
+
+def _reset_claimed_queue_keys_for_tests() -> None:
+    """Test-only: clear the process-local same-cycle claim registry.
+
+    Production never calls this -- one cycle is one process, so process
+    exit is the natural reset. The test suite shares one long-lived
+    interpreter across every test, so isolated cases reset explicitly.
+    """
+    with _claimed_queue_keys_lock:
+        _claimed_queue_keys.clear()
+
+
+def _register_or_conflicting_owners(
+    keys: Sequence[tuple[str, str]],
+    request_id: int,
+) -> set[int]:
+    """Atomically claim ``keys`` in the process-local same-cycle registry
+    for ``request_id``, or report the OTHER request id(s) already holding
+    any of them.
+
+    The whole key set is checked THEN registered under one lock
+    acquisition, so two threads racing the SAME keys can never both
+    observe "unclaimed" -- there is no TOCTOU window between the check
+    and the registration (issue #1178 PR2). Keys already owned by
+    ``request_id`` itself are never a conflict: multi-wave retries and
+    repeated candidates for the SAME request within one cycle must not
+    self-block.
+    """
+    with _claimed_queue_keys_lock:
+        conflicting = {
+            _claimed_queue_keys[key]
+            for key in keys
+            if key in _claimed_queue_keys
+            and _claimed_queue_keys[key] != request_id
+        }
+        if conflicting:
+            return conflicting
+        for key in keys:
+            _claimed_queue_keys[key] = request_id
+        return set()
+
+
+def _cross_request_conflict_ids(
+    files: list[DownloadFile],
+    request_id: int | None,
+    ctx: CratediggerContext,
+) -> set[int]:
+    """Return the OTHER request id(s) already holding any of ``files``'s
+    ``(username, filename)`` queue keys -- cross-cycle via the transfer
+    ledger, then (only when that is clear) same-cycle via the
+    process-local registry (issue #1178 PR2).
+
+    Called BEFORE ``_claim_initial_download_ownership`` at every
+    ``try_enqueue`` / ``try_multi_enqueue`` candidate. A non-empty result
+    means: do not claim, do not enqueue -- the caller skips this candidate
+    and continues searching, exactly like the peer-cooldown/denylist skip
+    (never a failure outcome; the request stays on normal cadence).
+
+    ``request_id is None`` (no pipeline-DB-backed request) or an empty
+    ``files`` list never conflicts -- there is nothing to protect. When
+    ``ctx.download_ownership`` is not wired (the same "untracked" fallback
+    ``_claim_initial_download_ownership`` already recognises), only the
+    same-cycle registry layer runs -- there is no worker-safe DB handle to
+    consult for the cross-cycle layer. The cross-cycle check runs FIRST
+    and has no side effect, so this ordering never registers a key in the
+    process-local registry for an attempt the cross-cycle layer is about
+    to veto anyway -- see the module comment above for why that ordering
+    matters.
+    """
+    if request_id is None or not files:
+        return set()
+    keys = [(f.username, f.filename) for f in files]
+    writer = getattr(ctx, "download_ownership", None)
+    if writer is not None:
+        cross_cycle_conflict = writer.get_conflicting_transfer_request_ids(
+            keys, request_id)
+        if cross_cycle_conflict:
+            return cross_cycle_conflict
+    return _register_or_conflicting_owners(keys, request_id)
 
 
 def _claim_initial_download_ownership(
@@ -1123,13 +1238,28 @@ def try_enqueue(
                 album_id,
             )
             continue
+        planned_files = _planned_downloads(
+            username=username,
+            file_dir=match_result.file_dir,
+            files=files_to_enqueue,
+        )
+        conflicting_requests = _cross_request_conflict_ids(
+            planned_files, _album_request_id(album), ctx,
+        )
+        if conflicting_requests:
+            logger.info(
+                "cross-request enqueue conflict (issue #1178): skipping "
+                "%s for album %s from %s -- queue keys already held by "
+                "request(s) %s",
+                _album_request_id(album),
+                album_id,
+                username,
+                sorted(conflicting_requests),
+            )
+            continue
         claim = _claim_initial_download_ownership(
             album,
-            _planned_downloads(
-                username=username,
-                file_dir=match_result.file_dir,
-                files=files_to_enqueue,
-            ),
+            planned_files,
             allowed_filetype,
             ctx,
         )
@@ -1429,6 +1559,22 @@ def try_multi_enqueue(
                 _album_request_id(album),
                 len(planned_downloads),
                 len(unique_transfer_keys),
+            )
+            return EnqueueAttempt(
+                matched=False,
+                candidates=tuple(accumulated),
+                pre_filter_skip_count=pre_filter_skips[0],
+            )
+        conflicting_requests = _cross_request_conflict_ids(
+            planned_downloads, _album_request_id(album), ctx,
+        )
+        if conflicting_requests:
+            logger.warning(
+                "MULTI-DISC CROSS-REQUEST CONFLICT (issue #1178): "
+                "request=%s queue keys already held by request(s) %s; "
+                "rejecting candidate and continuing search",
+                _album_request_id(album),
+                sorted(conflicting_requests),
             )
             return EnqueueAttempt(
                 matched=False,

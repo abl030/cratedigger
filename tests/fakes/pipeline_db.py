@@ -8572,6 +8572,33 @@ class FakePipelineDB:
                 abandoned.add(row.local_path)
         return abandoned
 
+    def get_conflicting_transfer_request_ids(
+        self,
+        keys: Sequence[tuple[str, str]],
+        exclude_request_id: int,
+    ) -> set[int]:
+        """Mirror the real ledger join: accepted rows keyed by any of
+        ``keys`` whose owning request is CURRENTLY 'downloading',
+        excluding ``exclude_request_id`` (#1178 PR2). A missing request
+        row (never seeded, or hard-deleted) mirrors the real INNER JOIN --
+        never a conflict."""
+        key_set = set(keys)
+        conflicting: set[int] = set()
+        for row in self._transfer_ledger.values():
+            if row.accepted_at is None:
+                continue
+            if row.request_id == exclude_request_id:
+                continue
+            if (row.username, row.filename) not in key_set:
+                continue
+            request = self._requests.get(row.request_id)
+            if request is None:
+                continue
+            if request.get("status") != "downloading":
+                continue
+            conflicting.add(row.request_id)
+        return conflicting
+
     def prune_transfer_ledger(self, older_than: datetime) -> int:
         """Mirror strict age pruning: pending intents ignore request status;
         accepted rows retain active wanted/downloading protection."""

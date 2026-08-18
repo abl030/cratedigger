@@ -22,6 +22,7 @@ See migrations 045 and 051 for the schema and rationale.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 
 import msgspec
@@ -200,6 +201,58 @@ class _TransferLedgerMixin(_PipelineDBBase):
             "AND r.active_download_state IS NULL",
         )
         return {r["local_path"] for r in cur.fetchall()}
+
+    def get_conflicting_transfer_request_ids(
+        self,
+        keys: Sequence[tuple[str, str]],
+        exclude_request_id: int,
+    ) -> set[int]:
+        """Cross-cycle half of the #1178 cross-request enqueue guard.
+
+        Returns every OTHER request id that already holds ACCEPTED
+        ownership (``accepted_at IS NOT NULL``) of any ``(username,
+        filename)`` pair in ``keys``, while that owner's request is
+        CURRENTLY ``downloading`` -- never any other status.
+
+        The status filter is deliberately the single value
+        ``'downloading'``, never ``'processing'``
+        (``.claude/rules/pipeline-db.md`` / CLAUDE.md critical invariant
+        10: never add ``processing`` to any slskd event/transfer/ledger/
+        reaper status set). A sibling request can still be mid-
+        ``processing`` on the SAME queue keys at the moment this method
+        is consulted -- that residual collision window is deliberate and
+        is left to the requeue self-heal (#898), not to this guard. A
+        ``'replaced'`` owner (Replace-lineage attempt sharing, e.g.
+        requests 8781/8846) or a ``'wanted'``/``'imported'`` owner
+        (already moved on) must NEVER block -- only an owner still
+        actively ``downloading`` the SAME keys is a live conflict.
+        """
+        if not keys:
+            return set()
+        # A fixed-shape static SQL string, never an f-string-assembled
+        # WHERE clause: the key set is passed as two parallel arrays and
+        # zipped server-side via unnest(...) rather than growing the SQL
+        # text with the input size. This keeps the query a single
+        # constant string the repository's static SQL-write audit
+        # (tests/test_replaced_write_audit.py) can fully resolve, and
+        # it's the one JOIN this method makes to album_requests -- never
+        # an UPDATE.
+        usernames = [key[0] for key in keys]
+        filenames = [key[1] for key in keys]
+        cur = self._execute(
+            """
+            SELECT DISTINCT l.request_id
+            FROM slskd_transfer_ledger l
+            JOIN album_requests r ON r.id = l.request_id
+            JOIN unnest(%s::text[], %s::text[]) AS k(username, filename)
+              ON l.username = k.username AND l.filename = k.filename
+            WHERE l.accepted_at IS NOT NULL
+              AND r.status = 'downloading'
+              AND l.request_id != %s
+            """,
+            (usernames, filenames, exclude_request_id),
+        )
+        return {r["request_id"] for r in cur.fetchall()}
 
     def prune_transfer_ledger(self, older_than: datetime) -> int:
         """Hard-delete rows strictly older than ``older_than`` (T3).

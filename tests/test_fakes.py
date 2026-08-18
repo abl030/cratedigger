@@ -8609,6 +8609,97 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
 
         self.assertEqual(removed, 1)
 
+    def _seed_accepted_row(
+        self, db: FakePipelineDB, *, request_id: int, status: str,
+        username: str, filename: str,
+    ) -> None:
+        from tests.helpers import make_request_row
+
+        db.seed_request(make_request_row(id=request_id, status=status))
+        db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=request_id, username=username, filename=filename),
+        ])
+        db.confirm_transfer_enqueue(username, filename)
+
+    def test_get_conflicting_transfer_request_ids_empty_keys_is_a_noop(self):
+        db = FakePipelineDB()
+        self.assertEqual(
+            db.get_conflicting_transfer_request_ids([], exclude_request_id=1),
+            set(),
+        )
+
+    def test_get_conflicting_transfer_request_ids_downloading_owner_conflicts(self):
+        db = FakePipelineDB()
+        self._seed_accepted_row(
+            db, request_id=99, status="downloading",
+            username="p0", filename="a.flac")
+
+        conflicting = db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=1)
+
+        self.assertEqual(conflicting, {99})
+
+    def test_get_conflicting_transfer_request_ids_status_filter(self):
+        for status in ("wanted", "imported", "replaced"):
+            with self.subTest(status=status):
+                db = FakePipelineDB()
+                self._seed_accepted_row(
+                    db, request_id=99, status=status,
+                    username="p0", filename="a.flac")
+
+                conflicting = db.get_conflicting_transfer_request_ids(
+                    [("p0", "a.flac")], exclude_request_id=1)
+
+                self.assertEqual(conflicting, set())
+
+    def test_get_conflicting_transfer_request_ids_excludes_own_rows(self):
+        db = FakePipelineDB()
+        self._seed_accepted_row(
+            db, request_id=1, status="downloading",
+            username="p0", filename="a.flac")
+
+        conflicting = db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=1)
+
+        self.assertEqual(conflicting, set())
+
+    def test_get_conflicting_transfer_request_ids_ignores_pending_intent(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=99, status="downloading"))
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=99, username="p0", filename="a.flac"),
+        ])  # never confirmed -- accepted_at stays NULL
+
+        conflicting = db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=1)
+
+        self.assertEqual(conflicting, set())
+
+    def test_get_conflicting_transfer_request_ids_ignores_unrelated_keys(self):
+        db = FakePipelineDB()
+        self._seed_accepted_row(
+            db, request_id=99, status="downloading",
+            username="p0", filename="a.flac")
+
+        conflicting = db.get_conflicting_transfer_request_ids(
+            [("p0", "b.flac")], exclude_request_id=1)
+
+        self.assertEqual(conflicting, set())
+
+    def test_get_conflicting_transfer_request_ids_missing_request_row(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=99, username="p0", filename="a.flac"),
+        ])
+        db.confirm_transfer_enqueue("p0", "a.flac")
+
+        conflicting = db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=1)
+
+        self.assertEqual(conflicting, set())
+
+
 class TestFakeSlskdEvents(unittest.TestCase):
     """Self-tests for the events sub-API fake (issue #146)."""
 

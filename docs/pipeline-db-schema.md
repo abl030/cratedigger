@@ -681,6 +681,31 @@ alone has no ownership value and long-tail requests search forever. Older
 accepted rows keep active-request protection; accepted evidence is deleted
 only when the request is inactive or hard-deleted.
 
+**Cross-request enqueue guard (issue #1178).** Two concurrent requests for
+different pressings of the same album can browse to the same peer directory
+and match the same `(username, filename)` files — nothing previously asked
+"is this queue key already held by another request" before claiming
+ownership, so both requests would accept the same files, share one
+`attempt_fingerprint`, and race for the same canonical processing folder;
+the loser saw its files vanish mid-import (`event_path_gone_from_disk`) and
+re-downloaded the whole album. `lib.enqueue._cross_request_conflict_ids` now
+runs before every `try_enqueue` / `try_multi_enqueue` claim: a cross-cycle
+check first (`PipelineDB.get_conflicting_transfer_request_ids` /
+`DownloadOwnershipWriter.get_conflicting_transfer_request_ids`, a read-only
+join of this table to `album_requests` requiring an accepted row whose
+owner is *currently* `downloading` — never `processing`, per the never-add-
+processing-to-a-transfer-status-set invariant), then a process-local
+same-cycle registry (`lib.enqueue._claimed_queue_keys`, one cycle = one
+process, no TTL). The cross-cycle read runs first deliberately: registering
+in the same-cycle registry before the cross-cycle check would "poison" the
+registry for a rejected attempt's OTHER, otherwise-free keys, wrongly
+blocking an unrelated same-cycle sibling. A `replaced` owner (Replace-
+lineage attempt sharing) or one that has already moved on
+(`wanted`/`imported`) never blocks; the same request re-claiming its own
+keys (poll-loop retries) never self-blocks. A guard hit skips the candidate
+exactly like the peer-cooldown/denylist skip — no claim, no enqueue, no new
+backoff, the request stays on normal cadence.
+
 ## Persisted search plans (migration 014)
 
 Search execution is plan-driven. Each wanted request owns a materialised
