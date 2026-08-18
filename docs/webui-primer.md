@@ -581,7 +581,12 @@ depends on.
   sibling candidate's own mismatch (a different pressing beets also
   considered) never leaks into the warning even when far more extreme (live
   evidence this is load-bearing: ignoring `is_target` entirely flags 146
-  historical rows instead of the true 124). Nothing is denylisted, no
+  historical rows instead of the true 124). A pair whose track carries
+  `discogs_indexed_component_count > 1` (a coalesced Discogs composite,
+  issue #1183) is also skipped regardless of deviation — that acceptance is
+  deliberately unbounded above, so a legitimately coalesced file overshooting
+  its declared summed program is not a mismatch; a missing key (every row
+  predating the field) means 1 (issue #1196 item 3). Nothing is denylisted, no
   scenario is renamed, no folder moves; the operator judges (Replace / Bad
   Rip / leave as-is) via the existing lanes. This replaced a validation-time
   REJECT design: independent review found that magnitude could not separate

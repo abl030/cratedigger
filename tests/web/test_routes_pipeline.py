@@ -525,6 +525,134 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         item = next(row for row in data["log"] if row["id"] == log_id)
         self.assertIsNone(item["track_length_warning"])
 
+    def test_track_length_warning_skips_a_coalesced_composite_overshoot(
+        self,
+    ) -> None:
+        """Issue #1196 item 3: #1183's composite acceptance is deliberately
+        unbounded above (``item.length >= track.length``, no cap), so a
+        legitimately coalesced Discogs composite file overshooting its
+        declared summed program by well over the bound must never render
+        the warning."""
+        self.db.seed_request(make_request_row(id=908, status="imported"))
+        log_id = self.db.log_download(
+            908, outcome="success",
+            validation_result=_validation_result_blob(mappings=[
+                TrackMapping(
+                    item=HarnessItem(path="01.flac", length=700.0),
+                    track=HarnessTrackInfo(
+                        title="Composite", length=100.0,
+                        discogs_indexed_component_count=3,
+                    ),
+                ),
+            ]),
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertIsNone(item["track_length_warning"])
+
+    def test_track_length_warning_still_fires_with_component_count_one(
+        self,
+    ) -> None:
+        """Must-still-work control for the #1196 composite skip: a pair
+        explicitly carrying ``discogs_indexed_component_count=1`` is not a
+        composite and must still warn exactly as before."""
+        self.db.seed_request(make_request_row(id=909, status="imported"))
+        log_id = self.db.log_download(
+            909, outcome="success",
+            validation_result=_validation_result_blob(mappings=[
+                TrackMapping(
+                    item=HarnessItem(
+                        path="00 - Hidden Track.flac", length=237.6),
+                    track=HarnessTrackInfo(
+                        title="Lost Weekend", length=15.0,
+                        discogs_indexed_component_count=1,
+                    ),
+                ),
+            ]),
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertEqual(
+            item["track_length_warning"],
+            "Track length contradicts the matched release: "
+            "'00 - Hidden Track.flac' is 237.6s where the release "
+            "declares 15.0s for 'Lost Weekend'",
+        )
+
+    def test_track_length_warning_still_fires_when_component_count_key_is_absent(
+        self,
+    ) -> None:
+        """Historical rows predate ``discogs_indexed_component_count``
+        entirely — it cannot be produced by encoding today's
+        ``HarnessTrackInfo`` (whose default always emits it as 1), so this
+        pin builds the documented ``ValidationResult.to_json()`` wire shape
+        directly with the key omitted, modelling the pre-#1183 format
+        (``lib/validation_envelope.py``'s own ``ValidationResultEnvelope``
+        keeps ``candidates``/``mapping`` as raw untyped dicts for exactly
+        this reason). The composite skip's default-to-1 read must not
+        silently swallow the original #1178 warning on every historical
+        row.
+
+        This is the load-bearing pin, not a courtesy control: the
+        generated property in
+        ``tests/test_track_length_warning_generated.py`` can never
+        construct a truly-missing key (msgspec always encodes the real
+        ``HarnessTrackInfo`` Struct's declared default), so an inverted
+        default — a missing key ALSO skipping, silently disabling the
+        whole warning — passes that entire module untouched and is caught
+        ONLY here (#1196 review round; verified live: planting the
+        inversion left all 7 generated-module tests green). Measured
+        stake on the live corpus (doc2, every ``download_log.
+        validation_result`` candidate mapping pair, all outcomes, all
+        candidates, 2026-08-18): 310,463 of 310,685 mapping pairs (28,939
+        of 28,959 rows) carry NO ``discogs_indexed_component_count`` key
+        at all, versus 222 pairs (20 rows) carrying it explicitly as 1
+        and zero carrying a value above 1 — 99.93% of the historical
+        population depends on the missing-key default this pin protects."""
+        self.db.seed_request(make_request_row(id=910, status="imported"))
+        log_id = self.db.log_download(
+            910, outcome="success",
+            validation_result={
+                "valid": True, "scenario": "strong_match", "distance": 0.05,
+                "mbid_found": True,
+                "target_mbid": "rel-track-length-warning",
+                "candidates": [{
+                    "album_id": "rel-track-length-warning",
+                    "distance": 0.05,
+                    "is_target": True,
+                    "mapping": [{
+                        "item": {
+                            "path": "00 - Hidden Track.flac",
+                            "length": 237.6,
+                        },
+                        "track": {
+                            "title": "Lost Weekend",
+                            "length": 15.0,
+                            # discogs_indexed_component_count deliberately
+                            # absent — pre-#1183 wire shape.
+                        },
+                    }],
+                }],
+            },
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertEqual(
+            item["track_length_warning"],
+            "Track length contradicts the matched release: "
+            "'00 - Hidden Track.flac' is 237.6s where the release "
+            "declares 15.0s for 'Lost Weekend'",
+        )
+
     def test_have_analysis_error_copy_respects_operator_stop(self):
         classified = classify_log_entry(LogEntry(
             outcome="have_analysis_error",
