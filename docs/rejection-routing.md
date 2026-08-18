@@ -46,7 +46,6 @@ on anything spelled but unclassified.
 |---|---|---|---|---|---|---|
 | `extra_tracks` | `lib/beets.py:175` (`choose_match` handler) | yes | `wrong_matches/` (curated move — see "The curated move's actual residue behavior (B1)" below) | yes | **yes** (allowlist) | yes → `wanted` |
 | `unmapped_audio` | `lib/beets.py::apply_candidate_scenario` (selected candidate does not cover every admitted local audio path exactly once, after the one Discogs flat-subtrack retry when applicable) | yes | `wrong_matches/` (curated) | yes | no — a manifest-integrity failure is not a pressing-match cleanup authorization | yes → `wanted` |
-| `track_length_mismatch` | `lib/beets.py::apply_candidate_scenario` (a mapped pair's measured file length deviates from its declared MB track length by more than `TRACK_LENGTH_MISMATCH_BOUND_SECONDS`, issue #1178 — the automation lane's default; force import disables this gate the same way it overrides distance) | yes | `wrong_matches/` (curated) | yes | no — a track-identity mismatch is not a pressing-match cleanup authorization, same routing as `unmapped_audio` | yes → `wanted` |
 | `high_distance` | `lib/beets.py:183` | yes | `wrong_matches/` (curated) | yes | **yes** (allowlist) | yes → `wanted` |
 | `mbid_not_found` | `lib/beets.py:325` | yes | `wrong_matches/` (curated) | yes | **yes** (allowlist) | yes → `wanted` |
 | `no_choose_match` | `lib/beets.py:124` (`NO_CHOOSE_MATCH_SCENARIO`) | yes | `wrong_matches/` (curated) | yes | **yes** (allowlist) | yes → `wanted` |

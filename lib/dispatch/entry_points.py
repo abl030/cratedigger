@@ -80,11 +80,9 @@ def dispatch_import_from_db(
     Since #1080 that override is literal rather than structural: this lane
     runs the SAME exact-release validation the automation lane runs
     (``lib.download_validation.validate_release_with_merge_redirect``),
-    differing in two arguments — the distance threshold, raised to
-    ``FORCE_IMPORT_DISTANCE_THRESHOLD``, and the track-length gate (issue
-    #1178), disabled outright (``track_length_bound=None``). See
-    ``_dispatch_import_from_db_locked`` for why the result is identity
-    resolution and never a verdict.
+    differing in one argument — the distance threshold, raised to
+    ``FORCE_IMPORT_DISTANCE_THRESHOLD``. See ``_dispatch_import_from_db_locked``
+    for why the result is identity resolution and never a verdict.
 
     Concurrency (issue #92): a per-``request_id`` advisory lock (IMPORT
     namespace) is taken up front. Two concurrent force imports
@@ -242,14 +240,13 @@ def _dispatch_import_from_db_locked(
     resolved_cfg = cfg or read_runtime_config()
 
     # The exact-release comparison, run through the SAME seam the automation
-    # lane runs, with the documented differences: the distance threshold is
-    # the operator's override (#1080), and the track-length gate is disabled
-    # outright (issue #1178) — both name "import despite the verdict", what
-    # force import is. Its purpose here is identity resolution, not a
-    # verdict — nothing below branches on ``result.valid``. What it does buy
-    # is the merge-redirect follow: when MusicBrainz has merged this release
-    # away, the library is retagged and the request rekeyed here, and the
-    # survivor is what dispatch imports. Before this, force met the
+    # lane runs, with the one documented difference: the distance threshold is
+    # the operator's override (#1080). Its purpose here is identity
+    # resolution, not a verdict — a force import exists to import DESPITE the
+    # validation verdict, so nothing below branches on ``result.valid``. What
+    # it does buy is the merge-redirect follow: when MusicBrainz has merged
+    # this release away, the library is retagged and the request rekeyed here,
+    # and the survivor is what dispatch imports. Before this, force met the
     # merged-away release at ``import_one.py::_find_target_candidate`` instead
     # and rejected ``mbid_missing`` forever.
     #
@@ -269,7 +266,6 @@ def _dispatch_import_from_db_locked(
         release_id=mbid,
         import_job_id=import_job_id,
         distance_threshold=FORCE_IMPORT_DISTANCE_THRESHOLD,
-        track_length_bound=None,
         cancellation_token=cancellation_token,
         canonical_release_fn=canonical_release_fn,
         retag_fn=retag_fn,

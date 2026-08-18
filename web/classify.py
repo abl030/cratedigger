@@ -2166,22 +2166,6 @@ def _rejection_verdict(entry: LogEntry) -> str:
             f"track{'' if unmatched == 1 else 's'} with no matching local file"
         )
 
-    # ``lib/beets.py::apply_candidate_scenario`` writes this after a
-    # candidate has ALREADY cleared the extra-tracks and audio-coverage
-    # checks: every local file maps onto a release track, but one mapped
-    # pair's measured duration deviates from that track's MB-declared
-    # length by more than the gate's bound (issue #1178 — a 237.6s file
-    # paired against a 15.0s declared track scored a passing beets
-    # distance and imported). The sentence names the FACT the producer
-    # knows — a duration disagreement on an otherwise-accepted mapping —
-    # and stops there; which pair and by how much is in ``beets_detail``
-    # underneath, not repeated here.
-    if scenario == "track_length_mismatch":
-        return (
-            "A matched track's duration does not match the requested "
-            "release's declared length"
-        )
-
     # Written by the two manifest guards that reject before beets is ever
     # consulted: ``lib/download_validation.py`` on the staged auto-import
     # folder and ``lib/dispatch/manifest_guard.py`` on a force/manual

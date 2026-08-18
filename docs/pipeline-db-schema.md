@@ -603,8 +603,7 @@ Payloads that genuinely omit those envelope keys, such as
 `beets_validate` always names a scenario — exactly one of three (issue #888):
 
 - a `choose_match` was decoded and decided: `strong_match` / `high_distance` /
-  `extra_tracks` / `unmapped_audio` / `track_length_mismatch` /
-  `mbid_not_found`;
+  `extra_tracks` / `unmapped_audio` / `mbid_not_found`;
 - no error was recorded and none was ever offered: `no_choose_match`;
 - an error was recorded first — the harness would not start, the strict wire
   decode refused a `choose_match`, the read loop raised, or the 120s timeout
@@ -1006,9 +1005,8 @@ admission** (`rejection_scenario_is_delete_eligible`) is a separate, narrower
 explicit allowlist — exactly `extra_tracks`, `high_distance`,
 `mbid_not_found`, `no_choose_match` may reach the reducer
 (`lib.wrong_match_cleanup_service.cleanup_wrong_match`) at all. World
-failures with a reviewable folder (`unmapped_audio`,
-`track_length_mismatch`, `untracked_audio`, `request_missing_mbid`,
-`request_missing_request_id`) are kept, banned, and
+failures with a reviewable folder (`unmapped_audio`, `untracked_audio`,
+`request_missing_mbid`, `request_missing_request_id`) are kept, banned, and
 shown, but the reducer never even looks at them — nor does any unknown or
 novel scenario string, nor `None`. Kept ⟺ its contributing peers are
 denylisted; kept ⟹ visible in the worklist. SQL, the test fake, and
@@ -1101,11 +1099,8 @@ overridden — nothing else about it is special-cased** (#1080). It runs the
 same exact-release validation the automation lane runs
 (`lib/download_validation.py::validate_release_with_merge_redirect`), handing
 it `lib/beets.py::FORCE_IMPORT_DISTANCE_THRESHOLD` instead of
-`beets_distance_threshold`, and `track_length_bound=None` instead of the
-default `TRACK_LENGTH_MISMATCH_BOUND_SECONDS` (issue #1178 — the same
-"import despite the verdict" override, applied to the per-track length gate
-below); `harness/import_one.py` under `--force` raises its apply-time
-`max_distance` to that same distance number. Two consequences:
+`beets_distance_threshold`; `harness/import_one.py` under `--force` raises
+its apply-time `max_distance` to that same number. Two consequences:
 
 - A request whose MusicBrainz release was merged away is rescued by whichever
   lane reaches it first. Before #1080 force skipped validation entirely and

@@ -94,7 +94,6 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from unittest.mock import patch
 
-from lib.beets import TRACK_LENGTH_MISMATCH_BOUND_SECONDS
 from lib.beets_db import AlbumInfo
 from lib.beets_retag import (
     RETAG_ALREADY_CURRENT,
@@ -400,7 +399,6 @@ def follow_merge(
             stored_release_id=world.album_data.mb_release_id,
             import_job_id=world.import_job_id,
             distance_threshold=world.cfg.beets_distance_threshold,
-            track_length_bound=TRACK_LENGTH_MISMATCH_BOUND_SECONDS,
             canonical_release_fn=canonical,
             retag_fn=retag,
         )

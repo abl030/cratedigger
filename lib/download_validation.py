@@ -460,7 +460,6 @@ def _follow_merged_release(
     stored_release_id: str | None,
     import_job_id: int | None,
     distance_threshold: float,
-    track_length_bound: float | None,
     canonical_release_fn: CanonicalReleaseFn,
     retag_fn: MergeRetagFn,
 ) -> MergeRekeyOutcome:
@@ -749,14 +748,10 @@ def _follow_merged_release(
     # ``beets_validate`` uses for the requested release (issue #1059) — and it
     # is handed THIS validation's threshold, not the config default, so a
     # rekeyed force import is named by the override it actually ran under
-    # (#1080). ``track_length_bound`` gets the identical treatment (#1178):
-    # the caller's own disabled-or-not bound, never re-derived here.
+    # (#1080).
     from lib.beets import apply_candidate_scenario
 
-    apply_candidate_scenario(
-        bv_result, match, distance_threshold,
-        track_length_bound=track_length_bound,
-    )
+    apply_candidate_scenario(bv_result, match, distance_threshold)
     return MergeRekeyOutcome(
         MERGE_REKEYED,
         (
@@ -777,7 +772,6 @@ def validate_release_with_merge_redirect(
     release_id: str,
     import_job_id: int | None,
     distance_threshold: float,
-    track_length_bound: float | None,
     cancellation_token: CancellationToken | None = None,
     canonical_release_fn: CanonicalReleaseFn | None = None,
     retag_fn: MergeRetagFn | None = None,
@@ -785,13 +779,12 @@ def validate_release_with_merge_redirect(
     """Validate one album against one exact release, following MB merges.
 
     THE exact-release comparison seam. Both import lanes run it, differing in
-    exactly two arguments — the distance threshold, which force import
+    exactly one argument — the distance threshold, which force import
     overrides to :data:`lib.beets.FORCE_IMPORT_DISTANCE_THRESHOLD` and
-    automation takes from ``beets_distance_threshold`` (#1080); and the
-    track-length bound, which force import disables (``None``) the same way
-    (issue #1178). Everything else, including the merge-redirect follow, is
-    the same code over the same inputs, so a request whose release
-    MusicBrainz merged away is rescued by whichever lane reaches it first.
+    automation takes from ``beets_distance_threshold`` (#1080). Everything
+    else, including the merge-redirect follow, is the same code over the same
+    inputs, so a request whose release MusicBrainz merged away is rescued by
+    whichever lane reaches it first.
 
     Before #1080 only the automation lane called this: force import went
     straight to ``dispatch_import_core`` and so met the merged-away release at
@@ -818,7 +811,6 @@ def validate_release_with_merge_redirect(
         album_path,
         release_id,
         distance_threshold,
-        track_length_bound=track_length_bound,
     )
     if result.scenario != "mbid_not_found":
         return ReleaseValidation(
@@ -843,7 +835,6 @@ def validate_release_with_merge_redirect(
         stored_release_id=release_id,
         import_job_id=import_job_id,
         distance_threshold=distance_threshold,
-        track_length_bound=track_length_bound,
         canonical_release_fn=(
             canonical_release_fn
             if canonical_release_fn is not None
@@ -952,8 +943,6 @@ def _process_beets_validation(
             cancellation_token=cancellation_token,
         )
     _checkpoint(cancellation_token)
-    from lib.beets import TRACK_LENGTH_MISMATCH_BOUND_SECONDS
-
     validation = validate_release_with_merge_redirect(
         db=ctx.pipeline_db_source._get_db(),
         cfg=ctx.cfg,
@@ -962,10 +951,6 @@ def _process_beets_validation(
         release_id=album_data.mb_release_id,
         import_job_id=import_job_id,
         distance_threshold=ctx.cfg.beets_distance_threshold,
-        # The automation lane always runs the gate (#1178) — only force
-        # import disables it, at the OTHER call site in
-        # ``lib/dispatch/entry_points.py``.
-        track_length_bound=TRACK_LENGTH_MISMATCH_BOUND_SECONDS,
         cancellation_token=cancellation_token,
         canonical_release_fn=canonical_release_fn,
         retag_fn=retag_fn,

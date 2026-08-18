@@ -17,7 +17,6 @@ from lib.quality import (
     ChooseMatchMessage,
     HarnessItem,
     HarnessSessionEvidence,
-    TrackMapping,
     ValidationResult,
 )
 from lib.util import beets_subprocess_env
@@ -34,21 +33,6 @@ logger = logging.getLogger("cratedigger")
 #: Effectively unbounded rather than infinite: it is only ever compared
 #: against a Beets distance, which is normalised to ``[0, 1]``.
 FORCE_IMPORT_DISTANCE_THRESHOLD: Final[float] = 999.0
-
-#: Maximum tolerated ``abs(item.length - track.length)`` for any ONE mapped
-#: pair before a candidate is rejected as a track-length mismatch (issue
-#: #1178). Beets itself clamps track-length error at ``track_length_max``
-#: (30s) when computing distance, so a much larger per-track duration
-#: mismatch costs the same as a small one and can still clear the 0.15
-#: distance gate — the #1178 defect: a 222.6s mismatch (a 237.6s hidden
-#: track paired with a declared 15.0s track) scored 0.1441 and imported.
-#:
-#: Calibrated on the live corpus: of 8,938 accepted imports with usable
-#: mapping pairs, 124 (1.4%) exceed 60s worst-deviation — a population that
-#: is NOT all false positives, since it also contains genuine silent
-#: failures (e.g. download_log 1803 imported a 2.0s file where MB declares
-#: 1350s). #1178's own 222.6s case clears this bound with 3.7x margin.
-TRACK_LENGTH_MISMATCH_BOUND_SECONDS: Final[float] = 60.0
 
 #: Scenario for a run that COMPLETED without error and never offered a match
 #: to review. It names the OBSERVATION — nothing was put in front of us — and
@@ -165,37 +149,12 @@ def _record_unmatched_run(
     result.detail = detail
 
 
-def _worst_track_length_deviation(
-    candidate: CandidateSummary,
-) -> tuple[float, TrackMapping] | None:
-    """Worst ``abs(item.length - track.length)`` over pairs with BOTH a
-    positive declared MB length and a positive measured file length.
-
-    A pair missing either length — most commonly a CD pregap hidden track,
-    which MusicBrainz frequently declares with no length at all — is
-    skipped rather than flagged: there is no positive declared length to
-    compare against, so ``track.length <= 0`` (or ``item.length <= 0``, an
-    unmeasured file) can never itself trigger a mismatch.
-    """
-    worst: tuple[float, TrackMapping] | None = None
-    for mapping in candidate.mapping:
-        track_length = mapping.track.length
-        item_length = mapping.item.length
-        if track_length <= 0 or item_length <= 0:
-            continue
-        deviation = abs(item_length - track_length)
-        if worst is None or deviation > worst[0]:
-            worst = (deviation, mapping)
-    return worst
-
-
 def apply_candidate_scenario(
     result: ValidationResult,
     candidate: CandidateSummary,
     distance_threshold: float,
     *,
     admitted_items: list[HarnessItem] | None = None,
-    track_length_bound: float | None = TRACK_LENGTH_MISMATCH_BOUND_SECONDS,
 ) -> None:
     """Turn ONE matched candidate into the result's exact-release scenario.
 
@@ -205,12 +164,6 @@ def apply_candidate_scenario(
     survivor's candidate once MusicBrainz's 301 has been followed, the local
     album retagged, and the request rekeyed. Re-deriving those four fields at
     a second site is the parallel-code-path trap (issue #1059).
-
-    ``track_length_bound`` gates the same way force import already bypasses
-    ``distance_threshold`` (#1080): force import passes ``None`` here, so a
-    candidate the operator is explicitly overriding is never named
-    ``track_length_mismatch`` — "import despite the verdict" applies to this
-    gate exactly as it applies to distance (issue #1178).
 
     Total and idempotent by construction: every branch assigns ``valid``, so
     calling it on a result that already named ``mbid_not_found`` leaves no
@@ -236,20 +189,6 @@ def apply_candidate_scenario(
             "candidate mapping would discard admitted audio: "
             f"{coverage.detail()}"
         )
-    elif (
-        track_length_bound is not None
-        and (worst := _worst_track_length_deviation(candidate)) is not None
-        and worst[0] > track_length_bound
-    ):
-        deviation, mapping = worst
-        result.valid = False
-        result.scenario = "track_length_mismatch"
-        result.detail = (
-            f"{mapping.item.path} is {mapping.item.length:.1f}s but "
-            f"{mapping.track.title!r} is declared "
-            f"{mapping.track.length:.1f}s (deviation {deviation:.1f}s "
-            f"> {track_length_bound:.0f}s)"
-        )
     elif candidate.distance <= distance_threshold:
         result.valid = True
         result.scenario = "strong_match"
@@ -267,7 +206,6 @@ def _beets_validate_once(
     distance_threshold: float = 0.15,
     *,
     preserve_discogs_flat_subtracks: bool = False,
-    track_length_bound: float | None = TRACK_LENGTH_MISMATCH_BOUND_SECONDS,
 ) -> ValidationResult:
     """Dry-run beets import with specific MBID. Returns ValidationResult.
 
@@ -276,9 +214,6 @@ def _beets_validate_once(
         album_path: Path to the album directory to validate
         mb_release_id: Target MusicBrainz release ID
         distance_threshold: Maximum acceptable distance (default 0.15)
-        track_length_bound: Passed straight through to
-            :func:`apply_candidate_scenario`; ``None`` disables the
-            track-length gate (the force-import override, issue #1178).
 
     Returns: ValidationResult with candidates, distance, scenario, etc.
 
@@ -406,7 +341,6 @@ def _beets_validate_once(
                             cand,
                             distance_threshold,
                             admitted_items=list(cm.items),
-                            track_length_bound=track_length_bound,
                         )
                         break
                 if not result.mbid_found:
@@ -471,8 +405,6 @@ def beets_validate(
     album_path: str,
     mb_release_id: str,
     distance_threshold: float = 0.15,
-    *,
-    track_length_bound: float | None = TRACK_LENGTH_MISMATCH_BOUND_SECONDS,
 ) -> ValidationResult:
     """Validate one exact release, preserving split Discogs audio if needed.
 
@@ -481,10 +413,6 @@ def beets_validate(
     composite earns one second, still-observational harness pass that keeps
     flat indexed subtracks separate. The second result is final: distance and
     every coverage rule are evaluated again, including for force imports.
-
-    ``track_length_bound`` passes straight through to
-    :func:`apply_candidate_scenario` on both passes — a force import that
-    disables it (``None``) stays disabled through the Discogs retry too.
     """
 
     result = _beets_validate_once(
@@ -492,7 +420,6 @@ def beets_validate(
         album_path,
         mb_release_id,
         distance_threshold,
-        track_length_bound=track_length_bound,
     )
     if result.scenario != "unmapped_audio":
         return result
@@ -517,5 +444,4 @@ def beets_validate(
         mb_release_id,
         distance_threshold,
         preserve_discogs_flat_subtracks=True,
-        track_length_bound=track_length_bound,
     )
