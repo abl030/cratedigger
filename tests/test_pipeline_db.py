@@ -17178,7 +17178,14 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         """#1196 item 1 world (d): a NULL active_download_state still
         fails CLOSED unconditionally -- every accepted row for that
         'downloading' owner counts as in-scope, regardless of the
-        ledger row's own fingerprint."""
+        ledger row's own fingerprint. (Review F3: this is NOT a
+        dedicated ``IS NULL`` SQL arm -- that arm was proven redundant
+        on real PG and removed. The fail-closed guarantee this pin
+        protects lives in the ELSE arm's ``COALESCE(...,
+        '-infinity')``: ``->>`` on a NULL jsonb state returns NULL for
+        any key, so ``COALESCE`` substitutes ``'-infinity'``, which
+        every real ``enqueued_at`` compares ``>=`` true. This pin kills
+        a mutant that removes or inverts that COALESCE.)"""
         owner = self._seed_accepted_row(
             status="downloading", username="p0", filename="a.flac")
         row = self.db.get_request(owner)

@@ -263,12 +263,18 @@ class _TransferLedgerMixin(_PipelineDBBase):
         request claimed pre-deploy remains ``'downloading'``. A NULL (or,
         by the same ``->>`` extraction returning NULL for a non-object
         value, malformed) ``active_download_state`` still fails CLOSED
-        unconditionally: every accepted row for that ``'downloading'``
-        owner counts as in-scope, exactly as before this change -- the
-        ``CASE`` below tests ``IS NULL`` explicitly first rather than
-        relying on the jsonb ``?``/`->>` operators' NULL-propagating
-        three-valued logic, which would otherwise silently drop the row
-        out of the WHERE clause (fail OPEN) instead of blocking.
+        unconditionally, and it does so through this SAME ``ELSE`` arm,
+        not a dedicated ``CASE WHEN ... IS NULL`` arm: ``->>`` applied to
+        a SQL NULL (or non-object) jsonb value returns NULL for ANY key,
+        so both the ``attempt_fingerprint`` ``WHEN`` test and the
+        ``enqueued_at`` extraction inside ``COALESCE`` see NULL, and
+        ``COALESCE(NULL, '-infinity')`` makes the comparison
+        ``l.enqueued_at >= '-infinity'`` -- true for any real
+        timestamp -- fail CLOSED (blocks) exactly like every other
+        deploy-window row. A dedicated ``IS NULL`` arm was tried and
+        proven redundant on real PG (identical result, one fewer
+        branch); the fail-closed guarantee lives entirely in this
+        ``COALESCE``, not in an explicit NULL check.
         """
         if not keys:
             return set()
@@ -294,7 +300,6 @@ class _TransferLedgerMixin(_PipelineDBBase):
               AND l.request_id != %s
               AND (
                   CASE
-                      WHEN r.active_download_state IS NULL THEN TRUE
                       WHEN r.active_download_state ->> 'attempt_fingerprint'
                           IS NOT NULL THEN
                           l.attempt_fingerprint =

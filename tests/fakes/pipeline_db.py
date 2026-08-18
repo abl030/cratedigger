@@ -8607,14 +8607,24 @@ class FakePipelineDB:
         request: Mapping[str, object],
     ) -> str | None:
         """Mirror ``active_download_state ->> 'attempt_fingerprint'``
-        (#1196 item 1) -- ``None`` when the top-level state is a
-        non-object value (malformed) or the key is absent/non-string.
-        Does NOT distinguish a missing key from an explicit JSON
-        ``null``, matching ``->>``'s own behaviour of returning SQL
-        NULL for both. Callers must check
-        ``active_download_state is None`` (the unconditional
-        fail-closed arm) separately BEFORE calling this -- it only
-        answers "does a non-NULL state carry this key"."""
+        (#1196 item 1) for the two shapes production ever writes: the
+        top-level state is SQL NULL (or a non-object value -- ``->>``
+        returns NULL for a NULL or non-object jsonb regardless of key,
+        matching ``None`` here), or the key is absent/JSON-null
+        (``->>`` also returns NULL, matching the ``dict.get`` miss
+        here). Does NOT distinguish a missing key from an explicit JSON
+        ``null`` -- ``->>`` does not either.
+
+        Known, deliberately UNRECONCILED divergence: if the
+        ``attempt_fingerprint`` JSON value were ever a non-string
+        scalar (a number, bool), real ``->>`` stringifies it (e.g.
+        ``42`` -> ``'42'``) rather than returning NULL, but this helper
+        returns ``None`` for that case. Unreachable in practice --
+        ``lib.download.build_active_download_state`` (the only
+        production writer) emits either a Python ``str`` or omits the
+        key entirely (``omit_defaults=True``), never a bare number or
+        bool -- so this divergence has no real-world state to exercise
+        it against."""
         raw = request.get("active_download_state")
         if isinstance(raw, str):
             try:
@@ -8638,21 +8648,25 @@ class FakePipelineDB:
         #1196 item 1). A missing request row (never seeded, or
         hard-deleted) mirrors the real INNER JOIN -- never a conflict.
 
-        Three-armed, mirroring the real SQL ``CASE`` exactly:
+        Two-armed, mirroring the real SQL ``CASE`` exactly (#1196
+        review F3 removed the real query's REDUNDANT ``WHEN
+        active_download_state IS NULL THEN TRUE`` arm -- proven on
+        real PG to behave identically to the ELSE arm's own
+        ``COALESCE``, since ``->>`` on a NULL jsonb also returns NULL
+        for any key):
 
-          1. ``active_download_state IS NULL`` -- fails CLOSED
-             unconditionally (every accepted row for that
-             'downloading' owner counts as in-scope).
-          2. State carries a string ``attempt_fingerprint`` -- EXACT
+          1. State carries a string ``attempt_fingerprint`` -- EXACT
              equality against the ledger row's own
              ``attempt_fingerprint`` decides in/out of scope; no clock
              comparison.
-          3. Else (state present but lacking the key, or malformed) --
+          2. Else (state is NULL, malformed, or lacks the key) --
              deploy-window fallback to the ``enqueued_at`` witness: a
              row older than the owner's current attempt boundary
              belongs to an abandoned earlier attempt and never
-             conflicts; a NULL/missing witness fails CLOSED (mirrors
-             the real query's ``COALESCE(..., '-infinity')``).
+             conflicts; a NULL/missing witness (including a NULL
+             top-level state -- ``_attempt_enqueued_at`` returns
+             ``None`` for that too) fails CLOSED (mirrors the real
+             query's ``COALESCE(..., '-infinity')``).
         """
         key_set = set(keys)
         conflicting: set[int] = set()
@@ -8667,9 +8681,6 @@ class FakePipelineDB:
             if request is None:
                 continue
             if request.get("status") != "downloading":
-                continue
-            if request.get("active_download_state") is None:
-                conflicting.add(row.request_id)
                 continue
             fingerprint = self._attempt_fingerprint_from_state(request)
             if fingerprint is not None:

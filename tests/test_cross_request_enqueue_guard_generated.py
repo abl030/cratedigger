@@ -75,9 +75,10 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from lib.download import build_active_download_state
 from lib.download_ownership import DownloadOwnershipWriter
 from lib.enqueue import ClaimedQueueKeysRegistry, _cross_request_conflict_ids
-from lib.grab_list import DownloadFile
+from lib.grab_list import DownloadFile, GrabListEntry
 from lib.pipeline_db import TransferLedgerRow
 from lib.processing_paths import attempt_fingerprint
 from tests.fakes import FakePipelineDB
@@ -194,6 +195,21 @@ def _run_world(world: GuardWorld) -> dict[tuple[int, int], bool]:
     ``attempt.state_has_fingerprint`` is True, so the property drives
     the guard's real fingerprint-equality arm AND its deploy-window
     time-predicate fallback arm across the same generated world space.
+
+    (#1196 item 1, review F1) The two sides are deliberately NOT sourced
+    from one shared local variable: the STATE'S value comes from calling
+    the REAL production writer,
+    ``lib.download.build_active_download_state``, over a synthetic
+    ``GrabListEntry`` built from this attempt's own keys -- the actual
+    function ``lib.enqueue._claim_initial_download_ownership`` calls in
+    production. The LEDGER'S value is the direct
+    ``attempt_fingerprint()`` call, mirroring
+    ``lib.enqueue._enqueue_with_claim_outcome``'s own inline computation
+    (there is no separate "ledger writer" function to call — that inline
+    call IS the production site). A production divergence between either
+    real site therefore has a genuine chance of producing two different
+    values here, rather than one test-local variable trivially agreeing
+    with itself.
     """
     db = FakePipelineDB()
     writer = DownloadOwnershipWriter(db_factory=lambda: db)
@@ -238,20 +254,34 @@ def _run_world(world: GuardWorld) -> dict[tuple[int, int], bool]:
             if won:
                 ordinal[0] += 1
                 witness = _BASE_TIME + timedelta(seconds=ordinal[0])
-                fingerprint = attempt_fingerprint(list(attempt.keys))
+                # STATE side: the real production writer, over the SAME
+                # `files` list just used for the guard check above.
+                written_state = build_active_download_state(
+                    GrabListEntry(
+                        album_id=0, filetype="flac", title="T",
+                        artist="A", year="2020", mb_release_id="mbid",
+                        files=files,
+                    ),
+                    enqueued_at=witness.isoformat(),
+                )
                 state: dict[str, object] = {
                     "filetype": "flac", "enqueued_at": witness.isoformat(),
                     "files": [],
                 }
                 if attempt.state_has_fingerprint:
-                    state["attempt_fingerprint"] = fingerprint
+                    state["attempt_fingerprint"] = (
+                        written_state.attempt_fingerprint)
                 db._requests[attempt.request_id]["active_download_state"] = (
                     state)
+                # LEDGER side: the direct pure-function call, mirroring
+                # _enqueue_with_claim_outcome's own inline computation
+                # -- independently derived from the STATE side above.
+                ledger_fingerprint = attempt_fingerprint(list(attempt.keys))
                 before_ids = set(db._transfer_ledger)
                 rows = [
                     TransferLedgerRow(
                         request_id=attempt.request_id, username=un,
-                        filename=fn, attempt_fingerprint=fingerprint)
+                        filename=fn, attempt_fingerprint=ledger_fingerprint)
                     for un, fn in attempt.keys
                 ]
                 db.record_transfer_enqueue(rows)

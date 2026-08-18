@@ -131,11 +131,16 @@ class TestReducePollCycle(unittest.TestCase):
                     size=100,
                 ),
             ],
-            # #1196 item 1: present by default on every case in this
-            # class so a reducer path that silently drops the field
-            # (rebuilding via a partial ActiveDownloadState(...) call
-            # instead of carrying it through) is caught everywhere, not
-            # only in the one test dedicated to this field.
+            # #1196 item 1: present by default so every case in this
+            # class builds a state with a real fingerprint value. This
+            # does NOT by itself guard against a reducer path dropping
+            # the field -- only ``test_progress_snapshot_carries_
+            # attempt_fingerprint_forward`` below asserts
+            # ``result.state.attempt_fingerprint``, and a planted
+            # mutant that drops the field in ``_copy_download_state``
+            # fails exactly that one test; every other case in this
+            # class stays green because none of them read the field.
+            # That dedicated pin is the actual guard.
             "attempt_fingerprint": "fp-abc12345",
         }
         values.update(overrides)
