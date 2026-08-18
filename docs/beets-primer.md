@@ -776,7 +776,19 @@ Distance is never permission to discard audio. Before either automatic or
 force import applies a candidate, Cratedigger requires the selected mapping to
 cover the complete action-time audio inventory exactly once. `extra_items`, a
 missing path, a duplicated path, or an unmatched release track fails closed as
-`unmapped_audio`; force changes only the distance threshold.
+`unmapped_audio`; force changes only the distance threshold and the
+track-length gate below.
+
+Beets itself clamps per-track length error at `track_length_max` (30s) when
+computing distance, so a much larger duration mismatch on one mapped pair
+costs the same as a small one and can still clear the gate. Cratedigger adds
+its own check on top: `lib/beets.py::apply_candidate_scenario` rejects as
+`track_length_mismatch` when any mapped pair's `abs(file_length -
+declared_length)` exceeds `TRACK_LENGTH_MISMATCH_BOUND_SECONDS` (60s,
+calibrated against the live corpus — issue #1178), skipping any pair
+missing either length (a CD pregap hidden track most commonly). Force import
+disables this gate exactly as it overrides distance — `track_length_bound=
+None` — since force means importing despite the verdict.
 
 Discogs flat indexed entries such as `A2.1` / `A2.2` are ambiguous: they may
 describe one physical composite file or separate files. The default Beets

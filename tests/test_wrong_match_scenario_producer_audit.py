@@ -77,6 +77,7 @@ _PRODUCER_FILES: tuple[str, ...] = (
 # automation lane's ``untracked_audio``) share the same routing.
 VISIBLE_NOT_DELETE_ELIGIBLE: frozenset[str] = frozenset({
     "unmapped_audio",
+    "track_length_mismatch",
     "untracked_audio",
     "request_missing_mbid",
     "request_missing_request_id",
