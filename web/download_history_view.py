@@ -142,6 +142,13 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     stage2_if_stage1_deferred_verdict: str | None = None
     request_source: str | None = None
     youtube_metadata: dict[str, object] | None = None
+    # Issue #1178 (post-correction, "surface-not-reject"): mirrors
+    # ClassifiedEntry.track_length_warning. msgspec.convert(strict=True)
+    # silently drops any ClassifiedEntry field this Struct does not also
+    # declare, so a new render-time field must be added HERE too, not just
+    # on ClassifiedEntry — the detail-view history panel is a second reader
+    # of the same classification, not a passthrough of it.
+    track_length_warning: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return msgspec.to_builtins(self)

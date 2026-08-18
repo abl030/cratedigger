@@ -737,6 +737,16 @@ export function renderDownloadHistoryItem(h) {
     ]);
   }
 
+  // Issue #1178 (post-correction, "surface-not-reject"): the render-time
+  // fact, surfaced on the detail view too — the compact card's chip tooltip
+  // is not the only place the operator can read it from.
+  if (h.track_length_warning) {
+    rows.push([
+      'Track length',
+      `<span style="color:#ec6;">${esc(h.track_length_warning)}</span>`,
+    ]);
+  }
+
   // Triage is the operator-action audit — it stays visible. The
   // internal decision internals (Preview / Reason / Stages) go behind
   // the forensics toggle below.

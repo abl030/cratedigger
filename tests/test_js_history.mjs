@@ -9,6 +9,7 @@ import {
   __test__,
 } from '../web/js/history.js';
 import { validDualProviderProof } from './fixtures/cd_rip_proof.mjs';
+import { esc } from '../web/js/util.js';
 import { readFileSync } from 'node:fs';
 const {
   formatV0Probe, formatSpectral, spectralChip, spectralGradeIsAdmissible,
@@ -89,6 +90,40 @@ console.log('renderDownloadHistoryItem() omits empty triage rows');
   assertExcludes(html, 'Triage', 'no triage label without audit');
   assertExcludes(html, 'Preview', 'no preview label without audit');
   assertExcludes(html, 'Stages', 'no stages label without audit');
+}
+
+console.log('renderDownloadHistoryItem() shows the track-length warning row (issue #1178)');
+{
+  const warning = "Track length contradicts the matched release: "
+    + "'00 - Hidden Track.flac' is 237.6s where the release declares "
+    + "15.0s for 'Lost Weekend'";
+  const html = renderDownloadHistoryFixture({
+    outcome: 'success',
+    soulseek_username: 'lwl',
+    created_at: '2026-08-15T10:25:15+00:00',
+    downloaded_label: 'FLAC',
+    verdict: 'FLAC',
+    track_length_warning: warning,
+  });
+
+  assertContains(html, '<span class="p-hist-label">Track length</span>',
+    'track-length row label rendered');
+  assertContains(html, `color:#ec6;">${esc(warning)}</span>`,
+    'track-length row uses the same amber warning styling as Bad '
+    + 'extension/Triage, with the full sentence as the value');
+}
+
+console.log('renderDownloadHistoryItem() omits the track-length row when the field is null');
+{
+  const html = renderDownloadHistoryFixture({
+    outcome: 'success',
+    soulseek_username: 'testuser',
+    created_at: '2026-04-25T23:25:00+00:00',
+    downloaded_label: 'MP3 320',
+    verdict: 'MP3 320',
+  });
+
+  assertExcludes(html, 'Track length', 'no track-length row without a warning');
 }
 
 console.log('renderDownloadHistoryItem() escapes wrong-match triage audit values');

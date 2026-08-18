@@ -101,6 +101,12 @@ export function renderRecentsItems(items, matchRates = null) {
       const badExtChip = badExtensions.length
         ? `<span class="badge badge-warn" title="${esc(badExtensions.join(', '))}">bad ext: ${badExtensions.length}</span>`
         : '';
+      // Issue #1178 (post-correction, "surface-not-reject"): a render-time
+      // fact, never a pipeline verdict — the server has already decided
+      // this import stands; the chip only asks the operator to look.
+      const trackLengthWarningChip = item.track_length_warning
+        ? `<span class="badge badge-warn" title="${esc(item.track_length_warning)}">track length</span>`
+        : '';
       const triageLabel = triageSummary && !String(badge).startsWith('Triaged')
         ? `<span class="recents-triage-label" title="${esc(triageDetail)}">${esc(triageLabelText(triageSummary))}</span>`
         : '';
@@ -128,7 +134,7 @@ export function renderRecentsItems(items, matchRates = null) {
         <div class="r-item" style="border-left-color:${borderColor}" onclick="window.toggleDetail('dl-${item.id}', ${item.request_id})">
           <div class="p-top">
             <div>
-              <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}"${badgeTitle}>${badge}</span>${cdRipProofBadge}${disambigChip}${badExtChip}</div>
+              <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}"${badgeTitle}>${badge}</span>${cdRipProofBadge}${disambigChip}${badExtChip}${trackLengthWarningChip}</div>
               <div class="p-artist">${esc(item.artist_name)}</div>
             </div>
             <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">${time}</span></div>
