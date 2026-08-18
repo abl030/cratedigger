@@ -500,8 +500,15 @@ string equality against `f"{albumartist} {album}"` — two different pressings
 that share a title (e.g. a reissue and the original) collide onto the same
 iTunes result and therefore the same wrong image. Ranking `cover_art_url`
 above `itunes` closes exactly that collision for Discogs-sourced requests —
-the entire population `cover_art_url` is ever populated for. It is not a
-categorical strict-pressing-identity guarantee for the whole `sources` list:
+`discogs` is the only one of Cratedigger's configured metadata-source
+plugins (the `plugins` list above) that populates `cover_art_url`. This is
+NOT a categorical claim about beets: the pinned version also ships
+`deezer`/`tidal` plugins that populate the same field, and
+`beetsplug/fetchart.py`'s own `CoverArtUrl` source is documented as usable
+with any plugin that sets it, or by an operator setting it by hand —
+neither `deezer`/`tidal` nor manual field-setting is part of this
+deployment's plugin list or workflow. It is also not a categorical
+strict-pressing-identity guarantee for the whole `sources` list:
 `coverart` (ranked first) expands to a Cover Art Archive lookup by BOTH
 release id AND release-group id, and release-group art is not
 pressing-exact. That gap happens to be unreachable for Discogs-sourced

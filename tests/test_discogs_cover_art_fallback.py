@@ -191,6 +191,33 @@ class TestDiscogsCoverArtFallback(unittest.TestCase):
                 with patch("requests.get", return_value=response):
                     self.assertIsNone(plugin.select_cover_art(release))
 
+    def test_crlf_token_never_leaks_into_the_fail_soft_log(self) -> None:
+        """#1200 review N1 -- a confirmed secret-disclosure defect.
+
+        A CR/LF inside the configured Discogs token makes ``requests``'
+        own header validator raise ``InvalidHeader`` -- a
+        ``RequestException``, so it IS caught by the fail-soft path --
+        with the offending header VALUE (the token) embedded in its
+        message. ``check_beets_config`` only tests ``token.strip()``
+        nonempty, so a token carrying a CR/LF passes startup and would
+        leak on every art miss if the log line ever interpolated the
+        exception object. Drives the REAL, fully unmocked path (header
+        validation raises client-side, before any network I/O -- no
+        ``requests.get`` patch needed) rather than a synthetic stand-in.
+        """
+        token = "sUpErSeCrEtT0k3n\nX"
+        release = _release(_BOWIE_1969_RELEASE_ID, [])
+        plugin = object.__new__(DiscogsPlugin)
+        plugin.config = _config(token)
+        with self.assertLogs("harness.beets_compat", level="WARNING") as logs:
+            result = plugin.select_cover_art(release)
+        self.assertIsNone(result)
+        self.assertEqual(len(logs.output), 1)
+        self.assertNotIn(token, logs.output[0])
+        self.assertNotIn("sUpErSeCrEtT0k3n", logs.output[0])
+        self.assertIn(str(_BOWIE_1969_RELEASE_ID), logs.output[0])
+        self.assertIn("InvalidHeader", logs.output[0])
+
     def test_429_fails_soft_but_logs_the_release_id_and_reason(self) -> None:
         """Residual from #1200 review: a rate-limited window otherwise
         fails soft to "no art" with nothing to diagnose from -- the WARNING
@@ -294,6 +321,31 @@ class TestDiscogsCoverArtFallbackWiring(unittest.TestCase):
             "at DiscogsPlugin instantiation, so a patch installed on "
             "either side of load_plugins is already live before any real "
             "import request reaches it (issue #1200 review F6).",
+        )
+
+    def test_timeout_constant_stays_well_under_the_validation_watchdogs(
+        self,
+    ) -> None:
+        """#1200 review N2 -- the F3 pins only proved the recorded
+        ``timeout=`` kwarg EQUALS ``_DISCOGS_COVER_ART_TIMEOUT_SECONDS``
+        itself; changing that constant (e.g. 10 -> 600) would leave every
+        one of them green while genuinely breaking the "never blocks an
+        import" guarantee. This is the missing absolute bound: the
+        fallback's own timeout must stay well under BOTH the harness's
+        120s validation watchdog (``lib/beets.py::_beets_validate_once``'s
+        ``threading.Timer(120.0, _timeout_kill)``) and
+        harness/import_one.py's 300s ``HARNESS_TIMEOUT`` -- otherwise a
+        single black-holed api.discogs.com lookup can outlast the shorter
+        watchdog and turn a soft art-miss into a hard validation
+        failure."""
+        self.assertLess(
+            _DISCOGS_COVER_ART_TIMEOUT_SECONDS,
+            120,
+            "_DISCOGS_COVER_ART_TIMEOUT_SECONDS must stay well under "
+            "lib/beets.py's 120s _beets_validate_once watchdog (and "
+            "also harness/import_one.py's 300s HARNESS_TIMEOUT) or a "
+            "black-holed Discogs lookup converts a soft art-miss into a "
+            "hard validation failure",
         )
 
 

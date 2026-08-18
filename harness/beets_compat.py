@@ -448,12 +448,19 @@ class _DiscogsApiCoverArtResponse(msgspec.Struct):
 def _release_data_dict(result: object) -> dict[str, object]:
     """Narrow ``result.data`` to a string-keyed dict, gracefully.
 
-    Mirrors ``lib.json_narrow.json_dict``'s degrade-to-``{}`` behaviour for
-    non-dict/non-string-keyed input, reimplemented locally with ``msgspec``
-    (already a hard dependency of this module) rather than imported from
-    ``lib`` -- harness/ is not guaranteed lib/ on sys.path
-    (cratedigger.service's own wrapper does not export PYTHONPATH; issue
-    #1200 review F1).
+    Reimplemented locally with ``msgspec`` (already a hard dependency of
+    this module) rather than imported from ``lib`` -- harness/ is not
+    guaranteed lib/ on sys.path (cratedigger.service's own wrapper does
+    not export PYTHONPATH; issue #1200 review F1).
+
+    Matches ``lib.json_narrow.json_dict``'s degrade-to-``{}`` behaviour
+    for non-dict input, but is deliberately MORE graceful for the
+    non-string-keyed case (issue #1200 review N3): ``json_dict`` calls
+    ``msgspec.convert`` uncaught there and RAISES ``ValidationError``,
+    while this helper catches that same error and also degrades to
+    ``{}``. The two are not interchangeable -- the wider degrade is
+    correct here because this is a fail-soft path (a malformed Discogs
+    API payload must never raise into the caller).
     """
     data = getattr(result, "data", None)
     if not isinstance(data, dict):
@@ -493,10 +500,22 @@ def _real_discogs_cover_art_url(release_id: object, user_token: str) -> str | No
         # (429) window otherwise fails soft to "no art" with nothing to
         # diagnose from -- this is the only signal an operator gets that
         # the fallback is silently degrading imports.
+        #
+        # NEVER interpolate the exception object itself (issue #1200
+        # review N1, a confirmed secret-disclosure defect): requests'
+        # header validator raises InvalidHeader -- a RequestException, so
+        # it IS caught here -- with the offending header VALUE embedded in
+        # its message, and this call's Authorization header carries the
+        # Discogs token. lib/beets.py deliberately dumps the harness's
+        # full stderr to journald (truncating loses the exception line),
+        # so `%s` on `exc` would land the token in the system journal. Log
+        # only structural, never-secret fields: the exception TYPE and,
+        # where present, the HTTP status code.
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
         _logger.warning(
             "Discogs cover-art fallback failed soft for release %r: "
-            "%s: %s",
-            release_id, type(exc).__name__, exc,
+            "%s (status=%r)",
+            release_id, type(exc).__name__, status_code,
         )
         return None
     if not payload.images:
