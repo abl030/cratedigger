@@ -8,13 +8,16 @@ another request" before claiming ownership (#1178: requests 8953/8954,
 layers in ``lib.enqueue._cross_request_conflict_ids``, consulted in this
 order:
 
-1. **Cross-cycle** (checked FIRST, read-only): ``lib.download_ownership.
-   DownloadOwnershipWriter.get_conflicting_transfer_request_ids`` reads
-   the transfer ledger for a PRIOR cycle's accepted ownership whose owner
-   is CURRENTLY ``'downloading'`` on its CURRENT attempt -- never
-   ``'processing'`` (CLAUDE.md critical invariant 10), and never a stale
-   abandoned attempt (review F2: an owner's OWN earlier, superseded
-   attempt must not block a sibling on that attempt's keys).
+1. **Cross-cycle** (checked FIRST, read-only): a callable bound to ONE
+   ``lib.download_ownership.DownloadOwnershipWriter.
+   open_conflict_check_session`` handle -- one per calling
+   ``try_enqueue`` / ``try_multi_enqueue`` invocation, never per
+   candidate (review F7) -- reads the transfer ledger for a PRIOR
+   cycle's accepted ownership whose owner is CURRENTLY ``'downloading'``
+   on its CURRENT attempt -- never ``'processing'`` (CLAUDE.md critical
+   invariant 10), and never a stale abandoned attempt (review F2: an
+   owner's OWN earlier, superseded attempt must not block a sibling on
+   that attempt's keys).
 2. **Same-cycle** (checked SECOND, only once the cross-cycle layer is
    clear): ``ctx.claimed_queue_keys_registry``
    (``lib.enqueue.ClaimedQueueKeysRegistry``, one instance per cycle),
@@ -202,8 +205,14 @@ def _run_world(world: GuardWorld) -> dict[tuple[int, int], bool]:
                     filename=fn, id="", file_dir="", username=un, size=0)
                 for un, fn in attempt.keys
             ]
-            conflicting = _cross_request_conflict_ids(
-                files, attempt.request_id, ctx)
+            # One session per attempt, mirroring one try_enqueue /
+            # try_multi_enqueue invocation's cross-cycle DB handle
+            # (issue #1178 PR2 review F7).
+            with writer.open_conflict_check_session() as check_cross_cycle:
+                conflicting = _cross_request_conflict_ids(
+                    files, attempt.request_id, ctx,
+                    check_cross_cycle=check_cross_cycle,
+                )
             won = not conflicting
             proceeded[(cycle_idx, attempt.request_id)] = won
             if won:

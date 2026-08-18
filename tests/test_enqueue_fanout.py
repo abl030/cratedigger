@@ -557,6 +557,7 @@ class TestFindDownloadWorkerContext(unittest.TestCase):
             user_upload_speed={"fast": 100},
             search_dir_audio_count={"fast": {"dirA": 1}},
             cooled_down_users={"cooled"},
+            claimed_queue_keys_registry=ClaimedQueueKeysRegistry(),
         )
         album = MagicMock(id=1, db_request_id=1)
 
@@ -580,6 +581,17 @@ class TestFindDownloadWorkerContext(unittest.TestCase):
         self.assertEqual(worker_ctx.denied_users_cache[1], {"blocked"})
         self.assertIs(worker_ctx.folder_cache, ctx.folder_cache)
         self.assertIs(worker_ctx.browse_coordinator, ctx.browse_coordinator)
+        # #1178 PR2 review F1: the same-cycle registry MUST be the same
+        # object, not a fresh one per worker -- a fresh registry per
+        # worker silently degrades the guard to cross-cycle-only, which
+        # does not reliably catch a genuine same-cycle collision (neither
+        # sibling has an accepted ledger row yet when the other's guard
+        # runs).
+        self.assertIsNotNone(ctx.claimed_queue_keys_registry)
+        self.assertIs(
+            worker_ctx.claimed_queue_keys_registry,
+            ctx.claimed_queue_keys_registry,
+        )
 
         # After the prefetch, additional ``get_album_tracks`` calls must
         # not reach back to the source. Reset the call counter so we
@@ -2863,6 +2875,206 @@ class TestCrossRequestEnqueueGuard(unittest.TestCase):
         self.assertFalse(attempt2.enqueue_failed)
         rows = db.record_transfer_enqueue_calls
         self.assertEqual({r.request_id for r in rows}, {2})
+
+    def test_peer_offline_release_frees_sibling(self):
+        """#1178 PR2 review F2, site: try_enqueue peer-offline. Request
+        1's guard clears and registers the shared key, then the matched
+        peer is found offline -- released. Request 2's IDENTICAL
+        candidate a moment later must reach ITS OWN peer-offline check
+        (not the cross-request guard), proving the registration was
+        released rather than left blocking an innocent sibling."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        db.seed_request(make_request_row(id=2, status="wanted"))
+        file_dir = "Music\\TheBun\\Album"
+        filenames = [f"{file_dir}\\01.flac"]
+        slskd, match = self._shared_candidate(file_dir, filenames)
+        slskd.users.set_status("TheBun", "Offline")
+        registry = ClaimedQueueKeysRegistry()
+        ctx1 = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=slskd, registry=registry)
+        ctx2 = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=slskd, registry=registry)
+        ctx2.current_album_cache[2] = _album_with_request(2)
+        results = {"TheBun": {"flac": [file_dir]}}
+
+        with self.assertLogs("cratedigger", level="INFO") as log_ctx, \
+             patch("lib.enqueue._fanout_browse_users", return_value=set()):
+            attempt1 = try_enqueue(
+                _make_tracks(), results, "flac", ctx1,
+                match_fn=_const_match(match),
+            )
+            attempt2 = try_enqueue(
+                _make_tracks(album_id=2), results, "flac", ctx2,
+                match_fn=_const_match(match),
+            )
+
+        self.assertFalse(attempt1.matched)
+        self.assertFalse(attempt2.matched)
+        peer_offline_lines = [
+            line for line in log_ctx.output
+            if "peer offline at enqueue: skipping TheBun" in line
+        ]
+        conflict_lines = [
+            line for line in log_ctx.output
+            if "cross-request enqueue conflict" in line
+        ]
+        # Both requests must independently reach the peer-offline check --
+        # a leftover (unreleased) registration would instead route request
+        # 2 into the cross-request-conflict branch and it would never
+        # reach its own offline probe.
+        self.assertEqual(len(peer_offline_lines), 2, log_ctx.output)
+        self.assertEqual(conflict_lines, [], log_ctx.output)
+
+    def test_verified_no_acceptance_release_frees_sibling(self):
+        """#1178 PR2 review F2, site: try_enqueue verified_no_acceptance.
+        Request 1 claims, then slskd rejects the enqueue and verification
+        confirms nothing landed -- the claim resets to 'wanted' and the
+        registry claim must be released too. Request 2's IDENTICAL
+        candidate must reach its OWN claim+enqueue attempt -- proven by
+        its own verified_no_acceptance download_log row (the mocked
+        ``slskd_enqueue_with_outcome`` bypasses the real write-ahead
+        ledger insert, so that signal isn't available here) -- not be
+        blocked by request 1's leftover registration."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        db.seed_request(make_request_row(id=2, status="wanted"))
+        registry = ClaimedQueueKeysRegistry()
+        ctx1 = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=FakeSlskdAPI(downloads=[]),
+            registry=registry)
+        ctx2 = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=FakeSlskdAPI(downloads=[]),
+            registry=registry)
+        ctx2.current_album_cache[2] = _album_with_request(2)
+        users = ["pooyork"]
+        results = _make_results(users)
+        file_dir = "musiclibrary\\Mercury Rev\\Deserter's Songs"
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [{"filename": "01.flac", "size": 123}],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(status="rejected"),
+             ):
+            attempt1 = try_enqueue(
+                _make_tracks(), results, "flac", ctx1,
+                match_fn=_const_match(match),
+            )
+            try_enqueue(
+                _make_tracks(album_id=2), results, "flac", ctx2,
+                match_fn=_const_match(match),
+            )
+
+        self.assertFalse(attempt1.matched)
+        self.assertEqual(db.request(1)["status"], "wanted")
+        # request 2 must have reached its OWN claim+enqueue attempt --
+        # proven by its own verified_no_acceptance download_log row (the
+        # real write-ahead ledger insert lives inside the mocked
+        # slskd_enqueue_with_outcome, so it never runs in this fixture) --
+        # rather than being blocked by request 1's leftover registration.
+        self.assertIn(2, {log.request_id for log in db.download_logs})
+
+    def test_multi_disc_claim_refused_release_frees_sibling(self):
+        """#1178 PR2 review F2, site: try_multi_enqueue claim-refused.
+        Same shape as the try_enqueue pin above, through the
+        try_multi_enqueue call site."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="unsearchable"))
+        db.seed_request(make_request_row(id=2, status="wanted"))
+        file_dir = "Music\\TheBun\\Album"
+        filenames = [f"{file_dir}\\01.flac"]
+        slskd, match = self._shared_candidate(file_dir, filenames)
+        registry = ClaimedQueueKeysRegistry()
+        ctx1 = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=slskd, registry=registry)
+        ctx2 = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=slskd, registry=registry)
+        ctx2.current_album_cache[2] = _album_with_request(2)
+        results = {"TheBun": {"flac": [file_dir]}}
+        release = MagicMock()
+        release.media = [MagicMock(medium_number=1)]
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("time.sleep"):
+            attempt1 = try_multi_enqueue(
+                release, _make_tracks(album_id=1), results, "flac", ctx1,
+                match_fn=_const_match(match),
+            )
+            attempt2 = try_multi_enqueue(
+                release, _make_tracks(album_id=2), results, "flac", ctx2,
+                match_fn=_const_match(match),
+            )
+
+        self.assertFalse(attempt1.matched)
+        self.assertTrue(attempt1.enqueue_failed)
+        self.assertEqual(db.request(1)["status"], "unsearchable")
+        self.assertTrue(attempt2.matched)
+        self.assertFalse(attempt2.enqueue_failed)
+        rows = db.record_transfer_enqueue_calls
+        self.assertEqual({r.request_id for r in rows}, {2})
+
+    def test_multi_disc_verified_no_acceptance_release_frees_sibling(self):
+        """#1178 PR2 review F2, site: try_multi_enqueue
+        verified_no_acceptance -- same trigger as the try_enqueue pin
+        above, through the try_multi_enqueue call site, but proven via
+        request 2's status_history transition instead of a download_log
+        row (try_multi_enqueue writes no download_log on this outcome,
+        unlike try_enqueue)."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        db.seed_request(make_request_row(id=2, status="wanted"))
+        file_dir = "Music\\TheBun\\Album"
+        filenames = [f"{file_dir}\\01.flac"]
+        _slskd, match = self._shared_candidate(file_dir, filenames)
+        registry = ClaimedQueueKeysRegistry()
+        ctx1 = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=FakeSlskdAPI(downloads=[]),
+            registry=registry)
+        ctx2 = _ctx_with_download_ownership(
+            cfg=cfg, db=db, slskd=FakeSlskdAPI(downloads=[]),
+            registry=registry)
+        ctx2.current_album_cache[2] = _album_with_request(2)
+        results = {"TheBun": {"flac": [file_dir]}}
+        release = MagicMock()
+        release.media = [MagicMock(medium_number=1)]
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome",
+                 return_value=SlskdEnqueueOutcome(status="rejected"),
+             ):
+            attempt1 = try_multi_enqueue(
+                release, _make_tracks(album_id=1), results, "flac", ctx1,
+                match_fn=_const_match(match),
+            )
+            try_multi_enqueue(
+                release, _make_tracks(album_id=2), results, "flac", ctx2,
+                match_fn=_const_match(match),
+            )
+
+        self.assertFalse(attempt1.matched)
+        self.assertTrue(attempt1.enqueue_failed)
+        self.assertEqual(db.request(1)["status"], "wanted")
+        # request 2 must have reached its OWN claim (transiently flipping
+        # to 'downloading' before verified_no_acceptance resets it back)
+        # -- try_multi_enqueue writes no download_log on this outcome
+        # (unlike try_enqueue), so the status_history transition is the
+        # only observable proof it wasn't blocked by request 1's leftover
+        # registration.
+        self.assertIn((2, "downloading"), db.status_history)
 
 
 class TestCrossRequestEnqueueGuardCrossCycle(unittest.TestCase):

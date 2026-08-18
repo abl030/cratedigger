@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from lib import transitions
@@ -216,24 +217,36 @@ class DownloadOwnershipWriter:
         finally:
             self._close_db(db)
 
-    def get_conflicting_transfer_request_ids(
+    @contextmanager
+    def open_conflict_check_session(
         self,
-        keys: Sequence[tuple[str, str]],
-        exclude_request_id: int,
-    ) -> set[int]:
-        """Cross-cycle read for the #1178 cross-request enqueue guard,
-        using a fresh DB handle -- same worker-safety rationale as every
-        other method here: find_download workers cannot reach the owner
-        thread's cached ``pipeline_db_source`` connection
-        (``lib.enqueue._WorkerPipelineDBSource`` raises on access), so
-        this read goes through the same per-operation handle the claim
-        writes already use.
+    ) -> Generator[Callable[[Sequence[tuple[str, str]], int], set[int]]]:
+        """Open ONE fresh DB handle covering every cross-cycle guard
+        check in one ``try_enqueue`` / ``try_multi_enqueue`` invocation
+        (issue #1178 PR2 review F7).
+
+        The guard runs before the peer-online probe, for every matched
+        candidate, across a worker pool sized to the whole cycle --
+        opening a fresh connection per CANDIDATE (as an earlier version
+        of this method did) risks a transient connection storm at
+        post-browse convergence. Sharing one handle across every guard
+        check in the invocation is safe because ``try_enqueue`` /
+        ``try_multi_enqueue`` each run on a single worker thread for
+        their whole call -- same worker-safety rationale as every other
+        method here (find_download workers cannot reach the owner
+        thread's cached ``pipeline_db_source`` connection;
+        ``lib.enqueue._WorkerPipelineDBSource`` raises on access), just
+        opened once per call instead of once per operation.
         """
-        if not keys:
-            return set()
         db = self._open_db()
         try:
-            return db.get_conflicting_transfer_request_ids(
-                keys, exclude_request_id)
+            def check(
+                keys: Sequence[tuple[str, str]], exclude_request_id: int,
+            ) -> set[int]:
+                if not keys:
+                    return set()
+                return db.get_conflicting_transfer_request_ids(
+                    keys, exclude_request_id)
+            yield check
         finally:
             self._close_db(db)

@@ -243,7 +243,29 @@ class _TransferLedgerMixin(_PipelineDBBase):
         ``active_download_state`` fail CLOSED: every accepted row for
         that 'downloading' owner counts as in-scope (blocks) rather than
         none of them (would silently stop protecting a request whose
-        state we can't currently read).
+        state we can't currently read). A syntactically present but
+        malformed ``enqueued_at`` string (never producible today --
+        ``lib/download.py``'s ``build_active_download_state`` always
+        writes ``datetime.now(UTC).isoformat()``) would instead raise
+        ``InvalidDatetimeFormat`` at the ``::timestamptz`` cast, failing
+        the whole cross-cycle check rather than either arm of the
+        deliberate NULL fail-closed above.
+
+        **Clock assumption (#1178 PR2 review F5).** The boundary compares
+        an application-clock witness (``enqueued_at``, stamped by this
+        host's Python process) to PostgreSQL-clock ledger timestamps
+        (``l.enqueued_at``, stamped by ``DEFAULT NOW()``). This repo
+        deploys both on the SAME host, and the witness is captured
+        strictly BEFORE the ledger write within one attempt (see
+        ``lib/enqueue.py``'s comment on ``claim.enqueued_at``), so a real
+        clock skew has to exceed that same-host, same-attempt margin to
+        matter. ``ActiveDownloadState`` does not carry the ledger's own
+        ``attempt_fingerprint`` (an exact, clock-free alternative), so
+        this predicate is not exact: a skew of that size fails OPEN --
+        i.e. an owner's OLD attempt could be miscounted as current and
+        block a sibling one cycle longer than it should. It never fails
+        the other direction (a current attempt being wrongly excluded),
+        since ``COALESCE`` already covers the missing-witness case.
         """
         if not keys:
             return set()

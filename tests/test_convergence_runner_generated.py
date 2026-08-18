@@ -205,6 +205,52 @@ class TestMainConvergenceWindows(unittest.TestCase):
         self.assertLess(end_of_cycle_line, summary_lines[0])
 
 
+class TestMainContextWiring(unittest.TestCase):
+    """#1178 PR2 review F1 (mutant b): a bounded AST parse of
+    ``cratedigger.main`` -- the same technique as
+    ``TestMainConvergenceWindows`` above, since ``main()`` needs a live DB
+    / slskd client to actually run -- pinning that the per-cycle
+    ``_module_ctx`` construction wires a real
+    ``lib.enqueue.ClaimedQueueKeysRegistry()`` into
+    ``claimed_queue_keys_registry``. Deleting the kwarg (or the whole
+    construction) would silently degrade the cross-request enqueue guard
+    to its cross-cycle-only layer, which does not reliably catch the
+    actual #1178 same-cycle collision: neither sibling request has an
+    accepted ledger row yet at the moment the other's guard runs."""
+
+    def test_module_ctx_wires_a_claimed_queue_keys_registry(self):
+        tree = ast.parse(inspect.getsource(cratedigger.main))
+        matches: list[ast.keyword] = []
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "_module_ctx"
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "CratediggerContext"
+            ):
+                continue
+            for kw in node.value.keywords:
+                if kw.arg == "claimed_queue_keys_registry":
+                    matches.append(kw)
+
+        self.assertEqual(
+            len(matches), 1,
+            "expected exactly one _module_ctx = CratediggerContext(...) "
+            "assignment carrying a claimed_queue_keys_registry= kwarg",
+        )
+        value = matches[0].value
+        self.assertTrue(
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "ClaimedQueueKeysRegistry",
+            f"claimed_queue_keys_registry= must construct a real "
+            f"ClaimedQueueKeysRegistry(), got {ast.dump(value)}",
+        )
+
+
 class TestGeneratedConvergenceIsolation(unittest.TestCase):
     @given(raises=st.lists(st.booleans(), min_size=0, max_size=12))
     def test_arbitrary_raising_steps_never_abort_the_registry(self, raises):

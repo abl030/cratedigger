@@ -6,7 +6,8 @@ import copy
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -60,6 +61,15 @@ MatchFn = Callable[
 ``try_enqueue`` / ``try_multi_enqueue``. Production passes
 :func:`lib.matching.check_for_match`; tests can pass a stub callable that
 controls per-user match outcomes instead of patching the module attribute."""
+
+ReleaseLike = Any
+"""Type of ``try_multi_enqueue``'s ``release`` parameter (a MusicBrainz-
+mirror-shaped release with a ``.media`` list of discs) -- ``Any`` because
+CLAUDE.md's "no adapter code between MB and Discogs" invariant means this
+crosses both source shapes. Named so ``try_multi_enqueue`` /
+``_try_multi_enqueue_impl`` share ONE ``Any`` token (issue #765 typing
+ratchet) instead of the wrapper-plus-impl split duplicating a bare ``Any``
+annotation."""
 
 _ClaimResolutionStatus = Literal[
     "accepted",
@@ -515,18 +525,22 @@ def _state_json_for_entry(
 # the whole album from scratch.
 #
 # Cross-cycle layer FIRST: lib.download_ownership.DownloadOwnershipWriter's
-# get_conflicting_transfer_request_ids reads the transfer ledger for a
-# PRIOR cycle's accepted ownership whose owner is still 'downloading' AND
-# still on its CURRENT attempt (scoped by active_download_state's
-# enqueued_at witness -- see lib/pipeline_db/transfer_ledger.py's docstring
-# for why an abandoned earlier attempt must never block; PR2 review F2). A
-# read-only check with no side effect, so a conflict here reports without
-# ever touching the same-cycle registry below. Both call sites (below)
-# invoke this OUTSIDE their own try/except (which wraps only the
-# enqueue-outcome resolution, AFTER a successful claim), so a DB error
-# here is not swallowed as "this one candidate failed" -- it propagates
-# uncaught through the whole find_download call for the album,
-# ultimately caught at the find-download worker boundary
+# open_conflict_check_session opens ONE fresh DB handle per try_enqueue /
+# try_multi_enqueue invocation (never per candidate -- PR2 review F7,
+# opening one per matched candidate across a whole cycle's worker pool
+# risked a connection storm at post-browse convergence) and reads the
+# transfer ledger for a PRIOR cycle's accepted ownership whose owner is
+# still 'downloading' AND still on its CURRENT attempt (scoped by
+# active_download_state's enqueued_at witness -- see
+# lib/pipeline_db/transfer_ledger.py's docstring for why an abandoned
+# earlier attempt must never block; PR2 review F2). A read-only check with
+# no side effect, so a conflict here reports without ever touching the
+# same-cycle registry below. Neither call site's own try/except (which
+# wraps only the enqueue-outcome resolution, AFTER a successful claim)
+# covers this session or its queries, so a DB error here (whether opening
+# the session or running a query) is not swallowed as "this one candidate
+# failed" -- it propagates uncaught through the whole find_download call
+# for the album, ultimately caught at the find-download worker boundary
 # (_apply_find_future) and reported as an "error" outcome for the WHOLE
 # attempt this cycle. That is still fail CLOSED for what this guard
 # exists to prevent: by construction, no earlier candidate in the same
@@ -644,15 +658,51 @@ class ClaimedQueueKeysRegistry:
                     del self._keys[key]
 
 
+ConflictChecker = Callable[[Sequence[tuple[str, str]], int], "set[int]"]
+"""Bound to ONE open cross-cycle DB handle for the life of a single
+``try_enqueue`` / ``try_multi_enqueue`` invocation -- see
+``_cross_cycle_conflict_checker`` and
+``DownloadOwnershipWriter.open_conflict_check_session`` (issue #1178 PR2
+review F7)."""
+
+
+@contextmanager
+def _cross_cycle_conflict_checker(
+    ctx: CratediggerContext,
+) -> Generator[ConflictChecker | None]:
+    """Open ONE cross-cycle DB session covering every guard check in one
+    ``try_enqueue`` / ``try_multi_enqueue`` invocation (issue #1178 PR2
+    review F7) -- opening a fresh connection per MATCHED CANDIDATE (the
+    guard runs before the peer-online probe, for every candidate, across
+    a worker pool sized to the whole cycle) risks a transient connection
+    storm at post-browse convergence. Safe to share one handle across
+    every guard check in the invocation because ``try_enqueue`` /
+    ``try_multi_enqueue`` each run on a single worker thread for their
+    whole call. Yields ``None`` (the same "untracked" degrade
+    ``_cross_request_conflict_ids`` already documents) when
+    ``ctx.download_ownership`` is not wired.
+    """
+    writer = getattr(ctx, "download_ownership", None)
+    if writer is None:
+        yield None
+        return
+    with writer.open_conflict_check_session() as check:
+        yield check
+
+
 def _cross_request_conflict_ids(
     files: list[DownloadFile],
     request_id: int | None,
     ctx: CratediggerContext,
+    *,
+    check_cross_cycle: ConflictChecker | None,
 ) -> set[int]:
     """Return the OTHER request id(s) already holding any of ``files``'s
-    ``(username, filename)`` queue keys -- cross-cycle via the transfer
-    ledger, then (only when that is clear) same-cycle via
-    ``ctx.claimed_queue_keys_registry`` (issue #1178 PR2).
+    ``(username, filename)`` queue keys -- cross-cycle via
+    ``check_cross_cycle`` (one DB handle shared across the whole calling
+    ``try_enqueue`` / ``try_multi_enqueue`` invocation -- see
+    ``_cross_cycle_conflict_checker``), then (only when that is clear)
+    same-cycle via ``ctx.claimed_queue_keys_registry`` (issue #1178 PR2).
 
     Called BEFORE ``_claim_initial_download_ownership`` at every
     ``try_enqueue`` / ``try_multi_enqueue`` candidate. A non-empty result
@@ -661,30 +711,28 @@ def _cross_request_conflict_ids(
     (never a failure outcome; the request stays on normal cadence).
 
     ``request_id is None`` (no pipeline-DB-backed request) or an empty
-    ``files`` list never conflicts -- there is nothing to protect. When
-    ``ctx.download_ownership`` is not wired (the same "untracked" fallback
-    ``_claim_initial_download_ownership`` already recognises), only the
-    same-cycle registry layer runs -- there is no worker-safe DB handle to
-    consult for the cross-cycle layer; likewise when
-    ``ctx.claimed_queue_keys_registry`` itself is not wired, only the
-    cross-cycle layer runs. The cross-cycle check runs FIRST and has no
-    side effect, so this ordering never registers a key in the same-cycle
-    registry for an attempt the cross-cycle layer is about to veto anyway
-    -- see the module comment above for why that ordering matters.
+    ``files`` list never conflicts -- there is nothing to protect.
+    ``check_cross_cycle is None`` (the same "untracked" fallback
+    ``_claim_initial_download_ownership`` already recognises, when
+    ``ctx.download_ownership`` is not wired) or
+    ``ctx.claimed_queue_keys_registry`` itself not wired independently
+    degrades each respective layer to a no-op. The cross-cycle check runs
+    FIRST and has no side effect, so this ordering never registers a key
+    in the same-cycle registry for an attempt the cross-cycle layer is
+    about to veto anyway -- see the module comment above for why that
+    ordering matters.
     """
     if request_id is None or not files:
         return set()
     keys = [(f.username, f.filename) for f in files]
-    writer = getattr(ctx, "download_ownership", None)
-    if writer is not None:
-        cross_cycle_conflict = writer.get_conflicting_transfer_request_ids(
-            keys, request_id)
+    if check_cross_cycle is not None:
+        cross_cycle_conflict = check_cross_cycle(keys, request_id)
         if cross_cycle_conflict:
             return cross_cycle_conflict
-    registry = getattr(ctx, "claimed_queue_keys_registry", None)
-    if registry is None:
+    if ctx.claimed_queue_keys_registry is None:
         return set()
-    return registry.register_or_conflicting_owners(keys, request_id)
+    return ctx.claimed_queue_keys_registry.register_or_conflicting_owners(
+        keys, request_id)
 
 
 def _release_claimed_queue_keys(
@@ -698,11 +746,10 @@ def _release_claimed_queue_keys(
     """
     if request_id is None or not files:
         return
-    registry = getattr(ctx, "claimed_queue_keys_registry", None)
-    if registry is None:
+    if ctx.claimed_queue_keys_registry is None:
         return
     keys = [(f.username, f.filename) for f in files]
-    registry.release(keys, request_id)
+    ctx.claimed_queue_keys_registry.release(keys, request_id)
 
 
 def _claim_initial_download_ownership(
@@ -1287,7 +1334,29 @@ def try_enqueue(
     parallel, then iterates matching against the warm cache. Returns on
     the first successful enqueue; falls through to the next user (and
     next wave) on enqueue failure.
+
+    Thin resource-management wrapper: opens ONE cross-cycle DB session
+    covering every guard check this call makes, closed on every exit path
+    (issue #1178 PR2 review F7) -- the actual matching/claim/enqueue work
+    is ``_try_enqueue_impl``, unchanged in shape, just taking the open
+    session as a parameter instead of opening its own per guard check.
     """
+    with _cross_cycle_conflict_checker(ctx) as check_cross_cycle:
+        return _try_enqueue_impl(
+            all_tracks, results, allowed_filetype, ctx,
+            check_cross_cycle, match_fn=match_fn,
+        )
+
+
+def _try_enqueue_impl(
+    all_tracks: Sequence[TrackRecord],
+    results: dict[str, dict[str, list[str]]],
+    allowed_filetype: str,
+    ctx: CratediggerContext,
+    check_cross_cycle: ConflictChecker | None,
+    *,
+    match_fn: MatchFn,
+) -> EnqueueAttempt:
     album_id = all_tracks[0]["albumId"]
     album = get_album_by_id(album_id, ctx)
     album_name = album.title
@@ -1335,6 +1404,7 @@ def try_enqueue(
         request_id = _album_request_id(album)
         conflicting_requests = _cross_request_conflict_ids(
             planned_files, request_id, ctx,
+            check_cross_cycle=check_cross_cycle,
         )
         if conflicting_requests:
             logger.info(
@@ -1492,7 +1562,7 @@ def try_enqueue(
 
 
 def try_multi_enqueue(
-    release: Any,
+    release: ReleaseLike,
     all_tracks: Sequence[TrackRecord],
     results: dict[str, dict[str, list[str]]],
     allowed_filetype: str,
@@ -1515,7 +1585,28 @@ def try_multi_enqueue(
     again on normal cadence. This is accepted, documented behaviour:
     multi-disc candidates are already scarce, and per-peer fallback here
     would multiply the disc-matching cost combinatorially.
+
+    Thin resource-management wrapper, same pattern as ``try_enqueue``: a
+    single cross-cycle DB session covers this whole call's guard check(s)
+    (issue #1178 PR2 review F7); the actual work is ``_try_multi_enqueue_impl``.
     """
+    with _cross_cycle_conflict_checker(ctx) as check_cross_cycle:
+        return _try_multi_enqueue_impl(
+            release, all_tracks, results, allowed_filetype, ctx,
+            check_cross_cycle, match_fn=match_fn,
+        )
+
+
+def _try_multi_enqueue_impl(
+    release: ReleaseLike,
+    all_tracks: Sequence[TrackRecord],
+    results: dict[str, dict[str, list[str]]],
+    allowed_filetype: str,
+    ctx: CratediggerContext,
+    check_cross_cycle: ConflictChecker | None,
+    *,
+    match_fn: MatchFn,
+) -> EnqueueAttempt:
     split_release: list[dict[str, Any]] = []
     for media in release.media:
         disk_tracks: list[TrackRecord] = [
@@ -1682,6 +1773,7 @@ def try_multi_enqueue(
             )
         conflicting_requests = _cross_request_conflict_ids(
             planned_downloads, _album_request_id(album), ctx,
+            check_cross_cycle=check_cross_cycle,
         )
         if conflicting_requests:
             logger.warning(

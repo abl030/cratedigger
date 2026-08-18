@@ -690,11 +690,13 @@ ownership, so both requests would accept the same files, share one
 the loser saw its files vanish mid-import (`event_path_gone_from_disk`) and
 re-downloaded the whole album. `lib.enqueue._cross_request_conflict_ids` now
 runs before every `try_enqueue` / `try_multi_enqueue` claim: a cross-cycle
-check first (`PipelineDB.get_conflicting_transfer_request_ids` /
-`DownloadOwnershipWriter.get_conflicting_transfer_request_ids`, a read-only
-join of this table to `album_requests` requiring an accepted row whose
-owner is *currently* `downloading` — never `processing`, per the never-add-
-processing-to-a-transfer-status-set invariant), then a cycle-scoped registry
+check first (`PipelineDB.get_conflicting_transfer_request_ids`, called
+through ONE `DownloadOwnershipWriter.open_conflict_check_session` handle
+shared across the whole calling invocation — never opened per candidate,
+see below — a read-only join of this table to `album_requests` requiring
+an accepted row whose owner is *currently* `downloading` — never
+`processing`, per the never-add-processing-to-a-transfer-status-set
+invariant), then a cycle-scoped registry
 (`lib.enqueue.ClaimedQueueKeysRegistry`, one instance per cycle, threaded
 into every find-download worker context by reference the same way
 `ctx.download_ownership` already is — not a module global; there is no
@@ -721,14 +723,31 @@ A `replaced` owner (Replace-lineage attempt sharing) or one that has already
 moved on (`wanted`/`imported`) never blocks; the same request re-claiming its
 own keys (poll-loop retries) never self-blocks. A guard hit skips the
 candidate exactly like the peer-cooldown/denylist skip — no claim, no
-enqueue, no new backoff, the request stays on normal cadence; a registered
-same-cycle claim that is then refused (the request's row no longer matches
-the expected `wanted` CAS) or verified to have landed nothing is released, so
-it cannot keep blocking an innocent sibling for the rest of the cycle. A
-guard skip is logged like an ordinary `no_match`, which could in theory feed
-the unfindable-detection signal — but the blocking window this guard can
-ever produce is bounded by a sibling's single in-flight download attempt,
-far shorter than the unfindable horizon, so this is not treated as a defect.
+enqueue, no new backoff, the request stays on normal cadence. A registered
+same-cycle claim is released — so it cannot keep blocking an innocent sibling
+for the rest of the cycle — at three points once the guard has already
+cleared for that candidate: the matched peer turns out to be offline
+(checked immediately after the guard, per the ordering below), the
+ownership claim itself is refused (the request's row no longer matches the
+expected `wanted` CAS), or the enqueue outcome resolves to
+`verified_no_acceptance` (the claim was reset and confirmed no transfer
+landed).
+
+The guard is checked BEFORE the peer-online probe in `try_enqueue`, so a
+conflicted candidate never pays for a network round trip it would only throw
+away; the cross-cycle DB session is opened ONCE per `try_enqueue` /
+`try_multi_enqueue` call (never per candidate — a fresh connection per
+matched candidate, across a worker pool sized to the whole cycle, risked a
+transient connection storm at post-browse convergence) and is safe to share
+because each call runs on a single worker thread for its whole invocation.
+
+A guard skip is logged like an ordinary `no_match`. `unfindable_detection`'s
+branch 4 signal only fires after `REQUIRED_ZERO_FIND_CYCLES` (3) consecutive
+zero-find plan cycles for the SAME request — a single skipped cycle cannot
+trip it — and a guard skip can only recur across cycles while the blocking
+sibling remains `status='downloading'` on the contested keys; once that
+sibling's attempt resolves (imported, replaced, or reset to `wanted`), the
+skip stops recurring. This is not treated as a defect.
 
 ## Persisted search plans (migration 014)
 

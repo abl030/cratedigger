@@ -16731,7 +16731,12 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
 
     def test_get_conflicting_transfer_request_ids_matches_fake(self):
         """The fake must mirror the real join's semantics exactly
-        (test-fidelity.md Rule A pattern applied to a read method)."""
+        (test-fidelity.md Rule A pattern applied to a read method) --
+        including the attempt-boundary predicate (review F6): without a
+        scoped owner carrying BOTH an old (excluded) and current
+        (included) attempt row, every case above takes the
+        COALESCE-null fallback arm and the boundary predicate itself is
+        never exercised on either side."""
         from tests.fakes import FakePipelineDB
 
         fake = FakePipelineDB()
@@ -16760,11 +16765,77 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                 db.confirm_transfer_enqueue(username, "a.flac")
             keys.append((username, "a.flac"))
 
+        # F6: a scoped owner carrying BOTH an old (excluded) attempt row
+        # and a current (included) attempt row, seeded identically on
+        # both the real and fake sides so parity is proven AT the
+        # boundary, not just at the null fallback.
+        scoped_owner = self._seed_request("downloading")
+        fake.seed_request({
+            "id": scoped_owner, "status": "downloading",
+            "artist_name": "Artist", "album_title": "Album", "year": None,
+        })
+        old_username, old_filename = "owner-old-attempt", "old.flac"
+        current_username, current_filename = (
+            "owner-current-attempt", "current.flac")
+        for db in (self.db, fake):
+            db.record_transfer_enqueue([
+                TransferLedgerRow(
+                    request_id=scoped_owner, username=old_username,
+                    filename=old_filename),
+            ])
+            db.confirm_transfer_enqueue(old_username, old_filename)
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = "
+            "NOW() - INTERVAL '30 days' "
+            "WHERE request_id = %s AND username = %s",
+            (scoped_owner, old_username),
+        )
+        old_fake_id = next(
+            fid for fid, r in fake._transfer_ledger.items()
+            if r.request_id == scoped_owner and r.username == old_username)
+        fake._transfer_ledger[old_fake_id].enqueued_at = (
+            datetime.now(UTC) - timedelta(days=30))
+
+        current_state = {
+            "filetype": "flac", "enqueued_at": datetime.now(UTC).isoformat(),
+            "files": [],
+        }
+        self.db._execute(
+            "UPDATE album_requests SET active_download_state = %s::jsonb "
+            "WHERE id = %s",
+            (json.dumps(current_state), scoped_owner),
+        )
+        fake.request(scoped_owner)["active_download_state"] = current_state
+        for db in (self.db, fake):
+            db.record_transfer_enqueue([
+                TransferLedgerRow(
+                    request_id=scoped_owner, username=current_username,
+                    filename=current_filename),
+            ])
+            db.confirm_transfer_enqueue(current_username, current_filename)
+        keys.extend([
+            (old_username, old_filename),
+            (current_username, current_filename),
+        ])
+
         self.assertEqual(
             self.db.get_conflicting_transfer_request_ids(
                 keys, exclude_request_id=candidate),
             fake.get_conflicting_transfer_request_ids(
                 keys, exclude_request_id=candidate),
+        )
+        # The boundary must actually be earning its keep: the old key is
+        # excluded, the current key still blocks.
+        self.assertEqual(
+            self.db.get_conflicting_transfer_request_ids(
+                [(old_username, old_filename)], exclude_request_id=candidate),
+            set(),
+        )
+        self.assertEqual(
+            self.db.get_conflicting_transfer_request_ids(
+                [(current_username, current_filename)],
+                exclude_request_id=candidate),
+            {scoped_owner},
         )
 
 @requires_postgres
