@@ -9,7 +9,7 @@ No I/O, no database — fully unit-testable.
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
-from typing import Any, Self
+from typing import Any, Final, Self
 
 import msgspec
 
@@ -24,7 +24,7 @@ from lib.failure_presentation import (
 )
 from lib.import_evidence import HaveAnalysisFailure
 from lib.import_queue import ImportJob
-from lib.json_narrow import is_list_like, json_list
+from lib.json_narrow import is_list_like, is_str_object_dict, json_list
 from lib.quality import (
     SPECTRAL_TRANSCODE_GRADES,
     AacLatticeCapture,
@@ -347,6 +347,15 @@ class ClassifiedEntry(msgspec.Struct):
     # on every row predating the field.
     stage2_if_stage1_deferred: str | None = None
     stage2_if_stage1_deferred_verdict: str | None = None
+    # Issue #1178 (post-correction, "surface-not-reject"): the worst
+    # per-track length deviation on the SELECTED candidate's mapping,
+    # rendered at read time from the already-persisted
+    # ``validation_result`` JSONB when it exceeds
+    # ``TRACK_LENGTH_WARNING_BOUND_SECONDS``. Purely a surfacing fact —
+    # nothing about the pipeline changed to produce it, and nothing acts
+    # on it. ``None`` on every rejected/force/manual row and on any
+    # imported row whose mapping never exceeds the bound.
+    track_length_warning: str | None = None
 
 
 class ImportJobDisplay(msgspec.Struct, frozen=True):
@@ -602,6 +611,7 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         disambiguation_detail=disambig_detail,
         stage2_if_stage1_deferred=counterfactual[0],
         stage2_if_stage1_deferred_verdict=counterfactual[1],
+        track_length_warning=_track_length_warning(entry),
         bad_extensions=bad_extensions,
         wrong_match_triage_action=triage["action"],
         wrong_match_triage_summary=triage["summary"],
@@ -1454,6 +1464,105 @@ def _target_extra_track_count(entry: LogEntry) -> int | None:
         if count > 0:
             return count
     return None
+
+
+#: Render-time warning threshold — NOT a pipeline gate. Issue #1178's first
+#: attempt used this exact magnitude as a validation-time REJECT, and
+#: independent review found the design could not separate the defect from
+#: the legitimate hidden-track/appended-medley population: of the historical
+#: cohort whose worst per-track deviation exceeds 60s, 85% is a single
+#: offending pair (usually the last track) on an otherwise-correct rip —
+#: Damien Rice "Eskimo" deviates 653s, well ABOVE #1178's own 222.6s case,
+#: and is a correct rip. Every reject also permanently denylisted
+#: contributing peers, so a reject gate at this bound would have serially
+#: banned peers offering CORRECT rips of exactly the long-tail records this
+#: system exists to rescue.
+#:
+#: This constant instead gates a render-time WARNING on an ALREADY-IMPORTED
+#: card: nothing is denylisted, no scenario is renamed, no folder moves —
+#: the worst-deviation pair is surfaced for the operator to judge (Replace /
+#: Bad Rip / leave as-is), never decided by the pipeline. Because the
+#: derivation runs at render time over already-persisted evidence, it is
+#: retroactive: the full historical cohort becomes visible, not just future
+#: imports.
+TRACK_LENGTH_WARNING_BOUND_SECONDS: Final[float] = 60.0
+
+
+def _track_length_warning(entry: LogEntry) -> str | None:
+    """Worst per-track length deviation on the matched candidate, when it
+    exceeds :data:`TRACK_LENGTH_WARNING_BOUND_SECONDS`.
+
+    Only ever considered for ``entry.outcome == "success"`` — a rejected
+    candidate's mismatch is a different surface's concern (the folder is
+    still in Wrong Matches), and a force/manual import already had its
+    folder reviewed by the operator by hand before launch. This is not
+    merely a courtesy exclusion: verified live, 0 of the force_import-
+    outcome rows persist a candidate at all (the force lane's own
+    ``validation_result`` is written candidate-less), so there would be
+    nothing here to read from one even without the ``outcome`` gate.
+
+    Reads the ``validation_result`` candidate mapping the way
+    ``lib/beets.py::apply_candidate_scenario`` persists it on an accepted
+    ``strong_match`` (issue #1059's single candidate→scenario site) —
+    nothing new is measured, nothing is written back. A pair missing
+    either length (a CD pregap hidden track most commonly — MusicBrainz
+    frequently declares no length for it) is skipped: there is no
+    positive declared length to compare against.
+
+    Issue #1178: download_log 40061 selected a mapping pairing a 237.6s
+    local file against MB track 17's declared 15.0s at beets distance
+    0.1441 — legitimate by beets' own 30s track-length distance clamp,
+    invisible anywhere else in the pipeline.
+    """
+    if entry.outcome != "success":
+        return None
+    try:
+        envelope = decode_validation_envelope(entry.validation_result)
+    except (msgspec.ValidationError, json.JSONDecodeError):
+        return None
+    worst_deviation = 0.0
+    worst_item_path: str | None = None
+    worst_item_length = 0.0
+    worst_track_length = 0.0
+    worst_track_title: str | None = None
+    for candidate in envelope.candidates:
+        # Only the SELECTED candidate — a non-target sibling's mapping (a
+        # different pressing beets also considered and rejected) says
+        # nothing about the release this row actually matched.
+        if candidate.get("is_target") is not True:
+            continue
+        for pair in json_list(candidate.get("mapping")):
+            if not is_str_object_dict(pair):
+                continue
+            item = pair.get("item")
+            track = pair.get("track")
+            if not is_str_object_dict(item) or not is_str_object_dict(track):
+                continue
+            item_length = _as_float(item.get("length"))
+            track_length = _as_float(track.get("length"))
+            if item_length is None or track_length is None:
+                continue
+            if item_length <= 0 or track_length <= 0:
+                continue
+            deviation = abs(item_length - track_length)
+            if deviation <= worst_deviation:
+                continue
+            worst_deviation = deviation
+            worst_item_path = _as_str(item.get("path"))
+            worst_item_length = item_length
+            worst_track_length = track_length
+            worst_track_title = _as_str(track.get("title"))
+        # Exactly one candidate ever carries ``is_target``.
+        break
+    if worst_deviation <= TRACK_LENGTH_WARNING_BOUND_SECONDS:
+        return None
+    item_desc = f"'{worst_item_path}'" if worst_item_path else "a local file"
+    slot_desc = f" for '{worst_track_title}'" if worst_track_title else ""
+    return (
+        "Track length contradicts the matched release: "
+        f"{item_desc} is {worst_item_length:.1f}s where the release "
+        f"declares {worst_track_length:.1f}s{slot_desc}"
+    )
 
 
 def _recorded_import_error(entry: LogEntry) -> str | None:
