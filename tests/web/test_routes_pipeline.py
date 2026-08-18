@@ -52,16 +52,28 @@ def _validation_result_blob(
     mbid: str = "rel-track-length-warning",
     scenario: str = "strong_match",
     valid: bool = True,
+    sibling_candidates: list[CandidateSummary] | None = None,
 ) -> dict[str, object]:
     """A ``validation_result`` blob shaped exactly like
     ``ValidationResult.to_json()`` writes it — built from the real Structs
-    (``.claude/rules/test-fidelity.md`` Rule C), never hand-typed keys."""
+    (``.claude/rules/test-fidelity.md`` Rule C), never hand-typed keys.
+
+    ``sibling_candidates`` models beets offering OTHER, non-target
+    candidates alongside the selected one (issue #1178 F1) — every one of
+    them keeps ``is_target=False`` by construction, since only one
+    candidate is ever the selected match.
+    """
     candidate = CandidateSummary(
         mbid=mbid, distance=distance, is_target=True, mapping=mappings,
     )
     result = ValidationResult(
         valid=valid, scenario=scenario, distance=distance,
-        mbid_found=True, target_mbid=mbid, candidates=[candidate],
+        mbid_found=True, target_mbid=mbid,
+        # Siblings precede the target — real beets candidate order is
+        # distance-sorted and gives no guarantee the selected match is
+        # emitted first, and placing it first here would hide a mutant
+        # that reads only the FIRST candidate rather than the SELECTED one.
+        candidates=[*(sibling_candidates or []), candidate],
     )
     return msgspec.to_builtins(result)
 
@@ -329,7 +341,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             item["track_length_warning"],
             "Track length contradicts the matched release: "
             "'00 - Hidden Track.flac' is 237.6s where the release "
-            "declares 15.0s",
+            "declares 15.0s for 'Lost Weekend'",
         )
 
     def test_track_length_warning_skips_a_pair_with_no_declared_length(self):
@@ -433,6 +445,78 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.db.seed_request(make_request_row(id=904, status="imported"))
         log_id = self.db.log_download(
             904, outcome="success", validation_result=None,
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertIsNone(item["track_length_warning"])
+
+    def test_track_length_warning_ignores_a_non_target_siblings_mismatch(
+        self,
+    ) -> None:
+        """Issue #1178 F1: beets' candidate list on this row also carries
+        a SIBLING pressing it considered and did NOT select — that
+        sibling's own mapping has the exact #1178-shaped mismatch, but the
+        SELECTED (``is_target``) candidate's mapping is clean. Live
+        evidence this clause is load-bearing: ignoring ``is_target``
+        entirely flags 146 historical rows instead of the real 124 — 22
+        of them would be a sibling pressing's mismatch bleeding onto the
+        row actually imported."""
+        self.db.seed_request(make_request_row(id=906, status="imported"))
+        sibling = CandidateSummary(
+            mbid="rel-sibling-pressing", distance=0.30, is_target=False,
+            mapping=[
+                TrackMapping(
+                    item=HarnessItem(
+                        path="00 - Hidden Track.flac", length=237.6),
+                    track=HarnessTrackInfo(
+                        title="Lost Weekend", length=15.0),
+                ),
+            ],
+        )
+        log_id = self.db.log_download(
+            906, outcome="success",
+            validation_result=_validation_result_blob(
+                sibling_candidates=[sibling],
+                mappings=[
+                    TrackMapping(
+                        item=HarnessItem(path="01.flac", length=100.0),
+                        track=HarnessTrackInfo(title="One", length=100.0),
+                    ),
+                ],
+            ),
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertIsNone(item["track_length_warning"])
+
+    def test_track_length_warning_absent_on_force_import_outcome(self) -> None:
+        """Issue #1178 F4: the outcome gate's force/manual half. A
+        force_import-outcome row carrying candidates and an over-bound
+        pair (synthetic here — the live force lane never persists a
+        candidate at all, but this pin targets the OUTCOME clause, not
+        the force lane's real data shape) must still warn None — force
+        import is identity resolution the operator already reviewed by
+        hand, never this field's concern."""
+        self.db.seed_request(make_request_row(id=907, status="imported"))
+        log_id = self.db.log_download(
+            907, outcome="force_import",
+            validation_result=_validation_result_blob(
+                distance=0.05, scenario="force_import",
+                mappings=[
+                    TrackMapping(
+                        item=HarnessItem(
+                            path="00 - Hidden Track.flac", length=237.6),
+                        track=HarnessTrackInfo(
+                            title="Lost Weekend", length=15.0),
+                    ),
+                ],
+            ),
         )
 
         status, data = self._get("/api/pipeline/log")

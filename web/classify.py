@@ -1495,15 +1495,19 @@ def _track_length_warning(entry: LogEntry) -> str | None:
     Only ever considered for ``entry.outcome == "success"`` — a rejected
     candidate's mismatch is a different surface's concern (the folder is
     still in Wrong Matches), and a force/manual import already had its
-    folder reviewed by the operator by hand before launch.
+    folder reviewed by the operator by hand before launch. This is not
+    merely a courtesy exclusion: verified live, 0 of the force_import-
+    outcome rows persist a candidate at all (the force lane's own
+    ``validation_result`` is written candidate-less), so there would be
+    nothing here to read from one even without the ``outcome`` gate.
 
-    Reads the SAME ``validation_result`` candidate mapping every
-    ``strong_match``/``force_import`` row already persists (issue #1059's
-    single candidate→scenario site, ``lib/beets.py::
-    apply_candidate_scenario``) — nothing new is measured, nothing is
-    written back. A pair missing either length (a CD pregap hidden track
-    most commonly — MusicBrainz frequently declares no length for it) is
-    skipped: there is no positive declared length to compare against.
+    Reads the ``validation_result`` candidate mapping the way
+    ``lib/beets.py::apply_candidate_scenario`` persists it on an accepted
+    ``strong_match`` (issue #1059's single candidate→scenario site) —
+    nothing new is measured, nothing is written back. A pair missing
+    either length (a CD pregap hidden track most commonly — MusicBrainz
+    frequently declares no length for it) is skipped: there is no
+    positive declared length to compare against.
 
     Issue #1178: download_log 40061 selected a mapping pairing a 237.6s
     local file against MB track 17's declared 15.0s at beets distance
@@ -1520,7 +1524,11 @@ def _track_length_warning(entry: LogEntry) -> str | None:
     worst_item_path: str | None = None
     worst_item_length = 0.0
     worst_track_length = 0.0
+    worst_track_title: str | None = None
     for candidate in envelope.candidates:
+        # Only the SELECTED candidate — a non-target sibling's mapping (a
+        # different pressing beets also considered and rejected) says
+        # nothing about the release this row actually matched.
         if candidate.get("is_target") is not True:
             continue
         for pair in json_list(candidate.get("mapping")):
@@ -1530,31 +1538,30 @@ def _track_length_warning(entry: LogEntry) -> str | None:
             track = pair.get("track")
             if not is_str_object_dict(item) or not is_str_object_dict(track):
                 continue
-            item_length = item.get("length")
-            track_length = track.get("length")
-            if not isinstance(item_length, (int, float)):
-                continue
-            if not isinstance(track_length, (int, float)):
+            item_length = _as_float(item.get("length"))
+            track_length = _as_float(track.get("length"))
+            if item_length is None or track_length is None:
                 continue
             if item_length <= 0 or track_length <= 0:
                 continue
-            deviation = abs(float(item_length) - float(track_length))
+            deviation = abs(item_length - track_length)
             if deviation <= worst_deviation:
                 continue
             worst_deviation = deviation
-            item_path = item.get("path")
-            worst_item_path = item_path if isinstance(item_path, str) else None
-            worst_item_length = float(item_length)
-            worst_track_length = float(track_length)
+            worst_item_path = _as_str(item.get("path"))
+            worst_item_length = item_length
+            worst_track_length = track_length
+            worst_track_title = _as_str(track.get("title"))
         # Exactly one candidate ever carries ``is_target``.
         break
     if worst_deviation <= TRACK_LENGTH_WARNING_BOUND_SECONDS:
         return None
     item_desc = f"'{worst_item_path}'" if worst_item_path else "a local file"
+    slot_desc = f" for '{worst_track_title}'" if worst_track_title else ""
     return (
         "Track length contradicts the matched release: "
         f"{item_desc} is {worst_item_length:.1f}s where the release "
-        f"declares {worst_track_length:.1f}s"
+        f"declares {worst_track_length:.1f}s{slot_desc}"
     )
 
 

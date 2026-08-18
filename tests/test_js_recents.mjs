@@ -501,7 +501,8 @@ console.log('renderRecentsItems() shows bad-extension postflight warning chip');
 console.log('renderRecentsItems() shows the track-length warning chip (issue #1178)');
 {
   const warning = "Track length contradicts the matched release: "
-    + "'00 - Hidden Track.flac' is 237.6s where the release declares 15.0s";
+    + "'00 - Hidden Track.flac' is 237.6s where the release declares "
+    + "15.0s for 'Lost Weekend'";
   const html = renderRecentsFixture([{
     id: 40061,
     request_id: 8954,
@@ -517,6 +518,16 @@ console.log('renderRecentsItems() shows the track-length warning chip (issue #11
   assertContains(html, 'track length', 'track-length warning chip rendered');
   assertContains(html, esc(warning),
     'the full derived sentence appears in the chip hover detail');
+  // The chip is a WARNING, not a proof badge — badge-verified is the
+  // green "positive proof" class this same module uses for CD-rip proof;
+  // an accusing-looking amber chip must never render with the green
+  // class, and this asserts the exact class attribute, not merely that
+  // 'badge-warn' appears SOMEWHERE (disambig/bad-ext chips share it too).
+  assertContains(
+    html,
+    `class="badge badge-warn" title="${esc(warning)}">track length<`,
+    'the chip renders with the badge-warn class, not badge-verified',
+  );
 }
 
 console.log('renderRecentsItems() omits the track-length warning chip when the field is null');

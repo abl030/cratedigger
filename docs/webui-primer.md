@@ -574,26 +574,34 @@ depends on.
   render-time-only fact, never a pipeline decision. `web/classify.py`'s
   `_track_length_warning` reads the ALREADY-PERSISTED `validation_result`
   candidate mapping on an imported row (`outcome == "success"` only) and
-  surfaces a warning when the worst per-track `|file − declared|` deviation
-  on the selected candidate exceeds `TRACK_LENGTH_WARNING_BOUND_SECONDS`
-  (60s) — a pair missing either length (a CD pregap hidden track,
-  most commonly) is skipped. Nothing is denylisted, no scenario is renamed,
-  no folder moves; the operator judges (Replace / Bad Rip / leave as-is)
-  via the existing lanes. This replaced a validation-time REJECT design:
-  independent review found that magnitude could not separate #1178's own
-  defect from the legitimate hidden-track/appended-medley population (85%
-  of the historical >60s cohort is a single-pair deviation on an otherwise-
-  correct rip), and every reject would have permanently denylisted
-  contributing peers offering correct rips. Because the derivation is
-  render-time, it is retroactive — every accepted import in the corpus is
-  re-evaluated on the next page load, not just future ones. Surfaced as a
-  `ClassifiedEntry.track_length_warning` field (nullable string; both the
+  surfaces a warning when the worst per-track `|file − declared|` deviation,
+  on the SELECTED (`is_target`) candidate's own mapping only, exceeds
+  `TRACK_LENGTH_WARNING_BOUND_SECONDS` (60s) — a pair missing either length
+  (a CD pregap hidden track, most commonly) is skipped, and a non-target
+  sibling candidate's own mismatch (a different pressing beets also
+  considered) never leaks into the warning even when far more extreme (live
+  evidence this is load-bearing: ignoring `is_target` entirely flags 146
+  historical rows instead of the true 124). Nothing is denylisted, no
+  scenario is renamed, no folder moves; the operator judges (Replace / Bad
+  Rip / leave as-is) via the existing lanes. This replaced a validation-time
+  REJECT design: independent review found that magnitude could not separate
+  #1178's own defect from the legitimate hidden-track/appended-medley
+  population (85% of the historical >60s cohort is a single-pair deviation
+  on an otherwise-correct rip), and every reject would have permanently
+  denylisted contributing peers offering correct rips. Because the
+  derivation is render-time, it is retroactive — every accepted import in
+  the corpus is re-evaluated on the next page load, not just future ones.
+  The sentence names the contradicted release track slot by title when the
+  producer has one (`"... declares 15.0s for 'Lost Weekend'"`). Surfaced as
+  a `ClassifiedEntry.track_length_warning` field (nullable string; both the
   Recents-log route and the pipeline-detail history route carry it — the
   latter via its own `DownloadHistoryViewRow` Struct, a SEPARATE reader of
   the same classification that must declare every field it forwards) and
-  rendered by `web/js/recents.js` as a `badge-warn` "track length" chip
-  next to the main badge, with the full derived sentence in the hover
-  title.
+  rendered in two places: `web/js/recents.js` as a `badge-warn` "track
+  length" chip next to the main badge (full sentence in the hover title),
+  and `web/js/history.js`'s detail grid as a labelled "Track length" row
+  (same amber styling as "Bad extension"/"Triage") so the sentence is
+  visible without hovering.
 - **Wrong Matches unavailable sources** — a candidate whose folder the server
   could not READ (permissions, I/O — never a folder proven gone) stays in the
   list with a `source unavailable` badge, an amber card, both Force Import and
