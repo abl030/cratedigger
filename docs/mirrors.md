@@ -78,6 +78,17 @@ contain exactly a non-empty `discogs.user_token` scalar and be named by
 `beets.runtime.expectedSecretInclude`; it is not a general configuration
 overlay. Restart guarded applications after token rotation.
 
+**The mirror cannot serve artwork** (issue #1200): it is built from Discogs'
+CC0 XML dumps, which carry no `<images>` elements at all, so a mirror-backed
+lookup always returns empty art. `harness/beets_compat.py`'s
+`configure_discogs_cover_art_fallback` compensates with one authenticated
+`api.discogs.com` lookup per miss (fails soft, never blocks an import); the
+consuming module's `fetchart.sources` must also rank `cover_art_url` ahead
+of `itunes` (`examples/cratedigger.nix`) or that fallback's art loses to an
+iTunes title guess anyway — `lib/beets_config_contract.py` warns at startup
+when discogs and fetchart are both active but that order isn't safe. Full
+rationale: `docs/beets-primer.md` § "Cover Art Config".
+
 ## LRCLIB (optional)
 
 The operator runs LRCLIB beside MusicBrainz in CT 100

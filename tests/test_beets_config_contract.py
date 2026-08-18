@@ -15,8 +15,10 @@ import msgspec
 import yaml
 
 from lib.beets_config_contract import (
+    FETCHART_IDENTITY_FIRST_SOURCES,
     REQUIRED_PLUGINS,
     BeetsConfigError,
+    _fetchart_cover_art_url_precedes_itunes,
     check_beets_config,
 )
 from tests.fakes.beets_contract import (
@@ -872,3 +874,157 @@ class TestBeetsConfigContract(unittest.TestCase):
         self.world._seal("importer")
         second = check_beets_config(self.world.cfg(), role="importer")
         self.assertEqual(first.fingerprint, second.fingerprint)
+
+
+class TestFetchartCoverArtUrlPrecedesItunesDecision(unittest.TestCase):
+    """Pure-function table for #1200's fetchart source-order decision."""
+
+    CASES: tuple[tuple[str, tuple[str, ...] | None, bool], ...] = (
+        ("absent_sources", None, False),
+        ("empty_sources", (), False),
+        (
+            "cover_art_url_missing",
+            ("coverart", "itunes", "amazon", "albumart", "filesystem"),
+            False,
+        ),
+        ("itunes_missing", ("coverart", "cover_art_url", "filesystem"), True),
+        (
+            "cover_art_url_before_itunes",
+            ("coverart", "cover_art_url", "itunes", "amazon", "albumart", "filesystem"),
+            True,
+        ),
+        (
+            "cover_art_url_after_itunes",
+            ("coverart", "itunes", "amazon", "albumart", "cover_art_url", "filesystem"),
+            False,
+        ),
+        (
+            "identity_first_constant_is_safe",
+            FETCHART_IDENTITY_FIRST_SOURCES,
+            True,
+        ),
+    )
+
+    def test_decision_matrix(self) -> None:
+        for desc, sources, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    _fetchart_cover_art_url_precedes_itunes(sources), expected
+                )
+
+
+class TestFetchartCoverArtUrlWarning(unittest.TestCase):
+    """#1200 — Discogs pressing art must not lose to an iTunes title guess."""
+
+    def setUp(self) -> None:
+        self.world = BeetsContractWorld()
+        self.addCleanup(self.world.close)
+
+    def _report_for_fetchart(self, fetchart: dict[str, object]):
+        self.world.unseal()
+        self.world._write_main_config(fetchart=fetchart)
+        self.world._seal("importer")
+        return check_beets_config(self.world.cfg(), role="importer")
+
+    def test_absent_sources_is_the_real_world_default_and_warns(self) -> None:
+        """The most important case: the shipped example ships no sources key
+        at all, and Beets' own upstream default (only applied once the
+        plugin is loaded, which this checker never does) ranks
+        cover_art_url last -- exactly the #1200 collision."""
+        report = self._report_for_fetchart({"auto": True})
+
+        self.assertTrue(report.ok, report.hard_failures)
+        codes = [warning.code for warning in report.warnings]
+        self.assertEqual(codes, ["fetchart_cover_art_url_ranked_after_itunes"])
+        message = report.warnings[0].message
+        self.assertIn("cover_art_url", message)
+        self.assertIn("itunes", message)
+        for source in FETCHART_IDENTITY_FIRST_SOURCES:
+            self.assertIn(repr(source), message)
+
+    def test_pair_format_sources_cannot_be_proven_safe_and_warns_without_crashing(
+        self,
+    ) -> None:
+        """Beets' own fetchart also accepts a ``source: query`` pair-list
+        syntax; confuse's as_str_seq() raises ConfigTypeError (not
+        NotFoundError) on that shape. This warning must not let that
+        propagate and crash the whole startup contract -- it treats
+        "order not provable" the same as unsafe."""
+        report = self._report_for_fetchart({
+            "auto": True,
+            "sources": [{"coverart": "*"}, "itunes", "cover_art_url"],
+        })
+
+        self.assertTrue(report.ok, report.hard_failures)
+        self.assertEqual(
+            [w.code for w in report.warnings],
+            ["fetchart_cover_art_url_ranked_after_itunes"],
+        )
+
+    def test_explicit_wrong_order_warns(self) -> None:
+        """The shape nixosconfig actually shipped before #1200: cover_art_url
+        is present but ranked after itunes."""
+        report = self._report_for_fetchart({
+            "auto": True,
+            "sources": ["coverart", "itunes", "amazon", "albumart",
+                        "cover_art_url", "filesystem"],
+        })
+
+        self.assertTrue(report.ok, report.hard_failures)
+        self.assertEqual(
+            [w.code for w in report.warnings],
+            ["fetchart_cover_art_url_ranked_after_itunes"],
+        )
+
+    def test_identity_first_order_does_not_warn(self) -> None:
+        report = self._report_for_fetchart({
+            "auto": True,
+            "sources": list(FETCHART_IDENTITY_FIRST_SOURCES),
+        })
+
+        self.assertTrue(report.ok, report.hard_failures)
+        self.assertEqual(report.warnings, ())
+
+    def test_itunes_absent_does_not_warn(self) -> None:
+        report = self._report_for_fetchart({
+            "auto": True,
+            "sources": ["coverart", "cover_art_url", "filesystem"],
+        })
+
+        self.assertTrue(report.ok, report.hard_failures)
+        self.assertEqual(report.warnings, ())
+
+    def test_without_discogs_plugin_absent_sources_does_not_warn(self) -> None:
+        self.world.unseal()
+        self.world._write_main_config(
+            plugins=[p for p in BASELINE_PLUGINS if p != "discogs"],
+            fetchart={"auto": True},
+        )
+        self.world._seal("importer")
+        report = check_beets_config(self.world.cfg(), role="importer")
+
+        self.assertTrue(report.ok, report.hard_failures)
+        self.assertNotIn(
+            "fetchart_cover_art_url_ranked_after_itunes",
+            [w.code for w in report.warnings],
+        )
+
+    def test_without_fetchart_plugin_does_not_warn(self) -> None:
+        self.world.unseal()
+        self.world._write_main_config(
+            plugins=[p for p in BASELINE_PLUGINS if p != "fetchart"],
+        )
+        self.world._seal("importer")
+        report = check_beets_config(self.world.cfg(), role="importer")
+
+        self.assertTrue(report.ok, report.hard_failures)
+        self.assertNotIn(
+            "fetchart_cover_art_url_ranked_after_itunes",
+            [w.code for w in report.warnings],
+        )
+
+    def test_warning_never_downgrades_ok_to_false(self) -> None:
+        report = self._report_for_fetchart({"auto": True})
+
+        self.assertTrue(report.ok)
+        self.assertEqual(report.hard_failures, ())

@@ -14,7 +14,20 @@
 # by default so a stranger gets stock plugin behaviour:
 #   - discogsMirrorUrl: point the discogs plugin's python3-discogs-client at
 #     a Discogs mirror (e.g. https://discogs.ablz.au) instead of
-#     api.discogs.com.
+#     api.discogs.com. A mirror built from Discogs' CC0 XML dumps CANNOT
+#     serve artwork: the dumps contain no `<images>` elements at all (verified
+#     against a live dump, issue #1200), so the plugin's cover_art_url field
+#     is never populated for a mirror-backed lookup, and fetchart falls
+#     through to a title-guessed source (e.g. itunes), which can put the
+#     wrong pressing's art on an album. harness/beets_compat.py's
+#     configure_discogs_cover_art_fallback compensates by wrapping
+#     DiscogsPlugin.select_cover_art itself (unconditionally, whether or not
+#     this file's mirror patch is applied): a miss from whatever client is
+#     configured -- mirror-patched here or stock -- triggers exactly one
+#     authenticated lookup against the real api.discogs.com for that release
+#     id, fails soft on any error, and never blocks or fails an import. Set
+#     this knob at your own risk of the same gap unless your consumer also
+#     wires that harness fallback.
 #   - lrclibUrl: point the lyrics plugin's LRCLIB base at a local instance
 #     (e.g. http://192.168.1.43:3300/api) instead of lrclib.net.
 # `--replace-fail` is the drift alarm: if a future `nix flake update` ships

@@ -567,6 +567,51 @@ def _optional_bool(active: IncludeLazyConfig, section: str, key: str) -> bool:
         return False
 
 
+#: The corrected fetchart source order named in the warning message and
+#: shipped by ``examples/cratedigger.nix``: exact-identity sources first (CAA
+#: by MBID, ``cover_art_url`` by exact Discogs release id), then title-guess
+#: sources, then local ``filesystem`` last so small legacy art cannot shadow
+#: a good remote fetch. Keep both in sync if this order ever changes.
+FETCHART_IDENTITY_FIRST_SOURCES: tuple[str, ...] = (
+    "coverart",
+    "cover_art_url",
+    "itunes",
+    "amazon",
+    "albumart",
+    "filesystem",
+)
+
+
+def _fetchart_cover_art_url_precedes_itunes(sources: tuple[str, ...] | None) -> bool:
+    """Whether the effective fetchart source order is safe against #1200.
+
+    ``None`` means ``fetchart.sources`` is not declared at all. Beets' own
+    ``FetchArtPlugin`` adds a default order via ``self.config.add(...)`` at
+    plugin-instantiation time (``load_plugins()``); this contract checker
+    reads Confuse's plain effective config and never loads plugins, so it
+    never observes that default -- it sees a bare absence. That absence is
+    exactly the shipped ``examples/cratedigger.nix`` shape (no ``sources``
+    key at all) and, at real runtime once plugins ARE loaded, resolves to
+    Beets' own upstream default order, which ranks ``cover_art_url`` LAST,
+    after ``itunes``. Treat absence as unsafe for that reason.
+
+    When ``itunes`` is not configured at all there is nothing for a
+    title-guess to win over, so an absent or trailing ``cover_art_url`` is
+    not this defect -- only relative order between the two matters.
+    """
+    if sources is None:
+        return False
+    try:
+        cover_art_url_index = sources.index("cover_art_url")
+    except ValueError:
+        return False
+    try:
+        itunes_index = sources.index("itunes")
+    except ValueError:
+        return True
+    return cover_art_url_index < itunes_index
+
+
 def _same_executable(expected: str) -> bool:
     if not expected:
         return False
@@ -931,6 +976,37 @@ def check_beets_config(
                 "musicbrainz_endpoint_drift",
                 "effective MusicBrainz endpoint differs from the runtime authority",
             ))
+
+        if "discogs" in configured and "fetchart" in configured:
+            try:
+                fetchart_sources: tuple[str, ...] | None = tuple(
+                    active["fetchart"]["sources"].as_str_seq()
+                )
+            except confuse.ConfigError:
+                # Absent (NotFoundError) and every shape as_str_seq() cannot
+                # coerce to a flat string list -- notably the source:query
+                # pair syntax beets' own fetchart also accepts, which raises
+                # ConfigTypeError -- both mean this checker cannot prove the
+                # order safe. This stays a WARNING, never a hard failure, so
+                # treat "cannot determine" the same as "unsafe" rather than
+                # letting an uncaught confuse error crash the whole startup
+                # contract for an operator using that syntax.
+                fetchart_sources = None
+            if not _fetchart_cover_art_url_precedes_itunes(fetchart_sources):
+                corrected = ", ".join(
+                    repr(source) for source in FETCHART_IDENTITY_FIRST_SOURCES
+                )
+                warnings.append(_finding(
+                    "fetchart_cover_art_url_ranked_after_itunes",
+                    "discogs and fetchart are both active but effective "
+                    "fetchart.sources does not rank cover_art_url ahead of "
+                    "itunes (unset defaults to Beets' own upstream order, "
+                    "which ranks cover_art_url last) -- a Discogs-pressing "
+                    "exact release image loses to an iTunes title guess and "
+                    "can collide two differently pressed same-titled "
+                    "releases onto the same wrong sleeve; set fetchart.sources "
+                    f"to [{corrected}]",
+                ))
 
         fingerprint_values = {
             "import": {key: active["import"][key].get(bool) for key in ("autotag", "move", "write")},

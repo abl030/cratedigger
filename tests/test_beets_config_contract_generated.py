@@ -17,6 +17,7 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.beets_config_contract import (
+    FETCHART_IDENTITY_FIRST_SOURCES,
     REQUIRED_PLUGINS,
     BeetsConfigError,
     BeetsRole,
@@ -874,3 +875,87 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         self.assertTrue(report.ok, report.hard_failures)
         warning_codes = [warning.code for warning in report.warnings]
         self.assertEqual(warning_codes, ["musicbrainz_endpoint_drift"] if drifted else [])
+
+    _FETCHART_SOURCE_NAMES: tuple[str, ...] = (
+        "coverart", "cover_art_url", "itunes", "amazon", "albumart",
+        "filesystem",
+    )
+
+    @staticmethod
+    def _independent_oracle_expects_warning(
+        sources: list[str] | None, absent_plugins: set[str]
+    ) -> bool:
+        """Independently reasoned oracle -- deliberately does NOT call
+        ``lib.beets_config_contract._fetchart_cover_art_url_precedes_itunes``
+        (or any other production helper), so a mutant inside that function
+        cannot make production and the property's own expectation agree by
+        construction; only the real ``check_beets_config`` adapter sits
+        between this oracle and the assertion below."""
+        if {"discogs", "fetchart"} & absent_plugins:
+            return False
+        if sources is None:
+            return True
+        if "cover_art_url" not in sources:
+            return True
+        if "itunes" not in sources:
+            return False
+        return sources.index("cover_art_url") > sources.index("itunes")
+
+    @example(sources=None, absent_plugins=frozenset())
+    @example(
+        sources=list(FETCHART_IDENTITY_FIRST_SOURCES),
+        absent_plugins=frozenset(),
+    )
+    @example(sources=["itunes", "cover_art_url"], absent_plugins=frozenset())
+    @example(sources=None, absent_plugins=frozenset({"discogs"}))
+    @example(sources=None, absent_plugins=frozenset({"fetchart"}))
+    @given(
+        sources=st.one_of(
+            st.none(),
+            st.lists(
+                st.sampled_from(_FETCHART_SOURCE_NAMES),
+                min_size=0,
+                max_size=len(_FETCHART_SOURCE_NAMES),
+                unique=True,
+            ),
+        ),
+        absent_plugins=st.sets(st.sampled_from(("discogs", "fetchart"))),
+    )
+    def test_fetchart_cover_art_url_warning_matches_the_pure_decision(
+        self,
+        sources: list[str] | None,
+        absent_plugins: set[str],
+    ) -> None:
+        """#1200 -- drives the real confuse-reading adapter in
+        check_beets_config over the fetchart.sources world space (present,
+        absent, every relative order, and with discogs/fetchart each
+        independently inactive) and asserts its warning emission agrees
+        with an independently written oracle on every world, not merely the
+        pinned ones."""
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        world.unseal()
+        fetchart_config: dict[str, object] = {"auto": True}
+        if sources is not None:
+            fetchart_config["sources"] = list(sources)
+        world._write_main_config(
+            plugins=[p for p in BASELINE_PLUGINS if p not in absent_plugins],
+            fetchart=fetchart_config,
+        )
+        world._seal("importer")
+
+        report = check_beets_config(world.cfg(), role="importer")
+
+        self.assertTrue(report.ok, report.hard_failures)
+        expected_warns = self._independent_oracle_expects_warning(
+            sources, absent_plugins
+        )
+        warning_codes = [warning.code for warning in report.warnings]
+        if expected_warns:
+            self.assertIn(
+                "fetchart_cover_art_url_ranked_after_itunes", warning_codes
+            )
+        else:
+            self.assertNotIn(
+                "fetchart_cover_art_url_ranked_after_itunes", warning_codes
+            )
