@@ -81,8 +81,6 @@ ALLOWLIST: dict[str, str] = {
         "status transition + rescue timestamp",
     "record_attempt":
         "counter increment + timestamp",
-    "record_consumed_search_attempt":
-        "counter increment + timestamp",
     "record_cycle_metrics":
         "scalar metrics, no dict payload",
     "record_non_consuming_search_attempt":
@@ -128,6 +126,14 @@ ALLOWLIST: dict[str, str] = {
     "record_field_resolution":
         "real-PG round-trip via get_field_resolution in "
         "TestFieldResolutionRecording::test_record_field_resolution_round_trip_preserves_request_and_field",
+    "record_consumed_search_attempt":
+        "34-column real-PG INSERT into search_log, round-tripped field-by-"
+        "field via get_search_history in TestRecordConsumedSearchAttempt::"
+        "test_consumed_attempt_persists_u11_forensics_columns and "
+        "test_consumed_attempt_persists_cross_request_conflict_marker "
+        "(#1196 item 2). The auto-detector's derived read candidates "
+        "(get_consumed_search_attempt / list_consumed_search_attempt) "
+        "don't match the real reader, get_search_history.",
     "update_spectral_state":
         "real-PG round-trip via get_request in "
         "TestSpectralColumns::test_update_spectral_state_updates_both_pairs",

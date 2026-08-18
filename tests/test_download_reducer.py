@@ -131,6 +131,17 @@ class TestReducePollCycle(unittest.TestCase):
                     size=100,
                 ),
             ],
+            # #1196 item 1: present by default so every case in this
+            # class builds a state with a real fingerprint value. This
+            # does NOT by itself guard against a reducer path dropping
+            # the field -- only ``test_progress_snapshot_carries_
+            # attempt_fingerprint_forward`` below asserts
+            # ``result.state.attempt_fingerprint``, and a planted
+            # mutant that drops the field in ``_copy_download_state``
+            # fails exactly that one test; every other case in this
+            # class stays green because none of them read the field.
+            # That dedicated pin is the actual guard.
+            "attempt_fingerprint": "fp-abc12345",
         }
         values.update(overrides)
         return ActiveDownloadState(**values)
@@ -184,6 +195,23 @@ class TestReducePollCycle(unittest.TestCase):
             result.verdict.decision,
             PollCycleDecision.in_progress,
         )
+
+    def test_progress_snapshot_carries_attempt_fingerprint_forward(self):
+        """#1196 item 1: the attempt's identity never changes across a
+        poll-cycle progress update. A reducer rebuild that dropped the
+        field (e.g. reconstructing via a bare ``ActiveDownloadState(...)``
+        instead of ``_copy_download_state``) would silently erase it from
+        ``active_download_state`` on the very first poll cycle after
+        claim -- this pin fails closed against that regression."""
+        state = self._state(attempt_fingerprint="fp-9f8e7d6c")
+        observed = PollFileSnapshot(
+            transfer_id="tx-1", state="InProgress", bytes_transferred=40,
+        )
+
+        result = self._reduce(state, self._snapshot(observed))
+
+        assert result.state is not None
+        self.assertEqual(result.state.attempt_fingerprint, "fp-9f8e7d6c")
 
     def test_terminal_failure_is_restored_when_snapshot_drops_row(self):
         state = self._state(files=[

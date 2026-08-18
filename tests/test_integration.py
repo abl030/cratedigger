@@ -1121,6 +1121,56 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
         self.assertEqual(result.outcome, "error")
         self.assertEqual(failed_grab, [album])
 
+    def test_apply_find_download_result_copies_cross_request_conflict_marker(self):
+        """#1196 item 2: the cross-request enqueue-guard skip marker
+        copies from ``FindDownloadResult.conflicting_request_ids`` onto
+        ``SearchResult.cross_request_conflict_ids`` -- the first real
+        adapter in the guard-skip forensics chain (the second,
+        ``cratedigger._log_search_result``, is pinned directly in
+        tests/test_integration_slices.py)."""
+        album = MagicMock()
+        failed_grab = []
+
+        from lib.search import SearchResult
+
+        result = SearchResult(
+            album_id=1, success=True, query="Artist Album",
+            result_count=7, elapsed_s=1.5,
+        )
+        cratedigger._apply_find_download_result(
+            album,
+            result,
+            enqueue_module.FindDownloadResult(
+                outcome="no_match",
+                conflicting_request_ids=frozenset({8846, 8781}),
+            ),
+            failed_grab,
+        )
+
+        self.assertEqual(result.outcome, "no_match")
+        self.assertEqual(result.cross_request_conflict_ids, (8781, 8846))
+
+    def test_apply_find_download_result_no_conflict_leaves_marker_empty(self):
+        """Must-still-work control: a plain no_match with no guard skip
+        carries the empty tuple, never a stray marker."""
+        album = MagicMock()
+        failed_grab = []
+
+        from lib.search import SearchResult
+
+        result = SearchResult(
+            album_id=1, success=True, query="Artist Album",
+            result_count=7, elapsed_s=1.5,
+        )
+        cratedigger._apply_find_download_result(
+            album,
+            result,
+            enqueue_module.FindDownloadResult(outcome="no_match"),
+            failed_grab,
+        )
+
+        self.assertEqual(result.cross_request_conflict_ids, ())
+
     def test_try_enqueue_marks_enqueue_failure_when_match_found_but_enqueue_fails(self):
         slskd = FakeSlskdAPI()
         slskd.transfers.enqueue_result = False

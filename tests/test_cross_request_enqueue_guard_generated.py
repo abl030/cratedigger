@@ -75,10 +75,12 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from lib.download import build_active_download_state
 from lib.download_ownership import DownloadOwnershipWriter
 from lib.enqueue import ClaimedQueueKeysRegistry, _cross_request_conflict_ids
-from lib.grab_list import DownloadFile
+from lib.grab_list import DownloadFile, GrabListEntry
 from lib.pipeline_db import TransferLedgerRow
+from lib.processing_paths import attempt_fingerprint
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_ctx_with_fake_db, make_request_row
 
@@ -103,6 +105,15 @@ class GuardAttempt:
     request_id: int
     keys: tuple[tuple[str, str], ...]
     resulting_status: _OwnerStatus
+    # #1196 item 1: whether a won attempt's ``active_download_state``
+    # carries the ``attempt_fingerprint`` key. Defaults True so every
+    # existing (pre-#1196) example pin below exercises the NEW primary
+    # fingerprint-equality mechanism without modification. False
+    # simulates the deploy-window gap -- an in-flight download claimed
+    # by code from before this field existed, whose ledger rows STILL
+    # carry a fingerprint (that column predates this change) while its
+    # state does not, so the guard must fall back to the time predicate.
+    state_has_fingerprint: bool = True
 
 
 @dataclass(frozen=True)
@@ -152,6 +163,7 @@ def guard_worlds(draw) -> GuardWorld:
                 request_id=request_id,
                 keys=draw(_keys_strategy()),
                 resulting_status=draw(st.sampled_from(_STATUSES)),
+                state_has_fingerprint=draw(st.booleans()),
             ))
         cycles.append(GuardCycle(attempts=tuple(attempts)))
     return GuardWorld(cycles=tuple(cycles))
@@ -174,6 +186,30 @@ def _run_world(world: GuardWorld) -> dict[tuple[int, int], bool]:
     fractionally AFTER it, so the real attempt-boundary predicate in
     ``lib/pipeline_db/transfer_ledger.py`` sees exactly the ordering
     production produces.
+
+    #1196 item 1: every ledger row for a won attempt carries the SAME
+    ``attempt_fingerprint`` (``lib.processing_paths.attempt_fingerprint``
+    over the attempt's own keys) production writes -- the ledger's
+    fingerprint column predates this change and is never conditional.
+    The STATE's ``attempt_fingerprint`` key is written only when
+    ``attempt.state_has_fingerprint`` is True, so the property drives
+    the guard's real fingerprint-equality arm AND its deploy-window
+    time-predicate fallback arm across the same generated world space.
+
+    (#1196 item 1, review F1) The two sides are deliberately NOT sourced
+    from one shared local variable: the STATE'S value comes from calling
+    the REAL production writer,
+    ``lib.download.build_active_download_state``, over a synthetic
+    ``GrabListEntry`` built from this attempt's own keys -- the actual
+    function ``lib.enqueue._claim_initial_download_ownership`` calls in
+    production. The LEDGER'S value is the direct
+    ``attempt_fingerprint()`` call, mirroring
+    ``lib.enqueue._enqueue_with_claim_outcome``'s own inline computation
+    (there is no separate "ledger writer" function to call — that inline
+    call IS the production site). A production divergence between either
+    real site therefore has a genuine chance of producing two different
+    values here, rather than one test-local variable trivially agreeing
+    with itself.
     """
     db = FakePipelineDB()
     writer = DownloadOwnershipWriter(db_factory=lambda: db)
@@ -218,15 +254,34 @@ def _run_world(world: GuardWorld) -> dict[tuple[int, int], bool]:
             if won:
                 ordinal[0] += 1
                 witness = _BASE_TIME + timedelta(seconds=ordinal[0])
-                db._requests[attempt.request_id]["active_download_state"] = {
+                # STATE side: the real production writer, over the SAME
+                # `files` list just used for the guard check above.
+                written_state = build_active_download_state(
+                    GrabListEntry(
+                        album_id=0, filetype="flac", title="T",
+                        artist="A", year="2020", mb_release_id="mbid",
+                        files=files,
+                    ),
+                    enqueued_at=witness.isoformat(),
+                )
+                state: dict[str, object] = {
                     "filetype": "flac", "enqueued_at": witness.isoformat(),
                     "files": [],
                 }
+                if attempt.state_has_fingerprint:
+                    state["attempt_fingerprint"] = (
+                        written_state.attempt_fingerprint)
+                db._requests[attempt.request_id]["active_download_state"] = (
+                    state)
+                # LEDGER side: the direct pure-function call, mirroring
+                # _enqueue_with_claim_outcome's own inline computation
+                # -- independently derived from the STATE side above.
+                ledger_fingerprint = attempt_fingerprint(list(attempt.keys))
                 before_ids = set(db._transfer_ledger)
                 rows = [
                     TransferLedgerRow(
                         request_id=attempt.request_id, username=un,
-                        filename=fn)
+                        filename=fn, attempt_fingerprint=ledger_fingerprint)
                     for un, fn in attempt.keys
                 ]
                 db.record_transfer_enqueue(rows)
@@ -358,6 +413,23 @@ _ABANDONED_ATTEMPT_DOES_NOT_BLOCK = GuardWorld(cycles=(
         GuardAttempt(2, (("OLD", "old.flac"),), "downloading"),
     )),
 ))
+# Same reproduction as above, but with the owner's state carrying NO
+# ``attempt_fingerprint`` key on either attempt (#1196 item 1
+# deploy-window: a request claimed by code from before this field
+# existed) -- the guard must still resolve correctly through the
+# time-predicate fallback, not the new equality arm.
+_ABANDONED_ATTEMPT_DOES_NOT_BLOCK_WITHOUT_FINGERPRINT = GuardWorld(cycles=(
+    GuardCycle(attempts=(
+        GuardAttempt(1, (("OLD", "old.flac"),), "downloading",
+                     state_has_fingerprint=False),
+    )),
+    GuardCycle(attempts=(
+        GuardAttempt(1, (("NEW", "new.flac"),), "downloading",
+                     state_has_fingerprint=False),
+        GuardAttempt(2, (("OLD", "old.flac"),), "downloading",
+                     state_has_fingerprint=False),
+    )),
+))
 # Same-request re-claim WITHIN one cycle (poll-loop / multi-wave retry:
 # exclude_request_id and the registry's same-request allowance) is proven
 # directly at the registry level -- guard_worlds() never repeats a
@@ -376,6 +448,7 @@ class TestGeneratedCrossRequestEnqueueGuard(unittest.TestCase):
     @example(world=_REPLACE_LINEAGE_DOES_NOT_BLOCK)
     @example(world=_IMPORTED_OWNER_DOES_NOT_BLOCK)
     @example(world=_ABANDONED_ATTEMPT_DOES_NOT_BLOCK)
+    @example(world=_ABANDONED_ATTEMPT_DOES_NOT_BLOCK_WITHOUT_FINGERPRINT)
     def test_guard_never_double_claims_or_over_blocks(self, world: GuardWorld):
         proceeded = _run_world(world)
         assert_no_double_claim(world, proceeded)
@@ -468,9 +541,20 @@ class TestCrossRequestGuardDecisivePins(unittest.TestCase):
 
     def test_abandoned_attempt_does_not_block_but_current_attempt_does(self):
         """#1178 PR2 review F2: request 1's OLD, superseded attempt never
-        blocks request 2; only request 1's CURRENT attempt could."""
+        blocks request 2; only request 1's CURRENT attempt could. With
+        ``state_has_fingerprint`` defaulting True, this now resolves
+        through the #1196 item 1 fingerprint-equality arm."""
         self.assertEqual(
             _run_world(_ABANDONED_ATTEMPT_DOES_NOT_BLOCK),
+            {(0, 1): True, (1, 1): True, (1, 2): True},
+        )
+
+    def test_abandoned_attempt_does_not_block_without_fingerprint(self):
+        """#1196 item 1 deploy-window: the same reproduction with no
+        ``attempt_fingerprint`` on the owner's state resolves identically
+        through the time-predicate fallback."""
+        self.assertEqual(
+            _run_world(_ABANDONED_ATTEMPT_DOES_NOT_BLOCK_WITHOUT_FINGERPRINT),
             {(0, 1): True, (1, 1): True, (1, 2): True},
         )
 

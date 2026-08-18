@@ -297,17 +297,30 @@ Untracked rows.
 - `current_spectral_grade TEXT`, `current_spectral_bitrate INTEGER` — point-in-time request stamps for history/rendering. Active decisions read the linked evidence row's atomic spectral fact; these scalars never seed or override evidence.
 - `current_lossless_source_v0_probe_min_bitrate INTEGER`, `current_lossless_source_v0_probe_avg_bitrate INTEGER`, `current_lossless_source_v0_probe_median_bitrate INTEGER` — point-in-time request stamps for history/rendering. The comparable source anchor used by policy is the linked evidence row's `v0_metric` with `subject='source'`.
 - `active_download_state JSONB` — persisted download state for async polling
-  (filetype, `enqueued_at`, per-file username/filename/size). Set by
-  `set_downloading()`, cleared on completion/timeout. While the request remains
-  `downloading`, the exact stored `enqueued_at` text is the immutable
-  incarnation witness for whole-state rewrites: initial enqueue ownership,
-  slskd event stamping, pre-purge terminal-evidence harvest, and poll reduction
-  update only when status is still `downloading`, the stored witness equals
-  the caller's expected text, and the outgoing state retains that same text.
-  Paths and transfer keys are evidence within an attempt, never its identity.
-  Event classification additionally requires a parseable current witness and a
+  (filetype, `enqueued_at`, `attempt_fingerprint`, per-file
+  username/filename/size). Set by `set_downloading()`, cleared on
+  completion/timeout. While the request remains `downloading`, the exact
+  stored `enqueued_at` text is the immutable incarnation witness for
+  whole-state rewrites: initial enqueue ownership, slskd event stamping,
+  pre-purge terminal-evidence harvest, and poll reduction update only when
+  status is still `downloading`, the stored witness equals the caller's
+  expected text, and the outgoing state retains that same text. Paths and
+  transfer keys are evidence within an attempt, never its identity. Event
+  classification additionally requires a parseable current witness and a
   completion occurrence at or after it; post-event polling admits only exact
   `(request_id, enqueued_at)` pairs captured before the transfer snapshot.
+  `attempt_fingerprint` (issue #1196) is a SEPARATE, orthogonal identity: a
+  deterministic digest of this attempt's whole (username, filename) transfer
+  key set, written once at claim time
+  (`lib.download.build_active_download_state`) and carried unchanged across
+  every poll-cycle rewrite. `enqueued_at` remains the sole incarnation
+  witness governing whole-state CAS writes (unchanged by this field);
+  `attempt_fingerprint` instead answers "is this the SAME attempt" for the
+  cross-request enqueue guard's ledger join
+  (`PipelineDB.get_conflicting_transfer_request_ids`, below) by exact
+  transfer-key identity rather than a clock comparison. Optional and omitted
+  from JSON when unset (`omit_defaults=True`) — historical rows and an
+  empty-manifest attempt both decode with it `None`.
   The witnessed handoff preserves this JSONB as immutable
   attempt/manifest provenance while entering `processing`. It stamps the
   canonical path and `processing_started_at` before the transaction commits,
@@ -705,19 +718,49 @@ runs first deliberately: registering in the registry before the cross-cycle
 check would "poison" it for a rejected attempt's OTHER, otherwise-free keys,
 wrongly blocking an unrelated same-cycle sibling.
 
-The cross-cycle join is additionally scoped to the owner's CURRENT attempt:
-`AND l.enqueued_at >= COALESCE((r.active_download_state ->> 'enqueued_at')
-::timestamptz, '-infinity')`, the same `enqueued_at` witness the poll path
-already threads as `not_before=state.enqueued_at`. A `'downloading'` owner
-can carry many historical accepted ledger rows — live-DB measurement found
-80.3% of accepted rows belong to a non-current attempt, up to 76 distinct
-accepted attempt fingerprints for one request — so without this scope an
-owner actively downloading a FRESH peer's files would falsely block a
-sibling on a queue key from that SAME owner's OWN abandoned attempt from 30
-days earlier. `COALESCE(..., '-infinity')` fails CLOSED on a NULL/missing
-`active_download_state`: every accepted row for that `'downloading'` owner
-then counts as in-scope (blocks), never silently stops protecting a request
-whose current-attempt witness can't currently be read.
+The cross-cycle join is additionally scoped to the owner's CURRENT attempt.
+A `'downloading'` owner can carry many historical accepted ledger rows —
+live-DB measurement found 80.3% of accepted rows belong to a non-current
+attempt, up to 76 distinct accepted attempt fingerprints for one request —
+so without this scope an owner actively downloading a FRESH peer's files
+would falsely block a sibling on a queue key from that SAME owner's OWN
+abandoned attempt from 30 days earlier.
+
+As of issue #1196 item 1 the scope is EXACT attempt identity, not a clock
+comparison: `active_download_state.attempt_fingerprint` (see above) carries
+the same `lib.processing_paths.attempt_fingerprint` value the ledger's own
+`attempt_fingerprint` column carries for every row this attempt writes —
+both derived from the identical transfer-key set, so they agree BY
+CONSTRUCTION. When the owner's state carries that key, the join requires
+EXACT fingerprint equality
+(`l.attempt_fingerprint = r.active_download_state ->> 'attempt_fingerprint'`):
+no app-clock-vs-PG-clock assumption, no skew window, no failure direction
+to reason about — a stale attempt's ledger rows simply carry a different
+fingerprint and never match, however new their `enqueued_at` looks.
+
+The PRE-#1196 time predicate — `AND l.enqueued_at >= COALESCE((r.
+active_download_state ->> 'enqueued_at')::timestamptz, '-infinity')`, the
+same `enqueued_at` witness the poll path already threads as
+`not_before=state.enqueued_at` — survives ONLY as the deploy-window
+fallback, taken when the owner's state exists but LACKS the
+`attempt_fingerprint` key (an in-flight download claimed by code from
+before this field existed). It can be deleted once no request claimed
+pre-deploy remains `'downloading'`. A NULL/missing/malformed
+`active_download_state` still fails CLOSED unconditionally through this
+SAME fallback expression — `->>` on a NULL or non-object jsonb value
+returns NULL for any key, so `COALESCE(..., '-infinity')` substitutes the
+minimum timestamp and every real `l.enqueued_at` compares `>=` true, i.e.
+every accepted row for that `'downloading'` owner counts as in-scope
+(blocks). (A syntactically present but malformed `enqueued_at` *string* —
+never producible today, since `build_active_download_state` always writes
+`datetime.now(UTC).isoformat()` — would instead raise
+`InvalidDatetimeFormat` at the `::timestamptz` cast inside that same
+`COALESCE`, failing the whole cross-cycle check rather than either fail-open
+or fail-closed on this predicate.) A dedicated `CASE WHEN
+active_download_state IS NULL THEN TRUE` arm was tried and found redundant
+on real PG (`->>` on NULL already returns NULL, so the `COALESCE` above
+does the same job) — the fail-closed guarantee lives entirely in that
+`COALESCE`, not a separate NULL check.
 
 A `replaced` owner (Replace-lineage attempt sharing) or one that has already
 moved on (`wanted`/`imported`) never blocks; the same request re-claiming its
@@ -741,13 +784,23 @@ matched candidate, across a worker pool sized to the whole cycle, risked a
 transient connection storm at post-browse convergence) and is safe to share
 because each call runs on a single worker thread for its whole invocation.
 
-A guard skip is logged like an ordinary `no_match`. `unfindable_detection`'s
-branch 4 signal only fires after `REQUIRED_ZERO_FIND_CYCLES` (3) consecutive
-zero-find plan cycles for the SAME request — a single skipped cycle cannot
-trip it — and a guard skip can only recur across cycles while the blocking
-sibling remains `status='downloading'` on the contested keys; once that
-sibling's attempt resolves (imported, replaced, or reset to `wanted`), the
-skip stops recurring. This is not treated as a defect.
+A guard skip is logged like an ordinary `no_match` — the `search_log.outcome`
+column is deliberately UNCHANGED by issue #1196 item 2, precisely so
+`unfindable_detection`'s classification inputs stay byte-identical (see
+`search_log.cross_request_conflict_request_ids` below, which is never
+referenced by `get_unfindable_search_log_signal`'s SQL). `unfindable_
+detection`'s branch 4 signal only fires after `REQUIRED_ZERO_FIND_CYCLES`
+(3) consecutive zero-find plan cycles for the SAME request — a single
+skipped cycle cannot trip it — and a guard skip can only recur across
+cycles while the blocking sibling remains `status='downloading'` on the
+contested keys; once that sibling's attempt resolves (imported, replaced,
+or reset to `wanted`), the skip stops recurring. This is not treated as a
+defect. What DOES change (#1196 item 2): the guard-skip search_log row
+additionally carries `cross_request_conflict_request_ids`, naming the
+conflicting owner(s) — an operator reading `pipeline-cli triage show` or
+the same-shaped `/api/triage/<id>` response can now tell "this attempt was
+deliberately declined because a sibling already held the queue keys" apart
+from "no peer had it", even though both produce the same `outcome`.
 
 ## Persisted search plans (migration 014)
 
@@ -967,6 +1020,25 @@ post-PR3 populate every applicable column.
 | `expected_track_count` | `INTEGER NULL` | The request's `total_tracks` snapshotted at search-execution time. Not slskd's result count, not a hardcoded value — the operator's expectation for this release. (R25) |
 | `matcher_score_top1` | `REAL NULL` | The top candidate's composite score (`matched_tracks + avg_ratio`) from `candidates[0]`. `0.0` on `no_results` / `no_match` with empty candidate set. (R26) |
 | `query_template` | `TEXT NULL` | Operator-readable shape derived from `plan_strategy` (e.g. `{artist} {title}`, `{artist} {track_N}`, `{catalog_number}`). Lets `GROUP BY query_template` surface which template shapes are productive vs noise. (R27) |
+
+### `search_log.cross_request_conflict_request_ids` (migration 079, issue #1196 item 2)
+
+`INTEGER[] NULL`, no CHECK constraint (mirrors `rejection_reason`'s plain
+nullable shape). The cross-request enqueue-guard (#1178) skip marker: `NULL`
+when the guard never fired for this search; a non-NULL array names every
+OTHER request id whose held queue keys made a candidate in this attempt
+decline. Threaded from `lib.enqueue`'s `EnqueueAttempt`/`FindDownloadResult`
+through `SearchResult.cross_request_conflict_ids`
+(`cratedigger._apply_find_download_result`) into
+`ConsumedAttemptInput.cross_request_conflict_request_ids`
+(`cratedigger._log_search_result` →
+`PipelineDB.record_consumed_search_attempt`). Deliberately a SEPARATE
+column from the seven migration-027 forensics scalars above and from
+`outcome` — `get_unfindable_search_log_signal`'s SQL never references it,
+so it cannot change `classify_unfindable_from_state`'s inputs. Rendered on
+`pipeline-cli triage show` (`conflict=<ids>` per recent entry) and the
+matching `SearchLogEntry.cross_request_conflict_request_ids` field on the
+`/api/triage/<id>` response.
 
 ### `album_requests` observability columns (migration 028, written by PR3 U12 / U13 / U14)
 

@@ -115,6 +115,22 @@ def _make_tracks(album_id: int = 1) -> list[TrackRecord]:
     )
 
 
+def _multi_disc_tracks(
+    *, album_id: int = 1, mediums: tuple[int, ...] = (1, 2),
+) -> list[TrackRecord]:
+    """Shared multi-disc TrackRecord builder -- one cast, reused by every
+    try_multi_enqueue test that needs more than one medium (#1196 item 1
+    review F1's composed pin reuses this rather than growing the file's
+    frozen escape-hatch count with its own inline cast)."""
+    return cast(
+        "list[TrackRecord]",
+        [
+            {"albumId": album_id, "title": f"Disc{m} Track", "mediumNumber": m}
+            for m in mediums
+        ],
+    )
+
+
 def _album_with_request(request_id: int = 1) -> MagicMock:
     return MagicMock(
         id=request_id,
@@ -1927,13 +1943,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         results = _make_results(users)
         release = MagicMock()
         release.media = [MagicMock(medium_number=1), MagicMock(medium_number=2)]
-        tracks = cast(
-            "list[TrackRecord]",
-            [
-                {"albumId": 1, "title": "Disc1 Track", "mediumNumber": 1},
-                {"albumId": 1, "title": "Disc2 Track", "mediumNumber": 2},
-            ],
-        )
+        tracks = _multi_disc_tracks()
 
         def fake_match(tracks, allowed_filetype, file_dirs, username, ctx):
             disc_no = tracks[0]["mediumNumber"]
@@ -2076,13 +2086,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         results = _make_results(users)
         release = MagicMock()
         release.media = [MagicMock(medium_number=1), MagicMock(medium_number=2)]
-        tracks = cast(
-            "list[TrackRecord]",
-            [
-                {"albumId": 1, "title": "Disc1 Track", "mediumNumber": 1},
-                {"albumId": 1, "title": "Disc2 Track", "mediumNumber": 2},
-            ],
-        )
+        tracks = _multi_disc_tracks()
 
         def fake_match(tracks, allowed_filetype, file_dirs, username, ctx):
             disc_no = tracks[0]["mediumNumber"]
@@ -2296,13 +2300,7 @@ class TestTransferLedgerThroughRealEnqueuePath(unittest.TestCase):
         results = _make_results(users)
         release = MagicMock()
         release.media = [MagicMock(medium_number=1), MagicMock(medium_number=2)]
-        tracks = cast(
-            "list[TrackRecord]",
-            [
-                {"albumId": 1, "title": "Disc1 Track", "mediumNumber": 1},
-                {"albumId": 1, "title": "Disc2 Track", "mediumNumber": 2},
-            ],
-        )
+        tracks = _multi_disc_tracks()
 
         def fake_match(tracks, allowed_filetype, file_dirs, username, ctx):
             disc_no = tracks[0]["mediumNumber"]
@@ -2717,6 +2715,132 @@ class TestCrossRequestEnqueueGuard(unittest.TestCase):
                 for line in log_ctx.output),
             log_ctx.output,
         )
+        # Issue #1196 item 2: the skipped attempt carries the forensics
+        # marker naming its conflicting owner; the winner carries none.
+        self.assertEqual(attempt2.conflicting_request_ids, frozenset({1}))
+        self.assertEqual(attempt1.conflicting_request_ids, frozenset())
+
+    def test_persisted_state_fingerprint_agrees_with_real_ledger_rows_single_disc(self):
+        """#1196 item 1 (review F1): agreement-by-construction, driven at
+        the REAL adapter (try_enqueue), never asserted from a shared
+        test-local variable. The ``attempt_fingerprint`` persisted onto
+        ``active_download_state`` by the real claim must equal the
+        ``attempt_fingerprint`` on EVERY real ledger row this same
+        attempt writes. Kills a mutant that diverges the ledger-side
+        computation (``lib.enqueue._enqueue_with_claim_outcome``) from
+        the state-side computation
+        (``lib.download.build_active_download_state``) -- e.g.
+        appending a stray character to the ledger-side value."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        file_dir = "Music\\TheBun\\Album"
+        filenames = [f"{file_dir}\\0{i}.flac" for i in (1, 2, 3)]
+        slskd, match = self._shared_candidate(file_dir, filenames)
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        results = {"TheBun": {"flac": [file_dir]}}
+        tracks = _make_tracks()
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("time.sleep"):
+            attempt = try_enqueue(
+                tracks, results, "flac", ctx, match_fn=_const_match(match),
+            )
+
+        self.assertTrue(attempt.matched)
+        state = _request_active_state(db)
+        self.assertIsNotNone(state.attempt_fingerprint)
+        ledger_fps = {
+            row.attempt_fingerprint
+            for row in db.record_transfer_enqueue_calls
+        }
+        self.assertEqual(
+            ledger_fps, {state.attempt_fingerprint},
+            "the persisted state fingerprint must equal every real "
+            "ledger row's fingerprint for this attempt (single-disc)",
+        )
+
+    def test_persisted_state_fingerprint_agrees_with_real_ledger_rows_multi_disc(self):
+        """Same F1 composed pin through ``try_multi_enqueue`` -- the
+        plausible divergence site the review named: each disc issues
+        its OWN enqueue call (and so its OWN ledger-side
+        ``attempt_fingerprint`` computation in
+        ``_enqueue_with_claim_outcome``), while the state is claimed
+        ONCE up front from the whole multi-disc manifest. Both must
+        still agree."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI(downloads=[
+            {
+                "username": "u00",
+                "directories": [{
+                    "directory": "u00\\Music",
+                    "files": [
+                        {"filename": "u00\\Music\\d1.flac", "id": "tid-d1"},
+                    ],
+                }],
+            },
+            {
+                "username": "u01",
+                "directories": [{
+                    "directory": "u01\\Music",
+                    "files": [
+                        {"filename": "u01\\Music\\d2.flac", "id": "tid-d2"},
+                    ],
+                }],
+            },
+        ])
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        users = ["u00", "u01"]
+        results = _make_results(users)
+        release = MagicMock()
+        release.media = [MagicMock(medium_number=1), MagicMock(medium_number=2)]
+        tracks = _multi_disc_tracks()
+
+        def fake_match(tracks, allowed_filetype, file_dirs, username, ctx):
+            disc_no = tracks[0]["mediumNumber"]
+            if disc_no == 1 and username == "u00":
+                return MatchResult(
+                    matched=True,
+                    directory={
+                        "directory": "u00\\Music",
+                        "files": [{"filename": "d1.flac", "size": 111}],
+                    },
+                    file_dir="u00\\Music",
+                    candidates=[],
+                )
+            if disc_no == 2 and username == "u01":
+                return MatchResult(
+                    matched=True,
+                    directory={
+                        "directory": "u01\\Music",
+                        "files": [{"filename": "d2.flac", "size": 222}],
+                    },
+                    file_dir="u01\\Music",
+                    candidates=[],
+                )
+            return _nomatch()
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("time.sleep"):
+            attempt = try_multi_enqueue(
+                release, tracks, results, "flac", ctx, match_fn=fake_match,
+            )
+
+        self.assertTrue(attempt.matched)
+        state = _request_active_state(db)
+        self.assertIsNotNone(state.attempt_fingerprint)
+        ledger_fps = {
+            row.attempt_fingerprint
+            for row in db.record_transfer_enqueue_calls
+        }
+        self.assertEqual(
+            ledger_fps, {state.attempt_fingerprint},
+            "the persisted state fingerprint must equal every real "
+            "per-disc ledger row's fingerprint for the SAME "
+            "whole-attempt manifest (multi-disc)",
+        )
 
     def test_multi_disc_candidate_is_skipped_not_enqueued(self):
         """Same pin, through the try_multi_enqueue call site (issue #1178
@@ -2770,6 +2894,9 @@ class TestCrossRequestEnqueueGuard(unittest.TestCase):
                 for line in log_ctx.output),
             log_ctx.output,
         )
+        # Issue #1196 item 2: same marker through the multi-disc seam.
+        self.assertEqual(attempt2.conflicting_request_ids, frozenset({1}))
+        self.assertEqual(attempt1.conflicting_request_ids, frozenset())
 
     def test_conflicted_peer_falls_through_to_next_peer(self):
         """#1178 PR2 review F4: a guard hit means "try the next peer", not
@@ -2832,6 +2959,11 @@ class TestCrossRequestEnqueueGuard(unittest.TestCase):
                 for line in log_ctx.output),
             log_ctx.output,
         )
+        # Issue #1196 item 2: even a WINNING attempt carries the marker
+        # for a peer it conflicted on and fell through past -- the
+        # forensics fact "a guard skip happened during this search" is
+        # independent of whether the search ultimately matched.
+        self.assertEqual(attempt.conflicting_request_ids, frozenset({99}))
 
     def test_claim_refused_releases_registry_for_sibling(self):
         """#1178 PR2 review F5: request 1's row has drifted to

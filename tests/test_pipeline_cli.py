@@ -6200,6 +6200,69 @@ class TestPipelineCliTriage(unittest.TestCase):
         self.assertIn("exhausted", out)
         self.assertIn("recent_entries", out)
 
+    def test_show_human_renders_cross_request_conflict_marker(self):
+        """#1196 item 2: the cross-request enqueue-guard skip marker is
+        visible on `pipeline-cli triage show` -- an operator reading a
+        plain no_match row can tell a deliberate decline from genuine
+        network absence."""
+        from lib.pipeline_db import ConsumedAttemptInput, SearchPlanItemInput
+
+        db = FakePipelineDB()
+        self._seed_unfindable(db, 42)
+        plan_id = db.create_successful_search_plan(
+            request_id=42, generator_id="g1",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q0",
+                canonical_query_key="q0")],
+        )
+        active = db.get_active_search_plan(42)
+        assert active is not None
+        item_id = active.items[0].id
+        db.record_consumed_search_attempt(ConsumedAttemptInput(
+            request_id=42, plan_id=plan_id, plan_item_id=item_id,
+            plan_ordinal=0, plan_strategy="default",
+            plan_canonical_query_key="q0", plan_repeat_group=None,
+            plan_generator_id="g1", query="q0", outcome="no_match",
+            plan_item_count=1, cycle_count_snapshot=0,
+            cross_request_conflict_request_ids=(8781, 8846),
+        ))
+
+        rc, out, err = self._run_show(db, 42)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        self.assertIn("conflict=8781,8846", out)
+
+    def test_show_human_renders_dash_when_no_conflict_marker(self):
+        """Must-still-work control: a plain no_match row with no guard
+        skip renders ``conflict=-``, not a stray marker."""
+        from lib.pipeline_db import ConsumedAttemptInput, SearchPlanItemInput
+
+        db = FakePipelineDB()
+        self._seed_unfindable(db, 42)
+        plan_id = db.create_successful_search_plan(
+            request_id=42, generator_id="g1",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="q0",
+                canonical_query_key="q0")],
+        )
+        active = db.get_active_search_plan(42)
+        assert active is not None
+        item_id = active.items[0].id
+        db.record_consumed_search_attempt(ConsumedAttemptInput(
+            request_id=42, plan_id=plan_id, plan_item_id=item_id,
+            plan_ordinal=0, plan_strategy="default",
+            plan_canonical_query_key="q0", plan_repeat_group=None,
+            plan_generator_id="g1", query="q0", outcome="no_match",
+            plan_item_count=1, cycle_count_snapshot=0,
+        ))
+
+        rc, out, err = self._run_show(db, 42)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(err, "")
+        self.assertIn("conflict=-", out)
+
     def test_show_json_round_trips_through_msgspec(self):
         """`--json` payload must decode back into a ``TriageResult`` so
         the API consumer gets the same wire shape on both surfaces."""

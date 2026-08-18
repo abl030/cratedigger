@@ -95,6 +95,14 @@ class SearchResult:
     # lookup failed before a terminal state was observed (pre-attempt /
     # error paths).
     result_count_uncapped: int | None = None
+    # Issue #1196 item 2: every OTHER request id the cross-request
+    # enqueue guard (#1178) skipped a candidate for during this search's
+    # find_download walk -- copied from ``FindDownloadResult.
+    # conflicting_request_ids`` by ``cratedigger._apply_find_download_
+    # result``. Forensics-only marker distinguishing a deliberate
+    # cross-request decline from genuine network absence; empty on every
+    # search that never hit the guard.
+    cross_request_conflict_ids: tuple[int, ...] = ()
     # NOTE: ``rejection_reason`` (U11 R22) and ``matcher_score_top1``
     # (U11 R26) are NOT carried on SearchResult. The log site in
     # ``cratedigger.py::_log_search_result`` reconstructs both from

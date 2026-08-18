@@ -105,6 +105,9 @@ class SearchLogRow:
     expected_track_count: int | None = None
     matcher_score_top1: float | None = None
     query_template: str | None = None
+    # Issue #1196 item 2: the cross-request enqueue-guard skip marker.
+    # None mirrors the real column's NULL when the guard never fired.
+    cross_request_conflict_request_ids: list[int] | None = None
 
 
 @dataclass

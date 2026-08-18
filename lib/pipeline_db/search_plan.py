@@ -1434,7 +1434,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                         rejection_reason, result_count_uncapped,
                         query_token_count, query_distinct_token_count,
                         expected_track_count, matcher_score_top1,
-                        query_template
+                        query_template, cross_request_conflict_request_ids
                     ) VALUES (
                         %s, %s, %s, %s, %s,
                         %s, %s, %s,
@@ -1450,7 +1450,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                         %s, %s,
                         %s, %s,
                         %s, %s,
-                        %s
+                        %s, %s
                     )
                     RETURNING id
                     """,
@@ -1488,6 +1488,11 @@ class _SearchPlanMixin(_PipelineDBBase):
                         attempt.expected_track_count,
                         attempt.matcher_score_top1,
                         attempt.query_template,
+                        (
+                            list(attempt.cross_request_conflict_request_ids)
+                            if attempt.cross_request_conflict_request_ids
+                            else None
+                        ),
                     ),
                 )
                 log_row = cur.fetchone()
@@ -1782,8 +1787,10 @@ class _SearchPlanMixin(_PipelineDBBase):
 
         Rows carry the columns the triage forensics struct needs —
         id, created_at, plan_strategy, query, outcome, result_count,
-        rejection_reason, matcher_score_top1. Anything else stays in
-        ``search_log``; ``search-plan history`` is the full-row view.
+        rejection_reason, matcher_score_top1,
+        cross_request_conflict_request_ids (#1196 item 2). Anything
+        else stays in ``search_log``; ``search-plan history`` is the
+        full-row view.
         """
         if not request_ids:
             return {}
@@ -1791,12 +1798,13 @@ class _SearchPlanMixin(_PipelineDBBase):
             """
             SELECT id, request_id, created_at, plan_strategy, query,
                    outcome, result_count, rejection_reason,
-                   matcher_score_top1
+                   matcher_score_top1, cross_request_conflict_request_ids
             FROM (
                 SELECT sl.id, sl.request_id, sl.created_at,
                        sl.plan_strategy, sl.query, sl.outcome,
                        sl.result_count, sl.rejection_reason,
                        sl.matcher_score_top1,
+                       sl.cross_request_conflict_request_ids,
                        ROW_NUMBER() OVER (
                            PARTITION BY sl.request_id
                            ORDER BY sl.created_at DESC, sl.id DESC

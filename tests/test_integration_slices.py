@@ -4417,6 +4417,149 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(row.final_state, "collection_crash")
         self.assertEqual(db.request(rid)["plan_cycle_count"], 1)
 
+    def test_log_search_result_persists_cross_request_conflict_marker(self):
+        """#1196 item 2: ``_log_search_result`` threads ``SearchResult.
+        cross_request_conflict_ids`` through to the real
+        ``ConsumedAttemptInput`` write, landing on
+        ``search_log.cross_request_conflict_request_ids`` (migration
+        079) -- the second real adapter in the guard-skip forensics
+        chain (the first, ``cratedigger._apply_find_download_result``,
+        is pinned directly in tests/test_integration.py)."""
+        from lib.search import (
+            SEARCH_PLAN_GENERATOR_ID,
+            PlanExecutionContext,
+            SearchResult,
+        )
+
+        cfg = self._make_cfg()
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Wiggles", album_title="Album",
+            source="request", mb_release_id="mbid-conflict", year=1991,
+        )
+        db.set_tracks(rid, [{"track_number": 1, "title": "Track"}])
+        album = self._make_album(request_id=rid, mb_release_id="mbid-conflict")
+        plan_id = self._seed_plan(db, rid, items=[("default", "Wiggles Album")])
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        item = active.items[0]
+        ctx = self._wire(cfg, FakeSlskdAPI(), db, album)
+
+        result = SearchResult(
+            album_id=album.id, success=True, query="Wiggles Album",
+            outcome="no_match",
+            plan_execution=PlanExecutionContext(
+                plan_id=plan_id, plan_item_id=item.id, plan_ordinal=0,
+                plan_strategy="default", plan_canonical_query_key="q",
+                plan_repeat_group=None,
+                plan_generator_id=SEARCH_PLAN_GENERATOR_ID,
+                plan_item_count=1, cycle_count_snapshot=0,
+            ),
+            cross_request_conflict_ids=(8781, 8846),
+        )
+
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        marker = db.search_logs[0].cross_request_conflict_request_ids
+        assert marker is not None
+        self.assertEqual(sorted(marker), [8781, 8846])
+
+    def test_find_download_conflict_marker_reaches_search_log_composed(self):
+        """#1196 item 2 (review F2): the FULL real chain -- find_download
+        (which internally calls _try_filetype, try_enqueue, and
+        _with_metrics) -> cratedigger._apply_find_download_result ->
+        cratedigger._log_search_result -- composed, not each hop
+        pinned in isolation. A real cross-request conflict is
+        engineered (an owner request already holds an accepted ledger
+        row for the SAME queue key our candidate resolves to), so the
+        guard actually fires inside the real try_enqueue call
+        find_download makes. Kills mutants that drop the marker at
+        _with_metrics or at either _try_filetype accumulation site --
+        neither of which the single-hop pins above can reach."""
+        from lib.download_ownership import DownloadOwnershipWriter
+        from lib.enqueue import ClaimedQueueKeysRegistry, find_download
+        from lib.pipeline_db import TransferLedgerRow
+        from tests.helpers import make_request_row
+
+        cfg = self._make_cfg()
+        slskd = FakeSlskdAPI()
+        slskd.searches.add_search(
+            search_id=42,
+            state="Completed",
+            responses=[{
+                "username": "good_peer",
+                "uploadSpeed": 100_000,
+                "files": [
+                    {"filename": "Music\\Album\\01 - Track One.flac", "bitRate": 1411},
+                    {"filename": "Music\\Album\\02 - Track Two.flac", "bitRate": 1411},
+                ],
+            }],
+        )
+        slskd.searches.search_text_id_sequence = [42]
+        slskd.users.set_directory("good_peer", "Music\\Album", [{
+            "directory": "Music\\Album",
+            "files": [
+                {"filename": "01 - Track One.flac", "size": 1, "id": "tid-1"},
+                {"filename": "02 - Track Two.flac", "size": 1, "id": "tid-2"},
+            ],
+        }])
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Wiggles", album_title="Album",
+            source="request", mb_release_id="mbid-composed-conflict",
+            year=1991,
+        )
+        db.set_tracks(rid, [
+            {"track_number": 1, "title": "Track One"},
+            {"track_number": 2, "title": "Track Two"},
+        ])
+        album = self._make_album(
+            request_id=rid, mb_release_id="mbid-composed-conflict")
+        self._seed_plan(db, rid, items=[("default", "*iggles Album")])
+
+        # The conflicting owner: a DIFFERENT request, already downloading,
+        # with an ACCEPTED ledger row for the exact (username, filename)
+        # queue key our candidate's first file resolves to
+        # ("good_peer", "Music\\Album\\01 - Track One.flac" -- file_dir +
+        # "\\" + basename, matching _prefixed_directory_files).
+        owner_rid = 999001
+        db.seed_request(make_request_row(
+            id=owner_rid, status="downloading",
+            artist_name="Owner", album_title="Owner Album"))
+        db.record_transfer_enqueue([TransferLedgerRow(
+            request_id=owner_rid, username="good_peer",
+            filename="Music\\Album\\01 - Track One.flac",
+            attempt_fingerprint="ownerfp")])
+        db.confirm_transfer_enqueue(
+            "good_peer", "Music\\Album\\01 - Track One.flac")
+
+        ctx = self._wire(cfg, slskd, db, album)
+        # Locally wired on THIS test's ctx only -- _wire() itself stays
+        # untouched so every other test in this class keeps its existing
+        # (unclaimed) behaviour.
+        ctx.download_ownership = DownloadOwnershipWriter(db_factory=lambda: db)
+        ctx.claimed_queue_keys_registry = ClaimedQueueKeysRegistry()
+
+        result = self._cratedigger.search_for_album(album, ctx)
+        find_result = find_download(album, ctx)
+        grab_list: dict[int, GrabListEntry] = {}
+        self._cratedigger._apply_find_download_result(
+            album, result, find_result, [], grab_list, ctx)
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        # The guard actually fired: the candidate never matched, and the
+        # owner is named.
+        self.assertEqual(find_result.outcome, "no_match")
+        self.assertEqual(grab_list, {})
+        self.assertEqual(
+            find_result.conflicting_request_ids, frozenset({owner_rid}))
+        # The marker survived the full real chain into the persisted row.
+        self.assertEqual(len(db.search_logs), 1)
+        marker = db.search_logs[0].cross_request_conflict_request_ids
+        assert marker is not None
+        self.assertEqual(marker, [owner_rid])
+
 
 class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
     """Integration slice: variant=exhausted → reset search_attempts, stay wanted.

@@ -4887,6 +4887,8 @@ class FakePipelineDB:
                 "result_count": entry.result_count,
                 "rejection_reason": entry.rejection_reason,
                 "matcher_score_top1": entry.matcher_score_top1,
+                "cross_request_conflict_request_ids": (
+                    entry.cross_request_conflict_request_ids),
             })
         return out
 
@@ -8416,6 +8418,8 @@ class FakePipelineDB:
             "expected_track_count": entry.expected_track_count,
             "matcher_score_top1": entry.matcher_score_top1,
             "query_template": entry.query_template,
+            "cross_request_conflict_request_ids": (
+                entry.cross_request_conflict_request_ids),
         }
 
     # --- slskd events cursor (issue #146 phase 1) ---
@@ -8598,6 +8602,40 @@ class FakePipelineDB:
         except ValueError:
             return None
 
+    @staticmethod
+    def _attempt_fingerprint_from_state(
+        request: Mapping[str, object],
+    ) -> str | None:
+        """Mirror ``active_download_state ->> 'attempt_fingerprint'``
+        (#1196 item 1) for the two shapes production ever writes: the
+        top-level state is SQL NULL (or a non-object value -- ``->>``
+        returns NULL for a NULL or non-object jsonb regardless of key,
+        matching ``None`` here), or the key is absent/JSON-null
+        (``->>`` also returns NULL, matching the ``dict.get`` miss
+        here). Does NOT distinguish a missing key from an explicit JSON
+        ``null`` -- ``->>`` does not either.
+
+        Known, deliberately UNRECONCILED divergence: if the
+        ``attempt_fingerprint`` JSON value were ever a non-string
+        scalar (a number, bool), real ``->>`` stringifies it (e.g.
+        ``42`` -> ``'42'``) rather than returning NULL, but this helper
+        returns ``None`` for that case. Unreachable in practice --
+        ``lib.download.build_active_download_state`` (the only
+        production writer) emits either a Python ``str`` or omits the
+        key entirely (``omit_defaults=True``), never a bare number or
+        bool -- so this divergence has no real-world state to exercise
+        it against."""
+        raw = request.get("active_download_state")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(raw, dict):
+            return None
+        value = raw.get("attempt_fingerprint")
+        return value if isinstance(value, str) else None
+
     def get_conflicting_transfer_request_ids(
         self,
         keys: Sequence[tuple[str, str]],
@@ -8606,14 +8644,30 @@ class FakePipelineDB:
         """Mirror the real ledger join: accepted rows keyed by any of
         ``keys`` whose owning request is CURRENTLY 'downloading' on its
         CURRENT attempt, excluding ``exclude_request_id`` (#1178 PR2,
-        attempt-scoped per review F2). A missing request row (never
-        seeded, or hard-deleted) mirrors the real INNER JOIN -- never a
-        conflict. A row older than the owner's current
-        ``active_download_state`` enqueued-at witness belongs to an
-        abandoned earlier attempt and never conflicts; a NULL/missing
-        witness fails CLOSED -- every accepted row for that 'downloading'
-        owner counts as in-scope (mirrors the real query's
-        ``COALESCE(..., '-infinity')``)."""
+        attempt-scoped per review F2; exact fingerprint identity added
+        #1196 item 1). A missing request row (never seeded, or
+        hard-deleted) mirrors the real INNER JOIN -- never a conflict.
+
+        Two-armed, mirroring the real SQL ``CASE`` exactly (#1196
+        review F3 removed the real query's REDUNDANT ``WHEN
+        active_download_state IS NULL THEN TRUE`` arm -- proven on
+        real PG to behave identically to the ELSE arm's own
+        ``COALESCE``, since ``->>`` on a NULL jsonb also returns NULL
+        for any key):
+
+          1. State carries a string ``attempt_fingerprint`` -- EXACT
+             equality against the ledger row's own
+             ``attempt_fingerprint`` decides in/out of scope; no clock
+             comparison.
+          2. Else (state is NULL, malformed, or lacks the key) --
+             deploy-window fallback to the ``enqueued_at`` witness: a
+             row older than the owner's current attempt boundary
+             belongs to an abandoned earlier attempt and never
+             conflicts; a NULL/missing witness (including a NULL
+             top-level state -- ``_attempt_enqueued_at`` returns
+             ``None`` for that too) fails CLOSED (mirrors the real
+             query's ``COALESCE(..., '-infinity')``).
+        """
         key_set = set(keys)
         conflicting: set[int] = set()
         for row in self._transfer_ledger.values():
@@ -8627,6 +8681,11 @@ class FakePipelineDB:
             if request is None:
                 continue
             if request.get("status") != "downloading":
+                continue
+            fingerprint = self._attempt_fingerprint_from_state(request)
+            if fingerprint is not None:
+                if row.attempt_fingerprint == fingerprint:
+                    conflicting.add(row.request_id)
                 continue
             attempt_enqueued_at = self._attempt_enqueued_at(request)
             if (
@@ -9306,6 +9365,11 @@ class FakePipelineDB:
                 expected_track_count=attempt.expected_track_count,
                 matcher_score_top1=attempt.matcher_score_top1,
                 query_template=attempt.query_template,
+                cross_request_conflict_request_ids=(
+                    list(attempt.cross_request_conflict_request_ids)
+                    if attempt.cross_request_conflict_request_ids
+                    else None
+                ),
             ))
 
             now = _utcnow()

@@ -809,6 +809,16 @@ def _log_search_result(
     )
     matcher_score_top1 = matcher_score_top1_for(list(candidates_seq))
     result_count_uncapped = getattr(result, "result_count_uncapped", None)
+    # Issue #1196 item 2: the cross-request enqueue-guard skip marker.
+    # None (not an empty tuple) when the guard never fired for this
+    # search -- the smallest honest signal: presence of a value IS the
+    # fact "a guard skip happened here", distinct from the same
+    # ``no_match``/``error`` outcome a peer-absent search also writes.
+    # Direct attribute read (review F6a), not ``getattr`` with a
+    # default -- ``result`` is typed ``SearchResult``, which declares
+    # this field unconditionally, so a future rename must be a Pyright
+    # error here, not a silently-always-empty marker.
+    cross_request_conflict_ids = result.cross_request_conflict_ids or None
 
     if is_consumed and plan_execution is not None:
         scheduler_success = (outcome == "found")
@@ -849,6 +859,8 @@ def _log_search_result(
                     expected_track_count=expected_track_count,
                     matcher_score_top1=matcher_score_top1,
                     query_template=query_template,
+                    cross_request_conflict_request_ids=(
+                        cross_request_conflict_ids),
                 )
             )
         except Exception:
@@ -860,7 +872,22 @@ def _log_search_result(
             )
         return
 
-    # Non-consuming pre-attempt path.
+    # Non-consuming pre-attempt path. ``cross_request_conflict_ids`` is
+    # computed above but deliberately DROPPED here -- ``NonConsuming
+    # AttemptInput`` carries no ``cross_request_conflict_request_ids``
+    # field at all. This is safe: a cross-request enqueue-guard skip
+    # (#1178) can only fire inside ``find_download`` (a matched
+    # candidate declined by the guard before claim), and
+    # ``search_and_queue`` only calls ``find_download`` when
+    # ``result.success`` is True. The ONLY ``search_for_album`` path
+    # that returns ``plan_execution=None`` is the "no active plan"
+    # early return, which also sets ``success=False`` -- so every
+    # ``SearchResult`` that could have reached the guard already has
+    # ``plan_execution is not None`` and was routed through the
+    # consumed branch above (``is_consumed and plan_execution is not
+    # None``), returned before reaching here. A genuine pre-attempt
+    # failure (slskd submit error, empty query, no plan) never reaches
+    # the matcher, so this path can never carry a real marker to drop.
     plan_kwargs: _PlanKwargs = {}
     if plan_execution is not None:
         plan_kwargs = {
@@ -957,6 +984,9 @@ def _apply_find_download_result(
     # Aggregate pre-filter skip count from the find_download walk gets
     # persisted on ``search_log.pre_filter_skip_count``.
     result.pre_filter_skip_count = find_result.pre_filter_skip_count
+    # Issue #1196 item 2: cross-request enqueue-guard skip marker.
+    result.cross_request_conflict_ids = tuple(
+        sorted(find_result.conflicting_request_ids))
     if ctx is not None and find_result.metrics is not None:
         metrics = find_result.metrics
         result.browse_time_s = metrics.browse_time_s

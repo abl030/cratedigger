@@ -287,6 +287,13 @@ class SearchLogEntry(msgspec.Struct, frozen=True):
     and the U11 forensics scalars (``rejection_reason``,
     ``matcher_score_top1``). Anything else stays on the raw
     ``search_log`` row.
+
+    ``cross_request_conflict_request_ids`` (issue #1196 item 2): the
+    cross-request enqueue-guard skip marker — the other request id(s)
+    whose held queue keys made this attempt decline a candidate,
+    distinguishing a deliberate decline from genuine network absence
+    (both otherwise surface as the SAME ``outcome``). ``None`` when the
+    guard never fired for this row.
     """
 
     id: int
@@ -297,6 +304,7 @@ class SearchLogEntry(msgspec.Struct, frozen=True):
     result_count: int | None
     rejection_reason: str | None
     matcher_score_top1: float | None
+    cross_request_conflict_request_ids: list[int] | None = None
 
 
 class SearchForensicsSummary(msgspec.Struct, frozen=True):
@@ -592,6 +600,7 @@ def _search_log_entry(row: dict[str, Any]) -> SearchLogEntry:
             matcher_f = float(matcher)
         except (TypeError, ValueError):
             matcher_f = None
+    conflict_ids = row.get("cross_request_conflict_request_ids")
     return SearchLogEntry(
         id=int(row["id"]),
         created_at=row["created_at"],
@@ -601,6 +610,9 @@ def _search_log_entry(row: dict[str, Any]) -> SearchLogEntry:
         result_count=_int_or_none(row.get("result_count")),
         rejection_reason=row.get("rejection_reason"),
         matcher_score_top1=matcher_f,
+        cross_request_conflict_request_ids=(
+            [int(rid) for rid in conflict_ids] if conflict_ids else None
+        ),
     )
 
 
