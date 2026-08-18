@@ -8577,32 +8577,6 @@ class FakePipelineDB:
         return abandoned
 
     @staticmethod
-    def _attempt_enqueued_at(request: Mapping[str, object]) -> datetime | None:
-        """Mirror ``(active_download_state ->> 'enqueued_at')::timestamptz``
-        -- tolerant of the fake's mixed storage shapes: a JSON string (as
-        written by ``update_download_state_if_downloading``/
-        ``claim_downloading``) or a plain dict (as some tests seed
-        directly). Returns ``None`` on anything unparseable, mirroring
-        SQL NULL for a missing/malformed state."""
-        raw = request.get("active_download_state")
-        if raw is None:
-            return None
-        if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except (TypeError, ValueError):
-                return None
-        if not isinstance(raw, dict):
-            return None
-        enqueued_at = raw.get("enqueued_at")
-        if not isinstance(enqueued_at, str):
-            return None
-        try:
-            return datetime.fromisoformat(enqueued_at)
-        except ValueError:
-            return None
-
-    @staticmethod
     def _attempt_fingerprint_from_state(
         request: Mapping[str, object],
     ) -> str | None:
@@ -8645,28 +8619,21 @@ class FakePipelineDB:
         ``keys`` whose owning request is CURRENTLY 'downloading' on its
         CURRENT attempt, excluding ``exclude_request_id`` (#1178 PR2,
         attempt-scoped per review F2; exact fingerprint identity added
-        #1196 item 1). A missing request row (never seeded, or
-        hard-deleted) mirrors the real INNER JOIN -- never a conflict.
+        #1196 item 1; deploy-window time fallback deleted #1199 item 2 --
+        the measured cohort was empty). A missing request row (never
+        seeded, or hard-deleted) mirrors the real INNER JOIN -- never a
+        conflict.
 
-        Two-armed, mirroring the real SQL ``CASE`` exactly (#1196
-        review F3 removed the real query's REDUNDANT ``WHEN
-        active_download_state IS NULL THEN TRUE`` arm -- proven on
-        real PG to behave identically to the ELSE arm's own
-        ``COALESCE``, since ``->>`` on a NULL jsonb also returns NULL
-        for any key):
+        Two-armed, mirroring the real SQL ``CASE`` exactly:
 
           1. State carries a string ``attempt_fingerprint`` -- EXACT
              equality against the ledger row's own
              ``attempt_fingerprint`` decides in/out of scope; no clock
              comparison.
-          2. Else (state is NULL, malformed, or lacks the key) --
-             deploy-window fallback to the ``enqueued_at`` witness: a
-             row older than the owner's current attempt boundary
-             belongs to an abandoned earlier attempt and never
-             conflicts; a NULL/missing witness (including a NULL
-             top-level state -- ``_attempt_enqueued_at`` returns
-             ``None`` for that too) fails CLOSED (mirrors the real
-             query's ``COALESCE(..., '-infinity')``).
+          2. Else (state is NULL, malformed, or lacks the key) -- fails
+             CLOSED unconditionally: every accepted row for that
+             ``'downloading'`` owner counts as in-scope (blocks),
+             mirroring the real query's ``ELSE TRUE``.
         """
         key_set = set(keys)
         conflicting: set[int] = set()
@@ -8683,17 +8650,11 @@ class FakePipelineDB:
             if request.get("status") != "downloading":
                 continue
             fingerprint = self._attempt_fingerprint_from_state(request)
-            if fingerprint is not None:
-                if row.attempt_fingerprint == fingerprint:
-                    conflicting.add(row.request_id)
+            if fingerprint is None:
+                conflicting.add(row.request_id)
                 continue
-            attempt_enqueued_at = self._attempt_enqueued_at(request)
-            if (
-                attempt_enqueued_at is not None
-                and row.enqueued_at < attempt_enqueued_at
-            ):
-                continue
-            conflicting.add(row.request_id)
+            if row.attempt_fingerprint == fingerprint:
+                conflicting.add(row.request_id)
         return conflicting
 
     def prune_transfer_ledger(self, older_than: datetime) -> int:

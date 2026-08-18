@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
@@ -404,32 +405,247 @@ SHARED_MODULES_WITHOUT_COVERAGE: dict[str, str] = {
 }
 
 
+#: Changed `lib/**/*.py` files whose full neighbour resolution (EXACT_PATH_
+#: NEIGHBOURS + prefix rules + direct candidates that actually exist) yields
+#: ZERO test modules — the lib/ twin of SHARED_MODULES_WITHOUT_COVERAGE
+#: (issue #1199 item 1, the durable fix behind #1196 item 4). Unlike the
+#: tests/-side registry, _changed_path_neighbours does NOT early-return for
+#: a path listed here: the full resolution still runs, so a module that
+#: later gains real neighbours (an EXACT_PATH_NEIGHBOURS entry, a new prefix
+#: rule, or a newly-created tests.test_<stem> module) SELECTS them
+#: immediately, on its very next diff, with no code change here — but the
+#: registration itself goes stale the moment that happens and the entry
+#: must then be deleted, which tests/test_lib_selection_coverage_audit.py
+#: enforces (issue #1199 review F1: caught by adding a real test module for
+#: a registered path and observing the audit go RED demanding removal — a
+#: prior version of this comment claimed "no code change needed to un-admit
+#: it" at all, which was false; selection self-corrects, the registry does
+#: not). tests/test_lib_selection_coverage_audit.py proves both directions: a
+#: registered path that now resolves neighbours (stale — must be removed),
+#: and a lib/**/*.py file with zero neighbours that is NOT registered here
+#: (must be added, or given real coverage). Population is a fresh
+#: measurement (driving the real resolution function), never hand-curated —
+#: hand-curated neighbour lists are exactly the mechanism that produced
+#: #1196's own false-claim correction round.
+LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
+    "lib/artist_catalogue.py": (
+        "measured 2026-08-19: zero neighbours -- tests.test_artist_catalogue "
+        "does not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
+        "(issue #1199)"
+    ),
+    "lib/banding.py": (
+        "measured 2026-08-19: zero neighbours -- tests.test_banding does "
+        "not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
+        "(issue #1199)"
+    ),
+    "lib/beets_startup.py": (
+        "measured 2026-08-19: zero neighbours -- tests.test_beets_startup "
+        "does not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
+        "(issue #1199)"
+    ),
+    "lib/convergence.py": (
+        "measured 2026-08-19: zero neighbours -- tests.test_convergence "
+        "does not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
+        "(issue #1199)"
+    ),
+    "lib/destructive_release_service.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_destructive_release_service does not exist and no "
+        "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/dispatch/__init__.py": (
+        "measured 2026-08-19: zero neighbours -- _direct_test_candidates "
+        "derives tests.test___init__ from the basename, which does not "
+        "exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
+        "(issue #1199)"
+    ),
+    "lib/dispatch/core.py": (
+        "measured 2026-08-19: zero neighbours -- _direct_test_candidates "
+        "derives tests.test_core from the basename (ignoring the dispatch/ "
+        "subdirectory), which does not exist; no EXACT_PATH_NEIGHBOURS/"
+        "prefix rule covers it either (issue #1199)"
+    ),
+    "lib/dispatch/evidence_gate.py": (
+        "measured 2026-08-19: zero neighbours -- basename-derived "
+        "tests.test_evidence_gate does not exist and no EXACT_PATH_"
+        "NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/dispatch/helpers.py": (
+        "measured 2026-08-19: zero neighbours -- basename-derived "
+        "tests.test_helpers does not exist and no EXACT_PATH_NEIGHBOURS/"
+        "prefix rule covers it (issue #1199)"
+    ),
+    "lib/dispatch/manifest_guard.py": (
+        "measured 2026-08-19: zero neighbours -- basename-derived "
+        "tests.test_manifest_guard does not exist and no EXACT_PATH_"
+        "NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/dispatch/outcome_actions.py": (
+        "measured 2026-08-19: zero neighbours -- basename-derived "
+        "tests.test_outcome_actions does not exist and no EXACT_PATH_"
+        "NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/dispatch/post_import.py": (
+        "measured 2026-08-19: zero neighbours -- basename-derived "
+        "tests.test_post_import does not exist and no EXACT_PATH_"
+        "NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/dispatch/quality_gate.py": (
+        "measured 2026-08-19: zero neighbours -- basename-derived "
+        "tests.test_quality_gate does not exist and no EXACT_PATH_"
+        "NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/dispatch/subprocess_runner.py": (
+        "measured 2026-08-19: zero neighbours -- basename-derived "
+        "tests.test_subprocess_runner does not exist and no EXACT_PATH_"
+        "NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/dispatch/types.py": (
+        "measured 2026-08-19: zero neighbours -- basename-derived "
+        "tests.test_types does not exist and no EXACT_PATH_NEIGHBOURS/"
+        "prefix rule covers it (issue #1199)"
+    ),
+    "lib/download_materialization.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_download_materialization does not exist and no "
+        "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/download_ownership.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_download_ownership does not exist and no EXACT_PATH_"
+        "NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/download_processing.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_download_processing does not exist and no EXACT_PATH_"
+        "NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/download_reconstruction.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_download_reconstruction does not exist and no "
+        "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/download_rejection.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_download_rejection does not exist and no EXACT_PATH_"
+        "NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/download_validation.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_download_validation does not exist and no EXACT_PATH_"
+        "NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/enqueue.py": (
+        "measured 2026-08-19: zero neighbours -- tests.test_enqueue does "
+        "not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
+        "(issue #1199)"
+    ),
+    "lib/ephemeral_postgres.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_ephemeral_postgres does not exist and no EXACT_PATH_"
+        "NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/evidence_action_file.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_evidence_action_file does not exist and no EXACT_PATH_"
+        "NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/fs_authority.py": (
+        "measured 2026-08-19: zero neighbours -- tests.test_fs_authority "
+        "does not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
+        "(issue #1199)"
+    ),
+    "lib/import_job_recovery_service.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_import_job_recovery_service does not exist and no "
+        "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/release_snapshot.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_release_snapshot does not exist and no EXACT_PATH_"
+        "NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/replace_status.py": (
+        "measured 2026-08-19: zero neighbours -- tests.test_replace_status "
+        "does not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
+        "(issue #1199)"
+    ),
+    "lib/search_plan_inspection.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_search_plan_inspection does not exist and no "
+        "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/slskd_transfer_ledger.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_slskd_transfer_ledger does not exist and no EXACT_PATH_"
+        "NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/slskd_transfers.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_slskd_transfers does not exist and no EXACT_PATH_"
+        "NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/startup_reconciliation.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_startup_reconciliation does not exist and no "
+        "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/v0_probe.py": (
+        "measured 2026-08-19: zero neighbours -- tests.test_v0_probe does "
+        "not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
+        "(issue #1199)"
+    ),
+    "lib/wrong_match_delete_service.py": (
+        "measured 2026-08-19: zero neighbours -- "
+        "tests.test_wrong_match_delete_service does not exist and no "
+        "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
+    ),
+    "lib/wrong_matches.py": (
+        "measured 2026-08-19: zero neighbours -- tests.test_wrong_matches "
+        "does not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
+        "(issue #1199)"
+    ),
+}
+
+
 def _assert_no_double_registration(
     exact_path_neighbours: Mapping[str, tuple[str, ...]],
-    shared_modules_without_coverage: Mapping[str, str],
+    admitted_gap_registry: Mapping[str, str],
+    *,
+    gap_registry_name: str = "SHARED_MODULES_WITHOUT_COVERAGE",
 ) -> None:
     """A path cannot be both a real mapping and an admitted coverage gap.
 
-    _changed_path_neighbours returns early for any path in
+    Shared shape for both admitted-gap registries (SHARED_MODULES_WITHOUT_
+    COVERAGE on the tests/ side, LIB_MODULES_WITHOUT_SELECTION_COVERAGE on
+    the lib/ side): _changed_path_neighbours returns early for any path in
     SHARED_MODULES_WITHOUT_COVERAGE, before EXACT_PATH_NEIGHBOURS or any
     prefix rule runs — so a path present in BOTH registries would silently
     discard its real, hand-authored EXACT_PATH_NEIGHBOURS mapping (issue
     #1081 review round: the tree-walking pin's assertion that a registered
     path selects nothing was a tautology of the early-return condition and
-    could never have caught this on its own). Fail at import time instead of
-    merely detecting it later — the contradiction becomes impossible to ship.
+    could never have caught this on its own). LIB_MODULES_WITHOUT_SELECTION_
+    COVERAGE does not early-return, but the same contradiction — a path
+    claiming zero neighbours while EXACT_PATH_NEIGHBOURS gives it real ones
+    — is still nonsensical and worth failing on at import time rather than
+    merely detecting it later.
     """
     contradictions = sorted(
-        set(exact_path_neighbours) & set(shared_modules_without_coverage)
+        set(exact_path_neighbours) & set(admitted_gap_registry)
     )
     if contradictions:
         raise ValueError(
-            "path(s) registered in both EXACT_PATH_NEIGHBOURS and "
-            f"SHARED_MODULES_WITHOUT_COVERAGE: {', '.join(contradictions)}"
+            f"path(s) registered in both EXACT_PATH_NEIGHBOURS and "
+            f"{gap_registry_name}: {', '.join(contradictions)}"
         )
 
 
 _assert_no_double_registration(EXACT_PATH_NEIGHBOURS, SHARED_MODULES_WITHOUT_COVERAGE)
+_assert_no_double_registration(
+    EXACT_PATH_NEIGHBOURS,
+    LIB_MODULES_WITHOUT_SELECTION_COVERAGE,
+    gap_registry_name="LIB_MODULES_WITHOUT_SELECTION_COVERAGE",
+)
 
 
 def _module_path(module: str, repo_root: Path) -> Path:
@@ -494,7 +710,13 @@ def _direct_test_candidates(path: PurePosixPath) -> tuple[str, ...]:
         return ()
     stem = path.stem
     if path.parts[:1] == ("lib",):
-        return (f"tests.test_{stem}",)
+        # tests.test_<stem>_generated is the same mechanical basename-only
+        # probe as tests.test_<stem> above, just for the generated sibling
+        # (issue #1199 review F5) -- both are checked for real existence by
+        # the caller via _existing_module before being added, so this is
+        # not hand-curation: a lib/ file whose ONLY coverage is a generated
+        # module (no deterministic tests.test_<stem>) now resolves too.
+        return (f"tests.test_{stem}", f"tests.test_{stem}_generated")
     if path.parts[:1] == ("scripts",):
         return (f"tests.test_{stem}",)
     if path.parts[:1] == ("web",) and path.parts[:2] != ("web", "routes"):
@@ -504,19 +726,19 @@ def _direct_test_candidates(path: PurePosixPath) -> tuple[str, ...]:
     return ()
 
 
-def _changed_path_neighbours(
+def _resolve_neighbours(
     relative_path: str,
+    path: PurePosixPath,
     repo_root: Path,
-) -> tuple[str, ...]:
-    if relative_path in SHARED_MODULES_WITHOUT_COVERAGE:
-        # An admitted gap always selects nothing beyond ambient, regardless
-        # of what a prefix rule below would otherwise contribute — a
-        # registration must not be a lookalike neighbour set (issue #1081
-        # review round: mirror_harness.py was registered but the
-        # tests/world_model/ prefix rule below would still have populated
-        # WORLD_MODEL_NEIGHBOURS for it).
-        return ()
-    path = PurePosixPath(relative_path)
+) -> list[str]:
+    """The full EXACT_PATH_NEIGHBOURS + self-selector + direct-candidate +
+    prefix-rule resolution, with NEITHER admitted-gap registry's fail-closed
+    check applied yet. Split out of _changed_path_neighbours so both the
+    tests/ and lib/ fail-closed checks can run against the SAME raw result,
+    and so a one-off measurement (issue #1199 item 1's registry population)
+    can call this directly without tripping the fail-closed raise for every
+    still-unregistered zero-neighbour file.
+    """
     neighbours: list[str] = list(EXACT_PATH_NEIGHBOURS.get(relative_path, ()))
     module = _path_module(path)
     if module is not None and module.startswith("tests."):
@@ -554,6 +776,23 @@ def _changed_path_neighbours(
                 "tests.test_quality_generated",
             )
         )
+    return neighbours
+
+
+def _changed_path_neighbours(
+    relative_path: str,
+    repo_root: Path,
+) -> tuple[str, ...]:
+    if relative_path in SHARED_MODULES_WITHOUT_COVERAGE:
+        # An admitted gap always selects nothing beyond ambient, regardless
+        # of what a prefix rule below would otherwise contribute — a
+        # registration must not be a lookalike neighbour set (issue #1081
+        # review round: mirror_harness.py was registered but the
+        # tests/world_model/ prefix rule below would still have populated
+        # WORLD_MODEL_NEIGHBOURS for it).
+        return ()
+    path = PurePosixPath(relative_path)
+    neighbours = _resolve_neighbours(relative_path, path, repo_root)
     if path.suffix == ".py" and path.parts[:1] == ("tests",) and not neighbours:
         # A non-test .py file under tests/ with no direct self-selector, no
         # EXACT_PATH_NEIGHBOURS entry, and no matching prefix rule is shared
@@ -570,6 +809,34 @@ def _changed_path_neighbours(
             "EXACT_PATH_NEIGHBOURS entry or a prefix rule for it in "
             "scripts/targeted_test_selection.py"
         )
+    if path.suffix == ".py" and path.parts[:1] == ("lib",) and not neighbours:
+        # The lib/ twin of the tests/-side check above (issue #1199 item 1,
+        # the durable fix behind #1196 item 4): a changed lib/**/*.py file
+        # that resolves zero test neighbours under-selects silently unless
+        # it is an admitted, reviewed gap. Unlike the tests/ case, an
+        # admitted lib/ gap does not return early above — it reaches here
+        # having already tried every real mechanism — so selection proceeds
+        # (ambient gates still run) but logs loudly naming the admitted gap;
+        # no silent caps.
+        if relative_path in LIB_MODULES_WITHOUT_SELECTION_COVERAGE:
+            print(
+                "admitted selection gap: "
+                f"{relative_path} resolves zero test neighbours "
+                f"({LIB_MODULES_WITHOUT_SELECTION_COVERAGE[relative_path]})",
+                file=sys.stderr,
+            )
+        else:
+            # Mirrors the tests/-side raise above: names only the real
+            # mapping mechanisms, never advertises the admitted-gap
+            # registry as an easy way out (issue #1199 review F6) — a
+            # registration there is a reviewed admission, made by touching
+            # LIB_MODULES_WITHOUT_SELECTION_COVERAGE directly, not something
+            # this error should suggest as equivalent to real coverage.
+            raise ValueError(
+                f"unmapped lib module: {relative_path} resolves zero test "
+                "neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
+                "prefix rule for it in scripts/targeted_test_selection.py"
+            )
     return tuple(neighbours)
 
 
