@@ -7074,6 +7074,46 @@ class TestBuildActiveDownloadState(unittest.TestCase):
         state = build_active_download_state(entry)
         self.assertIsNone(state.current_path)
 
+    def test_computes_attempt_fingerprint_agreeing_with_the_ledger(self):
+        """#1196 item 1: the state's ``attempt_fingerprint`` is computed
+        with the SAME ``lib.processing_paths.attempt_fingerprint``
+        function over the SAME (username, filename) pairs the transfer
+        ledger's own fingerprint is computed from (``lib.enqueue.
+        _enqueue_with_claim_outcome``'s ``attempt_fp``) -- agreement by
+        construction, proven here by calling the shared function
+        directly rather than a second formula."""
+        from lib.download import build_active_download_state
+        from lib.grab_list import DownloadFile, GrabListEntry
+        from lib.processing_paths import attempt_fingerprint
+        files = [
+            DownloadFile(filename="u\\M\\01.flac", id="tid-1",
+                         file_dir="u\\M", username="user1", size=1000),
+            DownloadFile(filename="u\\M\\02.flac", id="tid-2",
+                         file_dir="u\\M", username="user1", size=2000),
+        ]
+        entry = GrabListEntry(
+            album_id=1, filetype="flac", title="T", artist="A", year="2020",
+            mb_release_id="mbid", files=files,
+        )
+        state = build_active_download_state(entry)
+        self.assertEqual(
+            state.attempt_fingerprint,
+            attempt_fingerprint([(f.username, f.filename) for f in files]),
+        )
+
+    def test_attempt_fingerprint_is_none_for_empty_files(self):
+        """Mirrors the ledger's own ``attempt_fp = ... if
+        claim.entry.files else None`` guard (lib/enqueue.py) -- an empty
+        planned set has no identity to fingerprint."""
+        from lib.download import build_active_download_state
+        from lib.grab_list import GrabListEntry
+        entry = GrabListEntry(
+            album_id=1, filetype="flac", title="T", artist="A", year="2020",
+            mb_release_id="mbid", files=[],
+        )
+        state = build_active_download_state(entry)
+        self.assertIsNone(state.attempt_fingerprint)
+
 
 class TestReconstructGrabListEntry(unittest.TestCase):
     """Test reconstruct_grab_list_entry() — rebuild GrabListEntry from DB row + state."""

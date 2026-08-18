@@ -99,6 +99,12 @@ class EnqueueAttempt:
     rejected before browse across every ``check_for_match`` call this
     attempt contributed to; persisted on ``search_log`` for skip-pressure
     telemetry.
+
+    ``conflicting_request_ids`` (issue #1196 item 2) is every OTHER
+    request id the cross-request enqueue guard (#1178) skipped a
+    candidate for during this attempt -- forensics-only. A non-empty
+    value never means the whole attempt failed; other candidates may
+    still have matched (``matched=True``).
     """
 
     matched: bool
@@ -106,6 +112,7 @@ class EnqueueAttempt:
     enqueue_failed: bool = False
     candidates: tuple[CandidateScore, ...] = ()
     pre_filter_skip_count: int = 0
+    conflicting_request_ids: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -151,6 +158,10 @@ class FindDownloadResult:
     # Aggregate pre-filter skip count across every (filetype, disc,
     # wave) ``check_for_match`` call this walk contributed to.
     pre_filter_skip_count: int = 0
+    # Issue #1196 item 2: union of every ``EnqueueAttempt.
+    # conflicting_request_ids`` this walk observed -- the cross-request
+    # guard skip's forensics marker, distinct from network absence.
+    conflicting_request_ids: frozenset[int] = frozenset()
 
 
 class _WorkerPipelineDBSource:
@@ -271,6 +282,7 @@ def _with_metrics(
         candidates=result.candidates,
         metrics=FindDownloadMetrics.from_context(ctx),
         pre_filter_skip_count=result.pre_filter_skip_count,
+        conflicting_request_ids=result.conflicting_request_ids,
     )
 
 
@@ -1369,6 +1381,12 @@ def _try_enqueue_impl(
     had_enqueue_failure = False
     accumulated: list[CandidateScore] = []
     pre_filter_skips: list[int] = [0]
+    # Issue #1196 item 2: union of every candidate skipped for a
+    # cross-request conflict during this whole call -- carried on
+    # EVERY returned EnqueueAttempt (matched or not) so the caller can
+    # surface the marker regardless of whether a LATER candidate went
+    # on to match.
+    conflicting_ids: set[int] = set()
     match_wave: int | None = None
     for username, match_result, wave_idx in _iter_wave_matches(
         all_tracks, eligible, user_dirs, allowed_filetype, ctx, accumulated,
@@ -1407,6 +1425,7 @@ def _try_enqueue_impl(
             check_cross_cycle=check_cross_cycle,
         )
         if conflicting_requests:
+            conflicting_ids |= conflicting_requests
             logger.info(
                 "cross-request enqueue conflict (issue #1178): skipping "
                 "%s for album %s from %s -- queue keys already held by "
@@ -1469,6 +1488,7 @@ def _try_enqueue_impl(
                     downloads=downloads,
                     candidates=tuple(accumulated),
                     pre_filter_skip_count=pre_filter_skips[0],
+                    conflicting_request_ids=frozenset(conflicting_ids),
                 )
             if resolution.status == "poll_recovery":
                 _log_album_browse(
@@ -1483,6 +1503,7 @@ def _try_enqueue_impl(
                     downloads=resolution.downloads,
                     candidates=tuple(accumulated),
                     pre_filter_skip_count=pre_filter_skips[0],
+                    conflicting_request_ids=frozenset(conflicting_ids),
                 )
             if resolution.status == "verified_no_acceptance":
                 # Verified no acceptance: the claim was reset and confirmed
@@ -1536,6 +1557,7 @@ def _try_enqueue_impl(
                         downloads=recovery.downloads,
                         candidates=tuple(accumulated),
                         pre_filter_skip_count=pre_filter_skips[0],
+                        conflicting_request_ids=frozenset(conflicting_ids),
                     )
                 had_enqueue_failure = True
                 break
@@ -1558,6 +1580,7 @@ def _try_enqueue_impl(
         enqueue_failed=had_enqueue_failure,
         candidates=tuple(accumulated),
         pre_filter_skip_count=pre_filter_skips[0],
+        conflicting_request_ids=frozenset(conflicting_ids),
     )
 
 
@@ -1787,6 +1810,7 @@ def _try_multi_enqueue_impl(
                 matched=False,
                 candidates=tuple(accumulated),
                 pre_filter_skip_count=pre_filter_skips[0],
+                conflicting_request_ids=frozenset(conflicting_requests),
             )
         claim = _claim_initial_download_ownership(
             album,
@@ -1972,6 +1996,10 @@ def _try_filetype(
     had_enqueue_failure = False
     accumulated: list[CandidateScore] = []
     pre_filter_skip_count_total = 0
+    # Issue #1196 item 2: union of every EnqueueAttempt's
+    # conflicting_request_ids across every release/wave this filetype
+    # attempt tried.
+    conflicting_ids_total: set[int] = set()
 
     for _ in range(len(releases)):
         if not releases:
@@ -1989,12 +2017,14 @@ def _try_filetype(
         attempt = try_enqueue(all_tracks, results, allowed_filetype, ctx)
         accumulated.extend(attempt.candidates)
         pre_filter_skip_count_total += attempt.pre_filter_skip_count
+        conflicting_ids_total |= attempt.conflicting_request_ids
         if not attempt.matched and len(release.media) > 1:
             attempt = try_multi_enqueue(
                 release, all_tracks, results, allowed_filetype, ctx
             )
             accumulated.extend(attempt.candidates)
             pre_filter_skip_count_total += attempt.pre_filter_skip_count
+            conflicting_ids_total |= attempt.conflicting_request_ids
 
         if attempt.matched:
             assert attempt.downloads is not None
@@ -2028,6 +2058,7 @@ def _try_filetype(
                 grab_entry=grab_entry,
                 candidates=tuple(accumulated),
                 pre_filter_skip_count=pre_filter_skip_count_total,
+                conflicting_request_ids=frozenset(conflicting_ids_total),
             )
 
         if attempt.enqueue_failed:
@@ -2047,6 +2078,7 @@ def _try_filetype(
         outcome="enqueue_failed" if had_enqueue_failure else "no_match",
         candidates=tuple(accumulated),
         pre_filter_skip_count=pre_filter_skip_count_total,
+        conflicting_request_ids=frozenset(conflicting_ids_total),
     )
 
 
@@ -2077,17 +2109,21 @@ def find_download(
     had_enqueue_failure = False
     accumulated: list[CandidateScore] = []
     pre_filter_skip_count_total = 0
+    # Issue #1196 item 2: union across every filetype/catch-all walk.
+    conflicting_ids_total: set[int] = set()
     for allowed_filetype in filetypes_to_try:
         logger.info(f"Checking for Quality: {allowed_filetype}")
         result = _try_filetype(album, results, allowed_filetype, ctx)
         accumulated.extend(result.candidates)
         pre_filter_skip_count_total += result.pre_filter_skip_count
+        conflicting_ids_total |= result.conflicting_request_ids
         if result.outcome == "found":
             return _with_metrics(FindDownloadResult(
                 outcome="found",
                 grab_entry=result.grab_entry,
                 candidates=tuple(accumulated),
                 pre_filter_skip_count=pre_filter_skip_count_total,
+                conflicting_request_ids=frozenset(conflicting_ids_total),
             ), ctx)
         if result.outcome == "enqueue_failed":
             had_enqueue_failure = True
@@ -2103,12 +2139,14 @@ def find_download(
         result = _try_filetype(album, results, "*", ctx)
         accumulated.extend(result.candidates)
         pre_filter_skip_count_total += result.pre_filter_skip_count
+        conflicting_ids_total |= result.conflicting_request_ids
         if result.outcome == "found":
             return _with_metrics(FindDownloadResult(
                 outcome="found",
                 grab_entry=result.grab_entry,
                 candidates=tuple(accumulated),
                 pre_filter_skip_count=pre_filter_skip_count_total,
+                conflicting_request_ids=frozenset(conflicting_ids_total),
             ), ctx)
         if result.outcome == "enqueue_failed":
             had_enqueue_failure = True
@@ -2117,4 +2155,5 @@ def find_download(
         outcome="enqueue_failed" if had_enqueue_failure else "no_match",
         candidates=tuple(accumulated),
         pre_filter_skip_count=pre_filter_skip_count_total,
+        conflicting_request_ids=frozenset(conflicting_ids_total),
     ), ctx)

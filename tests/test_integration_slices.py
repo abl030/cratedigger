@@ -4417,6 +4417,53 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self.assertEqual(row.final_state, "collection_crash")
         self.assertEqual(db.request(rid)["plan_cycle_count"], 1)
 
+    def test_log_search_result_persists_cross_request_conflict_marker(self):
+        """#1196 item 2: ``_log_search_result`` threads ``SearchResult.
+        cross_request_conflict_ids`` through to the real
+        ``ConsumedAttemptInput`` write, landing on
+        ``search_log.cross_request_conflict_request_ids`` (migration
+        079) -- the second real adapter in the guard-skip forensics
+        chain (the first, ``cratedigger._apply_find_download_result``,
+        is pinned directly in tests/test_integration.py)."""
+        from lib.search import (
+            SEARCH_PLAN_GENERATOR_ID,
+            PlanExecutionContext,
+            SearchResult,
+        )
+
+        cfg = self._make_cfg()
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Wiggles", album_title="Album",
+            source="request", mb_release_id="mbid-conflict", year=1991,
+        )
+        db.set_tracks(rid, [{"track_number": 1, "title": "Track"}])
+        album = self._make_album(request_id=rid, mb_release_id="mbid-conflict")
+        plan_id = self._seed_plan(db, rid, items=[("default", "Wiggles Album")])
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        item = active.items[0]
+        ctx = self._wire(cfg, FakeSlskdAPI(), db, album)
+
+        result = SearchResult(
+            album_id=album.id, success=True, query="Wiggles Album",
+            outcome="no_match",
+            plan_execution=PlanExecutionContext(
+                plan_id=plan_id, plan_item_id=item.id, plan_ordinal=0,
+                plan_strategy="default", plan_canonical_query_key="q",
+                plan_repeat_group=None,
+                plan_generator_id=SEARCH_PLAN_GENERATOR_ID,
+                plan_item_count=1, cycle_count_snapshot=0,
+            ),
+            cross_request_conflict_ids=(8781, 8846),
+        )
+
+        self._cratedigger._log_search_result(album, result, ctx)
+
+        marker = db.search_logs[0].cross_request_conflict_request_ids
+        assert marker is not None
+        self.assertEqual(sorted(marker), [8781, 8846])
+
 
 class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
     """Integration slice: variant=exhausted → reset search_attempts, stay wanted.

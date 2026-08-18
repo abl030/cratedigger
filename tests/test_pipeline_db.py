@@ -12874,6 +12874,34 @@ class TestRecordConsumedSearchAttempt(unittest.TestCase):
         self.assertAlmostEqual(score, 1.5, places=4)
         self.assertEqual(row["query_template"], "{artist} {title} FLAC")
 
+    def test_consumed_attempt_persists_cross_request_conflict_marker(self):
+        """#1196 item 2: a non-empty
+        ``cross_request_conflict_request_ids`` input round-trips through
+        the real ``search_log`` column (migration 079), and an omitted
+        one persists as SQL NULL rather than an empty array -- the
+        marker's mere presence is the "a guard skip happened" fact."""
+        self.db.record_consumed_search_attempt(self._attempt(
+            0, outcome="no_match",
+            cross_request_conflict_request_ids=(8781, 8846),
+        ))
+        self.db._execute(
+            "UPDATE album_requests SET next_plan_ordinal = 0 WHERE id = %s",
+            (self.req_id,),
+        )
+        self.db.record_consumed_search_attempt(self._attempt(
+            0, outcome="no_match",
+        ))
+        rows = self.db.get_search_history(self.req_id)
+        self.assertEqual(len(rows), 2)
+        markers = [r["cross_request_conflict_request_ids"] for r in rows]
+        with_marker = [m for m in markers if m is not None]
+        without_marker = [m for m in markers if m is None]
+        self.assertEqual(len(with_marker), 1)
+        self.assertEqual(len(without_marker), 1)
+        marker = with_marker[0]
+        assert isinstance(marker, list)
+        self.assertEqual(sorted(marker), [8781, 8846])
+
     def test_u12_wrap_writes_failure_class_b_cands_never_match(self):
         """U12: wrap classifies all-no_match cycle as B."""
         # Cycle 0: both items return no_match (matcher rejected candidates).
@@ -14039,6 +14067,88 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
         self.assertEqual(sig.zero_find_cycles, 3)
         # One wrong-pressing hit (cycle 0).
         self.assertEqual(sig.wrong_pressing_hits, 1)
+
+    def test_search_log_signal_byte_identical_with_cross_request_conflict_marker(
+        self,
+    ):
+        """#1196 item 2: the cross-request enqueue-guard skip marker must
+        NEVER change unfindable-classification inputs. Exact repro of
+        ``test_search_log_signal_aggregates_zero_find_and_wrong_pressing``
+        above, with ``cross_request_conflict_request_ids`` populated on
+        EVERY row (found, wrong-pressing-hit, and plain no_match/
+        no_results) -- ``get_unfindable_search_log_signal``'s SQL never
+        references the new column, so both aggregates must come back
+        byte-identical to the marker-free world."""
+        from lib.pipeline_db import (
+            ConsumedAttemptInput,
+            SearchPlanItemInput,
+        )
+
+        db = make_db()
+        rid = self._seed_wanted(db, mbid="unf-sig-conflict")
+        plan_id = db.create_successful_search_plan(
+            request_id=rid,
+            generator_id="unf-gen",
+            items=[
+                SearchPlanItemInput(
+                    ordinal=0, strategy="default",
+                    query="q0", canonical_query_key="q0"),
+            ],
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        item_id = active.items[0].id
+
+        def _attempt(cycle_idx: int, *, outcome: str,
+                     rejection_reason: str | None = None,
+                     matcher_score_top1: float | None = None):
+            return ConsumedAttemptInput(
+                request_id=rid,
+                plan_id=plan_id,
+                plan_item_id=item_id,
+                plan_ordinal=0,
+                plan_strategy="default",
+                plan_canonical_query_key="q0",
+                plan_repeat_group=None,
+                plan_generator_id="unf-gen",
+                query="q0",
+                outcome=outcome,
+                plan_item_count=1,
+                cycle_count_snapshot=cycle_idx,
+                apply_scheduler_attempt=True,
+                scheduler_success=(outcome == "found"),
+                rejection_reason=rejection_reason,
+                matcher_score_top1=matcher_score_top1,
+                # The ONLY difference from the marker-free scenario
+                # above -- every row also carries the guard-skip marker.
+                cross_request_conflict_request_ids=(4242,),
+            )
+
+        db.record_consumed_search_attempt(_attempt(
+            0, outcome="no_match",
+            rejection_reason="strict_count_mismatch",
+            matcher_score_top1=0.9,
+        ))
+        db.record_consumed_search_attempt(_attempt(1, outcome="found"))
+        db.record_consumed_search_attempt(_attempt(
+            2, outcome="no_match",
+            rejection_reason="strict_count_mismatch",
+            matcher_score_top1=0.5,
+        ))
+        db.record_consumed_search_attempt(_attempt(3, outcome="no_results"))
+
+        sig = db.get_unfindable_search_log_signal(
+            rid, window_days=30, matcher_score_threshold=0.85,
+        )
+        self.assertEqual(sig.zero_find_cycles, 3)
+        self.assertEqual(sig.wrong_pressing_hits, 1)
+        # Also prove the marker itself landed (this test isn't
+        # accidentally exercising the marker-free code path).
+        rows = db.get_search_history(rid)
+        self.assertTrue(all(
+            row["cross_request_conflict_request_ids"] == [4242]
+            for row in rows
+        ))
 
     # ---- record_unfindable_run_metrics (#1112) ----
 
@@ -16818,6 +16928,60 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             (current_username, current_filename),
         ])
 
+        # #1196 item 1: a SECOND scoped owner whose state carries
+        # ``attempt_fingerprint`` -- seeded identically on both sides so
+        # parity is proven at the NEW fingerprint-equality branch too,
+        # not just the deploy-window fallback ``scoped_owner`` above
+        # exercises. Its old row's ``enqueued_at`` is pushed AFTER the
+        # witness -- deliberately the shape the time predicate alone
+        # would get wrong -- so this only stays excluded on both sides
+        # because the fingerprint (not the clock) decides it.
+        fp_owner = self._seed_request("downloading")
+        fake.seed_request({
+            "id": fp_owner, "status": "downloading",
+            "artist_name": "Artist", "album_title": "Album", "year": None,
+        })
+        fp_old_username, fp_old_filename = "fp-owner-old", "old-fp.flac"
+        fp_cur_username, fp_cur_filename = "fp-owner-current", "cur-fp.flac"
+        fp_old, fp_current = "aaaaaaaa", "bbbbbbbb"
+        fp_witness = datetime.now(UTC)
+        fp_state = {
+            "filetype": "flac", "enqueued_at": fp_witness.isoformat(),
+            "files": [], "attempt_fingerprint": fp_current,
+        }
+        self.db._execute(
+            "UPDATE album_requests SET active_download_state = %s::jsonb "
+            "WHERE id = %s",
+            (json.dumps(fp_state), fp_owner),
+        )
+        fake.request(fp_owner)["active_download_state"] = fp_state
+        for db in (self.db, fake):
+            db.record_transfer_enqueue([
+                TransferLedgerRow(
+                    request_id=fp_owner, username=fp_old_username,
+                    filename=fp_old_filename, attempt_fingerprint=fp_old),
+                TransferLedgerRow(
+                    request_id=fp_owner, username=fp_cur_username,
+                    filename=fp_cur_filename,
+                    attempt_fingerprint=fp_current),
+            ])
+            db.confirm_transfer_enqueue(fp_old_username, fp_old_filename)
+            db.confirm_transfer_enqueue(fp_cur_username, fp_cur_filename)
+        newer_than_witness = fp_witness + timedelta(seconds=5)
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = %s "
+            "WHERE request_id = %s AND username = %s",
+            (newer_than_witness, fp_owner, fp_old_username),
+        )
+        fp_old_fake_id = next(
+            fid for fid, r in fake._transfer_ledger.items()
+            if r.request_id == fp_owner and r.username == fp_old_username)
+        fake._transfer_ledger[fp_old_fake_id].enqueued_at = newer_than_witness
+        keys.extend([
+            (fp_old_username, fp_old_filename),
+            (fp_cur_username, fp_cur_filename),
+        ])
+
         self.assertEqual(
             self.db.get_conflicting_transfer_request_ids(
                 keys, exclude_request_id=candidate),
@@ -16837,6 +17001,195 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                 exclude_request_id=candidate),
             {scoped_owner},
         )
+        # Fingerprint arm on BOTH sides: a newer-but-wrong-fingerprint
+        # row is excluded, a matching-fingerprint row still blocks.
+        self.assertEqual(
+            self.db.get_conflicting_transfer_request_ids(
+                [(fp_old_username, fp_old_filename)],
+                exclude_request_id=candidate),
+            set(),
+        )
+        self.assertEqual(
+            fake.get_conflicting_transfer_request_ids(
+                [(fp_old_username, fp_old_filename)],
+                exclude_request_id=candidate),
+            set(),
+        )
+        self.assertEqual(
+            self.db.get_conflicting_transfer_request_ids(
+                [(fp_cur_username, fp_cur_filename)],
+                exclude_request_id=candidate),
+            {fp_owner},
+        )
+        self.assertEqual(
+            fake.get_conflicting_transfer_request_ids(
+                [(fp_cur_username, fp_cur_filename)],
+                exclude_request_id=candidate),
+            {fp_owner},
+        )
+
+    def test_get_conflicting_transfer_request_ids_fingerprint_match_blocks(self):
+        """#1196 item 1 world (a): the owner's state carries
+        attempt_fingerprint; an accepted ledger row with the SAME
+        fingerprint blocks by exact identity -- proven with a state
+        timestamp LATER than the ledger row's enqueued_at, a shape the
+        OLD time-only predicate would NOT have blocked, so this test
+        only passes because the fingerprint arm actually ran."""
+        owner = self._seed_request("downloading")
+        username, filename = "peer", "a.flac"
+        fp = "deadbeef"
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=owner, username=username, filename=filename,
+                attempt_fingerprint=fp),
+        ])
+        self.db.confirm_transfer_enqueue(username, filename)
+        ledger_enqueued_at = datetime.now(UTC)
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = %s "
+            "WHERE request_id = %s AND username = %s",
+            (ledger_enqueued_at, owner, username),
+        )
+        state = {
+            "filetype": "flac",
+            "enqueued_at": (
+                ledger_enqueued_at + timedelta(hours=1)).isoformat(),
+            "files": [], "attempt_fingerprint": fp,
+        }
+        self.db._execute(
+            "UPDATE album_requests SET active_download_state = %s::jsonb "
+            "WHERE id = %s",
+            (json.dumps(state), owner),
+        )
+        candidate = self._seed_request("wanted")
+
+        conflicting = self.db.get_conflicting_transfer_request_ids(
+            [(username, filename)], exclude_request_id=candidate)
+
+        self.assertEqual(
+            conflicting, {owner},
+            "matching fingerprint must block even though the ledger "
+            "row's enqueued_at is BEFORE the state witness -- the old "
+            "time predicate alone would have excluded it",
+        )
+
+    def test_get_conflicting_transfer_request_ids_different_fingerprint_beats_newer_time(self):
+        """#1196 item 1 world (b): a different-fingerprint row must NOT
+        block even when its enqueued_at is NEWER than the current-attempt
+        witness -- the exactness win over the time predicate. Reverting
+        to the pre-#1196 SQL (dropping the fingerprint CASE arm entirely)
+        makes this test RED, because the old time-only predicate DOES
+        block on this exact shape."""
+        owner = self._seed_request("downloading")
+        old_username, old_filename = "OLD", "old.flac"
+        fp_old, fp_current = "aaaaaaaa", "bbbbbbbb"
+        witness = datetime.now(UTC)
+        state = {
+            "filetype": "flac", "enqueued_at": witness.isoformat(),
+            "files": [], "attempt_fingerprint": fp_current,
+        }
+        self.db._execute(
+            "UPDATE album_requests SET active_download_state = %s::jsonb "
+            "WHERE id = %s",
+            (json.dumps(state), owner),
+        )
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=owner, username=old_username,
+                filename=old_filename, attempt_fingerprint=fp_old),
+        ])
+        self.db.confirm_transfer_enqueue(old_username, old_filename)
+        # NEWER than the witness -- the OLD time predicate
+        # (enqueued_at >= witness) would have counted this row as the
+        # current attempt and blocked.
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = %s "
+            "WHERE request_id = %s AND username = %s",
+            (witness + timedelta(seconds=5), owner, old_username),
+        )
+        candidate = self._seed_request("wanted")
+
+        conflicting = self.db.get_conflicting_transfer_request_ids(
+            [(old_username, old_filename)], exclude_request_id=candidate)
+
+        self.assertEqual(
+            conflicting, set(),
+            "a different-fingerprint row must not block even though "
+            "its enqueued_at is newer than the current-attempt witness",
+        )
+
+    def test_get_conflicting_transfer_request_ids_missing_fingerprint_key_falls_back_to_time(self):
+        """#1196 item 1 world (c): a state that carries
+        active_download_state but LACKS the attempt_fingerprint key
+        (deploy-window: claimed by code from before this field existed)
+        falls back to the pre-#1196 time predicate, proven both
+        directions -- the old attempt excluded, the current attempt
+        still blocks."""
+        owner = self._seed_request("downloading")
+        old_username, old_filename = "OLD", "old.flac"
+        current_username, current_filename = "NEW", "new.flac"
+        candidate = self._seed_request("wanted")
+
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=owner, username=old_username,
+                filename=old_filename),
+        ])
+        self.db.confirm_transfer_enqueue(old_username, old_filename)
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = "
+            "NOW() - INTERVAL '30 days' "
+            "WHERE request_id = %s AND username = %s",
+            (owner, old_username),
+        )
+
+        current_state = {
+            "filetype": "flac", "enqueued_at": datetime.now(UTC).isoformat(),
+            "files": [],
+            # No "attempt_fingerprint" key -- deploy-window state.
+        }
+        self.db._execute(
+            "UPDATE album_requests SET active_download_state = %s::jsonb "
+            "WHERE id = %s",
+            (json.dumps(current_state), owner),
+        )
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=owner, username=current_username,
+                filename=current_filename),
+        ])
+        self.db.confirm_transfer_enqueue(current_username, current_filename)
+
+        self.assertEqual(
+            self.db.get_conflicting_transfer_request_ids(
+                [(old_username, old_filename)], exclude_request_id=candidate),
+            set(),
+            "fallback: an abandoned earlier attempt must not block",
+        )
+        self.assertEqual(
+            self.db.get_conflicting_transfer_request_ids(
+                [(current_username, current_filename)],
+                exclude_request_id=candidate),
+            {owner},
+            "fallback: the current attempt must still block",
+        )
+
+    def test_get_conflicting_transfer_request_ids_null_state_blocks(self):
+        """#1196 item 1 world (d): a NULL active_download_state still
+        fails CLOSED unconditionally -- every accepted row for that
+        'downloading' owner counts as in-scope, regardless of the
+        ledger row's own fingerprint."""
+        owner = self._seed_accepted_row(
+            status="downloading", username="p0", filename="a.flac")
+        row = self.db.get_request(owner)
+        assert row is not None
+        self.assertIsNone(row["active_download_state"])
+        candidate = self._seed_request("wanted")
+
+        conflicting = self.db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=candidate)
+
+        self.assertEqual(conflicting, {owner})
 
 @requires_postgres
 class TestReadProjectionParity(unittest.TestCase):

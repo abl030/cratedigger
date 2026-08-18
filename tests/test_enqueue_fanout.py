@@ -2717,6 +2717,10 @@ class TestCrossRequestEnqueueGuard(unittest.TestCase):
                 for line in log_ctx.output),
             log_ctx.output,
         )
+        # Issue #1196 item 2: the skipped attempt carries the forensics
+        # marker naming its conflicting owner; the winner carries none.
+        self.assertEqual(attempt2.conflicting_request_ids, frozenset({1}))
+        self.assertEqual(attempt1.conflicting_request_ids, frozenset())
 
     def test_multi_disc_candidate_is_skipped_not_enqueued(self):
         """Same pin, through the try_multi_enqueue call site (issue #1178
@@ -2770,6 +2774,9 @@ class TestCrossRequestEnqueueGuard(unittest.TestCase):
                 for line in log_ctx.output),
             log_ctx.output,
         )
+        # Issue #1196 item 2: same marker through the multi-disc seam.
+        self.assertEqual(attempt2.conflicting_request_ids, frozenset({1}))
+        self.assertEqual(attempt1.conflicting_request_ids, frozenset())
 
     def test_conflicted_peer_falls_through_to_next_peer(self):
         """#1178 PR2 review F4: a guard hit means "try the next peer", not
@@ -2832,6 +2839,11 @@ class TestCrossRequestEnqueueGuard(unittest.TestCase):
                 for line in log_ctx.output),
             log_ctx.output,
         )
+        # Issue #1196 item 2: even a WINNING attempt carries the marker
+        # for a peer it conflicted on and fell through past -- the
+        # forensics fact "a guard skip happened during this search" is
+        # independent of whether the search ultimately matched.
+        self.assertEqual(attempt.conflicting_request_ids, frozenset({99}))
 
     def test_claim_refused_releases_registry_for_sibling(self):
         """#1178 PR2 review F5: request 1's row has drifted to

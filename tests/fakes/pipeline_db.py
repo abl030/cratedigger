@@ -4887,6 +4887,8 @@ class FakePipelineDB:
                 "result_count": entry.result_count,
                 "rejection_reason": entry.rejection_reason,
                 "matcher_score_top1": entry.matcher_score_top1,
+                "cross_request_conflict_request_ids": (
+                    entry.cross_request_conflict_request_ids),
             })
         return out
 
@@ -8416,6 +8418,8 @@ class FakePipelineDB:
             "expected_track_count": entry.expected_track_count,
             "matcher_score_top1": entry.matcher_score_top1,
             "query_template": entry.query_template,
+            "cross_request_conflict_request_ids": (
+                entry.cross_request_conflict_request_ids),
         }
 
     # --- slskd events cursor (issue #146 phase 1) ---
@@ -8598,6 +8602,30 @@ class FakePipelineDB:
         except ValueError:
             return None
 
+    @staticmethod
+    def _attempt_fingerprint_from_state(
+        request: Mapping[str, object],
+    ) -> str | None:
+        """Mirror ``active_download_state ->> 'attempt_fingerprint'``
+        (#1196 item 1) -- ``None`` when the top-level state is a
+        non-object value (malformed) or the key is absent/non-string.
+        Does NOT distinguish a missing key from an explicit JSON
+        ``null``, matching ``->>``'s own behaviour of returning SQL
+        NULL for both. Callers must check
+        ``active_download_state is None`` (the unconditional
+        fail-closed arm) separately BEFORE calling this -- it only
+        answers "does a non-NULL state carry this key"."""
+        raw = request.get("active_download_state")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(raw, dict):
+            return None
+        value = raw.get("attempt_fingerprint")
+        return value if isinstance(value, str) else None
+
     def get_conflicting_transfer_request_ids(
         self,
         keys: Sequence[tuple[str, str]],
@@ -8606,14 +8634,26 @@ class FakePipelineDB:
         """Mirror the real ledger join: accepted rows keyed by any of
         ``keys`` whose owning request is CURRENTLY 'downloading' on its
         CURRENT attempt, excluding ``exclude_request_id`` (#1178 PR2,
-        attempt-scoped per review F2). A missing request row (never
-        seeded, or hard-deleted) mirrors the real INNER JOIN -- never a
-        conflict. A row older than the owner's current
-        ``active_download_state`` enqueued-at witness belongs to an
-        abandoned earlier attempt and never conflicts; a NULL/missing
-        witness fails CLOSED -- every accepted row for that 'downloading'
-        owner counts as in-scope (mirrors the real query's
-        ``COALESCE(..., '-infinity')``)."""
+        attempt-scoped per review F2; exact fingerprint identity added
+        #1196 item 1). A missing request row (never seeded, or
+        hard-deleted) mirrors the real INNER JOIN -- never a conflict.
+
+        Three-armed, mirroring the real SQL ``CASE`` exactly:
+
+          1. ``active_download_state IS NULL`` -- fails CLOSED
+             unconditionally (every accepted row for that
+             'downloading' owner counts as in-scope).
+          2. State carries a string ``attempt_fingerprint`` -- EXACT
+             equality against the ledger row's own
+             ``attempt_fingerprint`` decides in/out of scope; no clock
+             comparison.
+          3. Else (state present but lacking the key, or malformed) --
+             deploy-window fallback to the ``enqueued_at`` witness: a
+             row older than the owner's current attempt boundary
+             belongs to an abandoned earlier attempt and never
+             conflicts; a NULL/missing witness fails CLOSED (mirrors
+             the real query's ``COALESCE(..., '-infinity')``).
+        """
         key_set = set(keys)
         conflicting: set[int] = set()
         for row in self._transfer_ledger.values():
@@ -8627,6 +8667,14 @@ class FakePipelineDB:
             if request is None:
                 continue
             if request.get("status") != "downloading":
+                continue
+            if request.get("active_download_state") is None:
+                conflicting.add(row.request_id)
+                continue
+            fingerprint = self._attempt_fingerprint_from_state(request)
+            if fingerprint is not None:
+                if row.attempt_fingerprint == fingerprint:
+                    conflicting.add(row.request_id)
                 continue
             attempt_enqueued_at = self._attempt_enqueued_at(request)
             if (
@@ -9306,6 +9354,11 @@ class FakePipelineDB:
                 expected_track_count=attempt.expected_track_count,
                 matcher_score_top1=attempt.matcher_score_top1,
                 query_template=attempt.query_template,
+                cross_request_conflict_request_ids=(
+                    list(attempt.cross_request_conflict_request_ids)
+                    if attempt.cross_request_conflict_request_ids
+                    else None
+                ),
             ))
 
             now = _utcnow()

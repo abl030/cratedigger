@@ -166,6 +166,20 @@ def build_active_download_state(
     Callers can pass the original timing witnesses when persisting updated
     retry state across polling cycles. Processor ownership and its canonical
     path are added only by the atomic handoff command.
+
+    ``attempt_fingerprint`` (issue #1196 item 1) is computed here from
+    ``entry.files`` with the exact same
+    ``lib.processing_paths.attempt_fingerprint`` derivation
+    ``lib.enqueue._enqueue_with_claim_outcome`` uses to compute the
+    ``attempt_fp`` written onto every ``slskd_transfer_ledger`` row this
+    attempt writes -- there computed from ``claim.entry.files``. Every
+    production caller passes either that SAME ``entry`` (the initial
+    claim, ``lib.enqueue._claim_initial_download_ownership``) or one
+    whose ``.files`` is content-identical to it (a reconstructed entry
+    built from an accepted-downloads subset that, by construction, is
+    only ever persisted once every planned file across every disc was
+    accepted -- ``lib.enqueue._persist_claimed_download_state``), so the
+    two fingerprints agree BY CONSTRUCTION without a second formula.
     """
     enqueued_at_value = enqueued_at or datetime.now(UTC).isoformat()
     files = [
@@ -191,6 +205,11 @@ def build_active_download_state(
         files=files,
         processing_started_at=None,
         current_path=None,
+        attempt_fingerprint=(
+            attempt_fingerprint(
+                [(f.username, f.filename) for f in entry.files])
+            if entry.files else None
+        ),
     )
 
 

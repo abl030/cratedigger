@@ -313,6 +313,22 @@ class ActiveDownloadState(msgspec.Struct, omit_defaults=True):
     last_progress_at: str | None = None
     processing_started_at: str | None = None
     current_path: str | None = None
+    # Exact attempt identity (issue #1196 item 1): the same
+    # ``lib.processing_paths.attempt_fingerprint`` derivation over this
+    # attempt's (username, filename) pairs that
+    # ``slskd_transfer_ledger.attempt_fingerprint`` already carries for
+    # every ledger row this attempt writes. Set once at claim time
+    # (``lib.download.build_active_download_state``) from the SAME
+    # ``entry.files`` list the ledger's own fingerprint is computed from,
+    # so the two agree by construction — never re-derived independently.
+    # ``None`` only for the empty-files edge case (mirrors the ledger's
+    # own ``attempt_fp = ... if claim.entry.files else None``) and for
+    # states persisted before this field existed (``omit_defaults=True``
+    # decodes a missing key as ``None``). Read by
+    # ``PipelineDB.get_conflicting_transfer_request_ids`` to scope the
+    # cross-request enqueue guard to the owner's CURRENT attempt by exact
+    # identity instead of a clock comparison.
+    attempt_fingerprint: str | None = None
 
     def to_json(self) -> str:
         return msgspec.json.encode(self).decode()
@@ -429,6 +445,13 @@ def _copy_download_state(
             else processing_started_at
         ),
         current_path=state.current_path if current_path is None else current_path,
+        # Identity of THIS attempt never changes across a poll-cycle
+        # progress update -- unconditionally carried forward, never
+        # recomputed (issue #1196 item 1). Dropping this would silently
+        # erase the fingerprint from ``active_download_state`` on the
+        # very first poll cycle after claim, since every reducer
+        # rebuild in ``reduce_poll_cycle`` goes through this helper.
+        attempt_fingerprint=state.attempt_fingerprint,
     )
 
 

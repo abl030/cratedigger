@@ -235,37 +235,40 @@ class _TransferLedgerMixin(_PipelineDBBase):
         downloading a fresh peer's files would falsely block a sibling
         on a queue key from that SAME owner's OWN abandoned attempt from
         30 days earlier. The join is therefore additionally scoped to
-        rows enqueued at or after the owner's CURRENT attempt boundary --
-        ``active_download_state ->> 'enqueued_at'``, the same witness
-        the poll path already uses as ``not_before=state.enqueued_at``
-        (``lib/download.py``) to scope reconciliation to one attempt.
-        ``COALESCE(..., '-infinity')`` makes a NULL/missing
-        ``active_download_state`` fail CLOSED: every accepted row for
-        that 'downloading' owner counts as in-scope (blocks) rather than
-        none of them (would silently stop protecting a request whose
-        state we can't currently read). A syntactically present but
-        malformed ``enqueued_at`` string (never producible today --
-        ``lib/download.py``'s ``build_active_download_state`` always
-        writes ``datetime.now(UTC).isoformat()``) would instead raise
-        ``InvalidDatetimeFormat`` at the ``::timestamptz`` cast, failing
-        the whole cross-cycle check rather than either arm of the
-        deliberate NULL fail-closed above.
+        the owner's CURRENT attempt only -- by exact fingerprint identity
+        where available, falling back to the ``enqueued_at`` witness
+        otherwise (both detailed below).
 
-        **Clock assumption (#1178 PR2 review F5).** The boundary compares
-        an application-clock witness (``enqueued_at``, stamped by this
-        host's Python process) to PostgreSQL-clock ledger timestamps
-        (``l.enqueued_at``, stamped by ``DEFAULT NOW()``). This repo
-        deploys both on the SAME host, and the witness is captured
-        strictly BEFORE the ledger write within one attempt (see
-        ``lib/enqueue.py``'s comment on ``claim.enqueued_at``), so a real
-        clock skew has to exceed that same-host, same-attempt margin to
-        matter. ``ActiveDownloadState`` does not carry the ledger's own
-        ``attempt_fingerprint`` (an exact, clock-free alternative), so
-        this predicate is not exact: a skew of that size fails OPEN --
-        i.e. an owner's OLD attempt could be miscounted as current and
-        block a sibling one cycle longer than it should. It never fails
-        the other direction (a current attempt being wrongly excluded),
-        since ``COALESCE`` already covers the missing-witness case.
+        **Attempt identity, not a clock comparison (#1196 item 1).**
+        ``ActiveDownloadState.attempt_fingerprint`` (written at claim time
+        by ``lib.download.build_active_download_state``) carries the exact
+        same ``lib.processing_paths.attempt_fingerprint`` value this
+        ledger's own ``attempt_fingerprint`` column carries for every row
+        this attempt writes -- both derived from the identical
+        (username, filename) pair set, so they agree BY CONSTRUCTION (see
+        ``build_active_download_state``'s docstring). When the owner's
+        state carries that key, this join therefore requires EXACT
+        fingerprint equality (``l.attempt_fingerprint = r.
+        active_download_state ->> 'attempt_fingerprint'``) instead of a
+        clock comparison -- no app-clock-vs-PG-clock assumption, no skew
+        window, no failure direction to reason about: a stale attempt's
+        ledger rows simply carry a different fingerprint and never match,
+        however new their ``enqueued_at`` looks.
+
+        The time predicate above (``l.enqueued_at >= COALESCE(...,
+        '-infinity')``) is retained ONLY as the deploy-window fallback,
+        taken when the owner's state exists but LACKS the
+        ``attempt_fingerprint`` key -- an in-flight download claimed by
+        code from before this field existed. It can be deleted once no
+        request claimed pre-deploy remains ``'downloading'``. A NULL (or,
+        by the same ``->>`` extraction returning NULL for a non-object
+        value, malformed) ``active_download_state`` still fails CLOSED
+        unconditionally: every accepted row for that ``'downloading'``
+        owner counts as in-scope, exactly as before this change -- the
+        ``CASE`` below tests ``IS NULL`` explicitly first rather than
+        relying on the jsonb ``?``/`->>` operators' NULL-propagating
+        three-valued logic, which would otherwise silently drop the row
+        out of the WHERE clause (fail OPEN) instead of blocking.
         """
         if not keys:
             return set()
@@ -289,9 +292,19 @@ class _TransferLedgerMixin(_PipelineDBBase):
             WHERE l.accepted_at IS NOT NULL
               AND r.status = 'downloading'
               AND l.request_id != %s
-              AND l.enqueued_at >= COALESCE(
-                  (r.active_download_state ->> 'enqueued_at')::timestamptz,
-                  '-infinity'
+              AND (
+                  CASE
+                      WHEN r.active_download_state IS NULL THEN TRUE
+                      WHEN r.active_download_state ->> 'attempt_fingerprint'
+                          IS NOT NULL THEN
+                          l.attempt_fingerprint =
+                              r.active_download_state ->> 'attempt_fingerprint'
+                      ELSE l.enqueued_at >= COALESCE(
+                          (r.active_download_state ->> 'enqueued_at')
+                              ::timestamptz,
+                          '-infinity'
+                      )
+                  END
               )
             """,
             (usernames, filenames, exclude_request_id),

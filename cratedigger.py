@@ -809,6 +809,13 @@ def _log_search_result(
     )
     matcher_score_top1 = matcher_score_top1_for(list(candidates_seq))
     result_count_uncapped = getattr(result, "result_count_uncapped", None)
+    # Issue #1196 item 2: the cross-request enqueue-guard skip marker.
+    # None (not an empty tuple) when the guard never fired for this
+    # search -- the smallest honest signal: presence of a value IS the
+    # fact "a guard skip happened here", distinct from the same
+    # ``no_match``/``error`` outcome a peer-absent search also writes.
+    cross_request_conflict_ids = getattr(
+        result, "cross_request_conflict_ids", ()) or None
 
     if is_consumed and plan_execution is not None:
         scheduler_success = (outcome == "found")
@@ -849,6 +856,8 @@ def _log_search_result(
                     expected_track_count=expected_track_count,
                     matcher_score_top1=matcher_score_top1,
                     query_template=query_template,
+                    cross_request_conflict_request_ids=(
+                        cross_request_conflict_ids),
                 )
             )
         except Exception:
@@ -957,6 +966,9 @@ def _apply_find_download_result(
     # Aggregate pre-filter skip count from the find_download walk gets
     # persisted on ``search_log.pre_filter_skip_count``.
     result.pre_filter_skip_count = find_result.pre_filter_skip_count
+    # Issue #1196 item 2: cross-request enqueue-guard skip marker.
+    result.cross_request_conflict_ids = tuple(
+        sorted(find_result.conflicting_request_ids))
     if ctx is not None and find_result.metrics is not None:
         metrics = find_result.metrics
         result.browse_time_s = metrics.browse_time_s

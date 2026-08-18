@@ -274,10 +274,18 @@ def cmd_triage_show(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
                 else "-"
             )
             query = entry.query or ""
+            # #1196 item 2: the cross-request enqueue-guard skip marker
+            # -- distinguishes a deliberate decline from genuine network
+            # absence on rows that otherwise look like a plain no_match.
+            conflict = (
+                ",".join(str(rid) for rid in
+                         entry.cross_request_conflict_request_ids)
+                if entry.cross_request_conflict_request_ids else "-"
+            )
             print(
                 f"      [{_format_dt(entry.created_at)}] id={entry.id} "
                 f"{entry.outcome} {strategy} rc={rc} reject={reason} "
-                f"matcher={matcher} query={query!r}"
+                f"matcher={matcher} conflict={conflict} query={query!r}"
             )
 
     return 0

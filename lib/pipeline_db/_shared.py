@@ -902,6 +902,14 @@ class ConsumedAttemptInput:
     expected_track_count: int | None = None
     matcher_score_top1: float | None = None
     query_template: str | None = None
+    # Issue #1196 item 2: every OTHER request id the cross-request
+    # enqueue guard (#1178) skipped a candidate for during this search's
+    # find_download walk. ``None`` (never an empty tuple) when the guard
+    # never fired -- the marker's presence IS the "a deliberate decline
+    # happened here" fact, distinct from the same ``no_match``/``error``
+    # outcome a peer-absent search also writes. Persisted on
+    # ``search_log.cross_request_conflict_request_ids`` (migration 079).
+    cross_request_conflict_request_ids: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
