@@ -301,6 +301,31 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_slskd_searches",
         "tests.test_search_exec",
     ),
+    # lib/dispatch/entry_points.py lives under lib/ so
+    # _direct_test_candidates fires, but it only ever probes
+    # tests.test_entry_points (derived from the basename, not the full
+    # path) — which does not exist. Because the file is under lib/, not
+    # tests/, the fail-closed check at the bottom of
+    # _changed_path_neighbours (which only fires for an unmapped tests/
+    # module) never catches the resulting under-selection either, so a
+    # diff touching only this file silently selected zero of its real
+    # behavior coverage (issue #1196 item 4, noticed during PR1 review for
+    # #1178 but moot there after a redesign). tests.test_dispatch_from_db
+    # is entry_points.py's own dedicated test module (imports it directly
+    # as ``dispatch_entry_points_module``); tests.test_force_import_gates
+    # and tests.test_force_import_merge_redirect import and call
+    # ``dispatch_import_from_db`` for the force lane;
+    # tests.test_integration_slices exercises the same function's
+    # force=True path as a real-code-path slice. Verified by grep, not
+    # merely mentioned in a comment (tests.test_force_import.py and
+    # tests.test_import_manifest.py were checked and excluded — neither
+    # imports or calls anything in this module).
+    "lib/dispatch/entry_points.py": (
+        "tests.test_dispatch_from_db",
+        "tests.test_force_import_gates",
+        "tests.test_force_import_merge_redirect",
+        "tests.test_integration_slices",
+    ),
 }
 
 #: Shared tests/ modules with NO real consuming test today — an admitted,

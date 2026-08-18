@@ -121,6 +121,32 @@ class TestTargetedTestSelection(unittest.TestCase):
         self.assertIn("tests.test_js_payload_contract_audit", selected)
         self.assertIn("tests.test_nix_module", selected)
 
+    def test_dispatch_entry_points_change_adds_its_real_consumers(self) -> None:
+        """Issue #1196 item 4: ``lib/dispatch/entry_points.py`` had no
+        ``EXACT_PATH_NEIGHBOURS`` entry. ``_direct_test_candidates`` only
+        ever probes for ``tests.test_entry_points`` (which does not exist,
+        since it derives from the basename, not the full path) — and
+        because the file lives under ``lib/``, not ``tests/``,
+        ``_changed_path_neighbours``'s fail-closed check (which only fires
+        for unmapped ``tests/`` modules) never catches the resulting
+        under-selection either. A diff touching only this file previously
+        selected zero of its real behavior coverage.
+        """
+        selected = expand_test_selection(
+            (),
+            changed_paths=("lib/dispatch/entry_points.py",),
+            repo_root=REPO_ROOT,
+        )
+
+        self.assertTrue(
+            {
+                "tests.test_dispatch_from_db",
+                "tests.test_force_import_gates",
+                "tests.test_force_import_merge_redirect",
+                "tests.test_integration_slices",
+            }.issubset(selected)
+        )
+
     def test_unknown_explicit_selector_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown test selector"):
             expand_test_selection(
