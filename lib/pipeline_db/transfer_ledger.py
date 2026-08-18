@@ -271,6 +271,17 @@ class _TransferLedgerMixin(_PipelineDBBase):
         involved at all. Only an owner whose state DOES carry
         ``attempt_fingerprint`` gets attempt-scoped blocking; the equality
         test itself is unchanged from #1196.
+
+        A live ``'downloading'`` owner reaching this ELSE arm today is
+        possible only via a NULL/malformed state or a pre-#1196 historical
+        row -- ``build_active_download_state`` sets ``attempt_fingerprint``
+        to ``None`` ONLY when ``entry.files`` is empty (issue #1199 review
+        F9), and every enqueue persist site in ``lib/enqueue.py`` guards
+        ``files_to_enqueue``/``planned_files`` non-empty (``if not
+        files_to_enqueue: ... continue``) before that state is ever built,
+        so a future change that lets an empty-files claim through would
+        silently make THIS owner's every accepted key block, not just its
+        current attempt's.
         """
         if not keys:
             return set()

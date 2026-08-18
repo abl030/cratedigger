@@ -8700,6 +8700,38 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
 
         self.assertEqual(conflicting, {99})
 
+    def test_get_conflicting_transfer_request_ids_explicit_json_null_fingerprint_blocks(
+        self,
+    ):
+        """Fake parity twin for the real-PG hostile-shape pin (issue #1199
+        review F8): an explicit ``"attempt_fingerprint": None`` value
+        (mirroring an explicit JSON ``null``, distinct from the key being
+        absent) fails closed exactly like a missing key. ``_attempt_
+        fingerprint_from_state`` already handles this correctly --
+        ``dict.get`` returns ``None`` for an explicit ``None`` value the
+        same as for a missing key, and the ``isinstance(value, str)``
+        check treats both as "no fingerprint" -- so this test proves that
+        existing behaviour rather than changing it."""
+        from tests.helpers import make_request_row
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=99, status="downloading"))
+        db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=99, username="p0", filename="a.flac",
+                attempt_fingerprint="deadbeef"),
+        ])
+        db.confirm_transfer_enqueue("p0", "a.flac")
+        db.request(99)["active_download_state"] = {
+            "filetype": "flac", "enqueued_at": datetime.now(UTC).isoformat(),
+            "files": [], "attempt_fingerprint": None,
+        }
+
+        conflicting = db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=1)
+
+        self.assertEqual(conflicting, {99})
+
     def test_get_conflicting_transfer_request_ids_status_filter(self):
         # 'processing' included specifically to kill the
         # status-filter-widened mutant (#1178 PR2 review F1); every other

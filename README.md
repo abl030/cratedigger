@@ -203,8 +203,13 @@ other non-`test_*.py` file) with no registered mapping in
 `scripts/targeted_test_selection.py` fails closed with exit code 2 before any
 phase runs, JS and Pyright included — see that module's
 `EXACT_PATH_NEIGHBOURS` / `SHARED_MODULES_WITHOUT_COVERAGE` for the mapping
-and the admitted-gap registry. `run_tests.sh` remains the one canonical
-complete suite.
+and the admitted-gap registry. A changed `lib/**/*.py` module gets the same
+fail-closed treatment on the other side of the same gap: one that resolves
+zero test neighbours (the basename-only `tests.test_<stem>` probe misses real
+coverage filed under a nested path, e.g. `lib/dispatch/core.py`) fails closed
+too unless admitted in `LIB_MODULES_WITHOUT_SELECTION_COVERAGE`, which
+`tests/test_lib_selection_coverage_audit.py` keeps exact in both directions.
+`run_tests.sh` remains the one canonical complete suite.
 `run_final_gate.sh` runs that exact suite on a clean commit and adds a receipt;
 it does not select different checks. CI does not enforce this local workflow.
 

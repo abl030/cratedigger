@@ -753,7 +753,15 @@ measurement on 2026-08-19 found the cohort empty (1 `downloading` request,
 `::timestamptz` cast, and its fake mirror were deleted as dead code per
 the no-deprecated-helpers rule (`.claude/rules/scope.md`) — there is no
 longer any attempt-boundary rescue for a fingerprint-less state; only the
-fingerprint-equality arm above scopes to the current attempt.
+fingerprint-equality arm above scopes to the current attempt. A live
+`'downloading'` owner reaching this ELSE arm is possible only via a
+NULL/malformed state or a pre-#1196 historical row: `build_active_download_
+state` sets `attempt_fingerprint` to `None` only when `entry.files` is
+empty, and every enqueue persist site in `lib/enqueue.py` guards
+`files_to_enqueue`/`planned_files` non-empty before that state is ever
+built — a future change that lets an empty-files claim through would
+silently make that owner's every accepted key block, not just its current
+attempt's (issue #1199 review F9).
 
 A `replaced` owner (Replace-lineage attempt sharing) or one that has already
 moved on (`wanted`/`imported`) never blocks; the same request re-claiming its

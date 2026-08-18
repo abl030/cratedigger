@@ -17160,6 +17160,51 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
 
         self.assertEqual(conflicting, {owner})
 
+    def test_get_conflicting_transfer_request_ids_explicit_json_null_fingerprint_blocks(
+        self,
+    ):
+        """Hostile-shape pin (issue #1199 review F8): an
+        ``active_download_state`` that carries an EXPLICIT JSON ``null``
+        for ``attempt_fingerprint`` (``{"attempt_fingerprint": null, ...}``
+        -- distinct from the key being ABSENT, and never producible by
+        ``build_active_download_state``'s ``omit_defaults=True``, but
+        constructible by hostile/manual data) must still fail CLOSED
+        (block). This is the world that distinguishes ``->>`` from ``->``
+        in the WHEN test: ``->>`` extracts a JSON null as SQL NULL (so the
+        CASE reaches ``ELSE TRUE`` and blocks); ``->`` would instead
+        extract a non-NULL jsonb 'null' scalar, taking the WHEN branch and
+        comparing it against the ledger's own (non-null) text
+        ``attempt_fingerprint`` -- which never matches, so a ``->``
+        regression would fail OPEN (not block) on exactly this shape."""
+        owner = self._seed_request("downloading")
+        username, filename = "p0", "a.flac"
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=owner, username=username, filename=filename,
+                attempt_fingerprint="deadbeef"),
+        ])
+        self.db.confirm_transfer_enqueue(username, filename)
+        state = {
+            "filetype": "flac", "enqueued_at": datetime.now(UTC).isoformat(),
+            "files": [], "attempt_fingerprint": None,
+        }
+        self.db._execute(
+            "UPDATE album_requests SET active_download_state = %s::jsonb "
+            "WHERE id = %s",
+            (json.dumps(state), owner),
+        )
+        candidate = self._seed_request("wanted")
+
+        conflicting = self.db.get_conflicting_transfer_request_ids(
+            [(username, filename)], exclude_request_id=candidate)
+
+        self.assertEqual(
+            conflicting, {owner},
+            "an explicit JSON null attempt_fingerprint must fail closed "
+            "(block), exactly like a missing key or a NULL top-level "
+            "state -- a -> regression instead of ->> would fail open here",
+        )
+
 @requires_postgres
 class TestReadProjectionParity(unittest.TestCase):
     """#481 item 2 — fake<->production READ-projection parity gate.

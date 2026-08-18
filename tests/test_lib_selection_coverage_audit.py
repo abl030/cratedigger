@@ -34,6 +34,8 @@ every offender, not just the first) is the check.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
@@ -144,6 +146,47 @@ class TestLibSelectionCoverageCheckerTripsOnViolations(unittest.TestCase):
             _changed_path_neighbours(
                 "lib/_totally_unmapped_selection_probe.py", REPO_ROOT
             )
+
+    def test_unmapped_nested_lib_file_fails_closed_with_its_name(
+        self,
+    ) -> None:
+        """Direction 2, NESTED shape (issue #1199 review F2): the
+        top-level probe above (`lib/_totally_unmapped_selection_probe.py`,
+        `len(path.parts) == 2`) cannot by itself distinguish the real
+        `path.parts[:1] == ("lib",)` guard from a narrower
+        `len(path.parts) == 2` mutant — every nested lib/ file in the real
+        tree today happens to be registered, so that survivor was never
+        exercised. This probe is nested three levels deep
+        (`len(path.parts) == 3`) and unregistered, so only the real
+        first-component guard, not a top-level-only narrowing, can make
+        this raise."""
+        with self.assertRaisesRegex(
+            ValueError,
+            r"lib/dispatch/_totally_unmapped_nested_probe\.py",
+        ):
+            _changed_path_neighbours(
+                "lib/dispatch/_totally_unmapped_nested_probe.py", REPO_ROOT
+            )
+
+    def test_admitted_gap_log_names_the_path_and_its_rationale(
+        self,
+    ) -> None:
+        """The loud admitted-gap stderr line (issue #1199 review F4) must
+        name BOTH the registered path AND its registered rationale — not
+        merely print SOME line. Captures the real stderr `_changed_path_
+        neighbours` writes for a real registered path, driven through the
+        public entry point."""
+        registered = next(iter(LIB_MODULES_WITHOUT_SELECTION_COVERAGE))
+        rationale = LIB_MODULES_WITHOUT_SELECTION_COVERAGE[registered]
+        buffer = io.StringIO()
+
+        with contextlib.redirect_stderr(buffer):
+            result = _changed_path_neighbours(registered, REPO_ROOT)
+
+        self.assertEqual(result, ())
+        emitted = buffer.getvalue()
+        self.assertIn(registered, emitted)
+        self.assertIn(rationale, emitted)
 
     def test_registered_gap_with_zero_neighbours_does_not_raise(self) -> None:
         """Must-still-work: a genuinely zero-neighbour path that IS

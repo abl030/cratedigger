@@ -412,9 +412,15 @@ SHARED_MODULES_WITHOUT_COVERAGE: dict[str, str] = {
 #: tests/-side registry, _changed_path_neighbours does NOT early-return for
 #: a path listed here: the full resolution still runs, so a module that
 #: later gains real neighbours (an EXACT_PATH_NEIGHBOURS entry, a new prefix
-#: rule, or a newly-created tests.test_<stem> module) simply stops being
-#: zero and is returned normally — no code change needed to "un-admit" it.
-#: tests/test_lib_selection_coverage_audit.py proves both directions: a
+#: rule, or a newly-created tests.test_<stem> module) SELECTS them
+#: immediately, on its very next diff, with no code change here — but the
+#: registration itself goes stale the moment that happens and the entry
+#: must then be deleted, which tests/test_lib_selection_coverage_audit.py
+#: enforces (issue #1199 review F1: caught by adding a real test module for
+#: a registered path and observing the audit go RED demanding removal — a
+#: prior version of this comment claimed "no code change needed to un-admit
+#: it" at all, which was false; selection self-corrects, the registry does
+#: not). tests/test_lib_selection_coverage_audit.py proves both directions: a
 #: registered path that now resolves neighbours (stale — must be removed),
 #: and a lib/**/*.py file with zero neighbours that is NOT registered here
 #: (must be added, or given real coverage). Population is a fresh
@@ -441,11 +447,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "measured 2026-08-19: zero neighbours -- tests.test_convergence "
         "does not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
         "(issue #1199)"
-    ),
-    "lib/current_library_display.py": (
-        "measured 2026-08-19: zero neighbours -- "
-        "tests.test_current_library_display does not exist and no "
-        "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
     ),
     "lib/destructive_release_service.py": (
         "measured 2026-08-19: zero neighbours -- "
@@ -549,11 +550,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "tests.test_evidence_action_file does not exist and no EXACT_PATH_"
         "NEIGHBOURS/prefix rule covers it (issue #1199)"
     ),
-    "lib/evidence_media_identity.py": (
-        "measured 2026-08-19: zero neighbours -- "
-        "tests.test_evidence_media_identity does not exist and no "
-        "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
-    ),
     "lib/fs_authority.py": (
         "measured 2026-08-19: zero neighbours -- tests.test_fs_authority "
         "does not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
@@ -579,11 +575,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "tests.test_search_plan_inspection does not exist and no "
         "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
     ),
-    "lib/search_scheduler.py": (
-        "measured 2026-08-19: zero neighbours -- "
-        "tests.test_search_scheduler does not exist and no EXACT_PATH_"
-        "NEIGHBOURS/prefix rule covers it (issue #1199)"
-    ),
     "lib/slskd_transfer_ledger.py": (
         "measured 2026-08-19: zero neighbours -- "
         "tests.test_slskd_transfer_ledger does not exist and no EXACT_PATH_"
@@ -608,11 +599,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "measured 2026-08-19: zero neighbours -- "
         "tests.test_wrong_match_delete_service does not exist and no "
         "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
-    ),
-    "lib/wrong_match_policy.py": (
-        "measured 2026-08-19: zero neighbours -- "
-        "tests.test_wrong_match_policy does not exist and no EXACT_PATH_"
-        "NEIGHBOURS/prefix rule covers it (issue #1199)"
     ),
     "lib/wrong_matches.py": (
         "measured 2026-08-19: zero neighbours -- tests.test_wrong_matches "
@@ -724,7 +710,13 @@ def _direct_test_candidates(path: PurePosixPath) -> tuple[str, ...]:
         return ()
     stem = path.stem
     if path.parts[:1] == ("lib",):
-        return (f"tests.test_{stem}",)
+        # tests.test_<stem>_generated is the same mechanical basename-only
+        # probe as tests.test_<stem> above, just for the generated sibling
+        # (issue #1199 review F5) -- both are checked for real existence by
+        # the caller via _existing_module before being added, so this is
+        # not hand-curation: a lib/ file whose ONLY coverage is a generated
+        # module (no deterministic tests.test_<stem>) now resolves too.
+        return (f"tests.test_{stem}", f"tests.test_{stem}_generated")
     if path.parts[:1] == ("scripts",):
         return (f"tests.test_{stem}",)
     if path.parts[:1] == ("web",) and path.parts[:2] != ("web", "routes"):
@@ -834,12 +826,16 @@ def _changed_path_neighbours(
                 file=sys.stderr,
             )
         else:
+            # Mirrors the tests/-side raise above: names only the real
+            # mapping mechanisms, never advertises the admitted-gap
+            # registry as an easy way out (issue #1199 review F6) — a
+            # registration there is a reviewed admission, made by touching
+            # LIB_MODULES_WITHOUT_SELECTION_COVERAGE directly, not something
+            # this error should suggest as equivalent to real coverage.
             raise ValueError(
                 f"unmapped lib module: {relative_path} resolves zero test "
                 "neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
-                "prefix rule for it in scripts/targeted_test_selection.py, "
-                "or register it in LIB_MODULES_WITHOUT_SELECTION_COVERAGE "
-                "if genuinely uncovered"
+                "prefix rule for it in scripts/targeted_test_selection.py"
             )
     return tuple(neighbours)
 
