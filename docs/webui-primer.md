@@ -570,6 +570,30 @@ depends on.
   stay invariant under the diagnostic. Measured against the live corpus
   (Rule D, 36,323 rows): 148 changed rows, every one in `verdict` +
   `summary`, each token moving exactly its own rows.
+- **Track-length warning chip (issue #1178, post-correction)** — a
+  render-time-only fact, never a pipeline decision. `web/classify.py`'s
+  `_track_length_warning` reads the ALREADY-PERSISTED `validation_result`
+  candidate mapping on an imported row (`outcome == "success"` only) and
+  surfaces a warning when the worst per-track `|file − declared|` deviation
+  on the selected candidate exceeds `TRACK_LENGTH_WARNING_BOUND_SECONDS`
+  (60s) — a pair missing either length (a CD pregap hidden track,
+  most commonly) is skipped. Nothing is denylisted, no scenario is renamed,
+  no folder moves; the operator judges (Replace / Bad Rip / leave as-is)
+  via the existing lanes. This replaced a validation-time REJECT design:
+  independent review found that magnitude could not separate #1178's own
+  defect from the legitimate hidden-track/appended-medley population (85%
+  of the historical >60s cohort is a single-pair deviation on an otherwise-
+  correct rip), and every reject would have permanently denylisted
+  contributing peers offering correct rips. Because the derivation is
+  render-time, it is retroactive — every accepted import in the corpus is
+  re-evaluated on the next page load, not just future ones. Surfaced as a
+  `ClassifiedEntry.track_length_warning` field (nullable string; both the
+  Recents-log route and the pipeline-detail history route carry it — the
+  latter via its own `DownloadHistoryViewRow` Struct, a SEPARATE reader of
+  the same classification that must declare every field it forwards) and
+  rendered by `web/js/recents.js` as a `badge-warn` "track length" chip
+  next to the main badge, with the full derived sentence in the hover
+  title.
 - **Wrong Matches unavailable sources** — a candidate whose folder the server
   could not READ (permissions, I/O — never a folder proven gone) stays in the
   list with a `source unavailable` badge, an amber card, both Force Import and

@@ -5,6 +5,7 @@
 
 import { __test__ } from '../web/js/recents.js';
 import { state } from '../web/js/state.js';
+import { esc } from '../web/js/util.js';
 import { validDualProviderProof } from './fixtures/cd_rip_proof.mjs';
 
 const { renderRecentsItems: renderRecentsFixture } = __test__;
@@ -495,6 +496,45 @@ console.log('renderRecentsItems() shows bad-extension postflight warning chip');
   assertContains(html, 'bad ext: 1', 'bad extension chip rendered');
   assertContains(html, '01 One Too Many Itches.bak',
     'bad extension filename appears in hover detail');
+}
+
+console.log('renderRecentsItems() shows the track-length warning chip (issue #1178)');
+{
+  const warning = "Track length contradicts the matched release: "
+    + "'00 - Hidden Track.flac' is 237.6s where the release declares 15.0s";
+  const html = renderRecentsFixture([{
+    id: 40061,
+    request_id: 8954,
+    created_at: '2026-08-15T10:25:15+00:00',
+    album_title: 'Lost Weekend',
+    artist_name: 'Phoebe Bridgers',
+    badge: 'Imported',
+    badge_class: 'badge-new',
+    border_color: '#1a4a2a',
+    summary: 'FLAC · lwl',
+    track_length_warning: warning,
+  }]);
+  assertContains(html, 'track length', 'track-length warning chip rendered');
+  assertContains(html, esc(warning),
+    'the full derived sentence appears in the chip hover detail');
+}
+
+console.log('renderRecentsItems() omits the track-length warning chip when the field is null');
+{
+  const html = renderRecentsFixture([{
+    id: 40062,
+    request_id: 8955,
+    created_at: '2026-08-15T10:25:15+00:00',
+    album_title: 'Some Other Album',
+    artist_name: 'Some Artist',
+    badge: 'Imported',
+    badge_class: 'badge-new',
+    border_color: '#1a4a2a',
+    summary: 'FLAC · lwl',
+    track_length_warning: null,
+  }]);
+  assertExcludes(html, 'track length',
+    'no track-length chip rendered when the field is null');
 }
 
 console.log('renderRecentsItems() uses the main badge and server-composed summary for deleted triage');

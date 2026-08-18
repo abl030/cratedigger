@@ -26,6 +26,13 @@ from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from lib.quality import (
+    CandidateSummary,
+    HarnessItem,
+    HarnessTrackInfo,
+    TrackMapping,
+    ValidationResult,
+)
 from tests.fakes import FakeBeetsDB
 from tests.helpers import (
     handoff_automation_owner,
@@ -36,6 +43,27 @@ from tests.web._harness import (
     _FakeDbWebServerCase,
     _fresh_triage_runner,
 )
+
+
+def _validation_result_blob(
+    mappings: list[TrackMapping],
+    *,
+    distance: float = 0.05,
+    mbid: str = "rel-track-length-warning",
+    scenario: str = "strong_match",
+    valid: bool = True,
+) -> dict[str, object]:
+    """A ``validation_result`` blob shaped exactly like
+    ``ValidationResult.to_json()`` writes it — built from the real Structs
+    (``.claude/rules/test-fidelity.md`` Rule C), never hand-typed keys."""
+    candidate = CandidateSummary(
+        mbid=mbid, distance=distance, is_target=True, mapping=mappings,
+    )
+    result = ValidationResult(
+        valid=valid, scenario=scenario, distance=distance,
+        mbid_found=True, target_mbid=mbid, candidates=[candidate],
+    )
+    return msgspec.to_builtins(result)
 
 
 class TestPipelineRouteContracts(_FakeDbWebServerCase):
@@ -257,6 +285,161 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(classified.installed_path, "/library/current")
         self.assertEqual(classified.candidate_reference, "/incoming/candidate")
         self.assertIn("request lifecycle was preserved", classified.verdict)
+
+    # --- Issue #1178 (post-correction): render-time track-length warning ---
+    #
+    # Every pin here drives the FULL outermost adapter — the actual
+    # /api/pipeline/log route, through build_recents_download_log_rows,
+    # classify_log_entry, and JSON encoding — not classify_log_entry alone.
+    # The prior (reverted) validation-time-gate review found helper-level
+    # pins let adapter-wiring mutants survive (F3/M1); this is the fix.
+
+    def test_track_length_warning_surfaces_on_the_1178_world(self):
+        """download_log 40061's exact shape: a 237.6s file paired against
+        MB track 17's declared 15.0s, at a distance (0.1441) that cleared
+        the 0.15 gate legitimately."""
+        self.db.seed_request(make_request_row(id=900, status="imported"))
+        log_id = self.db.log_download(
+            900, outcome="success",
+            validation_result=_validation_result_blob(
+                distance=0.1441,
+                mappings=[
+                    TrackMapping(
+                        item=HarnessItem(
+                            path="02 The Outside.flac", length=237.7),
+                        track=HarnessTrackInfo(
+                            title="The Outside", length=237.0),
+                    ),
+                    TrackMapping(
+                        item=HarnessItem(
+                            path="00 - Hidden Track.flac",
+                            length=237.633167),
+                        track=HarnessTrackInfo(
+                            title="Lost Weekend", length=15.0),
+                    ),
+                ],
+            ),
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertEqual(
+            item["track_length_warning"],
+            "Track length contradicts the matched release: "
+            "'00 - Hidden Track.flac' is 237.6s where the release "
+            "declares 15.0s",
+        )
+
+    def test_track_length_warning_skips_a_pair_with_no_declared_length(self):
+        """A CD pregap hidden track carries no declared MB length (0.0) —
+        the warning must skip it, never flag it, even though the file
+        measures long."""
+        self.db.seed_request(make_request_row(id=901, status="imported"))
+        log_id = self.db.log_download(
+            901, outcome="success",
+            validation_result=_validation_result_blob(mappings=[
+                TrackMapping(
+                    item=HarnessItem(
+                        path="00 - Hidden Track.flac", length=237.6),
+                    track=HarnessTrackInfo(title="Hidden Track", length=0.0),
+                ),
+                TrackMapping(
+                    item=HarnessItem(path="02.flac", length=100.0),
+                    track=HarnessTrackInfo(title="Two", length=100.0),
+                ),
+            ]),
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertIsNone(item["track_length_warning"])
+
+    def test_track_length_warning_absent_under_the_bound(self):
+        self.db.seed_request(make_request_row(id=902, status="imported"))
+        log_id = self.db.log_download(
+            902, outcome="success",
+            validation_result=_validation_result_blob(mappings=[
+                TrackMapping(
+                    item=HarnessItem(path="01.flac", length=100.0),
+                    track=HarnessTrackInfo(title="One", length=105.0),
+                ),
+            ]),
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertIsNone(item["track_length_warning"])
+
+    def test_track_length_warning_absent_at_exactly_the_bound(self):
+        """The comparison is strictly-greater-than: a deviation exactly AT
+        the bound still clears (no warning)."""
+        from web.classify import TRACK_LENGTH_WARNING_BOUND_SECONDS
+
+        self.db.seed_request(make_request_row(id=905, status="imported"))
+        log_id = self.db.log_download(
+            905, outcome="success",
+            validation_result=_validation_result_blob(mappings=[
+                TrackMapping(
+                    item=HarnessItem(
+                        path="01.flac",
+                        length=100.0 + TRACK_LENGTH_WARNING_BOUND_SECONDS,
+                    ),
+                    track=HarnessTrackInfo(title="One", length=100.0),
+                ),
+            ]),
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertIsNone(item["track_length_warning"])
+
+    def test_track_length_warning_absent_on_a_rejected_row(self):
+        """The same 222.6s-shaped mismatch on a REJECTED row never warns —
+        this field is about an already-imported card, not a candidate
+        judgement (that's the Wrong Matches worklist's job)."""
+        self.db.seed_request(make_request_row(id=903, status="wanted"))
+        log_id = self.db.log_download(
+            903, outcome="rejected",
+            validation_result=_validation_result_blob(
+                distance=0.2, scenario="high_distance", valid=False,
+                mappings=[
+                    TrackMapping(
+                        item=HarnessItem(
+                            path="00 - Hidden Track.flac", length=237.6),
+                        track=HarnessTrackInfo(
+                            title="Lost Weekend", length=15.0),
+                    ),
+                ],
+            ),
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertIsNone(item["track_length_warning"])
+
+    def test_track_length_warning_absent_with_no_candidates(self):
+        """A historical row with no candidates/mapping at all must not
+        warn — and must not crash the route."""
+        self.db.seed_request(make_request_row(id=904, status="imported"))
+        log_id = self.db.log_download(
+            904, outcome="success", validation_result=None,
+        )
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertIsNone(item["track_length_warning"])
 
     def test_have_analysis_error_copy_respects_operator_stop(self):
         classified = classify_log_entry(LogEntry(
