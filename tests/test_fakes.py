@@ -8640,9 +8640,17 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
 
         self.assertEqual(conflicting, {99})
 
-    def test_get_conflicting_transfer_request_ids_scopes_to_current_attempt(self):
-        """#1178 PR2 review F2: an abandoned earlier attempt's accepted
-        row must not block; the current attempt's row still does."""
+    def test_get_conflicting_transfer_request_ids_missing_fingerprint_key_blocks(
+        self,
+    ):
+        """#1199 item 2 fake twin: an active_download_state that EXISTS
+        but lacks "attempt_fingerprint" fails CLOSED unconditionally --
+        both an old (30-day) and a current accepted row block, with no
+        attempt-boundary rescue by age. Equivalence note: this replaces
+        test_get_conflicting_transfer_request_ids_scopes_to_current_
+        attempt, which asserted the OLD row did NOT block under the
+        now-deleted deploy-window time-predicate fallback; that
+        differentiation no longer exists in production."""
         from tests.helpers import make_request_row
 
         db = FakePipelineDB()
@@ -8669,14 +8677,14 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         self.assertEqual(
             db.get_conflicting_transfer_request_ids(
                 [("OLD", "old.flac")], exclude_request_id=1),
-            set(),
-            "abandoned attempt must not block",
+            {99},
+            "missing fingerprint key fails closed regardless of age",
         )
         self.assertEqual(
             db.get_conflicting_transfer_request_ids(
                 [("NEW", "new.flac")], exclude_request_id=1),
             {99},
-            "current attempt must still block",
+            "missing fingerprint key still blocks the current key too",
         )
 
     def test_get_conflicting_transfer_request_ids_null_state_fails_closed(self):

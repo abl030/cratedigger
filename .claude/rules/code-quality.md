@@ -318,7 +318,20 @@ few remaining directory prefix rules, or an admitted gap in
 mechanically enforces that no module under `tests/` imports it, not just
 review); one with none of those fails the whole
 entrypoint closed (`scripts/test.sh` exit code 2) before any phase runs —
-silent under-selection there is worse than a loud refusal. This is development
+silent under-selection there is worse than a loud refusal. A changed `lib/**.py`
+module gets the same fail-closed treatment on the OTHER side of the same gap
+(issue #1199): if its full resolution — the same `EXACT_PATH_NEIGHBOURS`
+entry/prefix-rule mechanism, plus `_direct_test_candidates`'s `tests.test_<
+stem>` probe, which is keyed on basename only and so misses real coverage
+filed under the file's full path (e.g. `lib/dispatch/core.py`) — yields zero
+test modules, selection fails the same way unless the path is admitted in
+`LIB_MODULES_WITHOUT_SELECTION_COVERAGE` (measured fresh at 39 files,
+`tests/test_lib_selection_coverage_audit.py` proves the registry exact in
+both directions: no stale admission, no unregistered zero-neighbour file).
+Unlike the tests/-side registry, an admitted lib/ gap does not skip the rest
+of selection — it still resolves normally and only short-circuits when that
+resolution is genuinely empty — so selection proceeds with a loud stderr line
+naming the admitted gap, never a silent cap. This is development
 feedback; the full suite remains the exhaustive pre-review boundary.
 
 Always use `nix-shell --run` for Python (`.claude/rules/nix-shell.md`). Direct

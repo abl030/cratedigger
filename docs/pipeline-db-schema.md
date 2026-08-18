@@ -738,29 +738,22 @@ no app-clock-vs-PG-clock assumption, no skew window, no failure direction
 to reason about — a stale attempt's ledger rows simply carry a different
 fingerprint and never match, however new their `enqueued_at` looks.
 
-The PRE-#1196 time predicate — `AND l.enqueued_at >= COALESCE((r.
-active_download_state ->> 'enqueued_at')::timestamptz, '-infinity')`, the
-same `enqueued_at` witness the poll path already threads as
-`not_before=state.enqueued_at` — survives ONLY as the deploy-window
-fallback, taken when the owner's state exists but LACKS the
-`attempt_fingerprint` key (an in-flight download claimed by code from
-before this field existed). It can be deleted once no request claimed
-pre-deploy remains `'downloading'`. A NULL/missing/malformed
-`active_download_state` still fails CLOSED unconditionally through this
-SAME fallback expression — `->>` on a NULL or non-object jsonb value
-returns NULL for any key, so `COALESCE(..., '-infinity')` substitutes the
-minimum timestamp and every real `l.enqueued_at` compares `>=` true, i.e.
-every accepted row for that `'downloading'` owner counts as in-scope
-(blocks). (A syntactically present but malformed `enqueued_at` *string* —
-never producible today, since `build_active_download_state` always writes
-`datetime.now(UTC).isoformat()` — would instead raise
-`InvalidDatetimeFormat` at the `::timestamptz` cast inside that same
-`COALESCE`, failing the whole cross-cycle check rather than either fail-open
-or fail-closed on this predicate.) A dedicated `CASE WHEN
-active_download_state IS NULL THEN TRUE` arm was tried and found redundant
-on real PG (`->>` on NULL already returns NULL, so the `COALESCE` above
-does the same job) — the fail-closed guarantee lives entirely in that
-`COALESCE`, not a separate NULL check.
+As of issue #1199 item 2, the ELSE arm is unconditional `TRUE`: a NULL,
+missing, or malformed `active_download_state` — or one that exists but
+LACKS the `attempt_fingerprint` key — fails CLOSED unconditionally, with
+no clock involved at all. Every accepted row for that `'downloading'`
+owner counts as in-scope (blocks), regardless of the ledger row's own
+`enqueued_at`. A PRE-#1199 version of this query instead fell back to a
+clock comparison (`AND l.enqueued_at >= COALESCE((r.active_download_state
+->> 'enqueued_at')::timestamptz, '-infinity')`) when the state existed but
+lacked the fingerprint key — a deploy-window accommodation for an
+in-flight download claimed by code from before that field existed. Live
+measurement on 2026-08-19 found the cohort empty (1 `downloading` request,
+0 NULL states, 0 lacking `attempt_fingerprint`), so the fallback arm, its
+`::timestamptz` cast, and its fake mirror were deleted as dead code per
+the no-deprecated-helpers rule (`.claude/rules/scope.md`) — there is no
+longer any attempt-boundary rescue for a fingerprint-less state; only the
+fingerprint-equality arm above scopes to the current attempt.
 
 A `replaced` owner (Replace-lineage attempt sharing) or one that has already
 moved on (`wanted`/`imported`) never blocks; the same request re-claiming its
