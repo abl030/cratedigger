@@ -454,6 +454,14 @@ filesystem permissions".
 
 ### Cover Art Config
 
+This is the required order (issue #1200), enforced as a startup WARNING by
+`lib/beets_config_contract.py` whenever `discogs`+`fetchart` are both active
+and `sources` doesn't rank `cover_art_url` ahead of `itunes` — including
+`sources` being unset, which is Beets' own upstream default and ranks
+`cover_art_url` LAST. `examples/cratedigger.nix` ships it; the live
+nixosconfig deployment reorders its own copy separately (a deploy-owned
+change, not shipped by this repo).
+
 ```yaml
 fetchart:
   auto: true
@@ -461,7 +469,7 @@ fetchart:
   maxwidth: 500     # CAA serves pre-built 500px thumbnails (no local resize needed)
   quality: 75       # JPEG compression for non-CAA sources
   sources:          # Priority order:
-    - coverart      # MusicBrainz Cover Art Archive — best quality, exact release
+    - coverart      # MusicBrainz Cover Art Archive — exact release OR release-group
     - cover_art_url # Exact-release art the matched metadata-source plugin found
     - itunes        # Apple Music — title-guessed, not pressing-exact
     - amazon
@@ -491,8 +499,15 @@ never a guess. `itunes`, by contrast, matches on exact `collectionName`
 string equality against `f"{albumartist} {album}"` — two different pressings
 that share a title (e.g. a reissue and the original) collide onto the same
 iTunes result and therefore the same wrong image. Ranking `cover_art_url`
-above `itunes` is what makes strict pressing identity (CLAUDE.md) hold for
-cover art, not just for track matching.
+above `itunes` closes exactly that collision for Discogs-sourced requests —
+the entire population `cover_art_url` is ever populated for. It is not a
+categorical strict-pressing-identity guarantee for the whole `sources` list:
+`coverart` (ranked first) expands to a Cover Art Archive lookup by BOTH
+release id AND release-group id, and release-group art is not
+pressing-exact. That gap happens to be unreachable for Discogs-sourced
+albums specifically (their `mb_releasegroupid` is neutralized, issue #570,
+so CAA is always skipped for them) but is real for MusicBrainz-sourced
+requests in general.
 
 ## Library Structure
 

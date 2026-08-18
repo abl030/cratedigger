@@ -37,6 +37,7 @@ from beetsplug.discogs import DiscogsPlugin
 
 from harness import beets_harness
 from harness.beets_compat import (
+    _DISCOGS_COVER_ART_TIMEOUT_SECONDS,
     DISCOGS_REAL_API_BASE,
     BeetsCapabilityError,
     _discogs_select_cover_art_method,
@@ -136,6 +137,9 @@ class TestDiscogsCoverArtFallback(unittest.TestCase):
             kwargs["headers"]["Authorization"], "Discogs token=real-token-123"
         )
         self.assertIn("User-Agent", kwargs["headers"])
+        self.assertEqual(
+            kwargs["timeout"], _DISCOGS_COVER_ART_TIMEOUT_SECONDS
+        )
 
     def test_missing_token_never_calls_the_real_api(self) -> None:
         plugin = object.__new__(DiscogsPlugin)
@@ -186,6 +190,26 @@ class TestDiscogsCoverArtFallback(unittest.TestCase):
                 plugin.config = _config("tok")
                 with patch("requests.get", return_value=response):
                     self.assertIsNone(plugin.select_cover_art(release))
+
+    def test_429_fails_soft_but_logs_the_release_id_and_reason(self) -> None:
+        """Residual from #1200 review: a rate-limited window otherwise
+        fails soft to "no art" with nothing to diagnose from -- the WARNING
+        log line is the only signal an operator gets."""
+        release = _release(_BOWIE_1969_RELEASE_ID, [])
+        plugin = object.__new__(DiscogsPlugin)
+        plugin.config = _config("tok")
+        with (
+            patch(
+                "requests.get",
+                return_value=_fake_response(429, b"too many requests"),
+            ),
+            self.assertLogs("harness.beets_compat", level="WARNING") as logs,
+        ):
+            result = plugin.select_cover_art(release)
+        self.assertIsNone(result)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn(str(_BOWIE_1969_RELEASE_ID), logs.output[0])
+        self.assertIn("429", logs.output[0])
 
     def test_empty_real_api_images_list_returns_none(self) -> None:
         plugin = object.__new__(DiscogsPlugin)
@@ -261,8 +285,15 @@ class TestDiscogsCoverArtFallbackWiring(unittest.TestCase):
         self.assertLess(
             fallback_lines[0], load_plugins_lines[0],
             "configure_discogs_cover_art_fallback must run before "
-            "plugins.load_plugins so the patched class method is what "
-            "gets instantiated",
+            "plugins.load_plugins -- a house convention keeping every "
+            "harness class patch (this and its sibling "
+            "configure_discogs_subtracks) grouped at the same one "
+            "process-startup point. NOT a correctness requirement: "
+            "self.select_cover_art is resolved on the class at CALL time "
+            "(beetsplug/discogs/__init__.py's plain attribute access), not "
+            "at DiscogsPlugin instantiation, so a patch installed on "
+            "either side of load_plugins is already live before any real "
+            "import request reaches it (issue #1200 review F6).",
         )
 
 

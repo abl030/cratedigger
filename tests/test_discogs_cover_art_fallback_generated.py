@@ -11,7 +11,11 @@ leaf faked:
   behaviour).
 * With no configured user token, the real API is never called and the
   result is ``None``.
-* With a token, the real API is called AT MOST ONCE per invocation. If it
+* With a token, the real API is called AT MOST ONCE per invocation, for the
+  EXACT release id the ``Release`` object carries (strict pressing identity
+  — a fallback that fetches a different release's artwork is the same
+  defect this fallback exists to eliminate), with the fail-soft timeout
+  pinned (never blocks an import on a black-holed api.discogs.com). If it
   returns a syntactically valid, non-empty ``images`` list, the fallback
   returns the first entry's ``uri`` exactly. Any other outcome — a raised
   network exception, a non-2xx response, a malformed JSON body, a
@@ -40,7 +44,11 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-from harness.beets_compat import configure_discogs_cover_art_fallback
+from harness.beets_compat import (
+    _DISCOGS_COVER_ART_TIMEOUT_SECONDS,
+    DISCOGS_REAL_API_BASE,
+    configure_discogs_cover_art_fallback,
+)
 
 _MIRROR_CLIENT = SimpleNamespace(_base_url="http://discogs-mirror.example")
 
@@ -119,6 +127,29 @@ def cover_art_worlds(draw: st.DrawFn) -> CoverArtWorld:
     )
 
 
+_RELEASE_URL_PREFIX = f"{DISCOGS_REAL_API_BASE}/releases/"
+
+
+def _requested_release_id(requested_urls: list[str]) -> int | None:
+    """Parse the release id the LAST real-API call actually requested.
+
+    ``None`` means either no call happened, or the requested URL does not
+    match the documented ``{DISCOGS_REAL_API_BASE}/releases/{release_id}``
+    shape at all -- both are real findings the checker must be able to see,
+    never silently swallowed.
+    """
+    if not requested_urls:
+        return None
+    url = requested_urls[-1]
+    if not url.startswith(_RELEASE_URL_PREFIX):
+        return None
+    suffix = url[len(_RELEASE_URL_PREFIX):]
+    try:
+        return int(suffix)
+    except ValueError:
+        return None
+
+
 def _fake_response(status_code: int, body: bytes) -> requests.Response:
     response = requests.Response()
     response.status_code = status_code
@@ -170,6 +201,9 @@ def cover_art_fallback_violations(
     network_images: list[str] | None,
     wrapped_result: str | None,
     real_api_call_count: int,
+    requested_release_id: int | None,
+    expected_release_id: int,
+    requested_timeout: object,
 ) -> list[str]:
     violations: list[str] = []
 
@@ -178,6 +212,23 @@ def cover_art_fallback_violations(
             "the real Discogs API was called more than once for one "
             f"select_cover_art invocation (calls={real_api_call_count})"
         )
+
+    if real_api_call_count > 0:
+        # Strict pressing identity (#1200): a fallback lookup that fetches
+        # a DIFFERENT release's artwork is exactly the wrong-pressing
+        # defect this fallback exists to eliminate -- not a lesser bug.
+        if requested_release_id != expected_release_id:
+            violations.append(
+                "the real Discogs API was called for the WRONG release id "
+                f"-- strict pressing identity violation: requested="
+                f"{requested_release_id!r} expected={expected_release_id!r}"
+            )
+        if requested_timeout != _DISCOGS_COVER_ART_TIMEOUT_SECONDS:
+            violations.append(
+                "the real Discogs API call did not pin the fail-soft "
+                f"timeout: requested={requested_timeout!r} expected="
+                f"{_DISCOGS_COVER_ART_TIMEOUT_SECONDS!r}"
+            )
 
     if stock_url:
         if wrapped_result != stock_url:
@@ -221,11 +272,21 @@ def cover_art_fallback_violations(
     return violations
 
 
-def _drive_real_fallback(world: CoverArtWorld) -> tuple[str | None, int]:
+@dataclass(frozen=True)
+class FallbackDrive:
+    wrapped_result: str | None
+    call_count: int
+    requested_release_id: int | None
+    requested_timeout: object
+
+
+def _drive_real_fallback(world: CoverArtWorld) -> FallbackDrive:
     """Run the REAL patched ``select_cover_art`` over one generated world.
 
-    Returns ``(wrapped_result, real_api_call_count)``. Only ``requests.get``
-    — the documented network leaf — is faked.
+    Only ``requests.get`` — the documented network leaf — is faked; every
+    call it actually received (URL and ``timeout=`` kwarg) is recorded, not
+    merely counted, so the checker can prove WHICH release was fetched and
+    that the fail-soft timeout was really pinned (#1200 review F2/F3).
     """
     configure_discogs_cover_art_fallback()
     plugin = object.__new__(DiscogsPlugin)
@@ -239,30 +300,49 @@ def _drive_real_fallback(world: CoverArtWorld) -> tuple[str | None, int]:
     )
 
     call_count = 0
+    requested_urls: list[str] = []
+    requested_timeouts: list[object] = []
     responder = _network_responder(world)
 
     def counting_responder(*args: object, **kwargs: object) -> requests.Response:
         nonlocal call_count
         call_count += 1
+        if args:
+            requested_urls.append(str(args[0]))
+        requested_timeouts.append(kwargs.get("timeout"))
         return responder(*args, **kwargs)
 
     with patch("requests.get", side_effect=counting_responder):
         result = plugin.select_cover_art(release)
-    return result, call_count
+    return FallbackDrive(
+        wrapped_result=result,
+        call_count=call_count,
+        requested_release_id=_requested_release_id(requested_urls),
+        requested_timeout=requested_timeouts[-1] if requested_timeouts else None,
+    )
 
 
 class TestCoverArtFallbackGenerated(unittest.TestCase):
     @given(world=cover_art_worlds())
     def test_real_api_fallback_contract_holds(self, world: CoverArtWorld) -> None:
-        wrapped_result, call_count = _drive_real_fallback(world)
+        drive = _drive_real_fallback(world)
         violations = cover_art_fallback_violations(
             stock_url=world.stock_url,
             token_present=world.token_present,
             network_images=world.network_images,
-            wrapped_result=wrapped_result,
-            real_api_call_count=call_count,
+            wrapped_result=drive.wrapped_result,
+            real_api_call_count=drive.call_count,
+            requested_release_id=drive.requested_release_id,
+            expected_release_id=world.release_id,
+            requested_timeout=drive.requested_timeout,
         )
         self.assertEqual(violations, [], (world, violations))
+
+
+#: Matching id/timeout, used by self-tests that don't care about F2/F3's
+#: clauses so that clause stays silent and only the intended one fires.
+_NEUTRAL_RELEASE_ID = 4242424
+_NEUTRAL_TIMEOUT = _DISCOGS_COVER_ART_TIMEOUT_SECONDS
 
 
 # Known-bad self-tests: each checker CLAUSE must trip on a planted
@@ -275,6 +355,9 @@ class TestCoverArtFallbackCheckerTripsOnViolations(unittest.TestCase):
             network_images=["https://real/a.jpg"],
             wrapped_result="https://real/a.jpg",
             real_api_call_count=2,
+            requested_release_id=_NEUTRAL_RELEASE_ID,
+            expected_release_id=_NEUTRAL_RELEASE_ID,
+            requested_timeout=_NEUTRAL_TIMEOUT,
         )
         self.assertTrue(
             any("called more than once" in v for v in violations), violations
@@ -287,6 +370,9 @@ class TestCoverArtFallbackCheckerTripsOnViolations(unittest.TestCase):
             network_images=None,
             wrapped_result="https://mirror/DIFFERENT.jpg",
             real_api_call_count=0,
+            requested_release_id=None,
+            expected_release_id=_NEUTRAL_RELEASE_ID,
+            requested_timeout=None,
         )
         self.assertTrue(
             any("not returned unchanged" in v for v in violations), violations
@@ -299,6 +385,9 @@ class TestCoverArtFallbackCheckerTripsOnViolations(unittest.TestCase):
             network_images=None,
             wrapped_result="https://mirror/stock.jpg",
             real_api_call_count=1,
+            requested_release_id=_NEUTRAL_RELEASE_ID,
+            expected_release_id=_NEUTRAL_RELEASE_ID,
+            requested_timeout=_NEUTRAL_TIMEOUT,
         )
         self.assertTrue(
             any(
@@ -314,6 +403,9 @@ class TestCoverArtFallbackCheckerTripsOnViolations(unittest.TestCase):
             network_images=None,
             wrapped_result=None,
             real_api_call_count=1,
+            requested_release_id=_NEUTRAL_RELEASE_ID,
+            expected_release_id=_NEUTRAL_RELEASE_ID,
+            requested_timeout=_NEUTRAL_TIMEOUT,
         )
         self.assertTrue(
             any(
@@ -330,6 +422,9 @@ class TestCoverArtFallbackCheckerTripsOnViolations(unittest.TestCase):
             network_images=None,
             wrapped_result="https://real/should-not-exist.jpg",
             real_api_call_count=0,
+            requested_release_id=None,
+            expected_release_id=_NEUTRAL_RELEASE_ID,
+            requested_timeout=None,
         )
         self.assertTrue(
             any(
@@ -346,6 +441,9 @@ class TestCoverArtFallbackCheckerTripsOnViolations(unittest.TestCase):
             network_images=["https://real/first.jpg", "https://real/second.jpg"],
             wrapped_result="https://real/second.jpg",
             real_api_call_count=1,
+            requested_release_id=_NEUTRAL_RELEASE_ID,
+            expected_release_id=_NEUTRAL_RELEASE_ID,
+            requested_timeout=_NEUTRAL_TIMEOUT,
         )
         self.assertTrue(
             any(
@@ -362,10 +460,55 @@ class TestCoverArtFallbackCheckerTripsOnViolations(unittest.TestCase):
             network_images=None,
             wrapped_result="https://real/should-not-exist.jpg",
             real_api_call_count=1,
+            requested_release_id=_NEUTRAL_RELEASE_ID,
+            expected_release_id=_NEUTRAL_RELEASE_ID,
+            requested_timeout=_NEUTRAL_TIMEOUT,
         )
         self.assertTrue(
             any(
                 "unreachable/malformed/empty" in v for v in violations
+            ),
+            violations,
+        )
+
+    def test_trips_when_real_api_requests_the_wrong_release_id(self) -> None:
+        """#1200 review F2 -- a fallback that fetches a DIFFERENT release's
+        artwork (a foreign/hardcoded id) is the exact strict-pressing-
+        identity violation this fallback exists to eliminate."""
+        violations = cover_art_fallback_violations(
+            stock_url=None,
+            token_present=True,
+            network_images=["https://real/a.jpg"],
+            wrapped_result="https://real/a.jpg",
+            real_api_call_count=1,
+            requested_release_id=999999,
+            expected_release_id=_NEUTRAL_RELEASE_ID,
+            requested_timeout=_NEUTRAL_TIMEOUT,
+        )
+        self.assertTrue(
+            any(
+                "WRONG release id" in v for v in violations
+            ),
+            violations,
+        )
+
+    def test_trips_when_real_api_call_does_not_pin_the_timeout(self) -> None:
+        """#1200 review F3 -- an unpinned request has no default timeout,
+        so a black-holed api.discogs.com would hang the harness past the
+        "never blocks an import" guarantee instead of failing soft."""
+        violations = cover_art_fallback_violations(
+            stock_url=None,
+            token_present=True,
+            network_images=["https://real/a.jpg"],
+            wrapped_result="https://real/a.jpg",
+            real_api_call_count=1,
+            requested_release_id=_NEUTRAL_RELEASE_ID,
+            expected_release_id=_NEUTRAL_RELEASE_ID,
+            requested_timeout=None,
+        )
+        self.assertTrue(
+            any(
+                "did not pin the fail-soft timeout" in v for v in violations
             ),
             violations,
         )
@@ -377,6 +520,9 @@ class TestCoverArtFallbackCheckerTripsOnViolations(unittest.TestCase):
             network_images=["https://real/first.jpg"],
             wrapped_result="https://real/first.jpg",
             real_api_call_count=1,
+            requested_release_id=_NEUTRAL_RELEASE_ID,
+            expected_release_id=_NEUTRAL_RELEASE_ID,
+            requested_timeout=_NEUTRAL_TIMEOUT,
         )
         self.assertEqual(violations, [])
 

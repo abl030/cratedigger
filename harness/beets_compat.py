@@ -7,6 +7,7 @@ outside it decides an upstream era from a version string.
 from __future__ import annotations
 
 import importlib
+import logging
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
@@ -17,7 +18,14 @@ import msgspec
 import requests
 from beets import library
 
-from lib.json_narrow import json_dict
+# beets_harness.py's own module-level logging.basicConfig(stream=sys.stderr)
+# runs at import time, before any harness call reaches this module -- a
+# plain getLogger here inherits that stderr handler, matching the harness's
+# stdout-is-JSON-protocol / stderr-is-human-diagnostics split
+# (.claude/rules/harness.md). Outside the harness (e.g. under a bare test
+# runner), the logging module's own last-resort handler still writes
+# WARNING+ to stderr.
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from beets.importer.actions import DuplicateAction
@@ -437,6 +445,25 @@ class _DiscogsApiCoverArtResponse(msgspec.Struct):
     images: list[_DiscogsApiCoverArtImage] = []
 
 
+def _release_data_dict(result: object) -> dict[str, object]:
+    """Narrow ``result.data`` to a string-keyed dict, gracefully.
+
+    Mirrors ``lib.json_narrow.json_dict``'s degrade-to-``{}`` behaviour for
+    non-dict/non-string-keyed input, reimplemented locally with ``msgspec``
+    (already a hard dependency of this module) rather than imported from
+    ``lib`` -- harness/ is not guaranteed lib/ on sys.path
+    (cratedigger.service's own wrapper does not export PYTHONPATH; issue
+    #1200 review F1).
+    """
+    data = getattr(result, "data", None)
+    if not isinstance(data, dict):
+        return {}
+    try:
+        return msgspec.convert(data, type=dict[str, object])
+    except msgspec.ValidationError:
+        return {}
+
+
 def _real_discogs_cover_art_url(release_id: object, user_token: str) -> str | None:
     """Look up one release's cover art on the real (non-mirror) Discogs API.
 
@@ -461,9 +488,22 @@ def _real_discogs_cover_art_url(release_id: object, user_token: str) -> str | No
         payload = msgspec.convert(
             response.json(), type=_DiscogsApiCoverArtResponse
         )
-    except (requests.RequestException, ValueError, msgspec.ValidationError):
+    except (requests.RequestException, ValueError, msgspec.ValidationError) as exc:
+        # Named and logged (issue #1200 review residual): a rate-limited
+        # (429) window otherwise fails soft to "no art" with nothing to
+        # diagnose from -- this is the only signal an operator gets that
+        # the fallback is silently degrading imports.
+        _logger.warning(
+            "Discogs cover-art fallback failed soft for release %r: "
+            "%s: %s",
+            release_id, type(exc).__name__, exc,
+        )
         return None
     if not payload.images:
+        _logger.debug(
+            "Discogs cover-art fallback found no images for release %r",
+            release_id,
+        )
         return None
     return payload.images[0].uri
 
@@ -489,13 +529,17 @@ def configure_discogs_cover_art_fallback() -> None:
     ``"images": []``, so upstream ``select_cover_art`` is structurally unable
     to find anything and ``cover_art_url`` is never set (issue #1200).
 
-    This wraps ``select_cover_art`` so it is a complete no-op for a stock
-    install, or for any release the configured client already resolves art
-    for: the original result wins outright, and the real API is never
-    called. Only when the original yields nothing does this perform ONE
-    authenticated lookup against the real Discogs API for that exact release
-    id. Fails soft in every case (see ``_real_discogs_cover_art_url``); never
-    blocks or fails an import.
+    This wraps ``select_cover_art`` so it is a complete no-op for ANY
+    release the configured client already resolves art for — mirror- or
+    stock-backed alike: that original result wins outright, and the real
+    API is never called. Only when the original yields nothing does this
+    perform ONE authenticated lookup against the real Discogs API for that
+    exact release id — including on a stock (non-mirror) install whose
+    release genuinely has no images, where it costs one additional
+    authenticated request to the same ``api.discogs.com`` release the
+    stock client just queried (issue #1200 review F5: it is NOT a no-op
+    for that case). Fails soft in every case (see
+    ``_real_discogs_cover_art_url``); never blocks or fails an import.
     """
     module = _required_module("beetsplug.discogs")
     plugin_class = _class(module, "DiscogsPlugin")
@@ -515,7 +559,7 @@ def configure_discogs_cover_art_fallback() -> None:
         stock_url = original_select_cover_art(self, result)
         if isinstance(stock_url, str) and stock_url:
             return stock_url
-        release_id = json_dict(getattr(result, "data", None)).get("id")
+        release_id = _release_data_dict(result).get("id")
         config = getattr(self, "config", None)
         if config is None:
             return None

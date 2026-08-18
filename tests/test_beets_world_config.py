@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from lib.beets_config_contract import FETCHART_IDENTITY_FIRST_SOURCES
 from lib.beets_db import BeetsDB
 from lib.dispatch.subprocess_runner import run_import_one
 from lib.util import beets_subprocess_env
@@ -63,6 +64,31 @@ class TestConsumerBeetsWorldConfig(unittest.TestCase):
                 "inline",
                 "permissions",
             ),
+        )
+        self.assertEqual(
+            consumer.fetchart_sources,
+            (
+                "coverart",
+                "cover_art_url",
+                "itunes",
+                "amazon",
+                "albumart",
+                "filesystem",
+            ),
+        )
+
+    def test_fetchart_sources_constant_matches_the_shipped_example(self) -> None:
+        """#1200 review F4 -- FETCHART_IDENTITY_FIRST_SOURCES's docstring
+        only PROSE-promises to stay in sync with examples/cratedigger.nix.
+        Reordering the constant (e.g. putting filesystem first, re-opening
+        the "tiny legacy art shadows a good fetch" case) must fail HERE,
+        the same way a paths.default/duplicate_keys/plugin-list drift
+        already does for its own fields."""
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        consumer = extract_consumer_beets_world_config(repo_root)
+
+        self.assertEqual(
+            consumer.fetchart_sources, FETCHART_IDENTITY_FIRST_SOURCES
         )
 
     def test_rejects_consumer_example_without_deployment_plugins(self) -> None:
