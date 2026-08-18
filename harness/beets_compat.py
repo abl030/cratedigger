@@ -14,7 +14,10 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Protocol, TypeGuard
 
 import msgspec
+import requests
 from beets import library
+
+from lib.json_narrow import json_dict
 
 if TYPE_CHECKING:
     from beets.importer.actions import DuplicateAction
@@ -29,6 +32,7 @@ _discogs_original_merge_subtracks: Callable[..., object] | None = None
 _discogs_original_coalesce_tracks: Callable[..., object] | None = None
 _discogs_original_add_merged_subtracks: Callable[..., object] | None = None
 _discogs_original_get_tracks: Callable[..., object] | None = None
+_discogs_original_select_cover_art: Callable[..., object] | None = None
 @dataclass(frozen=True)
 class DiscogsIndexedProgram:
     component_count: int
@@ -398,6 +402,134 @@ def configure_discogs_subtracks(*, preserve_flat: bool) -> None:
         return result
 
     type.__setattr__(plugin_class, "get_tracks", retain_component_counts)
+
+
+# The real Discogs API base (issue #1200). Deliberately a plain module-level
+# constant, not a nix option or config knob: it names a fixed upstream
+# service, not a deployment choice — see .claude/rules/scope.md
+# "single-operator, no backwards-compat".
+DISCOGS_REAL_API_BASE = "https://api.discogs.com"
+
+_DISCOGS_COVER_ART_USER_AGENT = (
+    "cratedigger-cover-art/1.0 +https://github.com/abl030/cratedigger"
+)
+_DISCOGS_COVER_ART_TIMEOUT_SECONDS = 10
+
+
+class _DiscogsApiCoverArtImage(msgspec.Struct):
+    """One entry of the real Discogs API's ``images`` array.
+
+    The live payload carries many other keys (``type``, ``resource_url``,
+    ``width``, ``height``, ``uri150``, ...); msgspec ignores unknown keys by
+    default, so only the one field this fallback reads needs declaring.
+    """
+
+    uri: str
+
+
+class _DiscogsApiCoverArtResponse(msgspec.Struct):
+    """The subset of a real ``GET /releases/<id>`` response this reads.
+
+    Defaults ``images`` to empty so a payload that omits the key entirely
+    degrades to "no art" rather than a validation error.
+    """
+
+    images: list[_DiscogsApiCoverArtImage] = []
+
+
+def _real_discogs_cover_art_url(release_id: object, user_token: str) -> str | None:
+    """Look up one release's cover art on the real (non-mirror) Discogs API.
+
+    Fails soft in every case: a missing token, a non-int/str release id, a
+    network error, a timeout, a non-2xx response, or a payload that does not
+    match ``_DiscogsApiCoverArtResponse`` all return ``None`` rather than
+    raising. Selection mirrors ``DiscogsPlugin.select_cover_art``'s own
+    "first image in the list is the best candidate" rule.
+    """
+    if not user_token or not isinstance(release_id, (int, str)):
+        return None
+    try:
+        response = requests.get(
+            f"{DISCOGS_REAL_API_BASE}/releases/{release_id}",
+            headers={
+                "User-Agent": _DISCOGS_COVER_ART_USER_AGENT,
+                "Authorization": f"Discogs token={user_token}",
+            },
+            timeout=_DISCOGS_COVER_ART_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = msgspec.convert(
+            response.json(), type=_DiscogsApiCoverArtResponse
+        )
+    except (requests.RequestException, ValueError, msgspec.ValidationError):
+        return None
+    if not payload.images:
+        return None
+    return payload.images[0].uri
+
+
+def _discogs_select_cover_art_method(
+    plugin_class: type[object],
+) -> Callable[..., object]:
+    """Resolve the ``select_cover_art`` seam, failing closed if it is gone."""
+
+    original = getattr(plugin_class, "select_cover_art", None)
+    if not callable(original):
+        raise BeetsCapabilityError(
+            "Beets Discogs plugin lacks callable select_cover_art"
+        )
+    return original
+
+
+def configure_discogs_cover_art_fallback() -> None:
+    """Install Cratedigger's real-API cover-art fallback for ``select_cover_art``.
+
+    The Discogs mirror (``nix/beets.nix``) is built from the CC0 XML dumps,
+    which carry zero artwork — every mirror release returns
+    ``"images": []``, so upstream ``select_cover_art`` is structurally unable
+    to find anything and ``cover_art_url`` is never set (issue #1200).
+
+    This wraps ``select_cover_art`` so it is a complete no-op for a stock
+    install, or for any release the configured client already resolves art
+    for: the original result wins outright, and the real API is never
+    called. Only when the original yields nothing does this perform ONE
+    authenticated lookup against the real Discogs API for that exact release
+    id. Fails soft in every case (see ``_real_discogs_cover_art_url``); never
+    blocks or fails an import.
+    """
+    module = _required_module("beetsplug.discogs")
+    plugin_class = _class(module, "DiscogsPlugin")
+    if plugin_class is None:
+        raise BeetsCapabilityError("Beets Discogs plugin lacks DiscogsPlugin")
+
+    original = _discogs_select_cover_art_method(plugin_class)
+
+    global _discogs_original_select_cover_art
+    if _discogs_original_select_cover_art is None:
+        _discogs_original_select_cover_art = original
+    original_select_cover_art = _discogs_original_select_cover_art
+
+    def select_cover_art_with_real_api_fallback(
+        self: object, result: object
+    ) -> str | None:
+        stock_url = original_select_cover_art(self, result)
+        if isinstance(stock_url, str) and stock_url:
+            return stock_url
+        release_id = json_dict(getattr(result, "data", None)).get("id")
+        config = getattr(self, "config", None)
+        if config is None:
+            return None
+        try:
+            user_token = config["user_token"].as_str()
+        except Exception:  # noqa: BLE001 — confuse access fails soft to no art
+            return None
+        return _real_discogs_cover_art_url(release_id, user_token)
+
+    type.__setattr__(
+        plugin_class,
+        "select_cover_art",
+        select_cover_art_with_real_api_fallback,
+    )
 
 
 class _ConfigValue(Protocol):

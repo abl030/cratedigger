@@ -836,6 +836,7 @@ def _run_protocol(args: argparse.Namespace) -> None:
     beets_compat.configure_discogs_subtracks(
         preserve_flat=args.preserve_discogs_flat_subtracks,
     )
+    beets_compat.configure_discogs_cover_art_fallback()
 
     _install_release_id_duplicate_lookup()
 

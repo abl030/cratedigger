@@ -461,17 +461,38 @@ fetchart:
   maxwidth: 500     # CAA serves pre-built 500px thumbnails (no local resize needed)
   quality: 75       # JPEG compression for non-CAA sources
   sources:          # Priority order:
-    - coverart      # MusicBrainz Cover Art Archive — best quality
-    - itunes        # Apple Music
+    - coverart      # MusicBrainz Cover Art Archive — best quality, exact release
+    - cover_art_url # Exact-release art the matched metadata-source plugin found
+    - itunes        # Apple Music — title-guessed, not pressing-exact
     - amazon
     - albumart      # albumart.org
-    - cover_art_url # URL from MB release
     - filesystem    # Local cover.jpg — LAST resort (prevents tiny legacy art shadowing)
 ```
 
 **Why maxwidth: 500 matters**: Embedded art is duplicated in EVERY track. At the old average (1138KB/cover), embedding across 83K tracks = ~91GB. At 500px (~71KB), it's ~6GB. An 85GB saving.
 
 **Artwork floor**: `minwidth: 300` prevents unusably small embedded artwork from entering the curated library.
+
+**Why `cover_art_url` must outrank `itunes` (issue #1200)**: `cover_art_url` is
+populated by whichever metadata-source plugin matched the request — for a
+Discogs-sourced request, by `beetsplug.discogs.DiscogsPlugin.select_cover_art`.
+Cratedigger's Discogs mirror (`nix/beets.nix`) is built from the CC0 XML
+dumps, which carry **zero artwork**, so the mirror-backed client structurally
+cannot populate `cover_art_url` on its own — it always sees `"images": []`.
+`harness/beets_compat.py::configure_discogs_cover_art_fallback` wraps
+`select_cover_art` to fall through to ONE authenticated lookup against the
+real `api.discogs.com` for that exact release id whenever the (mirror- or
+stock-)original returns nothing, using `discogs.user_token` from the Beets
+secret include; it fails soft (no art, never an import failure) on any
+network error, timeout, non-2xx response, or malformed payload, and is a
+complete no-op — the real API is never called — whenever the original
+lookup already has an answer. Either way, the result is exact-release art,
+never a guess. `itunes`, by contrast, matches on exact `collectionName`
+string equality against `f"{albumartist} {album}"` — two different pressings
+that share a title (e.g. a reissue and the original) collide onto the same
+iTunes result and therefore the same wrong image. Ranking `cover_art_url`
+above `itunes` is what makes strict pressing identity (CLAUDE.md) hold for
+cover art, not just for track matching.
 
 ## Library Structure
 
