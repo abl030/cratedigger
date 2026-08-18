@@ -16548,6 +16548,296 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.assertEqual(self.db.prune_transfer_ledger(boundary), 0)
         self.assertEqual(len(self._ledger_rows(rid)), 1)
 
+    def _seed_processing_request(self) -> int:
+        """Seed a request in status='processing' with a valid automation
+        import job owner: migration 066's CHECK
+        (``album_requests_processing_owner_equivalent``) plus its deferred
+        ``enforce_complete_processing_owner`` trigger both require
+        ``active_automation_import_job_id`` to name a real, still-active
+        (queued/running/recovery_required) ``automation_import`` job. The
+        trigger is deferred to COMMIT, not to the end of each statement --
+        under this connection's normal ``autocommit=True`` each ``_execute``
+        call IS its own committed transaction, so the INSERT and the UPDATE
+        must share one explicit transaction or the INSERT alone commits
+        with the request still 'wanted' and the trigger raises."""
+        rid = self._seed_request("wanted")
+        self.db.conn.autocommit = False
+        try:
+            cur = self.db._execute(
+                "INSERT INTO import_jobs (job_type, request_id) "
+                "VALUES ('automation_import', %s) RETURNING id",
+                (rid,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            job_id = row["id"]
+            self.db._execute(
+                "UPDATE album_requests SET status = 'processing', "
+                "active_automation_import_job_id = %s WHERE id = %s",
+                (job_id, rid),
+            )
+            self.db.conn.commit()
+        finally:
+            self.db.conn.autocommit = True
+        return rid
+
+    def _seed_accepted_row(
+        self, *, status: str, username: str, filename: str,
+    ) -> int:
+        rid = (
+            self._seed_processing_request() if status == "processing"
+            else self._seed_request(status)
+        )
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=rid, username=username, filename=filename),
+        ])
+        self.db.confirm_transfer_enqueue(username, filename)
+        return rid
+
+    def test_get_conflicting_transfer_request_ids_downloading_owner_conflicts(self):
+        """#1178 PR2 cross-cycle guard: an accepted row owned by a request
+        CURRENTLY downloading the same key is a live conflict."""
+        owner = self._seed_accepted_row(
+            status="downloading", username="TheBun", filename="01.flac")
+        candidate = self._seed_request("wanted")
+
+        conflicting = self.db.get_conflicting_transfer_request_ids(
+            [("TheBun", "01.flac")], exclude_request_id=candidate)
+
+        self.assertEqual(conflicting, {owner})
+
+    def test_get_conflicting_transfer_request_ids_scopes_to_current_attempt(self):
+        """#1178 PR2 review F2 reproduction: live-DB measurement found
+        80.3% of accepted ledger rows belong to a non-current attempt (up
+        to 76 accepted attempt fingerprints for one request); an owner
+        downloading a FRESH peer's files must not block a sibling on a
+        queue key from that SAME owner's OWN 30-day-old abandoned attempt.
+        The same key re-enqueued as part of the CURRENT attempt (at/after
+        the active_download_state witness) must still block."""
+        owner = self._seed_request("downloading")
+        old_username, old_filename = "OLD", "old.flac"
+        current_username, current_filename = "NEW", "new.flac"
+        candidate = self._seed_request("wanted")
+
+        # OLD abandoned attempt: accepted 30 days ago, no state references
+        # it any more.
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=owner, username=old_username, filename=old_filename),
+        ])
+        self.db.confirm_transfer_enqueue(old_username, old_filename)
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = "
+            "NOW() - INTERVAL '30 days' "
+            "WHERE request_id = %s AND username = %s",
+            (owner, old_username),
+        )
+
+        # CURRENT attempt: active_download_state's witness is captured,
+        # THEN the ledger row is written -- the same ordering
+        # lib/enqueue.py's real claim uses (claim.enqueued_at captured
+        # strictly before the write-ahead ledger insert).
+        current_state = {
+            "filetype": "flac", "enqueued_at": datetime.now(UTC).isoformat(),
+            "files": [],
+        }
+        self.db._execute(
+            "UPDATE album_requests SET active_download_state = %s::jsonb "
+            "WHERE id = %s",
+            (json.dumps(current_state), owner),
+        )
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=owner, username=current_username,
+                filename=current_filename),
+        ])
+        self.db.confirm_transfer_enqueue(current_username, current_filename)
+
+        self.assertEqual(
+            self.db.get_conflicting_transfer_request_ids(
+                [(old_username, old_filename)], exclude_request_id=candidate),
+            set(),
+            "an abandoned earlier attempt's key must NOT block",
+        )
+        self.assertEqual(
+            self.db.get_conflicting_transfer_request_ids(
+                [(current_username, current_filename)],
+                exclude_request_id=candidate),
+            {owner},
+            "the current attempt's key must still block",
+        )
+
+    def test_get_conflicting_transfer_request_ids_status_filter(self):
+        """Replace-lineage attempt sharing (8781/8846) and an owner that
+        already moved on must NEVER block -- only 'downloading' does. The
+        filter is deliberately the single value 'downloading', never
+        'processing' (CLAUDE.md critical invariant 10) -- 'processing' is
+        included here specifically to kill the
+        ``'downloading' -> IN ('downloading', 'processing')`` mutant
+        (#1178 PR2 review F1); every other status in this table already
+        happened to make that mutant unreachable."""
+        for status in ("replaced", "wanted", "imported", "processing"):
+            with self.subTest(status=status):
+                owner = self._seed_accepted_row(
+                    status=status, username=f"peer-{status}",
+                    filename=f"{status}.flac")
+                candidate = self._seed_request("wanted")
+
+                conflicting = self.db.get_conflicting_transfer_request_ids(
+                    [(f"peer-{status}", f"{status}.flac")],
+                    exclude_request_id=candidate)
+
+                self.assertEqual(conflicting, set(), (status, owner))
+
+    def test_get_conflicting_transfer_request_ids_excludes_self(self):
+        rid = self._seed_accepted_row(
+            status="downloading", username="p0", filename="a.flac")
+
+        conflicting = self.db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=rid)
+
+        self.assertEqual(conflicting, set())
+
+    def test_get_conflicting_transfer_request_ids_ignores_pending_intent(self):
+        owner = self._seed_request("downloading")
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=owner, username="p0", filename="a.flac"),
+        ])  # never confirmed -- accepted_at stays NULL
+        candidate = self._seed_request("wanted")
+
+        conflicting = self.db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=candidate)
+
+        self.assertEqual(conflicting, set())
+
+    def test_get_conflicting_transfer_request_ids_ignores_unrelated_keys(self):
+        self._seed_accepted_row(
+            status="downloading", username="p0", filename="a.flac")
+        candidate = self._seed_request("wanted")
+
+        conflicting = self.db.get_conflicting_transfer_request_ids(
+            [("p0", "b.flac")], exclude_request_id=candidate)
+
+        self.assertEqual(conflicting, set())
+
+    def test_get_conflicting_transfer_request_ids_empty_keys_is_a_noop(self):
+        candidate = self._seed_request("wanted")
+
+        self.assertEqual(
+            self.db.get_conflicting_transfer_request_ids(
+                [], exclude_request_id=candidate),
+            set(),
+        )
+
+    def test_get_conflicting_transfer_request_ids_matches_fake(self):
+        """The fake must mirror the real join's semantics exactly
+        (test-fidelity.md Rule A pattern applied to a read method) --
+        including the attempt-boundary predicate (review F6): without a
+        scoped owner carrying BOTH an old (excluded) and current
+        (included) attempt row, every case above takes the
+        COALESCE-null fallback arm and the boundary predicate itself is
+        never exercised on either side."""
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        cases = [
+            ("owner-downloading", "downloading"),
+            ("owner-wanted", "wanted"),
+            ("owner-imported", "imported"),
+            ("owner-replaced", "replaced"),
+        ]
+        candidate = self._seed_request("wanted")
+        fake.seed_request({
+            "id": candidate, "status": "wanted",
+            "artist_name": "Artist", "album_title": "Album", "year": None,
+        })
+        keys: list[tuple[str, str]] = []
+        for username, status in cases:
+            rid = self._seed_request(status)
+            fake.seed_request({
+                "id": rid, "status": status,
+                "artist_name": "Artist", "album_title": "Album", "year": None,
+            })
+            row = TransferLedgerRow(
+                request_id=rid, username=username, filename="a.flac")
+            for db in (self.db, fake):
+                db.record_transfer_enqueue([row])
+                db.confirm_transfer_enqueue(username, "a.flac")
+            keys.append((username, "a.flac"))
+
+        # F6: a scoped owner carrying BOTH an old (excluded) attempt row
+        # and a current (included) attempt row, seeded identically on
+        # both the real and fake sides so parity is proven AT the
+        # boundary, not just at the null fallback.
+        scoped_owner = self._seed_request("downloading")
+        fake.seed_request({
+            "id": scoped_owner, "status": "downloading",
+            "artist_name": "Artist", "album_title": "Album", "year": None,
+        })
+        old_username, old_filename = "owner-old-attempt", "old.flac"
+        current_username, current_filename = (
+            "owner-current-attempt", "current.flac")
+        for db in (self.db, fake):
+            db.record_transfer_enqueue([
+                TransferLedgerRow(
+                    request_id=scoped_owner, username=old_username,
+                    filename=old_filename),
+            ])
+            db.confirm_transfer_enqueue(old_username, old_filename)
+        self.db._execute(
+            "UPDATE slskd_transfer_ledger SET enqueued_at = "
+            "NOW() - INTERVAL '30 days' "
+            "WHERE request_id = %s AND username = %s",
+            (scoped_owner, old_username),
+        )
+        old_fake_id = next(
+            fid for fid, r in fake._transfer_ledger.items()
+            if r.request_id == scoped_owner and r.username == old_username)
+        fake._transfer_ledger[old_fake_id].enqueued_at = (
+            datetime.now(UTC) - timedelta(days=30))
+
+        current_state = {
+            "filetype": "flac", "enqueued_at": datetime.now(UTC).isoformat(),
+            "files": [],
+        }
+        self.db._execute(
+            "UPDATE album_requests SET active_download_state = %s::jsonb "
+            "WHERE id = %s",
+            (json.dumps(current_state), scoped_owner),
+        )
+        fake.request(scoped_owner)["active_download_state"] = current_state
+        for db in (self.db, fake):
+            db.record_transfer_enqueue([
+                TransferLedgerRow(
+                    request_id=scoped_owner, username=current_username,
+                    filename=current_filename),
+            ])
+            db.confirm_transfer_enqueue(current_username, current_filename)
+        keys.extend([
+            (old_username, old_filename),
+            (current_username, current_filename),
+        ])
+
+        self.assertEqual(
+            self.db.get_conflicting_transfer_request_ids(
+                keys, exclude_request_id=candidate),
+            fake.get_conflicting_transfer_request_ids(
+                keys, exclude_request_id=candidate),
+        )
+        # The boundary must actually be earning its keep: the old key is
+        # excluded, the current key still blocks.
+        self.assertEqual(
+            self.db.get_conflicting_transfer_request_ids(
+                [(old_username, old_filename)], exclude_request_id=candidate),
+            set(),
+        )
+        self.assertEqual(
+            self.db.get_conflicting_transfer_request_ids(
+                [(current_username, current_filename)],
+                exclude_request_id=candidate),
+            {scoped_owner},
+        )
+
 @requires_postgres
 class TestReadProjectionParity(unittest.TestCase):
     """#481 item 2 — fake<->production READ-projection parity gate.

@@ -8572,6 +8572,71 @@ class FakePipelineDB:
                 abandoned.add(row.local_path)
         return abandoned
 
+    @staticmethod
+    def _attempt_enqueued_at(request: Mapping[str, object]) -> datetime | None:
+        """Mirror ``(active_download_state ->> 'enqueued_at')::timestamptz``
+        -- tolerant of the fake's mixed storage shapes: a JSON string (as
+        written by ``update_download_state_if_downloading``/
+        ``claim_downloading``) or a plain dict (as some tests seed
+        directly). Returns ``None`` on anything unparseable, mirroring
+        SQL NULL for a missing/malformed state."""
+        raw = request.get("active_download_state")
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(raw, dict):
+            return None
+        enqueued_at = raw.get("enqueued_at")
+        if not isinstance(enqueued_at, str):
+            return None
+        try:
+            return datetime.fromisoformat(enqueued_at)
+        except ValueError:
+            return None
+
+    def get_conflicting_transfer_request_ids(
+        self,
+        keys: Sequence[tuple[str, str]],
+        exclude_request_id: int,
+    ) -> set[int]:
+        """Mirror the real ledger join: accepted rows keyed by any of
+        ``keys`` whose owning request is CURRENTLY 'downloading' on its
+        CURRENT attempt, excluding ``exclude_request_id`` (#1178 PR2,
+        attempt-scoped per review F2). A missing request row (never
+        seeded, or hard-deleted) mirrors the real INNER JOIN -- never a
+        conflict. A row older than the owner's current
+        ``active_download_state`` enqueued-at witness belongs to an
+        abandoned earlier attempt and never conflicts; a NULL/missing
+        witness fails CLOSED -- every accepted row for that 'downloading'
+        owner counts as in-scope (mirrors the real query's
+        ``COALESCE(..., '-infinity')``)."""
+        key_set = set(keys)
+        conflicting: set[int] = set()
+        for row in self._transfer_ledger.values():
+            if row.accepted_at is None:
+                continue
+            if row.request_id == exclude_request_id:
+                continue
+            if (row.username, row.filename) not in key_set:
+                continue
+            request = self._requests.get(row.request_id)
+            if request is None:
+                continue
+            if request.get("status") != "downloading":
+                continue
+            attempt_enqueued_at = self._attempt_enqueued_at(request)
+            if (
+                attempt_enqueued_at is not None
+                and row.enqueued_at < attempt_enqueued_at
+            ):
+                continue
+            conflicting.add(row.request_id)
+        return conflicting
+
     def prune_transfer_ledger(self, older_than: datetime) -> int:
         """Mirror strict age pruning: pending intents ignore request status;
         accepted rows retain active wanted/downloading protection."""

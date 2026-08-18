@@ -1517,11 +1517,16 @@ def main() -> int:
         # Build context with fresh caches for this cycle
         from lib.context import CratediggerContext
         from lib.download_ownership import DownloadOwnershipWriter
+        from lib.enqueue import ClaimedQueueKeysRegistry
         _module_ctx = CratediggerContext(
             cfg=cfg,
             slskd=slskd,
             pipeline_db_source=pipeline_db_source,
             download_ownership=DownloadOwnershipWriter(cfg.pipeline_db_dsn),
+            # One same-cycle registry per cycle (issue #1178 PR2 review
+            # F7) -- threaded into every find-download worker context by
+            # reference via prepare_find_download_context.
+            claimed_queue_keys_registry=ClaimedQueueKeysRegistry(),
         )
         from lib.peer_cache import connect_from_config
         _module_ctx.peer_cache = connect_from_config(cfg)

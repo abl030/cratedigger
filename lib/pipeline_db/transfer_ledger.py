@@ -22,6 +22,7 @@ See migrations 045 and 051 for the schema and rationale.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 
 import msgspec
@@ -200,6 +201,102 @@ class _TransferLedgerMixin(_PipelineDBBase):
             "AND r.active_download_state IS NULL",
         )
         return {r["local_path"] for r in cur.fetchall()}
+
+    def get_conflicting_transfer_request_ids(
+        self,
+        keys: Sequence[tuple[str, str]],
+        exclude_request_id: int,
+    ) -> set[int]:
+        """Cross-cycle half of the #1178 cross-request enqueue guard.
+
+        Returns every OTHER request id that already holds ACCEPTED
+        ownership (``accepted_at IS NOT NULL``) of any ``(username,
+        filename)`` pair in ``keys``, while that owner's request is
+        CURRENTLY ``downloading`` on its CURRENT attempt -- never any
+        other status, and never a stale abandoned attempt.
+
+        The status filter is deliberately the single value
+        ``'downloading'``, never ``'processing'``
+        (``.claude/rules/pipeline-db.md`` / CLAUDE.md critical invariant
+        10: never add ``processing`` to any slskd event/transfer/ledger/
+        reaper status set). A sibling request can still be mid-
+        ``processing`` on the SAME queue keys at the moment this method
+        is consulted -- that residual collision window is deliberate and
+        is left to the requeue self-heal (#898), not to this guard. A
+        ``'replaced'`` owner (Replace-lineage attempt sharing, e.g.
+        requests 8781/8846) or a ``'wanted'``/``'imported'`` owner
+        (already moved on) must NEVER block.
+
+        **Attempt scoping (#1178 PR2 review F2).** A ``'downloading'``
+        request can carry MANY historical accepted ledger rows: live-DB
+        measurement found 80.3% of accepted rows belong to a
+        non-current attempt, up to 76 distinct accepted attempt
+        fingerprints for one request. Without scoping, an owner actively
+        downloading a fresh peer's files would falsely block a sibling
+        on a queue key from that SAME owner's OWN abandoned attempt from
+        30 days earlier. The join is therefore additionally scoped to
+        rows enqueued at or after the owner's CURRENT attempt boundary --
+        ``active_download_state ->> 'enqueued_at'``, the same witness
+        the poll path already uses as ``not_before=state.enqueued_at``
+        (``lib/download.py``) to scope reconciliation to one attempt.
+        ``COALESCE(..., '-infinity')`` makes a NULL/missing
+        ``active_download_state`` fail CLOSED: every accepted row for
+        that 'downloading' owner counts as in-scope (blocks) rather than
+        none of them (would silently stop protecting a request whose
+        state we can't currently read). A syntactically present but
+        malformed ``enqueued_at`` string (never producible today --
+        ``lib/download.py``'s ``build_active_download_state`` always
+        writes ``datetime.now(UTC).isoformat()``) would instead raise
+        ``InvalidDatetimeFormat`` at the ``::timestamptz`` cast, failing
+        the whole cross-cycle check rather than either arm of the
+        deliberate NULL fail-closed above.
+
+        **Clock assumption (#1178 PR2 review F5).** The boundary compares
+        an application-clock witness (``enqueued_at``, stamped by this
+        host's Python process) to PostgreSQL-clock ledger timestamps
+        (``l.enqueued_at``, stamped by ``DEFAULT NOW()``). This repo
+        deploys both on the SAME host, and the witness is captured
+        strictly BEFORE the ledger write within one attempt (see
+        ``lib/enqueue.py``'s comment on ``claim.enqueued_at``), so a real
+        clock skew has to exceed that same-host, same-attempt margin to
+        matter. ``ActiveDownloadState`` does not carry the ledger's own
+        ``attempt_fingerprint`` (an exact, clock-free alternative), so
+        this predicate is not exact: a skew of that size fails OPEN --
+        i.e. an owner's OLD attempt could be miscounted as current and
+        block a sibling one cycle longer than it should. It never fails
+        the other direction (a current attempt being wrongly excluded),
+        since ``COALESCE`` already covers the missing-witness case.
+        """
+        if not keys:
+            return set()
+        # A fixed-shape static SQL string, never an f-string-assembled
+        # WHERE clause: the key set is passed as two parallel arrays and
+        # zipped server-side via unnest(...) rather than growing the SQL
+        # text with the input size. This keeps the query a single
+        # constant string the repository's static SQL-write audit
+        # (tests/test_replaced_write_audit.py) can fully resolve, and
+        # it's the one JOIN this method makes to album_requests -- never
+        # an UPDATE.
+        usernames = [key[0] for key in keys]
+        filenames = [key[1] for key in keys]
+        cur = self._execute(
+            """
+            SELECT DISTINCT l.request_id
+            FROM slskd_transfer_ledger l
+            JOIN album_requests r ON r.id = l.request_id
+            JOIN unnest(%s::text[], %s::text[]) AS k(username, filename)
+              ON l.username = k.username AND l.filename = k.filename
+            WHERE l.accepted_at IS NOT NULL
+              AND r.status = 'downloading'
+              AND l.request_id != %s
+              AND l.enqueued_at >= COALESCE(
+                  (r.active_download_state ->> 'enqueued_at')::timestamptz,
+                  '-infinity'
+              )
+            """,
+            (usernames, filenames, exclude_request_id),
+        )
+        return {r["request_id"] for r in cur.fetchall()}
 
     def prune_transfer_ledger(self, older_than: datetime) -> int:
         """Hard-delete rows strictly older than ``older_than`` (T3).

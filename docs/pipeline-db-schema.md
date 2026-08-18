@@ -681,6 +681,74 @@ alone has no ownership value and long-tail requests search forever. Older
 accepted rows keep active-request protection; accepted evidence is deleted
 only when the request is inactive or hard-deleted.
 
+**Cross-request enqueue guard (issue #1178).** Two concurrent requests for
+different pressings of the same album can browse to the same peer directory
+and match the same `(username, filename)` files — nothing previously asked
+"is this queue key already held by another request" before claiming
+ownership, so both requests would accept the same files, share one
+`attempt_fingerprint`, and race for the same canonical processing folder;
+the loser saw its files vanish mid-import (`event_path_gone_from_disk`) and
+re-downloaded the whole album. `lib.enqueue._cross_request_conflict_ids` now
+runs before every `try_enqueue` / `try_multi_enqueue` claim: a cross-cycle
+check first (`PipelineDB.get_conflicting_transfer_request_ids`, called
+through ONE `DownloadOwnershipWriter.open_conflict_check_session` handle
+shared across the whole calling invocation — never opened per candidate,
+see below — a read-only join of this table to `album_requests` requiring
+an accepted row whose owner is *currently* `downloading` — never
+`processing`, per the never-add-processing-to-a-transfer-status-set
+invariant), then a cycle-scoped registry
+(`lib.enqueue.ClaimedQueueKeysRegistry`, one instance per cycle, threaded
+into every find-download worker context by reference the same way
+`ctx.download_ownership` already is — not a module global; there is no
+process-wide state and nothing to reset between tests). The cross-cycle read
+runs first deliberately: registering in the registry before the cross-cycle
+check would "poison" it for a rejected attempt's OTHER, otherwise-free keys,
+wrongly blocking an unrelated same-cycle sibling.
+
+The cross-cycle join is additionally scoped to the owner's CURRENT attempt:
+`AND l.enqueued_at >= COALESCE((r.active_download_state ->> 'enqueued_at')
+::timestamptz, '-infinity')`, the same `enqueued_at` witness the poll path
+already threads as `not_before=state.enqueued_at`. A `'downloading'` owner
+can carry many historical accepted ledger rows — live-DB measurement found
+80.3% of accepted rows belong to a non-current attempt, up to 76 distinct
+accepted attempt fingerprints for one request — so without this scope an
+owner actively downloading a FRESH peer's files would falsely block a
+sibling on a queue key from that SAME owner's OWN abandoned attempt from 30
+days earlier. `COALESCE(..., '-infinity')` fails CLOSED on a NULL/missing
+`active_download_state`: every accepted row for that `'downloading'` owner
+then counts as in-scope (blocks), never silently stops protecting a request
+whose current-attempt witness can't currently be read.
+
+A `replaced` owner (Replace-lineage attempt sharing) or one that has already
+moved on (`wanted`/`imported`) never blocks; the same request re-claiming its
+own keys (poll-loop retries) never self-blocks. A guard hit skips the
+candidate exactly like the peer-cooldown/denylist skip — no claim, no
+enqueue, no new backoff, the request stays on normal cadence. A registered
+same-cycle claim is released — so it cannot keep blocking an innocent sibling
+for the rest of the cycle — at three points once the guard has already
+cleared for that candidate: the matched peer turns out to be offline
+(checked immediately after the guard, per the ordering below), the
+ownership claim itself is refused (the request's row no longer matches the
+expected `wanted` CAS), or the enqueue outcome resolves to
+`verified_no_acceptance` (the claim was reset and confirmed no transfer
+landed).
+
+The guard is checked BEFORE the peer-online probe in `try_enqueue`, so a
+conflicted candidate never pays for a network round trip it would only throw
+away; the cross-cycle DB session is opened ONCE per `try_enqueue` /
+`try_multi_enqueue` call (never per candidate — a fresh connection per
+matched candidate, across a worker pool sized to the whole cycle, risked a
+transient connection storm at post-browse convergence) and is safe to share
+because each call runs on a single worker thread for its whole invocation.
+
+A guard skip is logged like an ordinary `no_match`. `unfindable_detection`'s
+branch 4 signal only fires after `REQUIRED_ZERO_FIND_CYCLES` (3) consecutive
+zero-find plan cycles for the SAME request — a single skipped cycle cannot
+trip it — and a guard skip can only recur across cycles while the blocking
+sibling remains `status='downloading'` on the contested keys; once that
+sibling's attempt resolves (imported, replaced, or reset to `wanted`), the
+skip stops recurring. This is not treated as a defect.
+
 ## Persisted search plans (migration 014)
 
 Search execution is plan-driven. Each wanted request owns a materialised

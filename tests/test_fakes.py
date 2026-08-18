@@ -8609,6 +8609,152 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
 
         self.assertEqual(removed, 1)
 
+    def _seed_accepted_row(
+        self, db: FakePipelineDB, *, request_id: int, status: str,
+        username: str, filename: str,
+    ) -> None:
+        from tests.helpers import make_request_row
+
+        db.seed_request(make_request_row(id=request_id, status=status))
+        db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=request_id, username=username, filename=filename),
+        ])
+        db.confirm_transfer_enqueue(username, filename)
+
+    def test_get_conflicting_transfer_request_ids_empty_keys_is_a_noop(self):
+        db = FakePipelineDB()
+        self.assertEqual(
+            db.get_conflicting_transfer_request_ids([], exclude_request_id=1),
+            set(),
+        )
+
+    def test_get_conflicting_transfer_request_ids_downloading_owner_conflicts(self):
+        db = FakePipelineDB()
+        self._seed_accepted_row(
+            db, request_id=99, status="downloading",
+            username="p0", filename="a.flac")
+
+        conflicting = db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=1)
+
+        self.assertEqual(conflicting, {99})
+
+    def test_get_conflicting_transfer_request_ids_scopes_to_current_attempt(self):
+        """#1178 PR2 review F2: an abandoned earlier attempt's accepted
+        row must not block; the current attempt's row still does."""
+        from tests.helpers import make_request_row
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=99, status="downloading"))
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=99, username="OLD", filename="old.flac"),
+        ])
+        db.confirm_transfer_enqueue("OLD", "old.flac")
+        old_id = next(
+            fid for fid, r in db._transfer_ledger.items()
+            if r.username == "OLD")
+        db._transfer_ledger[old_id].enqueued_at = (
+            datetime.now(UTC) - timedelta(days=30))
+
+        db.request(99)["active_download_state"] = {
+            "filetype": "flac", "enqueued_at": datetime.now(UTC).isoformat(),
+            "files": [],
+        }
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=99, username="NEW", filename="new.flac"),
+        ])
+        db.confirm_transfer_enqueue("NEW", "new.flac")
+
+        self.assertEqual(
+            db.get_conflicting_transfer_request_ids(
+                [("OLD", "old.flac")], exclude_request_id=1),
+            set(),
+            "abandoned attempt must not block",
+        )
+        self.assertEqual(
+            db.get_conflicting_transfer_request_ids(
+                [("NEW", "new.flac")], exclude_request_id=1),
+            {99},
+            "current attempt must still block",
+        )
+
+    def test_get_conflicting_transfer_request_ids_null_state_fails_closed(self):
+        """No active_download_state at all (never seeded) -- every
+        accepted row for the 'downloading' owner still blocks."""
+        db = FakePipelineDB()
+        self._seed_accepted_row(
+            db, request_id=99, status="downloading",
+            username="p0", filename="a.flac")
+
+        conflicting = db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=1)
+
+        self.assertEqual(conflicting, {99})
+
+    def test_get_conflicting_transfer_request_ids_status_filter(self):
+        # 'processing' included specifically to kill the
+        # status-filter-widened mutant (#1178 PR2 review F1); every other
+        # status here already happened to leave it unreachable.
+        for status in ("wanted", "imported", "replaced", "processing"):
+            with self.subTest(status=status):
+                db = FakePipelineDB()
+                self._seed_accepted_row(
+                    db, request_id=99, status=status,
+                    username="p0", filename="a.flac")
+
+                conflicting = db.get_conflicting_transfer_request_ids(
+                    [("p0", "a.flac")], exclude_request_id=1)
+
+                self.assertEqual(conflicting, set())
+
+    def test_get_conflicting_transfer_request_ids_excludes_own_rows(self):
+        db = FakePipelineDB()
+        self._seed_accepted_row(
+            db, request_id=1, status="downloading",
+            username="p0", filename="a.flac")
+
+        conflicting = db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=1)
+
+        self.assertEqual(conflicting, set())
+
+    def test_get_conflicting_transfer_request_ids_ignores_pending_intent(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=99, status="downloading"))
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=99, username="p0", filename="a.flac"),
+        ])  # never confirmed -- accepted_at stays NULL
+
+        conflicting = db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=1)
+
+        self.assertEqual(conflicting, set())
+
+    def test_get_conflicting_transfer_request_ids_ignores_unrelated_keys(self):
+        db = FakePipelineDB()
+        self._seed_accepted_row(
+            db, request_id=99, status="downloading",
+            username="p0", filename="a.flac")
+
+        conflicting = db.get_conflicting_transfer_request_ids(
+            [("p0", "b.flac")], exclude_request_id=1)
+
+        self.assertEqual(conflicting, set())
+
+    def test_get_conflicting_transfer_request_ids_missing_request_row(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=99, username="p0", filename="a.flac"),
+        ])
+        db.confirm_transfer_enqueue("p0", "a.flac")
+
+        conflicting = db.get_conflicting_transfer_request_ids(
+            [("p0", "a.flac")], exclude_request_id=1)
+
+        self.assertEqual(conflicting, set())
+
+
 class TestFakeSlskdEvents(unittest.TestCase):
     """Self-tests for the events sub-API fake (issue #146)."""
 
