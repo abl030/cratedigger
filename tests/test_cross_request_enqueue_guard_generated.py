@@ -107,12 +107,15 @@ class GuardAttempt:
     resulting_status: _OwnerStatus
     # #1196 item 1: whether a won attempt's ``active_download_state``
     # carries the ``attempt_fingerprint`` key. Defaults True so every
-    # existing (pre-#1196) example pin below exercises the NEW primary
-    # fingerprint-equality mechanism without modification. False
-    # simulates the deploy-window gap -- an in-flight download claimed
-    # by code from before this field existed, whose ledger rows STILL
-    # carry a fingerprint (that column predates this change) while its
-    # state does not, so the guard must fall back to the time predicate.
+    # existing (pre-#1196) example pin below exercises the fingerprint-
+    # equality mechanism without modification. False simulates a state
+    # that exists but lacks the key -- the ledger rows STILL carry a
+    # fingerprint (that column predates this change) while the state
+    # does not, so the guard fails CLOSED unconditionally (#1199 item 2:
+    # the deploy-window time-predicate fallback this used to exercise
+    # was deleted -- the measured cohort was empty -- so this now blocks
+    # EVERY accepted key the owner has ever won, not just its current
+    # attempt's keys).
     state_has_fingerprint: bool = True
 
 
@@ -193,8 +196,9 @@ def _run_world(world: GuardWorld) -> dict[tuple[int, int], bool]:
     fingerprint column predates this change and is never conditional.
     The STATE's ``attempt_fingerprint`` key is written only when
     ``attempt.state_has_fingerprint`` is True, so the property drives
-    the guard's real fingerprint-equality arm AND its deploy-window
-    time-predicate fallback arm across the same generated world space.
+    the guard's real fingerprint-equality arm AND its fail-closed
+    missing-fingerprint arm (#1199 item 2) across the same generated
+    world space.
 
     (#1196 item 1, review F1) The two sides are deliberately NOT sourced
     from one shared local variable: the STATE'S value comes from calling
@@ -305,14 +309,27 @@ def expected_guard_decisions(world: GuardWorld) -> dict[tuple[int, int], bool]:
     separate real seam, exercised by the deterministic try_enqueue pins
     in tests/test_enqueue_fanout.py, not by this guard-only property).
 
-    Cross-cycle (review F2/F3): only a request's CURRENT (most recently
-    WON) attempt can ever conflict -- ``current_attempt`` is overwritten
-    on every win, so an earlier, superseded attempt for the SAME request
-    (even one that settled 'downloading' before being retried) is
-    excluded exactly like the real attempt-boundary predicate excludes
-    it.
+    Cross-cycle (review F2/F3, #1199 item 2): an owner's CURRENT (most
+    recently WON) attempt's ``state_has_fingerprint`` decides the scope
+    of what can conflict --
+
+    * ``True`` (the #1196 fingerprint-equality arm): only the CURRENT
+      attempt's own keys can conflict -- ``current_attempt_keys`` is
+      overwritten on every win, so an earlier, superseded attempt for
+      the SAME request is excluded exactly like the real fingerprint
+      predicate excludes it (a stale attempt's ledger rows carry a
+      different fingerprint and never match).
+    * ``False`` (the #1199 fail-closed arm): EVERY key the owner has
+      EVER won, across every attempt, can conflict -- there is no
+      attempt-boundary rescue once the current state lacks the
+      fingerprint key, mirroring the real query's unconditional
+      ``ELSE TRUE``. ``all_accepted_keys`` therefore accumulates across
+      every win and is never overwritten, unlike ``current_attempt_keys``.
     """
-    current_attempt: dict[int, tuple[_OwnerStatus, frozenset[tuple[str, str]]]] = {}
+    current_status: dict[int, _OwnerStatus] = {}
+    current_attempt_keys: dict[int, frozenset[tuple[str, str]]] = {}
+    current_state_has_fingerprint: dict[int, bool] = {}
+    all_accepted_keys: dict[int, set[tuple[str, str]]] = {}
     expected: dict[tuple[int, int], bool] = {}
     for cycle_idx, cycle in enumerate(world.cycles):
         claimed_this_cycle: dict[tuple[str, str], int] = {}
@@ -323,17 +340,31 @@ def expected_guard_decisions(world: GuardWorld) -> dict[tuple[int, int], bool]:
             )
             cross_cycle_conflict = not same_cycle_conflict and any(
                 owner_id != attempt.request_id
-                and status == "downloading"
-                and any(k in owner_keys for k in attempt.keys)
-                for owner_id, (status, owner_keys) in current_attempt.items()
+                and current_status.get(owner_id) == "downloading"
+                and (
+                    any(
+                        k in current_attempt_keys[owner_id]
+                        for k in attempt.keys
+                    )
+                    if current_state_has_fingerprint.get(owner_id, False)
+                    else any(
+                        k in all_accepted_keys[owner_id] for k in attempt.keys
+                    )
+                )
+                for owner_id in all_accepted_keys
             )
             won = not same_cycle_conflict and not cross_cycle_conflict
             expected[(cycle_idx, attempt.request_id)] = won
             if won:
                 for k in attempt.keys:
                     claimed_this_cycle[k] = attempt.request_id
-                current_attempt[attempt.request_id] = (
-                    attempt.resulting_status, frozenset(attempt.keys))
+                current_status[attempt.request_id] = attempt.resulting_status
+                current_attempt_keys[attempt.request_id] = frozenset(
+                    attempt.keys)
+                current_state_has_fingerprint[attempt.request_id] = (
+                    attempt.state_has_fingerprint)
+                all_accepted_keys.setdefault(
+                    attempt.request_id, set()).update(attempt.keys)
     return expected
 
 
@@ -414,11 +445,13 @@ _ABANDONED_ATTEMPT_DOES_NOT_BLOCK = GuardWorld(cycles=(
     )),
 ))
 # Same reproduction as above, but with the owner's state carrying NO
-# ``attempt_fingerprint`` key on either attempt (#1196 item 1
-# deploy-window: a request claimed by code from before this field
-# existed) -- the guard must still resolve correctly through the
-# time-predicate fallback, not the new equality arm.
-_ABANDONED_ATTEMPT_DOES_NOT_BLOCK_WITHOUT_FINGERPRINT = GuardWorld(cycles=(
+# ``attempt_fingerprint`` key on either attempt (a state that exists but
+# lacks the key) -- #1199 item 2 deleted the deploy-window time-predicate
+# fallback this used to exercise (the measured cohort was empty), so the
+# guard now fails CLOSED unconditionally: request 2's sibling attempt on
+# the OWNER's OLD, abandoned key is now BLOCKED too, unlike the
+# fingerprint-scoped world above where only the CURRENT key blocks.
+_MISSING_FINGERPRINT_STATE_BLOCKS_EVERY_HISTORICAL_KEY = GuardWorld(cycles=(
     GuardCycle(attempts=(
         GuardAttempt(1, (("OLD", "old.flac"),), "downloading",
                      state_has_fingerprint=False),
@@ -448,7 +481,7 @@ class TestGeneratedCrossRequestEnqueueGuard(unittest.TestCase):
     @example(world=_REPLACE_LINEAGE_DOES_NOT_BLOCK)
     @example(world=_IMPORTED_OWNER_DOES_NOT_BLOCK)
     @example(world=_ABANDONED_ATTEMPT_DOES_NOT_BLOCK)
-    @example(world=_ABANDONED_ATTEMPT_DOES_NOT_BLOCK_WITHOUT_FINGERPRINT)
+    @example(world=_MISSING_FINGERPRINT_STATE_BLOCKS_EVERY_HISTORICAL_KEY)
     def test_guard_never_double_claims_or_over_blocks(self, world: GuardWorld):
         proceeded = _run_world(world)
         assert_no_double_claim(world, proceeded)
@@ -549,13 +582,18 @@ class TestCrossRequestGuardDecisivePins(unittest.TestCase):
             {(0, 1): True, (1, 1): True, (1, 2): True},
         )
 
-    def test_abandoned_attempt_does_not_block_without_fingerprint(self):
-        """#1196 item 1 deploy-window: the same reproduction with no
-        ``attempt_fingerprint`` on the owner's state resolves identically
-        through the time-predicate fallback."""
+    def test_missing_fingerprint_state_blocks_every_historical_key(self):
+        """#1199 item 2: the same reproduction with no
+        ``attempt_fingerprint`` on the owner's state now fails CLOSED --
+        request 2's attempt on the owner's OLD, abandoned key is BLOCKED
+        (unlike the fingerprint-scoped
+        test_abandoned_attempt_does_not_block_but_current_attempt_does
+        above, where the same shape does NOT block), because the deleted
+        time-predicate fallback was the only thing that used to rescue
+        an abandoned attempt when the state lacks a fingerprint."""
         self.assertEqual(
-            _run_world(_ABANDONED_ATTEMPT_DOES_NOT_BLOCK_WITHOUT_FINGERPRINT),
-            {(0, 1): True, (1, 1): True, (1, 2): True},
+            _run_world(_MISSING_FINGERPRINT_STATE_BLOCKS_EVERY_HISTORICAL_KEY),
+            {(0, 1): True, (1, 1): True, (1, 2): False},
         )
 
 

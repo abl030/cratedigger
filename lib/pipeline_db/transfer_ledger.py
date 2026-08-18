@@ -235,9 +235,8 @@ class _TransferLedgerMixin(_PipelineDBBase):
         downloading a fresh peer's files would falsely block a sibling
         on a queue key from that SAME owner's OWN abandoned attempt from
         30 days earlier. The join is therefore additionally scoped to
-        the owner's CURRENT attempt only -- by exact fingerprint identity
-        where available, falling back to the ``enqueued_at`` witness
-        otherwise (both detailed below).
+        the owner's CURRENT attempt only, by exact fingerprint identity
+        (detailed below).
 
         **Attempt identity, not a clock comparison (#1196 item 1).**
         ``ActiveDownloadState.attempt_fingerprint`` (written at claim time
@@ -255,26 +254,34 @@ class _TransferLedgerMixin(_PipelineDBBase):
         ledger rows simply carry a different fingerprint and never match,
         however new their ``enqueued_at`` looks.
 
-        The time predicate above (``l.enqueued_at >= COALESCE(...,
-        '-infinity')``) is retained ONLY as the deploy-window fallback,
-        taken when the owner's state exists but LACKS the
-        ``attempt_fingerprint`` key -- an in-flight download claimed by
-        code from before this field existed. It can be deleted once no
-        request claimed pre-deploy remains ``'downloading'``. A NULL (or,
-        by the same ``->>`` extraction returning NULL for a non-object
-        value, malformed) ``active_download_state`` still fails CLOSED
-        unconditionally, and it does so through this SAME ``ELSE`` arm,
-        not a dedicated ``CASE WHEN ... IS NULL`` arm: ``->>`` applied to
-        a SQL NULL (or non-object) jsonb value returns NULL for ANY key,
-        so both the ``attempt_fingerprint`` ``WHEN`` test and the
-        ``enqueued_at`` extraction inside ``COALESCE`` see NULL, and
-        ``COALESCE(NULL, '-infinity')`` makes the comparison
-        ``l.enqueued_at >= '-infinity'`` -- true for any real
-        timestamp -- fail CLOSED (blocks) exactly like every other
-        deploy-window row. A dedicated ``IS NULL`` arm was tried and
-        proven redundant on real PG (identical result, one fewer
-        branch); the fail-closed guarantee lives entirely in this
-        ``COALESCE``, not in an explicit NULL check.
+        **Fail closed on a missing fingerprint (#1199 item 2).** A prior
+        version of this query fell back to a clock comparison
+        (``l.enqueued_at >= COALESCE(..., '-infinity')``) when the owner's
+        state existed but LACKED the ``attempt_fingerprint`` key -- a
+        deploy-window accommodation for an in-flight download claimed by
+        code from before that field existed. Live measurement on
+        2026-08-19 found the cohort empty (1 ``downloading`` request, 0
+        NULL states, 0 lacking ``attempt_fingerprint``), so the fallback
+        arm is dead code and is deleted per the no-deprecated-helpers rule.
+        The ``ELSE`` arm is now unconditional ``TRUE``: a NULL, malformed
+        (``->>`` returns NULL for a non-object jsonb value regardless of
+        key), or fingerprint-less ``active_download_state`` fails CLOSED
+        -- every accepted row for that ``'downloading'`` owner counts as
+        in-scope (blocks), with no attempt-boundary rescue and no clock
+        involved at all. Only an owner whose state DOES carry
+        ``attempt_fingerprint`` gets attempt-scoped blocking; the equality
+        test itself is unchanged from #1196.
+
+        A live ``'downloading'`` owner reaching this ELSE arm today is
+        possible only via a NULL/malformed state or a pre-#1196 historical
+        row -- ``build_active_download_state`` sets ``attempt_fingerprint``
+        to ``None`` ONLY when ``entry.files`` is empty (issue #1199 review
+        F9), and every enqueue persist site in ``lib/enqueue.py`` guards
+        ``files_to_enqueue``/``planned_files`` non-empty (``if not
+        files_to_enqueue: ... continue``) before that state is ever built,
+        so a future change that lets an empty-files claim through would
+        silently make THIS owner's every accepted key block, not just its
+        current attempt's.
         """
         if not keys:
             return set()
@@ -304,11 +311,7 @@ class _TransferLedgerMixin(_PipelineDBBase):
                           IS NOT NULL THEN
                           l.attempt_fingerprint =
                               r.active_download_state ->> 'attempt_fingerprint'
-                      ELSE l.enqueued_at >= COALESCE(
-                          (r.active_download_state ->> 'enqueued_at')
-                              ::timestamptz,
-                          '-infinity'
-                      )
+                      ELSE TRUE
                   END
               )
             """,
