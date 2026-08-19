@@ -643,11 +643,17 @@ class _JobActionAuthority:
     source field there uses instead of the raw ``front_gate_source`` its
     own ``_front_gate_check`` call resolves. A PR3 review round found 4
     such sites in ``process_claimed_preview_job`` still using
-    ``front_gate_source`` directly, unaffected by this flag: the action
-    copy those sites needed was already established by the SAME
+    ``front_gate_source`` directly, unaffected by this flag. A second
+    review round corrected the fix itself: the action copy those sites
+    need is USUALLY already established by the SAME
     ``_action_copy_front_gate`` call that produced ``front_gate_source``,
-    so there was never a "the copy doesn't exist yet" excuse — it was a
-    plain missed site, not a structural gap.
+    but its own except branch is exactly a "the copy doesn't exist yet"
+    case (``_prepare_force_action_path`` can itself fail — a moved/renamed
+    operator folder, EACCES, ENOSPC, a symlink inside it), and the first
+    fix's alias fell back to the raw ``front_gate_source`` in exactly that
+    world. ``front_gate_audit_source`` now fails closed instead: the
+    deterministic path this job would have retained had preparation
+    succeeded, never the operator's real folder.
     """
 
     snapshot_fn: Callable[[str, CratediggerConfig], str]
@@ -1245,27 +1251,54 @@ def process_claimed_preview_job(
         automation_authority=automation_authority,
         cancellation_token=cancellation_token,
     )
-    # F6 (issue #1176 PR3 review round): front_gate_source is the
-    # OPERATOR's raw path for a local-import job — never safe to persist
-    # into an audit-visible field per decision 2, exactly the boundary
-    # _JobActionAuthority.audit_shows_raw_path already draws for
-    # measure_and_persist_candidate_evidence's own source_display_path.
-    # front_gate_action is the disposable private action copy
-    # _action_copy_front_gate already established before EITHER value
-    # returns (see its body), so it exists at every point front_gate_source
-    # does — there is no "the copy doesn't exist yet" case here. Every
+    # F6 (issue #1176 PR3 review round, corrected in a second round): front_
+    # gate_source is the OPERATOR's raw path for a local-import job — never
+    # safe to persist into an audit-visible field per decision 2, exactly
+    # the boundary _JobActionAuthority.audit_shows_raw_path already draws
+    # for measure_and_persist_candidate_evidence's own source_display_path.
+    # front_gate_action is the disposable private action copy, USUALLY
+    # already established by the SAME _action_copy_front_gate call that
+    # produced front_gate_source — but its own except branch (line ~776
+    # above) is exactly the case a first review round's comment here denied:
+    # _prepare_force_action_path can itself fail (the operator's folder
+    # moved/renamed between enqueue and preview claim — realistic with a
+    # backed-up preview queue — a symlink/special file inside it, EACCES,
+    # ENOSPC on the processing tree), returning action_path=None while
+    # raw_path (front_gate_source) is still the real operator path. Every
     # MeasurementFailure / ImportPreviewResult / reused-evidence payload
     # below that names "the source" uses this alias instead of
-    # front_gate_source directly. Force keeps showing its own real
-    # wrong_matches-rooted front_gate_source unchanged: its raw path is
-    # already safe to display (audit_shows_raw_path=True) and is the more
-    # durable, reviewable location for an operator to inspect — only
+    # front_gate_source directly, so local-import must fail CLOSED here:
+    # when no action copy exists, fall back to the deterministic path this
+    # job would have retained had preparation succeeded (never to the raw
+    # operator path), and to the documented "not resolved" sentinel (``""``,
+    # the same one MeasurementFailure.source_path's own docstring defines)
+    # only if resolving even that requires config this job's own claim
+    # already proved readable and still somehow fails. Force keeps showing
+    # its own real wrong_matches-rooted front_gate_source unchanged: its raw
+    # path is already safe to display (audit_shows_raw_path=True) and is the
+    # more durable, reviewable location for an operator to inspect — only
     # local's leak closes here.
-    front_gate_audit_source = (
-        front_gate_action
-        if job.job_type == IMPORT_JOB_LOCAL and front_gate_action is not None
-        else front_gate_source
-    )
+    front_gate_audit_source = front_gate_source
+    if job.job_type == IMPORT_JOB_LOCAL:
+        if front_gate_action is not None:
+            front_gate_audit_source = front_gate_action
+        else:
+            try:
+                front_gate_audit_source = force_action_copy_path(
+                    _resolve_runtime_config(runtime_config),
+                    job.id,
+                    prefix=LOCAL_IMPORT_ACTION_PREFIX,
+                )
+            except Exception:
+                logger.debug(
+                    "Unable to resolve the deterministic local-import "
+                    "action path for job %s while building the audit-safe "
+                    "source alias; falling back to the not-resolved "
+                    "sentinel",
+                    job.id,
+                    exc_info=True,
+                )
+                front_gate_audit_source = ""
     if (
         front_gate_result is not None
         and front_gate_result.status == "ready"

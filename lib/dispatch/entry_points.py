@@ -114,11 +114,30 @@ def dispatch_import_from_db(
     never only on success). Terminal accept/failure bundles are instead
     reaped by ``scripts/importer.py::_cleanup_terminal_force_action`` after
     the terminal commit. The strict-validation guard's own reject reaches
-    NEITHER: it returns before ``dispatch_import_core`` is ever entered, so
-    ``_should_cleanup_path`` is never consulted, and the copy is not
-    disposed of at all — it is RELOCATED into ``wrong_matches/`` (see the
-    guard's own comment below) so the escape hatch above has something to
-    act on.
+    ``_should_cleanup_path`` NEITHER (it returns before
+    ``dispatch_import_core`` is ever entered) — but it does NOT escape
+    ``_cleanup_terminal_force_action``: every reject this guard writes is
+    still a terminal failure bundle, so the importer's shared terminal path
+    (``scripts/importer.py::process_claimed_job`` -> ``_record_terminal_
+    force_action_cleanup``) calls it exactly as it would for any other
+    reject. It simply finds nothing to remove, because relocation into
+    ``wrong_matches/`` (below) always runs FIRST, synchronously, inside
+    THIS function, before the terminal bundle it returns is ever
+    persisted — so by the time cleanup runs downstream, the deterministic
+    ``preview_result['action_path']`` it looks for is already gone from
+    that location. Its ``force_action_cleanup.removed: true`` receipt is
+    therefore misleading for this specific outcome (nothing was removed by
+    that call; the file was already elsewhere) but harmless, because the
+    receipt's only consumer is the crash-recovery replay sweep
+    (``list_terminal_force_action_cleanup_jobs``), which the ``removed:
+    true`` value correctly stops from re-visiting a row with nothing left
+    to reap. THIS ORDERING IS THE SAFETY, NOT AN INCIDENTAL DETAIL: it is
+    what stops cleanup from ever finding the relocated folder still at its
+    ORIGINAL private-copy path and deleting it there — if a future change
+    ever persisted the terminal bundle before relocating, that same
+    cleanup call would delete the operator's Wrong Matches folder itself,
+    destroying the escape hatch this delta exists to create. Relocate
+    before persisting; never reorder this.
 
     Concurrency (issue #92): a per-``request_id`` advisory lock (IMPORT
     namespace) is taken up front. Two concurrent force imports
@@ -192,6 +211,37 @@ def dispatch_import_from_db(
             retag_fn=retag_fn,
             distance_threshold=distance_threshold,
             scenario=scenario,
+        )
+
+
+def _assert_local_import_relocation_containment(
+    failed_path: str, resolved_cfg: CratediggerConfig,
+) -> None:
+    """Refuse to relocate anything outside the private processing tree.
+
+    Review-round LOW: this call is safe today only because the strict-
+    validation guard is its one caller and ``failed_path`` is always the
+    job's own private action copy. Every sibling mutator of this namespace
+    asserts its own containment before acting
+    (``lib.import_preview.remove_force_action_copy`` checks ``dirname(path)
+    != processing_albums_dir(...)``); without the same assertion here, a
+    future caller passing a lane path directly would have
+    ``lib.import_manifest._allocate_target`` relocate the OPERATOR's own
+    folder into ``<operator_dir>/wrong_matches/`` — a direct Hazard A
+    violation, not a disposable-scratch move. Extracted as its own
+    function (rather than inlined at the one call site) so it is directly
+    unit-testable without a ``PipelineDB``/dispatch fixture at all.
+    """
+    from lib.fs_authority import FilesystemAuthorityError
+    from lib.processing_paths import processing_albums_dir
+
+    if (
+        os.path.dirname(os.path.abspath(failed_path))
+        != processing_albums_dir(resolved_cfg.processing_dir)
+    ):
+        raise FilesystemAuthorityError(
+            "local-import rejection relocation refused a path "
+            "outside the private processing tree"
         )
 
 
@@ -404,6 +454,9 @@ def _dispatch_import_from_db_locked(
 
         rejection_path = failed_path
         try:
+            _assert_local_import_relocation_containment(
+                failed_path, resolved_cfg,
+            )
             moved_path = move_failed_import_whole(
                 failed_path,
                 scenario=validation.result.scenario or "invalid",

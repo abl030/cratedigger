@@ -810,14 +810,19 @@
     ++ map (path: "-${path}") beetsLibraryAuthorityRoots;
   beetsMutationWritePaths =
     map (path: "-${path}") beetsLibraryAuthorityRoots;
-  # Issue #1176 PR3: the importer and preview-worker units run with
-  # ProtectHome + PrivateTmp (untrustedInputSandbox); a localImport.dir
-  # under /home, /tmp, or /var/tmp would otherwise resolve every candidate
-  # as missing once these workers actually try to read it (predicted by
-  # PR2's own `localImport.dir` description, which named this as PR3's
-  # obligation). Bound read-only, never writable — the operator's folder
-  # is strictly read-only input this lane may copy from, never mutate.
-  # `missingOkExternalPath` already degrades to `[]` when `dir` is null.
+  # Issue #1176 PR3: the web, importer, and preview-worker units ALL run
+  # with ProtectHome + PrivateTmp (untrustedInputSandbox); a
+  # localImport.dir under /home, /tmp, or /var/tmp would otherwise resolve
+  # every candidate as missing the moment ANY of the three tries to read
+  # it (predicted by PR2's own `localImport.dir` description, which named
+  # this as PR3's obligation) — the web unit is the lane's actual front
+  # door (enqueue_local_import opens the root and the candidate path
+  # before a job is even enqueued; a review round found it missing from
+  # this bind set while the two downstream workers were not, so the front
+  # door itself was sandbox-blind). Bound read-only, never writable — the
+  # operator's folder is strictly read-only input this lane may copy
+  # from, never mutate. `missingOkExternalPath` already degrades to `[]`
+  # when `dir` is null.
   localImportReadOnlyPaths = lib.optionals cfg.localImport.enable
     (missingOkExternalPath cfg.localImport.dir);
   webSandboxWritePaths = [

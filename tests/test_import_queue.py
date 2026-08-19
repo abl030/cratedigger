@@ -4754,6 +4754,65 @@ class TestImportPreviewWorker(unittest.TestCase):
         assert isinstance(failure, dict)
         self.assertEqual(failure.get("source_path"), persisted_source)
 
+    def test_local_import_preview_never_persists_operator_path_when_the_action_copy_itself_fails(
+        self,
+    ) -> None:
+        """F6, second review round: the world the first fix's comment
+        denied — ``_action_copy_front_gate``'s own except branch
+        (``_prepare_force_action_path`` failing) — never leaks the
+        operator's real folder either.
+
+        Deletes the operator's source folder between enqueue and preview
+        claim (the reviewer's own reproduction: "operator moves or renames
+        the folder ... realistic with a backed-up preview queue"), so
+        BOTH the front-gate's first attempt AND ``execute_preview_job``'s
+        internal retry genuinely fail to establish an action copy —
+        ``front_gate_action`` is ``None`` throughout, unlike the sibling
+        test above where the copy succeeds and only measurement crashes.
+        """
+        from lib.import_queue import (
+            IMPORT_JOB_LOCAL,
+            local_import_dedupe_key,
+            local_import_payload,
+        )
+        from scripts import import_preview_worker
+
+        with _local_preview_source() as (source, cfg):
+            with open(os.path.join(source, "01.flac"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=61, status="wanted"))
+            db.enqueue_import_job(
+                IMPORT_JOB_LOCAL,
+                request_id=61,
+                dedupe_key=local_import_dedupe_key(61),
+                payload=local_import_payload(source_path=source, request_id=61),
+            )
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
+            assert claimed is not None
+
+            # The operator's folder is gone by the time preview claims the
+            # job — no action copy can ever be established.
+            shutil.rmtree(source)
+
+            updated = import_preview_worker.process_claimed_preview_job(
+                db, claimed, runtime_config=cfg,
+            )
+
+        assert updated is not None
+        assert updated.preview_result is not None
+        persisted_source = updated.preview_result.get("source_path")
+        self.assertIsNotNone(persisted_source)
+        self.assertNotEqual(
+            persisted_source, source,
+            "the crash audit leaked the operator's real folder even though "
+            "no action copy was ever established",
+        )
+        assert isinstance(persisted_source, str)
+        failure = updated.preview_result.get("failure")
+        assert isinstance(failure, dict)
+        self.assertEqual(failure.get("source_path"), persisted_source)
+
     def test_force_execute_path_requires_forwarded_runtime_config(self):
         """The real execute path must retain the caller's private config.
 

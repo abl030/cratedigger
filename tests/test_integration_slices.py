@@ -2615,7 +2615,6 @@ class TestLocalImportSlice(unittest.TestCase):
             TerminalDownloadAudit,
         )
         from lib.transitions import RequestTransition
-        from scripts.importer import process_claimed_job
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=71, status="wanted"))
@@ -2683,11 +2682,7 @@ class TestLocalImportSlice(unittest.TestCase):
             )
             os.makedirs(cfg.slskd_download_dir)
             with patch("lib.config.read_runtime_config", return_value=cfg):
-                updated = process_claimed_job(
-                    db,  # type: ignore[arg-type]
-                    claimed,
-                    execute_fn=lambda *_a, **_k: outcome,
-                )
+                updated = finalize_claimed_dispatch(db, claimed, outcome)
 
         assert updated is not None
         self.assertEqual(updated.status, "completed")
@@ -2717,13 +2712,11 @@ class TestLocalImportSlice(unittest.TestCase):
         ``process_claimed_job``'s own crash handler — the one path meant
         to catch an executor crash and record it, itself crashing.
         """
-        from lib.dispatch.types import DispatchOutcome
         from lib.import_queue import (
             IMPORT_JOB_LOCAL,
             local_import_dedupe_key,
             local_import_payload,
         )
-        from scripts.importer import process_claimed_job
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=72, status="wanted"))
@@ -2739,12 +2732,14 @@ class TestLocalImportSlice(unittest.TestCase):
         claimed = claim_next_import_job(db, worker_id="mandatory-crash-slice")
         assert claimed is not None and claimed.id == job.id
 
-        def _crashing_execute(*_args: object, **_kwargs: object) -> DispatchOutcome:
-            raise RuntimeError("simulated launched-but-unacknowledged crash")
-
-        updated = process_claimed_job(
-            db,  # type: ignore[arg-type]
-            claimed, execute_fn=_crashing_execute,
+        # finalize_claimed_dispatch raises `outcome` through the real
+        # process_claimed_job when it is a BaseException instance instead
+        # of a DispatchOutcome — the file's established Any-typed bridge,
+        # extended (issue #1176 PR3 review round) so this crash-path test
+        # reuses it instead of calling process_claimed_job directly.
+        updated = finalize_claimed_dispatch(
+            db, claimed,
+            RuntimeError("simulated launched-but-unacknowledged crash"),
         )
 
         assert updated is not None
@@ -2766,6 +2761,7 @@ class TestLocalImportSlice(unittest.TestCase):
         relaxed-threshold escape hatch. The reject names the action copy,
         never the operator's folder (Hazard B)."""
         from lib.dispatch import dispatch_import_from_db
+        from lib.import_preview import LOCAL_IMPORT_ACTION_PREFIX
         from lib.import_queue import IMPORT_JOB_LOCAL
         from lib.quality import AudioQualityMeasurement
         from lib.quality_evidence import snapshot_audio_files
@@ -2776,58 +2772,72 @@ class TestLocalImportSlice(unittest.TestCase):
         ))
         db.set_tracks(62, [{"track_number": 1, "title": "Track"}])
 
+        operator_path = "/operator/real/WrongRip"
+        root = tempfile.mkdtemp()
+        # addCleanup (not try/finally) so this runs AFTER the assertions
+        # below, which check the RELOCATED folder — a descendant of root,
+        # not of the pre-relocation action_path — for real on disk.
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        processing_dir = os.path.join(root, "processing")
+        albums_dir = os.path.join(processing_dir, "albums")
+        os.makedirs(albums_dir)
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
             local_import_enabled=True,
             local_import_dir="/operator/real",
+            processing_dir=processing_dir,
         )
-        operator_path = "/operator/real/WrongRip"
-        tmpdir = tempfile.mkdtemp()
-        try:
-            with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
-                handle.write(b"audio")
-            job = db.enqueue_import_job(
-                IMPORT_JOB_LOCAL,
-                request_id=62,
-                payload={"source_path": operator_path, "request_id": 62},
-            )
-            _seed_candidate_for_import_job(
-                db, job.id,
-                mb_release_id="mbid-local-2",
-                source_path=tmpdir,
-                files=snapshot_audio_files(tmpdir),
-                measurement=AudioQualityMeasurement(
-                    min_bitrate_kbps=320, avg_bitrate_kbps=320,
-                    median_bitrate_kbps=320, format="MP3",
-                    spectral_grade="genuine",
-                ),
-                codec="mp3", container="mp3", storage_format="MP3",
-            )
-            db.mark_import_job_preview_importable(
-                job.id, preview_result={"ready": True},
-            )
-            claimed = claim_next_import_job(db, worker_id="local-reject-slice")
-            assert claimed is not None and claimed.id == job.id
+        job = db.enqueue_import_job(
+            IMPORT_JOB_LOCAL,
+            request_id=62,
+            payload={"source_path": operator_path, "request_id": 62},
+        )
+        # The real action copy the preview worker would have retained — the
+        # containment guard on the strict-validation guard's relocation
+        # call (review-round LOW) requires this to actually live under
+        # processing/albums/, exactly as production's own failed_path
+        # always does for this call site.
+        action_path = os.path.join(
+            albums_dir, f"{LOCAL_IMPORT_ACTION_PREFIX}{job.id}",
+        )
+        os.makedirs(action_path)
+        with open(os.path.join(action_path, "01.mp3"), "wb") as handle:
+            handle.write(b"audio")
+        _seed_candidate_for_import_job(
+            db, job.id,
+            mb_release_id="mbid-local-2",
+            source_path=action_path,
+            files=snapshot_audio_files(action_path),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320, avg_bitrate_kbps=320,
+                median_bitrate_kbps=320, format="MP3",
+                spectral_grade="genuine",
+            ),
+            codec="mp3", container="mp3", storage_format="MP3",
+        )
+        db.mark_import_job_preview_importable(
+            job.id, preview_result={"ready": True},
+        )
+        claimed = claim_next_import_job(db, worker_id="local-reject-slice")
+        assert claimed is not None and claimed.id == job.id
 
-            with patch_dispatch_externals(), \
-                 patch("lib.config.read_runtime_config", return_value=cfg), \
-                 patch(
-                     "lib.beets.beets_validate",
-                     return_value=make_validation_result(
-                         valid=False, scenario="high_distance", distance=0.9,
-                     ),
-                 ):
-                result = dispatch_import_from_db(
-                    db, request_id=62, failed_path=tmpdir,  # type: ignore[arg-type]
-                    source_reference_path=None,
-                    import_job_id=claimed.id,
-                    distance_threshold=cfg.beets_distance_threshold,
-                    scenario="local_import",
-                )
-                finalize_claimed_dispatch(db, claimed, result)
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        with patch_dispatch_externals(), \
+             patch("lib.config.read_runtime_config", return_value=cfg), \
+             patch(
+                 "lib.beets.beets_validate",
+                 return_value=make_validation_result(
+                     valid=False, scenario="high_distance", distance=0.9,
+                 ),
+             ):
+            result = dispatch_import_from_db(
+                db, request_id=62, failed_path=action_path,  # type: ignore[arg-type]
+                source_reference_path=None,
+                import_job_id=claimed.id,
+                distance_threshold=cfg.beets_distance_threshold,
+                scenario="local_import",
+            )
+            finalize_claimed_dispatch(db, claimed, result)
 
         self.assertFalse(result.success)
         row = db.request(62)
@@ -2855,15 +2865,17 @@ class TestLocalImportSlice(unittest.TestCase):
         # wrong-match-delete[-group]/-converge / the autonomous reducer,
         # which all open the row's path through
         # open_configured_quarantine_directory. The moved folder is no
-        # longer at tmpdir — it is at the same basename one level under
-        # wrong_matches/.
+        # longer at action_path — it is at the same basename one level
+        # under wrong_matches/.
         assert isinstance(failed_path, str)
-        self.assertNotEqual(failed_path, tmpdir)
+        self.assertNotEqual(failed_path, action_path)
         self.assertEqual(
             os.path.dirname(failed_path),
-            os.path.join(os.path.dirname(tmpdir), "wrong_matches"),
+            os.path.join(albums_dir, "wrong_matches"),
         )
-        self.assertEqual(os.path.basename(failed_path), os.path.basename(tmpdir))
+        self.assertEqual(
+            os.path.basename(failed_path), os.path.basename(action_path),
+        )
         self.assertTrue(os.path.isdir(failed_path))
 
 

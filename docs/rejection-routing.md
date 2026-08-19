@@ -258,8 +258,17 @@ producer_audit.py`'s registered producer files —
   quarantine folder, so there is no reason to preserve it for review. The
   strict-validation guard's OWN reject (below) never reaches
   `dispatch_import_core` at all, so `_should_cleanup_path` is never
-  consulted for it — that reject uses a third, distinct mechanism
-  (relocation into `wrong_matches/`, not cleanup) instead.
+  consulted for it. But it is still a terminal failure bundle, so
+  `scripts/importer.py::_cleanup_terminal_force_action` DOES run for it —
+  it just finds nothing, because relocation into `wrong_matches/` (below)
+  always runs FIRST, synchronously, before the terminal bundle is ever
+  persisted. That ordering is the safety, not an incidental detail: it is
+  what stops cleanup from ever finding the relocated folder still at its
+  original private-copy path and deleting it there. Its `force_action_
+  cleanup.removed: true` receipt is therefore misleading in isolation
+  (nothing was removed by that specific call) but harmless, since the
+  crash-recovery replay sweep it feeds correctly reads `true` as "nothing
+  left to reap" either way.
 - **A strict-validation reject reuses the manifest guard's own writer**
   (`lib.dispatch.manifest_guard._guard_reject`, extended with an optional
   `distance` parameter for this caller) rather than a parallel one. The
