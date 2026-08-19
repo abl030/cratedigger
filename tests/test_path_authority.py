@@ -400,6 +400,28 @@ class TestUnreadableEntryCountingAndReasonText(unittest.TestCase):
         self.assertIn("socket, FIFO or device node", text)
         self.assertNotIn("may be transient", text)
 
+    def test_not_configured_is_counted_as_containment_not_a_world_failure(
+        self,
+    ) -> None:
+        """Issue #1176 PR2 review round 3: the local-import lane's own
+        "never configured" refusal is a containment code, not a possibly-
+        transient world failure — pinned with the SAME real-producer
+        discipline as its ELOOP/ENXIO/ENODEV siblings above, deriving the
+        code from a real :class:`LocalImportNotConfiguredError` rather
+        than a hand-typed literal (test-fidelity.md Rule C)."""
+        cfg = MagicMock()
+        cfg.local_import_enabled = False
+        cfg.local_import_dir = ""
+        with self.assertRaises(LocalImportNotConfiguredError) as caught, \
+                open_configured_local_import_directory("/tmp/whatever", cfg):
+            pass
+        exc = caught.exception
+        self.assertEqual(exc.code, "not_configured")
+        self.assertFalse(errno_proves_absence(exc.code))
+        text = unreadable_reason_text(exc.code)
+        self.assertIn("never turned on", text)
+        self.assertNotIn("may be transient", text)
+
     def test_enoent_proves_absence_and_is_never_counted(self) -> None:
         with tempfile.TemporaryDirectory() as root, open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
             open_regular_relative(root_fd, "absent.mp3")
@@ -830,7 +852,7 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
     def _cfg(
         self, *, root: str, processing: str, staging: str, slskd: str,
         beets_directory: str = "", beets_library_db: str = "",
-        lock_file_path: str = "", enabled: bool = True,
+        enabled: bool = True,
     ) -> MagicMock:
         cfg = MagicMock()
         cfg.local_import_enabled = enabled
@@ -840,7 +862,6 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
         cfg.slskd_download_dir = slskd
         cfg.beets_directory = beets_directory
         cfg.beets_library_db = beets_library_db
-        cfg.lock_file_path = lock_file_path
         return cfg
 
     def _world(self, parent: str) -> tuple[str, str, str, str, str]:
@@ -870,8 +891,9 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
             with self.assertRaisesRegex(
                 LocalImportNotConfiguredError,
                 "local-import lane is not safely configured",
-            ), open_configured_local_import_directory(candidate, cfg):
+            ) as caught, open_configured_local_import_directory(candidate, cfg):
                 pass
+            self.assertEqual(caught.exception.code, "not_configured")
 
     def test_unset_dir_refuses_with_not_configured_error(self) -> None:
         with tempfile.TemporaryDirectory() as parent:
@@ -883,10 +905,11 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
             with self.assertRaisesRegex(
                 LocalImportNotConfiguredError,
                 "local-import lane is not safely configured",
-            ), open_configured_local_import_directory(
+            ) as caught, open_configured_local_import_directory(
                 os.path.join(root, "cd-rip"), cfg,
             ):
                 pass
+            self.assertEqual(caught.exception.code, "not_configured")
 
     def test_root_of_slash_refuses_with_not_configured_error(self) -> None:
         """Issue #1176 PR2 review finding 9: the module assertion already
@@ -904,8 +927,9 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
             with self.assertRaisesRegex(
                 LocalImportNotConfiguredError,
                 "local-import lane is not safely configured",
-            ), open_configured_local_import_directory("/etc", cfg):
+            ) as caught, open_configured_local_import_directory("/etc", cfg):
                 pass
+            self.assertEqual(caught.exception.code, "not_configured")
 
     def test_root_of_double_slash_refuses_with_not_configured_error(self) -> None:
         """Issue #1176 PR2 review round 2 finding 1 — the serious bypass.
@@ -923,8 +947,9 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
             with self.assertRaisesRegex(
                 LocalImportNotConfiguredError,
                 "local-import lane is not safely configured",
-            ), open_configured_local_import_directory("/etc", cfg):
+            ) as caught, open_configured_local_import_directory("/etc", cfg):
                 pass
+            self.assertEqual(caught.exception.code, "not_configured")
 
     def test_root_of_triple_slash_refuses_with_not_configured_error(self) -> None:
         with tempfile.TemporaryDirectory() as parent:
@@ -936,8 +961,9 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
             with self.assertRaisesRegex(
                 LocalImportNotConfiguredError,
                 "local-import lane is not safely configured",
-            ), open_configured_local_import_directory("/etc", cfg):
+            ) as caught, open_configured_local_import_directory("/etc", cfg):
                 pass
+            self.assertEqual(caught.exception.code, "not_configured")
 
     def test_relative_root_refuses_without_blaming_the_candidate(self) -> None:
         """Issue #1176 PR2 review round 2 finding 2: a relative
@@ -959,8 +985,36 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
             with self.assertRaisesRegex(
                 LocalImportNotConfiguredError,
                 "local-import lane is not safely configured",
-            ), open_configured_local_import_directory("/etc", cfg):
+            ) as caught, open_configured_local_import_directory("/etc", cfg):
                 pass
+            self.assertEqual(caught.exception.code, "not_configured")
+
+    def test_none_root_reaches_the_not_root_gate_clause(self) -> None:
+        """Issue #1176 PR2 review round 3 finding 3: the ``not root`` half
+        of the gate's ``if not enabled or not root or ...`` guard is
+        correct fail-closed legislation whose own world was untested —
+        ``_local_import_root_is_unsafe("")`` already answers the
+        empty-string case, so only a non-``str`` falsy value like
+        ``None`` (a misconfigured value from outside this lane's own
+        str-typed ini parsing) actually exercises THIS clause rather than
+        that one. Per the rules this widens the tested world instead of
+        deleting the clause."""
+        with tempfile.TemporaryDirectory() as parent:
+            _root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = MagicMock()
+            cfg.local_import_enabled = True
+            cfg.local_import_dir = None
+            cfg.processing_dir = processing
+            cfg.beets_staging_dir = staging
+            cfg.slskd_download_dir = slskd
+            cfg.beets_directory = beets_directory
+            cfg.beets_library_db = ""
+            with self.assertRaisesRegex(
+                LocalImportNotConfiguredError,
+                "local-import lane is not safely configured",
+            ) as caught, open_configured_local_import_directory("/etc", cfg):
+                pass
+            self.assertEqual(caught.exception.code, "not_configured")
 
     def test_empty_path_is_refused_as_not_absolute(self) -> None:
         """An empty ``raw_path`` has no dedicated clause — ``os.path.isabs("")``
@@ -1128,27 +1182,6 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
             ), open_configured_local_import_directory(candidate, cfg):
                 pass
 
-    def test_candidate_inside_state_dir_is_refused(self) -> None:
-        """Issue #1176 PR2 review finding 7: the owned set was missing
-        Cratedigger's own mutable ``stateDir`` (lock, denylists, processing
-        metadata), derivable as ``dirname(cfg.lock_file_path)``."""
-        with tempfile.TemporaryDirectory() as parent:
-            root, processing, staging, slskd, beets_directory = self._world(parent)
-            state_dir = os.path.join(root, "state")
-            os.mkdir(state_dir)
-            cfg = self._cfg(
-                root=root, processing=processing, staging=staging,
-                slskd=slskd, beets_directory=beets_directory,
-                lock_file_path=os.path.join(state_dir, ".cratedigger.lock"),
-            )
-            candidate = os.path.join(state_dir, "sneaky")
-            os.mkdir(candidate)
-            with self.assertRaisesRegex(
-                FilesystemAuthorityError,
-                "resolves inside a Cratedigger-owned subtree",
-            ), open_configured_local_import_directory(candidate, cfg):
-                pass
-
     def test_lookalike_sibling_of_owned_beets_directory_is_still_authorized(
         self,
     ) -> None:
@@ -1266,6 +1299,32 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
             candidate = os.path.join(root, "cd-rip\x00nasty")
             with self.assertRaisesRegex(
                 FilesystemAuthorityError,
+                "unsyscallable path component",
+            ), open_configured_local_import_directory(candidate, cfg):
+                pass
+
+    def test_embedded_nul_in_root_is_a_structured_root_error(self) -> None:
+        """Issue #1176 PR2 review round 3 finding 2: the candidate-side pin
+        above only widened ``open_relative_directory``'s catch —
+        ``open_directory_path`` (which walks the ROOT itself, not the
+        candidate) needed the identical fix and had no pin proving it.
+        Reverting just that one loop's ``except`` clause reproduces the
+        escape: a NUL-embedded root raises a raw ``ValueError`` instead of
+        going through :class:`LocalImportRootError`. A NUL byte in a
+        component does not fail ``_local_import_root_is_unsafe`` (that
+        check only asks ``isabs``/``lstrip`` — pure string ops that never
+        look at individual components), so the walk reaches the no-follow
+        open."""
+        with tempfile.TemporaryDirectory() as parent:
+            _root, processing, staging, slskd, beets_directory = self._world(parent)
+            root = os.path.join(parent, "evil\x00root")
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            candidate = os.path.join(root, "somefile")
+            with self.assertRaisesRegex(
+                LocalImportRootError,
                 "unsyscallable path component",
             ), open_configured_local_import_directory(candidate, cfg):
                 pass

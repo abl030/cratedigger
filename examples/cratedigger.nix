@@ -214,10 +214,13 @@ in
     # additionally refuses any candidate that resolves inside a
     # Cratedigger-owned subtree (the WHOLE processingDir, not just albums/
     # -- preview/ is equally off-limits -- the Beets validation staging
-    # dir, slskd.downloadDir, the Beets library root, the directory
-    # holding the Beets SQLite library DB, or Cratedigger's own stateDir)
-    # even when nested under this root, since a broad root can legitimately
-    # contain those trees as siblings of a real import source.
+    # dir, slskd.downloadDir, the Beets library root, or the directory
+    # holding the Beets SQLite library DB) even when nested under this
+    # root, since a broad root can legitimately contain those trees as
+    # siblings of a real import source. Cratedigger's own stateDir is
+    # deliberately NOT on that list -- it holds no audio and this lane
+    # only ever reads, so pointing it there is a footgun (an
+    # empty_fileset rejection at import time), not a security exposure.
     #
     # Sandbox note: the importer/preview-worker units run with
     # ProtectHome = true AND PrivateTmp = true, so a dir under /home,

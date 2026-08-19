@@ -1920,7 +1920,6 @@ _LOCAL_IMPORT_WORLDS: frozenset[str] = frozenset({
     "owned_slskd",
     "owned_beets_directory",
     "owned_beets_library_db_dir",
-    "owned_state_dir",
     "lookalike_beets_directory",
     "lookalike_processing",
     "not_configured_disabled",
@@ -1954,25 +1953,32 @@ _LOCAL_IMPORT_MUST_SUCCEED_WORLDS: frozenset[str] = frozenset({
 })
 
 #: Worlds that must NEVER come back authorized, independent of where the
-#: candidate sits. Issue #1176 PR2 review round 2 finding 4: the "not
-#: configured" worlds (lane disabled, root unset, root relative/degenerate)
-#: were first given a candidate INSIDE the sandbox root — but
-#: :func:`assert_local_import_authorization_is_earned` only judges
-#: AUTHORIZED worlds against containment, so a gate-bypass mutant that
-#: authorizes a validly-contained candidate is invisible to it (the
-#: candidate genuinely IS under root and outside every owned subtree, so
-#: "authorization implies containment" holds even though the LANE should
-#: have refused before containment was ever relevant). Moving the
-#: candidate OUTSIDE the sandbox (as first tried) does not fix this either:
-#: it then gets refused for the ordinary "outside root" reason regardless
-#: of whether the not-configured gate itself fired, which is the SAME
-#: masking one layer up. Neither candidate placement can prove this world
-#: refuses BECAUSE it is unconfigured — only a direct "must be refused"
-#: assertion can, so these worlds keep the candidate INSIDE the sandbox
-#: (the world that would be legitimately authorized if the gate were
-#: bypassed) and the test method asserts non-authorization directly,
+#: candidate sits or what :func:`assert_local_import_authorization_is_earned`
+#: — which only ever judges AUTHORIZED worlds against containment — can see.
+#: Issue #1176 PR2 review round 2 finding 4: ``not_configured_disabled`` and
+#: ``not_configured_no_dir`` keep their candidate INSIDE the sandbox root
+#: (the world that WOULD be legitimately authorized if the gate were
+#: bypassed) precisely because that checker cannot help here in either
+#: direction — a validly-contained candidate satisfies "authorization
+#: implies containment" whether or not the gate fired, and moving the
+#: candidate outside the sandbox does not fix that: it then gets refused
+#: for the ordinary "outside root" reason regardless of the gate, which is
+#: the SAME masking one layer up. Only a direct "must be refused" assertion
+#: can prove these two worlds refuse BECAUSE they are unconfigured,
 #: mirroring how ``_LOCAL_IMPORT_MUST_SUCCEED_WORLDS`` exists because the
 #: same checker cannot see an over-eager refusal either.
+#:
+#: The other four (``root_is_slash`` and its degenerate/relative siblings)
+#: use a candidate OUTSIDE the sandbox instead, and are already covered by
+#: the ordinary containment checker for the slash-degenerate cases (see the
+#: candidate-construction comment below); they are listed here too only
+#: for defense in depth, not because the checker is blind to them the same
+#: way. ``root_relative`` is the one exception even to that: no candidate
+#: choice makes ITS bypass observable to this property at all (see the
+#: same comment) — the direct assertion below still runs for it, but the
+#: deterministic pin
+#: (``tests.test_path_authority.TestOpenConfiguredLocalImportDirectory.test_relative_root_refuses_without_blaming_the_candidate``)
+#: is the only thing that actually proves that mutant dies.
 _LOCAL_IMPORT_MUST_REFUSE_WORLDS: frozenset[str] = frozenset({
     "not_configured_disabled",
     "not_configured_no_dir",
@@ -2081,7 +2087,6 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
     @example(world="owned_slskd", leaf="album")
     @example(world="owned_beets_directory", leaf="album")
     @example(world="owned_beets_library_db_dir", leaf="album")
-    @example(world="owned_state_dir", leaf="album")
     @example(world="lookalike_beets_directory", leaf="album")
     @example(world="lookalike_processing", leaf="album")
     @example(world="not_configured_disabled", leaf="album")
@@ -2116,8 +2121,6 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
             os.makedirs(preview, exist_ok=True)
             beets_library_db = os.path.join(root, "beets-db", "beets-library.db")
             os.makedirs(os.path.dirname(beets_library_db), exist_ok=True)
-            state_dir = os.path.join(root, "state")
-            os.makedirs(state_dir, exist_ok=True)
 
             # The expected owned set is built HERE, from the tmpdir locals
             # above, independently of any production function — see
@@ -2125,13 +2128,15 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
             # (review finding 1). ``preview`` needs no separate entry: it
             # is a child of ``processing``, and the whole ``processing``
             # tree is owned (review finding 6), so lexical containment
-            # under ``processing`` alone already covers it. The Beets
-            # library DB directory and Cratedigger's own stateDir (review
-            # finding 7) are separate siblings and DO need their own
-            # entries.
+            # under ``processing`` alone already covers it. Cratedigger's
+            # own stateDir is deliberately NOT here — see
+            # local_import_owned_subtrees's own docstring for why a
+            # dirname(lock_file_path)-derived entry was tried and reverted
+            # (it resolves to /nix/store, not stateDir, in the production
+            # shape read_runtime_config() actually builds).
             owned = (
                 processing, staging, slskd, beets_directory,
-                os.path.dirname(beets_library_db), state_dir,
+                os.path.dirname(beets_library_db),
             )
 
             enabled = world != "not_configured_disabled"
@@ -2149,15 +2154,12 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
                 configured_dir = os.path.join(parent, "missing-root")
             else:
                 configured_dir = root
-            cfg = CratediggerConfig.from_ini(
-                _local_import_ini(
-                    enabled=enabled, local_dir=configured_dir,
-                    processing=processing, staging=staging, slskd=slskd,
-                    beets_directory=beets_directory,
-                    beets_library_db=beets_library_db,
-                ),
-                var_dir=state_dir,
-            )
+            cfg = CratediggerConfig.from_ini(_local_import_ini(
+                enabled=enabled, local_dir=configured_dir,
+                processing=processing, staging=staging, slskd=slskd,
+                beets_directory=beets_directory,
+                beets_library_db=beets_library_db,
+            ))
             self.assertEqual(cfg.local_import_enabled, enabled)
             self.assertEqual(cfg.local_import_dir, configured_dir)
             self.assertEqual(cfg.processing_dir, processing)
@@ -2165,8 +2167,6 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
             self.assertEqual(cfg.slskd_download_dir, slskd)
             self.assertEqual(cfg.beets_directory, beets_directory)
             self.assertEqual(cfg.beets_library_db, beets_library_db)
-            self.assertEqual(
-                cfg.lock_file_path, os.path.join(state_dir, ".cratedigger.lock"))
 
             unreadable_parent: str | None = None
             unreadable_root: str | None = None
@@ -2193,9 +2193,6 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
                 os.makedirs(candidate, exist_ok=True)
             elif world == "owned_beets_library_db_dir":
                 candidate = os.path.join(os.path.dirname(beets_library_db), leaf)
-                os.makedirs(candidate, exist_ok=True)
-            elif world == "owned_state_dir":
-                candidate = os.path.join(state_dir, leaf)
                 os.makedirs(candidate, exist_ok=True)
             elif world == "lookalike_beets_directory":
                 candidate = os.path.join(beets_directory + "-old", leaf)
@@ -2229,16 +2226,36 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
                 # sandbox is the only candidate the checker can call out as
                 # wrongly authorized.
                 candidate = "/etc"
-            elif world in (
-                "root_double_slash", "root_triple_slash", "root_relative",
-            ):
-                # Same reasoning as ``root_is_slash`` immediately above:
-                # deliberately outside the sandbox ``root`` so a bypass of
-                # the degenerate-root / relative-root guard
-                # (``_local_import_root_is_unsafe``, review round 2
-                # finding 1/2) is observable as an out-of-bounds
-                # authorization rather than masked by lexical containment
-                # under the sandbox.
+            elif world in ("root_double_slash", "root_triple_slash"):
+                # Same reasoning as ``root_is_slash`` immediately above,
+                # and for the same structural reason: bypassing the guard
+                # makes the EFFECTIVE root the real "/" (``lstrip(os.sep)``
+                # collapses any all-slashes spelling to it), so a candidate
+                # outside the sandbox becomes newly reachable and the
+                # containment checker can call the escape out.
+                candidate = "/etc"
+            elif world == "root_relative":
+                # NOT the same reasoning as the two worlds above, despite
+                # the identical-looking candidate (issue #1176 PR2 review
+                # round 3 finding 4): bypassing the absoluteness guard does
+                # NOT change what "/etc" resolves to the way a degenerate
+                # root does. ``_relative_to`` calls ``os.path.relpath``,
+                # which resolves the relative root against the CURRENT
+                # WORKING DIRECTORY — some ``<cwd>/relative/root`` — and a
+                # relpath from there to a fixed absolute candidate like
+                # "/etc" is essentially always ``..``-laden, which
+                # ``_parts`` rejects regardless of whether the guard fired.
+                # So THIS world's candidate gets refused either way, and no
+                # candidate choice can make the bypass observable to a
+                # property that only ever compares authorized-vs-refused —
+                # every refusal looks the same to it. Only the deterministic
+                # pin, which asserts the exact exception TYPE and message
+                # (``test_relative_root_refuses_without_blaming_the_candidate``),
+                # actually proves this mutant dies. Kept in the world set
+                # (and in ``_LOCAL_IMPORT_MUST_REFUSE_WORLDS`` below) only
+                # so a change that made it spuriously AUTHORIZE something
+                # would still be caught — not as a claim that this property
+                # patrols the absoluteness guard itself.
                 candidate = "/etc"
             elif world == "candidate_is_root":
                 candidate = root
@@ -2306,9 +2323,7 @@ def _local_import_ini(
     from ``[Paths]``, ``beets_staging_dir`` from ``[Beets Validation]``,
     ``slskd_download_dir`` from ``[Slskd]``, and ``beets_directory`` /
     ``beets_library_db`` from ``[Beets]`` — the same sections the nix
-    module renders into ``config.ini``. ``lock_file_path`` is NOT an ini
-    key at all; it is derived from the caller-supplied ``var_dir`` passed
-    to ``CratediggerConfig.from_ini`` alongside this parser.
+    module renders into ``config.ini``.
     """
     import configparser
 

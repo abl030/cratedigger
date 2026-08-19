@@ -461,12 +461,16 @@ normalized (no trailing slash, no `.`/`..` components — `isAbsoluteNormalizedP
 the same helper this module's other path options, including `stateDir` and
 every `beets.runtime.*` path, already use), and not `/`.
 Execution-time authority (`lib.fs_authority.open_configured_local_import_directory`)
-re-checks every one of those constraints itself — a preflight is not
-authority, so a hand-built `CratediggerConfig` reaching that function is
-never trusted to have already been validated by this module — and
-additionally narrows the allowlist further: it refuses any candidate that
-resolves inside a Cratedigger-owned subtree even when nested beneath the
-configured `localImport.dir`:
+re-checks that the configured root is absolute and not degenerate (`/`,
+`//`, …) itself — a preflight is not authority, so a hand-built
+`CratediggerConfig` reaching that function is never trusted to have
+already been validated by this module. Normalization issues within an
+otherwise-absolute root (a stray `.`/`..` component, an internal doubled
+slash) surface later, inside the no-follow open itself, rather than at
+this upfront check. Execution-time authority additionally narrows the
+allowlist further: it refuses any candidate that resolves inside a
+Cratedigger-owned subtree even when nested beneath the configured
+`localImport.dir`:
 
 - the WHOLE `processingDir` (not narrowed to its `albums/` child — the
   private `preview/` scratch is equally off-limits; a candidate under it
@@ -487,9 +491,19 @@ configured `localImport.dir`:
   `CratediggerConfig.beets_library_db`'s parent) — mirrors the module's
   own `beetsLibraryAuthorityRoots` (`nix/module.nix`), which is
   `expectedDirectory` PLUS `dirOf expectedLibrary`, not `expectedDirectory`
-  alone;
-- Cratedigger's own mutable `stateDir` (lock, denylists, processing
-  metadata — `dirname(cfg.lock_file_path)`).
+  alone.
+
+Cratedigger's own mutable `stateDir` is deliberately NOT on that list. A
+`dirname(cfg.lock_file_path)`-derived entry was tried and reverted: for
+the production shape `read_runtime_config()` actually builds — the shape
+every real consumer this lane will join uses — `lock_file_path` resolves
+under the immutable store config's own directory (`/nix/store/…`), not
+`stateDir`, so the entry would have protected the wrong path in
+production while looking correct in a hand-built test fixture. `stateDir`
+holds no audio and this lane only ever reads, so pointing it there is a
+footgun that produces an `empty_fileset` rejection at import time, not a
+security exposure — not worth a config field or a derivation that lies
+about what it protects.
 
 A broad root such as `/mnt/virtio` can legitimately contain those trees as
 siblings of a genuine import source, and a config-time check would have to

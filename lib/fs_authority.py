@@ -322,12 +322,14 @@ def unreadable_reason_text(
 
     ``unsafe_symlink`` and ``not_regular_file`` are CONTAINMENT refusals:
     we chose not to follow/open a kind of name, which says nothing about
-    the health of the storage underneath it. ``path_escape`` and
-    ``untrusted_ownership`` are the same family — a boundary decision, not
-    a world failure. Every other non-absence code (``open_failed``,
-    ``read_failed``, ``write_failed``, ``unspecified``) is the opposite: a
-    storage layer that failed or refused to answer, which may clear up on
-    retry.
+    the health of the storage underneath it. ``path_escape``,
+    ``untrusted_ownership``, and ``not_configured`` are the same family —
+    a boundary decision, not a world failure; ``not_configured`` in
+    particular is refused before any candidate is even looked at, so
+    there is no storage layer underneath it to be flaky. Every other
+    non-absence code (``open_failed``, ``read_failed``, ``write_failed``,
+    ``unspecified``) is the opposite: a storage layer that failed or
+    refused to answer, which may clear up on retry.
 
     ``missing`` and ``not_a_directory`` PROVE absence and have no
     refusal text — no caller may reach this function with either, since
@@ -1095,7 +1097,7 @@ class LocalImportNotConfiguredError(FilesystemAuthorityError):
 #: it was an unprotected gap until issue #1176 PR2 review found it — the
 #: processing root has no legitimate import-source use at any depth.
 #:
-#: Six candidates feed the returned tuple, and EVERY one passes through
+#: Five candidates feed the returned tuple, and EVERY one passes through
 #: the same trailing ``if path`` filter — including ``beets_directory``,
 #: whose owning module option
 #: (``services.cratedigger.beets.runtime.expectedDirectory``) is REQUIRED
@@ -1110,17 +1112,28 @@ class LocalImportNotConfiguredError(FilesystemAuthorityError):
 #: via ``os.path.abspath(os.path.normpath(""))``, which is the actual
 #: reason every candidate is filtered rather than just that one.
 #:
-#: The remaining two (issue #1176 PR2 review finding 7) mirror the
-#: module's own ``beetsLibraryAuthorityRoots`` (``nix/module.nix``,
-#: ``expectedDirectory`` PLUS ``dirOf expectedLibrary``) and its mutable
-#: runtime state: the directory holding the Beets SQLite library DB
-#: (journals, import log, harness audit — ``cfg.beets_library_db``'s
-#: parent) and the directory holding the pipeline's own lock file
-#: (``cfg.lock_file_path``'s parent — Cratedigger's ``stateDir``: lock,
-#: denylists, processing metadata). Both are un-set-able through the
-#: module (their owning options are required or always-derived) but a
-#: hand-built ``CratediggerConfig`` could still leave either empty, so
-#: they go through the same filter as everything else.
+#: The fifth (issue #1176 PR2 review finding 7) mirrors the module's own
+#: ``beetsLibraryAuthorityRoots`` (``nix/module.nix``, ``expectedDirectory``
+#: PLUS ``dirOf expectedLibrary``): the directory holding the Beets SQLite
+#: library DB, journals, import log, and harness audit
+#: (``cfg.beets_library_db``'s parent). Un-set-able through the module (its
+#: owning option is required) but a hand-built ``CratediggerConfig`` could
+#: still leave it empty, so it goes through the same filter as everything
+#: else.
+#:
+#: Cratedigger's own mutable ``stateDir`` (lock, denylists, processing
+#: metadata) is deliberately NOT here, and deriving it from
+#: ``dirname(cfg.lock_file_path)`` was tried and reverted: for the
+#: production shape produced by ``read_runtime_config()`` — the shape every
+#: real consumer this lane will join actually uses —
+#: ``lock_file_path = dirname(<immutable store config path>)``, i.e.
+#: ``/nix/store``, not ``stateDir`` at all; only a hand-built "strict"
+#: fixture shape resolves it correctly, so both test tiers were blind to
+#: the drift. ``stateDir`` holds no audio, and this lane only ever reads:
+#: pointing it there produces an ``empty_fileset`` rejection at import
+#: time, not a security exposure. It is a footgun guard, not a safety
+#: guard, and not worth a fifth config field or a derivation that lies in
+#: the shape production actually uses.
 def local_import_owned_subtrees(cfg: object) -> tuple[str, ...]:
     """Cratedigger's own trees, as absolute paths, filtering out any unset."""
     candidates = (
@@ -1129,7 +1142,6 @@ def local_import_owned_subtrees(cfg: object) -> tuple[str, ...]:
         getattr(cfg, "slskd_download_dir"),  # noqa: B009 - structural config boundary
         getattr(cfg, "beets_directory"),  # noqa: B009 - structural config boundary
         os.path.dirname(getattr(cfg, "beets_library_db")),  # noqa: B009 - structural config boundary
-        os.path.dirname(getattr(cfg, "lock_file_path")),  # noqa: B009 - structural config boundary
     )
     return tuple(path for path in candidates if path)
 
