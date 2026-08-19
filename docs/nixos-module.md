@@ -51,6 +51,8 @@ upstream module and adds:
 | `discogs.apiBase` | `null` | Discogs mirror origin. Mirror-REQUIRED: unset ⇒ Discogs browse off with a 503 mirror-required message (public api.discogs.com does not serve this API shape). |
 | `stateDir` | `/var/lib/cratedigger` | Mutable runtime state (lock, denylists, processing metadata). Application config is an immutable store file. |
 | `processingDir` | `${stateDir}/processing` | Private `0700` Cratedigger-owned root: canonical albums and their same-filesystem failure quarantine live in `albums/`, bounded preview scratch in `preview/`. Must be absolute and disjoint from slskd's download tree. |
+| `localImport.enable` | `false` | Enable the manual local-import lane (issue #1176): "here's a request ID, here's a folder on disk, import it." Off by default; PR2 ships only this configuration surface and its execution-time path authority, not the lane itself. |
+| `localImport.dir` | `null` | Absolute root the local-import lane may read from. Deliberately has NO working default even when enabled — see "Manual local-import lane" below. |
 | `slskd.apiKeyFile` | (required) | Path to a file containing the raw slskd API key (one line). |
 | `slskd.downloadDir` | (required) | Where slskd downloads land. |
 | `slskd.hostUrl` | `http://localhost:5030` | slskd HTTP base URL. |
@@ -429,6 +431,64 @@ measurement and import. slskd and quarantine bytes remain untrusted and are
 never passed to mutating media tools directly. A force/quarantine preview keeps
 one private normalized action copy through Beets; its original path remains the
 job's audit and recovery authority.
+
+### Manual local-import lane (issue #1176)
+
+`localImport.enable` / `localImport.dir` configure a lane for the case
+"here's a request ID, here's a folder already on disk (a CD rip, a friend's
+copy, a completed download that failed at materialization) — import it."
+The lane always **copies** the named folder into private processing
+scratch before running the existing preview → importer → quality gate →
+beets chain; it never imports in place and never mutates or deletes the
+operator's folder (see issue #111: converting in place could destroy the
+source on a `downgrade` verdict, before copy-first made the folder
+strictly read-only input).
+
+Both options are deliberately redundant — `enable` (bool) and `dir` (path)
+rather than one nullable path — because it reads more obviously to a human
+that this is a conscious, two-part act. `dir` has **no working default**
+even when `enable = true`: an installation that never names a directory has
+no local-import surface at all. This mirrors the module's refusal to
+default `slskd.downloadDir` — a build that failed until a directory was
+named would just push operators toward a placeholder like `/tmp`,
+manufacturing the very surface the option exists to gate.
+
+`dir` is the ALLOWLIST root, checked lexically at config time (must be
+absolute, not `/`). Execution-time authority
+(`lib.fs_authority.open_configured_local_import_directory`) narrows that
+allowlist further: it refuses any candidate that resolves inside a
+Cratedigger-owned subtree — `processingDir`'s `albums/`, the Beets
+validation staging directory (`beets.validation.stagingDir`),
+`slskd.downloadDir`, and (when configured) the Beets library root
+(`beets.directory` / `CratediggerConfig.beets_directory`) — even when the
+candidate is nested beneath the configured `localImport.dir`. This
+narrowing deliberately lives at execution time rather than as a module
+assertion: a broad root such as `/mnt/virtio` can legitimately contain
+those trees as siblings of a genuine import source, and a config-time
+check would have to reject the whole broad root outright. Pointing this
+lane at the live library or at Cratedigger's own processing tree is the
+realistic operator typo, and it is also where file ownership stops being
+unambiguous (good-citizen doctrine, issue #571).
+
+This lane deliberately reintroduces a caller-named-path input vocabulary —
+the same SHAPE as the removed `manual-import` HTTP endpoint (finding
+CD-SEC-03, `docs/security-audit-2026-07-12.md`), whose teeth were that
+`import-preview` ran `mp3val -f` **in place** on any `.mp3` under a
+caller-supplied directory. It avoids CD-SEC-03's mistakes rather than
+"fixing" that already-remediated finding: copy-first is now guaranteed by
+architecture (this lane never operates on the operator's folder in place),
+and the remaining job — confinement — is placed at execution authority
+rather than skipped or left to the input vocabulary, mirroring
+`lib/force_import_service.py::enqueue_force_import`'s own doctrine that a
+preflight is not authority: the eventual copy worker will re-open the
+configured directory before reading it, exactly as the preview worker
+already does for the quarantine roots.
+
+As of this PR the module renders `[Local Import] enabled` / `dir` into
+`config.ini` and `lib.fs_authority.open_configured_local_import_directory`
+exists as the sole reader of those fields — no service, CLI subcommand, or
+import lane consumes them yet (tracked separately as PR1/PR3 of issue
+#1176).
 
 ### Startup write-probe
 

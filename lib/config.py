@@ -202,6 +202,19 @@ class CratediggerConfig:
     lock_file_path: str = ""
     config_file_path: str = ""
 
+    # --- Local import lane (issue #1176 PR2) ---
+    # Manual "here is a request ID, here is a folder on disk" lane. The
+    # module option (services.cratedigger.localImport) deliberately has NO
+    # working default for the directory: an empty local_import_dir means
+    # the lane has no authorized root at all, regardless of
+    # local_import_enabled. This PR ships only the configuration surface
+    # and lib.fs_authority.open_configured_local_import_directory, the sole
+    # execution-time authority that reads these two fields — nothing else
+    # constructs a lane from them yet (PR1 adds DB vocabulary, PR3 wires the
+    # lane itself).
+    local_import_enabled: bool = False
+    local_import_dir: str = ""
+
     # --- Derived (computed once at init) ---
     _allowed_specs: "tuple[AudioFileSpec, ...]" = ()
 
@@ -384,6 +397,9 @@ class CratediggerConfig:
             ),
             lock_file_path=os.path.join(var_dir, ".cratedigger.lock"),
             config_file_path=os.path.join(config_dir, "config.ini"),
+            # Local import lane
+            local_import_enabled=getbool("Local Import", "enabled", False),
+            local_import_dir=get("Local Import", "dir", ""),
         )
 
 

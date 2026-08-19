@@ -27,10 +27,13 @@ from lib.download_materialization import (
 from lib.fs_authority import (
     FilesystemAuthorityError,
     FsAuthorityCode,
+    LocalImportNotConfiguredError,
     SharedDownloadRootError,
     classify_path_errno,
     errno_proves_absence,
     is_containment_refusal,
+    local_import_owned_subtrees,
+    open_configured_local_import_directory,
     open_configured_quarantine_directory,
     open_directory_path,
     open_private_child_directory,
@@ -809,6 +812,255 @@ class TestPrivateProcessingAuthority(unittest.TestCase):
             with open_configured_quarantine_directory(relative, cfg) as opened:
                 self.assertEqual(
                     os.fstat(opened.fd).st_ino, os.stat(album).st_ino)
+
+
+class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
+    """Issue #1176 PR2: the local-import lane's execution-time authority.
+
+    One pin per refusal clause, each asserting THAT CLAUSE's own message
+    via ``assertRaisesRegex`` — a bare ``assertRaises`` is not proof, since
+    a world violating several clauses would only ever exercise the first.
+    """
+
+    def _cfg(
+        self, *, root: str, processing: str, staging: str, slskd: str,
+        beets_directory: str = "", enabled: bool = True,
+    ) -> MagicMock:
+        cfg = MagicMock()
+        cfg.local_import_enabled = enabled
+        cfg.local_import_dir = root
+        cfg.processing_dir = processing
+        cfg.beets_staging_dir = staging
+        cfg.slskd_download_dir = slskd
+        cfg.beets_directory = beets_directory
+        return cfg
+
+    def _world(self, parent: str) -> tuple[str, str, str, str, str]:
+        """A BROAD root that genuinely CONTAINS the owned subtrees as
+        children — the ``/mnt/virtio``-shaped deployment the owned-subtree
+        carve-out exists for (issue #1176 PR2)."""
+        root = os.path.join(parent, "local-import-root")
+        processing = os.path.join(root, "cratedigger-processing")
+        staging = os.path.join(root, "incoming")
+        slskd = os.path.join(root, "slskd-downloads")
+        beets_directory = os.path.join(root, "beets-library")
+        for directory in (root, processing, staging, slskd, beets_directory):
+            os.makedirs(directory, 0o700, exist_ok=True)
+        os.makedirs(processing_albums_dir(processing), 0o700, exist_ok=True)
+        return root, processing, staging, slskd, beets_directory
+
+    def test_disabled_lane_refuses_with_not_configured_error(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory, enabled=False,
+            )
+            candidate = os.path.join(root, "cd-rip")
+            os.mkdir(candidate)
+            with self.assertRaisesRegex(
+                LocalImportNotConfiguredError,
+                "local-import lane is not configured",
+            ), open_configured_local_import_directory(candidate, cfg):
+                pass
+
+    def test_unset_dir_refuses_with_not_configured_error(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root="", processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            with self.assertRaisesRegex(
+                LocalImportNotConfiguredError,
+                "local-import lane is not configured",
+            ), open_configured_local_import_directory(
+                os.path.join(root, "cd-rip"), cfg,
+            ):
+                pass
+
+    def test_empty_path_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError, "local-import path is missing",
+            ), open_configured_local_import_directory("", cfg):
+                pass
+
+    def test_relative_path_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError, "local-import path must be absolute",
+            ), open_configured_local_import_directory("cd-rip", cfg):
+                pass
+
+    def test_candidate_outside_root_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            outside = os.path.join(parent, "elsewhere")
+            os.mkdir(outside)
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError,
+                "outside the configured local-import root",
+            ), open_configured_local_import_directory(outside, cfg):
+                pass
+
+    def test_candidate_inside_processing_albums_dir_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            candidate = os.path.join(processing_albums_dir(processing), "sneaky")
+            os.mkdir(candidate)
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError,
+                "resolves inside a Cratedigger-owned subtree",
+            ), open_configured_local_import_directory(candidate, cfg):
+                pass
+
+    def test_candidate_inside_beets_staging_dir_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            candidate = os.path.join(staging, "sneaky")
+            os.mkdir(candidate)
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError,
+                "resolves inside a Cratedigger-owned subtree",
+            ), open_configured_local_import_directory(candidate, cfg):
+                pass
+
+    def test_candidate_inside_slskd_download_dir_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            candidate = os.path.join(slskd, "sneaky")
+            os.mkdir(candidate)
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError,
+                "resolves inside a Cratedigger-owned subtree",
+            ), open_configured_local_import_directory(candidate, cfg):
+                pass
+
+    def test_candidate_inside_beets_directory_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            candidate = os.path.join(beets_directory, "sneaky")
+            os.mkdir(candidate)
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError,
+                "resolves inside a Cratedigger-owned subtree",
+            ), open_configured_local_import_directory(candidate, cfg):
+                pass
+
+    def test_empty_beets_directory_is_not_treated_as_an_owned_subtree(self) -> None:
+        """An unset ``beets_directory`` (optional field) must never be
+        silently treated as "the current working directory" — the
+        ``os.path.abspath(os.path.normpath(""))`` trap."""
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, _beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory="",
+            )
+            self.assertNotIn("", local_import_owned_subtrees(cfg))
+            candidate = os.path.join(root, "cd-rip")
+            os.mkdir(candidate)
+            with open_configured_local_import_directory(candidate, cfg) as opened:
+                self.assertEqual(
+                    os.fstat(opened.fd).st_ino, os.stat(candidate).st_ino)
+
+    def test_happy_path_opens_the_candidate_under_a_broad_root(self) -> None:
+        """The configured root legitimately CONTAINS the owned subtrees as
+        siblings (the ``/mnt/virtio``-shaped deployment) — a sibling
+        candidate must still open cleanly."""
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            candidate = os.path.join(root, "cd-rip")
+            os.mkdir(candidate)
+            with open_configured_local_import_directory(candidate, cfg) as opened:
+                self.assertEqual(
+                    os.fstat(opened.fd).st_ino, os.stat(candidate).st_ino)
+                self.assertEqual(opened.display_path, os.path.abspath(candidate))
+
+    def test_missing_candidate_reports_missing_not_outside(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            os.mkdir(os.path.join(root, "cd-rip"))
+            gone = os.path.join(root, "cd-rip", "Deleted")
+            with self.assertRaises(FilesystemAuthorityError) as refused, \
+                    open_configured_local_import_directory(gone, cfg):
+                pass
+            self.assertEqual(refused.exception.code, "missing")
+            self.assertNotIn(
+                "outside the configured local-import root",
+                str(refused.exception))
+
+    def test_contained_but_unreadable_candidate_is_not_reported_as_containment(
+        self,
+    ) -> None:
+        """Mirrors the live #1063 bug fixed for the quarantine resolver:
+        an EACCES reached AFTER containment is proven must never be
+        reported as a containment (path_escape / owned-subtree) verdict.
+        """
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            cd_rip = os.path.join(root, "cd-rip")
+            album = os.path.join(cd_rip, "Album")
+            os.mkdir(cd_rip, 0o700)
+            os.mkdir(album, 0o700)
+            os.chmod(cd_rip, 0o000)
+            try:
+                with self.assertRaises(FilesystemAuthorityError) as refused, \
+                        open_configured_local_import_directory(album, cfg):
+                    pass
+            finally:
+                os.chmod(cd_rip, 0o700)
+            self.assertEqual(refused.exception.code, "open_failed")
+            self.assertEqual(refused.exception.errno_symbol, "EACCES")
+            self.assertNotIn(
+                "outside the configured local-import root",
+                str(refused.exception))
+            self.assertNotIn(
+                "resolves inside a Cratedigger-owned subtree",
+                str(refused.exception))
 
 
 class TestPrivatePreviewCopyBounds(unittest.TestCase):

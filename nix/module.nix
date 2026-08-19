@@ -1040,6 +1040,10 @@
     [Paths]
     processing_dir = ${cfg.processingDir}
 
+    [Local Import]
+    enabled = ${if cfg.localImport.enable then "True" else "False"}
+    dir = ${if cfg.localImport.dir != null then toString cfg.localImport.dir else ""}
+
     [Release Settings]
     use_most_common_tracknum = ${if cfg.releaseSettings.useMostCommonTracknum then "True" else "False"}
     allow_multi_disc = ${if cfg.releaseSettings.allowMultiDisc then "True" else "False"}
@@ -1244,6 +1248,58 @@ in {
         snapshots.  It must be absolute, disjoint from slskd.downloadDir,
         and beneath a parent that is not writable by slskd or another group.
       '';
+    };
+
+    # Manual local-import lane (issue #1176 PR2): an operator names a
+    # request ID and a directory already on disk, and Cratedigger COPIES it
+    # into private processing scratch (never importing in place, never
+    # mutating or deleting the operator's folder) before running it through
+    # the existing preview -> importer -> quality gate -> beets chain. This
+    # PR ships only the configuration surface and the execution-time path
+    # authority (lib.fs_authority.open_configured_local_import_directory) —
+    # no service, CLI subcommand, or import lane reads these options yet.
+    #
+    # Both options are deliberately redundant (enable AND dir, rather than
+    # a single nullable dir) because it reads more obviously to a human,
+    # and dir deliberately has NO working default even when enabled: naming
+    # this directory is a conscious operator act, and an installation that
+    # never sets it has NO local-import surface at all. A build that failed
+    # until a directory was named would just push operators to type a
+    # placeholder like /tmp, manufacturing the very surface this option
+    # exists to gate.
+    localImport = {
+      enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Enable the manual local-import lane. Off by default with no
+          working `localImport.dir` default — see `localImport.dir` for why
+          enabling this is a conscious, two-part act.
+        '';
+      };
+      dir = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = ''
+          Absolute root directory the local-import lane is permitted to
+          read from. Deliberately has NO default, even when
+          `localImport.enable = true`: naming this directory is a
+          conscious operator act, and an installation that does not set it
+          has no local-import surface at all.
+
+          Execution-time authority
+          (`lib.fs_authority.open_configured_local_import_directory`)
+          additionally refuses any candidate that resolves inside a
+          Cratedigger-owned subtree — the processing root
+          (`processingDir`'s `albums/`), the Beets validation staging
+          directory, the slskd download directory, and (when configured)
+          the Beets library root — even when it is nested under this
+          root. A broad root such as `/mnt/virtio` can legitimately
+          contain those trees too, so that narrowing lives at execution
+          time, not as a module-level assertion here (which would have to
+          reject the whole broad root outright).
+        '';
+      };
     };
 
     timer = {
@@ -2037,6 +2093,14 @@ in {
           in !(lib.hasPrefix "${processing}/" downloads || lib.hasPrefix "${downloads}/" processing || processing == downloads)
         );
         message = "services.cratedigger.processingDir must be lexically disjoint from services.cratedigger.slskd.downloadDir";
+      }
+      {
+        assertion = !cfg.localImport.enable || (
+          cfg.localImport.dir != null
+          && lib.hasPrefix "/" cfg.localImport.dir
+          && cfg.localImport.dir != "/"
+        );
+        message = "services.cratedigger.localImport: enable requires localImport.dir to be set, absolute, and not /.";
       }
       {
         assertion = cfg.pipelineDb.createLocally || cfg.pipelineDb.dsn != null;

@@ -195,6 +195,32 @@ in
     # distinct; Cratedigger needs only the slskd download-directory group.
     processingDir = "/srv/cratedigger-processing";
 
+    # --- Manual local-import lane (issue #1176 PR2): off by default -----
+    # Lets an operator name a request ID and a directory already on disk
+    # (a CD rip, a friend's copy, a completed download that failed at
+    # materialization) and have Cratedigger COPY it into private processing
+    # scratch before running the existing preview -> importer -> quality
+    # gate -> beets chain -- never importing in place, never mutating or
+    # deleting the named folder.
+    #
+    # `localImport.dir` deliberately has NO default even when enabled:
+    # naming this directory is a conscious operator act, and leaving the
+    # lane unconfigured means it has NO local-import surface at all. Do not
+    # "fix" that by pointing this at a placeholder like /tmp -- that
+    # manufactures exactly the surface this option exists to gate.
+    #
+    # Security note: the configured root is checked at EXECUTION time, not
+    # just here -- lib.fs_authority.open_configured_local_import_directory
+    # additionally refuses any candidate that resolves inside a
+    # Cratedigger-owned subtree (processingDir's albums/, the Beets
+    # validation staging dir, slskd.downloadDir, or the Beets library root)
+    # even when nested under this root, since a broad root can legitimately
+    # contain those trees as siblings of a real import source.
+    # localImport = {
+    #   enable = true;
+    #   dir = "/srv/music/manual-imports";
+    # };
+
     # --- Database: provisioned locally, peer auth, zero passwords -----
     # Keep this safe default unless you deliberately operate an external
     # PostgreSQL server. PostgreSQL data must remain on a supported local

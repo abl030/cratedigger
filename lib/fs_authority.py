@@ -996,6 +996,147 @@ def open_configured_quarantine_directory(
     raise FilesystemAuthorityError("path is outside configured quarantine roots")
 
 
+class LocalImportNotConfiguredError(FilesystemAuthorityError):
+    """The local-import lane (issue #1176) has no configured authority at all.
+
+    Its own TYPE, the same dispatch-by-``except`` pattern already used here
+    by :class:`SharedDownloadRootError` and its copy-phase siblings: "the
+    lane was never turned on / never given a root" is a materially
+    different fact than "this specific candidate is outside the configured
+    root" (the ordinary ``path_escape`` refusal
+    :func:`open_configured_local_import_directory` raises below), and PR3
+    needs to tell them apart to name the exact module option
+    (``services.cratedigger.localImport.enable`` /
+    ``services.cratedigger.localImport.dir``) in its message instead of a
+    generic containment refusal.
+
+    Deliberately reuses the existing ``"unspecified"`` :data:`FsAuthorityCode`
+    rather than adding a new member to that ``Literal``: a new code would
+    have to be threaded through every OTHER exhaustive classifier that
+    closes over the type — ``refusal_is_indeterminate`` and
+    ``unreadable_reason_text`` here (both patrolled by
+    ``get_args(FsAuthorityCode)`` in ``tests/test_path_authority.py``),
+    ``lib.download_materialization``'s ``assert_never``-enforced reason
+    vocabulary, and the Wrong Matches HTTP classifier's pinned table in
+    ``tests/test_wrong_match_file_service.py`` — for a fact none of those
+    OTHER consumers can ever observe: this exception is raised only here.
+    The exception TYPE is the distinct, structured discriminator a caller
+    branches on; the code stays the generic "predates/outside classification"
+    value it already is everywhere else unclassified.
+    """
+
+
+#: Cratedigger-owned subtrees the local-import lane must never read from,
+#: even when they sit beneath the configured root (issue #1176 PR2). A
+#: narrowing of the configured-root ALLOWLIST, not a general denylist
+#: (`.claude/rules/scope.md` rejects a denylist as the primary mechanism) —
+#: this only ever runs after a candidate has already proven to lie under
+#: ``cfg.local_import_dir``. A broad root such as ``/mnt/virtio``
+#: legitimately contains these trees as siblings of legitimate import
+#: sources, so the narrowing has to live at execution time, not as a
+#: module-level config assertion (which would have to reject the broad
+#: root outright, even though most paths under it are fine).
+#:
+#: The Beets library root (``cfg.beets_directory``) is included when the
+#: deployment has configured one; it is documented as optional on
+#: ``CratediggerConfig`` (some deployments absolutize via ``plex_path_map``
+#: instead), so an empty value is simply omitted here rather than treated
+#: as an error — see the residual-risk note in docs/nixos-module.md.
+def local_import_owned_subtrees(cfg: object) -> tuple[str, ...]:
+    """Cratedigger's own trees, as absolute paths, filtering out any unset."""
+    from lib.processing_paths import processing_albums_dir
+
+    candidates = (
+        processing_albums_dir(getattr(cfg, "processing_dir")),  # noqa: B009 - structural config boundary
+        getattr(cfg, "beets_staging_dir"),  # noqa: B009 - structural config boundary
+        getattr(cfg, "slskd_download_dir"),  # noqa: B009 - structural config boundary
+        getattr(cfg, "beets_directory"),  # noqa: B009 - structural config boundary
+    )
+    return tuple(path for path in candidates if path)
+
+
+@contextmanager
+def open_configured_local_import_directory(
+    raw_path: str, cfg: object,
+) -> Generator[HeldDirectory]:
+    """Resolve an operator-named path through the local-import lane's authority.
+
+    Mirrors :func:`open_configured_quarantine_directory`'s no-follow
+    descriptor discipline and structured-refusal discipline: a refusal
+    established AFTER containment is proven (an unreadable candidate, a
+    missing candidate) is never reported as a containment failure — the
+    live #1063 bug, where an EACCES on the private processing root was
+    reported as "path is outside configured roots", accusing the
+    operator's config of a problem that did not exist. Here that
+    discipline is trivial to keep rather than reconstruct: containment is
+    established purely lexically (this function opens nothing until AFTER
+    both the root-containment and owned-subtree checks pass), so every
+    ``FilesystemAuthorityError`` the no-follow opens below can raise is
+    already an honestly-classified storage/containment refusal, not a
+    verdict this function has to reclassify.
+
+    Differences from the quarantine resolver:
+
+    * Exactly ONE configured root (``cfg.local_import_dir``), not three —
+      there is no legacy multi-root precedence to arbitrate.
+    * No required path-component marker: containment under the configured
+      root is the whole test, so every path under it is a legitimate
+      candidate (unlike quarantine's ``failed_imports``/``wrong_matches``
+      requirement).
+    * ``raw_path`` MUST be absolute. Quarantine accepts a legacy relative
+      DB path because old rows really contain one; this is a brand-new
+      lane fed only by an operator-typed path (PR3), so there is no
+      relative-path precedent to honour and accepting one would only add
+      an ambiguous "relative to what" reading.
+    * The lane can be entirely unconfigured (``local_import_enabled`` is
+      false, or ``local_import_dir`` is unset) — refused via
+      :class:`LocalImportNotConfiguredError`, DISTINCT from an ordinary
+      containment refusal, so PR3 can name the module option rather than
+      rendering a generic "outside configured roots" message.
+    * Additionally refuses any candidate that resolves inside a
+      Cratedigger-owned subtree (:func:`local_import_owned_subtrees`) even
+      when it is nested under the configured root — pointing this lane at
+      the live library or Cratedigger's own processing tree is the
+      realistic operator typo, and it is also where file ownership stops
+      being unambiguous (good-citizen doctrine, issue #571).
+    """
+    enabled = bool(getattr(cfg, "local_import_enabled"))  # noqa: B009 - structural config boundary
+    root = getattr(cfg, "local_import_dir")  # noqa: B009 - structural config boundary
+    if not enabled or not root:
+        raise LocalImportNotConfiguredError(
+            "local-import lane is not configured: set "
+            "services.cratedigger.localImport.enable = true and "
+            "services.cratedigger.localImport.dir to an absolute root")
+    if not raw_path:
+        raise FilesystemAuthorityError("local-import path is missing")
+    if not os.path.isabs(raw_path):
+        raise FilesystemAuthorityError(
+            "local-import path must be absolute", code="path_escape")
+
+    try:
+        relative = _relative_to(root, os.path.abspath(os.path.normpath(raw_path)))
+    except FilesystemAuthorityError as exc:
+        raise FilesystemAuthorityError(
+            f"path is outside the configured local-import root: {raw_path}",
+            code="path_escape") from exc
+
+    candidate_abs = os.path.abspath(os.path.join(root, relative))
+    for owned in local_import_owned_subtrees(cfg):
+        if paths_overlap(owned, candidate_abs):
+            raise FilesystemAuthorityError(
+                f"path resolves inside a Cratedigger-owned subtree, "
+                f"refused regardless of the configured local-import root: "
+                f"{owned}",
+                code="path_escape")
+
+    with open_directory_path(root) as root_fd, open_relative_directory(root_fd, relative) as candidate_fd:
+        held = HeldDirectory(fd=os.dup(candidate_fd), display_path=candidate_abs)
+    try:
+        yield held
+    finally:
+        held.close()
+
+
 def open_regular_relative(root_fd: int, relative_path: str) -> OpenedRegularFile:
     """Open one regular descendant without ever following a pathname link."""
     parts = _parts(relative_path)
