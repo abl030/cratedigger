@@ -6688,7 +6688,13 @@ class FakePipelineDB:
                     # entirely — it is no longer even historically valid on
                     # import_jobs.job_type (contrast with the download_log
                     # outcome of the same name, below, which is unaffected).
+                    # PR1 round 2 added 'local_import' here: a successful
+                    # local import genuinely is a capture (the album was
+                    # acquired and installed), so it must confer
+                    # has_captured_history exactly as force_import and
+                    # youtube_import already do.
                     "automation_import", "force_import", "youtube_import",
+                    "local_import",
                 )
                 for job in self._import_jobs
             )

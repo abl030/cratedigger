@@ -391,12 +391,18 @@ class _DownloadLogMixin(_PipelineDBBase):
                      source_download_log_id: int | None = None,
                      # Migration 037 discriminator (``'slskd'`` / ``'youtube'``
                      # / ``'local'`` as of migration 080). Defaults to
-                     # ``'slskd'`` — the shape every current caller writes —
-                     # so every existing call site is unaffected. YouTube rows
-                     # never flow through this method (they use the dedicated
-                     # ``insert_youtube_running``); the ``local_import`` lane
-                     # (issue #1176 PR3) will be the first caller to pass
-                     # ``source='local'`` explicitly.
+                     # ``'slskd'`` so every existing DIRECT caller of this
+                     # method is unaffected. This parameter is NOT the writer
+                     # of the operator-visible TERMINAL ``download_log`` row —
+                     # that row is written by
+                     # ``_insert_terminal_download_audit``
+                     # (lib/pipeline_db/terminal_outcomes.py), which derives
+                     # ``source`` from the linked ``import_jobs.job_type`` in
+                     # its own SQL CASE (widened for ``'local_import'`` ->
+                     # ``'local'`` alongside this migration, issue #1176 PR1
+                     # round 2). ``insert_youtube_running`` is a third, wholly
+                     # separate INSERT — the queue-only ``'youtube_running'``
+                     # writer — and is unrelated to either of the above.
                      source: str = "slskd",
                      ) -> int:
         beets_distance_value, beets_scenario_value = derive_validation_log_columns(

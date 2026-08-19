@@ -15765,6 +15765,11 @@ class TestGetPipelineOverlay(unittest.TestCase):
             ("job-automation", "wanted", None, ("automation_import", "completed"), True),
             ("job-force", "wanted", None, ("force_import", "completed"), True),
             ("job-youtube", "wanted", None, ("youtube_import", "completed"), True),
+            # Issue #1176 PR1 round 2 (product decision, not deferred to
+            # PR3): a successful local import genuinely is a capture — the
+            # album was acquired and installed — so it confers
+            # has_captured_history exactly as force_import/youtube_import do.
+            ("job-local", "wanted", None, ("local_import", "completed"), True),
             ("no-witness", "wanted", None, None, False),
             ("download-rejected", "wanted", "rejected", None, False),
             ("download-youtube", "wanted", "youtube_success", None, False),
@@ -15806,6 +15811,7 @@ class TestGetPipelineOverlay(unittest.TestCase):
             "capture-job-automation": True,
             "capture-job-force": True,
             "capture-job-youtube": True,
+            "capture-job-local": True,
             "capture-no-witness": False,
             "capture-download-rejected": False,
             "capture-download-youtube": False,

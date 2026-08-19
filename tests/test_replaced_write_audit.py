@@ -107,7 +107,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "caller input or mutates album_requests. Issue #1022 projects a "
         "shared row's current-only lineage to NULL on this read surface"
     ),
-    ("lib/pipeline_db/download_log.py", 794, "2d2cba8bbf4b379f"): (
+    ("lib/pipeline_db/download_log.py", 800, "2d2cba8bbf4b379f"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(#867 intentionally added terminal/evidence projection and moved final "
         "classification after same-path DISTINCT). Issue #829 PR4/N3 CHANGED "
@@ -123,19 +123,19 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "shifted this line only — fingerprint unchanged, confirming the SQL "
         "itself is untouched"
     ),
-    ("lib/pipeline_db/download_log.py", 858, "e0154e89026dc8ef"): (
+    ("lib/pipeline_db/download_log.py", 864, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
         "#1077 F2's column removal, and issue #1176 PR1's ``log_download`` "
         "``source`` parameter above each shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 876, "13517e08e7db52f3"): (
+    ("lib/pipeline_db/download_log.py", 882, "13517e08e7db52f3"): (
         "validation key is closed vocabulary and IN list is value placeholders "
         "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
         "#1077 F2's column removal, and issue #1176 PR1's ``log_download`` "
         "``source`` parameter above each shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 893, "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", 899, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary "
         "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
         "#1077 F2's column removal, and issue #1176 PR1's ``log_download`` "
@@ -169,115 +169,111 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "for the converged cohort; all values remain parameters and "
         "album_requests is still only read)"
     ),
-    ("lib/pipeline_db/requests.py", 223, "b84b3af3ecbbf089"): (
+    ("lib/pipeline_db/requests.py", 224, "b84b3af3ecbbf089"): (
         "INSERT columns derive from the fixed AddRequestInput schema "
-        "and values remain one placeholder per validated schema field "
-        "(issue #1176 PR1's job_type retirement in "
-        "``_CAPTURE_AND_EVIDENCE_SELECT`` below shifted this line only — "
-        "fingerprint unchanged, confirming the SQL itself is untouched)"
+        "and values remain one placeholder per validated schema field"
     ),
-    ("lib/pipeline_db/requests.py", 235, "ead47926ac19037a"): (
+    ("lib/pipeline_db/requests.py", 236, "ead47926ac19037a"): (
         "request-by-id uses the fixed shared presentation projection and one "
-        "value placeholder (issue #1176 PR1's job_type retirement above "
-        "shifted this line only)"
+        "value placeholder"
     ),
-    ("lib/pipeline_db/requests.py", 331, "5d62850ba552ff76"): (
+    ("lib/pipeline_db/requests.py", 332, "5d62850ba552ff76"): (
         "cardinality-preserving library candidate lookup composes only the "
         "fixed presentation and capture/evidence projections with two value "
         "array parameters, then filters strict identities in Python; the "
         "Library contract no longer selects structured CD proof while the "
         "pointed current-evidence release-id gate remains for exact "
-        "verified/provisional facts. Issue #1176 PR1 retired the dead "
-        "``job_type = 'manual_import'`` arm from the embedded "
+        "verified/provisional facts. Issue #1176 PR1 round 1 retired the "
+        "dead ``job_type = 'manual_import'`` arm from the embedded "
         "``_CAPTURE_AND_EVIDENCE_SELECT`` predicate (zero live import_jobs "
         "rows ever carried it; migration 080 also drops it from the "
-        "job_type CHECK) — the interpolation site itself is unchanged, so "
-        "the fingerprint (which normalizes the ``{dynamic}`` slot) is "
-        "unaffected"
+        "job_type CHECK); round 2 added ``'local_import'`` to the same list "
+        "(a successful local import is a capture too, decided in review) — "
+        "net line position unchanged from before PR1. Neither edit touches "
+        "the interpolation site itself, so the fingerprint (which "
+        "normalizes the ``{dynamic}`` slot) is unaffected by either change"
     ),
-    ("lib/pipeline_db/requests.py", 355, "fc57192d01989af4"): (
+    ("lib/pipeline_db/requests.py", 356, "fc57192d01989af4"): (
         "MusicBrainz request lookup uses the fixed shared presentation "
-        "projection and one value placeholder (issue #1176 PR1's job_type "
-        "retirement above shifted this line only)"
+        "projection and one value placeholder"
     ),
-    ("lib/pipeline_db/requests.py", 368, "0ad0e7484937cd31"): (
+    ("lib/pipeline_db/requests.py", 369, "0ad0e7484937cd31"): (
         "Discogs request lookup uses the fixed shared presentation projection "
-        "and one value placeholder (issue #1176 PR1's job_type retirement "
-        "above shifted this line only)"
+        "and one value placeholder"
     ),
-    ("lib/pipeline_db/requests.py", 417, "327e39bd024d50d3"): (
+    ("lib/pipeline_db/requests.py", 418, "327e39bd024d50d3"): (
         "replacement-chain lookup uses the fixed shared presentation "
-        "projection and one value placeholder (issue #1176 PR1's job_type "
-        "retirement above shifted this line only)"
+        "projection and one value placeholder"
     ),
-    ("lib/pipeline_db/requests.py", 489, "1bd5cbde29149322"): (
+    ("lib/pipeline_db/requests.py", 490, "1bd5cbde29149322"): (
         "release-id lookup selects one of two fixed identity predicates "
-        "and uses the fixed shared presentation projection (issue #1176 "
-        "PR1's job_type retirement above shifted this line only)"
+        "and uses the fixed shared presentation projection"
     ),
-    ("lib/pipeline_db/requests.py", 512, "d1da142f4a1a30a8"): (
+    ("lib/pipeline_db/requests.py", 513, "d1da142f4a1a30a8"): (
         "non-replaced listing uses the fixed shared presentation projection "
-        "with one static lifecycle predicate (issue #1176 PR1's job_type "
-        "retirement above shifted this line only)"
+        "with one static lifecycle predicate"
     ),
-    ("lib/pipeline_db/requests.py", 714, "bc05e500065af93a"): (
+    ("lib/pipeline_db/requests.py", 715, "bc05e500065af93a"): (
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "values use one typed JSONB record parameter, and the exact active "
-        "source plus absent processing owner are guarded (issue #1176 PR1's "
-        "job_type retirement above shifted this line only)"
+        "source plus absent processing owner are guarded"
     ),
-    ("lib/pipeline_db/requests.py", 733, "943205ae40bba7e6"): (
+    ("lib/pipeline_db/requests.py", 734, "943205ae40bba7e6"): (
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "values use one typed JSONB record parameter, and any processing owner "
-        "causes the guarded update to report a conflict (issue #1176 PR1's "
-        "job_type retirement above shifted this line only)"
+        "causes the guarded update to report a conflict"
     ),
-    ("lib/pipeline_db/requests.py", 1616, "890d0f2e35ffd73c"): (
+    ("lib/pipeline_db/requests.py", 1617, "890d0f2e35ffd73c"): (
         "optional LIMIT is normalized through int before interpolation "
-        "and the base wanted query is static (issue #1176 PR1's job_type "
-        "retirement above shifted this line only)"
+        "and the base wanted query is static"
     ),
-    ("lib/pipeline_db/requests.py", 1646, "bf514491f423d3be"): (
+    ("lib/pipeline_db/requests.py", 1647, "bf514491f423d3be"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder "
-        "over the fixed shared presentation projection (issue #1176 PR1's "
-        "job_type retirement above shifted this line only)"
+        "over the fixed shared presentation projection"
     ),
-    ("lib/pipeline_db/requests.py", 1675, "93f3043b99b3ec7c"): (
+    ("lib/pipeline_db/requests.py", 1676, "93f3043b99b3ec7c"): (
         "request search composes only one fixed optional status predicate over "
-        "the fixed presentation projection and value placeholders (issue #1176 "
-        "PR1's job_type retirement above shifted this line only)"
+        "the fixed presentation projection and value placeholders"
     ),
-    ("lib/pipeline_db/requests.py", 1814, "724128efb25b8439"): (
+    ("lib/pipeline_db/requests.py", 1815, "724128efb25b8439"): (
         "artist request lookup uses the fixed presentation and capture/evidence "
         "projections with a static UUID-aware fallback predicate; the Library "
         "contract no longer selects structured CD proof while the pointed "
         "current-evidence release-id gate remains for exact verified/provisional "
-        "facts. Issue #1176 PR1 retired the dead ``job_type = 'manual_import'`` "
-        "arm from the embedded ``_CAPTURE_AND_EVIDENCE_SELECT`` predicate — the "
-        "interpolation site is unchanged, so the fingerprint is unaffected"
+        "facts. Issue #1176 PR1 round 1 retired the dead "
+        "``job_type = 'manual_import'`` arm from the embedded "
+        "``_CAPTURE_AND_EVIDENCE_SELECT`` predicate; round 2 added "
+        "``'local_import'`` to the same list — the interpolation site is "
+        "unchanged throughout, so the fingerprint is unaffected by either "
+        "change"
     ),
-    ("lib/pipeline_db/requests.py", 1833, "f59ded429883f2ec"): (
+    ("lib/pipeline_db/requests.py", 1834, "f59ded429883f2ec"): (
         "artist-name fallback uses the fixed presentation and capture/evidence "
         "projections with one escaped value placeholder; the Library contract "
         "no longer selects structured CD proof while the pointed current-evidence "
         "release-id gate remains for exact verified/provisional facts. Issue "
-        "#1176 PR1 retired the dead ``job_type = 'manual_import'`` arm from the "
-        "embedded ``_CAPTURE_AND_EVIDENCE_SELECT`` predicate — the interpolation "
-        "site is unchanged, so the fingerprint is unaffected"
+        "#1176 PR1 round 1 retired the dead ``job_type = 'manual_import'`` arm "
+        "from the embedded ``_CAPTURE_AND_EVIDENCE_SELECT`` predicate; round 2 "
+        "added ``'local_import'`` to the same list — the interpolation site is "
+        "unchanged throughout, so the fingerprint is unaffected by either change"
     ),
-    ("lib/pipeline_db/requests.py", 1864, "fdbd2821ab3cbb5a"): (
+    ("lib/pipeline_db/requests.py", 1865, "fdbd2821ab3cbb5a"): (
         "attempt kind is validated against the fixed retry-counter vocabulary "
         "and every value remains a direct placeholder; an attached processing "
-        "owner makes the compare-and-set a zero-write conflict (issue #1176 "
-        "PR1's job_type retirement above shifted this line only)"
+        "owner makes the compare-and-set a zero-write conflict"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1141, "ebb50341a8d836f6"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1142, "ebb50341a8d836f6"): (
         "processing-terminal metadata keys use the validated request-field "
         "vocabulary while exact request and owner predicates retain authority; "
         "the static owner-clearing status CAS remains the final request write "
         "(review #2: identity moved because the enclosing method now reads "
         "retry-counter policy from the canonical VALID_TRANSITIONS table "
-        "instead of zeroing counters inline — no SQL-shape change here)"
+        "instead of zeroing counters inline — no SQL-shape change here. Issue "
+        "#1176 PR1 round 2 added a ``WHEN job_type = 'local_import'`` arm to "
+        "``_insert_terminal_download_audit``'s unrelated download_log-facing "
+        "CASE, earlier in this same file — that statement never mentions "
+        "album_requests and is outside this audit's scope, but it shifted "
+        "this line only)"
     ),
 }
 
@@ -314,7 +310,7 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 457, "9b11fb540dfe44e3"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1168, "6674811fa5453c86"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1169, "6674811fa5453c86"): (
         "automation terminalization performs the final exact processing-owner "
         "CAS and clears the owner in the same static request write "
         "(review #2: retry counters are now policy-derived placeholders read "
@@ -322,50 +318,43 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "zeros, so `processing -> wanted` retains them and automatic backoff "
         "keeps growing; the exact `status = 'processing' AND "
         "active_automation_import_job_id = %s` predicate and the "
-        "owner-clearing final write are unchanged)"
+        "owner-clearing final write are unchanged. Issue #1176 PR1 round 2's "
+        "``local_import`` CASE arm in ``_insert_terminal_download_audit``, "
+        "earlier in this file, shifted this line only — that statement is "
+        "download_log-facing and never mentions album_requests)"
     ),
-    ("lib/pipeline_db/requests.py", 529, "a2f3083f8cbe8885"): (
+    ("lib/pipeline_db/requests.py", 530, "a2f3083f8cbe8885"): (
         "Replace holds the row lock and CASes the captured active source status "
-        "only when no processing owner exists (issue #1176 PR1's job_type "
-        "retirement in ``_CAPTURE_AND_EVIDENCE_SELECT`` above shifted this "
-        "line only — fingerprint unchanged, confirming the SQL itself is "
-        "untouched)"
+        "only when no processing owner exists"
     ),
-    ("lib/pipeline_db/requests.py", 1026, "b74f9eb518948ae5"): (
+    ("lib/pipeline_db/requests.py", 1027, "b74f9eb518948ae5"): (
         "operator idempotence uses a no-op CAS against the observed status "
-        "and refuses an active processing owner (issue #1176 PR1's job_type "
-        "retirement above shifted this line only)"
+        "and refuses an active processing owner"
     ),
-    ("lib/pipeline_db/requests.py", 1065, "94c8caa29b5f3093"): (
+    ("lib/pipeline_db/requests.py", 1066, "94c8caa29b5f3093"): (
         "ordinary typed transitions CAS the source status selected by the DAG "
-        "and refuse an active processing owner (issue #1176 PR1's job_type "
-        "retirement above shifted this line only)"
+        "and refuse an active processing owner"
     ),
-    ("lib/pipeline_db/requests.py", 1164, "cd2c8644115e82f6"): (
+    ("lib/pipeline_db/requests.py", 1165, "cd2c8644115e82f6"): (
         "typed imported transition CASes status with rescue audit atomically "
-        "and refuses an active processing owner (issue #1176 PR1's job_type "
-        "retirement above shifted this line only)"
+        "and refuses an active processing owner"
     ),
-    ("lib/pipeline_db/requests.py", 1302, "745b1dc37147f0f5"): (
+    ("lib/pipeline_db/requests.py", 1303, "745b1dc37147f0f5"): (
         "typed reset-to-wanted transition CASes its captured source status; "
         "the Bad Rip priority timestamp is a static CASE update in the same CAS, "
-        "and an active processing owner is refused (issue #1176 PR1's job_type "
-        "retirement above shifted this line only)"
+        "and an active processing owner is refused"
     ),
-    ("lib/pipeline_db/requests.py", 1376, "3490139cad98e85e"): (
+    ("lib/pipeline_db/requests.py", 1377, "3490139cad98e85e"): (
         "automatic recovery accepts only downloading as its exact source "
-        "without widening processing authority (issue #1176 PR1's job_type "
-        "retirement above shifted this line only)"
+        "without widening processing authority"
     ),
-    ("lib/pipeline_db/requests.py", 1421, "a0853139ff6dd9ad"): (
+    ("lib/pipeline_db/requests.py", 1422, "a0853139ff6dd9ad"): (
         "typed download claim accepts only the explicit wanted source status "
-        "and installs one immutable active download state (issue #1176 PR1's "
-        "job_type retirement above shifted this line only)"
+        "and installs one immutable active download state"
     ),
-    ("lib/pipeline_db/requests.py", 1457, "34dd9d8beb763829"): (
+    ("lib/pipeline_db/requests.py", 1458, "34dd9d8beb763829"): (
         "plan-aware download claim uses an exact wanted source predicate "
-        "plus exact persisted-plan witnesses (issue #1176 PR1's job_type "
-        "retirement above shifted this line only)"
+        "plus exact persisted-plan witnesses"
     ),
 }
 

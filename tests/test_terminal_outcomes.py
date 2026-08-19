@@ -24,7 +24,14 @@ from lib.import_execution import (
     OwnerSessionIdentity,
     ProcessIdentity,
 )
-from lib.import_queue import IMPORT_JOB_FORCE, ImportJob
+from lib.import_queue import (
+    IMPORT_JOB_FORCE,
+    IMPORT_JOB_LOCAL,
+    IMPORT_JOB_YOUTUBE,
+    ImportJob,
+    local_import_payload,
+    youtube_import_payload,
+)
 from lib.pipeline_db import (
     BACKOFF_BASE_MINUTES,
     PipelineDB,
@@ -313,6 +320,8 @@ def _seed_running_import(
     unfindable: bool = False,
     automation_state: bool = False,
     cooldown_username: str | None = None,
+    job_type: str = IMPORT_JOB_FORCE,
+    payload: dict[str, object] | None = None,
 ) -> tuple[PipelineDB, int, int]:
     db = make_db()
     request_id = db.add_request(
@@ -403,10 +412,10 @@ def _seed_running_import(
             ("{}", request_id),
         )
         job = db.enqueue_import_job(
-            IMPORT_JOB_FORCE,
+            job_type,
             request_id=request_id,
-            dedupe_key=f"atomic:{request_id}",
-            payload={
+            dedupe_key=f"atomic:{request_id}:{job_type}",
+            payload=payload or {
                 "download_log_id": 1,
                 "failed_path": "/tmp/atomic-force",
             },
@@ -2215,6 +2224,101 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         self.assertIsNone(row["source_download_log_id"])
         self.assertEqual(row["source"], "slskd")
         self.assertEqual(result.job.status, "failed")
+
+    def test_job_backed_local_import_terminal_audit_lands_source_local(self):
+        """Issue #1176 PR1 round 2: the headline provenance fix.
+
+        ``_insert_terminal_download_audit``'s job_type-derived CASE is the
+        writer of the OPERATOR-VISIBLE terminal ``download_log`` row (not
+        ``log_download``'s own ``source`` default parameter, which only
+        applies to *direct* callers) — a ``local_import`` job's terminal
+        outcome must land ``source='local'``, not silently fall through to
+        the ``ELSE 'slskd'`` branch and claim a Soulseek transfer that never
+        happened."""
+        db, request_id, job_id = _seed_running_import(
+            job_type=IMPORT_JOB_LOCAL,
+            payload=local_import_payload(
+                source_path="/mnt/virtio/Music/Incoming/local/x",
+                request_id=1,
+            ),
+        )
+        self.addCleanup(db.close)
+        outcome = ImportTerminalOutcome(
+            request_id=request_id,
+            import_job_id=job_id,
+            initial_transition=transitions.RequestTransition.to_imported(),
+            audit=TerminalDownloadAudit(outcome="success"),
+            job=ImportJobTerminal(
+                status="completed",
+                result={"success": True},
+                message="local import complete",
+            ),
+        )
+
+        result = db.persist_import_terminal_outcome(outcome)
+
+        row = db.get_download_log_entry(result.download_log_id)
+        assert row is not None
+        self.assertEqual(row["source"], "local")
+
+    def test_job_backed_youtube_import_terminal_audit_still_lands_source_youtube(
+        self,
+    ):
+        """Must-still-work pin: adding the local_import CASE arm must not
+        disturb the pre-existing youtube_import arm."""
+        db, request_id, job_id = _seed_running_import(
+            job_type=IMPORT_JOB_YOUTUBE,
+            payload=youtube_import_payload(
+                staged_path="/Incoming/auto-import/Artist - Album",
+                request_id=1,
+                browse_id="MPREb_terminal",
+                download_log_id=1,
+            ),
+        )
+        self.addCleanup(db.close)
+        outcome = ImportTerminalOutcome(
+            request_id=request_id,
+            import_job_id=job_id,
+            initial_transition=transitions.RequestTransition.to_imported(),
+            audit=TerminalDownloadAudit(outcome="success"),
+            job=ImportJobTerminal(
+                status="completed",
+                result={"success": True},
+                message="youtube import complete",
+            ),
+        )
+
+        result = db.persist_import_terminal_outcome(outcome)
+
+        row = db.get_download_log_entry(result.download_log_id)
+        assert row is not None
+        self.assertEqual(row["source"], "youtube")
+
+    def test_job_backed_force_import_terminal_audit_still_lands_source_slskd(
+        self,
+    ):
+        """Must-still-work pin: adding the local_import CASE arm must not
+        disturb the ELSE branch every other (force/automation) job_type
+        falls through to."""
+        db, request_id, job_id = _seed_running_import()  # default: force_import
+        self.addCleanup(db.close)
+        outcome = ImportTerminalOutcome(
+            request_id=request_id,
+            import_job_id=job_id,
+            initial_transition=transitions.RequestTransition.to_imported(),
+            audit=TerminalDownloadAudit(outcome="force_import"),
+            job=ImportJobTerminal(
+                status="completed",
+                result={"success": True},
+                message="force import complete",
+            ),
+        )
+
+        result = db.persist_import_terminal_outcome(outcome)
+
+        row = db.get_download_log_entry(result.download_log_id)
+        assert row is not None
+        self.assertEqual(row["source"], "slskd")
 
     def _run_job_backed_automation_result(
         self,

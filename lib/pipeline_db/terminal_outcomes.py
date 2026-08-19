@@ -724,8 +724,9 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 %s, %s, %s, %s, %s, %s, %s,
                 COALESCE(
                     (SELECT source FROM origin),
-                    (SELECT CASE WHEN job_type = 'youtube_import'
-                                 THEN 'youtube' ELSE 'slskd' END
+                    (SELECT CASE WHEN job_type = 'youtube_import' THEN 'youtube'
+                                 WHEN job_type = 'local_import' THEN 'local'
+                                 ELSE 'slskd' END
                      FROM import_jobs
                      WHERE id = %s AND request_id = %s),
                     'slskd'

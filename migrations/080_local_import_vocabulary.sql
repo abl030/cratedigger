@@ -16,13 +16,16 @@
 --
 --   2. ``import_jobs_job_type_check`` is widened to admit ``'local_import'``
 --      and simultaneously drops ``'manual_import'``. ``manual_import`` was
---      the job_type for an HTTP endpoint removed as security finding
---      CD-SEC-03 (``docs/security-audit-2026-07-12.md``); ``import_jobs``
---      carries ZERO rows with ``job_type = 'manual_import'`` (verified
---      2026-08-19), so retiring it loses no history. This repo is
---      single-operator, forward-only, no compat shims (``.claude/rules/
---      scope.md``) — there is no reason to keep vocabulary for a job_type no
---      writer has produced since the endpoint that wrote it was deleted.
+--      the job_type for ``post_manual_import``, an HTTP endpoint NAMED in
+--      security finding CD-SEC-03 (``docs/security-audit-2026-07-12.md`` —
+--      CD-SEC-03 itself was remediated separately, via ``post_import_preview``'s
+--      path-authority work) and REMOVED by the issue #737 mode-blind refactor
+--      (commit ``0a6314ec``, 2026-07-18); ``import_jobs`` carries ZERO rows
+--      with ``job_type = 'manual_import'`` (verified 2026-08-19), so retiring
+--      it loses no history. This repo is single-operator, forward-only, no
+--      compat shims (``.claude/rules/scope.md``) — there is no reason to keep
+--      vocabulary for a job_type no writer has produced since the endpoint
+--      that wrote it was deleted.
 --      ``download_log_outcome_check`` is DELIBERATELY left untouched: the
 --      ``manual_import`` OUTCOME (as opposed to job_type) is still carried
 --      by 7 live ``download_log`` audit rows from April 2026 and remains

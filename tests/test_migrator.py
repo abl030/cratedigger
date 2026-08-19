@@ -6173,9 +6173,11 @@ class TestLocalImportVocabularySchema(unittest.TestCase):
     - ``download_log_source_check`` admits ``'local'`` alongside the
       existing ``'slskd'`` / ``'youtube'`` values (migration 037).
     - ``import_jobs_job_type_check`` admits ``'local_import'`` and no
-      longer admits ``'manual_import'`` (retired: the HTTP endpoint that
-      wrote it was removed as security finding CD-SEC-03, and zero live
-      rows carried it).
+      longer admits ``'manual_import'`` (retired: ``post_manual_import``,
+      the HTTP endpoint that wrote it, was named in security finding
+      CD-SEC-03 (remediated separately, via ``post_import_preview``) and
+      removed by the issue #737 mode-blind refactor (commit ``0a6314ec``);
+      zero live rows carried it).
     - ``download_log_outcome_check`` is UNCHANGED: the ``manual_import``
       OUTCOME (a different column, a different taxonomy) must still be
       admitted — 7 live audit rows depend on it.
@@ -6287,8 +6289,11 @@ class TestLocalImportVocabularySchema(unittest.TestCase):
 
     def test_job_type_check_no_longer_admits_manual_import(self):
         """The retired job_type value: 'manual_import' was the vocabulary
-        for an HTTP endpoint removed as security finding CD-SEC-03. Zero
-        live import_jobs rows carried it, so retiring it loses no history."""
+        for post_manual_import, an HTTP endpoint named in security finding
+        CD-SEC-03 (remediated separately, via post_import_preview) and
+        removed by the issue #737 mode-blind refactor (commit 0a6314ec).
+        Zero live import_jobs rows carried it, so retiring it loses no
+        history."""
         rid = self._make_request("mig080-manual-import-rejected-mbid")
         try:
             with self.assertRaises(psycopg2.errors.CheckViolation):
@@ -6387,6 +6392,47 @@ class TestLocalImportVocabularySchema(unittest.TestCase):
                     '{"source_path": "/tmp/local-c", "request_id": 1}'::jsonb
                 )
             """, (rid,))
+        finally:
+            self._exec("DELETE FROM import_jobs WHERE request_id = %s", (rid,))
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_active_local_import_recovery_required_blocks_new_queued(self):
+        """Per-clause proof (code-quality.md § "Per-clause proof"): the
+        index's WHERE clause names THREE statuses
+        (``'queued','running','recovery_required'``) as active, and the
+        sibling test above only ever drives ``queued -> completed``, which
+        cannot distinguish the real clause from a narrower
+        ``('queued','running')`` mutant. A ``local_import`` job stuck in
+        ``recovery_required`` (a durably-authorized Beets launch with no
+        terminal acknowledgement — the same status YouTube/force jobs use)
+        must still block a fresh ``queued`` attempt for the same request:
+        two live local-import attempts racing the same Beets album is
+        exactly the corruption this index exists to prevent."""
+        rid = self._make_request("mig080-local-import-recovery-mbid")
+        try:
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, request_id, dedupe_key, payload
+                ) VALUES (
+                    'local_import', %s, 'local_import:request:recovery-a',
+                    '{"source_path": "/tmp/local-recovery-a", "request_id": 1}'::jsonb
+                )
+            """, (rid,))
+            self._exec("""
+                UPDATE import_jobs
+                SET status = 'recovery_required'
+                WHERE request_id = %s
+                  AND job_type = 'local_import'
+            """, (rid,))
+            with self.assertRaises(psycopg2.errors.UniqueViolation):
+                self._exec("""
+                    INSERT INTO import_jobs (
+                        job_type, request_id, dedupe_key, payload
+                    ) VALUES (
+                        'local_import', %s, 'local_import:request:recovery-b',
+                        '{"source_path": "/tmp/local-recovery-b", "request_id": 1}'::jsonb
+                    )
+                """, (rid,))
         finally:
             self._exec("DELETE FROM import_jobs WHERE request_id = %s", (rid,))
             self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))

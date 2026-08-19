@@ -232,8 +232,12 @@ PostgreSQL holdings projection, badge column, migration, or backfill:
   MusicBrainz or Discogs release identity. A sibling pressing never counts.
 - `has_captured_history` is true when the request has a durable successful
   download outcome (`success`, `force_import`, or `manual_import`), a completed
-  successful import job (`automation_import`, `force_import`, `manual_import`,
-  or `youtube_import`), or the accepted current `status='imported'` legacy
+  successful import job (`automation_import`, `force_import`, `youtube_import`,
+  or `local_import` — issue #1176 PR1 round 2: a successful local import
+  genuinely is a capture, so it confers this exactly as force/youtube imports
+  do; `manual_import` is not in this job-type list — that job_type is retired
+  entirely by migration 080, unlike the still-live `manual_import` *outcome*
+  named above), or the accepted current `status='imported'` legacy
   fallback. Historical witnesses remain true across later status changes. The
   status-only fallback deliberately disappears if the operator explicitly
   reopens that legacy request, until ordinary acquisition writes a witness.
@@ -425,7 +429,7 @@ processing, and YouTube rescue all share this table.
 
 Key fields:
 
-- `job_type TEXT` — active values are `force_import`, `automation_import`, and `youtube_import`. `local_import` (issue #1176 PR1) is admitted by the CHECK constraint ahead of the import-local lane that will use it — no writer enqueues it yet. `manual_import` is retired entirely: it was the job_type for an HTTP endpoint removed as security finding CD-SEC-03, carried zero live rows, and migration 080 drops it from the CHECK (it is no longer even historically enqueueable — contrast with the `manual_import` *outcome* on `download_log`, a separate taxonomy on a separate column that is unaffected and still carries live audit rows).
+- `job_type TEXT` — active values are `force_import`, `automation_import`, and `youtube_import`. `local_import` (issue #1176 PR1) is admitted by the CHECK constraint ahead of the import-local lane that will use it — no writer enqueues it yet. `manual_import` is retired entirely: it was the job_type for `post_manual_import`, an HTTP endpoint named in security finding CD-SEC-03 (whose remediation is unrelated — CD-SEC-03 was fixed via `post_import_preview`'s path-authority work) and removed by the issue #737 mode-blind refactor (commit `0a6314ec`, 2026-07-18). It carried zero live rows, and migration 080 drops it from the CHECK (it is no longer even historically enqueueable — contrast with the `manual_import` *outcome* on `download_log`, a separate taxonomy on a separate column that is unaffected and still carries live audit rows).
 - `status TEXT` — `queued`, `running`, `recovery_required`, `completed`, or
   `failed`. `recovery_required` remains readable for historical rows whose
   Beets launch was durably authorized but no terminal acknowledgement

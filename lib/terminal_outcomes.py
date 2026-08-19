@@ -88,7 +88,19 @@ class TerminalDownloadAudit:
     source_download_log_id: int | None = None
 
     def as_log_kwargs(self) -> dict[str, object]:
-        """Return the exact public ``log_download`` keyword projection."""
+        """Project every dataclass field onto its matching ``log_download``
+        keyword parameter, by name.
+
+        NOT exact — never was, and issue #1176 PR1 widened the gap further:
+        ``log_download`` also accepts ``transfer_detail`` (never carried by
+        this terminal-outcome Struct) and, as of migration 080, ``source``
+        (also absent here). The real terminal ``download_log`` row's
+        ``source`` is not projected through this method at all: it is
+        derived from the linked ``import_jobs.job_type`` by
+        ``_insert_terminal_download_audit``'s own SQL CASE
+        (``lib/pipeline_db/terminal_outcomes.py``), independently of
+        whatever ``log_download`` call site consumes this dict.
+        """
         return {item.name: getattr(self, item.name) for item in fields(self)}
 
 
