@@ -40,6 +40,7 @@ class ConsumerBeetsWorldConfig:
     album_fields: tuple[tuple[str, str], ...]
     duplicate_album_keys: tuple[str, ...]
     deployment_plugins: tuple[str, ...]
+    fetchart_sources: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -126,11 +127,31 @@ def extract_consumer_beets_world_config(
             "deployment plugin list is empty in examples/cratedigger.nix"
         )
 
+    # #1200 review F4: FETCHART_IDENTITY_FIRST_SOURCES's docstring only
+    # PROSE-promises to stay in sync with this file's fetchart.sources list
+    # -- extracting it here lets
+    # tests/test_beets_world_config.py::TestConsumerBeetsWorldConfig
+    # .test_fetchart_sources_constant_matches_the_shipped_example assert
+    # equality against it, so a reordering of the constant fails instead of
+    # silently instructing operators toward an order the shipped example
+    # contradicts.
+    sources_block = re.search(r"sources\s*=\s*\[([^\]]+)\]", source)
+    if sources_block is None:
+        raise AssertionError(
+            "fetchart.sources not found in examples/cratedigger.nix"
+        )
+    fetchart_sources = tuple(re.findall(r'"([^"]+)"', sources_block.group(1)))
+    if not fetchart_sources:
+        raise AssertionError(
+            "fetchart.sources is empty in examples/cratedigger.nix"
+        )
+
     return ConsumerBeetsWorldConfig(
         default_path_template=default_match.group(1),
         album_fields=album_fields,
         duplicate_album_keys=duplicate_keys,
         deployment_plugins=deployment_plugins,
+        fetchart_sources=fetchart_sources,
     )
 
 

@@ -80,6 +80,27 @@ let
       auto = true;
       minwidth = 300;
       maxwidth = 500;
+      # Identity-first order (#1200): exact-identity sources before
+      # title-guess sources, and local filesystem last. "coverart" (Cover
+      # Art Archive by MBID) and "cover_art_url" (Beets' discogs plugin,
+      # exact Discogs release id -- populated by Cratedigger's harness
+      # fallback even behind a Discogs mirror, see nix/beets.nix) both name
+      # the exact pressing the request pins. "itunes"/"amazon"/"albumart"
+      # only guess by title and can collide two different pressings of the
+      # same album onto one wrong sleeve. "filesystem" (locally dropped
+      # art) goes last so a small legacy image can never shadow a good
+      # remote fetch. Leaving this key unset instead inherits Beets'
+      # upstream default, which ranks cover_art_url LAST, after itunes --
+      # lib/beets_config_contract.py warns if that happens with discogs
+      # active.
+      sources = [
+        "coverart"
+        "cover_art_url"
+        "itunes"
+        "amazon"
+        "albumart"
+        "filesystem"
+      ];
     };
   };
   beetsConfigDir = cratediggerPkgs.runCommand

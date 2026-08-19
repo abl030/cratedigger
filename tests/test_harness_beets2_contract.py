@@ -804,6 +804,43 @@ class TestAuniqueCollisionContract(unittest.TestCase):
 
 
 class TestHarnessBeets2Contract(unittest.TestCase):
+    def test_harness_starts_without_pythonpath_matching_main_service_wrapper(
+        self,
+    ):
+        """cratedigger.service's own wrapper (nix/module.nix, cratediggerPkg)
+        does NOT export PYTHONPATH -- only importerPkg/previewWorkerPkg do.
+        harness/beets_harness.py's own sys.path[0] is harness/, not the repo
+        root, so any module-scope ``from lib.X import Y`` reachable from
+        harness/beets_compat.py breaks the main pipeline loop specifically
+        (issue #1200 review F1). The sibling --help launch above proves
+        nothing about this: it never overrides ``env=``, so it silently
+        inherits THIS test process's own PYTHONPATH (nix-shell/the test
+        runner already export the repo root) -- exactly the permissiveness
+        gap this regression test exists to close (test-fidelity.md).
+
+        Launches through ``harness/run_beets_harness.sh`` -- the exact
+        entry point ``lib/beets.py``'s ``harness_path`` names and the main
+        pipeline loop actually invokes (issue #1200 review N5), not
+        ``beets_harness.py`` directly. Higher fidelity than invoking the
+        interpreter on the script path: a future edit to the wrapper
+        itself that injects a PYTHONPATH export would also be caught
+        here. Strip PYTHONPATH explicitly and launch the real wrapper the
+        way the main service actually does."""
+        env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+        self.assertNotIn("PYTHONPATH", env)
+        wrapper = os.path.join(_REPO, "harness", "run_beets_harness.sh")
+        proc = subprocess.run(
+            [wrapper, "--help"],
+            cwd=_REPO, env=env, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(
+            proc.returncode, 0,
+            "harness failed to start without PYTHONPATH -- this is the "
+            "exact shape cratedigger.service's wrapper runs under\n"
+            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}",
+        )
+        self.assertIn("Beets interactive import harness", proc.stdout)
+
     def test_help_stays_on_normal_stdout_and_protocol_is_private(self):
         help_proc = subprocess.run(
             [os.environ["CRATEDIGGER_BEETS_PYTHON"], os.path.join(_REPO, "harness", "beets_harness.py"), "--help"],

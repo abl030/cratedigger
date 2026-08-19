@@ -14,6 +14,7 @@ from pathlib import Path
 import yaml
 
 from lib.beets_config_contract import (
+    FETCHART_IDENTITY_FIRST_SOURCES,
     BeetsConfigError,
     BeetsConfigReport,
     ContractFinding,
@@ -379,7 +380,15 @@ class BeetsContractWorld:
             "permissions": {"file": "0664", "dir": "02775"},
             "musicbrainz": {"host": "musicbrainz.org", "https": True},
             "convert": {"auto": False, "auto_keep": False},
-            "fetchart": {"auto": True},
+            # Baseline world stays warning-free: rank cover_art_url ahead of
+            # itunes (#1200) so tests that assert a clean default report
+            # aren't tripped by the new fetchart_cover_art_url_ranked_after_
+            # itunes warning. Tests exercising that warning override this key
+            # explicitly (absent, or reordered).
+            "fetchart": {
+                "auto": True,
+                "sources": list(FETCHART_IDENTITY_FIRST_SOURCES),
+            },
         }
         config.update(overrides)
         self.main_config.write_text(yaml.safe_dump(config), encoding="utf-8")
