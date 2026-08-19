@@ -354,100 +354,168 @@ class TestCollapseDiskFullFailures(unittest.TestCase):
 
 class TestRunTargetsWorkerExceptionWiring(unittest.TestCase):
     """`_run_targets` really delegates to the measured classifier (#1111),
-    through the injected ``classify_infrastructure_failure`` seam rather
-    than the module's captured default (#1208 item 2).
+    with the floor controlled through the SAME configured
+    ``CRATEDIGGER_TEST_RAM_MIN_BYTES`` override production honors
+    (`scripts/run_test_suite.py::_default_min_headroom_bytes`, read
+    verbatim including ``0``) — the identical env-var idiom
+    `tests/test_test_tmpfs.py` already uses, set for the duration and
+    restored in a ``finally`` (#1208 item 2).
 
-    The prior shape asserted ``disk_full`` against a live measurement of
-    the AMBIENT, shared test-RAM root at its own 1 GiB configured floor —
-    its own comment admitted the assumption ("ample real headroom on the
-    host"). On 2026-08-19, 1.25G of leaked sibling scratch left over from
-    OOM-killed suite runs (issue #1208 item 1) made that assumption false
-    and failed this test on three consecutive otherwise-green gate runs,
-    while it passed in isolation with no code changed in between. This
-    test now injects a replacement classifier so `disk_full` is decided
-    against a controlled, zero floor — deterministic under arbitrary
-    shared-root pressure — while still proving the exception really flows
-    through a REAL, live measurement (not a hardcoded verdict).
+    The prior shape drove `_run_targets` unmodified but asserted
+    ``disk_full`` against a LIVE measurement of the ambient, shared
+    test-RAM root at the default (unset) floor — its own comment admitted
+    the assumption ("ample real headroom on the host running this test").
+    On 2026-08-19, 1.25G of leaked sibling scratch from OOM-killed suite
+    runs (#1208 item 1) made that assumption false and failed this test on
+    three consecutive otherwise-green gate runs, while it passed in
+    isolation with no code changed in between. A first fix injected a
+    ``classify_infrastructure_failure`` kwarg-DI seam into `_run_targets`
+    with the production classifier as its default — but review found that
+    seam left the module's own default binding completely UNPINNED: a
+    planted always-``disk_full=True`` default classifier survived the
+    whole module undetected, since no test exercised `_run_targets`
+    without overriding the seam.
+
+    This design needs no production change at all. Instead of injecting a
+    replacement classifier, both tests below set
+    ``CRATEDIGGER_TEST_RAM_MIN_BYTES`` to a floor chosen so that ANY real
+    measurement of the host's actual free bytes falls on the same side of
+    the comparison — deterministic under arbitrary shared-root pressure —
+    while `_run_targets`, the real classifier, the real live measurement,
+    and the real default `available_bytes` binding all run completely
+    unmodified and genuinely under test. The headroom really is
+    live-measured here; the test name stands.
     """
+
+    def _classify_worker_mismatch(self) -> TargetInfrastructureFailure:
+        """Run one real worker through `_run_targets`'s exception path and
+        return the sole resulting `TargetInfrastructureFailure`.
+
+        The trigger is a real, deterministic parent-side exception (no
+        disk pressure needed): the child legitimately reports its own real
+        test IDs, which differ from the fabricated expectation below, so
+        the parent's own mismatch guard raises before returning.
+        """
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            tests_dir = root / "fixture_tests"
+            tests_dir.mkdir()
+            (tests_dir / "__init__.py").write_text("", encoding="utf-8")
+            (tests_dir / "test_alpha.py").write_text(
+                "import unittest\n\n"
+                "class Alpha(unittest.TestCase):\n"
+                "    def test_ok(self):\n"
+                "        pass\n",
+                encoding="utf-8",
+            )
+            module = TestModule(
+                name="fixture_tests.test_alpha",
+                path=tests_dir / "test_alpha.py",
+                weight=1,
+            )
+            target = TestTarget(
+                module=module,
+                test_name="fixture_tests.test_alpha",
+                expected_test_ids=(
+                    "fixture_tests.test_alpha.Alpha.test_bogus",
+                ),
+            )
+
+            results, infrastructure_failures = _run_targets(
+                (target,),
+                worker_count=1,
+                top_level_directory=root,
+                durations=0,
+            )
+
+        self.assertEqual(results, ())
+        self.assertEqual(len(infrastructure_failures), 1)
+        return infrastructure_failures[0]
+
+    def _with_configured_floor(self, raw_floor: str) -> TargetInfrastructureFailure:
+        original = os.environ.get("CRATEDIGGER_TEST_RAM_MIN_BYTES")
+        os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = raw_floor
+        try:
+            return self._classify_worker_mismatch()
+        finally:
+            if original is None:
+                os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+            else:
+                os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original
 
     def test_a_real_worker_exception_is_classified_by_live_measured_headroom(
         self,
     ) -> None:
-        # (a) Witness that a real, live measurement is available in this
-        # process — proves the production measurer genuinely works here,
-        # rather than the test merely trusting it exists.
-        live_measurement = _measure_tempdir_available_bytes()
-        self.assertIsInstance(live_measurement, int)
+        """Case A: floor "0" -- ``available < 0`` is False for every real
+        measurement, and for an unmeasurable ``None`` (`available is not
+        None and available < floor` short-circuits) -- so `disk_full` is
+        deterministically False."""
+        failure = self._with_configured_floor("0")
 
-        classify_calls: list[tuple[TestTarget, Exception]] = []
-
-        def _classify_with_controlled_floor(
-            target: TestTarget, exc: Exception
-        ) -> TargetInfrastructureFailure:
-            classify_calls.append((target, exc))
-            # (b) Deliberately below the >= 1 GiB configured floor so a
-            # classifier that ignored `minimum_bytes` and fell back to the
-            # env floor would flip `disk_full` True here — the controlled
-            # floor below is what keeps the verdict deterministic instead.
-            return _classify_target_infrastructure_failure(
-                target,
-                exc,
-                available_bytes=lambda: 100 * 1024 * 1024,
-                minimum_bytes=0,
-            )
-
-        original_floor_env = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
-        try:
-            with tempfile.TemporaryDirectory() as tempdir:
-                root = Path(tempdir)
-                tests_dir = root / "fixture_tests"
-                tests_dir.mkdir()
-                (tests_dir / "__init__.py").write_text("", encoding="utf-8")
-                (tests_dir / "test_alpha.py").write_text(
-                    "import unittest\n\n"
-                    "class Alpha(unittest.TestCase):\n"
-                    "    def test_ok(self):\n"
-                    "        pass\n",
-                    encoding="utf-8",
-                )
-                module = TestModule(
-                    name="fixture_tests.test_alpha",
-                    path=tests_dir / "test_alpha.py",
-                    weight=1,
-                )
-                # A real, deterministic parent-side exception (no disk
-                # pressure needed): the child legitimately reports its own
-                # real test IDs, and the parent's own mismatch guard raises
-                # before returning.
-                target = TestTarget(
-                    module=module,
-                    test_name="fixture_tests.test_alpha",
-                    expected_test_ids=(
-                        "fixture_tests.test_alpha.Alpha.test_bogus",
-                    ),
-                )
-
-                results, infrastructure_failures = _run_targets(
-                    (target,),
-                    worker_count=1,
-                    top_level_directory=root,
-                    durations=0,
-                    classify_infrastructure_failure=_classify_with_controlled_floor,
-                )
-        finally:
-            if original_floor_env is not None:
-                os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original_floor_env
-
-        self.assertEqual(results, ())
-        # The injected classifier was actually reached by `_run_targets`'s
-        # worker-exception path — proves the seam is wired, not bypassed.
-        self.assertEqual(len(classify_calls), 1)
-        self.assertEqual(len(infrastructure_failures), 1)
-        failure = infrastructure_failures[0]
         self.assertIn("unexpected test IDs", failure.detail)
-        # Controlled zero floor: deterministic regardless of shared-root
-        # pressure on the host running this test.
         self.assertFalse(failure.disk_full)
+
+    def test_a_floor_far_above_any_real_measurement_marks_it_disk_full(
+        self,
+    ) -> None:
+        """Case B: floor huge (10**18 bytes, ~888 PB) -- any real
+        measurement of an actual host's free bytes is below it, so
+        `disk_full` is deterministically True and the detail carries the
+        measured-bytes prefix. This pins the PROPAGATION direction: a
+        mutant that resets `disk_full` back to False before the failure is
+        appended in `_run_targets` survives Case A (which already expects
+        False) but flips this one."""
+        failure = self._with_configured_floor("1000000000000000000")
+
+        self.assertIn("unexpected test IDs", failure.detail)
+        self.assertTrue(failure.disk_full)
+        self.assertIn("bytes free", failure.detail)
+
+
+class TestMeasureTempdirAvailableBytesTracksDiskUsage(unittest.TestCase):
+    """The module's only real-input coverage of
+    `_measure_tempdir_available_bytes` was through classifier tests that
+    inject a fake `available_bytes` callable, so the measurer's own body
+    (`shutil.disk_usage(tempfile.gettempdir()).free`) had no direct guard
+    -- near-vacuous against a `.free` -> `.total` mutant (#1208 item 2
+    review, F3).
+
+    A static tolerance-window comparison against one live
+    `shutil.disk_usage(...).free` read is NOT reliable evidence here:
+    measured on this repository's own shared test-RAM root, `total -
+    free` (bytes actually in use) was ~5.5 MiB at authoring time --
+    comfortably inside any "generous" tolerance such as 64 MiB, so a
+    `.total` mutant reports a value indistinguishable from `.free` within
+    that window and the mutant SURVIVES (confirmed empirically: planted,
+    ran, green). This test instead forces a real, deterministic drop in
+    free space by writing real data, and asserts the measurer tracks that
+    drop -- `.total` is a static filesystem property that never moves when
+    disk CONTENTS change, so the mutant cannot survive regardless of
+    ambient occupancy.
+    """
+
+    def test_measured_value_tracks_a_real_consumption_delta(self) -> None:
+        before = _measure_tempdir_available_bytes()
+        self.assertIsNotNone(before)
+        assert before is not None
+
+        payload_bytes = 32 * 1024 * 1024
+        with tempfile.NamedTemporaryFile(dir=tempfile.gettempdir()) as scratch:
+            scratch.write(b"\0" * payload_bytes)
+            scratch.flush()
+            os.fsync(scratch.fileno())
+
+            after = _measure_tempdir_available_bytes()
+
+        self.assertIsNotNone(after)
+        assert after is not None
+        # `.total` would report the identical value before and after --
+        # real usage never changes it. `.free` (the correct field) must
+        # drop by roughly the payload size. A deliberately loose
+        # half-payload threshold absorbs concurrent sibling activity on
+        # the shared root without losing the ability to catch the
+        # swapped-field mutant, whose reported drop is ~0.
+        self.assertGreaterEqual(before - after, payload_bytes // 2)
 
 
 class TestModuleDiscovery(unittest.TestCase):

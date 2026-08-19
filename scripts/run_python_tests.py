@@ -1269,19 +1269,8 @@ def _run_targets(
     worker_count: int,
     top_level_directory: Path,
     durations: int,
-    classify_infrastructure_failure: Callable[
-        [TestTarget, Exception], TargetInfrastructureFailure
-    ] = _classify_target_infrastructure_failure,
 ) -> tuple[tuple[TargetRunResult, ...], tuple[TargetInfrastructureFailure, ...]]:
-    """Drain the shared queue completely and collect every target outcome.
-
-    ``classify_infrastructure_failure`` defaults to the production
-    ``_classify_target_infrastructure_failure``, which measures live free
-    bytes on the ambient ``TMPDIR``. Tests that need a deterministic
-    ``disk_full`` verdict inject a replacement here (kwarg-DI seam,
-    `.claude/rules/code-quality.md` "Mocks: leaf-seam only" strategy 2) —
-    never patch the captured default.
-    """
+    """Drain the shared queue completely and collect every target outcome."""
     results: list[TargetRunResult] = []
     infrastructure_failures: list[TargetInfrastructureFailure] = []
     context = multiprocessing.get_context("spawn")
@@ -1303,7 +1292,7 @@ def _run_targets(
                 result = future.result()
             except Exception as exc:  # noqa: BLE001 - worker infrastructure boundary
                 infrastructure_failures.append(
-                    classify_infrastructure_failure(target, exc)
+                    _classify_target_infrastructure_failure(target, exc)
                 )
                 continue
             if result.target != target:
