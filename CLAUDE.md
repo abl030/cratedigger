@@ -12,10 +12,13 @@ Do not use Compound Engineering (`ce-*`, `compound-engineering:*`, or `lfg`) in
 this repository. Native agent planning, implementation, debugging, and review
 are sufficient.
 
-Work in an isolated git worktree, and clean it up when it is no longer useful.
-Keep the shared checkout on `main` and reasonably current; after merging to
-`main`, pull it forward. Use judgment around active or dirty trees, and never
-disturb another agent's work.
+Work in an isolated git worktree, and remove it when your task ends — durable
+work lives on pushed branches, never in worktrees. A stale worktree that is
+clean and whose commits are on `main` may be swept by any session, via
+`git worktree remove` without `--force` so the tool itself refuses dirty
+trees (#1208); never disturb another agent's live work. Keep the shared
+checkout on `main` and reasonably current; after merging to `main`, pull it
+forward.
 
 `.claude/memory/` is the exception: it is written in the shared checkout, not
 task worktrees. Notice and preserve those changes when cleaning up or advancing

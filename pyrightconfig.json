@@ -1,5 +1,7 @@
 {
-  "extraPaths": ["."],
+  "extraPaths": [
+    "."
+  ],
   "venvPath": ".",
   "venv": ".pyright-venv",
   "pythonVersion": "3.13",
@@ -8,8 +10,9 @@
   "exclude": [
     "build",
     "tools/vulture",
-    ".pyright-venv",
-    ".nixpkgs-src",
-    ".claude/worktrees"
+    "**/.*",
+    "**/node_modules",
+    "**/result",
+    "**/result-*"
   ]
 }
