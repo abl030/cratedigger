@@ -4875,6 +4875,53 @@ pkgs.testers.nixosTest {
         ).strip()
 
     def _pipeline_data_snapshot():
+        # #1204 review F6: fail closed, at the exact snapshot, if this
+        # whole-DB equality window is ever entered while
+        # cratedigger-unfindable.timer -- or the service it triggers -- is
+        # live. Every call site below sits inside this phase's quiesced
+        # region (the initial _quiesce_unfindable() call, a re-quiesce after
+        # each of the three switch-to-configuration calls, and the
+        # phase-end restart only after the very last such call) -- so this
+        # never trips today. A future switch-to-configuration added inside
+        # this phase without a matching _quiesce_unfindable() re-stop trips
+        # this assertion here instead of producing an unattributable
+        # pg_dump diff further down.
+        #
+        # Both units are checked (#1204 review round 3 item 6a).
+        # cratedigger-unfindable.service carries no `wantedBy` of its own
+        # (nix/module.nix -- confirmed against the tree: only the .timer has
+        # `wantedBy = ["timers.target"]`), so switch-to-configuration's
+        # unit-closure reconciliation can never start the SERVICE directly,
+        # only the TIMER, which then triggers the service on its own
+        # schedule. The timer check alone is therefore sufficient against
+        # every writer this phase's reconciliation can produce today; the
+        # service check closes that permanently rather than leaving the
+        # no-wantedBy fact as an unstated assumption the guard's sufficiency
+        # silently depends on -- a future unit definition that adds a
+        # `wantedBy` to the service would otherwise reopen exactly the hole
+        # this guard exists to close.
+        unfindable_timer_status, _ = machine.execute(
+            "systemctl is-active --quiet cratedigger-unfindable.timer"
+        )
+        assert unfindable_timer_status != 0, (
+            "cratedigger-unfindable.timer is ACTIVE during a "
+            "_pipeline_data_snapshot() call (#1204). This phase's quiesce "
+            "contract requires the timer stopped before every whole-DB "
+            "equality snapshot -- add a _quiesce_unfindable() call "
+            "immediately after whatever switch-to-configuration or unit "
+            "restart reactivated it."
+        )
+        unfindable_service_status, _ = machine.execute(
+            "systemctl is-active --quiet cratedigger-unfindable.service"
+        )
+        assert unfindable_service_status != 0, (
+            "cratedigger-unfindable.service is ACTIVE during a "
+            "_pipeline_data_snapshot() call (#1204). This phase's quiesce "
+            "contract requires the service stopped before every whole-DB "
+            "equality snapshot -- add a _quiesce_unfindable() call "
+            "immediately after whatever switch-to-configuration or unit "
+            "restart reactivated it."
+        )
         dump = machine.succeed(
             "runuser -u postgres -- pg_dump --data-only --no-owner "
             "cratedigger"
@@ -4886,11 +4933,150 @@ pkgs.testers.nixosTest {
             if not line.startswith(("\\restrict ", "\\unrestrict "))
         )
 
+    def _quiesce_unfindable():
+        # switch-to-configuration reconciles the FULL unit closure declared
+        # by the target generation on every call, including a specialisation
+        # switch to an otherwise-identical generation: it (re)starts any unit
+        # wanted by an active target -- multi-user.target's ordinary services
+        # exactly as much as timers.target's timers -- that is not currently
+        # active, regardless of this phase having stopped it moments earlier.
+        # This is not timer-specific: three of the other four workers
+        # (cratedigger-web, cratedigger-importer,
+        # cratedigger-import-preview-worker) hit the same reconciliation and
+        # are explicitly re-stopped later in this phase (see the repeated
+        # `systemctl stop` calls for them, e.g. before the missing_state
+        # scenario below) -- cratedigger-unfindable.timer was simply the one
+        # nothing had been re-quiescing. cratedigger-youtube-ingest is the
+        # exception (#1204 review round 3 item 5): switch1 restarts it too,
+        # but nothing in this phase stops it again, so it runs across every
+        # remaining equality window here -- see the PR body for why that
+        # residual is benign. Confirmed empirically while developing this
+        # fix: the very first switch-to-configuration call below restarted
+        # cratedigger-unfindable.timer within 5 seconds of the initial stop,
+        # well before that scenario's own equality assert. Call this
+        # immediately after every switch-to-configuration call in this
+        # phase.
+        #
+        # Ordering contract for every call site (#1204 review round 3 item
+        # 6b -- moved here from the pipeline_before_hard call site so it
+        # travels with this helper rather than living at one caller):
+        # capture every `_pipeline_data_snapshot()` baseline in this phase
+        # AFTER calling this function following whatever event reactivated
+        # the timer, never before it. `_pipeline_data_snapshot()`'s own
+        # guard only checks state at the instant of each snapshot call -- a
+        # switch-to-configuration call that lands INSIDE an already-open
+        # baseline-to-comparison window defeats even a correct re-quiesce
+        # placed elsewhere in the phase, because nothing re-checks the guard
+        # for the span between the two snapshots themselves.
+        #
+        # Stop the timer FIRST, in its own call, then the service in a
+        # second call (#1204 review residual 1; corrected #1204 review round
+        # 3 item 3). A `.timer` unit carries an implicit `Before=` on the
+        # service it triggers (systemd.timer(5)); systemd inverts Before=/
+        # After= ordering for stop jobs relative to start jobs, so a single
+        # combined `systemctl stop timer service` invocation is GUARANTEED
+        # to stop the SERVICE first and the TIMER second -- the exact wrong
+        # order, since it leaves the timer alive (and able to re-trigger the
+        # service) for the whole time its own stop job is still queued
+        # behind the service's. This is not a "no guaranteed ordering" risk;
+        # it is a guaranteed wrong one. Two separate calls, timer then
+        # service, produce the order this phase actually needs: nothing can
+        # re-trigger the service once the first call returns, and the
+        # second call kills anything already in flight.
+        machine.succeed("systemctl stop cratedigger-unfindable.timer")
+        machine.succeed("systemctl stop cratedigger-unfindable.service")
+
+    # #1204 defect 2: cratedigger-unfindable.timer is OnCalendar=daily +
+    # Persistent=true + RandomizedDelaySec=30min (nix/module.nix). The real
+    # arming mechanism is NOT this test's own clock excursion elsewhere in
+    # this file (~line 2169, a net-zero backward-then-forward `date -s` used
+    # for an unrelated stale-preview-snapshot scenario) -- it is the
+    # ordinary boot-relative daily OnCalendar boundary plus Persistent=true
+    # catch-up: every time the timer is (re)armed, if its persisted
+    # last-trigger stamp shows the most recent daily boundary was missed,
+    # systemd schedules a near-term catch-up elapse (still jittered by
+    # RandomizedDelaySec) instead of waiting for tomorrow's boundary.
+    #
+    # The 2026-08-19 incident's own mechanism is NOT isolated to an in-phase
+    # re-arm (#1204 review round 3 item 2 -- corrects an earlier, wrong
+    # causal claim that used to sit here): on main, nothing in this phase
+    # stops or re-arms cratedigger-unfindable.timer at all, so no
+    # switch-to-configuration call there ever restarted it -- and the
+    # journal places the live fire (VM-time 241.18s) inside the
+    # startup-probe stretch (the pipeline_before_probe scenario below),
+    # which contains no switch-to-configuration call whatsoever. The timer
+    # was armed BEFORE this phase (either at ordinary VM boot or by an
+    # earlier deploy-hold release restarting TIMER_UNITS elsewhere in this
+    # test file) and simply elapsed, after its own RandomizedDelaySec
+    # jitter, at whatever real wall-clock moment that landed -- which
+    # happened to fall inside the probe scenario's own open equality
+    # window. Honest framing: the incident proves the timer can elapse at
+    # an arbitrary, unattributable moment during this phase; it does NOT
+    # prove a specific re-arm caused it. Whenever it fires, even against a
+    # DB with zero unfindable candidates, migration 077 (#1112)'s
+    # unfindable_run_metrics write is attempted once per batch pass that
+    # actually starts, and emptiness alone does not suppress that write
+    # (scripts/run_unfindable_detection.py ~29-31, 204-215 -- only an abort
+    # before any probe, or a swallowed DB error on the insert itself, skips
+    # the row; neither applies to a clean empty run) -- so that one empty
+    # run broke the _pipeline_data_snapshot() equality assert below it. The
+    # main cratedigger.timer has no equivalent exposure because this test's
+    # own VM config deliberately keeps it far from firing via BOTH
+    # `onBootSec = "1d"` AND `onUnitInactiveSec = "1d"`; cratedigger-unfindable
+    # has no such isolation.
+    #
+    # Backdate the persistent stamp (#1204 review F2) so this phase's first
+    # re-arm opportunity is guaranteed overdue rather than dependent on
+    # wall-clock luck -- this deliberately MANUFACTURES the overdue
+    # condition for THIS test's in-phase re-arms, a different and stronger
+    # exposure than the historical incident's own unattributed elapse
+    # above; it is what makes this fix's correctness provable rather than
+    # merely plausible. Confirmed empirically: with this backdate in place,
+    # the very next re-arm -- switch1 (hard)'s own switch-to-configuration
+    # reconciliation, below -- triggered a full natural empty run, including
+    # its unfindable_run_metrics write, entirely INSIDE that
+    # switch-to-configuration subprocess call, before this phase's own
+    # Python-level _quiesce_unfindable() call ever got control back. #1204
+    # review F1's move of pipeline_before_hard's capture to AFTER that
+    # switch's own quiesce (not before the switch) is exactly why this real
+    # race did not break the equality assert below it; the pre-F1 ordering
+    # would have missed that row in the baseline and failed here. The
+    # persisted stamp is written at TRIGGER time -- the instant the timer
+    # fires and the service transitions to running -- not on service
+    # completion (#1204 review round 3 item 4 -- corrects an earlier,
+    # imprecise "a completed run refreshes" claim here): a SIGTERM'd or
+    # condition-skipped run clears the overdue condition exactly as a fully
+    # completed one does, since the write happens before the service does
+    # any actual work. So the timer does NOT stay overdue for the rest of
+    # the phase once ANY trigger happens, completed or not -- confirmed
+    # empirically that switch2 (warning), switch3 (safe), and the original
+    # phase-end restart (before #1204 review round 3 item 1's
+    # forward-touch, below) all stayed quiet -- no further natural trigger
+    # -- for the remainder of that test run. _quiesce_unfindable() after
+    # every switch-to-configuration call is required regardless of whether
+    # any given re-arm happens to race a trigger -- F6's guard above, not
+    # this backdate on its own, is the actual deterministic backstop.
+    # Stopping the timer alone is not enough -- an already-queued/running
+    # service start is not cancelled by stopping its timer -- so both are
+    # stopped here via _quiesce_unfindable(), and again immediately after
+    # each of the three switch-to-configuration calls below, so no whole-DB
+    # equality window in this phase ever runs with the timer live. Only the
+    # timer is restarted, once, at the very end of the phase (forward-
+    # touching the stamp first -- see that comment for why). U13 above only
+    # asserts the timer is *enabled* (wantedBy timers.target); `systemctl
+    # stop` does not change is-enabled, so that assertion is unaffected by
+    # any of this.
+    machine.succeed(
+        "install -d -m 0755 /var/lib/systemd/timers; "
+        "touch -d '8 days ago' "
+        "/var/lib/systemd/timers/stamp-cratedigger-unfindable.timer"
+    )
     machine.succeed(
         "systemctl stop cratedigger-web.service cratedigger-importer.service "
         "cratedigger-import-preview-worker.service "
         "cratedigger-youtube-ingest.service"
     )
+    _quiesce_unfindable()
     safe_system = machine.succeed("readlink -f /run/current-system").strip()
     hard_system = machine.succeed(
         "readlink -f /run/current-system/specialisation/cratedigger-beets-hard"
@@ -4900,11 +5086,30 @@ pkgs.testers.nixosTest {
         "cratedigger-beets-warning"
     ).strip()
     beets_before_hard = _beets_world_digest()
-    pipeline_before_hard = _pipeline_data_snapshot()
 
     # Keep every unrelated application stopped while installing the invalid
     # authority, then exercise one exact startup attempt with retries disabled.
     machine.succeed(f"{hard_system}/bin/switch-to-configuration test")
+    _quiesce_unfindable()
+    # #1204 review F1: captured here, immediately after the switch and its
+    # re-quiesce, not before the switch -- capturing beforehand would open
+    # this equality window while the switch's own reconciliation still had
+    # the timer live (see _quiesce_unfindable()'s docstring for the general
+    # ordering contract this follows). This narrows what the equality assert
+    # below covers, and that narrowing is deliberate (#1204 review round 3
+    # item 7 -- states the trade explicitly rather than "still supports it"
+    # as an earlier version of this comment claimed): the old, pre-#1204
+    # window captured this baseline BEFORE the switch, so its assert
+    # incidentally also covered whatever DB effect the switch's OWN
+    # reconciliation restarts of the four workers might have had while
+    # running under the invalid hard authority. That incidental coverage is
+    # gone now -- the assert below covers only the explicitly started
+    # preview-worker's own attempt. This is the correct trade: the old
+    # window's broader incidental coverage came at the cost of a live race
+    # against the switch's own timer reactivation (#1204 review F1), a real
+    # defect this fix reproduced live during development, not a
+    # hypothetical one.
+    pipeline_before_hard = _pipeline_data_snapshot()
     machine.succeed(
         "systemctl start --no-block cratedigger-import-preview-worker.service"
     )
@@ -4926,6 +5131,7 @@ pkgs.testers.nixosTest {
     assert _pipeline_data_snapshot() == pipeline_before_hard
 
     machine.succeed(f"{warning_system}/bin/switch-to-configuration test")
+    _quiesce_unfindable()
     machine.succeed(
         "systemctl reset-failed cratedigger-import-preview-worker.service; "
         "systemctl start cratedigger-import-preview-worker.service"
@@ -4960,6 +5166,7 @@ pkgs.testers.nixosTest {
     machine.succeed("systemctl stop cratedigger-import-preview-worker.service")
 
     machine.succeed(f"{safe_system}/bin/switch-to-configuration test")
+    _quiesce_unfindable()
     # A missing external state authority must reach Cratedigger's intrinsic
     # admission check. The systemd missing-path modifier prevents namespace
     # setup from failing first; the checker rejects the exact absent authority
@@ -5129,6 +5336,39 @@ pkgs.testers.nixosTest {
     ) == 1, recovered_log
     assert "probe failed" not in recovered_log, recovered_log
     assert _beets_world_digest() == beets_before_probe
+
+    # Re-arm the timer this phase's whole-DB equality window quiesced above.
+    # Every remaining pg_dump-equality assert has now run; nothing between
+    # here and the real reboot further down needs the timer stopped, and
+    # that reboot scenario proves it back to ActiveState=active regardless
+    # (systemd starts every wantedBy=timers.target unit on boot). Only the
+    # timer needs restarting -- the oneshot service itself has no
+    # persistent "stopped" state to restore, and no later assertion checks
+    # cratedigger-unfindable.service's ActiveState.
+    #
+    # Forward-touch the persistent stamp to "now" immediately before this
+    # restart (#1204 review round 3 item 1 -- replaces an earlier,
+    # luck-based claim that switch1's natural trigger above already
+    # consumed the overdue condition for the rest of this boot). That
+    # consumption is a per-run race, not a guarantee: RandomizedDelaySec
+    # draws up to 30 minutes against this whole VM test's few-minute
+    # budget, so on a run where switch1's own race does NOT trigger, the
+    # stamp is still 8 days old here and this restart would itself be
+    # eligible for its own catch-up elapse. Forward-touching makes the
+    # timer's post-restart state a mechanism, not a coin flip: a current
+    # stamp means the next OnCalendar=daily boundary is a genuine ~24h
+    # away (plus jitter), so this restart cannot produce a stray run later
+    # in this file -- including squeezing the two `timeout 120 ...
+    # cratedigger-deploy-hold acquire` budgets and the untimed
+    # prepare-controlled call further down, both of which drain this exact
+    # timer's own producer queue as part of their real production
+    # behaviour and have no reason to expect it eager -- or surviving the
+    # real reboot near the end of this test to fire unexpectedly on the
+    # fresh boot.
+    machine.succeed(
+        "touch /var/lib/systemd/timers/stamp-cratedigger-unfindable.timer"
+    )
+    machine.succeed("systemctl start cratedigger-unfindable.timer")
 
     readiness_log = machine.succeed(
         "journalctl -b -u cratedigger-test-beets-readiness.service -o cat"
