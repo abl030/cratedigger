@@ -1152,6 +1152,12 @@ class TestImporterWorker(unittest.TestCase):
             download_log_id=7,
             source_reference_path="/tmp/failed",
             cfg=self._force_cfg,
+            # issue #1176 PR3: the shared action-copy dispatch helper always
+            # forwards these two explicitly; force resolves them to
+            # dispatch_import_from_db's own defaults, so behavior is
+            # byte-identical even though the call shape now names them.
+            distance_threshold=None,
+            scenario="force_import",
         )
         assert updated is not None
         self.assertEqual(updated.status, "completed")
@@ -1371,6 +1377,11 @@ class TestImporterWorker(unittest.TestCase):
             download_log_id=7,
             source_reference_path="/tmp/failed",
             cfg=self._force_cfg,
+            # issue #1176 PR3: see test_force_import_job_calls_existing_
+            # dispatch_and_completes above — same byte-identical-behavior
+            # rationale for these two explicit defaults.
+            distance_threshold=None,
+            scenario="force_import",
         )
 
     def test_force_import_without_private_action_requeues_before_dispatch(self):
@@ -3496,6 +3507,24 @@ class TestImporterWorker(unittest.TestCase):
                     worker_id=worker_id,
                 )
 
+            # _ForceStageDB's runtime_checkable isinstance check uses
+            # getattr_static under the hood, which does NOT invoke
+            # __getattr__ — so the local-import claim method must be
+            # declared explicitly too, even though this test only ever
+            # exercises the force-import claim_fn.
+            def claim_local_import_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+            ) -> ImportJob | None:
+                return db.claim_local_import_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                )
+
             def close(self) -> None:
                 return None
 
@@ -4327,6 +4356,24 @@ class TestImportPreviewWorker(unittest.TestCase):
                 worker_id: str | None,
             ) -> ImportJob | None:
                 return db.claim_force_import_preview_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                )
+
+            # _RequestScopedPreviewStageDB's runtime_checkable isinstance
+            # check uses getattr_static under the hood, which does NOT
+            # invoke __getattr__ — so the local-import claim method must be
+            # declared explicitly too, even though this test only ever
+            # exercises the force-import claim_fn.
+            def claim_local_import_preview_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+            ) -> ImportJob | None:
+                return db.claim_local_import_preview_job_under_lock(
                     job_id,
                     request_id=request_id,
                     worker_id=worker_id,

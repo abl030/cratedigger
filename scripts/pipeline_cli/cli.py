@@ -39,6 +39,7 @@ from scripts.pipeline_cli.imports import (
     cmd_force_import,
     cmd_import_job_recovery,
     cmd_import_jobs,
+    cmd_import_local,
     cmd_import_preview,
     cmd_import_preview_from_download_log,
     import_preview_is_routed,
@@ -125,6 +126,7 @@ def main(*, api_socket: str | None = None):
         "wrong-match-triage-cancel": cmd_wrong_match_triage_cancel,
         "replace": cmd_replace,
         "force-import": cmd_force_import,
+        "import-local": cmd_import_local,
         "beets-distance": cmd_beets_distance,
     }
     if args.command in api_commands:

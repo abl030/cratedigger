@@ -12,8 +12,8 @@ mechanical pattern as the ``lib/quality/`` split, issue #477):
     query.py            query (read-only-by-default SQL; explicit write escape hatch)
     show.py             show (full per-request detail dump)
     quality.py           quality / repair-spectral (quality-gate debug)
-    imports.py           force-import / import-jobs / import-job-recovery /
-                       import-preview
+    imports.py           force-import / import-local / import-jobs /
+                       import-job-recovery / import-preview
     api_mutations.py     API-backed pipeline-delete / set-quality / upgrade /
                          wrong-match-converge / resolve-rg / merge-rekey
     wrong_match.py       wrong-match-triage / -triage-cancel / -delete /
@@ -93,6 +93,7 @@ from scripts.pipeline_cli.imports import (
     cmd_force_import,
     cmd_import_job_recovery,
     cmd_import_jobs,
+    cmd_import_local,
     cmd_import_preview,
     cmd_import_preview_from_download_log,
 )
@@ -146,6 +147,7 @@ __all__ = [
     "cmd_force_import",
     "cmd_import_job_recovery",
     "cmd_import_jobs",
+    "cmd_import_local",
     "cmd_import_preview",
     "cmd_import_preview_from_download_log",
     "cmd_library_delete",

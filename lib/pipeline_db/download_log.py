@@ -38,6 +38,7 @@ DownloadLogOutcome = Literal[
     "force_import", "manual_import", "curator_ban",
     "measurement_failed", "user_offline", "have_analysis_error",
     "youtube_running", "youtube_success", "youtube_failed",
+    "local_import",
 ]
 DOWNLOAD_LOG_OUTCOMES: frozenset[str] = frozenset(get_args(DownloadLogOutcome))
 
@@ -197,7 +198,7 @@ _LOG_QUERY_TEMPLATE = """
 
 #: The only outcome filters ``get_log`` accepts, as literal SQL fragments.
 _LOG_OUTCOME_FILTERS: dict[str, str] = {
-    "imported": "WHERE dl.outcome IN ('success', 'force_import')",
+    "imported": "WHERE dl.outcome IN ('success', 'force_import', 'local_import')",
     "rejected": (
         "WHERE dl.outcome IN "
         "('rejected', 'failed', 'timeout', 'measurement_failed')"
@@ -252,7 +253,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                 SELECT
                     COUNT(*) AS total,
                     COUNT(*) FILTER (
-                        WHERE outcome IN ('success', 'force_import')
+                        WHERE outcome IN ('success', 'force_import', 'local_import')
                     ) AS imported
                 FROM download_log
             ),
@@ -332,7 +333,7 @@ class _DownloadLogMixin(_PipelineDBBase):
             LEFT JOIN download_log origin
                 ON origin.id = dl.source_download_log_id
             WHERE dl.source_download_log_id = ANY(%s)
-              AND dl.outcome IN ('success', 'force_import', 'manual_import')
+              AND dl.outcome IN ('success', 'force_import', 'manual_import', 'local_import')
             ORDER BY dl.id DESC
             """,
             ([int(log_id) for log_id in source_log_ids],),
@@ -941,7 +942,7 @@ class _DownloadLogMixin(_PipelineDBBase):
             SELECT soulseek_username
             FROM download_log
             WHERE request_id = %s
-              AND outcome IN ('success', 'force_import')
+              AND outcome IN ('success', 'force_import', 'local_import')
               AND soulseek_username IS NOT NULL
             ORDER BY id DESC
             LIMIT 1

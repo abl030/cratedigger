@@ -1,7 +1,8 @@
 """Pipeline mutation route handlers.
 
 Split from web/routes/pipeline.py (#546 W4) — the CRUD mutation cluster
-(add/update/upgrade/set-quality/set-intent/ban-source/force-import/delete).
+(add/update/upgrade/set-quality/set-intent/ban-source/force-import/
+import-local/delete).
 GET/read routes (log, status, recent, all, search, downloading, detail,
 requests-by-rg, active-rgs, import-jobs) stay in ``web/routes/pipeline.py``.
 """
@@ -44,6 +45,19 @@ from lib.force_import_service import (
     RESULT_QUEUED,
     RESULT_REQUEST_MISSING,
     enqueue_force_import,
+)
+from lib.local_import_service import (
+    LOCAL_IMPORT_HTTP_STATUS,
+    enqueue_local_import,
+)
+from lib.local_import_service import (
+    RESULT_PROCESSING_LOCKED as LOCAL_RESULT_PROCESSING_LOCKED,
+)
+from lib.local_import_service import (
+    RESULT_QUEUED as LOCAL_RESULT_QUEUED,
+)
+from lib.local_import_service import (
+    RESULT_REQUEST_MISSING as LOCAL_RESULT_REQUEST_MISSING,
 )
 from lib.pipeline_delete_service import (
     PipelineDeleteApplied,
@@ -937,6 +951,68 @@ def post_pipeline_force_import(h: RouteHandler, body: dict[str, object]) -> None
     }, status=202)
 
 
+class PipelineImportLocalRequest(BaseModel):
+    request_id: int = Field(gt=0)
+    source_path: str = Field(min_length=1)
+
+
+def post_pipeline_import_local(h: RouteHandler, body: dict[str, object]) -> None:
+    req_body = parse_body(h, body, PipelineImportLocalRequest)
+    if req_body is None:
+        return
+    s = _server()
+    request_id = req_body.request_id
+
+    result = enqueue_local_import(
+        s._db(),
+        read_runtime_config(),
+        request_id=request_id,
+        source_path=req_body.source_path,
+    )
+    if result.outcome == LOCAL_RESULT_REQUEST_MISSING:
+        h._error(
+            f"Album request {request_id} not found",
+            LOCAL_IMPORT_HTTP_STATUS[result.outcome],
+        )
+        return
+    if result.outcome == LOCAL_RESULT_PROCESSING_LOCKED:
+        owner = transitions.processing_owner_payload(result.processing_owner)
+        if owner is None:
+            raise RuntimeError(
+                "processing-locked local import is missing its exact owner"
+            )
+        h._json({
+            "error": LOCAL_RESULT_PROCESSING_LOCKED,
+            "reason": LOCAL_RESULT_PROCESSING_LOCKED,
+            "request_id": result.request_id,
+            "processing_owner": owner,
+            "detail": result.detail,
+        }, status=LOCAL_IMPORT_HTTP_STATUS[result.outcome])
+        return
+    if result.outcome != LOCAL_RESULT_QUEUED:
+        h._error(
+            result.detail
+            or f"Files not found or unauthorized at: {result.source_path}",
+            LOCAL_IMPORT_HTTP_STATUS[result.outcome],
+        )
+        return
+    assert result.job is not None
+    job = result.job
+    req = s._db().get_request(request_id)
+    assert req is not None
+
+    h._json({
+        "status": "queued",
+        "job_id": job.id,
+        "job": _serialize_import_job(job),
+        "deduped": bool(getattr(job, "deduped", False)),
+        "request_id": request_id,
+        "artist": req["artist_name"],
+        "album": req["album_title"],
+        "message": "Import queued",
+    }, status=202)
+
+
 class PipelineDeleteRequest(BaseModel):
     id: int = Field(gt=0)
 
@@ -1012,6 +1088,12 @@ ROUTES: list[RouteRegistration] = [
     route(
         "POST", "/api/pipeline/force-import", post_pipeline_force_import,
         "Enqueue a force-import job for a rejected download_log row.",
+        classified=True,
+    ),
+    route(
+        "POST", "/api/pipeline/import-local", post_pipeline_import_local,
+        "Enqueue a local-import job: import an operator-named folder on "
+        "disk already against a request's exact release.",
         classified=True,
     ),
     route(

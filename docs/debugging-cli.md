@@ -25,7 +25,7 @@ The installed wrapper has two independent authority shapes:
 - `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
   `merge-rekey`, `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
   `wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
-  `force-import`, `beets-distance`,
+  `force-import`, `import-local`, `beets-distance`,
   `import-preview --download-log-id`, and `triage quarantine` connect to
   `/run/cratedigger-web/web.sock`. The caller must be a
   member of `services.cratedigger.web.accessGroup` (default
@@ -140,7 +140,7 @@ remains after a purge failure.
 `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
 `merge-rekey`, `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
 `wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
-`force-import`, `beets-distance`, and
+`force-import`, `import-local`, `beets-distance`, and
 `import-preview --download-log-id` call the canonical web route over the
 module-owned Unix socket.
 The installed Nix wrapper selects that socket while constructing the parser:
@@ -163,7 +163,7 @@ hatch. The installed wrapper does not expose `--api-base`.
 Valid JSON route responses, including 5xx responses, are relayed on stdout —
 except for the commands that kept their own text/`--json` presentation
 (`wrong-match-delete`, `wrong-match-delete-group`, `wrong-match-triage`,
-`replace`, `force-import`, `beets-distance`, `import-preview`), which render
+`replace`, `force-import`, `import-local`, `beets-distance`, `import-preview`), which render
 the route's payload exactly as they did when they executed in-process.
 Any 2xx exits 0; 404 exits 2; 400/422 exits 3; 409 exits 4; other statuses
 exit 5. Per-command overrides preserve exit codes those commands already had:
@@ -302,6 +302,7 @@ inside socket authorization, never credentials.
   `lib.fs_authority.errno_proves_absence`).
 - `pipeline-cli disk-coverage` — Compare active pipeline rows with Beets library coverage; each off-disk row reports whether its exact identity is `missing` or `ambiguous`.
 - `pipeline-cli force-import` — Queue a rejected download for the importer lane.
+- `pipeline-cli import-local` — Import a folder already on disk (`<request_id> <source_path>`) against a request's exact release (issue #1176); strict pressing-identity validation, no relaxed-threshold escape hatch — a candidate that fails lands as an ordinary Wrong Matches row.
 - `pipeline-cli import-job-recovery show` — Show read-only exact evidence for one import job.
 - `pipeline-cli import-jobs` — List import queue jobs.
 - `pipeline-cli import-preview` — Inspect an import preview and its evidence inputs.

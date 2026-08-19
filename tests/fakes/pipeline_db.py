@@ -66,6 +66,7 @@ from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES,
+    IMPORT_JOB_LOCAL,
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WAITING,
     IMPORT_JOB_RECOVERY_REQUIRED,
@@ -1559,7 +1560,8 @@ class FakePipelineDB:
         rows = []
         for row in self._import_jobs:
             if (
-                row.get("job_type") != IMPORT_JOB_FORCE
+                # issue #1176 PR3 widened this to local_import too.
+                row.get("job_type") not in (IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL)
                 or row.get("status") not in ("completed", "failed")
             ):
                 continue
@@ -1655,10 +1657,10 @@ class FakePipelineDB:
             if row.get("status") == "queued"
             and row.get("preview_status") in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
             and (
-                row.get("job_type") not in (
-                    IMPORT_JOB_AUTOMATION,
-                    IMPORT_JOB_FORCE,
-                )
+                # Positive routing (issue #1176 PR3): youtube_import is the
+                # sole unguarded type; automation_import and
+                # force_import/local_import each get their own guard below.
+                row.get("job_type") == IMPORT_JOB_YOUTUBE
                 or (
                     row.get("job_type") == IMPORT_JOB_AUTOMATION
                     and execution_lease is not None
@@ -1666,7 +1668,7 @@ class FakePipelineDB:
                     and self._automation_job_has_authority(row)
                 )
                 or (
-                    row.get("job_type") == IMPORT_JOB_FORCE
+                    row.get("job_type") in (IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL)
                     and row.get("request_id") is not None
                     and self._force_job_request_is_current(
                         row,
@@ -1711,10 +1713,9 @@ class FakePipelineDB:
                 candidate
                 for candidate in self._import_jobs
                 if candidate.get("id") == job_id
-                and candidate.get("job_type") not in (
-                    IMPORT_JOB_AUTOMATION,
-                    IMPORT_JOB_FORCE,
-                )
+                # youtube_import only (issue #1176 PR3) — local_import
+                # claims through claim_local_import_job_under_lock instead.
+                and candidate.get("job_type") == IMPORT_JOB_YOUTUBE
                 and candidate.get("status") == "queued"
                 and candidate.get("preview_status")
                 in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
@@ -1788,6 +1789,39 @@ class FakePipelineDB:
                 if candidate["id"] == job_id
                 and candidate.get("request_id") == request_id
                 and candidate.get("job_type") == IMPORT_JOB_FORCE
+                and candidate.get("status") == "queued"
+                and candidate.get("preview_status")
+                in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+            ),
+            None,
+        )
+        if row is None or not self._force_job_request_is_current(
+            row,
+            request_id=request_id,
+        ):
+            return None
+        return self._claim_import_job_row(
+            row,
+            worker_id=worker_id,
+            execution_lease=None,
+        )
+
+    def claim_local_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        """Mirrors ``claim_force_import_job_under_lock`` exactly (issue
+        #1176 PR3), reusing the same request-currency guard."""
+        row = next(
+            (
+                candidate
+                for candidate in self._import_jobs
+                if candidate["id"] == job_id
+                and candidate.get("request_id") == request_id
+                and candidate.get("job_type") == IMPORT_JOB_LOCAL
                 and candidate.get("status") == "queued"
                 and candidate.get("preview_status")
                 in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
@@ -1941,6 +1975,19 @@ class FakePipelineDB:
                     request.get("status") not in ("wanted", "unsearchable")
                     or not isinstance(job.payload, YoutubeImportPayload)
                     or job.payload.staged_path != source_path
+                ):
+                    return None
+            elif job.job_type == IMPORT_JOB_LOCAL:
+                # No payload-field equality check (issue #1176 PR3) — see
+                # lib.pipeline_db.import_jobs.PipelineDB
+                # .authorize_import_job_launch's docstring: local-import's
+                # ``source_path`` IS the private action copy already
+                # (source_reference_path=None), deterministic from job.id
+                # alone, so there is no separate durable payload field it
+                # could usefully equal.
+                if (
+                    request.get("status") == "processing"
+                    or request.get("active_automation_import_job_id") is not None
                 ):
                     return None
             else:
@@ -2482,10 +2529,9 @@ class FakePipelineDB:
                 now - import_preview_requeue_delay(int(row.get("attempts") or 0))
             )
             and (
-                row.get("job_type") not in (
-                    IMPORT_JOB_AUTOMATION,
-                    IMPORT_JOB_FORCE,
-                )
+                # Positive routing (issue #1176 PR3) — mirrors
+                # _import_job_candidate_rows.
+                row.get("job_type") == IMPORT_JOB_YOUTUBE
                 or (
                     row.get("job_type") == IMPORT_JOB_AUTOMATION
                     and execution_lease is not None
@@ -2493,7 +2539,7 @@ class FakePipelineDB:
                     and self._automation_job_has_authority(row)
                 )
                 or (
-                    row.get("job_type") == IMPORT_JOB_FORCE
+                    row.get("job_type") in (IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL)
                     and row.get("request_id") is not None
                     and self._force_job_request_is_current(
                         row,
@@ -2534,10 +2580,9 @@ class FakePipelineDB:
                 candidate
                 for candidate in self._import_jobs
                 if candidate.get("id") == job_id
-                and candidate.get("job_type") not in (
-                    IMPORT_JOB_AUTOMATION,
-                    IMPORT_JOB_FORCE,
-                )
+                # youtube_import only (issue #1176 PR3) — local_import
+                # claims through claim_local_import_preview_job_under_lock.
+                and candidate.get("job_type") == IMPORT_JOB_YOUTUBE
                 and candidate.get("status") == "queued"
                 and candidate.get("preview_status") == "waiting"
             ),
@@ -2593,6 +2638,38 @@ class FakePipelineDB:
                 if candidate["id"] == job_id
                 and candidate.get("request_id") == request_id
                 and candidate.get("job_type") == IMPORT_JOB_FORCE
+                and candidate.get("status") == "queued"
+                and candidate.get("preview_status") == "waiting"
+            ),
+            None,
+        )
+        if row is None or not self._force_job_request_is_current(
+            row,
+            request_id=request_id,
+        ):
+            return None
+        return self._claim_import_preview_row(
+            row,
+            worker_id=worker_id,
+            execution_lease=None,
+        )
+
+    def claim_local_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        """Mirrors ``claim_force_import_preview_job_under_lock`` exactly
+        (issue #1176 PR3)."""
+        row = next(
+            (
+                candidate
+                for candidate in self._import_jobs
+                if candidate["id"] == job_id
+                and candidate.get("request_id") == request_id
+                and candidate.get("job_type") == IMPORT_JOB_LOCAL
                 and candidate.get("status") == "queued"
                 and candidate.get("preview_status") == "waiting"
             ),
@@ -5681,8 +5758,11 @@ class FakePipelineDB:
             == expected_import_job_id
         )
         force_claim = (
+            # issue #1176 PR3 widened this arm to admit local_import too —
+            # see lib.pipeline_db.requests.PipelineDB
+            # .rekey_release_identity's docstring.
             job is not None
-            and job.job_type == IMPORT_JOB_FORCE
+            and job.job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL)
             and job.status == "running"
             and job.request_id == request_id
             and row.get("active_automation_import_job_id") is None

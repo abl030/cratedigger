@@ -952,6 +952,136 @@ class TestCmdForceImport(_FakeDbWebServerCase):
                         self.assertEqual(self.db.list_import_jobs(), [])
 
 
+class TestCmdImportLocal(_FakeDbWebServerCase):
+    """``import-local`` is a thin adapter over ``POST
+    /api/pipeline/import-local`` (issue #1176 PR3) — mirrors
+    ``TestCmdForceImport``'s shape exactly: the configured-authority
+    preflight must run under the service identity, so these pins drive
+    the real route through the real service and assert the CLI's exit
+    codes (derived from ``LOCAL_IMPORT_HTTP_STATUS``, per
+    ``lib.local_import_service.enqueue_local_import``'s outcome table)."""
+
+    def _run(self, request_id: int, source_path: str) -> tuple[int, str]:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_import_local(
+                None,
+                argparse.Namespace(
+                    request_id=request_id,
+                    source_path=source_path,
+                    api_endpoint=TcpApiEndpoint(self.base),
+                ),
+            )
+        return rc, stdout.getvalue()
+
+    def test_processing_owner_conflict_is_typed_and_exit_four(self) -> None:
+        self.db.seed_request(make_request_row(
+            id=123, status="wanted", mb_release_id="mbid-123",
+            artist_name="Artist", album_title="Album",
+        ))
+        owner = handoff_automation_owner(self.db, 123)
+
+        with patch(
+            "web.routes.pipeline_mutations.read_runtime_config",
+            return_value=MagicMock(),
+        ):
+            rc, out = self._run(123, "/operator/Album")
+
+        self.assertEqual(rc, 4)
+        self.assertEqual(json.loads(out), {
+            "error": "processing_locked",
+            "reason": "processing_locked",
+            "request_id": 123,
+            "processing_owner": {
+                "job_id": owner.id,
+                "status": owner.status,
+                "preview_status": owner.preview_status,
+            },
+            "detail": (
+                f"request 123 is owned by automation import job {owner.id}"
+            ),
+        })
+        self.assertEqual(
+            [job.id for job in self.db.list_import_jobs()],
+            [owner.id],
+        )
+
+    def test_import_local_enqueues_with_authorized_path(self) -> None:
+        from lib.import_queue import IMPORT_JOB_LOCAL, local_import_dedupe_key
+
+        self.db.seed_request(make_request_row(
+            id=123, status="wanted", mb_release_id="mbid-123",
+            artist_name="Artist", album_title="Album",
+        ))
+        with tempfile.TemporaryDirectory() as root:
+            local_dir = os.path.join(root, "LocalImport")
+            album = os.path.join(local_dir, "MyRip", "Album")
+            os.makedirs(album)
+            cfg = SimpleNamespace(
+                local_import_enabled=True,
+                local_import_dir=local_dir,
+                processing_dir=os.path.join(root, "processing"),
+                beets_staging_dir=os.path.join(root, "Incoming"),
+                slskd_download_dir=os.path.join(root, "slskd"),
+                beets_directory=os.path.join(root, "Beets"),
+                beets_library_db=os.path.join(root, "beets-db", "beets-library.db"),
+            )
+            with patch(
+                "web.routes.pipeline_mutations.read_runtime_config",
+                return_value=cfg,
+            ):
+                rc, out = self._run(123, album)
+
+        self.assertEqual(rc, 0)
+        self.assertIn("[OK] Queued", out)
+        self.assertEqual(len(self.db._import_jobs), 1)
+        job_row = self.db._import_jobs[0]
+        self.assertEqual(job_row["job_type"], IMPORT_JOB_LOCAL)
+        self.assertEqual(job_row["request_id"], 123)
+        self.assertEqual(
+            job_row["dedupe_key"], local_import_dedupe_key(123))
+        self.assertEqual(job_row["payload"]["source_path"], album)
+        self.assertEqual(job_row["payload"]["request_id"], 123)
+
+    def test_import_local_failure_exit_codes_enqueue_nothing(self) -> None:
+        self.db.seed_request(make_request_row(
+            id=123, mb_release_id="mbid-123",
+            artist_name="Artist", album_title="Album",
+        ))
+        self.db.seed_request(make_request_row(
+            id=124, mb_release_id=None, discogs_release_id="124",
+            artist_name="Discogs Artist", album_title="Discogs Album",
+        ))
+        with tempfile.TemporaryDirectory() as root:
+            local_dir = os.path.join(root, "LocalImport")
+            os.makedirs(local_dir)
+            cfg = SimpleNamespace(
+                local_import_enabled=True,
+                local_import_dir=local_dir,
+                processing_dir=os.path.join(root, "processing"),
+                beets_staging_dir=os.path.join(root, "Incoming"),
+                slskd_download_dir=os.path.join(root, "slskd"),
+                beets_directory=os.path.join(root, "Beets"),
+                beets_library_db=os.path.join(root, "beets-db", "beets-library.db"),
+            )
+            outside = os.path.join(root, "outside")
+            os.makedirs(outside)
+
+            with patch(
+                "web.routes.pipeline_mutations.read_runtime_config",
+                return_value=cfg,
+            ):
+                for name, request_id, source_path, expected_rc in (
+                    ("missing request", 999_999, local_dir, 2),
+                    ("outside root", 123, outside, 3),
+                    ("missing MusicBrainz ID", 124, local_dir, 3),
+                ):
+                    with self.subTest(name=name):
+                        rc, _out = self._run(request_id, source_path)
+                        self.assertEqual(rc, expected_rc)
+                        self.assertEqual(self.db.list_import_jobs(), [])
+
+
 class TestCmdImportPreview(unittest.TestCase):
     def test_values_json_outputs_common_preview_json(self):
         """Values-mode JSON output round-trips a real preview verdict.

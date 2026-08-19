@@ -36,6 +36,7 @@ from lib.import_execution import (
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
+    IMPORT_JOB_LOCAL,
     AutomationHandoffResult,
     ImportJob,
 )
@@ -576,6 +577,22 @@ class ImportJobClaimDB(Protocol):
         worker_id: str | None,
     ) -> ImportJob | None: ...
 
+    def claim_local_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None: ...
+
+    def claim_local_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None: ...
+
 
 def claim_next_import_job(
     db: ImportJobClaimDB,
@@ -625,6 +642,20 @@ def claim_next_import_job(
                 request_id=candidate.request_id,
                 worker_id=worker_id,
             )
+    if candidate.job_type == IMPORT_JOB_LOCAL:
+        if candidate.request_id is None:
+            return None
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            candidate.request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return db.claim_local_import_job_under_lock(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+            )
     return db.claim_import_job_candidate(
         candidate.id,
         worker_id=worker_id,
@@ -670,6 +701,20 @@ def claim_next_import_preview_job(
             if not acquired:
                 return None
             return db.claim_force_import_preview_job_under_lock(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+            )
+    if candidate.job_type == IMPORT_JOB_LOCAL:
+        if candidate.request_id is None:
+            return None
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            candidate.request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return db.claim_local_import_preview_job_under_lock(
                 candidate.id,
                 request_id=candidate.request_id,
                 worker_id=worker_id,

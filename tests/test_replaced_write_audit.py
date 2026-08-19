@@ -98,16 +98,19 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 376, "cd644e51f3670265"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 305, "cba0d6d56f1878ac"): (
+    ("lib/pipeline_db/download_log.py", 306, "cba0d6d56f1878ac"): (
         "get_log's three outcome variants were three verbatim copies of one "
         "SELECT; issue #829 Phase 5 PR4 collapsed them to a single template "
         "whose two slots are the shared candidate-evidence column block and "
         "an outcome filter drawn from a closed literal map. Issue #962 adds "
         "only read-only exact-release identity projections; no slot takes "
         "caller input or mutates album_requests. Issue #1022 projects a "
-        "shared row's current-only lineage to NULL on this read surface"
+        "shared row's current-only lineage to NULL on this read surface. "
+        "Issue #1176 PR3's ``local_import`` Literal member above shifted "
+        "this line only — fingerprint unchanged, confirming the SQL itself "
+        "is untouched"
     ),
-    ("lib/pipeline_db/download_log.py", 814, "2d2cba8bbf4b379f"): (
+    ("lib/pipeline_db/download_log.py", 815, "2d2cba8bbf4b379f"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(#867 intentionally added terminal/evidence projection and moved final "
         "classification after same-path DISTINCT). Issue #829 PR4/N3 CHANGED "
@@ -119,27 +122,30 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "``e.audio_corrupt AS candidate_audio_corrupt`` projection — an "
         "incidental fact about linked evidence used to hide an otherwise-kept, "
         "visible row, which the removal fixes; still read-only, no new caller "
-        "input. Issue #1176 PR1's ``log_download`` ``source`` parameter above "
-        "shifted this line only — fingerprint unchanged, confirming the SQL "
-        "itself is untouched"
+        "input. Issue #1176 PR1's ``log_download`` ``source`` parameter and "
+        "PR3's ``local_import`` Literal member above each shifted this line "
+        "only — fingerprint unchanged, confirming the SQL itself is untouched"
     ),
-    ("lib/pipeline_db/download_log.py", 878, "e0154e89026dc8ef"): (
+    ("lib/pipeline_db/download_log.py", 879, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
-        "#1077 F2's column removal, and issue #1176 PR1's ``log_download`` "
-        "``source`` parameter above each shifted this line only)"
+        "#1077 F2's column removal, issue #1176 PR1's ``log_download`` "
+        "``source`` parameter, and PR3's ``local_import`` Literal member "
+        "above each shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 896, "13517e08e7db52f3"): (
+    ("lib/pipeline_db/download_log.py", 897, "13517e08e7db52f3"): (
         "validation key is closed vocabulary and IN list is value placeholders "
         "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
-        "#1077 F2's column removal, and issue #1176 PR1's ``log_download`` "
-        "``source`` parameter above each shifted this line only)"
+        "#1077 F2's column removal, issue #1176 PR1's ``log_download`` "
+        "``source`` parameter, and PR3's ``local_import`` Literal member "
+        "above each shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 913, "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", 914, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary "
         "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
-        "#1077 F2's column removal, and issue #1176 PR1's ``log_download`` "
-        "``source`` parameter above each shifted this line only)"
+        "#1077 F2's column removal, issue #1176 PR1's ``log_download`` "
+        "``source`` parameter, and PR3's ``local_import`` Literal member "
+        "above each shifted this line only)"
     ),
     ("lib/pipeline_db/import_jobs.py", 590, "ecf3d1844c67f653"): (
         "optional job filter is a fixed literal WHERE clause "

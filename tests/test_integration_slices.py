@@ -73,6 +73,7 @@ from tests.helpers import (
     make_import_result,
     make_request_row,
     make_requests_http_error,
+    make_validation_result,
     patch_dispatch_externals,
 )
 
@@ -2448,6 +2449,213 @@ class TestForceImportSlice(unittest.TestCase):
 
         row = db.request(833)
         self.assertNotIn("imported_path", row)
+
+
+class TestLocalImportSlice(unittest.TestCase):
+    """Integration slice: dispatch_import_from_db through the local-import
+    lane's three deviations from force (issue #1176 PR3): strict
+    validation at the ordinary distance threshold, no operator-path audit
+    exposure, and its own attempt scenario. ``lib.beets.beets_validate`` is
+    patched (the thin subprocess-wrapper boundary, code-quality.md mock
+    rule 4) so the slice controls the release-identity verdict directly,
+    the same way ``patch_dispatch_externals`` controls the import harness.
+    """
+
+    def test_local_import_success(self) -> None:
+        """A valid candidate imports exactly like force, with
+        outcome='local_import' and no operator-path exposure."""
+        from lib.dispatch import dispatch_import_from_db
+        from lib.import_queue import IMPORT_JOB_LOCAL
+        from lib.quality import AudioQualityMeasurement, ValidationResult
+        from lib.quality_evidence import snapshot_audio_files
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=61, status="wanted", mb_release_id="mbid-local-1",
+        ))
+        db.set_tracks(61, [{"track_number": 1, "title": "Track"}])
+
+        ir = make_import_result(decision="import", new_min_bitrate=320)
+        stdout = _make_stdout(ir)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
+            is_cbr=False, album_path="/Beets/Test")
+
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+            local_import_enabled=True,
+            local_import_dir="/operator/real",
+        )
+
+        operator_path = "/operator/real/MyRip"
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_LOCAL,
+                request_id=61,
+                payload={"source_path": operator_path, "request_id": 61},
+            )
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-local-1",
+                source_path=tmpdir,
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320, avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320, format="MP3",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3", container="mp3", storage_format="MP3",
+            )
+            db.mark_import_job_preview_importable(
+                job.id, preview_result={"ready": True},
+            )
+            claimed = claim_next_import_job(db, worker_id="local-slice")
+            assert claimed is not None and claimed.id == job.id
+            _seed_current_for_request(
+                db, 61,
+                mb_release_id="mbid-local-1",
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=180, avg_bitrate_kbps=180,
+                    median_bitrate_kbps=180, format="MP3",
+                    spectral_bitrate_kbps=128,
+                    spectral_grade="likely_transcode",
+                ),
+                codec="mp3", container="mp3", storage_format="mp3",
+            )
+            with patch_dispatch_externals() as ext, \
+                 _patch_linked_current_beets(db, 61, beets_info), \
+                 patch("lib.config.read_runtime_config", return_value=cfg), \
+                 patch(
+                     "lib.beets.beets_validate",
+                     return_value=ValidationResult(
+                         valid=True, scenario="strong_match", distance=0.01,
+                         target_mbid="mbid-local-1",
+                     ),
+                 ):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout=stdout, stderr="")
+                result = dispatch_import_from_db(
+                    db, request_id=61, failed_path=tmpdir,  # type: ignore[arg-type]
+                    source_reference_path=None,
+                    import_job_id=claimed.id,
+                    distance_threshold=cfg.beets_distance_threshold,
+                    scenario="local_import",
+                )
+                finalize_claimed_dispatch(db, claimed, result)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        self.assertTrue(result.success)
+        row = db.request(61)
+        # This fixture carries no prev/new-bitrate delta (mirrors
+        # TestForceImportSlice.test_force_import_success, which asserts
+        # the SAME preservation for its own seeded status): the terminal
+        # policy arbitration preserves the request's current runnable
+        # status here rather than flipping it, since neither side of this
+        # slice's job is to exercise that separate upgrade-delta path.
+        self.assertEqual(row["status"], "wanted")
+        db.assert_log(self, 0, outcome="local_import")
+        # Hazard B, end to end: the terminal audit never names the
+        # operator's real folder.
+        raw = db.download_logs[0].validation_result
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        if isinstance(raw, dict):
+            self.assertNotEqual(raw.get("failed_path"), operator_path)
+
+    def test_local_import_strict_reject_lands_as_ordinary_wrong_match(
+        self,
+    ) -> None:
+        """Unlike force, an invalid verdict at the strict threshold
+        REJECTS — decision 3: strict pressing identity, no
+        relaxed-threshold escape hatch. The reject names the action copy,
+        never the operator's folder (Hazard B)."""
+        from lib.dispatch import dispatch_import_from_db
+        from lib.import_queue import IMPORT_JOB_LOCAL
+        from lib.quality import AudioQualityMeasurement
+        from lib.quality_evidence import snapshot_audio_files
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=62, status="wanted", mb_release_id="mbid-local-2",
+        ))
+        db.set_tracks(62, [{"track_number": 1, "title": "Track"}])
+
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+            local_import_enabled=True,
+            local_import_dir="/operator/real",
+        )
+        operator_path = "/operator/real/WrongRip"
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_LOCAL,
+                request_id=62,
+                payload={"source_path": operator_path, "request_id": 62},
+            )
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-local-2",
+                source_path=tmpdir,
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320, avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320, format="MP3",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3", container="mp3", storage_format="MP3",
+            )
+            db.mark_import_job_preview_importable(
+                job.id, preview_result={"ready": True},
+            )
+            claimed = claim_next_import_job(db, worker_id="local-reject-slice")
+            assert claimed is not None and claimed.id == job.id
+
+            with patch_dispatch_externals(), \
+                 patch("lib.config.read_runtime_config", return_value=cfg), \
+                 patch(
+                     "lib.beets.beets_validate",
+                     return_value=make_validation_result(
+                         valid=False, scenario="high_distance", distance=0.9,
+                     ),
+                 ):
+                result = dispatch_import_from_db(
+                    db, request_id=62, failed_path=tmpdir,  # type: ignore[arg-type]
+                    source_reference_path=None,
+                    import_job_id=claimed.id,
+                    distance_threshold=cfg.beets_distance_threshold,
+                    scenario="local_import",
+                )
+                finalize_claimed_dispatch(db, claimed, result)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        self.assertFalse(result.success)
+        row = db.request(62)
+        # Strict reject preserves the request's runnable status — never
+        # parked (CLAUDE.md invariant 11).
+        self.assertEqual(row["status"], "wanted")
+        db.assert_log(self, 0, outcome="rejected")
+        raw = db.download_logs[0].validation_result
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        assert isinstance(raw, dict)
+        self.assertEqual(raw.get("scenario"), "high_distance")
+        # Hazard B: the strict-validation guard's own reject
+        # (_guard_reject, reused from the manifest guard's writer) names
+        # the disposable action copy, never the operator's real folder —
+        # source_reference_path is always None for this lane.
+        self.assertEqual(raw.get("failed_path"), tmpdir)
+        self.assertNotEqual(raw.get("failed_path"), operator_path)
 
 
 class TestPreserveSourceSlice(unittest.TestCase):

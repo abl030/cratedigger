@@ -132,6 +132,7 @@ Web UI / CLI → PostgreSQL (wanted → downloading → processing → imported;
    completed download → validate vs exact release ID (dist ≤ 0.15)
    source=request    → keep exact processing owner path → import_one.py (spectral → convert → quality gate) → /Beets
    force import      → same path, Beets distance overridden (validation + merge redirect included)
+   local import      → operator path copied into private scratch, same path, strict distance (rejects to Wrong Matches)
    source=redownload → stage /Incoming/post-validation (manual review only, never auto-imported)
 ```
 

@@ -51,7 +51,7 @@ _CAPTURE_AND_EVIDENCE_SELECT = """
             FROM download_log capture_download
             WHERE capture_download.request_id = request_row.id
               AND capture_download.outcome IN (
-                  'success', 'force_import', 'manual_import'
+                  'success', 'force_import', 'manual_import', 'local_import'
               )
         )
         OR EXISTS (
@@ -1992,17 +1992,22 @@ class _RequestsMixin(_PipelineDBBase):
             pointer IS ownership (invariant 10), and it excludes the frozen
             ``replaced`` status by construction: a frozen audit ancestor is
             never ``processing``.
-          - ``claim_force_import_job_under_lock`` — ``status NOT IN
-            ('processing', 'replaced')``, no automation owner attached, and
-            the named ``force_import`` job ``running`` against this request.
-            A force import runs on a ``wanted`` / ``imported`` /
-            ``unsearchable`` / ``downloading`` row under ``IMPORT(request_id)``
-            and CANNOT take the ``processing`` pointer: migration 066's
-            owner-equivalence CHECK and its partial unique index reserve that
-            for one active ``automation_import`` job. Before #1080 the force
-            lane could therefore never follow a merge — it met the merged-away
-            release at the apply-time comparison inside ``import_one.py``
-            instead, which has no redirect concept.
+          - ``claim_force_import_job_under_lock`` / ``claim_local_import_
+            job_under_lock`` — ``status NOT IN ('processing', 'replaced')``,
+            no automation owner attached, and the named ``force_import`` OR
+            ``local_import`` job ``running`` against this request (issue
+            #1176 PR3 widened this arm's ``job_type`` term from a bare
+            equality to ``IN ('force_import', 'local_import')`` — the
+            local-import lane is modeled on force's copy chain end to end,
+            and #1080's "don't diverge and recreate any pathways" authority
+            below governs this arm exactly as it governs the rest of the
+            lane). Neither runs on ``processing`` and CANNOT take the
+            ``processing`` pointer: migration 066's owner-equivalence CHECK
+            and its partial unique index reserve that for one active
+            ``automation_import`` job. Before #1080 the force lane could
+            therefore never follow a merge — it met the merged-away release
+            at the apply-time comparison inside ``import_one.py`` instead,
+            which has no redirect concept.
           - **the operator merge-rekey arm (#1089)** — admitted only when
             ``expected_import_job_id IS NULL`` (the two claim arms above are
             each keyed to a real job id and so can never satisfy this one by
@@ -2110,7 +2115,7 @@ class _RequestsMixin(_PipelineDBBase):
                         "      SELECT 1 FROM import_jobs j"
                         "      WHERE j.id = %s"
                         "        AND j.request_id = album_requests.id"
-                        "        AND j.job_type = 'force_import'"
+                        "        AND j.job_type IN ('force_import', 'local_import')"
                         "        AND j.status = 'running'"
                         "    )"
                         "  )"

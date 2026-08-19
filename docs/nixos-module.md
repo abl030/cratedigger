@@ -51,7 +51,7 @@ upstream module and adds:
 | `discogs.apiBase` | `null` | Discogs mirror origin. Mirror-REQUIRED: unset ⇒ Discogs browse off with a 503 mirror-required message (public api.discogs.com does not serve this API shape). |
 | `stateDir` | `/var/lib/cratedigger` | Mutable runtime state (lock, denylists, processing metadata). Application config is an immutable store file. |
 | `processingDir` | `${stateDir}/processing` | Private `0700` Cratedigger-owned root: canonical albums and their same-filesystem failure quarantine live in `albums/`, bounded preview scratch in `preview/`. Must be absolute and disjoint from slskd's download tree. |
-| `localImport.enable` | `false` | Enable the manual local-import lane (issue #1176): "here's a request ID, here's a folder on disk, import it." Off by default; PR2 ships only this configuration surface and its execution-time path authority, not the lane itself. |
+| `localImport.enable` | `false` | Enable the manual local-import lane (issue #1176): "here's a request ID, here's a folder on disk, import it." Off by default. `pipeline-cli import-local <request_id> <path>` / `POST /api/pipeline/import-local`. |
 | `localImport.dir` | `null` | Absolute root the local-import lane may read from. Deliberately has NO working default even when enabled — see "Manual local-import lane" below. |
 | `slskd.apiKeyFile` | (required) | Path to a file containing the raw slskd API key (one line). |
 | `slskd.downloadDir` | (required) | Where slskd downloads land. |
@@ -513,16 +513,20 @@ the live library or at Cratedigger's own processing tree is the realistic
 operator typo, and it is also where file ownership stops being unambiguous
 (good-citizen doctrine, issue #571).
 
-Sandbox interaction to know about now, even though PR2 does not touch it:
-the importer and preview-worker units run under `ProtectHome = true` AND
-`PrivateTmp = true` (this module's shared `untrustedInputSandbox`), so a
-`localImport.dir` under `/home`, `/tmp`, or `/var/tmp` — natural choices
-for this lane, and `/tmp` is literally the placeholder this option's own
-no-default design exists to discourage (see above) — resolves EVERY
-candidate as missing once those units actually try to read it. PR3, which
-wires the copy worker into that sandbox, owns adding the matching bind
-mount / `ReadOnlyPaths` entry; naming one of these directories today is
-not itself wrong, it just does nothing useful until PR3 lands.
+Sandbox interaction: the importer and preview-worker units run under
+`ProtectHome = true` AND `PrivateTmp = true` (this module's shared
+`untrustedInputSandbox`), so a `localImport.dir` under `/home`, `/tmp`, or
+`/var/tmp` — natural choices for this lane, and `/tmp` is literally the
+placeholder this option's own no-default design exists to discourage (see
+above) — would otherwise resolve EVERY candidate as missing once those
+units try to read it. PR3 (issue #1176) closes that gap: both units
+read-only-bind the exact configured `dir` (`localImportReadOnlyPaths` in
+`nix/module.nix`, the same missing-tolerant `-`-prefixed shape every other
+external bind in this module already uses — `beetsConfigReadOnlyPaths`,
+`beetsObserverReadOnlyPaths`, …), so it is visible inside the sandbox
+regardless of which of those three roots (or an ordinary path) it names.
+The bind is always read-only — this lane's copy worker only ever reads
+from the operator's folder, never writes into it.
 
 This lane deliberately reintroduces a caller-named-path input vocabulary —
 the same SHAPE as the removed `manual-import` HTTP endpoint (finding
@@ -540,11 +544,14 @@ session, rather than trusting an authorization computed earlier and
 carried across a queue boundary as a bare path string — the same shape
 `enqueue_force_import`'s own docstring names for the quarantine roots.
 
-As of this PR the module renders `[Local Import] enabled` / `dir` into
-`config.ini` and `lib.fs_authority.open_configured_local_import_directory`
-exists as the sole reader of those fields — no service, CLI subcommand, or
-import lane consumes them yet (tracked separately as PR1/PR3 of issue
-#1176).
+The module renders `[Local Import] enabled` / `dir` into `config.ini`;
+`lib.fs_authority.open_configured_local_import_directory` (PR2) resolves an
+operator-named path through it, and the local-import lane itself (PR3 —
+`lib/local_import_service.py`, `pipeline-cli import-local`, `POST
+/api/pipeline/import-local`, and the `local_import` preview/import worker
+branches) is the reader that reaches Beets. See `docs/rejection-routing.md`
+§ "Local-import outcomes" and `docs/pipeline-db-schema.md`'s `job_type`
+entry for the full dispatch shape.
 
 ### Startup write-probe
 

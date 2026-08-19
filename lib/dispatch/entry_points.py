@@ -19,7 +19,10 @@ from lib.dispatch.evidence_gate import (
     _download_info_from_candidate_evidence,
     _requeue_import_job_to_preview,
 )
-from lib.dispatch.manifest_guard import _guard_force_import_audio_manifest
+from lib.dispatch.manifest_guard import (
+    _guard_force_import_audio_manifest,
+    _guard_reject,
+)
 from lib.dispatch.quality_gate import _check_quality_gate_core
 from lib.dispatch.types import (
     DISPATCH_CODE_BAD_REQUEST,
@@ -37,7 +40,7 @@ if TYPE_CHECKING:
     from lib.dispatch.types import ImportOneRunner, QualityGateFn
     from lib.import_execution import CancellationToken, OwnerSessionIdentity
     from lib.mb_canonical import CanonicalReleaseFn
-    from lib.pipeline_db import PipelineDB
+    from lib.pipeline_db import DownloadLogOutcome, PipelineDB
 
 logger = logging.getLogger("cratedigger")
 
@@ -61,6 +64,8 @@ def dispatch_import_from_db(
     owner_session_identity: OwnerSessionIdentity | None = None,
     canonical_release_fn: CanonicalReleaseFn | None = None,
     retag_fn: MergeRetagFn | None = None,
+    distance_threshold: float | None = None,
+    scenario: DownloadLogOutcome = "force_import",
 ) -> DispatchOutcome:
     """Run a force-import through the full dispatch pipeline.
 
@@ -80,9 +85,27 @@ def dispatch_import_from_db(
     Since #1080 that override is literal rather than structural: this lane
     runs the SAME exact-release validation the automation lane runs
     (``lib.download_validation.validate_release_with_merge_redirect``),
-    differing in one argument — the distance threshold, raised to
+    differing in one argument — the distance threshold, raised by default to
     ``FORCE_IMPORT_DISTANCE_THRESHOLD``. See ``_dispatch_import_from_db_locked``
     for why the result is identity resolution and never a verdict.
+
+    ``distance_threshold`` / ``scenario`` (issue #1176 PR3) are the ONE seam
+    the local-import lane shares this entry point through rather than
+    forking it: ``distance_threshold=None`` (every production force-import
+    caller) keeps today's ``FORCE_IMPORT_DISTANCE_THRESHOLD`` override
+    byte-identical; local-import passes its config's ordinary
+    ``beets_distance_threshold`` instead — strict pressing-identity
+    validation, no relaxed-threshold escape hatch (CLAUDE.md's decision 3
+    for #1176: a candidate that fails strict validation lands as an
+    ordinary Wrong Matches row, and force-importing THAT row is the
+    already-built escape hatch). ``scenario`` (default ``"force_import"``,
+    the historical literal) becomes the attempt-scenario audit label
+    (``dispatch_import_core``'s ``scenario``/``outcome_label`` params) and,
+    for local-import, the deliberately-uncovered ``"local_import"`` string
+    (excluded from ``FORCE_IMPORT_SCENARIOS`` on purpose, per
+    ``lib.dispatch.helpers._should_cleanup_path`` — a local-import action
+    copy is disposable on every outcome, exactly like an auto-import
+    source, never only on success).
 
     Concurrency (issue #92): a per-``request_id`` advisory lock (IMPORT
     namespace) is taken up front. Two concurrent force imports
@@ -154,6 +177,8 @@ def dispatch_import_from_db(
             owner_session_identity=owner_session_identity,
             canonical_release_fn=canonical_release_fn,
             retag_fn=retag_fn,
+            distance_threshold=distance_threshold,
+            scenario=scenario,
         )
 
 
@@ -176,6 +201,8 @@ def _dispatch_import_from_db_locked(
     owner_session_identity: OwnerSessionIdentity | None = None,
     canonical_release_fn: CanonicalReleaseFn | None = None,
     retag_fn: MergeRetagFn | None = None,
+    distance_threshold: float | None = None,
+    scenario: DownloadLogOutcome = "force_import",
 ) -> DispatchOutcome:
     """Body of dispatch_import_from_db, called once the advisory lock is held.
 
@@ -258,6 +285,11 @@ def _dispatch_import_from_db_locked(
     from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
     from lib.download_validation import validate_release_with_merge_redirect
 
+    effective_distance_threshold = (
+        distance_threshold
+        if distance_threshold is not None
+        else FORCE_IMPORT_DISTANCE_THRESHOLD
+    )
     validation = validate_release_with_merge_redirect(
         db=db,
         cfg=resolved_cfg,
@@ -265,7 +297,7 @@ def _dispatch_import_from_db_locked(
         request_id=request_id,
         release_id=mbid,
         import_job_id=import_job_id,
-        distance_threshold=FORCE_IMPORT_DISTANCE_THRESHOLD,
+        distance_threshold=effective_distance_threshold,
         cancellation_token=cancellation_token,
         canonical_release_fn=canonical_release_fn,
         retag_fn=retag_fn,
@@ -311,6 +343,49 @@ def _dispatch_import_from_db_locked(
 
     label = f"{req.get('artist_name', '')} - {req.get('album_title', '')}"
 
+    # Candidate freshness is the first force-import gate.  Manifest drift is
+    # evidence drift, not a terminal audit outcome: preview will snapshot the
+    # current action tree and re-establish the candidate before this guard
+    # evaluates the operator's expected audio manifest.
+    attempt_result = ImportAttemptResult.from_import_job(db, import_job_id)
+
+    # Strict-validation guard (issue #1176 PR3, local-import only): an
+    # explicit ``distance_threshold`` override (anything other than
+    # ``None``, which every force-import caller leaves unset) means the
+    # caller wants THIS validation's verdict honored rather than imported
+    # despite it — "strict pressing identity" per CLAUDE.md decision 3 for
+    # #1176. A rejection here reuses ``_guard_reject`` unchanged: preserve
+    # request status, preserve the (disposable, local-import-owned) folder,
+    # write no denylist entry, and land as an ORDINARY Wrong Matches row —
+    # ``validation.result.scenario`` is already one of beets_validate's own
+    # vocabulary (``extra_tracks`` / ``high_distance`` / ``mbid_not_found`` /
+    # ``no_choose_match`` / …), the exact strings automation produces, so no
+    # new taxonomy is needed and force-importing that row remains the
+    # already-built escape hatch. Force-import never reaches this branch:
+    # its ``distance_threshold`` stays ``None``, and ``validation.result
+    # .valid`` is otherwise never consulted, unchanged from before #1176.
+    if distance_threshold is not None and not validation.result.valid:
+        return _persist_terminal_dispatch_outcome(
+            db,
+            _guard_reject(
+                db,
+                request_id=request_id,
+                failed_path=failed_path,
+                audit_source_path=source_reference_path,
+                source_username=source_username,
+                attempt_result=attempt_result,
+                detail=(
+                    validation.result.detail
+                    or "release validation rejected the candidate"
+                ),
+                scenario=validation.result.scenario or "invalid",
+                distance=validation.result.distance,
+                import_job_id=import_job_id,
+                source_download_log_id=download_log_id,
+            ),
+            defer=_job_is_running(db, import_job_id),
+        )
+
     candidate_result = ensure_candidate_evidence_for_action(
         db,
         source_path=failed_path,
@@ -331,11 +406,6 @@ def _dispatch_import_from_db_locked(
             reason=reason,
         )
 
-    # Candidate freshness is the first force-import gate.  Manifest drift is
-    # evidence drift, not a terminal audit outcome: preview will snapshot the
-    # current action tree and re-establish the candidate before this guard
-    # evaluates the operator's expected audio manifest.
-    attempt_result = ImportAttemptResult.from_import_job(db, import_job_id)
     manifest_reject = _guard_force_import_audio_manifest(
         db,
         request_id=request_id,
@@ -383,10 +453,10 @@ def _dispatch_import_from_db_locked(
         # Force-import explicitly bypasses the beets distance
         # check — no measurement exists to report (#550 defect #4).
         distance=None,
-        scenario="force_import",
+        scenario=scenario,
         files=files,
         cfg=resolved_cfg,
-        outcome_label="force_import",
+        outcome_label=scenario,
         requeue_on_failure=False,
         source_dirs=source_dirs,
         candidate_import_job_id=import_job_id,

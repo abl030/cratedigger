@@ -730,11 +730,24 @@ class _ImportJobsMixin(
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
     def list_terminal_force_action_cleanup_jobs(self) -> list[ImportJob]:
-        """Return terminal force jobs whose private copies need convergence."""
+        """Return terminal force/local-import jobs whose private job-scoped
+        action copies need convergence.
+
+        Widened to ``local_import`` by issue #1176 PR3: local-import retains
+        the identical job-scoped private copy under a distinct prefix
+        (``lib.import_preview.LOCAL_IMPORT_ACTION_PREFIX``), so a crash
+        between the terminal commit and the live post-commit cleanup call
+        leaves an orphaned copy the same way a force crash would — this
+        sweep reaps either. The receipt key
+        (``force_action_cleanup.removed``) stays shared: both job types'
+        live cleanup path writes it through the same
+        ``_record_terminal_force_action_cleanup`` helper
+        (``scripts/importer.py``).
+        """
         cur = self._execute("""
             SELECT *
             FROM import_jobs
-            WHERE job_type = 'force_import'
+            WHERE job_type IN ('force_import', 'local_import')
               AND status IN ('completed', 'failed')
               AND NULLIF(preview_result->>'action_path', '') IS NOT NULL
               AND result #>> '{force_action_cleanup,removed}'
@@ -841,7 +854,22 @@ class _ImportJobsMixin(
         limit: int,
         offset: int = 0,
     ) -> list[ImportJob]:
-        """Select a bounded ordered import set without creating state."""
+        """Select a bounded ordered import set without creating state.
+
+        The ``job_type`` disjunction is a POSITIVE routing table, not a
+        negative catch-all (issue #1176 PR3): ``youtube_import`` is the only
+        type with no request-status guard here, and it is named explicitly
+        rather than falling out of a ``NOT IN (automation, force)`` bucket —
+        a bucket that used to silently admit ``local_import`` too, with none
+        of ``force_import``'s guard, before this fix (a claimed local-import
+        job would then fail at Beets launch with a misleading
+        ``launch_authority_conflict`` instead of a clear processing-locked
+        refusal). ``local_import`` gets ``force_import``'s exact guard
+        shape: it never takes the ``processing`` pointer either (CLAUDE.md
+        decision 5 for #1176), so a request an automation job currently
+        owns must refuse a local-import claim the same way it refuses a
+        force one.
+        """
         if limit <= 0:
             raise ValueError("import candidate limit must be positive")
         if offset < 0:
@@ -857,10 +885,7 @@ class _ImportJobsMixin(
             WHERE job.status = 'queued'
               AND job.preview_status = 'evidence_ready'
               AND (
-                  job.job_type NOT IN (
-                      'automation_import',
-                      'force_import'
-                  )
+                  job.job_type = 'youtube_import'
                   OR (
                       job.job_type = 'automation_import'
                       AND %s IS NOT NULL
@@ -868,7 +893,7 @@ class _ImportJobsMixin(
                       AND request.active_automation_import_job_id = job.id
                   )
                   OR (
-                      job.job_type = 'force_import'
+                      job.job_type IN ('force_import', 'local_import')
                       AND request.status = job.expected_request_status
                       AND request.status NOT IN ('processing', 'replaced')
                       AND request.active_automation_import_job_id IS NULL
@@ -893,7 +918,16 @@ class _ImportJobsMixin(
         *,
         worker_id: str | None = None,
     ) -> ImportJob | None:
-        """Claim one exact non-request-scoped candidate from a bounded scan."""
+        """Claim one exact non-request-scoped candidate from a bounded scan.
+
+        ``job_type = 'youtube_import'`` is the ONLY type this unguarded claim
+        may take (issue #1176 PR3): ``local_import`` is request-scoped like
+        ``force_import`` and must claim through
+        ``claim_local_import_job_under_lock`` instead, so it gets the same
+        request-status guard. A bare ``NOT IN ('automation_import',
+        'force_import')`` used to admit ``local_import`` here too, with no
+        guard at all.
+        """
         cur = self._execute("""
             UPDATE import_jobs
             SET status = 'running',
@@ -903,7 +937,7 @@ class _ImportJobsMixin(
                 heartbeat_at = NOW(),
                 updated_at = NOW()
             WHERE id = %s
-              AND job_type NOT IN ('automation_import', 'force_import')
+              AND job_type = 'youtube_import'
               AND status = 'queued'
               AND preview_status = 'evidence_ready'
             RETURNING *
@@ -939,6 +973,65 @@ class _ImportJobsMixin(
                 WHERE id = %s
                   AND request_id = %s
                   AND job_type = 'force_import'
+                  AND status = 'queued'
+                  AND preview_status = 'evidence_ready'
+                  AND expected_request_status = %s
+                FOR UPDATE
+            """, (job_id, request_id, request["status"]))
+            if job_cur.fetchone() is None:
+                self.conn.rollback()
+                return None
+            claimed_cur = self._execute("""
+                UPDATE import_jobs
+                SET status = 'running',
+                    attempts = attempts + 1,
+                    worker_id = %s,
+                    started_at = COALESCE(started_at, NOW()),
+                    heartbeat_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+            """, (worker_id, job_id))
+            row = claimed_cur.fetchone()
+            if row is None:
+                self.conn.rollback()
+                return None
+            self.conn.commit()
+            return ImportJob.from_row(dict(row))
+
+
+    def claim_local_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        """Claim the exact local-import job while the caller retains pinned
+        IMPORT — mirrors ``claim_force_import_job_under_lock`` exactly
+        (issue #1176 PR3): a local import never takes the ``processing``
+        pointer either (CLAUDE.md decision 5), so it is refused under the
+        identical guard.
+        """
+        with self._atomic():
+            request_cur = self._execute("""
+                SELECT status
+                FROM album_requests
+                WHERE id = %s
+                  AND status NOT IN ('processing', 'replaced')
+                  AND active_automation_import_job_id IS NULL
+                FOR UPDATE
+            """, (request_id,))
+            request = request_cur.fetchone()
+            if request is None:
+                self.conn.rollback()
+                return None
+            job_cur = self._execute("""
+                SELECT id
+                FROM import_jobs
+                WHERE id = %s
+                  AND request_id = %s
+                  AND job_type = 'local_import'
                   AND status = 'queued'
                   AND preview_status = 'evidence_ready'
                   AND expected_request_status = %s
@@ -1110,6 +1203,20 @@ class _ImportJobsMixin(
         authority. The active path belongs exclusively to the job-type-specific
         predicate below; the caller and harness verify those current files
         against the evidence snapshot before Beets may mutate the library.
+
+        The ``local_import`` arm (issue #1176 PR3) checks only request status
+        and the absence of an automation owner — the same two conditions
+        ``force_import`` checks, minus its ``payload->>'failed_path' = %s``
+        equality. Force's payload field names the OPERATOR's original
+        quarantine path, which never equals the actual launch source (the
+        private force-action copy), so that equality is a staleness check on
+        an audit value, not on the real launch path. Local-import's own
+        ``source_reference_path=None`` design (CLAUDE.md decision 2 for
+        #1176) means its ``source_path`` argument here IS the private action
+        copy already — deterministic from ``job.id`` alone, exactly like
+        force's own confinement-root derivation
+        (``_default_force_action_copy_path``), so there is no separate
+        payload field it could usefully equal.
         """
         if (
             expected_execution_lease is not None
@@ -1169,6 +1276,11 @@ class _ImportJobsMixin(
                         job.job_type = 'youtube_import'
                         AND request.status IN ('wanted', 'unsearchable')
                         AND job.payload->>'staged_path' = %s
+                    )
+                    OR (
+                        job.job_type = 'local_import'
+                        AND request.status != 'processing'
+                        AND request.active_automation_import_job_id IS NULL
                     )
               )
             RETURNING job.*
@@ -1984,7 +2096,12 @@ class _ImportJobsMixin(
         limit: int,
         offset: int = 0,
     ) -> list[ImportJob]:
-        """Select a bounded ordered preview set without creating state."""
+        """Select a bounded ordered preview set without creating state.
+
+        Same positive ``job_type`` routing as ``peek_import_job_candidates``
+        (issue #1176 PR3): ``youtube_import`` is the sole unguarded type;
+        ``force_import`` and ``local_import`` share the request-scoped guard.
+        """
         if limit <= 0:
             raise ValueError("preview candidate limit must be positive")
         if offset < 0:
@@ -2008,10 +2125,7 @@ class _ImportJobsMixin(
                   )
               )
               AND (
-                  job.job_type NOT IN (
-                      'automation_import',
-                      'force_import'
-                  )
+                  job.job_type = 'youtube_import'
                   OR (
                       job.job_type = 'automation_import'
                       AND %s IS NOT NULL
@@ -2019,7 +2133,7 @@ class _ImportJobsMixin(
                       AND request.active_automation_import_job_id = job.id
                   )
                   OR (
-                      job.job_type = 'force_import'
+                      job.job_type IN ('force_import', 'local_import')
                       AND request.status = job.expected_request_status
                       AND request.status NOT IN ('processing', 'replaced')
                       AND request.active_automation_import_job_id IS NULL
@@ -2046,7 +2160,13 @@ class _ImportJobsMixin(
         *,
         worker_id: str | None = None,
     ) -> ImportJob | None:
-        """Claim one exact non-request-scoped candidate from a bounded scan."""
+        """Claim one exact non-request-scoped candidate from a bounded scan.
+
+        ``job_type = 'youtube_import'`` only (issue #1176 PR3) — mirrors
+        ``claim_import_job_candidate``'s own positive routing fix.
+        ``local_import`` claims through
+        ``claim_local_import_preview_job_under_lock`` instead.
+        """
         cur = self._execute("""
             UPDATE import_jobs
             SET preview_status = 'running',
@@ -2058,7 +2178,7 @@ class _ImportJobsMixin(
                 preview_error = NULL,
                 updated_at = NOW()
             WHERE id = %s
-              AND job_type NOT IN ('automation_import', 'force_import')
+              AND job_type = 'youtube_import'
               AND status = 'queued'
               AND preview_status = 'waiting'
             RETURNING *
@@ -2094,6 +2214,68 @@ class _ImportJobsMixin(
                 WHERE id = %s
                   AND request_id = %s
                   AND job_type = 'force_import'
+                  AND status = 'queued'
+                  AND preview_status = 'waiting'
+                  AND expected_request_status = %s
+                FOR UPDATE
+            """, (job_id, request_id, request["status"]))
+            if job_cur.fetchone() is None:
+                self.conn.rollback()
+                return None
+            claimed_cur = self._execute("""
+                UPDATE import_jobs
+                SET preview_status = 'running',
+                    preview_attempts = preview_attempts + 1,
+                    preview_worker_id = %s,
+                    preview_started_at = COALESCE(
+                        preview_started_at,
+                        NOW()
+                    ),
+                    preview_heartbeat_at = NOW(),
+                    preview_message = NULL,
+                    preview_error = NULL,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+            """, (worker_id, job_id))
+            row = claimed_cur.fetchone()
+            if row is None:
+                self.conn.rollback()
+                return None
+            self.conn.commit()
+            return ImportJob.from_row(dict(row))
+
+
+    def claim_local_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        """Claim the exact local-import preview while caller retains pinned
+        IMPORT — mirrors ``claim_force_import_preview_job_under_lock``
+        exactly (issue #1176 PR3); see ``claim_local_import_job_under_lock``.
+        """
+        with self._atomic():
+            request_cur = self._execute("""
+                SELECT status
+                FROM album_requests
+                WHERE id = %s
+                  AND status NOT IN ('processing', 'replaced')
+                  AND active_automation_import_job_id IS NULL
+                FOR UPDATE
+            """, (request_id,))
+            request = request_cur.fetchone()
+            if request is None:
+                self.conn.rollback()
+                return None
+            job_cur = self._execute("""
+                SELECT id
+                FROM import_jobs
+                WHERE id = %s
+                  AND request_id = %s
+                  AND job_type = 'local_import'
                   AND status = 'queued'
                   AND preview_status = 'waiting'
                   AND expected_request_status = %s

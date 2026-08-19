@@ -810,6 +810,16 @@
     ++ map (path: "-${path}") beetsLibraryAuthorityRoots;
   beetsMutationWritePaths =
     map (path: "-${path}") beetsLibraryAuthorityRoots;
+  # Issue #1176 PR3: the importer and preview-worker units run with
+  # ProtectHome + PrivateTmp (untrustedInputSandbox); a localImport.dir
+  # under /home, /tmp, or /var/tmp would otherwise resolve every candidate
+  # as missing once these workers actually try to read it (predicted by
+  # PR2's own `localImport.dir` description, which named this as PR3's
+  # obligation). Bound read-only, never writable — the operator's folder
+  # is strictly read-only input this lane may copy from, never mutate.
+  # `missingOkExternalPath` already degrades to `[]` when `dir` is null.
+  localImportReadOnlyPaths = lib.optionals cfg.localImport.enable
+    (missingOkExternalPath cfg.localImport.dir);
   webSandboxWritePaths = [
     cfg.stateDir
     cfg.processingDir
@@ -1250,14 +1260,17 @@ in {
       '';
     };
 
-    # Manual local-import lane (issue #1176 PR2): an operator names a
-    # request ID and a directory already on disk, and Cratedigger COPIES it
-    # into private processing scratch (never importing in place, never
-    # mutating or deleting the operator's folder) before running it through
-    # the existing preview -> importer -> quality gate -> beets chain. This
-    # PR ships only the configuration surface and the execution-time path
-    # authority (lib.fs_authority.open_configured_local_import_directory) —
-    # no service, CLI subcommand, or import lane reads these options yet.
+    # Manual local-import lane (issue #1176): an operator names a request
+    # ID and a directory already on disk, and Cratedigger COPIES it into
+    # private processing scratch (never importing in place, never mutating
+    # or deleting the operator's folder) before running it through the
+    # existing preview -> importer -> quality gate -> beets chain. PR2
+    # shipped the configuration surface and the execution-time path
+    # authority (lib.fs_authority.open_configured_local_import_directory);
+    # PR3 wires it up end to end — pipeline-cli import-local / POST
+    # /api/pipeline/import-local, the local_import preview/import lanes,
+    # and the sandbox bind (localImportReadOnlyPaths, below) both units
+    # need to read this option's configured `dir`.
     #
     # Both options are deliberately redundant (enable AND dir, rather than
     # a single nullable dir) because it reads more obviously to a human,
@@ -1309,10 +1322,15 @@ in {
           those units. A `dir` under any of `/home`, `/tmp`, or `/var/tmp`
           — natural choices for this lane, `/tmp` especially, since it is
           the exact placeholder this option's own no-default design exists
-          to discourage — will resolve every candidate as missing once the
-          copy worker (PR3) actually runs inside that sandbox; PR3 owns
-          adding the matching bind mount/ReadOnlyPaths entry, not this
-          option.
+          to discourage — would otherwise resolve every candidate as
+          missing once the copy worker actually runs inside that sandbox.
+          PR3 (issue #1176) closes that gap: both units read-only-bind
+          this exact `dir` (`localImportReadOnlyPaths`, the same
+          missing-tolerant `-`-prefixed shape every other external bind in
+          this module uses) so it is visible inside the sandbox regardless
+          of which of `/home`, `/tmp`, `/var/tmp`, or an ordinary path it
+          names — never writable: the operator's folder is strictly
+          read-only input this lane may copy from, never mutate.
         '';
       };
     };
@@ -2769,7 +2787,7 @@ in {
         User = cfg.user;
         Group = cfg.group;
         UMask = "0000";
-        BindReadOnlyPaths = beetsConfigReadOnlyPaths;
+        BindReadOnlyPaths = beetsConfigReadOnlyPaths ++ localImportReadOnlyPaths;
         BindPaths = missingOkExternalPath cfg.beets.runtime.expectedStateFile;
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${importerPkg}/bin/cratedigger-importer";
@@ -2797,7 +2815,7 @@ in {
         User = cfg.user;
         Group = cfg.group;
         UMask = "0000";
-        BindReadOnlyPaths = beetsObserverReadOnlyPaths;
+        BindReadOnlyPaths = beetsObserverReadOnlyPaths ++ localImportReadOnlyPaths;
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${previewWorkerPkg}/bin/cratedigger-import-preview-worker";
         WorkingDirectory = cfg.stateDir;
