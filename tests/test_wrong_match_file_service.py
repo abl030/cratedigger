@@ -39,6 +39,12 @@ class TestWrongMatchRefusalClassification(unittest.TestCase):
         "write_failed": "unavailable",
         # Residual/unclassified code — never a definitive claim (503).
         "unspecified": "unavailable",
+        # not_configured (issue #1176) is is_containment_refusal() True —
+        # unreachable through THIS classifier in practice (only
+        # lib.fs_authority.open_configured_local_import_directory raises
+        # it), but the table is exhaustive over the whole declared
+        # vocabulary regardless of which producer actually reaches it.
+        "not_configured": "refused",
     }
 
     def test_table_covers_every_declared_code(self) -> None:
@@ -64,7 +70,7 @@ class TestWrongMatchRefusalClassification(unittest.TestCase):
 
         containment_codes = {
             "unsafe_symlink", "not_regular_file",
-            "path_escape", "untrusted_ownership",
+            "path_escape", "untrusted_ownership", "not_configured",
         }
         for code in containment_codes:
             with self.subTest(code=code):

@@ -330,6 +330,7 @@ class TestIndeterminateRefusalVocabulary(unittest.TestCase):
         for code in (
             "unspecified", "path_escape", "unsafe_symlink", "not_a_directory",
             "not_regular_file", "untrusted_ownership", "missing",
+            "not_configured",
         ):
             with self.subTest(code=code):
                 self.assertFalse(refusal_is_indeterminate(code))

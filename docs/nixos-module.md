@@ -472,8 +472,8 @@ configured `localImport.dir`:
   private `preview/` scratch is equally off-limits; a candidate under it
   was an unprotected gap in this PR's own first review round);
 - the Beets validation staging directory (`beets.validation.stagingDir`),
-  which — unlike the other three — really can be unset: it is `nullOr`
-  and required only when `beets.validation.enable`;
+  which — unlike the rest of this list — really can be unset: it is
+  `nullOr` and required only when `beets.validation.enable`;
 - `slskd.downloadDir`;
 - the Beets library root (`beets.runtime.expectedDirectory` /
   `CratediggerConfig.beets_directory`) — always populated for a working
@@ -481,7 +481,15 @@ configured `localImport.dir`:
   configured": asserted non-null, absolute, normalized, and non-`/`), so
   this entry never observes an empty value on a real deployment; the
   empty-string filter in `local_import_owned_subtrees` exists for the
-  staging-dir case above, not this one.
+  staging-dir case above, not this one;
+- the directory holding the Beets SQLite library DB, journals, import
+  log, and harness audit (`dirname(beets.runtime.expectedLibrary)` /
+  `CratediggerConfig.beets_library_db`'s parent) — mirrors the module's
+  own `beetsLibraryAuthorityRoots` (`nix/module.nix`), which is
+  `expectedDirectory` PLUS `dirOf expectedLibrary`, not `expectedDirectory`
+  alone;
+- Cratedigger's own mutable `stateDir` (lock, denylists, processing
+  metadata — `dirname(cfg.lock_file_path)`).
 
 A broad root such as `/mnt/virtio` can legitimately contain those trees as
 siblings of a genuine import source, and a config-time check would have to
@@ -492,13 +500,15 @@ operator typo, and it is also where file ownership stops being unambiguous
 (good-citizen doctrine, issue #571).
 
 Sandbox interaction to know about now, even though PR2 does not touch it:
-the importer and preview-worker units run under `ProtectHome = true` (this
-module's shared `untrustedInputSandbox`), so a `localImport.dir` under
-`/home` — a natural choice for this lane — resolves EVERY candidate as
-missing once those units actually try to read it. PR3, which wires the
-copy worker into that sandbox, owns adding the matching bind mount /
-`ReadOnlyPaths` entry; naming a `/home` directory today is not itself
-wrong, it just does nothing useful until PR3 lands.
+the importer and preview-worker units run under `ProtectHome = true` AND
+`PrivateTmp = true` (this module's shared `untrustedInputSandbox`), so a
+`localImport.dir` under `/home`, `/tmp`, or `/var/tmp` — natural choices
+for this lane, and `/tmp` is literally the placeholder this option's own
+no-default design exists to discourage (see above) — resolves EVERY
+candidate as missing once those units actually try to read it. PR3, which
+wires the copy worker into that sandbox, owns adding the matching bind
+mount / `ReadOnlyPaths` entry; naming one of these directories today is
+not itself wrong, it just does nothing useful until PR3 lands.
 
 This lane deliberately reintroduces a caller-named-path input vocabulary —
 the same SHAPE as the removed `manual-import` HTTP endpoint (finding

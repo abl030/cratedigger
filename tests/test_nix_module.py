@@ -712,7 +712,7 @@ def _shared_module_worlds_web_auth_matrix() -> dict[str, object]:
 
 
 def _shared_module_worlds_rest() -> dict[str, object]:
-    """The other four nix-eval worlds this module's tests still merge.
+    """The other five nix-eval worlds this module's tests still merge.
 
     Issue #1131 review round 2: ``headlessComposition`` (0.80s),
     ``mergedGateway`` (18.67s), ``beetsCapability`` (38.28s), and
@@ -727,10 +727,21 @@ def _shared_module_worlds_rest() -> dict[str, object]:
     actually saves is on the order of a few seconds, not the difference
     between the four solo totals and one combined run (those totals
     double-count nixpkgs-import work every eval pays regardless of
-    merging). Every world here only ever reads ``.config.assertions`` or
-    plain option/service values, never forces ``.system.build.toplevel``,
-    so none of them can raise mid-evaluation and take the others down
-    with it.
+    merging).
+
+    Issue #1176 PR2 review round 1 finding 8 added a fifth world,
+    ``localImportAssertions`` (seven small ``lib.nixosSystem`` evaluations
+    with no ``web``/``beets.validation`` composition — the cheapest shape
+    in this file). Measured this whole target's wall time before and
+    after: ~34.9s solo before, ~41.8s solo after (+20%) — still well under
+    ``webAuthMatrix``'s own ~65s, so the two-target floor this function's
+    own docstring argues for is unchanged; no existing world here was
+    weakened to fit it in.
+
+    Every world here only ever reads ``.config.assertions`` or plain
+    option/service values, never forces ``.system.build.toplevel``, so
+    none of them can raise mid-evaluation and take the others down with
+    it.
 
     ``test_injected_basic_path_cannot_render_toplevel`` DOES force
     ``.system.build.toplevel`` to observe the resulting Nix assertion
@@ -2416,12 +2427,16 @@ class TestLocalImportModuleContract(unittest.TestCase):
     surface — options, config.ini rendering, and the module assertion."""
 
     def test_config_ini_renders_local_import_section_unconditionally(self) -> None:
-        """Both keys use the ``${if enable then "True" else "False"}``
-        ternary form, never ``optionalString cfg.localImport.enable`` — so
-        the ``[Local Import]`` section and both keys render REGARDLESS of
-        ``enable``, which is what lets a disabled lane still ship
-        ``enabled = False`` / an empty ``dir`` rather than omitting the
-        section outright (issue #1176 PR2 review finding 8)."""
+        """Both keys render via an unconditional Nix ternary — ``enabled``
+        via ``${if cfg.localImport.enable then "True" else "False"}``,
+        ``dir`` via its OWN, different ternary on a different predicate
+        (``${if cfg.localImport.dir != null then toString ... else ""}``)
+        — never ``optionalString cfg.localImport.enable`` gating either
+        line or the whole section. So the ``[Local Import]`` section and
+        both keys render REGARDLESS of ``enable``, which is what lets a
+        disabled lane still ship ``enabled = False`` / an empty ``dir``
+        rather than omitting the section outright (issue #1176 PR2 review
+        finding 8)."""
         text = _nix_source(MODULE_NIX)
         self.assertIn("[Local Import]", text)
         self.assertIn(

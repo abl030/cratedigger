@@ -470,7 +470,7 @@ class TestUnreadableEntryCountingAndReasonText(unittest.TestCase):
         """
         containment_codes = {
             "unsafe_symlink", "not_regular_file",
-            "path_escape", "untrusted_ownership",
+            "path_escape", "untrusted_ownership", "not_configured",
         }
         for code in get_args(FsAuthorityCode):
             with self.subTest(code=code):
@@ -829,7 +829,8 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
 
     def _cfg(
         self, *, root: str, processing: str, staging: str, slskd: str,
-        beets_directory: str = "", enabled: bool = True,
+        beets_directory: str = "", beets_library_db: str = "",
+        lock_file_path: str = "", enabled: bool = True,
     ) -> MagicMock:
         cfg = MagicMock()
         cfg.local_import_enabled = enabled
@@ -838,6 +839,8 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
         cfg.beets_staging_dir = staging
         cfg.slskd_download_dir = slskd
         cfg.beets_directory = beets_directory
+        cfg.beets_library_db = beets_library_db
+        cfg.lock_file_path = lock_file_path
         return cfg
 
     def _world(self, parent: str) -> tuple[str, str, str, str, str]:
@@ -890,12 +893,67 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
         rejects ``dir == "/"`` at build time, but a preflight is not
         authority — a hand-built ``CratediggerConfig`` reaching this
         function with ``local_import_dir == "/"`` must be refused here
-        too, or every path outside the four owned subtrees becomes a
+        too, or every path outside every owned subtree becomes a
         legal import source."""
         with tempfile.TemporaryDirectory() as parent:
             _root, processing, staging, slskd, beets_directory = self._world(parent)
             cfg = self._cfg(
                 root="/", processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            with self.assertRaisesRegex(
+                LocalImportNotConfiguredError,
+                "local-import lane is not safely configured",
+            ), open_configured_local_import_directory("/etc", cfg):
+                pass
+
+    def test_root_of_double_slash_refuses_with_not_configured_error(self) -> None:
+        """Issue #1176 PR2 review round 2 finding 1 — the serious bypass.
+        ``open_directory_path`` does ``path.lstrip(os.sep)``, so ``"//"``
+        lstrips to ``""`` and names the REAL ``/`` while a naive
+        ``root == "/"`` string compare says False and every downstream
+        containment check reports success. Measured against the real
+        function before the fix: ``root="//"`` authorized ``/etc/ssl``."""
+        with tempfile.TemporaryDirectory() as parent:
+            _root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root="//", processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            with self.assertRaisesRegex(
+                LocalImportNotConfiguredError,
+                "local-import lane is not safely configured",
+            ), open_configured_local_import_directory("/etc", cfg):
+                pass
+
+    def test_root_of_triple_slash_refuses_with_not_configured_error(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            _root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root="///", processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            with self.assertRaisesRegex(
+                LocalImportNotConfiguredError,
+                "local-import lane is not safely configured",
+            ), open_configured_local_import_directory("/etc", cfg):
+                pass
+
+    def test_relative_root_refuses_without_blaming_the_candidate(self) -> None:
+        """Issue #1176 PR2 review round 2 finding 2: a relative
+        ``local_import_dir`` used to be blamed on the CANDIDATE — lexical
+        containment (``_relative_to``, which resolves a relative ``start``
+        against the current working directory via ``os.path.relpath``)
+        ran before the root was ever validated, so ``root="relative/root"``
+        with candidate ``/etc`` raised a plain ``FilesystemAuthorityError``
+        naming ``/etc`` as "outside the configured local-import root" —
+        an accusation against the folder the operator named for a fault
+        that was entirely in the broken root. Root validation now happens
+        first."""
+        with tempfile.TemporaryDirectory() as parent:
+            _root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root="relative/root", processing=processing, staging=staging,
                 slskd=slskd, beets_directory=beets_directory,
             )
             with self.assertRaisesRegex(
@@ -1047,6 +1105,50 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
             ), open_configured_local_import_directory(candidate, cfg):
                 pass
 
+    def test_candidate_inside_beets_library_db_dir_is_refused(self) -> None:
+        """Issue #1176 PR2 review finding 7: the owned set was missing the
+        directory holding the Beets SQLite library DB (journals, import
+        log, harness audit) — the module's own ``beetsLibraryAuthorityRoots``
+        is ``expectedDirectory`` PLUS ``dirOf expectedLibrary``, and only
+        the first half was carried over here."""
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            beets_db_dir = os.path.join(root, "beets-db")
+            os.mkdir(beets_db_dir)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+                beets_library_db=os.path.join(beets_db_dir, "beets-library.db"),
+            )
+            candidate = os.path.join(beets_db_dir, "sneaky")
+            os.mkdir(candidate)
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError,
+                "resolves inside a Cratedigger-owned subtree",
+            ), open_configured_local_import_directory(candidate, cfg):
+                pass
+
+    def test_candidate_inside_state_dir_is_refused(self) -> None:
+        """Issue #1176 PR2 review finding 7: the owned set was missing
+        Cratedigger's own mutable ``stateDir`` (lock, denylists, processing
+        metadata), derivable as ``dirname(cfg.lock_file_path)``."""
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            state_dir = os.path.join(root, "state")
+            os.mkdir(state_dir)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+                lock_file_path=os.path.join(state_dir, ".cratedigger.lock"),
+            )
+            candidate = os.path.join(state_dir, "sneaky")
+            os.mkdir(candidate)
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError,
+                "resolves inside a Cratedigger-owned subtree",
+            ), open_configured_local_import_directory(candidate, cfg):
+                pass
+
     def test_lookalike_sibling_of_owned_beets_directory_is_still_authorized(
         self,
     ) -> None:
@@ -1144,6 +1246,29 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
                 pass
             self.assertNotIsInstance(refused.exception, LocalImportRootError)
             self.assertEqual(refused.exception.code, "missing")
+
+    def test_embedded_nul_in_candidate_is_a_structured_refusal(self) -> None:
+        """Issue #1176 PR2 review finding 9: ``os.open`` raises a raw
+        ``ValueError`` — never ``OSError`` — for a component containing an
+        embedded NUL byte, and ``_parts`` does not reject NUL (only
+        empty/``.``/``..`` components). Before the fix this escaped
+        ``open_relative_directory``'s ``except OSError`` uncaught — a raw
+        ``ValueError`` a PR3 consumer's ``except FilesystemAuthorityError``
+        would never catch, even though that type itself subclasses
+        ``ValueError``. This lane is the first caller to feed these
+        no-follow loops an operator-typed string directly."""
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            candidate = os.path.join(root, "cd-rip\x00nasty")
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError,
+                "unsyscallable path component",
+            ), open_configured_local_import_directory(candidate, cfg):
+                pass
 
     def test_empty_beets_directory_is_not_treated_as_an_owned_subtree(self) -> None:
         """An unset ``beets_directory`` (optional field) must never be

@@ -1303,12 +1303,16 @@ in {
           (which would have to reject the whole broad root outright).
 
           The importer and preview-worker units run with `ProtectHome =
-          true` (this module's shared `untrustedInputSandbox`), which
-          makes `/home` empty inside those units. A `dir` under `/home`
-          — a natural choice for this lane — will resolve every candidate
-          as missing once the copy worker (PR3) actually runs inside that
-          sandbox; PR3 owns adding the matching bind mount/ReadOnlyPaths
-          entry, not this option.
+          true` AND `PrivateTmp = true` (this module's shared
+          `untrustedInputSandbox`), which makes `/home` empty and gives
+          `/tmp`/`/var/tmp` their own private, per-unit namespaces inside
+          those units. A `dir` under any of `/home`, `/tmp`, or `/var/tmp`
+          — natural choices for this lane, `/tmp` especially, since it is
+          the exact placeholder this option's own no-default design exists
+          to discourage — will resolve every candidate as missing once the
+          copy worker (PR3) actually runs inside that sandbox; PR3 owns
+          adding the matching bind mount/ReadOnlyPaths entry, not this
+          option.
         '';
       };
     };
