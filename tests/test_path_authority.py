@@ -28,6 +28,7 @@ from lib.fs_authority import (
     FilesystemAuthorityError,
     FsAuthorityCode,
     LocalImportNotConfiguredError,
+    LocalImportRootError,
     SharedDownloadRootError,
     classify_path_errno,
     errno_proves_absence,
@@ -49,7 +50,11 @@ from lib.import_preview import (
     _snapshot_authorized_directory,
     remove_preview_snapshot,
 )
-from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
+from lib.processing_paths import (
+    canonical_folder_for_row,
+    processing_albums_dir,
+    processing_preview_dir,
+)
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
@@ -847,6 +852,7 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
         for directory in (root, processing, staging, slskd, beets_directory):
             os.makedirs(directory, 0o700, exist_ok=True)
         os.makedirs(processing_albums_dir(processing), 0o700, exist_ok=True)
+        os.makedirs(processing_preview_dir(processing), 0o700, exist_ok=True)
         return root, processing, staging, slskd, beets_directory
 
     def test_disabled_lane_refuses_with_not_configured_error(self) -> None:
@@ -860,7 +866,7 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
             os.mkdir(candidate)
             with self.assertRaisesRegex(
                 LocalImportNotConfiguredError,
-                "local-import lane is not configured",
+                "local-import lane is not safely configured",
             ), open_configured_local_import_directory(candidate, cfg):
                 pass
 
@@ -873,13 +879,38 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 LocalImportNotConfiguredError,
-                "local-import lane is not configured",
+                "local-import lane is not safely configured",
             ), open_configured_local_import_directory(
                 os.path.join(root, "cd-rip"), cfg,
             ):
                 pass
 
-    def test_empty_path_is_refused(self) -> None:
+    def test_root_of_slash_refuses_with_not_configured_error(self) -> None:
+        """Issue #1176 PR2 review finding 9: the module assertion already
+        rejects ``dir == "/"`` at build time, but a preflight is not
+        authority — a hand-built ``CratediggerConfig`` reaching this
+        function with ``local_import_dir == "/"`` must be refused here
+        too, or every path outside the four owned subtrees becomes a
+        legal import source."""
+        with tempfile.TemporaryDirectory() as parent:
+            _root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root="/", processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            with self.assertRaisesRegex(
+                LocalImportNotConfiguredError,
+                "local-import lane is not safely configured",
+            ), open_configured_local_import_directory("/etc", cfg):
+                pass
+
+    def test_empty_path_is_refused_as_not_absolute(self) -> None:
+        """An empty ``raw_path`` has no dedicated clause — ``os.path.isabs("")``
+        is already ``False``, so it falls through to the same refusal as
+        any other non-absolute input (issue #1176 PR2 review finding 10:
+        the deleted dedicated branch used the generic ``"unspecified"``
+        code, which ``unreadable_reason_text()`` words as a possibly-
+        transient read failure — wrong for a semantic input refusal)."""
         with tempfile.TemporaryDirectory() as parent:
             root, processing, staging, slskd, beets_directory = self._world(parent)
             cfg = self._cfg(
@@ -887,7 +918,7 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
                 slskd=slskd, beets_directory=beets_directory,
             )
             with self.assertRaisesRegex(
-                FilesystemAuthorityError, "local-import path is missing",
+                FilesystemAuthorityError, "local-import path must be absolute",
             ), open_configured_local_import_directory("", cfg):
                 pass
 
@@ -916,6 +947,24 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
                 FilesystemAuthorityError,
                 "outside the configured local-import root",
             ), open_configured_local_import_directory(outside, cfg):
+                pass
+
+    def test_candidate_equal_to_root_reports_honest_message(self) -> None:
+        """Issue #1176 PR2 review finding 4: ``relpath(root, root)`` is
+        ``"."``, and the generic "outside" wrapping used to relabel this as
+        "path is outside the configured local-import root: <root>" — a
+        false claim, since the path IS the root. Still refused; the
+        message must say so honestly."""
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError,
+                "path is the configured local-import root itself",
+            ), open_configured_local_import_directory(root, cfg):
                 pass
 
     def test_candidate_inside_processing_albums_dir_is_refused(self) -> None:
@@ -977,6 +1026,124 @@ class TestOpenConfiguredLocalImportDirectory(unittest.TestCase):
                 "resolves inside a Cratedigger-owned subtree",
             ), open_configured_local_import_directory(candidate, cfg):
                 pass
+
+    def test_candidate_inside_processing_preview_dir_is_refused(self) -> None:
+        """Issue #1176 PR2 review finding 6: the owned entry for the
+        processing root used to be narrowed to ``processing_albums_dir``,
+        leaving the private 0700 ``preview/`` scratch — also legally
+        importable today — unprotected. Widened to the whole
+        ``processing_dir``."""
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            candidate = os.path.join(processing_preview_dir(processing), "sneaky")
+            os.mkdir(candidate)
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError,
+                "resolves inside a Cratedigger-owned subtree",
+            ), open_configured_local_import_directory(candidate, cfg):
+                pass
+
+    def test_lookalike_sibling_of_owned_beets_directory_is_still_authorized(
+        self,
+    ) -> None:
+        """Issue #1176 PR2 review finding 5: the owned-subtree check must be
+        component-wise, not a naive string prefix — ``<beets_directory>-old``
+        is a genuine SIBLING, not a descendant, and must stay importable.
+        A ``str.startswith`` mutant would refuse this (``"beets-library-old"``
+        starts with ``"beets-library"`` as a raw string)."""
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            candidate = os.path.join(beets_directory + "-old", "Album")
+            os.makedirs(candidate)
+            with open_configured_local_import_directory(candidate, cfg) as opened:
+                self.assertEqual(
+                    os.fstat(opened.fd).st_ino, os.stat(candidate).st_ino)
+
+    def test_lookalike_sibling_of_owned_processing_dir_is_still_authorized(
+        self,
+    ) -> None:
+        """The same discrimination as above, against the (now widened,
+        finding 6) processing-root owned entry: ``<processing_dir>-old`` is
+        a sibling, not a descendant."""
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            candidate = os.path.join(processing + "-old", "albums", "Album")
+            os.makedirs(candidate)
+            with open_configured_local_import_directory(candidate, cfg) as opened:
+                self.assertEqual(
+                    os.fstat(opened.fd).st_ino, os.stat(candidate).st_ino)
+
+    def test_root_missing_reports_as_local_import_root_error(self) -> None:
+        """Issue #1176 PR2 review finding 3: a missing/unreadable
+        configured ROOT must be distinguishable from a missing/unreadable
+        CANDIDATE (the precedent consumer, ``lib/force_import_service.py``,
+        would tell an operator their named folder doesn't exist when the
+        fault is entirely in ``local_import_dir``, or retry an EACCES on
+        the root forever as if it were transient)."""
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            missing_root = os.path.join(root, "does-not-exist")
+            cfg = self._cfg(
+                root=missing_root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            with self.assertRaisesRegex(
+                LocalImportRootError,
+                "configured local-import root refused",
+            ), open_configured_local_import_directory(
+                os.path.join(missing_root, "cd-rip"), cfg,
+            ):
+                pass
+
+    def test_root_unreadable_reports_as_local_import_root_error(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            os.chmod(root, 0o000)
+            try:
+                with self.assertRaises(LocalImportRootError) as refused, \
+                        open_configured_local_import_directory(
+                            os.path.join(root, "cd-rip"), cfg,
+                        ):
+                    pass
+            finally:
+                os.chmod(root, 0o700)
+            self.assertEqual(refused.exception.code, "open_failed")
+            self.assertEqual(refused.exception.errno_symbol, "EACCES")
+
+    def test_candidate_missing_is_not_reported_as_root_error(self) -> None:
+        """The split cuts only one way: a refusal of the CANDIDATE (the
+        root itself opened fine) must stay a plain
+        ``FilesystemAuthorityError``, never :class:`LocalImportRootError`
+        — proves the wrapping is scoped to the root's own open, not the
+        whole resolve."""
+        with tempfile.TemporaryDirectory() as parent:
+            root, processing, staging, slskd, beets_directory = self._world(parent)
+            cfg = self._cfg(
+                root=root, processing=processing, staging=staging,
+                slskd=slskd, beets_directory=beets_directory,
+            )
+            gone = os.path.join(root, "does-not-exist-either")
+            with self.assertRaises(FilesystemAuthorityError) as refused, \
+                    open_configured_local_import_directory(gone, cfg):
+                pass
+            self.assertNotIsInstance(refused.exception, LocalImportRootError)
+            self.assertEqual(refused.exception.code, "missing")
 
     def test_empty_beets_directory_is_not_treated_as_an_owned_subtree(self) -> None:
         """An unset ``beets_directory`` (optional field) must never be

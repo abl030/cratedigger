@@ -1037,22 +1037,60 @@ class LocalImportNotConfiguredError(FilesystemAuthorityError):
 #: module-level config assertion (which would have to reject the broad
 #: root outright, even though most paths under it are fine).
 #:
-#: The Beets library root (``cfg.beets_directory``) is included when the
-#: deployment has configured one; it is documented as optional on
-#: ``CratediggerConfig`` (some deployments absolutize via ``plex_path_map``
-#: instead), so an empty value is simply omitted here rather than treated
-#: as an error — see the residual-risk note in docs/nixos-module.md.
+#: ``processing_dir`` is refused WHOLE, not narrowed to its ``albums/``
+#: child: ``preview/`` is private 0700 scratch too, and a candidate under
+#: it was an unprotected gap until issue #1176 PR2 review found it — the
+#: processing root has no legitimate import-source use at any depth.
+#:
+#: The Beets library root (``cfg.beets_directory``) is unconditionally
+#: included, never filtered for emptiness: the owning module option
+#: (``services.cratedigger.beets.runtime.expectedDirectory``) is REQUIRED
+#: (asserted non-null, absolute, normalized, and non-``/``) for every
+#: functioning deployment of this module, so a module-configured
+#: ``CratediggerConfig`` can never reach here with it empty. The empty-
+#: string filter below exists for the field that genuinely CAN be empty on
+#: a real deployment: ``beets_staging_dir``, sourced from
+#: ``beets.validation.stagingDir``, which is ``nullOr`` and required only
+#: when ``beets.validation.enable`` — leaving it unset when validation is
+#: off must not resolve to "the current working directory" via
+#: ``os.path.abspath(os.path.normpath(""))``, hence filtering empty
+#: strings out of the whole tuple rather than special-casing one field.
 def local_import_owned_subtrees(cfg: object) -> tuple[str, ...]:
     """Cratedigger's own trees, as absolute paths, filtering out any unset."""
-    from lib.processing_paths import processing_albums_dir
-
     candidates = (
-        processing_albums_dir(getattr(cfg, "processing_dir")),  # noqa: B009 - structural config boundary
+        getattr(cfg, "processing_dir"),  # noqa: B009 - structural config boundary
         getattr(cfg, "beets_staging_dir"),  # noqa: B009 - structural config boundary
         getattr(cfg, "slskd_download_dir"),  # noqa: B009 - structural config boundary
         getattr(cfg, "beets_directory"),  # noqa: B009 - structural config boundary
     )
     return tuple(path for path in candidates if path)
+
+
+class LocalImportRootError(FilesystemAuthorityError):
+    """A refusal to open the CONFIGURED local-import ROOT itself.
+
+    Its own TYPE, the same dispatch-by-``except`` pattern issue #868
+    established with :class:`SharedDownloadRootError`: "the operator's
+    configured ``local_import_dir`` is missing/unreadable" is a materially
+    different fact from "the candidate the operator named under that root
+    is missing/unreadable", and conflating them under the precedent
+    consumer's own dispatch (``lib/force_import_service.py``'s
+    ``refusal_is_indeterminate`` branch) would tell an operator their named
+    folder does not exist when the fault is entirely in
+    ``local_import_dir``, or retry an EACCES on the root forever as if it
+    were a transient world failure against what is actually a permanent
+    misconfiguration. Both codes and the errno symbol are preserved so the
+    underlying cause survives the re-attribution, exactly as
+    :class:`SharedDownloadRootError` does for the untrusted share.
+    """
+
+    @classmethod
+    def wrapping(cls, exc: FilesystemAuthorityError) -> LocalImportRootError:
+        return cls(
+            f"configured local-import root refused: {exc}",
+            code=exc.code,
+            errno_symbol=exc.errno_symbol,
+        )
 
 
 @contextmanager
@@ -1067,13 +1105,20 @@ def open_configured_local_import_directory(
     missing candidate) is never reported as a containment failure — the
     live #1063 bug, where an EACCES on the private processing root was
     reported as "path is outside configured roots", accusing the
-    operator's config of a problem that did not exist. Here that
-    discipline is trivial to keep rather than reconstruct: containment is
+    operator's config of a problem that did not exist. Containment here is
     established purely lexically (this function opens nothing until AFTER
-    both the root-containment and owned-subtree checks pass), so every
-    ``FilesystemAuthorityError`` the no-follow opens below can raise is
-    already an honestly-classified storage/containment refusal, not a
-    verdict this function has to reclassify.
+    the root-containment and owned-subtree checks pass), so the storage
+    errno class (missing/EACCES/ESTALE/…) that the no-follow opens below
+    can raise is always honestly classified rather than reclassified. The
+    SUBJECT of that refusal — the operator's configured root, or the
+    candidate they named under it — is a second, independent fact this
+    function must not blur: :func:`open_directory_path` on ``root`` is
+    wrapped into :class:`LocalImportRootError` (the same
+    dispatch-by-``except`` split issue #868 gave the untrusted share via
+    :class:`SharedDownloadRootError`), while the candidate's own open stays
+    a plain :class:`FilesystemAuthorityError` — so "your configured root is
+    broken" and "the folder you named is missing/unreadable" can never be
+    reported as the other.
 
     Differences from the quarantine resolver:
 
@@ -1089,10 +1134,17 @@ def open_configured_local_import_directory(
       relative-path precedent to honour and accepting one would only add
       an ambiguous "relative to what" reading.
     * The lane can be entirely unconfigured (``local_import_enabled`` is
-      false, or ``local_import_dir`` is unset) — refused via
-      :class:`LocalImportNotConfiguredError`, DISTINCT from an ordinary
-      containment refusal, so PR3 can name the module option rather than
-      rendering a generic "outside configured roots" message.
+      false, ``local_import_dir`` is unset, or ``local_import_dir`` is
+      ``"/"``) — refused via :class:`LocalImportNotConfiguredError`,
+      DISTINCT from an ordinary containment refusal, so PR3 can name the
+      module option rather than rendering a generic "outside configured
+      roots" message. The module assertion already rejects ``"/"`` at
+      build time, but a preflight is not authority (the same doctrine
+      ``lib/force_import_service.py::enqueue_force_import`` states for its
+      own preflight) — a hand-built ``CratediggerConfig`` reaching this
+      function with ``local_import_dir == "/"`` must be refused here too,
+      or every path outside the four owned subtrees becomes a legal
+      import source.
     * Additionally refuses any candidate that resolves inside a
       Cratedigger-owned subtree (:func:`local_import_owned_subtrees`) even
       when it is nested under the configured root — pointing this lane at
@@ -1102,19 +1154,31 @@ def open_configured_local_import_directory(
     """
     enabled = bool(getattr(cfg, "local_import_enabled"))  # noqa: B009 - structural config boundary
     root = getattr(cfg, "local_import_dir")  # noqa: B009 - structural config boundary
-    if not enabled or not root:
+    if not enabled or not root or root == "/":
         raise LocalImportNotConfiguredError(
-            "local-import lane is not configured: set "
+            "local-import lane is not safely configured: set "
             "services.cratedigger.localImport.enable = true and "
-            "services.cratedigger.localImport.dir to an absolute root")
-    if not raw_path:
-        raise FilesystemAuthorityError("local-import path is missing")
+            "services.cratedigger.localImport.dir to an absolute root "
+            "other than /")
+    # No empty-path branch: os.path.isabs("") is False, so an empty
+    # raw_path already falls through to the absolute-path refusal below
+    # with no separate clause to keep honest — a dedicated "path is
+    # missing" branch here used the generic "unspecified" code, which
+    # unreadable_reason_text() words as a possibly-transient read failure;
+    # an empty/non-absolute input is a semantic refusal, never that.
     if not os.path.isabs(raw_path):
         raise FilesystemAuthorityError(
             "local-import path must be absolute", code="path_escape")
 
+    candidate_norm = os.path.abspath(os.path.normpath(raw_path))
+    root_abs = os.path.abspath(root)
+    if candidate_norm == root_abs:
+        raise FilesystemAuthorityError(
+            f"path is the configured local-import root itself, not a "
+            f"subdirectory to import: {raw_path}",
+            code="path_escape")
     try:
-        relative = _relative_to(root, os.path.abspath(os.path.normpath(raw_path)))
+        relative = _relative_to(root, candidate_norm)
     except FilesystemAuthorityError as exc:
         raise FilesystemAuthorityError(
             f"path is outside the configured local-import root: {raw_path}",
@@ -1129,8 +1193,13 @@ def open_configured_local_import_directory(
                 f"{owned}",
                 code="path_escape")
 
-    with open_directory_path(root) as root_fd, open_relative_directory(root_fd, relative) as candidate_fd:
-        held = HeldDirectory(fd=os.dup(candidate_fd), display_path=candidate_abs)
+    with ExitStack() as scope:
+        try:
+            root_fd = scope.enter_context(open_directory_path(root))
+        except FilesystemAuthorityError as exc:
+            raise LocalImportRootError.wrapping(exc) from exc
+        with open_relative_directory(root_fd, relative) as candidate_fd:
+            held = HeldDirectory(fd=os.dup(candidate_fd), display_path=candidate_abs)
     try:
         yield held
     finally:

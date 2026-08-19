@@ -212,10 +212,16 @@ in
     # Security note: the configured root is checked at EXECUTION time, not
     # just here -- lib.fs_authority.open_configured_local_import_directory
     # additionally refuses any candidate that resolves inside a
-    # Cratedigger-owned subtree (processingDir's albums/, the Beets
-    # validation staging dir, slskd.downloadDir, or the Beets library root)
-    # even when nested under this root, since a broad root can legitimately
-    # contain those trees as siblings of a real import source.
+    # Cratedigger-owned subtree (the WHOLE processingDir, not just albums/
+    # -- preview/ is equally off-limits -- the Beets validation staging
+    # dir, slskd.downloadDir, or the Beets library root) even when nested
+    # under this root, since a broad root can legitimately contain those
+    # trees as siblings of a real import source.
+    #
+    # Sandbox note: the importer/preview-worker units run with
+    # ProtectHome = true, so a dir under /home is EMPTY inside those
+    # units -- avoid /home here unless PR3's copy worker has also been
+    # given the matching bind mount for it.
     # localImport = {
     #   enable = true;
     #   dir = "/srv/music/manual-imports";

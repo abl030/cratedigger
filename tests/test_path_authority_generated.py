@@ -30,7 +30,6 @@ from lib.download_materialization import (
 from lib.fs_authority import (
     FilesystemAuthorityError,
     copy_opened_file,
-    local_import_owned_subtrees,
     open_configured_local_import_directory,
     open_directory_path,
     open_private_processing_root,
@@ -47,7 +46,11 @@ from lib.import_queue import (
     force_import_dedupe_key,
     force_import_payload,
 )
-from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
+from lib.processing_paths import (
+    canonical_folder_for_row,
+    processing_albums_dir,
+    processing_preview_dir,
+)
 from lib.quality_evidence import EvidenceBuildResult
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakePipelineDB
@@ -1912,13 +1915,37 @@ _LOCAL_IMPORT_WORLDS: frozenset[str] = frozenset({
     "present",
     "outside",
     "owned_processing",
+    "owned_processing_preview",
     "owned_staging",
     "owned_slskd",
     "owned_beets_directory",
+    "lookalike_beets_directory",
+    "lookalike_processing",
     "not_configured_disabled",
     "not_configured_no_dir",
+    "root_is_slash",
+    "candidate_is_root",
     "missing",
     "unreadable",
+    "root_missing",
+    "root_unreadable",
+})
+
+#: Worlds that must come back AUTHORIZED — a legitimate import source, not
+#: merely "some refusal is acceptable". ``present`` is the ordinary case;
+#: the ``lookalike_*`` worlds are the issue #1176 PR2 review finding-5
+#: regression guard: a candidate whose NAME merely starts with an owned
+#: subtree's name (``<beets_directory>-old``, a genuine SIBLING, not a
+#: descendant) must stay importable. A ``str.startswith`` mutant in place
+#: of the production ``paths_overlap`` call would wrongly refuse these —
+#: :func:`assert_local_import_authorization_is_earned` alone cannot catch
+#: that shape of bug (it only ever judges AUTHORIZED worlds, and an
+#: over-eager refusal never reaches it), so the test method asserts these
+#: worlds succeed directly.
+_LOCAL_IMPORT_MUST_SUCCEED_WORLDS: frozenset[str] = frozenset({
+    "present",
+    "lookalike_beets_directory",
+    "lookalike_processing",
 })
 
 
@@ -1945,6 +1972,18 @@ def assert_local_import_authorization_is_earned(
     math — an independent ``os.path.commonpath`` check here means a defect
     in ``paths_overlap`` itself would still be caught, rather than the
     checker and the code under test silently agreeing by construction.
+
+    ``owned_subtrees`` MUST be independently sourced by the caller from the
+    world's own tmpdir locals (``processing``, ``staging``, ``slskd``,
+    ``beets_directory``) — NEVER by calling
+    :func:`lib.fs_authority.local_import_owned_subtrees` on the same
+    ``cfg`` under test. That was PR2's own review finding 1: this checker's
+    independent MATH is worthless if its caller still hands it a SET
+    derived from the very function being tested — deleting a member from
+    ``local_import_owned_subtrees`` left the whole property green, because
+    both "what should be protected" and "what production protects" were
+    reading the same (now-wrong) answer. The math and the set must both be
+    independent for either independence to mean anything.
 
     Fails closed on an unrecognised world so a new world added to the
     property's ``st.sampled_from`` cannot silently skip verification
@@ -1979,24 +2018,43 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
 
     Driven end to end through real ``CratediggerConfig.from_ini`` plumbing
     (test-fidelity Rule C — a hand-built stub config would only prove the
-    resolver's own attribute-name assumptions, not that the nix-module ->
-    config.ini -> ``CratediggerConfig`` -> ``lib.fs_authority`` pipeline is
-    wired correctly) and the real no-follow resolver, over a BROAD
-    configured root that genuinely contains the owned subtrees as siblings
-    of a legitimate import source — the realistic ``/mnt/virtio``-shaped
-    deployment the owned-subtree carve-out exists for.
+    resolver's own attribute-name assumptions, not that ``config.ini`` ->
+    ``CratediggerConfig`` -> ``lib.fs_authority`` is wired correctly) and
+    the real no-follow resolver, over a BROAD configured root that
+    genuinely contains the owned subtrees as siblings of a legitimate
+    import source — the realistic ``/mnt/virtio``-shaped deployment the
+    owned-subtree carve-out exists for.
+
+    This property does NOT, by itself, prove the leading leg of that
+    chain — that ``_local_import_ini``'s hand-typed ``[Local Import]``
+    section and ``enabled``/``dir`` key spellings are what
+    ``nix/module.nix`` actually renders. A module that instead rendered
+    ``[LocalImport]`` would leave every test here green while the lane
+    stayed permanently unconfigured in production (issue #1176 PR2 review
+    finding 7). That leg is pinned separately, against the real module
+    SOURCE, by
+    ``tests.test_nix_module.TestLocalImportModuleContract.test_config_ini_renders_local_import_section_unconditionally``
+    — the two tests together close the full nix-module -> config.ini ->
+    ``CratediggerConfig`` -> ``lib.fs_authority`` chain; neither alone does.
     """
 
     @example(world="present", leaf="album")
     @example(world="outside", leaf="album")
     @example(world="owned_processing", leaf="album")
+    @example(world="owned_processing_preview", leaf="album")
     @example(world="owned_staging", leaf="album")
     @example(world="owned_slskd", leaf="album")
     @example(world="owned_beets_directory", leaf="album")
+    @example(world="lookalike_beets_directory", leaf="album")
+    @example(world="lookalike_processing", leaf="album")
     @example(world="not_configured_disabled", leaf="album")
     @example(world="not_configured_no_dir", leaf="album")
+    @example(world="root_is_slash", leaf="album")
+    @example(world="candidate_is_root", leaf="album")
     @example(world="missing", leaf="album")
     @example(world="unreadable", leaf="album")
+    @example(world="root_missing", leaf="album")
+    @example(world="root_unreadable", leaf="album")
     @given(
         world=st.sampled_from(sorted(_LOCAL_IMPORT_WORLDS)),
         leaf=_SAFE_COMPONENTS,
@@ -2014,9 +2072,27 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
                 os.makedirs(directory, exist_ok=True)
             albums = processing_albums_dir(processing)
             os.makedirs(albums, exist_ok=True)
+            preview = processing_preview_dir(processing)
+            os.makedirs(preview, exist_ok=True)
+
+            # The expected owned set is built HERE, from the tmpdir locals
+            # above, independently of any production function — see
+            # assert_local_import_authorization_is_earned's own docstring
+            # (review finding 1). ``preview`` needs no separate entry: it
+            # is a child of ``processing``, and the whole ``processing``
+            # tree is owned (review finding 6), so lexical containment
+            # under ``processing`` alone already covers it.
+            owned = (processing, staging, slskd, beets_directory)
 
             enabled = world != "not_configured_disabled"
-            configured_dir = "" if world == "not_configured_no_dir" else root
+            if world == "not_configured_no_dir":
+                configured_dir = ""
+            elif world == "root_is_slash":
+                configured_dir = "/"
+            elif world == "root_missing":
+                configured_dir = os.path.join(parent, "missing-root")
+            else:
+                configured_dir = root
             cfg = CratediggerConfig.from_ini(_local_import_ini(
                 enabled=enabled, local_dir=configured_dir,
                 processing=processing, staging=staging, slskd=slskd,
@@ -2029,9 +2105,8 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
             self.assertEqual(cfg.slskd_download_dir, slskd)
             self.assertEqual(cfg.beets_directory, beets_directory)
 
-            owned = local_import_owned_subtrees(cfg)
-
             unreadable_parent: str | None = None
+            unreadable_root: str | None = None
             if world == "present":
                 candidate = os.path.join(root, "cd-rip", leaf)
                 os.makedirs(candidate, exist_ok=True)
@@ -2040,6 +2115,9 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
                 os.makedirs(candidate, exist_ok=True)
             elif world == "owned_processing":
                 candidate = os.path.join(albums, leaf)
+                os.makedirs(candidate, exist_ok=True)
+            elif world == "owned_processing_preview":
+                candidate = os.path.join(preview, leaf)
                 os.makedirs(candidate, exist_ok=True)
             elif world == "owned_staging":
                 candidate = os.path.join(staging, leaf)
@@ -2050,9 +2128,27 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
             elif world == "owned_beets_directory":
                 candidate = os.path.join(beets_directory, leaf)
                 os.makedirs(candidate, exist_ok=True)
+            elif world == "lookalike_beets_directory":
+                candidate = os.path.join(beets_directory + "-old", leaf)
+                os.makedirs(candidate, exist_ok=True)
+            elif world == "lookalike_processing":
+                candidate = os.path.join(processing + "-old", "albums", leaf)
+                os.makedirs(candidate, exist_ok=True)
             elif world in ("not_configured_disabled", "not_configured_no_dir"):
                 candidate = os.path.join(root, "cd-rip", leaf)
                 os.makedirs(candidate, exist_ok=True)
+            elif world == "root_is_slash":
+                # Deliberately NOT under the sandbox ``root``: if the
+                # ``local_import_dir == "/"`` guard were ever bypassed, a
+                # candidate placed inside ``root`` would still resolve as
+                # "contained" from the checker's point of view (``root`` is
+                # itself a descendant of the real "/"), masking the very
+                # mutant this world exists to kill. A path OUTSIDE the
+                # sandbox is the only candidate the checker can call out as
+                # wrongly authorized.
+                candidate = "/etc"
+            elif world == "candidate_is_root":
+                candidate = root
             elif world == "missing":
                 candidate = os.path.join(root, "cd-rip", leaf)
             elif world == "unreadable":
@@ -2060,12 +2156,21 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
                 os.makedirs(unreadable_parent, exist_ok=True)
                 candidate = os.path.join(unreadable_parent, leaf)
                 os.makedirs(candidate, exist_ok=True)
-                os.chmod(unreadable_parent, 0o000)
+            elif world == "root_missing":
+                candidate = os.path.join(configured_dir, "cd-rip", leaf)
+            elif world == "root_unreadable":
+                candidate = os.path.join(root, "cd-rip", leaf)
+                os.makedirs(candidate, exist_ok=True)
+                unreadable_root = root
             else:  # pragma: no cover - _LOCAL_IMPORT_WORLDS is exhaustive here
                 raise AssertionError(f"unhandled world {world!r}")
 
             held_display_path: str | None = None
             try:
+                if unreadable_parent is not None:
+                    os.chmod(unreadable_parent, 0o000)
+                if unreadable_root is not None:
+                    os.chmod(unreadable_root, 0o000)
                 try:
                     with open_configured_local_import_directory(
                         candidate, cfg,
@@ -2076,6 +2181,14 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
             finally:
                 if unreadable_parent is not None:
                     os.chmod(unreadable_parent, 0o700)
+                if unreadable_root is not None:
+                    os.chmod(unreadable_root, 0o700)
+
+            if world in _LOCAL_IMPORT_MUST_SUCCEED_WORLDS:
+                self.assertIsNotNone(
+                    held_display_path,
+                    f"world={world!r} is a legitimate sibling of an owned "
+                    f"subtree and must still be authorized")
 
             assert_local_import_authorization_is_earned(
                 world=world, root=root, owned_subtrees=owned,

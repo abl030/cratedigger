@@ -1126,6 +1126,89 @@ def _shared_module_worlds_rest() -> dict[str, object]:
             web = unit "cratedigger-web";
             census = unit "cratedigger-retag-census";
           };
+
+        # Issue #1176 PR2 review finding 8: the localImport.{enable,dir}
+        # assertion never had evaluated-world coverage. Reads only
+        # .config.assertions (never forces .system.build.toplevel), so it
+        # is safe to merge into this shared eval per this function's own
+        # documented invariant.
+        localImportAssertions =
+          let
+            evaluate = extra:
+              let
+                system = lib.nixosSystem {
+                  system = builtins.currentSystem;
+                  modules = [
+                    f.nixosModules.default
+                    ({ ... }: {
+                      services.cratedigger = {
+                        enable = true;
+                        src = ./.;
+                        slskd.apiKeyFile = "/run/secrets/slskd-key";
+                        slskd.downloadDir = "/srv/slskd";
+                        pipelineDb.createLocally = true;
+                        beets.runtime = {
+                          package = beetsPackage;
+                          configDir = "/etc/beets";
+                          expectedLibrary = "/srv/beets/beets-library.db";
+                          expectedDirectory = "/srv/music";
+                          expectedStateFile = "/var/lib/beets/state.pickle";
+                          expectedSecretInclude = "/run/secrets/beets.yaml";
+                        };
+                      };
+                    })
+                    extra
+                  ];
+                };
+              in map (assertion: assertion.message)
+                (builtins.filter
+                  (assertion:
+                    !assertion.assertion
+                    && lib.hasPrefix
+                      "services.cratedigger.localImport"
+                      assertion.message)
+                  system.config.assertions);
+          in {
+            missingDir = evaluate {
+              services.cratedigger.localImport.enable = true;
+            };
+            relativeDir = evaluate {
+              services.cratedigger.localImport = {
+                enable = true;
+                dir = "srv/imports";
+              };
+            };
+            emptyDir = evaluate {
+              services.cratedigger.localImport = {
+                enable = true;
+                dir = "";
+              };
+            };
+            slashDir = evaluate {
+              services.cratedigger.localImport = {
+                enable = true;
+                dir = "/";
+              };
+            };
+            trailingSlashDir = evaluate {
+              services.cratedigger.localImport = {
+                enable = true;
+                dir = "/srv/imports/";
+              };
+            };
+            validDir = evaluate {
+              services.cratedigger.localImport = {
+                enable = true;
+                dir = "/srv/imports";
+              };
+            };
+            disabledWithBadDir = evaluate {
+              services.cratedigger.localImport = {
+                enable = false;
+                dir = "not/absolute";
+              };
+            };
+          };
       }
     '''
     return _cached_nix_eval_json(expression)
@@ -2326,6 +2409,75 @@ class TestApiBaseThreading(unittest.TestCase):
         text = _nix_source(MODULE_NIX)
         self.assertNotIn("services.cratedigger.beets.config", text)
         self.assertNotIn("mbHost = lib.removePrefix", text)
+
+
+class TestLocalImportModuleContract(unittest.TestCase):
+    """Issue #1176 PR2: the manual local-import lane's configuration
+    surface — options, config.ini rendering, and the module assertion."""
+
+    def test_config_ini_renders_local_import_section_unconditionally(self) -> None:
+        """Both keys use the ``${if enable then "True" else "False"}``
+        ternary form, never ``optionalString cfg.localImport.enable`` — so
+        the ``[Local Import]`` section and both keys render REGARDLESS of
+        ``enable``, which is what lets a disabled lane still ship
+        ``enabled = False`` / an empty ``dir`` rather than omitting the
+        section outright (issue #1176 PR2 review finding 8)."""
+        text = _nix_source(MODULE_NIX)
+        self.assertIn("[Local Import]", text)
+        self.assertIn(
+            'enabled = ${if cfg.localImport.enable then "True" else "False"}',
+            text)
+        self.assertIn(
+            'dir = ${if cfg.localImport.dir != null then toString cfg.localImport.dir else ""}',
+            text)
+        self.assertNotIn("optionalString cfg.localImport", text)
+
+    def test_options_declared_with_no_working_dir_default(self) -> None:
+        text = _nix_source(MODULE_NIX)
+        idx = text.index("localImport = {")
+        block = text[idx:idx + 1600]
+        self.assertIn("enable = mkOption {", block)
+        self.assertIn("dir = mkOption {", block)
+        self.assertIn("type = types.nullOr types.str;", block)
+        # Both options' own blocks default off/unset — `default = false;`
+        # for enable, `default = null;` for dir. Neither carries a working
+        # directory value anywhere in this block.
+        self.assertIn("default = false;", block)
+        self.assertIn("default = null;", block)
+
+    def test_assertion_uses_the_shared_normalized_path_helper(self) -> None:
+        """Issue #1176 PR2 review finding 2: a bare ``hasPrefix "/"`` check
+        admits ``dir = "/srv/imports/"`` (trailing slash) — every candidate
+        then dies inside ``open_directory_path`` with a containment
+        verdict about a fault that is entirely in the operator's config.
+        The module already has ``isAbsoluteNormalizedPath`` for exactly
+        this; the assertion must use it, not a hand-rolled check."""
+        text = _nix_source(MODULE_NIX)
+        idx = text.index("services.cratedigger.localImport: enable requires")
+        block = text[max(0, idx - 400):idx]
+        self.assertIn("isAbsoluteNormalizedPath cfg.localImport.dir", block)
+        self.assertIn('cfg.localImport.dir != "/"', block)
+
+    def test_assertion_firing_matrix(self) -> None:
+        """Issue #1176 PR2 review finding 8: evaluated-world coverage for
+        the assertion firing on null/relative/empty/trailing-slash/`/`,
+        staying silent on a valid dir, and staying silent when the lane is
+        simply disabled regardless of ``dir``."""
+        worlds = _shared_module_worlds_rest()["localImportAssertions"]
+        assert isinstance(worlds, dict)
+        expected_message = (
+            "services.cratedigger.localImport: enable requires "
+            "localImport.dir to be set, an absolute normalized path "
+            "(no trailing slash, no . or .. components), and not /."
+        )
+        for bad_world in (
+            "missingDir", "relativeDir", "emptyDir", "slashDir",
+            "trailingSlashDir",
+        ):
+            with self.subTest(world=bad_world):
+                self.assertEqual(worlds[bad_world], [expected_message])
+        self.assertEqual(worlds["validDir"], [])
+        self.assertEqual(worlds["disabledWithBadDir"], [])
 
 
 class TestOwnedRedisContract(unittest.TestCase):

@@ -1281,23 +1281,34 @@ in {
         type = types.nullOr types.str;
         default = null;
         description = ''
-          Absolute root directory the local-import lane is permitted to
-          read from. Deliberately has NO default, even when
+          Absolute, normalized root directory (no trailing slash, no `.`
+          or `..` components) the local-import lane is permitted to read
+          from. Deliberately has NO default, even when
           `localImport.enable = true`: naming this directory is a
           conscious operator act, and an installation that does not set it
-          has no local-import surface at all.
+          has no local-import surface at all. Must not be `/`.
 
           Execution-time authority
           (`lib.fs_authority.open_configured_local_import_directory`)
-          additionally refuses any candidate that resolves inside a
-          Cratedigger-owned subtree — the processing root
-          (`processingDir`'s `albums/`), the Beets validation staging
-          directory, the slskd download directory, and (when configured)
-          the Beets library root — even when it is nested under this
-          root. A broad root such as `/mnt/virtio` can legitimately
-          contain those trees too, so that narrowing lives at execution
-          time, not as a module-level assertion here (which would have to
-          reject the whole broad root outright).
+          re-checks every one of these constraints itself rather than
+          trusting this module-time assertion (a preflight is not
+          authority) and additionally refuses any candidate that resolves
+          inside a Cratedigger-owned subtree — the WHOLE `processingDir`
+          (not just its `albums/` child: the private `preview/` scratch is
+          equally off-limits), the Beets validation staging directory, the
+          slskd download directory, and the Beets library root — even when
+          it is nested under this root. A broad root such as `/mnt/virtio`
+          can legitimately contain those trees too, so that narrowing
+          lives at execution time, not as a module-level assertion here
+          (which would have to reject the whole broad root outright).
+
+          The importer and preview-worker units run with `ProtectHome =
+          true` (this module's shared `untrustedInputSandbox`), which
+          makes `/home` empty inside those units. A `dir` under `/home`
+          — a natural choice for this lane — will resolve every candidate
+          as missing once the copy worker (PR3) actually runs inside that
+          sandbox; PR3 owns adding the matching bind mount/ReadOnlyPaths
+          entry, not this option.
         '';
       };
     };
@@ -2097,10 +2108,10 @@ in {
       {
         assertion = !cfg.localImport.enable || (
           cfg.localImport.dir != null
-          && lib.hasPrefix "/" cfg.localImport.dir
+          && isAbsoluteNormalizedPath cfg.localImport.dir
           && cfg.localImport.dir != "/"
         );
-        message = "services.cratedigger.localImport: enable requires localImport.dir to be set, absolute, and not /.";
+        message = "services.cratedigger.localImport: enable requires localImport.dir to be set, an absolute normalized path (no trailing slash, no . or .. components), and not /.";
       }
       {
         assertion = cfg.pipelineDb.createLocally || cfg.pipelineDb.dsn != null;

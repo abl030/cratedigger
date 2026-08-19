@@ -448,27 +448,57 @@ Both options are deliberately redundant — `enable` (bool) and `dir` (path)
 rather than one nullable path — because it reads more obviously to a human
 that this is a conscious, two-part act. `dir` has **no working default**
 even when `enable = true`: an installation that never names a directory has
-no local-import surface at all. This mirrors the module's refusal to
-default `slskd.downloadDir` — a build that failed until a directory was
-named would just push operators toward a placeholder like `/tmp`,
-manufacturing the very surface the option exists to gate.
+no local-import surface at all. A build that instead FAILED until a
+directory was named would just push operators toward a placeholder like
+`/tmp`, manufacturing the very surface the option exists to gate — so this
+option stays off (and buildable) with nothing configured, unlike most of
+this module's other required paths (`slskd.downloadDir`,
+`beets.runtime.expectedDirectory`, …), which fail the build when unset
+precisely because THEY have no safe "just don't use it" reading.
 
-`dir` is the ALLOWLIST root, checked lexically at config time (must be
-absolute, not `/`). Execution-time authority
-(`lib.fs_authority.open_configured_local_import_directory`) narrows that
-allowlist further: it refuses any candidate that resolves inside a
-Cratedigger-owned subtree — `processingDir`'s `albums/`, the Beets
-validation staging directory (`beets.validation.stagingDir`),
-`slskd.downloadDir`, and (when configured) the Beets library root
-(`beets.directory` / `CratediggerConfig.beets_directory`) — even when the
-candidate is nested beneath the configured `localImport.dir`. This
-narrowing deliberately lives at execution time rather than as a module
-assertion: a broad root such as `/mnt/virtio` can legitimately contain
-those trees as siblings of a genuine import source, and a config-time
-check would have to reject the whole broad root outright. Pointing this
-lane at the live library or at Cratedigger's own processing tree is the
-realistic operator typo, and it is also where file ownership stops being
-unambiguous (good-citizen doctrine, issue #571).
+`dir` is the ALLOWLIST root, checked at config time for being absolute,
+normalized (no trailing slash, no `.`/`..` components — `isAbsoluteNormalizedPath`,
+the same helper this module's other path options, including `stateDir` and
+every `beets.runtime.*` path, already use), and not `/`.
+Execution-time authority (`lib.fs_authority.open_configured_local_import_directory`)
+re-checks every one of those constraints itself — a preflight is not
+authority, so a hand-built `CratediggerConfig` reaching that function is
+never trusted to have already been validated by this module — and
+additionally narrows the allowlist further: it refuses any candidate that
+resolves inside a Cratedigger-owned subtree even when nested beneath the
+configured `localImport.dir`:
+
+- the WHOLE `processingDir` (not narrowed to its `albums/` child — the
+  private `preview/` scratch is equally off-limits; a candidate under it
+  was an unprotected gap in this PR's own first review round);
+- the Beets validation staging directory (`beets.validation.stagingDir`),
+  which — unlike the other three — really can be unset: it is `nullOr`
+  and required only when `beets.validation.enable`;
+- `slskd.downloadDir`;
+- the Beets library root (`beets.runtime.expectedDirectory` /
+  `CratediggerConfig.beets_directory`) — always populated for a working
+  module deployment (this option is REQUIRED, not merely "when
+  configured": asserted non-null, absolute, normalized, and non-`/`), so
+  this entry never observes an empty value on a real deployment; the
+  empty-string filter in `local_import_owned_subtrees` exists for the
+  staging-dir case above, not this one.
+
+A broad root such as `/mnt/virtio` can legitimately contain those trees as
+siblings of a genuine import source, and a config-time check would have to
+reject the whole broad root outright — that is why the narrowing lives at
+execution time rather than as a module assertion. Pointing this lane at
+the live library or at Cratedigger's own processing tree is the realistic
+operator typo, and it is also where file ownership stops being unambiguous
+(good-citizen doctrine, issue #571).
+
+Sandbox interaction to know about now, even though PR2 does not touch it:
+the importer and preview-worker units run under `ProtectHome = true` (this
+module's shared `untrustedInputSandbox`), so a `localImport.dir` under
+`/home` — a natural choice for this lane — resolves EVERY candidate as
+missing once those units actually try to read it. PR3, which wires the
+copy worker into that sandbox, owns adding the matching bind mount /
+`ReadOnlyPaths` entry; naming a `/home` directory today is not itself
+wrong, it just does nothing useful until PR3 lands.
 
 This lane deliberately reintroduces a caller-named-path input vocabulary —
 the same SHAPE as the removed `manual-import` HTTP endpoint (finding
@@ -480,9 +510,11 @@ architecture (this lane never operates on the operator's folder in place),
 and the remaining job — confinement — is placed at execution authority
 rather than skipped or left to the input vocabulary, mirroring
 `lib/force_import_service.py::enqueue_force_import`'s own doctrine that a
-preflight is not authority: the eventual copy worker will re-open the
-configured directory before reading it, exactly as the preview worker
-already does for the quarantine roots.
+preflight is not authority: the eventual copy worker (PR3) will call
+`open_configured_local_import_directory` itself, inside its own held
+session, rather than trusting an authorization computed earlier and
+carried across a queue boundary as a bare path string — the same shape
+`enqueue_force_import`'s own docstring names for the quarantine roots.
 
 As of this PR the module renders `[Local Import] enabled` / `dir` into
 `config.ini` and `lib.fs_authority.open_configured_local_import_directory`
