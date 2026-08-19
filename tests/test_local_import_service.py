@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from lib.import_queue import LocalImportPayload, local_import_dedupe_key
 from lib.local_import_service import (
     LOCAL_IMPORT_HTTP_STATUS,
+    RESULT_ALREADY_QUEUED_DIFFERENT_PATH,
     RESULT_NOT_CONFIGURED,
     RESULT_PATH_UNAVAILABLE,
     RESULT_PROCESSING_LOCKED,
@@ -37,6 +38,7 @@ class TestLocalImportService(unittest.TestCase):
             RESULT_UNAUTHORIZED_PATH: 3,
             RESULT_PATH_UNAVAILABLE: 5,
             RESULT_PROCESSING_LOCKED: 4,
+            RESULT_ALREADY_QUEUED_DIFFERENT_PATH: 4,
         }
         expected_status = {
             RESULT_QUEUED: 202,
@@ -46,6 +48,7 @@ class TestLocalImportService(unittest.TestCase):
             RESULT_UNAUTHORIZED_PATH: 422,
             RESULT_PATH_UNAVAILABLE: 503,
             RESULT_PROCESSING_LOCKED: 409,
+            RESULT_ALREADY_QUEUED_DIFFERENT_PATH: 409,
         }
         self.assertEqual(LOCAL_IMPORT_HTTP_STATUS, expected_status)
         for outcome, exit_code in expected_exit.items():
@@ -105,6 +108,53 @@ class TestLocalImportService(unittest.TestCase):
         assert isinstance(job.payload, LocalImportPayload)
         self.assertEqual(job.payload.source_path, album)
         self.assertEqual(job.payload.request_id, 867)
+
+    def test_resubmitting_the_same_path_keeps_deduping_to_queued(self) -> None:
+        """The ordinary retry case: unchanged by the F8 conflict check."""
+        db, cfg, root = self._world()
+        album = os.path.join(root, "MyRip", "Album")
+        os.makedirs(album)
+
+        first = enqueue_local_import(db, cfg, request_id=867, source_path=album)
+        second = enqueue_local_import(db, cfg, request_id=867, source_path=album)
+
+        self.assertEqual(first.outcome, RESULT_QUEUED)
+        self.assertEqual(second.outcome, RESULT_QUEUED)
+        assert first.job is not None and second.job is not None
+        self.assertEqual(first.job.id, second.job.id)
+        self.assertEqual(len(db.list_import_jobs()), 1)
+
+    def test_different_path_while_a_job_is_already_queued_is_a_conflict(
+        self,
+    ) -> None:
+        """F8: a typo'd-then-corrected resubmission must not silently
+        report success while the FIRST (wrong) folder stays queued."""
+        db, cfg, root = self._world()
+        wrong = os.path.join(root, "Typo'd", "Album")
+        corrected = os.path.join(root, "Corrected", "Album")
+        os.makedirs(wrong)
+        os.makedirs(corrected)
+
+        first = enqueue_local_import(db, cfg, request_id=867, source_path=wrong)
+        second = enqueue_local_import(
+            db, cfg, request_id=867, source_path=corrected,
+        )
+
+        self.assertEqual(first.outcome, RESULT_QUEUED)
+        self.assertEqual(
+            second.outcome, RESULT_ALREADY_QUEUED_DIFFERENT_PATH,
+        )
+        self.assertEqual(second.request_id, 867)
+        # The response names the path the operator JUST submitted, not the
+        # one still queued — the detail is what tells them apart.
+        self.assertEqual(second.source_path, corrected)
+        assert second.detail is not None
+        self.assertIn(wrong, second.detail)
+        # Still exactly ONE queued job — the corrected path was never
+        # enqueued, and the wrong one was never silently replaced either.
+        self.assertEqual(len(db.list_import_jobs()), 1)
+        assert first.job is not None and second.job is not None
+        self.assertEqual(first.job.id, second.job.id)
 
     def test_missing_request_returns_exact_outcome_without_job(self) -> None:
         db, cfg, root = self._world()

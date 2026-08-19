@@ -48,6 +48,7 @@ from lib.import_execution import (
     probe_execution_liveness,
 )
 from lib.import_preview import (
+    ACTION_COPY_PREFIX_BY_JOB_TYPE,
     LOCAL_IMPORT_ACTION_PREFIX,
     PREVIEW_VERDICT_EVIDENCE_READY,
     PREVIEW_VERDICT_MEASUREMENT_FAILED,
@@ -299,16 +300,6 @@ def _candidate_evidence_ready_for_job(
     )
 
 
-#: The job-scoped-action-copy prefix for each job type that retains one
-#: (issue #1176 PR3). ``youtube_import`` and ``automation_import`` are
-#: absent on purpose — neither retains a private action copy under
-#: ``processing/albums/`` the way force/local-import do.
-_ACTION_COPY_PREFIX_BY_JOB_TYPE: dict[str, str] = {
-    IMPORT_JOB_FORCE: "force-action-",
-    IMPORT_JOB_LOCAL: LOCAL_IMPORT_ACTION_PREFIX,
-}
-
-
 def _cleanup_terminal_preview_force_action(
     job: ImportJob,
     terminal_job: ImportJob | None,
@@ -318,7 +309,7 @@ def _cleanup_terminal_preview_force_action(
 ) -> ImportJob | None:
     """Discard a force/local-import action only after preview reaches a
     known terminal state."""
-    prefix = _ACTION_COPY_PREFIX_BY_JOB_TYPE.get(job.job_type)
+    prefix = ACTION_COPY_PREFIX_BY_JOB_TYPE.get(job.job_type)
     if (
         prefix is None
         or terminal_job is None
@@ -640,12 +631,23 @@ class _JobActionAuthority:
     (``True``): force's raw path is a Cratedigger-managed quarantine
     folder, safe to display. Local-import sets it ``False`` — CLAUDE.md
     decision 2 for #1176 requires every audit surface this lane touches to
-    name the disposable action copy, never the operator's real folder;
-    ``execute_preview_job`` reads this flag to decide what
-    ``measure_and_persist_candidate_evidence``'s ``source_display_path``
-    (measurement-failure audit text — a different surface than dispatch's
-    Wrong Matches ``failed_path``, but the same "never the operator's
-    folder" rule) receives.
+    name the disposable action copy, never the operator's real folder.
+    Two readers consult this flag. ``execute_preview_job`` reads it to
+    decide what ``measure_and_persist_candidate_evidence``'s
+    ``source_display_path`` (measurement-failure audit text — a different
+    surface than dispatch's Wrong Matches ``failed_path``, but the same
+    "never the operator's folder" rule) receives.
+    ``process_claimed_preview_job`` (issue #1176 PR3 review round, F6)
+    reads it separately to build ``front_gate_audit_source`` — the alias
+    every ``MeasurementFailure``/``ImportPreviewResult``/reused-evidence
+    source field there uses instead of the raw ``front_gate_source`` its
+    own ``_front_gate_check`` call resolves. A PR3 review round found 4
+    such sites in ``process_claimed_preview_job`` still using
+    ``front_gate_source`` directly, unaffected by this flag: the action
+    copy those sites needed was already established by the SAME
+    ``_action_copy_front_gate`` call that produced ``front_gate_source``,
+    so there was never a "the copy doesn't exist yet" excuse — it was a
+    plain missed site, not a structural gap.
     """
 
     snapshot_fn: Callable[[str, CratediggerConfig], str]
@@ -1243,12 +1245,43 @@ def process_claimed_preview_job(
         automation_authority=automation_authority,
         cancellation_token=cancellation_token,
     )
+    # F6 (issue #1176 PR3 review round): front_gate_source is the
+    # OPERATOR's raw path for a local-import job — never safe to persist
+    # into an audit-visible field per decision 2, exactly the boundary
+    # _JobActionAuthority.audit_shows_raw_path already draws for
+    # measure_and_persist_candidate_evidence's own source_display_path.
+    # front_gate_action is the disposable private action copy
+    # _action_copy_front_gate already established before EITHER value
+    # returns (see its body), so it exists at every point front_gate_source
+    # does — there is no "the copy doesn't exist yet" case here. Every
+    # MeasurementFailure / ImportPreviewResult / reused-evidence payload
+    # below that names "the source" uses this alias instead of
+    # front_gate_source directly. Force keeps showing its own real
+    # wrong_matches-rooted front_gate_source unchanged: its raw path is
+    # already safe to display (audit_shows_raw_path=True) and is the more
+    # durable, reviewable location for an operator to inspect — only
+    # local's leak closes here.
+    front_gate_audit_source = (
+        front_gate_action
+        if job.job_type == IMPORT_JOB_LOCAL and front_gate_action is not None
+        else front_gate_source
+    )
     if (
         front_gate_result is not None
         and front_gate_result.status == "ready"
         and front_gate_result.evidence is not None
         and front_gate_source is not None
     ):
+        # Re-derive with the SAME rule as front_gate_audit_source above,
+        # but from a point where pyright has already narrowed
+        # front_gate_source to str (the guard just above) — the outer
+        # front_gate_audit_source is str | None because it was computed
+        # before that narrowing existed.
+        narrowed_audit_source: str = (
+            front_gate_audit_source
+            if front_gate_audit_source is not None
+            else front_gate_source
+        )
         persisted_existing = SpectralAnalysisDetail(attempted=False)
         preserve_have_source = False
         reuse_have_evidence = False
@@ -1298,7 +1331,7 @@ def process_claimed_preview_job(
                     )
                     return handle_current_authority_failed(
                         detail,
-                        source_path=front_gate_source,
+                        source_path=narrowed_audit_source,
                     )
                 else:
                     current_evidence = current_result.evidence
@@ -1331,7 +1364,7 @@ def process_claimed_preview_job(
                 )
                 return handle_current_authority_failed(
                     f"{type(exc).__name__}: {exc}",
-                    source_path=front_gate_source,
+                    source_path=narrowed_audit_source,
                 )
         # Explicit annotation gives the fallback lambda below an expected
         # type to infer its parameter from (otherwise its parameter type is
@@ -1415,7 +1448,7 @@ def process_claimed_preview_job(
         reused_payload = _reused_evidence_preview_payload(
             job,
             front_gate_result.evidence,
-            front_gate_source,
+            narrowed_audit_source,
             ImportResult(spectral=audit),
             action_path=front_gate_action,
         )
@@ -1460,7 +1493,7 @@ def process_claimed_preview_job(
         crash_payload = MeasurementFailure(
             reason="measurement_crashed",
             detail=f"{type(exc).__name__}: {exc}",
-            source_path=front_gate_source or "",
+            source_path=front_gate_audit_source or "",
         )
         crash_result = ImportPreviewResult(
             mode="path",
@@ -1471,7 +1504,7 @@ def process_claimed_preview_job(
             detail=f"{type(exc).__name__}: {exc}",
             request_id=job.request_id,
             download_log_id=_download_log_id_from_job(job),
-            source_path=front_gate_source,
+            source_path=front_gate_audit_source,
             action_path=front_gate_action,
             failure=crash_payload,
         )

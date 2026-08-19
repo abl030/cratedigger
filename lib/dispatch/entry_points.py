@@ -98,14 +98,27 @@ def dispatch_import_from_db(
     validation, no relaxed-threshold escape hatch (CLAUDE.md's decision 3
     for #1176: a candidate that fails strict validation lands as an
     ordinary Wrong Matches row, and force-importing THAT row is the
-    already-built escape hatch). ``scenario`` (default ``"force_import"``,
-    the historical literal) becomes the attempt-scenario audit label
-    (``dispatch_import_core``'s ``scenario``/``outcome_label`` params) and,
-    for local-import, the deliberately-uncovered ``"local_import"`` string
-    (excluded from ``FORCE_IMPORT_SCENARIOS`` on purpose, per
-    ``lib.dispatch.helpers._should_cleanup_path`` — a local-import action
-    copy is disposable on every outcome, exactly like an auto-import
-    source, never only on success).
+    already-built escape hatch — a PR3 review round found this was only
+    true in intent until the strict-validation guard below also relocated
+    the action copy into ``wrong_matches/``; see its own comment). Two
+    DISTINCT disposal mechanisms cover the disposable action copy, and a
+    strict-validation reject uses neither: ``scenario`` (default
+    ``"force_import"``, the historical literal) becomes the attempt-
+    scenario audit label (``dispatch_import_core``'s ``scenario``/
+    ``outcome_label`` params) and, for local-import, the deliberately-
+    uncovered ``"local_import"`` string (excluded from
+    ``FORCE_IMPORT_SCENARIOS`` on purpose, per
+    ``lib.dispatch.helpers._should_cleanup_path`` — for outcomes that
+    reach ``dispatch_import_core``, a local-import action copy is
+    disposable on every one of THOSE, exactly like an auto-import source,
+    never only on success). Terminal accept/failure bundles are instead
+    reaped by ``scripts/importer.py::_cleanup_terminal_force_action`` after
+    the terminal commit. The strict-validation guard's own reject reaches
+    NEITHER: it returns before ``dispatch_import_core`` is ever entered, so
+    ``_should_cleanup_path`` is never consulted, and the copy is not
+    disposed of at all — it is RELOCATED into ``wrong_matches/`` (see the
+    guard's own comment below) so the escape hatch above has something to
+    act on.
 
     Concurrency (issue #92): a per-``request_id`` advisory lock (IMPORT
     namespace) is taken up front. Two concurrent force imports
@@ -355,22 +368,67 @@ def _dispatch_import_from_db_locked(
     # caller wants THIS validation's verdict honored rather than imported
     # despite it — "strict pressing identity" per CLAUDE.md decision 3 for
     # #1176. A rejection here reuses ``_guard_reject`` unchanged: preserve
-    # request status, preserve the (disposable, local-import-owned) folder,
-    # write no denylist entry, and land as an ORDINARY Wrong Matches row —
-    # ``validation.result.scenario`` is already one of beets_validate's own
-    # vocabulary (``extra_tracks`` / ``high_distance`` / ``mbid_not_found`` /
-    # ``no_choose_match`` / …), the exact strings automation produces, so no
-    # new taxonomy is needed and force-importing that row remains the
-    # already-built escape hatch. Force-import never reaches this branch:
-    # its ``distance_threshold`` stays ``None``, and ``validation.result
-    # .valid`` is otherwise never consulted, unchanged from before #1176.
+    # request status, write no denylist entry, and land as an ORDINARY
+    # Wrong Matches row — ``validation.result.scenario`` is already one of
+    # beets_validate's own vocabulary (``extra_tracks`` / ``high_distance`` /
+    # ``mbid_not_found`` / ``no_choose_match`` / …), the exact strings
+    # automation produces, so no new taxonomy is needed. Force-import never
+    # reaches this branch: its ``distance_threshold`` stays ``None``, and
+    # ``validation.result.valid`` is otherwise never consulted, unchanged
+    # from before #1176.
     if distance_threshold is not None and not validation.result.valid:
+        # Review-round F4 fix: unlike force (whose ``failed_path`` always
+        # falls back to the operator's REAL, pre-existing wrong_matches-
+        # rooted source via ``audit_source_path``, since force always acts
+        # on an existing Wrong Matches row), local-import has no
+        # pre-existing quarantine source at all — ``source_reference_path``
+        # is always ``None`` here (decision 2), so an unmoved
+        # ``failed_path`` names the disposable private action copy
+        # directly under ``processing/albums/``, with no ``wrong_matches``
+        # path component. ``open_configured_quarantine_directory`` (the
+        # gate every escape-hatch action — ``enqueue_force_import``,
+        # ``wrong-match-delete[-group]``, ``-converge``, the autonomous
+        # reducer — opens the row's path through) refuses anything outside
+        # a configured quarantine root, so the row was worklist-visible
+        # forever with literally no action able to touch it. Relocate the
+        # action copy into the SAME curated Wrong Matches root every other
+        # rejection uses, exactly like ``move_failed_import_whole`` — whole,
+        # not curated, since no validated audio manifest exists yet at this
+        # pre-evidence guard (issue #1077 D4: "world failures with a
+        # reviewable folder move whole, not curated"). A relocation
+        # failure never blocks the rejection itself — invariant 11, broken
+        # worlds surface and restart — it just leaves the audit naming the
+        # unmoved path, exactly as it did before this fix.
+        from lib.import_execution import ExecutionCancelled
+        from lib.import_manifest import move_failed_import_whole
+
+        rejection_path = failed_path
+        try:
+            moved_path = move_failed_import_whole(
+                failed_path,
+                scenario=validation.result.scenario or "invalid",
+                before_mutation=(
+                    cancellation_token.raise_if_cancelled
+                    if cancellation_token is not None else None
+                ),
+            )
+            if moved_path is not None:
+                rejection_path = moved_path
+        except ExecutionCancelled:
+            raise
+        except Exception:
+            logger.exception(
+                "Failed to relocate rejected local-import source %s into "
+                "Wrong Matches; recording the rejection at its unmoved "
+                "path instead",
+                failed_path,
+            )
         return _persist_terminal_dispatch_outcome(
             db,
             _guard_reject(
                 db,
                 request_id=request_id,
-                failed_path=failed_path,
+                failed_path=rejection_path,
                 audit_source_path=source_reference_path,
                 source_username=source_username,
                 attempt_result=attempt_result,

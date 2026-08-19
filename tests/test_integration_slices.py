@@ -2568,6 +2568,196 @@ class TestLocalImportSlice(unittest.TestCase):
         if isinstance(raw, dict):
             self.assertNotEqual(raw.get("failed_path"), operator_path)
 
+    def test_local_import_terminal_acceptance_drives_real_process_claimed_job(
+        self,
+    ) -> None:
+        """Issue #1176 PR3 review round — the mandatory slice.
+
+        Every other local-import slice calls ``dispatch_import_from_db``
+        plus ``finalize_claimed_dispatch`` on a fixture with no bitrate
+        delta, so it never lands on a SUCCESSFUL TERMINAL ACCEPTANCE
+        (``ImportTerminalOutcome.successful_terminal_acceptance=True`` —
+        the verified-lossless-proof branch) and never drives the real
+        ``scripts.importer.process_claimed_job`` at all. This slice does
+        both: it builds the terminal command the real dispatch/quality-gate
+        pipeline hands ``process_claimed_job`` for an ACCEPTED local
+        import, and it feeds that command through ``execute_fn`` — the
+        legitimate kwarg-DI seam between the queue-outcome mapper and its
+        dispatch executor (``finalize_claimed_dispatch`` uses the exact
+        same seam) — so ``process_claimed_job``'s own terminal-persistence
+        internals run for real.
+
+        Before the fix this was RED on two independent defects:
+
+        * **F1** — ``lib.terminal_outcomes.ImportTerminalOutcome.
+          __post_init__`` only accepted ``audit.outcome in ("success",
+          "force_import")`` for a successful terminal acceptance;
+          ``"local_import"`` raised ``ValueError`` from OUTSIDE every
+          enclosing ``try`` in ``process_claimed_job`` — an unhandled
+          crash AFTER beets had already imported the album, with no
+          ``download_log`` row, no ``imported`` transition, no cleanup.
+        * **F5** — ``scripts.importer._cleanup_terminal_force_action``
+          called ``cleanup_force_action_copy_for_job`` with no ``prefix=``,
+          so it compared the local job's real
+          ``local-import-action-<id>`` copy against the WRONG job type's
+          expected name and raised before ever touching the filesystem —
+          the copy leaked permanently and ``force_action_cleanup.removed``
+          was always ``False``.
+        """
+        from lib.dispatch.types import DispatchOutcome
+        from lib.import_queue import (
+            IMPORT_JOB_LOCAL,
+            local_import_dedupe_key,
+            local_import_payload,
+        )
+        from lib.terminal_outcomes import (
+            PendingImportTerminalOutcome,
+            TerminalDownloadAudit,
+        )
+        from lib.transitions import RequestTransition
+        from scripts.importer import process_claimed_job
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=71, status="wanted"))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_LOCAL,
+            request_id=71,
+            dedupe_key=local_import_dedupe_key(71),
+            payload=local_import_payload(
+                source_path="/operator/real/Verified", request_id=71,
+            ),
+        )
+        # The real action copy the preview worker would have retained —
+        # F5 needs a genuine directory on disk with the job's own
+        # LOCAL_IMPORT_ACTION_PREFIX-named path, not a bare string, so the
+        # cleanup call this test drives has something real to (attempt to)
+        # remove.
+        with tempfile.TemporaryDirectory() as parent:
+            from lib.import_preview import LOCAL_IMPORT_ACTION_PREFIX
+
+            processing_dir = os.path.join(parent, "processing")
+            albums_dir = os.path.join(processing_dir, "albums")
+            action_path = os.path.join(
+                albums_dir, f"{LOCAL_IMPORT_ACTION_PREFIX}{job.id}",
+            )
+            os.mkdir(processing_dir, 0o700)
+            os.mkdir(albums_dir, 0o700)
+            os.mkdir(action_path)
+            with open(os.path.join(action_path, "01.flac"), "wb") as handle:
+                handle.write(b"verified lossless audio")
+            db.mark_import_job_preview_importable(
+                job.id, preview_result={"action_path": action_path},
+            )
+            claimed = claim_next_import_job(db, worker_id="mandatory-slice")
+            assert claimed is not None and claimed.id == job.id
+
+            # The exact terminal command the real quality-gate pipeline
+            # builds for a verified-lossless accepted import (see
+            # lib.dispatch.post_import._run_or_stage_quality_gate calling
+            # PendingImportTerminalOutcome.mark_successful_terminal_
+            # acceptance() when plan.successful_terminal_acceptance is
+            # True) — constructed directly here so this slice exercises
+            # process_claimed_job's own logic without also having to
+            # stand up the full evidence/quality-gate machinery a
+            # correctness-of-THIS-decision test would separately own
+            # (that parity contract is TestLiveBugReproductionsThrough
+            # EvidencePipeline in tests/test_quality_classification.py).
+            pending = PendingImportTerminalOutcome(
+                request_id=71,
+                import_job_id=job.id,
+                initial_transition=RequestTransition.to_imported(
+                    from_status="wanted",
+                ),
+                audit=TerminalDownloadAudit(outcome="local_import"),
+            ).mark_successful_terminal_acceptance()
+            outcome = DispatchOutcome(
+                success=True,
+                message="Imported",
+                terminal_outcome=pending,
+            )
+
+            cfg = CratediggerConfig(
+                processing_dir=processing_dir,
+                slskd_download_dir=os.path.join(parent, "downloads"),
+                audio_check_mode="off",
+            )
+            os.makedirs(cfg.slskd_download_dir)
+            with patch("lib.config.read_runtime_config", return_value=cfg):
+                updated = process_claimed_job(
+                    db,  # type: ignore[arg-type]
+                    claimed,
+                    execute_fn=lambda *_a, **_k: outcome,
+                )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "completed")
+        row = db.request(71)
+        self.assertEqual(row["status"], "imported")
+        db.assert_log(self, 0, outcome="local_import")
+        # F5: the real action copy was actually reaped, not left leaking
+        # under a wrong-prefix comparison that never touched the disk.
+        assert updated.result is not None
+        cleanup = updated.result.get("force_action_cleanup")
+        assert isinstance(cleanup, dict)
+        self.assertTrue(
+            cleanup.get("removed"),
+            f"action copy cleanup did not succeed: {cleanup!r}",
+        )
+        self.assertFalse(os.path.exists(action_path))
+
+    def test_local_import_bundle_less_crash_drives_real_process_claimed_job(
+        self,
+    ) -> None:
+        """The mandatory slice's other half: a bundle-less failure.
+
+        Before the fix this was RED on **F2** —
+        ``lib.terminal_outcomes.non_automation_failure_terminal_outcome``
+        admitted only ``ForceImportPayload``/``YoutubeImportPayload``, so
+        a ``LocalImportPayload`` raised ``TypeError`` from
+        ``process_claimed_job``'s own crash handler — the one path meant
+        to catch an executor crash and record it, itself crashing.
+        """
+        from lib.dispatch.types import DispatchOutcome
+        from lib.import_queue import (
+            IMPORT_JOB_LOCAL,
+            local_import_dedupe_key,
+            local_import_payload,
+        )
+        from scripts.importer import process_claimed_job
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=72, status="wanted"))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_LOCAL,
+            request_id=72,
+            dedupe_key=local_import_dedupe_key(72),
+            payload=local_import_payload(
+                source_path="/operator/real/Crash", request_id=72,
+            ),
+        )
+        db.mark_import_job_preview_importable(job.id, preview_result={})
+        claimed = claim_next_import_job(db, worker_id="mandatory-crash-slice")
+        assert claimed is not None and claimed.id == job.id
+
+        def _crashing_execute(*_args: object, **_kwargs: object) -> DispatchOutcome:
+            raise RuntimeError("simulated launched-but-unacknowledged crash")
+
+        updated = process_claimed_job(
+            db,  # type: ignore[arg-type]
+            claimed, execute_fn=_crashing_execute,
+        )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        # The request itself is untouched — a non-automation failure never
+        # owns the request lifecycle.
+        row = db.request(72)
+        self.assertEqual(row["status"], "wanted")
+        db.assert_log(self, 0, outcome="failed")
+        self.assertIn(
+            "Local import attempt failed:", db.download_logs[0].error_message or "",
+        )
+
     def test_local_import_strict_reject_lands_as_ordinary_wrong_match(
         self,
     ) -> None:
@@ -2654,8 +2844,27 @@ class TestLocalImportSlice(unittest.TestCase):
         # (_guard_reject, reused from the manifest guard's writer) names
         # the disposable action copy, never the operator's real folder —
         # source_reference_path is always None for this lane.
-        self.assertEqual(raw.get("failed_path"), tmpdir)
-        self.assertNotEqual(raw.get("failed_path"), operator_path)
+        failed_path = raw.get("failed_path")
+        self.assertNotEqual(failed_path, operator_path)
+        # F4 (issue #1176 PR3 review round): the guard relocates the
+        # action copy into <processing_dir>/albums/wrong_matches/ BEFORE
+        # writing the audit row — unlike force, local-import has no
+        # pre-existing quarantine source to fall back to, so an unmoved
+        # path would have no wrong_matches component and the resulting
+        # row would be invisible to enqueue_force_import /
+        # wrong-match-delete[-group]/-converge / the autonomous reducer,
+        # which all open the row's path through
+        # open_configured_quarantine_directory. The moved folder is no
+        # longer at tmpdir — it is at the same basename one level under
+        # wrong_matches/.
+        assert isinstance(failed_path, str)
+        self.assertNotEqual(failed_path, tmpdir)
+        self.assertEqual(
+            os.path.dirname(failed_path),
+            os.path.join(os.path.dirname(tmpdir), "wrong_matches"),
+        )
+        self.assertEqual(os.path.basename(failed_path), os.path.basename(tmpdir))
+        self.assertTrue(os.path.isdir(failed_path))
 
 
 class TestPreserveSourceSlice(unittest.TestCase):

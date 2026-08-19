@@ -122,6 +122,7 @@ carries the sentence), but it should say what it is."""
 NON_AUTOMATION_IMPORT_FAILURE_PREFIXES: Final[frozenset[str]] = frozenset({
     "Force import attempt failed:",
     "YouTube import attempt failed:",
+    "Local import attempt failed:",
 })
 """Producer-owned prefixes for failed non-owning import attempts."""
 
@@ -348,6 +349,7 @@ def non_automation_import_failure_message(
     prefix = {
         "force_import": "Force import attempt failed:",
         "youtube_import": "YouTube import attempt failed:",
+        "local_import": "Local import attempt failed:",
     }.get(job_type)
     if prefix is None:
         raise ValueError(f"non-automation failure does not support {job_type!r}")

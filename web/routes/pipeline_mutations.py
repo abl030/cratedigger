@@ -1092,8 +1092,8 @@ ROUTES: list[RouteRegistration] = [
     ),
     route(
         "POST", "/api/pipeline/import-local", post_pipeline_import_local,
-        "Enqueue a local-import job: import an operator-named folder on "
-        "disk already against a request's exact release.",
+        "Enqueue a local-import job: import an operator-named folder "
+        "already on disk against a request's exact release.",
         classified=True,
     ),
     route(

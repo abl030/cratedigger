@@ -229,7 +229,9 @@ def _quality_summary(row: Mapping[str, object],
     }
 
 
-_IMPORT_SUCCESS_OUTCOMES = ("success", "force_import", "manual_import")
+_IMPORT_SUCCESS_OUTCOMES = (
+    "success", "force_import", "local_import", "manual_import",
+)
 
 
 def _latest_import_summary(rows: Sequence[Mapping[str, object]]
@@ -240,8 +242,8 @@ def _latest_import_summary(rows: Sequence[Mapping[str, object]]
     recent attempt. A rejection that happened after a successful import
     doesn't change what beets has — the earlier success is still the
     authoritative picture. Scan the newest-first history for the first
-    active success/force_import row or historical manual_import row and
-    surface its metadata.
+    active success/force_import/local_import row or historical manual_import
+    row and surface its metadata.
 
     Returns ``None`` when the release has never been successfully imported.
     """

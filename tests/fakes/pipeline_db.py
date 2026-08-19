@@ -4656,7 +4656,7 @@ class FakePipelineDB:
         for entry in reversed(self.download_logs):
             if entry.request_id != request_id:
                 continue
-            if entry.outcome not in ("success", "force_import"):
+            if entry.outcome not in ("success", "force_import", "local_import"):
                 continue
             if entry.soulseek_username is None:
                 continue
@@ -6418,7 +6418,7 @@ class FakePipelineDB:
         total = len(self.download_logs)
         imported = sum(
             1 for e in self.download_logs
-            if e.outcome in ("success", "force_import"))
+            if e.outcome in ("success", "force_import", "local_import"))
         found_24h = sum(
             1 for e in self.search_logs
             if e.outcome == "found"
@@ -6517,7 +6517,7 @@ class FakePipelineDB:
     def get_log(self, limit: int = 50,
                 outcome_filter: str | None = None,
                 ) -> list[DownloadLogWithRequestRow]:
-        imported = {"success", "force_import"}
+        imported = {"success", "force_import", "local_import"}
         rejected = {"rejected", "failed", "timeout", "measurement_failed"}
         rows: list[dict[str, object]] = []
         # Newest-first to match the real ORDER BY dl.created_at DESC.
@@ -6622,7 +6622,9 @@ class FakePipelineDB:
             self._download_log_to_dict(entry)
             for entry in reversed(self.download_logs)
             if entry.source_download_log_id in wanted
-            and entry.outcome in ("success", "force_import", "manual_import")
+            and entry.outcome in (
+                "success", "force_import", "manual_import", "local_import",
+            )
         ])
 
     def get_by_status(
@@ -6754,7 +6756,16 @@ class FakePipelineDB:
             has_captured_history = has_captured_history or any(
                 entry.request_id == request_id
                 and entry.outcome in (
+                    # Mirrors _CAPTURE_AND_EVIDENCE_SELECT
+                    # (lib/pipeline_db/requests.py). Review round: this
+                    # outcome half was left un-widened while the job_type
+                    # half below (added in the SAME PR1 round-2 change)
+                    # correctly gained 'local_import' — a successful local
+                    # import writes a 'local_import' download_log outcome
+                    # too, so both halves must confer
+                    # has_captured_history identically.
                     "success", "force_import", "manual_import",
+                    "local_import",
                 )
                 for entry in self.download_logs
             )

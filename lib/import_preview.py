@@ -52,6 +52,7 @@ from lib.fs_authority import (
     remove_relative_tree,
 )
 from lib.import_execution import CancellationToken, ExecutionCancelled
+from lib.import_queue import IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL
 from lib.measurement import (
     AacLatticeMeasureFn,
     ExistingSpectralResolver,
@@ -511,6 +512,24 @@ def remove_preview_snapshot(
 #: across every job type.
 LOCAL_IMPORT_ACTION_PREFIX = "local-import-action-"
 
+#: The job-scoped-action-copy prefix for each job type that retains one
+#: (issue #1176 PR3 review round). Both the importer and preview worker call
+#: ``cleanup_force_action_copy_for_job``/``force_action_copy_path`` with a
+#: job's own prefix looked up here — a single shared table instead of two,
+#: since a missing or wrong prefix compares the path against the WRONG job
+#: type's deterministic name and raises ``FilesystemAuthorityError`` before
+#: ever touching the filesystem (issue #1176 PR3 F5: the importer's own
+#: cleanup site called the force-import path helper with no ``prefix=`` at
+#: all, so every local-import terminal cleanup raised, leaked its action
+#: copy permanently, and re-raised on every subsequent importer startup
+#: recovery sweep). ``youtube_import`` and ``automation_import`` are absent
+#: on purpose — neither retains a private action copy under
+#: ``processing/albums/`` the way force/local-import do.
+ACTION_COPY_PREFIX_BY_JOB_TYPE: dict[str, str] = {
+    IMPORT_JOB_FORCE: "force-action-",
+    IMPORT_JOB_LOCAL: LOCAL_IMPORT_ACTION_PREFIX,
+}
+
 
 def retain_preview_snapshot_for_force_action(
     path: str,
@@ -569,11 +588,18 @@ def remove_force_action_copy(
     """Remove one unneeded retained job-scoped action copy after a terminal
     result. ``prefix`` — see :func:`retain_preview_snapshot_for_force_action`.
     """
+    # F9 (issue #1176 PR3 review round): this function serves both lanes
+    # (``prefix`` is the job-type signal), but every FilesystemAuthorityError
+    # below said "force" unconditionally — the exact text an operator sees
+    # in a failed cleanup's ``force_action_cleanup.error`` receipt (F5).
+    lane_label = "local-import" if prefix == LOCAL_IMPORT_ACTION_PREFIX else "force"
     name = os.path.basename(path)
     if name == path or not name.startswith(prefix):
-        raise FilesystemAuthorityError("not a private force action copy")
+        raise FilesystemAuthorityError(f"not a private {lane_label} action copy")
     if os.path.dirname(path) != processing_albums_dir(cfg.processing_dir):
-        raise FilesystemAuthorityError("force action copy is outside private root")
+        raise FilesystemAuthorityError(
+            f"{lane_label} action copy is outside private root"
+        )
     with open_private_processing_root(
         cfg.processing_dir, cfg.slskd_download_dir,
     ) as processing_fd, open_private_child_directory(processing_fd, "albums") as albums_fd:
@@ -597,7 +623,12 @@ def cleanup_force_action_copy_for_job(
     ``prefix`` — see :func:`retain_preview_snapshot_for_force_action`.
     """
     if path != force_action_copy_path(cfg, import_job_id, prefix=prefix):
-        raise FilesystemAuthorityError("force action copy does not belong to job")
+        lane_label = (
+            "local-import" if prefix == LOCAL_IMPORT_ACTION_PREFIX else "force"
+        )
+        raise FilesystemAuthorityError(
+            f"{lane_label} action copy does not belong to job"
+        )
     remove_force_action_copy(
         path,
         cfg,

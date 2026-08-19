@@ -248,12 +248,18 @@ producer_audit.py`'s registered producer files —
 
 - **Deliberately excluded from `FORCE_IMPORT_SCENARIOS`** (unlike
   `force_import`), so `lib.dispatch.helpers._should_cleanup_path` always
-  returns `True` for it: the private action copy is cleaned up on every
-  outcome — success, reject, timeout — exactly like an auto-import's
-  disposable processing-owner source, never only on success the way
-  force's is. This is a correctness requirement, not a convenience: the
-  action copy is Cratedigger's own disposable scratch, not the operator's
-  quarantine folder, so there is no reason to preserve it for review.
+  returns `True` for it: for any outcome that reaches `dispatch_import_core`
+  (accept, or a reject in the evidence pipeline downstream of the
+  strict-validation guard), the private action copy is cleaned up on
+  every one of THOSE — exactly like an auto-import's disposable
+  processing-owner source, never only on success the way force's is. This
+  is a correctness requirement, not a convenience: the action copy is
+  ordinarily Cratedigger's own disposable scratch, not the operator's
+  quarantine folder, so there is no reason to preserve it for review. The
+  strict-validation guard's OWN reject (below) never reaches
+  `dispatch_import_core` at all, so `_should_cleanup_path` is never
+  consulted for it — that reject uses a third, distinct mechanism
+  (relocation into `wrong_matches/`, not cleanup) instead.
 - **A strict-validation reject reuses the manifest guard's own writer**
   (`lib.dispatch.manifest_guard._guard_reject`, extended with an optional
   `distance` parameter for this caller) rather than a parallel one. The
@@ -275,6 +281,21 @@ producer_audit.py`'s registered producer files —
   `failed_path = audit_source_path or failed_path` always falls back to the
   disposable private action copy. No Wrong Matches row this lane writes ever
   carries the operator's real folder as `failed_path`.
+  Unlike force — whose `failed_path` fallback is always an EXISTING
+  `wrong_matches/`-rooted folder, since force always acts on a row already
+  there — local-import has no pre-existing quarantine source at all, so an
+  unmoved action copy would name a folder with no `wrong_matches` path
+  component, making the row invisible to `open_configured_quarantine_
+  directory` (the gate `enqueue_force_import`, `wrong-match-delete[-group]`,
+  `-converge`, and the autonomous reducer all open the row's path through)
+  and worklist-visible with literally no action able to touch it (issue
+  #1176 PR3 review round, F4). The strict-validation guard therefore
+  relocates the action copy into `<processing_dir>/albums/wrong_matches/`
+  (`lib.import_manifest.move_failed_import_whole` — whole, not curated,
+  since no validated audio manifest exists yet at this pre-evidence guard)
+  BEFORE calling `_guard_reject`, so `failed_path` names that new location.
+  A relocation failure never blocks the rejection itself; it just leaves
+  the audit naming the unmoved path, exactly as it did before this fix.
 - **Never consumes a Wrong Matches source on success or failure** — unlike
   force's D7 routing above. `scripts/importer.py::
   _force_job_wrong_match_payload` returns `None` for any job whose
@@ -294,6 +315,14 @@ producer_audit.py`'s registered producer files —
   ('force_import', 'local_import')`, since both retain an identically-shaped
   private copy under `processing/albums/` (`force-action-<job_id>` /
   `local-import-action-<job_id>`) that needs the same crash-safe convergence.
+  `scripts/importer.py::_cleanup_terminal_force_action` (the live cleanup
+  call this sweep replays) resolves each job's own prefix from
+  `lib.import_preview.ACTION_COPY_PREFIX_BY_JOB_TYPE` before calling
+  `cleanup_force_action_copy_for_job` — a PR3 review round found this call
+  hardcoding force's own prefix, so every local-import cleanup compared its
+  path against the WRONG job type's deterministic name, raised before ever
+  touching the filesystem, and re-raised identically on every subsequent
+  replay of this same sweep (issue #1176 PR3 review round, F5).
 
 ## The `wrong_match_triage` audit block is reducer-only
 

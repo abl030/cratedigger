@@ -25,6 +25,7 @@ from lib.fs_authority import (
 from lib.import_queue import (
     IMPORT_JOB_LOCAL,
     ImportJob,
+    LocalImportPayload,
     local_import_dedupe_key,
     local_import_payload,
 )
@@ -55,6 +56,21 @@ retryable vocabulary, exactly like the sibling force-import surface (issue
 #1063).
 """
 RESULT_PROCESSING_LOCKED = "processing_locked"
+RESULT_ALREADY_QUEUED_DIFFERENT_PATH = "already_queued_different_path"
+"""issue #1176 PR3 review round, F8: ``local_import_dedupe_key`` keys on the
+request alone (there is no ``download_log`` row to key on — see its own
+docstring), so ``enqueue_import_job``'s ``ON CONFLICT ... DO NOTHING``
+silently returns the FIRST still-active job for this request regardless of
+whether THIS call's ``source_path`` matches it. Left unchecked, an operator
+who typo'd a path, re-ran with the corrected one, and read a 202 "queued"
+line would have the ORIGINAL (wrong) folder imported with no cancel path —
+the response named the corrected path while the queued job still pointed
+at the first one. Detected here by comparing the returned job's own
+payload against THIS call's freshly-authorized path: a deduped return
+whose queued path differs is a genuine conflict, not a duplicate
+submission, and gets 409 naming the path actually queued. The SAME path
+resubmitted keeps deduping to 202 exactly as before — nothing changes for
+the ordinary retry case this dedupe key exists to serve."""
 
 # There is no separate CLI exit-code table: ``pipeline-cli import-local``
 # executes through ``POST /api/pipeline/import-local`` and derives its exit
@@ -67,6 +83,7 @@ LOCAL_IMPORT_HTTP_STATUS = {
     RESULT_UNAUTHORIZED_PATH: 422,
     RESULT_PATH_UNAVAILABLE: 503,
     RESULT_PROCESSING_LOCKED: 409,
+    RESULT_ALREADY_QUEUED_DIFFERENT_PATH: 409,
 }
 
 
@@ -173,6 +190,29 @@ def enqueue_local_import(
             f"{request['album_title']}"
         ),
     )
+    # F8: a deduped return whose queued payload names a DIFFERENT path than
+    # this call just authorized is a genuine conflict — a still-active job
+    # for this request already exists, and THIS call's source_path was
+    # never enqueued. The dedupe key is request-scoped only (no
+    # download_log row to key on), so ON CONFLICT DO NOTHING cannot tell
+    # "same path resubmitted" from "different path, request already busy"
+    # by itself; this comparison is what tells them apart.
+    if (
+        job.deduped
+        and isinstance(job.payload, LocalImportPayload)
+        and job.payload.source_path != authorized_path
+    ):
+        return LocalImportEnqueueResult(
+            RESULT_ALREADY_QUEUED_DIFFERENT_PATH,
+            request_id,
+            source_path=authorized_path,
+            detail=(
+                f"request {request_id} already has an active local import "
+                f"queued for {job.payload.source_path!r}; cancel or let it "
+                f"finish before importing a different folder"
+            ),
+            job=job,
+        )
     return LocalImportEnqueueResult(
         RESULT_QUEUED,
         request_id,

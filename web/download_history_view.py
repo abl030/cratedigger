@@ -256,7 +256,9 @@ def _project_current_library_have(
         "existing_v0_probe_median_bitrate",
         "comparison_basis",
     )
-    if item.get("outcome") in ("success", "force_import", "manual_import"):
+    if item.get("outcome") in (
+        "success", "force_import", "local_import", "manual_import",
+    ):
         return
 
     attempt_has_any = (

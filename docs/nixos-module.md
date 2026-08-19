@@ -513,20 +513,29 @@ the live library or at Cratedigger's own processing tree is the realistic
 operator typo, and it is also where file ownership stops being unambiguous
 (good-citizen doctrine, issue #571).
 
-Sandbox interaction: the importer and preview-worker units run under
-`ProtectHome = true` AND `PrivateTmp = true` (this module's shared
+Sandbox interaction: the web, importer, AND preview-worker units all run
+under `ProtectHome = true` AND `PrivateTmp = true` (this module's shared
 `untrustedInputSandbox`), so a `localImport.dir` under `/home`, `/tmp`, or
 `/var/tmp` — natural choices for this lane, and `/tmp` is literally the
 placeholder this option's own no-default design exists to discourage (see
-above) — would otherwise resolve EVERY candidate as missing once those
-units try to read it. PR3 (issue #1176) closes that gap: both units
-read-only-bind the exact configured `dir` (`localImportReadOnlyPaths` in
-`nix/module.nix`, the same missing-tolerant `-`-prefixed shape every other
-external bind in this module already uses — `beetsConfigReadOnlyPaths`,
+above) — would otherwise resolve EVERY candidate as missing the moment ANY
+of the three tries to read it. The web unit is the lane's actual front
+door: `enqueue_local_import` (called directly from
+`web/routes/pipeline_mutations.py`) opens the root and the candidate path
+before a job is even enqueued, and `pipeline-cli import-local` is a pure
+HTTP relay to that same route — it never opens the path itself. PR3 (issue
+#1176) closes the gap for all three: every one of them read-only-binds the
+exact configured `dir` (`localImportReadOnlyPaths` in `nix/module.nix`,
+the same missing-tolerant `-`-prefixed shape every other external bind in
+this module already uses — `beetsConfigReadOnlyPaths`,
 `beetsObserverReadOnlyPaths`, …), so it is visible inside the sandbox
 regardless of which of those three roots (or an ordinary path) it names.
 The bind is always read-only — this lane's copy worker only ever reads
-from the operator's folder, never writes into it.
+from the operator's folder, never writes into it. A PR3 review round found
+the web unit missing from this bind set: only the importer and
+preview-worker were bound, so the front door itself was sandbox-blind and
+a `dir` under any of those roots failed at enqueue-time with a 422/503
+about a folder that plainly exists.
 
 This lane deliberately reintroduces a caller-named-path input vocabulary —
 the same SHAPE as the removed `manual-import` HTTP endpoint (finding

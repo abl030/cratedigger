@@ -143,7 +143,10 @@ def cmd_import_local(_db: object, args: argparse.Namespace) -> int:
       * 3 — 422 missing release id, local-import lane not configured, or
             unauthorized path (outside the configured root, or inside a
             Cratedigger-owned subtree)
-      * 4 — 409 processing-locked
+      * 4 — 409 processing-locked, OR ``already_queued_different_path``
+            (this request already has a DIFFERENT local-import folder
+            actively queued — the response names the one actually queued;
+            resubmitting the SAME path keeps deduping to 0)
       * 5 — 503 ``path_unavailable`` (the local-import authority could not
             OBSERVE the folder — permissions, I/O; retryable, and never a
             claim that the path is wrong or gone)

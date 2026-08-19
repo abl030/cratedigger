@@ -462,10 +462,23 @@ def _cleanup_terminal_force_action(job: ImportJob) -> dict[str, object] | None:
         return None
     try:
         from lib.config import read_runtime_config
-        from lib.import_preview import cleanup_force_action_copy_for_job
+        from lib.import_preview import (
+            ACTION_COPY_PREFIX_BY_JOB_TYPE,
+            cleanup_force_action_copy_for_job,
+        )
 
         cfg = read_runtime_config()
-        cleanup_force_action_copy_for_job(action_path, cfg, import_job_id=job.id)
+        # issue #1176 PR3 F5: this call used to hardcode force's own
+        # "force-action-" prefix, so it compared every local-import action
+        # path against the WRONG job type's deterministic name and raised
+        # before ever touching the filesystem — the copy leaked forever and
+        # re-raised on every subsequent importer startup recovery sweep.
+        # ``ACTION_COPY_PREFIX_BY_JOB_TYPE`` is the same table
+        # scripts/import_preview_worker.py's sibling cleanup already uses.
+        prefix = ACTION_COPY_PREFIX_BY_JOB_TYPE.get(job.job_type, "force-action-")
+        cleanup_force_action_copy_for_job(
+            action_path, cfg, import_job_id=job.id, prefix=prefix,
+        )
         return {"action_path": action_path, "removed": True}
     except Exception as exc:
         logger.exception("Failed to remove retained force action copy %s", action_path)
@@ -730,9 +743,17 @@ def _execute_action_copy_dispatch(
     from lib.config import read_runtime_config
     from lib.import_preview import force_action_copy_path
 
+    # F9 (issue #1176 PR3 review round): this helper serves BOTH lanes, but
+    # its two operator-facing strings below were hardcoded to "force" even
+    # for a local-import job — one raises a ValueError whose text surfaces
+    # verbatim in the Recents crash audit
+    # ("Executor crashed: ValueError: ...") via
+    # _terminalize_non_automation_failure, the other is a requeue reason.
+    lane_label = "local-import" if job.job_type == IMPORT_JOB_LOCAL else "force"
+
     if (cancellation_token is None) != (owner_session_identity is None):
         raise ValueError(
-            "force job cancellation and pinned session must be paired"
+            f"{lane_label} job cancellation and pinned session must be paired"
         )
     if cancellation_token is not None:
         cancellation_token.raise_if_cancelled()
@@ -753,7 +774,7 @@ def _execute_action_copy_dispatch(
         return _requeue_import_job_to_preview(
             db,
             import_job_id=job.id,
-            reason="force action copy unavailable; preview must rebuild it",
+            reason=f"{lane_label} action copy unavailable; preview must rebuild it",
         )
     resolved_distance_threshold = distance_threshold_fn(runtime_config)
     if cancellation_token is None:
