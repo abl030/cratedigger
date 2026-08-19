@@ -163,12 +163,18 @@ class WrongMatchSourceRefused(OSError):
     per-entry granularity (``unreadable_is_containment`` in
     :func:`build_wrong_match_explorer`); this is the same fix one level
     up, for the WHOLE root open and the single-file stream resolve. An
-    ``unsafe_symlink``, ``not_regular_file``, ``path_escape`` or
-    ``untrusted_ownership`` refusal is a security-boundary DECISION, not
-    evidence the folder is missing (404 would state a definitive
-    negative we never observed) and not a retryable world failure (503
-    would imply a retry might help — it cannot: the same name refuses
-    identically every time).
+    ``unsafe_symlink``, ``not_regular_file``, ``path_escape``,
+    ``untrusted_ownership``, or ``not_configured`` refusal is a
+    security-boundary DECISION, not evidence the folder is missing (404
+    would state a definitive negative we never observed) and not a
+    retryable world failure (503 would imply a retry might help — it
+    cannot: the same name refuses identically every time). This lane
+    never itself configures a local-import root, so ``not_configured``
+    is not reachable through this classifier today; it is listed only
+    because :func:`is_containment_refusal` (below) decides this family
+    dynamically rather than off a hand-copied list, and a hand-copied
+    list here would silently go stale the next time that predicate's own
+    family grows.
     """
 
 
@@ -194,19 +200,29 @@ def _classify_wrong_match_refusal(code: FsAuthorityCode) -> _WrongMatchRefusalVe
        (404): the only codes allowed to claim a definitive absence.
     2. Else :func:`is_containment_refusal` — a security-boundary DECISION
        (``unsafe_symlink``, ``not_regular_file``, ``path_escape``,
-       ``untrusted_ownership``) → ``"refused"`` (422): the name may well
-       exist, we simply refuse to read it. Follows the #1084 precedent
-       (``OUTCOME_SKIPPED_UNSAFE_PATH`` → 422 on the delete path).
+       ``untrusted_ownership``, ``not_configured``) → ``"refused"``
+       (422): the name may well exist, we simply refuse to read it.
+       Follows the #1084 precedent (``OUTCOME_SKIPPED_UNSAFE_PATH`` → 422
+       on the delete path). ``not_configured`` is not reachable through
+       this lane in practice (nothing here configures a local-import
+       root) but is a real member of the family this clause asks about,
+       exactly the same way it joined the enumeration without a code
+       change here — the dynamic predicate did the work, not a hand-kept
+       list.
     3. Every remaining code answers ``"unavailable"`` (503) — a genuine,
        retryable world failure (``open_failed``, ``read_failed``,
        ``write_failed``, where :func:`refusal_is_indeterminate` is
-       ``True``) and an unclassified residual (``unspecified`` today, or
-       a future :data:`FsAuthorityCode` this function has not been
-       taught about) DELIBERATELY share this verdict: an unclassifiable
-       refusal must never make a definitive claim of absence or
-       containment, so non-claim is the fail-safe side for both, matching
+       ``True``) and an unclassified residual (``unspecified`` today)
+       DELIBERATELY share this verdict: an unclassifiable refusal must
+       never make a definitive claim of absence or containment, so
+       non-claim is the fail-safe side for both, matching
        :func:`refusal_is_indeterminate`'s own falsy-fallthrough doctrine.
-       This is not a gap — the exhaustive table in
+       A genuinely NEW future :data:`FsAuthorityCode` lands here too,
+       but only if it is not ALSO already covered by clause 1 or 2's
+       predicates — ``not_configured`` is the proof this isn't
+       automatic: it was a new code once, and it landed in clause 2 on
+       day one, with no change to this function at all. This is not a
+       gap — the exhaustive table in
        ``tests/test_wrong_match_file_service.py`` pins every declared
        code individually, so a future code that SHOULD split out of this
        bucket fails that table, not silently inherits it.

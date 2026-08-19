@@ -30,6 +30,7 @@ FsAuthorityCode = Literal[
     "open_failed",
     "read_failed",
     "write_failed",
+    "not_configured",
 ]
 """Machine-stable classification of one filesystem-authority refusal.
 
@@ -42,12 +43,12 @@ non-regular file — can never be reported as an ordinary storage error,
 nor a storage errno as a containment violation.
 
 ``path_escape``, ``unsafe_symlink``, ``not_a_directory``,
-``not_regular_file`` and ``untrusted_ownership`` are the containment
-codes: the name — or the authority the tree is held under — is
-untrustworthy. ``untrusted_ownership`` covers the private-tree ownership
-and permission assertions (a group/other-writable ancestor, a root that
-is not owned by the service identity, a root or child that is not mode
-0700). Those are security-relevant authority downgrades, not the
+``not_regular_file``, ``untrusted_ownership`` and ``not_configured`` are
+the containment codes: the name — or the authority the tree is held
+under — is untrustworthy. ``untrusted_ownership`` covers the private-tree
+ownership and permission assertions (a group/other-writable ancestor, a
+root that is not owned by the service identity, a root or child that is
+not mode 0700). Those are security-relevant authority downgrades, not the
 "renameat2 is unsupported" miscellany ``unspecified`` collects, and
 lumping them together fused ~13 causes into one reason (issue #868). ``missing``, ``open_failed``, ``read_failed`` and ``write_failed`` are
 not — they say nothing about trust. Consumers that translate these into their own vocabulary do
@@ -64,6 +65,17 @@ Each carries its errno.
 classification (configured-root policy checks, preview/quarantine
 guards). It is deliberately NOT a synonym for "safe": consumers that map
 codes to their own vocabulary must fail closed on it.
+
+``not_configured`` (issue #1176 PR2 review finding 5) is for a refusal
+that never touched a candidate at all — the whole configured authority
+(e.g. the local-import lane) was never turned on or never given a root.
+Reusing ``unspecified`` here made ``unreadable_reason_text()`` word an
+entirely-unconfigured lane as "could not be read, may be transient",
+which is false for a semantic, permanent, non-retryable refusal; a
+dedicated code lets every consumer that already asks
+``refusal_is_indeterminate``/``unreadable_reason_text`` render it
+correctly WITHOUT that consumer having to special-case one exception
+TYPE ahead of the shared code vocabulary.
 """
 
 
@@ -223,6 +235,32 @@ def _raise_path_error(path: str, exc: OSError) -> FilesystemAuthorityError:
     )
 
 
+def _raise_open_error(
+    path: str, exc: OSError | ValueError,
+) -> FilesystemAuthorityError:
+    """Classify one failed no-follow open, including an unsyscallable name.
+
+    ``os.open`` raises ``ValueError`` — never ``OSError`` — for a
+    component containing an embedded NUL byte: Python catches this before
+    the syscall, since a NUL cannot be represented in the underlying C
+    string, and ``_parts`` does not reject NUL (only empty/``.``/``..``
+    components). Without this, that ``ValueError`` escapes every no-follow
+    open loop uncaught — invisible to a caller matching
+    ``except FilesystemAuthorityError`` even though that type itself
+    subclasses ``ValueError``, since a raw ``ValueError`` is not an
+    instance of the subclass (issue #1176 PR2 review finding 9). Mirrors
+    :func:`observe_directory`'s own explicit ``except ValueError``. New
+    exposure specifically because the local-import lane is the first
+    caller of these no-follow loops to take an operator-typed string
+    directly, rather than a DB column already round-tripped through a
+    validated column type.
+    """
+    if isinstance(exc, ValueError):
+        return FilesystemAuthorityError(
+            f"unsyscallable path component: {path}", code="path_escape")
+    return _raise_path_error(path, exc)
+
+
 DirectoryPresence = Literal["present", "absent", "indeterminate"]
 """Whether a name was PROVEN to hold a directory, proven not to, or neither."""
 
@@ -284,12 +322,14 @@ def unreadable_reason_text(
 
     ``unsafe_symlink`` and ``not_regular_file`` are CONTAINMENT refusals:
     we chose not to follow/open a kind of name, which says nothing about
-    the health of the storage underneath it. ``path_escape`` and
-    ``untrusted_ownership`` are the same family — a boundary decision, not
-    a world failure. Every other non-absence code (``open_failed``,
-    ``read_failed``, ``write_failed``, ``unspecified``) is the opposite: a
-    storage layer that failed or refused to answer, which may clear up on
-    retry.
+    the health of the storage underneath it. ``path_escape``,
+    ``untrusted_ownership``, and ``not_configured`` are the same family —
+    a boundary decision, not a world failure; ``not_configured`` in
+    particular is refused before any candidate is even looked at, so
+    there is no storage layer underneath it to be flaky. Every other
+    non-absence code (``open_failed``, ``read_failed``, ``write_failed``,
+    ``unspecified``) is the opposite: a storage layer that failed or
+    refused to answer, which may clear up on retry.
 
     ``missing`` and ``not_a_directory`` PROVE absence and have no
     refusal text — no caller may reach this function with either, since
@@ -311,6 +351,12 @@ def unreadable_reason_text(
             )
         case "path_escape" | "untrusted_ownership":
             return "refused by the containment boundary, not a world failure"
+        case "not_configured":
+            return (
+                "the configured authority was never turned on or never "
+                "given a root, refused before any candidate was even "
+                "looked at (containment, not a world failure)"
+            )
         case "open_failed" | "read_failed" | "write_failed" | "unspecified":
             suffix = f" ({errno_symbol})" if errno_symbol else ""
             return f"could not be read, may be transient{suffix}"
@@ -341,7 +387,7 @@ def is_containment_refusal(code: FsAuthorityCode) -> bool:
     :func:`errno_proves_absence`.
     """
     return code in ("unsafe_symlink", "not_regular_file",
-                    "path_escape", "untrusted_ownership")
+                    "path_escape", "untrusted_ownership", "not_configured")
 
 
 def refusal_is_indeterminate(code: FsAuthorityCode) -> bool | None:
@@ -376,6 +422,7 @@ def refusal_is_indeterminate(code: FsAuthorityCode) -> bool | None:
             | "not_regular_file"
             | "untrusted_ownership"
             | "missing"
+            | "not_configured"
         ):
             return False
 
@@ -567,8 +614,8 @@ def open_directory_path(path: str) -> Generator[int]:
         for part in parts:
             try:
                 child = os.open(part, _DIR_FLAGS, dir_fd=fd)
-            except OSError as exc:
-                raise _raise_path_error(path, exc) from exc
+            except (OSError, ValueError) as exc:
+                raise _raise_open_error(path, exc) from exc
             os.close(fd)
             fd = child
         yield fd
@@ -838,8 +885,8 @@ def open_relative_directory(
         for part in _parts(relative_path):
             try:
                 child = os.open(part, _DIR_FLAGS, dir_fd=fd)
-            except OSError as exc:
-                raise _raise_path_error(relative_path, exc) from exc
+            except (OSError, ValueError) as exc:
+                raise _raise_open_error(relative_path, exc) from exc
             os.close(fd)
             fd = child
         yield fd
@@ -994,6 +1041,288 @@ def open_configured_quarantine_directory(
             code="missing",
         )
     raise FilesystemAuthorityError("path is outside configured quarantine roots")
+
+
+class LocalImportNotConfiguredError(FilesystemAuthorityError):
+    """The local-import lane (issue #1176) has no configured authority at all.
+
+    Its own TYPE, the same dispatch-by-``except`` pattern already used here
+    by :class:`SharedDownloadRootError` and its copy-phase siblings: "the
+    lane was never turned on / never given a root" is a materially
+    different fact than "this specific candidate is outside the configured
+    root" (the ordinary ``path_escape`` refusal
+    :func:`open_configured_local_import_directory` raises below), and PR3
+    needs to tell them apart to name the exact module option
+    (``services.cratedigger.localImport.enable`` /
+    ``services.cratedigger.localImport.dir``) in its message instead of a
+    generic containment refusal.
+
+    Always carries ``code="not_configured"`` — hardcoded here rather than
+    left to each raise site, so the invariant holds regardless of how a
+    caller constructs the exception. PR2 review round 1 reused the
+    existing ``"unspecified"`` code instead of adding a new
+    :data:`FsAuthorityCode` member, reasoning that a new code would need
+    threading through every OTHER exhaustive classifier that closes over
+    the type. Round 2 found that reasoning wrong on its own terms: reusing
+    ``"unspecified"`` made ``unreadable_reason_text("unspecified")`` word
+    this refusal as "could not be read, may be transient" — false for a
+    semantic, permanent refusal — and the threading those OTHER
+    classifiers need is exactly the "fail closed loudly" shape this
+    module already prefers (a missing ``match`` case is a Pyright error
+    via ``assert_never`` in ``lib.download_materialization``, not a
+    silent gap). ``not_configured`` is now a first-class code (see its
+    own doc in :data:`FsAuthorityCode`); the exception TYPE remains the
+    discriminator a caller branches on for the exact module-option
+    message, but a caller that only ever asks ``.code`` — never
+    special-casing this type first — now gets the correct answer too.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="not_configured")
+
+
+#: Cratedigger-owned subtrees the local-import lane must never read from,
+#: even when they sit beneath the configured root (issue #1176 PR2). A
+#: narrowing of the configured-root ALLOWLIST, not a general denylist
+#: (`.claude/rules/scope.md` rejects a denylist as the primary mechanism) —
+#: this only ever runs after a candidate has already proven to lie under
+#: ``cfg.local_import_dir``. A broad root such as ``/mnt/virtio``
+#: legitimately contains these trees as siblings of legitimate import
+#: sources, so the narrowing has to live at execution time, not as a
+#: module-level config assertion (which would have to reject the broad
+#: root outright, even though most paths under it are fine).
+#:
+#: ``processing_dir`` is refused WHOLE, not narrowed to its ``albums/``
+#: child: ``preview/`` is private 0700 scratch too, and a candidate under
+#: it was an unprotected gap until issue #1176 PR2 review found it — the
+#: processing root has no legitimate import-source use at any depth.
+#:
+#: Five candidates feed the returned tuple, and EVERY one passes through
+#: the same trailing ``if path`` filter — including ``beets_directory``,
+#: whose owning module option
+#: (``services.cratedigger.beets.runtime.expectedDirectory``) is REQUIRED
+#: (asserted non-null, absolute, normalized, and non-``/``) for every
+#: functioning module deployment, so it never actually observes an empty
+#: value there; the filter still applies to it uniformly rather than
+#: special-casing which fields are "safe" to skip. The field that
+#: genuinely CAN be empty on a real deployment is ``beets_staging_dir``,
+#: sourced from ``beets.validation.stagingDir``, which is ``nullOr`` and
+#: required only when ``beets.validation.enable`` — leaving it unset when
+#: validation is off must not resolve to "the current working directory"
+#: via ``os.path.abspath(os.path.normpath(""))``, which is the actual
+#: reason every candidate is filtered rather than just that one.
+#:
+#: The fifth (issue #1176 PR2 review finding 7) mirrors the module's own
+#: ``beetsLibraryAuthorityRoots`` (``nix/module.nix``, ``expectedDirectory``
+#: PLUS ``dirOf expectedLibrary``): the directory holding the Beets SQLite
+#: library DB, journals, import log, and harness audit
+#: (``cfg.beets_library_db``'s parent). Un-set-able through the module (its
+#: owning option is required) but a hand-built ``CratediggerConfig`` could
+#: still leave it empty, so it goes through the same filter as everything
+#: else.
+#:
+#: Cratedigger's own mutable ``stateDir`` (lock, denylists, processing
+#: metadata) is deliberately NOT here, and deriving it from
+#: ``dirname(cfg.lock_file_path)`` was tried and reverted: for the
+#: production shape produced by ``read_runtime_config()`` — the shape every
+#: real consumer this lane will join actually uses —
+#: ``lock_file_path = dirname(<immutable store config path>)``, i.e.
+#: ``/nix/store``, not ``stateDir`` at all; only a hand-built "strict"
+#: fixture shape resolves it correctly, so both test tiers were blind to
+#: the drift. ``stateDir`` holds no audio, and this lane only ever reads:
+#: pointing it there produces an ``empty_fileset`` rejection at import
+#: time, not a security exposure. It is a footgun guard, not a safety
+#: guard, and not worth a fifth config field or a derivation that lies in
+#: the shape production actually uses.
+def local_import_owned_subtrees(cfg: object) -> tuple[str, ...]:
+    """Cratedigger's own trees, as absolute paths, filtering out any unset."""
+    candidates = (
+        getattr(cfg, "processing_dir"),  # noqa: B009 - structural config boundary
+        getattr(cfg, "beets_staging_dir"),  # noqa: B009 - structural config boundary
+        getattr(cfg, "slskd_download_dir"),  # noqa: B009 - structural config boundary
+        getattr(cfg, "beets_directory"),  # noqa: B009 - structural config boundary
+        os.path.dirname(getattr(cfg, "beets_library_db")),  # noqa: B009 - structural config boundary
+    )
+    return tuple(path for path in candidates if path)
+
+
+def _local_import_root_is_unsafe(root: str) -> bool:
+    """Does ``root`` fail to name a genuine, non-degenerate absolute
+    directory this lane may be confined to?
+
+    Checked against the SAME resolved form :func:`open_directory_path`
+    will actually walk (``root.lstrip(os.sep)``), not a bare string
+    compare against ``"/"``: ``"/"``, ``"//"``, ``"///"``, … all lstrip to
+    the empty string and are therefore the identical bare filesystem
+    root, however many redundant leading slashes a hand-built
+    ``CratediggerConfig`` spells it with (issue #1176 PR2 review round 2
+    finding 1 — a naive ``root == "/"`` compare let ``"//"`` name the
+    real ``/`` while every containment check downstream reported success,
+    turning the whole filesystem minus every owned subtree into a
+    legal import source).
+
+    A relative root is refused here too, BEFORE it is ever used
+    lexically: :func:`_relative_to` calls ``os.path.relpath``, which
+    silently resolves a relative ``start`` against the CURRENT WORKING
+    DIRECTORY rather than raising — so validating absoluteness only
+    inside :func:`open_directory_path` (reached after containment is
+    already computed) is too late; the resulting lexical mismatch was
+    being blamed on the operator's CANDIDATE instead of the broken root
+    (review round 2 finding 2). Checking both facts here, before
+    ``_relative_to`` is ever called, is what keeps root-subject and
+    candidate-subject refusals from blurring into each other.
+    """
+    return not os.path.isabs(root) or root.lstrip(os.sep) == ""
+
+
+class LocalImportRootError(FilesystemAuthorityError):
+    """A refusal to open the CONFIGURED local-import ROOT itself.
+
+    Its own TYPE, the same dispatch-by-``except`` pattern issue #868
+    established with :class:`SharedDownloadRootError`: "the operator's
+    configured ``local_import_dir`` is missing/unreadable" is a materially
+    different fact from "the candidate the operator named under that root
+    is missing/unreadable" — WHICH subject failed is a dispatch decision,
+    and an ``except`` clause makes it structural, exactly as
+    :class:`SharedDownloadRootError` does for the untrusted share.
+
+    This makes the distinction AVAILABLE; it does not, by itself, change
+    any policy. ``wrapping()`` deliberately preserves ``code`` and
+    ``errno_symbol`` unchanged, so a root EACCES still carries
+    ``code="open_failed"`` and ``refusal_is_indeterminate(...)`` still
+    answers ``True`` for it — the identical answer a CANDIDATE EACCES
+    would give, since the underlying storage fact really is the same
+    either way. A caller wanting root-subject and candidate-subject
+    refusals to be treated differently (for example: never silently
+    retry an EACCES that turns out to be a permanent misconfiguration of
+    ``local_import_dir``, the way it might legitimately retry a
+    transient EACCES on one candidate folder) must branch on
+    ``isinstance(exc, LocalImportRootError)`` itself, not solely on
+    ``.code`` — this type is the seam that makes that branch possible,
+    not a policy that applies it. No consumer in THIS repository does
+    that branching yet; the first candidate is PR3.
+    """
+
+    @classmethod
+    def wrapping(cls, exc: FilesystemAuthorityError) -> LocalImportRootError:
+        return cls(
+            f"configured local-import root refused: {exc}",
+            code=exc.code,
+            errno_symbol=exc.errno_symbol,
+        )
+
+
+@contextmanager
+def open_configured_local_import_directory(
+    raw_path: str, cfg: object,
+) -> Generator[HeldDirectory]:
+    """Resolve an operator-named path through the local-import lane's authority.
+
+    Mirrors :func:`open_configured_quarantine_directory`'s no-follow
+    descriptor discipline and structured-refusal discipline: a refusal
+    established AFTER containment is proven (an unreadable candidate, a
+    missing candidate) is never reported as a containment failure — the
+    live #1063 bug, where an EACCES on the private processing root was
+    reported as "path is outside configured roots", accusing the
+    operator's config of a problem that did not exist. Containment here is
+    established purely lexically (this function opens nothing until AFTER
+    the root-containment and owned-subtree checks pass), so the storage
+    errno class (missing/EACCES/ESTALE/…) that the no-follow opens below
+    can raise is always honestly classified rather than reclassified. The
+    SUBJECT of that refusal — the operator's configured root, or the
+    candidate they named under it — is a second, independent fact this
+    function must not blur: :func:`open_directory_path` on ``root`` is
+    wrapped into :class:`LocalImportRootError` (the same
+    dispatch-by-``except`` split issue #868 gave the untrusted share via
+    :class:`SharedDownloadRootError`), while the candidate's own open stays
+    a plain :class:`FilesystemAuthorityError` — so "your configured root is
+    broken" and "the folder you named is missing/unreadable" can never be
+    reported as the other.
+
+    Differences from the quarantine resolver:
+
+    * Exactly ONE configured root (``cfg.local_import_dir``), not three —
+      there is no legacy multi-root precedence to arbitrate.
+    * No required path-component marker: containment under the configured
+      root is the whole test, so every path under it is a legitimate
+      candidate (unlike quarantine's ``failed_imports``/``wrong_matches``
+      requirement).
+    * ``raw_path`` MUST be absolute. Quarantine accepts a legacy relative
+      DB path because old rows really contain one; this is a brand-new
+      lane fed only by an operator-typed path (PR3), so there is no
+      relative-path precedent to honour and accepting one would only add
+      an ambiguous "relative to what" reading.
+    * The lane can be entirely unconfigured — ``local_import_enabled`` is
+      false, ``local_import_dir`` is unset, or (:func:`_local_import_root_is_unsafe`)
+      the root is relative or degenerate (``"/"``, ``"//"``, ``"///"``, …)
+      — refused via :class:`LocalImportNotConfiguredError`, DISTINCT from
+      an ordinary containment refusal, so PR3 can name the module option
+      rather than rendering a generic "outside configured roots" message.
+      The module assertion already rejects a relative or degenerate root
+      at build time, but a preflight is not authority (the same doctrine
+      ``lib/force_import_service.py::enqueue_force_import`` states for its
+      own preflight) — a hand-built ``CratediggerConfig`` reaching this
+      function with such a root must be refused here too, or every path
+      outside every owned subtree becomes a legal import source.
+    * Additionally refuses any candidate that resolves inside a
+      Cratedigger-owned subtree (:func:`local_import_owned_subtrees`) even
+      when it is nested under the configured root — pointing this lane at
+      the live library or Cratedigger's own processing tree is the
+      realistic operator typo, and it is also where file ownership stops
+      being unambiguous (good-citizen doctrine, issue #571).
+    """
+    enabled = bool(getattr(cfg, "local_import_enabled"))  # noqa: B009 - structural config boundary
+    root = getattr(cfg, "local_import_dir")  # noqa: B009 - structural config boundary
+    if not enabled or not root or _local_import_root_is_unsafe(root):
+        raise LocalImportNotConfiguredError(
+            "local-import lane is not safely configured: set "
+            "services.cratedigger.localImport.enable = true and "
+            "services.cratedigger.localImport.dir to an absolute, "
+            "non-degenerate root (not relative, not \"/\", \"//\", …)")
+    # No empty-path branch: os.path.isabs("") is False, so an empty
+    # raw_path already falls through to the absolute-path refusal below
+    # with no separate clause to keep honest — a dedicated "path is
+    # missing" branch here used the generic "unspecified" code, which
+    # unreadable_reason_text() words as a possibly-transient read failure;
+    # an empty/non-absolute input is a semantic refusal, never that.
+    if not os.path.isabs(raw_path):
+        raise FilesystemAuthorityError(
+            "local-import path must be absolute", code="path_escape")
+
+    candidate_norm = os.path.abspath(os.path.normpath(raw_path))
+    root_abs = os.path.abspath(root)
+    if candidate_norm == root_abs:
+        raise FilesystemAuthorityError(
+            f"path is the configured local-import root itself, not a "
+            f"subdirectory to import: {raw_path}",
+            code="path_escape")
+    try:
+        relative = _relative_to(root, candidate_norm)
+    except FilesystemAuthorityError as exc:
+        raise FilesystemAuthorityError(
+            f"path is outside the configured local-import root: {raw_path}",
+            code="path_escape") from exc
+
+    candidate_abs = os.path.abspath(os.path.join(root, relative))
+    for owned in local_import_owned_subtrees(cfg):
+        if paths_overlap(owned, candidate_abs):
+            raise FilesystemAuthorityError(
+                f"path resolves inside a Cratedigger-owned subtree, "
+                f"refused regardless of the configured local-import root: "
+                f"{owned}",
+                code="path_escape")
+
+    with ExitStack() as scope:
+        try:
+            root_fd = scope.enter_context(open_directory_path(root))
+        except FilesystemAuthorityError as exc:
+            raise LocalImportRootError.wrapping(exc) from exc
+        with open_relative_directory(root_fd, relative) as candidate_fd:
+            held = HeldDirectory(fd=os.dup(candidate_fd), display_path=candidate_abs)
+    try:
+        yield held
+    finally:
+        held.close()
 
 
 def open_regular_relative(root_fd: int, relative_path: str) -> OpenedRegularFile:

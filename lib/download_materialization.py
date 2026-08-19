@@ -263,7 +263,15 @@ def _reason_in_vocabulary(
             return f"{vocabulary.read_failed_prefix}{exc.errno_symbol or 'UNKNOWN'}"
         case "write_failed":
             return f"{vocabulary.write_failed_prefix}{exc.errno_symbol or 'UNKNOWN'}"
-        case "unspecified":
+        case "unspecified" | "not_configured":
+            # not_configured (issue #1176 PR2) names a DIFFERENT authority
+            # (the local-import lane) than any subject this vocabulary
+            # describes, and is unreachable through this function in
+            # practice — grouped with "unspecified" rather than the
+            # containment bucket above for the same reason that bucket's
+            # own comment states: calling an unrelated authority's own
+            # refusal a containment finding about THIS tree would
+            # manufacture a security finding out of ignorance.
             return vocabulary.unclassified
     assert_never(code)
 
