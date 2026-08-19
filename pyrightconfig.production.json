@@ -34,9 +34,10 @@
   "exclude": [
     "build",
     "tools/vulture",
-    ".pyright-venv",
-    ".nixpkgs-src",
-    ".claude/worktrees",
-    "tests"
+    "**/.*",
+    "**/node_modules",
+    "tests",
+    "**/result",
+    "**/result-*"
   ]
 }

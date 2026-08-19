@@ -77,16 +77,24 @@ pkgs.mkShell {
     # spurious reportMissingImports. Refreshed every shell entry (the store path
     # changes on ``nix flake update``); registered as an indirect GC root so
     # ``nix-collect-garbage`` won't sever the symlink.
+    # Anchor both GC roots at the repo TOP LEVEL, never $PWD (issue #1208
+    # item 3): a shell entered from a subdirectory used to plant these
+    # symlinks in-repo where the root-anchored pyright excludes cannot see
+    # them — two .nixpkgs-src links under docs/research/calibration-data/
+    # made every whole-repo pyright run analyze the entire nixpkgs Python
+    # corpus (~20 CPU-minutes and an OOM-scale node heap per run).
+    _cd_root="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
     _cd_pyenv="$(${testPythonEnv}/bin/python3 -c 'import sys,os;print(os.path.dirname(os.path.dirname(sys.executable)))')"
-    nix-store --realise "$_cd_pyenv" --indirect --add-root "$PWD/.pyright-venv" >/dev/null 2>&1 \
-      || ln -sfn "$_cd_pyenv" "$PWD/.pyright-venv"
+    nix-store --realise "$_cd_pyenv" --indirect --add-root "$_cd_root/.pyright-venv" >/dev/null 2>&1 \
+      || ln -sfn "$_cd_pyenv" "$_cd_root/.pyright-venv"
     unset _cd_pyenv
 
     # GC-root the pinned nixpkgs source tree (fetched by the flake.lock
     # shim above) so nix-collect-garbage doesn't force a re-download on
     # the next shell entry. Same pattern as .pyright-venv.
-    nix-store --realise ${pkgs.path} --indirect --add-root "$PWD/.nixpkgs-src" >/dev/null 2>&1 \
-      || ln -sfn ${pkgs.path} "$PWD/.nixpkgs-src"
+    nix-store --realise ${pkgs.path} --indirect --add-root "$_cd_root/.nixpkgs-src" >/dev/null 2>&1 \
+      || ln -sfn ${pkgs.path} "$_cd_root/.nixpkgs-src"
+    unset _cd_root
 
     # The harness wrapper (harness/run_beets_harness.sh) execs this
     # interpreter. In production the guarded [Beets] runtime contract names

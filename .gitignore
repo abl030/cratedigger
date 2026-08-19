@@ -1,6 +1,6 @@
 /.venv
-/result
-/result-*
+result
+result-*
 __pycache__/
 *.pyc
 *.egg-info/
