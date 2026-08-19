@@ -7565,6 +7565,131 @@ class TestYoutubeImportJobType(unittest.TestCase):
         )
 
 
+class TestLocalImportJobType(unittest.TestCase):
+    """Constant + helper coverage for the ``local_import`` job_type
+    (issue #1176 PR1 — DB vocabulary and provenance plumbing only; no
+    production code enqueues this job_type yet).
+
+    Covers:
+    - ``IMPORT_JOB_LOCAL`` is registered in ``IMPORT_JOB_TYPES``
+    - ``local_import_dedupe_key`` is keyed on the REQUEST (a local import
+      has no originating download_log row, unlike force/youtube imports)
+    - ``local_import_payload`` produces the {source_path, request_id} shape
+    - ``validate_payload`` enforces both fields present and typed —
+      including the wire-boundary rule (RED test feeding the wrong type
+      and asserting ``msgspec.ValidationError``)
+    """
+
+    def test_constant_is_in_registered_job_types(self):
+        from lib.import_queue import IMPORT_JOB_LOCAL, IMPORT_JOB_TYPES
+        self.assertIn(IMPORT_JOB_LOCAL, IMPORT_JOB_TYPES)
+        self.assertEqual(IMPORT_JOB_LOCAL, "local_import")
+
+    def test_validate_job_type_accepts_local_import(self):
+        from lib.import_queue import IMPORT_JOB_LOCAL, validate_job_type
+        self.assertEqual(
+            validate_job_type(IMPORT_JOB_LOCAL), IMPORT_JOB_LOCAL,
+        )
+
+    def test_local_import_payload_roundtrip(self):
+        from lib.import_queue import (
+            IMPORT_JOB_LOCAL,
+            local_import_payload,
+            validate_payload,
+        )
+        payload = local_import_payload(
+            source_path="/mnt/virtio/Music/Incoming/local/Artist - Album",
+            request_id=42,
+        )
+        self.assertEqual(payload, {
+            "source_path": "/mnt/virtio/Music/Incoming/local/Artist - Album",
+            "request_id": 42,
+        })
+        self.assertEqual(validate_payload(IMPORT_JOB_LOCAL, payload), payload)
+
+    def test_local_import_payload_preserves_positive_request_id(self):
+        from lib.import_queue import local_import_payload
+        payload = local_import_payload(
+            source_path="/mnt/virtio/Music/Incoming/local/x",
+            request_id=42,
+        )
+        self.assertIsInstance(payload["request_id"], int)
+        self.assertEqual(payload["request_id"], 42)
+
+    def test_validate_payload_local_rejects_missing_source_path(self):
+        from lib.import_queue import IMPORT_JOB_LOCAL, validate_payload
+        with self.assertRaises(msgspec.ValidationError):
+            validate_payload(IMPORT_JOB_LOCAL, {"request_id": 42})
+
+    def test_validate_payload_local_rejects_empty_source_path(self):
+        from lib.import_queue import IMPORT_JOB_LOCAL, validate_payload
+        with self.assertRaises(msgspec.ValidationError):
+            validate_payload(IMPORT_JOB_LOCAL, {
+                "source_path": "",
+                "request_id": 42,
+            })
+
+    def test_validate_payload_local_rejects_missing_request_id(self):
+        from lib.import_queue import IMPORT_JOB_LOCAL, validate_payload
+        with self.assertRaises(msgspec.ValidationError):
+            validate_payload(IMPORT_JOB_LOCAL, {
+                "source_path": "/mnt/virtio/Music/Incoming/local/x",
+            })
+
+    def test_validate_payload_local_rejects_non_int_request_id(self):
+        """Wire-boundary rule (code-quality.md): the wrong TYPE at the
+        msgspec.Struct boundary must raise ValidationError, not silently
+        coerce. A JSON int-vs-str drift on this field is exactly the
+        issue #99 / PR #98 failure mode the wire-boundary rule exists to
+        catch — here at import_queue's own JSONB payload boundary."""
+        from lib.import_queue import IMPORT_JOB_LOCAL, validate_payload
+        with self.assertRaises(msgspec.ValidationError):
+            validate_payload(IMPORT_JOB_LOCAL, {
+                "source_path": "/mnt/virtio/Music/Incoming/local/x",
+                "request_id": "42",  # str, not int
+            })
+
+    def test_validate_payload_local_rejects_non_positive_request_id(self):
+        from lib.import_queue import IMPORT_JOB_LOCAL, validate_payload
+        for bad_id in (0, -1):
+            with (
+                self.subTest(request_id=bad_id),
+                self.assertRaises(msgspec.ValidationError),
+            ):
+                validate_payload(IMPORT_JOB_LOCAL, {
+                    "source_path": "/mnt/virtio/Music/Incoming/local/x",
+                    "request_id": bad_id,
+                })
+
+    def test_validate_payload_local_rejects_unknown_field(self):
+        from lib.import_queue import IMPORT_JOB_LOCAL, validate_payload
+        with self.assertRaises(msgspec.ValidationError):
+            validate_payload(IMPORT_JOB_LOCAL, {
+                "source_path": "/mnt/virtio/Music/Incoming/local/x",
+                "request_id": 42,
+                "download_log_id": 99,  # local imports have no such row
+            })
+
+    def test_dedupe_key_uses_request_id_not_download_log_id(self):
+        """A local import has no originating download_log row to key on
+        (unlike force_import/youtube_import) — the request is the natural
+        grain, matching the request-scoped partial unique index
+        ``one_active_local_import_per_request`` (migration 080)."""
+        from lib.import_queue import local_import_dedupe_key
+        self.assertEqual(
+            local_import_dedupe_key(7),
+            "local_import:request:7",
+        )
+        # Same request id ⇒ same key (idempotency / dedupe).
+        self.assertEqual(
+            local_import_dedupe_key(7), local_import_dedupe_key(7),
+        )
+        # Different request id ⇒ different key.
+        self.assertNotEqual(
+            local_import_dedupe_key(7), local_import_dedupe_key(8),
+        )
+
+
 class TestExecuteYoutubeImportJob(unittest.TestCase):
     """U9: importer dispatcher for ``youtube_import`` job_type.
 

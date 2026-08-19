@@ -389,6 +389,15 @@ class _DownloadLogMixin(_PipelineDBBase):
                      # dicts (via msgspec.to_builtins), or None.
                      transfer_detail: Any = None,
                      source_download_log_id: int | None = None,
+                     # Migration 037 discriminator (``'slskd'`` / ``'youtube'``
+                     # / ``'local'`` as of migration 080). Defaults to
+                     # ``'slskd'`` — the shape every current caller writes —
+                     # so every existing call site is unaffected. YouTube rows
+                     # never flow through this method (they use the dedicated
+                     # ``insert_youtube_running``); the ``local_import`` lane
+                     # (issue #1176 PR3) will be the first caller to pass
+                     # ``source='local'`` explicitly.
+                     source: str = "slskd",
                      ) -> int:
         beets_distance_value, beets_scenario_value = derive_validation_log_columns(
             validation_result,
@@ -415,10 +424,10 @@ class _DownloadLogMixin(_PipelineDBBase):
                 v0_probe_avg_bitrate, v0_probe_median_bitrate,
                 existing_v0_probe_kind, existing_v0_probe_min_bitrate,
                 existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
-                transfer_detail, source_download_log_id
+                transfer_detail, source_download_log_id, source
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
             request_id, soulseek_username, normalized_contributors,
@@ -439,6 +448,7 @@ class _DownloadLogMixin(_PipelineDBBase):
             psycopg2.extras.Json(transfer_detail)
             if transfer_detail is not None else None,
             source_download_log_id,
+            source,
         ))
         row = cur.fetchone()
         self.conn.commit()

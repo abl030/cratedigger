@@ -1041,7 +1041,7 @@ class TestPreviewEvidenceFactsSchema(unittest.TestCase):
                     job_type, status, request_id, payload, preview_status
                 )
                 VALUES (
-                    'manual_import', 'queued', %s, '{}'::jsonb,
+                    'force_import', 'queued', %s, '{}'::jsonb,
                     'measurement_failed'
                 )
             """, (rid,))
@@ -1057,7 +1057,7 @@ class TestPreviewEvidenceFactsSchema(unittest.TestCase):
                         job_type, status, request_id, payload, preview_status
                     )
                     VALUES (
-                        'manual_import', 'queued', %s, '{}'::jsonb,
+                        'force_import', 'queued', %s, '{}'::jsonb,
                         'not_a_real_preview_status'
                     )
                 """, (rid,))
@@ -1347,7 +1347,7 @@ class TestRecoverStuckPreviewUncertainJobsSchema(unittest.TestCase):
                         preview_heartbeat_at
                     )
                     VALUES (
-                        'manual_import', 'queued', %s, '{}'::jsonb,
+                        'force_import', 'queued', %s, '{}'::jsonb,
                         %s, 'pre-existing message',
                         '2026-05-15 00:00:00+00'
                     )
@@ -1385,7 +1385,7 @@ class TestRecoverStuckPreviewUncertainJobsSchema(unittest.TestCase):
                     preview_status, preview_message
                 )
                 VALUES (
-                    'manual_import', 'failed', %s, '{}'::jsonb,
+                    'force_import', 'failed', %s, '{}'::jsonb,
                     'uncertain', 'historical failed job'
                 )
             """, (rid,))
@@ -6161,6 +6161,235 @@ class TestSimplifySlskdTransferOwnershipCurrentSchema(unittest.TestCase):
                 self.assertEqual(cur.fetchone(), ("YES",))
         finally:
             conn.close()
+
+
+@requires_postgres
+class TestLocalImportVocabularySchema(unittest.TestCase):
+    """Migration 080 (issue #1176 PR1): DB vocabulary for the future
+    ``import-local`` lane. PR1 makes nothing reachable — no writer produces
+    ``source='local'`` or ``job_type='local_import'`` yet — so this class
+    only proves the schema itself is correct:
+
+    - ``download_log_source_check`` admits ``'local'`` alongside the
+      existing ``'slskd'`` / ``'youtube'`` values (migration 037).
+    - ``import_jobs_job_type_check`` admits ``'local_import'`` and no
+      longer admits ``'manual_import'`` (retired: the HTTP endpoint that
+      wrote it was removed as security finding CD-SEC-03, and zero live
+      rows carried it).
+    - ``download_log_outcome_check`` is UNCHANGED: the ``manual_import``
+      OUTCOME (a different column, a different taxonomy) must still be
+      admitted — 7 live audit rows depend on it.
+    - partial unique index ``one_active_local_import_per_request`` mirrors
+      migration 060's YouTube analogue.
+    """
+
+    def _query(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def _exec(self, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+        finally:
+            conn.close()
+
+    def _make_request(self, mbid: str) -> int:
+        self._exec("""
+            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
+            VALUES (%s, 'A', 'B', 'request')
+            ON CONFLICT (mb_release_id) DO NOTHING
+        """, (mbid,))
+        return self._query(
+            "SELECT id FROM album_requests WHERE mb_release_id = %s",
+            (mbid,),
+        )[0][0]
+
+    def test_records_applied_version_080(self):
+        rows = self._query(
+            "SELECT version FROM schema_migrations WHERE version = 80"
+        )
+        self.assertEqual(len(rows), 1)
+
+    def test_source_check_admits_local(self):
+        rid = self._make_request("mig080-local-source-mbid")
+        try:
+            self._exec("""
+                INSERT INTO download_log (request_id, source, outcome)
+                VALUES (%s, 'local', 'success')
+            """, (rid,))
+            rows = self._query("""
+                SELECT source, outcome FROM download_log
+                WHERE request_id = %s
+            """, (rid,))
+            self.assertEqual(rows, [("local", "success")])
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_source_check_still_rejects_unknown_value(self):
+        rid = self._make_request("mig080-bad-source-mbid")
+        try:
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec("""
+                    INSERT INTO download_log (request_id, source, outcome)
+                    VALUES (%s, 'dropbox', 'success')
+                """, (rid,))
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_source_check_still_admits_slskd_and_youtube(self):
+        # Widening the CHECK must not narrow it — both prior values stay
+        # admitted alongside the new one.
+        rid = self._make_request("mig080-prior-sources-mbid")
+        try:
+            for source in ("slskd", "youtube"):
+                with self.subTest(source=source):
+                    self._exec("""
+                        INSERT INTO download_log (request_id, source, outcome)
+                        VALUES (%s, %s, 'success')
+                    """, (rid, source))
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_job_type_check_admits_local_import(self):
+        rid = self._make_request("mig080-local-import-job-mbid")
+        dedupe_key = "local_import:request:mig080"
+        try:
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, request_id, dedupe_key, payload
+                ) VALUES (
+                    'local_import', %s, %s,
+                    '{"source_path": "/mnt/virtio/Music/Incoming/local/x",
+                      "request_id": 1}'::jsonb
+                )
+            """, (rid, dedupe_key))
+            rows = self._query("""
+                SELECT job_type, payload->>'source_path'
+                FROM import_jobs WHERE dedupe_key = %s
+            """, (dedupe_key,))
+            self.assertEqual(
+                rows,
+                [("local_import", "/mnt/virtio/Music/Incoming/local/x")],
+            )
+        finally:
+            self._exec("DELETE FROM import_jobs WHERE dedupe_key = %s",
+                       (dedupe_key,))
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_job_type_check_no_longer_admits_manual_import(self):
+        """The retired job_type value: 'manual_import' was the vocabulary
+        for an HTTP endpoint removed as security finding CD-SEC-03. Zero
+        live import_jobs rows carried it, so retiring it loses no history."""
+        rid = self._make_request("mig080-manual-import-rejected-mbid")
+        try:
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec("""
+                    INSERT INTO import_jobs (
+                        job_type, request_id, dedupe_key, payload
+                    ) VALUES (
+                        'manual_import', %s, 'manual_import:mig080',
+                        '{}'::jsonb
+                    )
+                """, (rid,))
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_job_type_check_still_admits_prior_values(self):
+        # Widening the CHECK to add local_import (and retiring
+        # manual_import) must not disturb the three surviving job types.
+        # ``automation_import`` real INSERTs also have to satisfy issue
+        # #898's unrelated owner-equivalence trigger
+        # (``enforce_complete_processing_owner``), which this test has no
+        # business setting up just to prove a CHECK constraint's text — so
+        # this asserts the CHECK's own definition directly via
+        # ``pg_get_constraintdef``, the same introspection every other
+        # constraint-shape assertion in this class already uses.
+        rows = self._query("""
+            SELECT pg_get_constraintdef(oid)
+            FROM pg_constraint
+            WHERE conrelid = 'import_jobs'::regclass
+              AND conname = 'import_jobs_job_type_check'
+        """)
+        self.assertEqual(len(rows), 1)
+        constraint_def = rows[0][0]
+        for job_type in ("force_import", "automation_import", "youtube_import"):
+            with self.subTest(job_type=job_type):
+                self.assertIn(f"'{job_type}'", constraint_def)
+
+    def test_outcome_check_unchanged_still_admits_manual_import_outcome(self):
+        """The retirement is scoped to import_jobs.job_type ONLY.
+        download_log.outcome='manual_import' (a different taxonomy, a
+        different column) must still be admitted — 7 live audit rows from
+        April 2026 depend on it."""
+        rid = self._make_request("mig080-manual-import-outcome-mbid")
+        try:
+            self._exec("""
+                INSERT INTO download_log (request_id, source, outcome)
+                VALUES (%s, 'slskd', 'manual_import')
+            """, (rid,))
+            rows = self._query("""
+                SELECT outcome FROM download_log WHERE request_id = %s
+            """, (rid,))
+            self.assertEqual(rows, [("manual_import",)])
+        finally:
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+
+    def test_one_active_local_import_per_request_index_exists(self):
+        rows = self._query("""
+            SELECT indexname FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'import_jobs'
+              AND indexname = 'one_active_local_import_per_request'
+        """)
+        self.assertEqual(len(rows), 1)
+
+    def test_active_local_import_unique_by_request(self):
+        rid = self._make_request("mig080-local-import-active-mbid")
+        try:
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, request_id, dedupe_key, payload
+                ) VALUES (
+                    'local_import', %s, 'local_import:request:a',
+                    '{"source_path": "/tmp/local-a", "request_id": 1}'::jsonb
+                )
+            """, (rid,))
+            with self.assertRaises(psycopg2.errors.UniqueViolation):
+                self._exec("""
+                    INSERT INTO import_jobs (
+                        job_type, request_id, dedupe_key, payload
+                    ) VALUES (
+                        'local_import', %s, 'local_import:request:b',
+                        '{"source_path": "/tmp/local-b", "request_id": 1}'::jsonb
+                    )
+                """, (rid,))
+            self._exec("""
+                UPDATE import_jobs
+                SET status = 'completed'
+                WHERE request_id = %s
+                  AND job_type = 'local_import'
+            """, (rid,))
+            # Once terminal, the partial index admits the next attempt.
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, request_id, dedupe_key, payload
+                ) VALUES (
+                    'local_import', %s, 'local_import:request:c',
+                    '{"source_path": "/tmp/local-c", "request_id": 1}'::jsonb
+                )
+            """, (rid,))
+        finally:
+            self._exec("DELETE FROM import_jobs WHERE request_id = %s", (rid,))
+            self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
 
 
 # ---------------------------------------------------------------------------

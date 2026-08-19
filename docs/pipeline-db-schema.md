@@ -372,7 +372,7 @@ Untracked rows.
   remains the durable operator surface. This non-owning action never
   transitions the request: `wanted`, an explicit `unsearchable` stop, and
   terminal `imported` remain exactly as they were.
-- `source TEXT NOT NULL DEFAULT 'slskd'` — sourcing-channel discriminator added by migration 037. CHECK constraint admits `'slskd'` and `'youtube'`. The default backfilled every pre-037 row to `'slskd'` in one ALTER (no separate backfill script per the single-operator no-backfill-script rule). Consumers rendering `download_log` rows (`pipeline-cli show`, web routes' "recent attempts") use this column to distinguish channels.
+- `source TEXT NOT NULL DEFAULT 'slskd'` — sourcing-channel discriminator added by migration 037. CHECK constraint admits `'slskd'`, `'youtube'`, and (migration 080, issue #1176 PR1) `'local'`. The default backfilled every pre-037 row to `'slskd'` in one ALTER (no separate backfill script per the single-operator no-backfill-script rule). Consumers rendering `download_log` rows (`pipeline-cli show`, web routes' "recent attempts") use this column to distinguish channels. `'local'` is CHECK-admitted ahead of its writer — `log_download`'s `source` parameter accepts it, but no production caller passes it yet; the import-local lane (a later PR) is the first.
 - `youtube_metadata JSONB` — YT-specific audit payload added by migration 037. Nullable; populated only for `source='youtube'` rows. Typed at the read seam as `lib.youtube_ingest_service.YoutubeIngestMetadata: msgspec.Struct`. Carries `yt_url`, `browse_id`, `audio_playlist_id`, optional `expected_track_count`, `resolver_mapping_id`, `per_track_video_ids`, and terminal-state fields (`reason`, `stderr_excerpt`, `observed_track_count`).
 - **Partial unique index `one_youtube_running_per_request` ON `download_log (request_id) WHERE source = 'youtube' AND outcome = 'youtube_running'`** — added by migration 037. Enforces idempotency at the DB layer: at most one in-flight YT rescue per `request_id` at any time. Application-level pre-insert checks would race; this index is atomic. Once the row transitions to a terminal `youtube_success` / `youtube_failed`, the index admits the next submission.
 
@@ -425,7 +425,7 @@ processing, and YouTube rescue all share this table.
 
 Key fields:
 
-- `job_type TEXT` — active values are `force_import`, `automation_import`, and `youtube_import`. Historical `manual_import` rows remain readable but cannot be enqueued.
+- `job_type TEXT` — active values are `force_import`, `automation_import`, and `youtube_import`. `local_import` (issue #1176 PR1) is admitted by the CHECK constraint ahead of the import-local lane that will use it — no writer enqueues it yet. `manual_import` is retired entirely: it was the job_type for an HTTP endpoint removed as security finding CD-SEC-03, carried zero live rows, and migration 080 drops it from the CHECK (it is no longer even historically enqueueable — contrast with the `manual_import` *outcome* on `download_log`, a separate taxonomy on a separate column that is unaffected and still carries live audit rows).
 - `status TEXT` — `queued`, `running`, `recovery_required`, `completed`, or
   `failed`. `recovery_required` remains readable for historical rows whose
   Beets launch was durably authorized but no terminal acknowledgement
@@ -447,7 +447,9 @@ Key fields:
   jobs require a positive `download_log_id` and nonempty `failed_path`, with
   optional `source_username` and `source_dirs`; automation jobs carry no
   fields; YouTube jobs require positive `request_id`/`download_log_id` values
-  and nonempty `staged_path`/`browse_id` values.
+  and nonempty `staged_path`/`browse_id` values; `local_import` jobs require a
+  positive `request_id` and a nonempty `source_path` — no `download_log_id`,
+  since a local import has no originating `download_log` row.
 - `result JSONB`, `message`, `error` — terminal worker result visible to web
   and CLI callers. Result and preview-result display/audit data remain broadly
   decoded; `preview_status` continues to accept historical/raw
@@ -459,6 +461,14 @@ Key fields:
   widened by migration 060. Keeps the post-yt-dlp
   importer handoff request-scoped, so a second browse id cannot enqueue a
   parallel active YouTube import for the same request.
+- **Partial unique index `one_active_local_import_per_request` ON
+  `import_jobs (request_id) WHERE job_type = 'local_import' AND status IN
+  ('queued', 'running', 'recovery_required')`** — added by migration 080
+  (issue #1176 PR1), mirroring the YouTube index above. A local import has no
+  originating `download_log` row to dedupe against (unlike `force_import`/
+  `youtube_import`, which key their dedupe string on a download_log id), so
+  the request is the only natural grain for both the dedupe key
+  (`local_import_dedupe_key`) and this index.
 - `attempts`, `worker_id`, `started_at`, `heartbeat_at`, `completed_at` —
   claim and recovery metadata.
 - `execution_invocation_id`, `execution_host_boot_id`,

@@ -1715,6 +1715,27 @@ class TestFakePipelineDB(unittest.TestCase):
 
         self.assertEqual(db.download_logs[0].transfer_detail, detail)
 
+    def test_log_download_source_defaults_to_slskd(self):
+        """Migration 037's ``source`` discriminator: ``log_download``'s
+        default must match the production NOT NULL DEFAULT ``'slskd'`` so
+        every existing caller (none of which pass ``source=``) keeps
+        writing the same row shape it always has."""
+        db = FakePipelineDB()
+        db.log_download(42, outcome="success")
+
+        self.assertEqual(db.download_logs[0].source, "slskd")
+
+    def test_log_download_records_explicit_source(self):
+        """Issue #1176 PR1: a future ``import-local`` caller passes
+        ``source='local'`` — the fake must record exactly what it was
+        given, not silently default or drop it. This is the fake-side
+        half of the ``source`` parameter; the real-PG round trip lives in
+        ``tests/test_pipeline_db.py``."""
+        db = FakePipelineDB()
+        db.log_download(42, outcome="success", source="local")
+
+        self.assertEqual(db.download_logs[0].source, "local")
+
     def test_assert_log_passes(self):
         db = FakePipelineDB()
         log_id = db.log_download(42, outcome="success", soulseek_username="user1")

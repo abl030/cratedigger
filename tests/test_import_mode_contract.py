@@ -12,6 +12,7 @@ from lib.import_preview import ImportPreviewValues
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
+    IMPORT_JOB_LOCAL,
     IMPORT_JOB_TYPES,
     IMPORT_JOB_YOUTUBE,
 )
@@ -25,14 +26,18 @@ from web.routes.imports import ROUTES
 
 class TestImportModeContract(unittest.TestCase):
     def test_manual_import_action_is_absent(self) -> None:
+        # issue #1176 PR1 adds IMPORT_JOB_LOCAL (vocabulary only — nothing
+        # enqueues it yet); manual_import stays permanently absent.
         self.assertEqual(
             IMPORT_JOB_TYPES,
             frozenset({
                 IMPORT_JOB_AUTOMATION,
                 IMPORT_JOB_FORCE,
                 IMPORT_JOB_YOUTUBE,
+                IMPORT_JOB_LOCAL,
             }),
         )
+        self.assertNotIn("manual_import", IMPORT_JOB_TYPES)
         parser, _, _ = _build_parser()
         subcommands = next(
             action.choices

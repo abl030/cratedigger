@@ -5265,6 +5265,87 @@ class TestDownloadLog(unittest.TestCase):
             [msgspec.to_builtins(d) for d in detail],
         )
 
+    def test_log_download_round_trip_preserves_every_field_including_source(
+        self,
+    ):
+        """Rule A (test-fidelity.md): migration 080 (issue #1176 PR1) adds
+        the ``source`` parameter to ``log_download`` — a real-PG round trip
+        is the only thing that can prove the new column actually landed in
+        the INSERT column list rather than being silently dropped
+        (``FakePipelineDB`` stores the input dict verbatim and cannot see
+        that class of drift; this is the exact ``album_title`` failure mode
+        Rule A exists for). Every kwarg is asserted individually, not just
+        ``source`` — direct typed kwargs (no dict-unpack) so each assertion
+        below reads a literal TypedDict key, matching the house style in
+        ``test_log_and_get_download`` rather than a dynamic-key loop."""
+        self.db.log_download(
+            request_id=self.req_id,
+            soulseek_username="local-op",
+            filetype="flac",
+            download_path="/mnt/virtio/Music/Incoming/auto-import/local",
+            beets_distance=0.05,
+            beets_scenario="single-disc",
+            beets_detail="matched exactly",
+            valid=True,
+            outcome="success",
+            staged_path="/mnt/virtio/Music/Incoming/auto-import/local",
+            bitrate=1000,
+            sample_rate=44100,
+            bit_depth=16,
+            is_vbr=False,
+            was_converted=False,
+            original_filetype="flac",
+            slskd_filetype="flac",
+            actual_filetype="flac",
+            actual_min_bitrate=1000,
+            spectral_grade="EXCELLENT",
+            spectral_bitrate=1000,
+            existing_min_bitrate=900,
+            existing_spectral_bitrate=900,
+            final_format="flac",
+            # The field under test: migration 080 widened
+            # download_log_source_check to admit 'local' -- proving the
+            # value round-trips through the real INSERT, not just the
+            # Python default parameter.
+            source="local",
+        )
+
+        history = self.db.get_download_history(self.req_id)
+        self.assertEqual(len(history), 1)
+        row = history[0]
+        self.assertEqual(row["soulseek_username"], "local-op")
+        self.assertEqual(row["filetype"], "flac")
+        self.assertEqual(
+            row["download_path"],
+            "/mnt/virtio/Music/Incoming/auto-import/local",
+        )
+        beets_distance = row["beets_distance"]
+        assert beets_distance is not None
+        self.assertAlmostEqual(beets_distance, 0.05)
+        self.assertEqual(row["beets_scenario"], "single-disc")
+        self.assertEqual(row["beets_detail"], "matched exactly")
+        self.assertEqual(row["valid"], True)
+        self.assertEqual(row["outcome"], "success")
+        self.assertEqual(
+            row["staged_path"],
+            "/mnt/virtio/Music/Incoming/auto-import/local",
+        )
+        self.assertEqual(row["bitrate"], 1000)
+        self.assertEqual(row["sample_rate"], 44100)
+        self.assertEqual(row["bit_depth"], 16)
+        self.assertEqual(row["is_vbr"], False)
+        self.assertEqual(row["was_converted"], False)
+        self.assertEqual(row["original_filetype"], "flac")
+        self.assertEqual(row["slskd_filetype"], "flac")
+        self.assertEqual(row["actual_filetype"], "flac")
+        self.assertEqual(row["actual_min_bitrate"], 1000)
+        self.assertEqual(row["spectral_grade"], "EXCELLENT")
+        self.assertEqual(row["spectral_bitrate"], 1000)
+        self.assertEqual(row["existing_min_bitrate"], 900)
+        self.assertEqual(row["existing_spectral_bitrate"], 900)
+        self.assertEqual(row["final_format"], "flac")
+        self.assertEqual(row["source"], "local")
+
 
 @requires_postgres
 class TestSearchLog(unittest.TestCase):
@@ -15674,10 +15755,15 @@ class TestGetPipelineOverlay(unittest.TestCase):
             ("legacy-imported", "imported", None, None, True),
             ("download-success", "wanted", "success", None, True),
             ("download-force", "wanted", "force_import", None, True),
+            # download_log.outcome='manual_import' stays live (7 real audit
+            # rows) — unaffected by migration 080, which only retires the
+            # *job_type* value 'manual_import' (a different taxonomy, a
+            # different column). There is no "job-manual" case any more:
+            # import_jobs.job_type='manual_import' is no longer a value the
+            # CHECK constraint (or _CAPTURE_AND_EVIDENCE_SELECT) admits.
             ("download-manual", "wanted", "manual_import", None, True),
             ("job-automation", "wanted", None, ("automation_import", "completed"), True),
             ("job-force", "wanted", None, ("force_import", "completed"), True),
-            ("job-manual", "wanted", None, ("manual_import", "completed"), True),
             ("job-youtube", "wanted", None, ("youtube_import", "completed"), True),
             ("no-witness", "wanted", None, None, False),
             ("download-rejected", "wanted", "rejected", None, False),
@@ -15719,7 +15805,6 @@ class TestGetPipelineOverlay(unittest.TestCase):
             "capture-download-manual": True,
             "capture-job-automation": True,
             "capture-job-force": True,
-            "capture-job-manual": True,
             "capture-job-youtube": True,
             "capture-no-witness": False,
             "capture-download-rejected": False,

@@ -342,6 +342,7 @@ class TestDownloadLogRowRuntimeContract(unittest.TestCase):
             transfer_detail=[
                 {"filename": "01 track.flac", "reason": "timed_out"},
             ],
+            source="slskd",
         )
 
         converted = download_log_row(self._raw_row(log_id))
