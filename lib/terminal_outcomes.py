@@ -17,6 +17,7 @@ from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     ForceImportPayload,
     ImportJob,
+    LocalImportPayload,
     YoutubeImportPayload,
 )
 from lib.transitions import RequestTransition, TransitionApplied
@@ -301,7 +302,13 @@ class ImportTerminalOutcome:
         )
         if (
             self.job.status != "completed"
-            or self.audit.outcome not in ("success", "force_import")
+            # issue #1176 PR3 F1: local_import was never added here, so a
+            # successful strictly-validated local import (a genuine
+            # verified-lossless terminal acceptance, exactly like force)
+            # raised ValueError AFTER beets had already imported the
+            # album — an unhandled crash outside every enclosing try, no
+            # download_log row, no imported transition, no cleanup.
+            or self.audit.outcome not in ("success", "force_import", "local_import")
             or final_transition is None
             or final_transition.target_status != "imported"
         ):
@@ -370,18 +377,29 @@ def non_automation_failure_terminal_outcome(
     message: str,
     result: dict[str, object],
 ) -> ImportTerminalOutcome:
-    """Build the sole terminal-and-visible failure command for force/YouTube.
+    """Build the sole terminal-and-visible failure command for force/
+    local-import/YouTube.
 
     Non-automation attempts do not own a request lifecycle transition.  Their
     terminal record is instead one atomic pair: the exact job becomes failed
-    and its origin download row gains a linked, operator-readable failure.
+    and its origin download row gains a linked, operator-readable failure —
+    except local-import (issue #1176 PR3, ``LocalImportPayload``), which has
+    no origin ``download_log`` row at all: the operator names a request ID
+    and a folder already on disk, not a rejected download, so
+    ``source_download_log_id`` is ``None`` here on purpose. The PostgreSQL
+    write (``lib/pipeline_db/terminal_outcomes.py``) already handles a
+    ``None`` source cleanly — no origin CTE match, no spurious "unavailable
+    or refused" provenance suffix — and already derives ``source='local'``
+    for a ``local_import`` job type independent of any origin row.
     """
     if job.job_type == IMPORT_JOB_AUTOMATION:
         raise ValueError("automation failures require owner-terminal authority")
     if job.request_id is None:
         raise ValueError("non-automation import job requires a request")
     payload = job.payload
-    if not isinstance(payload, (ForceImportPayload, YoutubeImportPayload)):
+    if not isinstance(
+        payload, (ForceImportPayload, YoutubeImportPayload, LocalImportPayload),
+    ):
         raise TypeError("non-automation import job has no source download log")
     diagnostic = non_automation_import_failure_message(
         job.job_type,
@@ -390,6 +408,11 @@ def non_automation_failure_terminal_outcome(
     )
     if diagnostic in NON_AUTOMATION_IMPORT_FAILURE_PREFIXES:
         raise ValueError("non-automation failure requires a diagnostic")
+    source_download_log_id = (
+        payload.download_log_id
+        if isinstance(payload, (ForceImportPayload, YoutubeImportPayload))
+        else None
+    )
     return ImportTerminalOutcome(
         request_id=job.request_id,
         import_job_id=job.id,
@@ -397,7 +420,7 @@ def non_automation_failure_terminal_outcome(
         audit=TerminalDownloadAudit(
             outcome="failed",
             error_message=diagnostic,
-            source_download_log_id=payload.download_log_id,
+            source_download_log_id=source_download_log_id,
         ),
         job=ImportJobTerminal(
             status="failed",

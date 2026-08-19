@@ -67,10 +67,19 @@ def _guard_reject(
     attempt_result: ImportAttemptResult,
     detail: str,
     scenario: str,
+    distance: float | None = None,
     import_job_id: int | None = None,
     source_download_log_id: int | None = None,
 ) -> DispatchOutcome:
-    """Reject a force-import at the manifest guard.
+    """Reject a force-import (or local-import) at a pre-Beets guard.
+
+    ``distance`` (issue #1176 PR3) is ``None`` for every existing caller —
+    the manifest guard below fires before beets can even run, so it has no
+    measurement to report. The local-import strict-validation guard
+    (``lib.dispatch.entry_points``) is the first caller with a real beets
+    distance: it reuses this exact writer rather than a parallel one, since
+    the shape (preserve status, preserve the folder, no denylist, one
+    ``download_log`` audit row) is identical.
 
     Writes the mandatory ``download_log`` audit row without changing the
     request lifecycle or retry counters. A force attempt may inspect a
@@ -93,8 +102,10 @@ def _guard_reject(
     folder choice, not the peer's quality (mirrors ``nested_layout``).
     """
     logger.error("IMPORT GUARD REJECT (%s): path=%s %s", scenario, failed_path, detail)
-    # No beets distance was measured — this guard fires before beets can
-    # even run (#550 defect #4). Record NULL, not a fabricated 0.0.
+    # No beets distance was measured for the manifest guard — it fires
+    # before beets can even run (#550 defect #4); record NULL there, not a
+    # fabricated 0.0. The local-import strict-validation guard passes its
+    # real measured distance instead.
     pending = _record_rejection_and_maybe_requeue(
         db,
         request_id,
@@ -102,7 +113,7 @@ def _guard_reject(
         detail=detail,
         error=None,
         validation_result=ValidationResult(
-            distance=None,
+            distance=distance,
             scenario=scenario,
             detail=detail,
             failed_path=audit_source_path or failed_path,

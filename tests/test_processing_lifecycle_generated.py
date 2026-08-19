@@ -306,6 +306,37 @@ class _GeneratedStageSession:
             worker_id=worker_id,
         )
 
+    # _ForceStageDB / _RequestScopedPreviewStageDB's runtime_checkable
+    # isinstance check uses getattr_static, which does NOT invoke
+    # __getattr__ — the local-import claim methods must be declared
+    # explicitly too, even though these generated properties only ever
+    # exercise the force-import claim_fn (issue #1176 PR3).
+    def claim_local_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ):
+        return self.db.claim_local_import_preview_job_under_lock(
+            job_id,
+            request_id=request_id,
+            worker_id=worker_id,
+        )
+
+    def claim_local_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ):
+        return self.db.claim_local_import_job_under_lock(
+            job_id,
+            request_id=request_id,
+            worker_id=worker_id,
+        )
+
     def close(self) -> None:
         return None
 

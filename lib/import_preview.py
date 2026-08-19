@@ -42,6 +42,7 @@ from lib.fs_authority import (
     copy_opened_file,
     exclusive_relative_lock,
     observe_directory,
+    open_configured_local_import_directory,
     open_configured_quarantine_directory,
     open_directory_path,
     open_private_child_directory,
@@ -51,6 +52,7 @@ from lib.fs_authority import (
     remove_relative_tree,
 )
 from lib.import_execution import CancellationToken, ExecutionCancelled
+from lib.import_queue import IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL
 from lib.measurement import (
     AacLatticeMeasureFn,
     ExistingSpectralResolver,
@@ -440,6 +442,34 @@ def snapshot_configured_quarantine_directory(
         )
 
 
+def snapshot_configured_local_import_directory(
+    raw_path: str,
+    cfg: CratediggerConfig,
+    *,
+    limits: PreviewSnapshotLimits | None = None,
+    available_bytes_fn: PreviewAvailableBytesFn | None = None,
+    copy_fn: PreviewCopyFn | None = None,
+    cancellation_token: CancellationToken | None = None,
+) -> str:
+    """Copy an operator-named local-import folder from its held authority.
+
+    Sibling of :func:`snapshot_configured_quarantine_directory` (issue
+    #1176 PR3) — identical descriptor-copy discipline, differing only in
+    which authority resolves ``raw_path``:
+    :func:`lib.fs_authority.open_configured_local_import_directory` (PR2)
+    instead of the quarantine roots.
+    """
+    with open_configured_local_import_directory(raw_path, cfg) as source:
+        return _snapshot_opened_directory(
+            source.fd,
+            cfg,
+            limits=limits,
+            available_bytes_fn=available_bytes_fn,
+            copy_fn=copy_fn,
+            cancellation_token=cancellation_token,
+        )
+
+
 def _remove_preview_tree(
     path: str,
     cfg: CratediggerConfig,
@@ -475,31 +505,64 @@ def remove_preview_snapshot(
     )
 
 
+#: The local-import lane's action-copy prefix (issue #1176 PR3) — passed as
+#: ``prefix=`` to every action-copy helper below so a local-import job's
+#: retained private copy can never collide on name with a force job's, even
+#: though ``import_job_id`` is drawn from the same ``import_jobs`` sequence
+#: across every job type.
+LOCAL_IMPORT_ACTION_PREFIX = "local-import-action-"
+
+#: The job-scoped-action-copy prefix for each job type that retains one
+#: (issue #1176 PR3 review round). Both the importer and preview worker call
+#: ``cleanup_force_action_copy_for_job``/``force_action_copy_path`` with a
+#: job's own prefix looked up here — a single shared table instead of two,
+#: since a missing or wrong prefix compares the path against the WRONG job
+#: type's deterministic name and raises ``FilesystemAuthorityError`` before
+#: ever touching the filesystem (issue #1176 PR3 F5: the importer's own
+#: cleanup site called the force-import path helper with no ``prefix=`` at
+#: all, so every local-import terminal cleanup raised, leaked its action
+#: copy permanently, and re-raised on every subsequent importer startup
+#: recovery sweep). ``youtube_import`` and ``automation_import`` are absent
+#: on purpose — neither retains a private action copy under
+#: ``processing/albums/`` the way force/local-import do.
+ACTION_COPY_PREFIX_BY_JOB_TYPE: dict[str, str] = {
+    IMPORT_JOB_FORCE: "force-action-",
+    IMPORT_JOB_LOCAL: LOCAL_IMPORT_ACTION_PREFIX,
+}
+
+
 def retain_preview_snapshot_for_force_action(
     path: str,
     cfg: CratediggerConfig,
     *,
     import_job_id: int,
+    prefix: str = "force-action-",
     cancellation_token: CancellationToken | None = None,
 ) -> str:
-    """Promote one verified private snapshot to a force-import action copy.
+    """Promote one verified private snapshot to a job-scoped action copy.
 
     The source has already crossed the descriptor-copy boundary.  This is a
     rename wholly inside Cratedigger's private processing tree, not another
     copy of the operator's quarantine folder.  The returned path survives
     preview so the importer consumes the exact normalized bytes evidence
     describes.
+
+    ``prefix`` (issue #1176 PR3) defaults to today's ``"force-action-"`` so
+    the force lane stays byte-identical; the local-import lane passes its
+    own ``"local-import-action-"`` prefix so a force copy and a local-import
+    copy can never collide on name even though ``import_job_id`` is drawn
+    from the same ``import_jobs`` sequence across every job type.
     """
     name = os.path.basename(path)
     if name == path or not name.startswith("preview-"):
         raise FilesystemAuthorityError("not a private preview snapshot")
     if os.path.dirname(path) != processing_preview_dir(cfg.processing_dir):
         raise FilesystemAuthorityError("preview snapshot is outside private root")
-    action_name = f"force-action-{import_job_id}"
+    action_name = f"{prefix}{import_job_id}"
     with open_private_processing_root(
         cfg.processing_dir, cfg.slskd_download_dir,
     ) as processing_fd, open_private_child_directory(processing_fd, "preview") as preview_fd, open_private_child_directory(processing_fd, "albums") as albums_fd, exclusive_relative_lock(
-        albums_fd, f".force-action-{import_job_id}.lock",
+        albums_fd, f".{action_name}.lock",
     ):
         _checkpoint(cancellation_token)
         _remove_relative_tree_cancellable(
@@ -519,14 +582,24 @@ def remove_force_action_copy(
     path: str,
     cfg: CratediggerConfig,
     *,
+    prefix: str = "force-action-",
     cancellation_token: CancellationToken | None = None,
 ) -> None:
-    """Remove one unneeded retained force action copy after a terminal result."""
+    """Remove one unneeded retained job-scoped action copy after a terminal
+    result. ``prefix`` — see :func:`retain_preview_snapshot_for_force_action`.
+    """
+    # F9 (issue #1176 PR3 review round): this function serves both lanes
+    # (``prefix`` is the job-type signal), but every FilesystemAuthorityError
+    # below said "force" unconditionally — the exact text an operator sees
+    # in a failed cleanup's ``force_action_cleanup.error`` receipt (F5).
+    lane_label = "local-import" if prefix == LOCAL_IMPORT_ACTION_PREFIX else "force"
     name = os.path.basename(path)
-    if name == path or not name.startswith("force-action-"):
-        raise FilesystemAuthorityError("not a private force action copy")
+    if name == path or not name.startswith(prefix):
+        raise FilesystemAuthorityError(f"not a private {lane_label} action copy")
     if os.path.dirname(path) != processing_albums_dir(cfg.processing_dir):
-        raise FilesystemAuthorityError("force action copy is outside private root")
+        raise FilesystemAuthorityError(
+            f"{lane_label} action copy is outside private root"
+        )
     with open_private_processing_root(
         cfg.processing_dir, cfg.slskd_download_dir,
     ) as processing_fd, open_private_child_directory(processing_fd, "albums") as albums_fd:
@@ -543,22 +616,35 @@ def cleanup_force_action_copy_for_job(
     cfg: CratediggerConfig,
     *,
     import_job_id: int,
+    prefix: str = "force-action-",
     cancellation_token: CancellationToken | None = None,
 ) -> None:
-    """Remove only the deterministic force copy owned by this job."""
-    if path != force_action_copy_path(cfg, import_job_id):
-        raise FilesystemAuthorityError("force action copy does not belong to job")
+    """Remove only the deterministic action copy owned by this job.
+    ``prefix`` — see :func:`retain_preview_snapshot_for_force_action`.
+    """
+    if path != force_action_copy_path(cfg, import_job_id, prefix=prefix):
+        lane_label = (
+            "local-import" if prefix == LOCAL_IMPORT_ACTION_PREFIX else "force"
+        )
+        raise FilesystemAuthorityError(
+            f"{lane_label} action copy does not belong to job"
+        )
     remove_force_action_copy(
         path,
         cfg,
+        prefix=prefix,
         cancellation_token=cancellation_token,
     )
 
 
-def force_action_copy_path(cfg: CratediggerConfig, import_job_id: int) -> str:
-    """The one reclaimable private action directory for a force job."""
+def force_action_copy_path(
+    cfg: CratediggerConfig, import_job_id: int, *, prefix: str = "force-action-",
+) -> str:
+    """The one reclaimable private action directory for a job.
+    ``prefix`` — see :func:`retain_preview_snapshot_for_force_action`.
+    """
     return os.path.join(
-        processing_albums_dir(cfg.processing_dir), f"force-action-{import_job_id}",
+        processing_albums_dir(cfg.processing_dir), f"{prefix}{import_job_id}",
     )
 
 

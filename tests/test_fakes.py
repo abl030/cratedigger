@@ -7779,6 +7779,54 @@ class TestFakeMergeRekeyForceClaimFence(unittest.TestCase):
         )
         return db, job_id
 
+    def _local_job(
+        self, db: FakePipelineDB, *, request_id: int, claim: bool = True,
+    ) -> int:
+        """Sibling of ``_force_job`` (issue #1176 PR3): the fake's
+        ``force_claim`` merge-rekey predicate was widened to admit
+        ``local_import`` too — see ``lib.pipeline_db.requests
+        .PipelineDB.rekey_release_identity``'s docstring."""
+        from lib.import_queue import (
+            IMPORT_JOB_LOCAL,
+            local_import_dedupe_key,
+            local_import_payload,
+        )
+
+        job = db.enqueue_import_job(
+            IMPORT_JOB_LOCAL,
+            request_id=request_id,
+            dedupe_key=local_import_dedupe_key(request_id),
+            payload=local_import_payload(
+                source_path="/operator/album", request_id=request_id,
+            ),
+        )
+        db.mark_import_job_preview_importable(
+            job.id, preview_result={}, message="ready",
+        )
+        if claim:
+            claimed = db.claim_local_import_job_under_lock(
+                job.id, request_id=request_id, worker_id="fence-test",
+            )
+            assert claimed is not None and claimed.status == "running"
+        return job.id
+
+    def test_a_claimed_running_local_import_job_rekeys_its_own_request(self):
+        """Mirrors the FORCE test above exactly, proving the widened
+        ``force_claim`` predicate covers local_import too."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41, mb_release_id=self.MERGED, status="wanted",
+        ))
+        job_id = self._local_job(db, request_id=41)
+
+        self.assertTrue(self._rekey(db, job_id))
+
+        row = db.request(41)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.SURVIVOR)
+        self.assertEqual(row["status"], "wanted")
+        self.assertIsNone(row["active_automation_import_job_id"])
+
     def _rekey(self, db: FakePipelineDB, job_id: int, request_id: int = 41):
         return db.update_request_release_for_merge(
             request_id,

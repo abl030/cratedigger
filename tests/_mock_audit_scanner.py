@@ -520,7 +520,7 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.wrong_match_delete_service.delete_wrong_match': 1,
     'lib.wrong_match_delete_service.delete_wrong_match_group': 1,
     'lib.youtube_ingest_service.YoutubeIngestService.submit': 5,
-    'scripts.import_preview_worker.measure_and_persist_candidate_evidence': 13,
+    'scripts.import_preview_worker.measure_and_persist_candidate_evidence': 14,
     'scripts.pipeline_cli.youtube._RedisYoutubeCache': 2,
     'scripts.pipeline_cli.youtube._build_youtube_client': 2,
     'scripts.pipeline_cli.youtube.resolve_youtube_album': 1,

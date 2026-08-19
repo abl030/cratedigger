@@ -1312,6 +1312,17 @@ _OWN_MESSAGE_TRIGGERS: tuple[_Trigger, ...] = (
         expect="YouTube import attempt failed: producer crash",
         outcome="failed",
     ),
+    _Trigger(
+        # issue #1176 PR3 review round: local-import's own non-automation
+        # failure prefix, added to lib/failure_presentation.py's prefix
+        # dict alongside force/YouTube's — same producer, same shape.
+        trigger="local import attempt failed:",
+        produced_by="lib/terminal_outcomes.py",
+        evidence="non_automation_import_failure_message(",
+        probe="Local import attempt failed: producer crash",
+        expect="Local import attempt failed: producer crash",
+        outcome="failed",
+    ),
 )
 
 _MEASUREMENT_TRIGGERS: tuple[_Trigger, ...] = (

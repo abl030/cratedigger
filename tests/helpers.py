@@ -36,6 +36,7 @@ from lib.import_execution import (
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
+    IMPORT_JOB_LOCAL,
     AutomationHandoffResult,
     ImportJob,
 )
@@ -475,9 +476,27 @@ def pinned_dispatch_authority(
 
 
 def finalize_claimed_dispatch(db: Any, job: Any, outcome: Any) -> Any:
-    """Apply a direct dispatch result through the production queue owner."""
+    """Apply a direct dispatch result through the production queue owner.
+
+    ``outcome`` is ordinarily the ``DispatchOutcome`` (or equivalent) the
+    caller already computed. Passing a ``BaseException`` INSTANCE instead
+    lets a fixture drive ``process_claimed_job``'s own executor-crash
+    handling without hand-rolling a raising ``execute_fn`` at the call
+    site — no existing caller passes one, so this is purely additive and
+    every existing caller's behavior is unchanged. This is the file's
+    established, ``Any``-typed bridge from a ``FakePipelineDB`` fixture
+    into the ``PipelineDB``-typed ``process_claimed_job``, so a crash-path
+    caller reuses it instead of calling ``process_claimed_job`` directly
+    (issue #1176 PR3 review round: keeps the tests typing ratchet frozen —
+    no new escape hatch).
+    """
     from lib.import_queue import IMPORT_JOB_AUTOMATION
     from scripts.importer import _execution_lease_from_job, process_claimed_job
+
+    def _execute(*_args: object, **_kwargs: object):
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
 
     if job.job_type == IMPORT_JOB_AUTOMATION:
         execution_lease = _execution_lease_from_job(job)
@@ -493,7 +512,7 @@ def finalize_claimed_dispatch(db: Any, job: Any, outcome: Any) -> Any:
             return process_claimed_job(
                 db,
                 job,
-                execute_fn=lambda *_args, **_kwargs: outcome,
+                execute_fn=_execute,
                 execution_lease=execution_lease,
                 cancellation_token=cancellation_token,
                 owner_session_identity=owner_session_identity,
@@ -501,7 +520,7 @@ def finalize_claimed_dispatch(db: Any, job: Any, outcome: Any) -> Any:
     return process_claimed_job(
         db,
         job,
-        execute_fn=lambda *_args, **_kwargs: outcome,
+        execute_fn=_execute,
     )
 
 
@@ -576,6 +595,22 @@ class ImportJobClaimDB(Protocol):
         worker_id: str | None,
     ) -> ImportJob | None: ...
 
+    def claim_local_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None: ...
+
+    def claim_local_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None: ...
+
 
 def claim_next_import_job(
     db: ImportJobClaimDB,
@@ -625,6 +660,20 @@ def claim_next_import_job(
                 request_id=candidate.request_id,
                 worker_id=worker_id,
             )
+    if candidate.job_type == IMPORT_JOB_LOCAL:
+        if candidate.request_id is None:
+            return None
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            candidate.request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return db.claim_local_import_job_under_lock(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+            )
     return db.claim_import_job_candidate(
         candidate.id,
         worker_id=worker_id,
@@ -670,6 +719,20 @@ def claim_next_import_preview_job(
             if not acquired:
                 return None
             return db.claim_force_import_preview_job_under_lock(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+            )
+    if candidate.job_type == IMPORT_JOB_LOCAL:
+        if candidate.request_id is None:
+            return None
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            candidate.request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return db.claim_local_import_preview_job_under_lock(
                 candidate.id,
                 request_id=candidate.request_id,
                 worker_id=worker_id,

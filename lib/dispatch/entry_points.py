@@ -19,7 +19,10 @@ from lib.dispatch.evidence_gate import (
     _download_info_from_candidate_evidence,
     _requeue_import_job_to_preview,
 )
-from lib.dispatch.manifest_guard import _guard_force_import_audio_manifest
+from lib.dispatch.manifest_guard import (
+    _guard_force_import_audio_manifest,
+    _guard_reject,
+)
 from lib.dispatch.quality_gate import _check_quality_gate_core
 from lib.dispatch.types import (
     DISPATCH_CODE_BAD_REQUEST,
@@ -37,7 +40,7 @@ if TYPE_CHECKING:
     from lib.dispatch.types import ImportOneRunner, QualityGateFn
     from lib.import_execution import CancellationToken, OwnerSessionIdentity
     from lib.mb_canonical import CanonicalReleaseFn
-    from lib.pipeline_db import PipelineDB
+    from lib.pipeline_db import DownloadLogOutcome, PipelineDB
 
 logger = logging.getLogger("cratedigger")
 
@@ -61,6 +64,8 @@ def dispatch_import_from_db(
     owner_session_identity: OwnerSessionIdentity | None = None,
     canonical_release_fn: CanonicalReleaseFn | None = None,
     retag_fn: MergeRetagFn | None = None,
+    distance_threshold: float | None = None,
+    scenario: DownloadLogOutcome = "force_import",
 ) -> DispatchOutcome:
     """Run a force-import through the full dispatch pipeline.
 
@@ -80,9 +85,59 @@ def dispatch_import_from_db(
     Since #1080 that override is literal rather than structural: this lane
     runs the SAME exact-release validation the automation lane runs
     (``lib.download_validation.validate_release_with_merge_redirect``),
-    differing in one argument — the distance threshold, raised to
+    differing in one argument — the distance threshold, raised by default to
     ``FORCE_IMPORT_DISTANCE_THRESHOLD``. See ``_dispatch_import_from_db_locked``
     for why the result is identity resolution and never a verdict.
+
+    ``distance_threshold`` / ``scenario`` (issue #1176 PR3) are the ONE seam
+    the local-import lane shares this entry point through rather than
+    forking it: ``distance_threshold=None`` (every production force-import
+    caller) keeps today's ``FORCE_IMPORT_DISTANCE_THRESHOLD`` override
+    byte-identical; local-import passes its config's ordinary
+    ``beets_distance_threshold`` instead — strict pressing-identity
+    validation, no relaxed-threshold escape hatch (CLAUDE.md's decision 3
+    for #1176: a candidate that fails strict validation lands as an
+    ordinary Wrong Matches row, and force-importing THAT row is the
+    already-built escape hatch — a PR3 review round found this was only
+    true in intent until the strict-validation guard below also relocated
+    the action copy into ``wrong_matches/``; see its own comment). Two
+    DISTINCT disposal mechanisms cover the disposable action copy, and a
+    strict-validation reject uses neither: ``scenario`` (default
+    ``"force_import"``, the historical literal) becomes the attempt-
+    scenario audit label (``dispatch_import_core``'s ``scenario``/
+    ``outcome_label`` params) and, for local-import, the deliberately-
+    uncovered ``"local_import"`` string (excluded from
+    ``FORCE_IMPORT_SCENARIOS`` on purpose, per
+    ``lib.dispatch.helpers._should_cleanup_path`` — for outcomes that
+    reach ``dispatch_import_core``, a local-import action copy is
+    disposable on every one of THOSE, exactly like an auto-import source,
+    never only on success). Terminal accept/failure bundles are instead
+    reaped by ``scripts/importer.py::_cleanup_terminal_force_action`` after
+    the terminal commit. The strict-validation guard's own reject reaches
+    ``_should_cleanup_path`` NEITHER (it returns before
+    ``dispatch_import_core`` is ever entered) — but it does NOT escape
+    ``_cleanup_terminal_force_action``: every reject this guard writes is
+    still a terminal failure bundle, so the importer's shared terminal path
+    (``scripts/importer.py::process_claimed_job`` -> ``_record_terminal_
+    force_action_cleanup``) calls it exactly as it would for any other
+    reject. It simply finds nothing to remove, because relocation into
+    ``wrong_matches/`` (below) always runs FIRST, synchronously, inside
+    THIS function, before the terminal bundle it returns is ever
+    persisted — so by the time cleanup runs downstream, the deterministic
+    ``preview_result['action_path']`` it looks for is already gone from
+    that location. Its ``force_action_cleanup.removed: true`` receipt is
+    therefore misleading for this specific outcome (nothing was removed by
+    that call; the file was already elsewhere) but harmless, because the
+    receipt's only consumer is the crash-recovery replay sweep
+    (``list_terminal_force_action_cleanup_jobs``), which the ``removed:
+    true`` value correctly stops from re-visiting a row with nothing left
+    to reap. THIS ORDERING IS THE SAFETY, NOT AN INCIDENTAL DETAIL: it is
+    what stops cleanup from ever finding the relocated folder still at its
+    ORIGINAL private-copy path and deleting it there — if a future change
+    ever persisted the terminal bundle before relocating, that same
+    cleanup call would delete the operator's Wrong Matches folder itself,
+    destroying the escape hatch this delta exists to create. Relocate
+    before persisting; never reorder this.
 
     Concurrency (issue #92): a per-``request_id`` advisory lock (IMPORT
     namespace) is taken up front. Two concurrent force imports
@@ -154,6 +209,39 @@ def dispatch_import_from_db(
             owner_session_identity=owner_session_identity,
             canonical_release_fn=canonical_release_fn,
             retag_fn=retag_fn,
+            distance_threshold=distance_threshold,
+            scenario=scenario,
+        )
+
+
+def _assert_local_import_relocation_containment(
+    failed_path: str, resolved_cfg: CratediggerConfig,
+) -> None:
+    """Refuse to relocate anything outside the private processing tree.
+
+    Review-round LOW: this call is safe today only because the strict-
+    validation guard is its one caller and ``failed_path`` is always the
+    job's own private action copy. Every sibling mutator of this namespace
+    asserts its own containment before acting
+    (``lib.import_preview.remove_force_action_copy`` checks ``dirname(path)
+    != processing_albums_dir(...)``); without the same assertion here, a
+    future caller passing a lane path directly would have
+    ``lib.import_manifest._allocate_target`` relocate the OPERATOR's own
+    folder into ``<operator_dir>/wrong_matches/`` — a direct Hazard A
+    violation, not a disposable-scratch move. Extracted as its own
+    function (rather than inlined at the one call site) so it is directly
+    unit-testable without a ``PipelineDB``/dispatch fixture at all.
+    """
+    from lib.fs_authority import FilesystemAuthorityError
+    from lib.processing_paths import processing_albums_dir
+
+    if (
+        os.path.dirname(os.path.abspath(failed_path))
+        != processing_albums_dir(resolved_cfg.processing_dir)
+    ):
+        raise FilesystemAuthorityError(
+            "local-import rejection relocation refused a path "
+            "outside the private processing tree"
         )
 
 
@@ -176,6 +264,8 @@ def _dispatch_import_from_db_locked(
     owner_session_identity: OwnerSessionIdentity | None = None,
     canonical_release_fn: CanonicalReleaseFn | None = None,
     retag_fn: MergeRetagFn | None = None,
+    distance_threshold: float | None = None,
+    scenario: DownloadLogOutcome = "force_import",
 ) -> DispatchOutcome:
     """Body of dispatch_import_from_db, called once the advisory lock is held.
 
@@ -258,6 +348,11 @@ def _dispatch_import_from_db_locked(
     from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
     from lib.download_validation import validate_release_with_merge_redirect
 
+    effective_distance_threshold = (
+        distance_threshold
+        if distance_threshold is not None
+        else FORCE_IMPORT_DISTANCE_THRESHOLD
+    )
     validation = validate_release_with_merge_redirect(
         db=db,
         cfg=resolved_cfg,
@@ -265,7 +360,7 @@ def _dispatch_import_from_db_locked(
         request_id=request_id,
         release_id=mbid,
         import_job_id=import_job_id,
-        distance_threshold=FORCE_IMPORT_DISTANCE_THRESHOLD,
+        distance_threshold=effective_distance_threshold,
         cancellation_token=cancellation_token,
         canonical_release_fn=canonical_release_fn,
         retag_fn=retag_fn,
@@ -311,6 +406,97 @@ def _dispatch_import_from_db_locked(
 
     label = f"{req.get('artist_name', '')} - {req.get('album_title', '')}"
 
+    # Candidate freshness is the first force-import gate.  Manifest drift is
+    # evidence drift, not a terminal audit outcome: preview will snapshot the
+    # current action tree and re-establish the candidate before this guard
+    # evaluates the operator's expected audio manifest.
+    attempt_result = ImportAttemptResult.from_import_job(db, import_job_id)
+
+    # Strict-validation guard (issue #1176 PR3, local-import only): an
+    # explicit ``distance_threshold`` override (anything other than
+    # ``None``, which every force-import caller leaves unset) means the
+    # caller wants THIS validation's verdict honored rather than imported
+    # despite it — "strict pressing identity" per CLAUDE.md decision 3 for
+    # #1176. A rejection here reuses ``_guard_reject`` unchanged: preserve
+    # request status, write no denylist entry, and land as an ORDINARY
+    # Wrong Matches row — ``validation.result.scenario`` is already one of
+    # beets_validate's own vocabulary (``extra_tracks`` / ``high_distance`` /
+    # ``mbid_not_found`` / ``no_choose_match`` / …), the exact strings
+    # automation produces, so no new taxonomy is needed. Force-import never
+    # reaches this branch: its ``distance_threshold`` stays ``None``, and
+    # ``validation.result.valid`` is otherwise never consulted, unchanged
+    # from before #1176.
+    if distance_threshold is not None and not validation.result.valid:
+        # Review-round F4 fix: unlike force (whose ``failed_path`` always
+        # falls back to the operator's REAL, pre-existing wrong_matches-
+        # rooted source via ``audit_source_path``, since force always acts
+        # on an existing Wrong Matches row), local-import has no
+        # pre-existing quarantine source at all — ``source_reference_path``
+        # is always ``None`` here (decision 2), so an unmoved
+        # ``failed_path`` names the disposable private action copy
+        # directly under ``processing/albums/``, with no ``wrong_matches``
+        # path component. ``open_configured_quarantine_directory`` (the
+        # gate every escape-hatch action — ``enqueue_force_import``,
+        # ``wrong-match-delete[-group]``, ``-converge``, the autonomous
+        # reducer — opens the row's path through) refuses anything outside
+        # a configured quarantine root, so the row was worklist-visible
+        # forever with literally no action able to touch it. Relocate the
+        # action copy into the SAME curated Wrong Matches root every other
+        # rejection uses, exactly like ``move_failed_import_whole`` — whole,
+        # not curated, since no validated audio manifest exists yet at this
+        # pre-evidence guard (issue #1077 D4: "world failures with a
+        # reviewable folder move whole, not curated"). A relocation
+        # failure never blocks the rejection itself — invariant 11, broken
+        # worlds surface and restart — it just leaves the audit naming the
+        # unmoved path, exactly as it did before this fix.
+        from lib.import_execution import ExecutionCancelled
+        from lib.import_manifest import move_failed_import_whole
+
+        rejection_path = failed_path
+        try:
+            _assert_local_import_relocation_containment(
+                failed_path, resolved_cfg,
+            )
+            moved_path = move_failed_import_whole(
+                failed_path,
+                scenario=validation.result.scenario or "invalid",
+                before_mutation=(
+                    cancellation_token.raise_if_cancelled
+                    if cancellation_token is not None else None
+                ),
+            )
+            if moved_path is not None:
+                rejection_path = moved_path
+        except ExecutionCancelled:
+            raise
+        except Exception:
+            logger.exception(
+                "Failed to relocate rejected local-import source %s into "
+                "Wrong Matches; recording the rejection at its unmoved "
+                "path instead",
+                failed_path,
+            )
+        return _persist_terminal_dispatch_outcome(
+            db,
+            _guard_reject(
+                db,
+                request_id=request_id,
+                failed_path=rejection_path,
+                audit_source_path=source_reference_path,
+                source_username=source_username,
+                attempt_result=attempt_result,
+                detail=(
+                    validation.result.detail
+                    or "release validation rejected the candidate"
+                ),
+                scenario=validation.result.scenario or "invalid",
+                distance=validation.result.distance,
+                import_job_id=import_job_id,
+                source_download_log_id=download_log_id,
+            ),
+            defer=_job_is_running(db, import_job_id),
+        )
+
     candidate_result = ensure_candidate_evidence_for_action(
         db,
         source_path=failed_path,
@@ -331,11 +517,6 @@ def _dispatch_import_from_db_locked(
             reason=reason,
         )
 
-    # Candidate freshness is the first force-import gate.  Manifest drift is
-    # evidence drift, not a terminal audit outcome: preview will snapshot the
-    # current action tree and re-establish the candidate before this guard
-    # evaluates the operator's expected audio manifest.
-    attempt_result = ImportAttemptResult.from_import_job(db, import_job_id)
     manifest_reject = _guard_force_import_audio_manifest(
         db,
         request_id=request_id,
@@ -383,10 +564,10 @@ def _dispatch_import_from_db_locked(
         # Force-import explicitly bypasses the beets distance
         # check — no measurement exists to report (#550 defect #4).
         distance=None,
-        scenario="force_import",
+        scenario=scenario,
         files=files,
         cfg=resolved_cfg,
-        outcome_label="force_import",
+        outcome_label=scenario,
         requeue_on_failure=False,
         source_dirs=source_dirs,
         candidate_import_job_id=import_job_id,

@@ -237,6 +237,35 @@ def _force_preview_source():
         yield source, cfg
 
 
+@contextmanager
+def _local_preview_source():
+    """Make a real configured local-import source for worker preview tests
+    (issue #1176 PR3 F6): mirrors ``_force_preview_source`` but resolves
+    through ``open_configured_local_import_directory`` instead of the
+    quarantine roots.
+    """
+    with tempfile.TemporaryDirectory() as parent:
+        local_import_root = os.path.join(parent, "LocalImport")
+        source = os.path.join(local_import_root, "MyRip", "Album")
+        processing_dir = os.path.join(parent, "processing")
+        download_root = os.path.join(parent, "downloads")
+        os.makedirs(source)
+        os.mkdir(processing_dir, 0o700)
+        os.mkdir(os.path.join(processing_dir, "albums"), 0o700)
+        os.mkdir(os.path.join(processing_dir, "preview"), 0o700)
+        os.mkdir(download_root)
+        cfg = CratediggerConfig(
+            local_import_enabled=True,
+            local_import_dir=local_import_root,
+            processing_dir=processing_dir,
+            # open_private_processing_root requires an absolute shared
+            # download root even though local-import never reads from it.
+            slskd_download_dir=download_root,
+            audio_check_mode="off",
+        )
+        yield source, cfg
+
+
 def _force_download_log(
     db: FakePipelineDB,
     request_id: int,
@@ -1152,6 +1181,12 @@ class TestImporterWorker(unittest.TestCase):
             download_log_id=7,
             source_reference_path="/tmp/failed",
             cfg=self._force_cfg,
+            # issue #1176 PR3: the shared action-copy dispatch helper always
+            # forwards these two explicitly; force resolves them to
+            # dispatch_import_from_db's own defaults, so behavior is
+            # byte-identical even though the call shape now names them.
+            distance_threshold=None,
+            scenario="force_import",
         )
         assert updated is not None
         self.assertEqual(updated.status, "completed")
@@ -1371,6 +1406,11 @@ class TestImporterWorker(unittest.TestCase):
             download_log_id=7,
             source_reference_path="/tmp/failed",
             cfg=self._force_cfg,
+            # issue #1176 PR3: see test_force_import_job_calls_existing_
+            # dispatch_and_completes above — same byte-identical-behavior
+            # rationale for these two explicit defaults.
+            distance_threshold=None,
+            scenario="force_import",
         )
 
     def test_force_import_without_private_action_requeues_before_dispatch(self):
@@ -3496,6 +3536,24 @@ class TestImporterWorker(unittest.TestCase):
                     worker_id=worker_id,
                 )
 
+            # _ForceStageDB's runtime_checkable isinstance check uses
+            # getattr_static under the hood, which does NOT invoke
+            # __getattr__ — so the local-import claim method must be
+            # declared explicitly too, even though this test only ever
+            # exercises the force-import claim_fn.
+            def claim_local_import_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+            ) -> ImportJob | None:
+                return db.claim_local_import_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                )
+
             def close(self) -> None:
                 return None
 
@@ -4332,6 +4390,24 @@ class TestImportPreviewWorker(unittest.TestCase):
                     worker_id=worker_id,
                 )
 
+            # _RequestScopedPreviewStageDB's runtime_checkable isinstance
+            # check uses getattr_static under the hood, which does NOT
+            # invoke __getattr__ — so the local-import claim method must be
+            # declared explicitly too, even though this test only ever
+            # exercises the force-import claim_fn.
+            def claim_local_import_preview_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+            ) -> ImportJob | None:
+                return db.claim_local_import_preview_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                )
+
             def close(self) -> None:
                 return None
 
@@ -4614,6 +4690,128 @@ class TestImportPreviewWorker(unittest.TestCase):
         assert updated.preview_result is not None
         self.assertEqual(updated.preview_result["verdict"], "evidence_ready")
         self.assertIsNotNone(updated.importable_at)
+
+    def test_local_import_preview_crash_never_persists_operator_path(self):
+        """F6 (issue #1176 PR3 review round): a crash during local-import
+        preview measurement must record the disposable private action
+        copy as its ``source_path`` — never the operator's real folder,
+        which ``front_gate_source`` alone (unlike ``front_gate_action``)
+        would leak straight into the persisted ``MeasurementFailure`` /
+        ``ImportPreviewResult``.
+
+        Drives the REAL front-gate (``process_claimed_preview_job`` ->
+        ``_front_gate_check`` -> ``_action_copy_front_gate``) so the
+        action copy is genuinely established on disk before the injected
+        crash, exactly as production reaches it — only the measurement
+        step itself is faked, at the same edge
+        ``test_force_job_preview_would_import_marks_importable`` patches.
+        """
+        from lib.import_queue import (
+            IMPORT_JOB_LOCAL,
+            local_import_dedupe_key,
+            local_import_payload,
+        )
+        from scripts import import_preview_worker
+
+        with _local_preview_source() as (source, cfg):
+            with open(os.path.join(source, "01.flac"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=61, status="wanted"))
+            db.enqueue_import_job(
+                IMPORT_JOB_LOCAL,
+                request_id=61,
+                dedupe_key=local_import_dedupe_key(61),
+                payload=local_import_payload(source_path=source, request_id=61),
+            )
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
+            assert claimed is not None
+
+            with patch(
+                "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
+                side_effect=RuntimeError("simulated measurement crash"),
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db, claimed, runtime_config=cfg,
+                )
+
+        assert updated is not None
+        assert updated.preview_result is not None
+        persisted_source = updated.preview_result.get("source_path")
+        self.assertIsNotNone(persisted_source)
+        self.assertNotEqual(
+            persisted_source, source,
+            "the crash audit leaked the operator's real folder",
+        )
+        assert isinstance(persisted_source, str)
+        self.assertTrue(
+            os.path.basename(persisted_source).startswith(
+                import_preview_worker.LOCAL_IMPORT_ACTION_PREFIX,
+            ),
+            f"expected the disposable action copy, got {persisted_source!r}",
+        )
+        failure = updated.preview_result.get("failure")
+        assert isinstance(failure, dict)
+        self.assertEqual(failure.get("source_path"), persisted_source)
+
+    def test_local_import_preview_never_persists_operator_path_when_the_action_copy_itself_fails(
+        self,
+    ) -> None:
+        """F6, second review round: the world the first fix's comment
+        denied — ``_action_copy_front_gate``'s own except branch
+        (``_prepare_force_action_path`` failing) — never leaks the
+        operator's real folder either.
+
+        Deletes the operator's source folder between enqueue and preview
+        claim (the reviewer's own reproduction: "operator moves or renames
+        the folder ... realistic with a backed-up preview queue"), so
+        BOTH the front-gate's first attempt AND ``execute_preview_job``'s
+        internal retry genuinely fail to establish an action copy —
+        ``front_gate_action`` is ``None`` throughout, unlike the sibling
+        test above where the copy succeeds and only measurement crashes.
+        """
+        from lib.import_queue import (
+            IMPORT_JOB_LOCAL,
+            local_import_dedupe_key,
+            local_import_payload,
+        )
+        from scripts import import_preview_worker
+
+        with _local_preview_source() as (source, cfg):
+            with open(os.path.join(source, "01.flac"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=61, status="wanted"))
+            db.enqueue_import_job(
+                IMPORT_JOB_LOCAL,
+                request_id=61,
+                dedupe_key=local_import_dedupe_key(61),
+                payload=local_import_payload(source_path=source, request_id=61),
+            )
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
+            assert claimed is not None
+
+            # The operator's folder is gone by the time preview claims the
+            # job — no action copy can ever be established.
+            shutil.rmtree(source)
+
+            updated = import_preview_worker.process_claimed_preview_job(
+                db, claimed, runtime_config=cfg,
+            )
+
+        assert updated is not None
+        assert updated.preview_result is not None
+        persisted_source = updated.preview_result.get("source_path")
+        self.assertIsNotNone(persisted_source)
+        self.assertNotEqual(
+            persisted_source, source,
+            "the crash audit leaked the operator's real folder even though "
+            "no action copy was ever established",
+        )
+        assert isinstance(persisted_source, str)
+        failure = updated.preview_result.get("failure")
+        assert isinstance(failure, dict)
+        self.assertEqual(failure.get("source_path"), persisted_source)
 
     def test_force_execute_path_requires_forwarded_runtime_config(self):
         """The real execute path must retain the caller's private config.

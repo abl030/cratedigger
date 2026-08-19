@@ -48,6 +48,8 @@ from lib.import_execution import (
     probe_execution_liveness,
 )
 from lib.import_preview import (
+    ACTION_COPY_PREFIX_BY_JOB_TYPE,
+    LOCAL_IMPORT_ACTION_PREFIX,
     PREVIEW_VERDICT_EVIDENCE_READY,
     PREVIEW_VERDICT_MEASUREMENT_FAILED,
     ImportPreviewResult,
@@ -63,14 +65,17 @@ from lib.import_preview import (
     preserve_existing_source_spectral,
     remove_preview_snapshot,
     retain_preview_snapshot_for_force_action,
+    snapshot_configured_local_import_directory,
     snapshot_configured_quarantine_directory,
 )
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
+    IMPORT_JOB_LOCAL,
     IMPORT_JOB_YOUTUBE,
     ForceImportPayload,
     ImportJob,
+    LocalImportPayload,
     YoutubeImportPayload,
 )
 from lib.measurement import (
@@ -98,6 +103,7 @@ from lib.quality import (
 )
 from lib.quality_evidence import (
     EvidenceBuildResult,
+    QualityEvidenceDB,
     audio_snapshot_matches,
     candidate_evidence_persistence_receipt_semantic_error,
     load_candidate_evidence_for_source,
@@ -301,9 +307,11 @@ def _cleanup_terminal_preview_force_action(
     action_path: str | None,
     runtime_config: CratediggerConfig | None,
 ) -> ImportJob | None:
-    """Discard a force action only after preview reaches a known terminal state."""
+    """Discard a force/local-import action only after preview reaches a
+    known terminal state."""
+    prefix = ACTION_COPY_PREFIX_BY_JOB_TYPE.get(job.job_type)
     if (
-        job.job_type != IMPORT_JOB_FORCE
+        prefix is None
         or terminal_job is None
         or terminal_job.status == "recovery_required"
     ):
@@ -315,12 +323,14 @@ def _cleanup_terminal_preview_force_action(
     try:
         resolved_config = _resolve_runtime_config(runtime_config)
         terminal_action_path = (
-            action_path or force_action_copy_path(resolved_config, job.id)
+            action_path
+            or force_action_copy_path(resolved_config, job.id, prefix=prefix)
         )
         cleanup_force_action_copy_for_job(
             terminal_action_path,
             resolved_config,
             import_job_id=job.id,
+            prefix=prefix,
         )
     except Exception:
         # Preview's DB outcome is already durable. A stale private copy is
@@ -606,21 +616,88 @@ def _reused_evidence_preview_payload(
     return payload
 
 
+@dataclass(frozen=True)
+class _JobActionAuthority:
+    """Bundles what varies between job types sharing
+    ``_prepare_force_action_path`` (issue #1176 PR3): which authority
+    resolves the operator/configured root, which prefix names the retained
+    job-scoped action copy, and whether the operator's raw path is safe to
+    surface as measurement-failure audit display text. Bundled as one
+    parameter rather than three so the entry point still takes exactly ONE
+    new argument for "the authority" — everything about the alternate
+    lane travels together.
+
+    ``audit_shows_raw_path`` defaults to force's own historical behavior
+    (``True``): force's raw path is a Cratedigger-managed quarantine
+    folder, safe to display. Local-import sets it ``False`` — CLAUDE.md
+    decision 2 for #1176 requires every audit surface this lane touches to
+    name the disposable action copy, never the operator's real folder.
+    Two readers consult this flag. ``execute_preview_job`` reads it to
+    decide what ``measure_and_persist_candidate_evidence``'s
+    ``source_display_path`` (measurement-failure audit text — a different
+    surface than dispatch's Wrong Matches ``failed_path``, but the same
+    "never the operator's folder" rule) receives.
+    ``process_claimed_preview_job`` (issue #1176 PR3 review round, F6)
+    reads it separately to build ``front_gate_audit_source`` — the alias
+    every ``MeasurementFailure``/``ImportPreviewResult``/reused-evidence
+    source field there uses instead of the raw ``front_gate_source`` its
+    own ``_front_gate_check`` call resolves. A PR3 review round found 4
+    such sites in ``process_claimed_preview_job`` still using
+    ``front_gate_source`` directly, unaffected by this flag. A second
+    review round corrected the fix itself: the action copy those sites
+    need is USUALLY already established by the SAME
+    ``_action_copy_front_gate`` call that produced ``front_gate_source``,
+    but its own except branch is exactly a "the copy doesn't exist yet"
+    case (``_prepare_force_action_path`` can itself fail — a moved/renamed
+    operator folder, EACCES, ENOSPC, a symlink inside it), and the first
+    fix's alias fell back to the raw ``front_gate_source`` in exactly that
+    world. ``front_gate_audit_source`` now fails closed instead: the
+    deterministic path this job would have retained had preparation
+    succeeded, never the operator's real folder.
+    """
+
+    snapshot_fn: Callable[[str, CratediggerConfig], str]
+    action_prefix: str
+    audit_shows_raw_path: bool = True
+
+
+#: Default authority: today's force-import quarantine resolution, unchanged.
+_FORCE_ACTION_AUTHORITY = _JobActionAuthority(
+    snapshot_fn=snapshot_configured_quarantine_directory,
+    action_prefix="force-action-",
+)
+
+#: The local-import lane's authority (issue #1176 PR3): resolves through
+#: ``open_configured_local_import_directory`` instead of the quarantine
+#: roots, retains its copy under a distinct prefix, and never surfaces the
+#: operator's raw path in preview's own audit trail either.
+_LOCAL_IMPORT_ACTION_AUTHORITY = _JobActionAuthority(
+    snapshot_fn=snapshot_configured_local_import_directory,
+    action_prefix=LOCAL_IMPORT_ACTION_PREFIX,
+    audit_shows_raw_path=False,
+)
+
+
 def _prepare_force_action_path(
     db: object,
     job: ImportJob,
     cfg: CratediggerConfig,
     *,
     raw_path: str,
+    authority: _JobActionAuthority = _FORCE_ACTION_AUTHORITY,
 ) -> str:
-    """Publish one normalized, private action copy for a force job.
+    """Publish one normalized, private action copy for a force/local-import
+    job.
 
-    This is the only force-copy lifecycle owner.  Repeating a preview replaces
-    the job's deterministic action directory, so retrying cannot accumulate
-    random copies of an operator-owned quarantine source.
+    This is the only such copy's lifecycle owner.  Repeating a preview
+    replaces the job's deterministic action directory, so retrying cannot
+    accumulate random copies of an operator-owned source. ``authority``
+    (issue #1176 PR3) defaults to force's own quarantine resolution + prefix,
+    so every existing force-import caller is byte-identical; the
+    local-import lane passes ``_LOCAL_IMPORT_ACTION_AUTHORITY`` instead.
     """
     del db
-    snapshot = snapshot_configured_quarantine_directory(raw_path, cfg)
+    snapshot = authority.snapshot_fn(raw_path, cfg)
     try:
         # The descriptor copy is now private working state.  Normalize before
         # inventorying/persisting evidence, and never touch ``raw_path``.
@@ -634,10 +711,85 @@ def _prepare_force_action_path(
             snapshot,
             cfg,
             import_job_id=job.id,
+            prefix=authority.action_prefix,
         )
     finally:
         if os.path.isdir(snapshot):
             remove_preview_snapshot(snapshot, cfg)
+
+
+def _local_import_raw_path(job: ImportJob) -> tuple[int | None, str]:
+    """A local-import job's raw path IS its payload — no download_log
+    lookup needed (issue #1176 PR3): unlike force/YouTube, a local import
+    has no originating ``download_log`` row.
+    """
+    # Programmer-error invariant (the payload is already decoded/validated
+    # by job_type at read time), not a caller type error — mirrors every
+    # other "<job_type> payload type mismatch" AssertionError in this file.
+    if not isinstance(job.payload, LocalImportPayload):
+        raise AssertionError("local_import payload type mismatch")  # noqa: TRY004
+    return None, job.payload.source_path
+
+
+def _action_copy_front_gate(
+    db: QualityEvidenceDB,
+    job: ImportJob,
+    *,
+    resolve_raw_path: Callable[[], tuple[int | None, str]],
+    runtime_config: CratediggerConfig | None,
+    authority: _JobActionAuthority,
+    candidate_evidence_loader: Callable[..., EvidenceBuildResult] | None,
+) -> tuple[EvidenceBuildResult | None, str | None, str | None]:
+    """Shared front-gate body for job types that retain a private,
+    job-scoped action copy (force-import, local-import — issue #1176 PR3).
+
+    ``resolve_raw_path`` stays inside the ``try`` (rather than being
+    resolved by the caller) so a failure deriving it — force's
+    download_log lookup can raise — is caught exactly as it always was;
+    local-import's own resolver cannot raise (the payload is already
+    validated at decode time) but shares the same shape for one reason:
+    consistency, not necessity.
+    """
+    raw_path: str | None = None
+    try:
+        download_log_id, raw_path = resolve_raw_path()
+        cfg = _resolve_runtime_config(runtime_config)
+        action_path = _prepare_force_action_path(
+            db, job, cfg, raw_path=raw_path, authority=authority,
+        )
+        load_candidate = (
+            candidate_evidence_loader or load_candidate_evidence_for_source
+        )
+        result = load_candidate(
+            db,
+            source_path=action_path,
+            download_log_id=download_log_id,
+            import_job_id=job.id,
+        )
+        # Reuse is allowed to discover a content-addressed evidence row
+        # through the originating audit record, but completion is not:
+        # bind the proven exact action snapshot to this job before its
+        # strict completion gate runs.
+        if (
+            result.status == "ready"
+            and result.evidence is not None
+            and result.evidence.id is not None
+        ):
+            db.set_import_job_candidate_evidence(job.id, result.evidence.id)
+        return result, raw_path, action_path
+    except (ExecutionCancelled, OwnerSessionLost):
+        raise
+    except Exception:
+        logger.debug(
+            "%s front-gate isolation failed for job %s; falling through",
+            job.job_type,
+            job.id,
+            exc_info=True,
+        )
+        # The front gate has already recovered the persisted source. Keep it
+        # for a later failure audit even when its isolated snapshot was not
+        # available; only the evidence-reuse optimization failed.
+        return None, raw_path, None
 
 
 def _front_gate_check(
@@ -657,45 +809,24 @@ def _front_gate_check(
     result with ``status == 'ready'`` means measurement can be skipped.
     """
     if job.job_type == IMPORT_JOB_FORCE:
-        raw_path: str | None = None
-        try:
-            download_log_id, raw_path = _force_download_log_failed_path(db, job)
-            cfg = _resolve_runtime_config(runtime_config)
-            action_path = _prepare_force_action_path(
-                db, job, cfg, raw_path=raw_path,
-            )
-            load_candidate = (
-                candidate_evidence_loader or load_candidate_evidence_for_source
-            )
-            result = load_candidate(
-                db,
-                source_path=action_path,
-                download_log_id=download_log_id,
-                import_job_id=job.id,
-            )
-            # Reuse is allowed to discover a content-addressed evidence row
-            # through the originating audit record, but completion is not:
-            # bind the proven exact action snapshot to this job before its
-            # strict completion gate runs.
-            if (
-                result.status == "ready"
-                and result.evidence is not None
-                and result.evidence.id is not None
-            ):
-                db.set_import_job_candidate_evidence(job.id, result.evidence.id)
-            return result, raw_path, action_path
-        except (ExecutionCancelled, OwnerSessionLost):
-            raise
-        except Exception:
-            logger.debug(
-                "force front-gate isolation failed for job %s; falling through",
-                job.id,
-                exc_info=True,
-            )
-            # The front gate has already recovered the persisted force source.
-            # Keep it for a later failure audit even when its isolated snapshot
-            # was not available; only the evidence-reuse optimization failed.
-            return None, raw_path, None
+        return _action_copy_front_gate(
+            db,
+            job,
+            resolve_raw_path=lambda: _force_download_log_failed_path(db, job),
+            runtime_config=runtime_config,
+            authority=_FORCE_ACTION_AUTHORITY,
+            candidate_evidence_loader=candidate_evidence_loader,
+        )
+
+    if job.job_type == IMPORT_JOB_LOCAL:
+        return _action_copy_front_gate(
+            db,
+            job,
+            resolve_raw_path=lambda: _local_import_raw_path(job),
+            runtime_config=runtime_config,
+            authority=_LOCAL_IMPORT_ACTION_AUTHORITY,
+            candidate_evidence_loader=candidate_evidence_loader,
+        )
 
     if cancellation_token is not None:
         cancellation_token.raise_if_cancelled()
@@ -742,6 +873,9 @@ def _preview_input(
 
     if job.job_type == IMPORT_JOB_FORCE:
         raise ValueError("Force import preview inputs are resolved from download_log")
+
+    if job.job_type == IMPORT_JOB_LOCAL:
+        raise ValueError("Local import preview inputs are resolved from the payload")
 
     if job.job_type == IMPORT_JOB_AUTOMATION:
         if automation_authority is None or cancellation_token is None:
@@ -792,21 +926,33 @@ def execute_preview_job(
     measure_candidate = (
         candidate_measurement_fn or measure_and_persist_candidate_evidence
     )
-    if job.job_type == IMPORT_JOB_FORCE:
+    if job.job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL):
         if job.request_id is None:
             raise ValueError("Import job has no request_id")
-        download_log_id, raw_path = _force_download_log_failed_path(db, job)
+        authority = (
+            _FORCE_ACTION_AUTHORITY
+            if job.job_type == IMPORT_JOB_FORCE
+            else _LOCAL_IMPORT_ACTION_AUTHORITY
+        )
+        resolve_raw_path = (
+            (lambda: _force_download_log_failed_path(db, job))
+            if job.job_type == IMPORT_JOB_FORCE
+            else (lambda: _local_import_raw_path(job))
+        )
+        download_log_id, raw_path = resolve_raw_path()
         if prepared_force_source_path is not None:
             raw_path = prepared_force_source_path
         cfg = _resolve_runtime_config(runtime_config)
         action_path = prepared_force_action_path or _prepare_force_action_path(
-            db, job, cfg, raw_path=raw_path,
+            db, job, cfg, raw_path=raw_path, authority=authority,
         )
         result = measure_candidate(
             db,
             request_id=job.request_id,
             path=action_path,
-            source_display_path=raw_path,
+            source_display_path=(
+                raw_path if authority.audit_shows_raw_path else None
+            ),
             force=True,
             download_log_id=download_log_id,
             import_job_id=job.id,
@@ -1105,12 +1251,70 @@ def process_claimed_preview_job(
         automation_authority=automation_authority,
         cancellation_token=cancellation_token,
     )
+    # F6 (issue #1176 PR3 review round, corrected in a second round): front_
+    # gate_source is the OPERATOR's raw path for a local-import job — never
+    # safe to persist into an audit-visible field per decision 2, exactly
+    # the boundary _JobActionAuthority.audit_shows_raw_path already draws
+    # for measure_and_persist_candidate_evidence's own source_display_path.
+    # front_gate_action is the disposable private action copy, USUALLY
+    # already established by the SAME _action_copy_front_gate call that
+    # produced front_gate_source — but its own except branch (line ~776
+    # above) is exactly the case a first review round's comment here denied:
+    # _prepare_force_action_path can itself fail (the operator's folder
+    # moved/renamed between enqueue and preview claim — realistic with a
+    # backed-up preview queue — a symlink/special file inside it, EACCES,
+    # ENOSPC on the processing tree), returning action_path=None while
+    # raw_path (front_gate_source) is still the real operator path. Every
+    # MeasurementFailure / ImportPreviewResult / reused-evidence payload
+    # below that names "the source" uses this alias instead of
+    # front_gate_source directly, so local-import must fail CLOSED here:
+    # when no action copy exists, fall back to the deterministic path this
+    # job would have retained had preparation succeeded (never to the raw
+    # operator path), and to the documented "not resolved" sentinel (``""``,
+    # the same one MeasurementFailure.source_path's own docstring defines)
+    # only if resolving even that requires config this job's own claim
+    # already proved readable and still somehow fails. Force keeps showing
+    # its own real wrong_matches-rooted front_gate_source unchanged: its raw
+    # path is already safe to display (audit_shows_raw_path=True) and is the
+    # more durable, reviewable location for an operator to inspect — only
+    # local's leak closes here.
+    front_gate_audit_source = front_gate_source
+    if job.job_type == IMPORT_JOB_LOCAL:
+        if front_gate_action is not None:
+            front_gate_audit_source = front_gate_action
+        else:
+            try:
+                front_gate_audit_source = force_action_copy_path(
+                    _resolve_runtime_config(runtime_config),
+                    job.id,
+                    prefix=LOCAL_IMPORT_ACTION_PREFIX,
+                )
+            except Exception:
+                logger.debug(
+                    "Unable to resolve the deterministic local-import "
+                    "action path for job %s while building the audit-safe "
+                    "source alias; falling back to the not-resolved "
+                    "sentinel",
+                    job.id,
+                    exc_info=True,
+                )
+                front_gate_audit_source = ""
     if (
         front_gate_result is not None
         and front_gate_result.status == "ready"
         and front_gate_result.evidence is not None
         and front_gate_source is not None
     ):
+        # Re-derive with the SAME rule as front_gate_audit_source above,
+        # but from a point where pyright has already narrowed
+        # front_gate_source to str (the guard just above) — the outer
+        # front_gate_audit_source is str | None because it was computed
+        # before that narrowing existed.
+        narrowed_audit_source: str = (
+            front_gate_audit_source
+            if front_gate_audit_source is not None
+            else front_gate_source
+        )
         persisted_existing = SpectralAnalysisDetail(attempted=False)
         preserve_have_source = False
         reuse_have_evidence = False
@@ -1160,7 +1364,7 @@ def process_claimed_preview_job(
                     )
                     return handle_current_authority_failed(
                         detail,
-                        source_path=front_gate_source,
+                        source_path=narrowed_audit_source,
                     )
                 else:
                     current_evidence = current_result.evidence
@@ -1193,7 +1397,7 @@ def process_claimed_preview_job(
                 )
                 return handle_current_authority_failed(
                     f"{type(exc).__name__}: {exc}",
-                    source_path=front_gate_source,
+                    source_path=narrowed_audit_source,
                 )
         # Explicit annotation gives the fallback lambda below an expected
         # type to infer its parameter from (otherwise its parameter type is
@@ -1277,7 +1481,7 @@ def process_claimed_preview_job(
         reused_payload = _reused_evidence_preview_payload(
             job,
             front_gate_result.evidence,
-            front_gate_source,
+            narrowed_audit_source,
             ImportResult(spectral=audit),
             action_path=front_gate_action,
         )
@@ -1322,7 +1526,7 @@ def process_claimed_preview_job(
         crash_payload = MeasurementFailure(
             reason="measurement_crashed",
             detail=f"{type(exc).__name__}: {exc}",
-            source_path=front_gate_source or "",
+            source_path=front_gate_audit_source or "",
         )
         crash_result = ImportPreviewResult(
             mode="path",
@@ -1333,7 +1537,7 @@ def process_claimed_preview_job(
             detail=f"{type(exc).__name__}: {exc}",
             request_id=job.request_id,
             download_log_id=_download_log_id_from_job(job),
-            source_path=front_gate_source,
+            source_path=front_gate_audit_source,
             action_path=front_gate_action,
             failure=crash_payload,
         )
@@ -1529,7 +1733,14 @@ class _AutomationPreviewStageDB(Protocol):
 
 
 @runtime_checkable
-class _ForcePreviewStageDB(Protocol):
+class _RequestScopedPreviewStageDB(Protocol):
+    """Preview stage-DB surface shared by force-import and local-import
+    claiming (issue #1176 PR3): both are request-scoped, IMPORT-pinned
+    claims that differ only in which method names the job type — declaring
+    both methods on one Protocol lets ``_process_force_claim`` serve either
+    lane through its ``claim_fn`` seam without a second isinstance check.
+    """
+
     def _pin_owner_session(
         self,
         cancellation_token: CancellationToken,
@@ -1549,7 +1760,39 @@ class _ForcePreviewStageDB(Protocol):
         worker_id: str | None,
     ) -> ImportJob | None: ...
 
+    def claim_local_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None: ...
+
     def close(self) -> None: ...
+
+
+def _claim_force_import_preview(
+    stage_db: _RequestScopedPreviewStageDB,
+    job_id: int,
+    *,
+    request_id: int,
+    worker_id: str | None,
+) -> ImportJob | None:
+    return stage_db.claim_force_import_preview_job_under_lock(
+        job_id, request_id=request_id, worker_id=worker_id,
+    )
+
+
+def _claim_local_import_preview(
+    stage_db: _RequestScopedPreviewStageDB,
+    job_id: int,
+    *,
+    request_id: int,
+    worker_id: str | None,
+) -> ImportJob | None:
+    return stage_db.claim_local_import_preview_job_under_lock(
+        job_id, request_id=request_id, worker_id=worker_id,
+    )
 
 
 def _process_automation_claim(
@@ -1641,12 +1884,24 @@ def _process_force_claim(
     process_fn: Callable[..., ImportJob | None] = (
         process_claimed_preview_job_with_heartbeat
     ),
+    claim_fn: Callable[
+        ..., ImportJob | None,
+    ] = _claim_force_import_preview,
 ) -> ImportJob | None:
-    """Claim and run force preview effects on one pinned IMPORT session."""
+    """Claim and run force/local-import preview effects on one pinned
+    IMPORT session.
+
+    ``claim_fn`` (issue #1176 PR3) defaults to force's own claim method so
+    every existing caller stays byte-identical; the local-import lane
+    passes ``_claim_local_import_preview`` instead. Everything else — pin
+    the owner session, take the per-request IMPORT lock, dispatch to
+    ``process_fn`` — is shared, because the ONLY thing that differs between
+    the two claims is which method names the job type.
+    """
     if candidate.request_id is None:
         return None
     stage_db = stage_db_factory(dsn)
-    if not isinstance(stage_db, _ForcePreviewStageDB):
+    if not isinstance(stage_db, _RequestScopedPreviewStageDB):
         raise TypeError("force preview DB is missing its owner-session protocol")
     token = CancellationToken()
     try:
@@ -1659,7 +1914,8 @@ def _process_force_claim(
             token.raise_if_cancelled()
             if not acquired:
                 return None
-            job = stage_db.claim_force_import_preview_job_under_lock(
+            job = claim_fn(
+                stage_db,
                 candidate.id,
                 request_id=candidate.request_id,
                 worker_id=worker_id,
@@ -1707,7 +1963,7 @@ def run_once(
     try:
         execution_lease = capture(systemd_unit=PREVIEW_SYSTEMD_UNIT)
     except ValueError:
-        # Non-systemd development runs may still process Force/YouTube jobs.
+        # Non-systemd development runs may still process Force/local-import/YouTube jobs.
         # Automation remains invisible to claim without a complete lease.
         execution_lease = None
     candidates = db.peek_import_preview_job_candidates(
@@ -1759,6 +2015,23 @@ def run_once(
                 candidate_measurement_fn=candidate_measurement_fn,
                 claim_callback=claim_state.mark,
                 process_fn=process_fn,
+            )
+        elif candidate.job_type == IMPORT_JOB_LOCAL:
+            dsn = getattr(db, "dsn", None)
+            if not dsn:
+                continue
+            result = _process_force_claim(
+                candidate,
+                dsn=str(dsn),
+                worker_id=worker_id,
+                heartbeat_interval=heartbeat_interval,
+                runtime_config=runtime_config,
+                stage_db_factory=stage_db_factory or PipelineDB,
+                heartbeat_db_factory=heartbeat_db_factory or PipelineDB,
+                candidate_measurement_fn=candidate_measurement_fn,
+                claim_callback=claim_state.mark,
+                process_fn=process_fn,
+                claim_fn=_claim_local_import_preview,
             )
         else:
             job = db.claim_import_preview_job_candidate(
@@ -1850,7 +2123,7 @@ def recover_running_preview_jobs(
 ) -> list[ImportJob]:
     """Requeue every preview job left running by a previous worker process.
 
-    Called once at startup. Legacy Force/YouTube jobs retain immediate
+    Called once at startup. Legacy Force/local-import/YouTube jobs retain immediate
     same-process recovery. Automation is requeued only when the shared
     execution probe proves the exact persisted lease dead; live, unknown,
     incomplete, or mismatched evidence leaves the row untouched. The periodic

@@ -30,6 +30,27 @@ from lib.force_import_service import (
     RESULT_REQUEST_MISSING,
     RESULT_UNAUTHORIZED_PATH,
 )
+from lib.local_import_service import (
+    LOCAL_IMPORT_HTTP_STATUS,
+)
+from lib.local_import_service import (
+    RESULT_NOT_CONFIGURED as LOCAL_RESULT_NOT_CONFIGURED,
+)
+from lib.local_import_service import (
+    RESULT_PROCESSING_LOCKED as LOCAL_RESULT_PROCESSING_LOCKED,
+)
+from lib.local_import_service import (
+    RESULT_QUEUED as LOCAL_RESULT_QUEUED,
+)
+from lib.local_import_service import (
+    RESULT_REQUEST_MBID_MISSING as LOCAL_RESULT_REQUEST_MBID_MISSING,
+)
+from lib.local_import_service import (
+    RESULT_REQUEST_MISSING as LOCAL_RESULT_REQUEST_MISSING,
+)
+from lib.local_import_service import (
+    RESULT_UNAUTHORIZED_PATH as LOCAL_RESULT_UNAUTHORIZED_PATH,
+)
 from lib.transitions import TransitionConflict, TransitionConflictKind
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import handoff_automation_owner, make_request_row
@@ -67,6 +88,24 @@ def _force_import_runtime_config(
             f"staging_dir = {staging_dir}\n"
             "\n[Paths]\n"
             f"processing_dir = {processing_dir}\n",
+        )
+    try:
+        with patch.dict(os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": config_path}):
+            yield
+    finally:
+        os.unlink(config_path)
+
+
+@contextmanager
+def _local_import_runtime_config(*, local_import_dir: str, enabled: bool = True):
+    """Run one route call against a real temporary runtime config with the
+    local-import lane configured (issue #1176 PR3)."""
+    config_path = os.path.join(os.path.dirname(local_import_dir), "config.ini")
+    with open(config_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "[Local Import]\n"
+            f"enabled = {'true' if enabled else 'false'}\n"
+            f"dir = {local_import_dir}\n",
         )
     try:
         with patch.dict(os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": config_path}):
@@ -141,6 +180,9 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         "request_status",
     }
     FORCE_IMPORT_REQUIRED_FIELDS: ClassVar = {
+        "status", "request_id", "artist", "album", "message",
+    }
+    LOCAL_IMPORT_REQUIRED_FIELDS: ClassVar = {
         "status", "request_id", "artist", "album", "message",
     }
     DELETE_REQUIRED_FIELDS: ClassVar = {"status", "id"}
@@ -1334,6 +1376,110 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], RESULT_PROCESSING_LOCKED)
         self.assertEqual(data["reason"], RESULT_PROCESSING_LOCKED)
+        self.assertEqual(data["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
+        self.assertEqual(len(self.db.list_import_jobs()), 1)
+
+    def test_pipeline_import_local_contract(self):
+        with tempfile.TemporaryDirectory() as root:
+            local_root = os.path.join(root, "LocalImport")
+            album = os.path.join(local_root, "MyRip", "Album")
+            os.makedirs(album)
+            self.db.seed_request(make_request_row(
+                id=201, status="wanted", mb_release_id="local-201",
+            ))
+            with _local_import_runtime_config(local_import_dir=local_root):
+                status, data = self._post(
+                    "/api/pipeline/import-local",
+                    {"request_id": 201, "source_path": album},
+                )
+
+        self.assertEqual(status, 202)
+        _assert_required_fields(
+            self, data, self.LOCAL_IMPORT_REQUIRED_FIELDS,
+            "pipeline import-local response")
+        self.assertEqual(len(self.db.list_import_jobs()), 1)
+
+    def test_pipeline_import_local_statuses_are_service_mapped(self):
+        with tempfile.TemporaryDirectory() as root:
+            local_root = os.path.join(root, "LocalImport")
+            album = os.path.join(local_root, "MyRip", "Album")
+            os.makedirs(album)
+            self.db.seed_request(make_request_row(
+                id=202, status="wanted", mb_release_id="local-202",
+            ))
+            self.db.seed_request(make_request_row(
+                id=203, status="wanted", mb_release_id=None,
+                discogs_release_id="203",
+            ))
+            outside = os.path.join(root, "outside")
+            os.makedirs(outside)
+
+            with _local_import_runtime_config(local_import_dir=local_root):
+                for name, request_id, source_path, outcome in (
+                    ("missing request", 999_999, album, LOCAL_RESULT_REQUEST_MISSING),
+                    ("missing MusicBrainz ID", 203, album, LOCAL_RESULT_REQUEST_MBID_MISSING),
+                    ("outside root", 202, outside, LOCAL_RESULT_UNAUTHORIZED_PATH),
+                ):
+                    with self.subTest(name=name):
+                        status, _data = self._post(
+                            "/api/pipeline/import-local",
+                            {"request_id": request_id, "source_path": source_path},
+                        )
+                        self.assertEqual(status, LOCAL_IMPORT_HTTP_STATUS[outcome])
+                        self.assertEqual(self.db.list_import_jobs(), [])
+
+                status, data = self._post(
+                    "/api/pipeline/import-local",
+                    {"request_id": 202, "source_path": album},
+                )
+
+        self.assertEqual(status, LOCAL_IMPORT_HTTP_STATUS[LOCAL_RESULT_QUEUED])
+        self.assertEqual(len(self.db.list_import_jobs()), 1)
+        _assert_required_fields(
+            self, data, self.LOCAL_IMPORT_REQUIRED_FIELDS,
+            "pipeline import-local queued response")
+
+    def test_pipeline_import_local_not_configured(self):
+        with tempfile.TemporaryDirectory() as root:
+            local_root = os.path.join(root, "LocalImport")
+            os.makedirs(local_root)
+            self.db.seed_request(make_request_row(
+                id=204, status="wanted", mb_release_id="local-204",
+            ))
+            with _local_import_runtime_config(
+                local_import_dir=local_root, enabled=False,
+            ):
+                status, data = self._post(
+                    "/api/pipeline/import-local",
+                    {"request_id": 204, "source_path": local_root},
+                )
+
+        self.assertEqual(status, LOCAL_IMPORT_HTTP_STATUS[LOCAL_RESULT_NOT_CONFIGURED])
+        self.assertIn("services.cratedigger.localImport", data.get("error", ""))
+        self.assertEqual(self.db.list_import_jobs(), [])
+
+    def test_pipeline_import_local_processing_returns_exact_owner(self):
+        with tempfile.TemporaryDirectory() as root:
+            local_root = os.path.join(root, "LocalImport")
+            album = os.path.join(local_root, "MyRip", "Album")
+            os.makedirs(album)
+            self.db.seed_request(make_request_row(
+                id=205, status="wanted", mb_release_id="local-205",
+            ))
+            owner = handoff_automation_owner(self.db, 205)
+            with _local_import_runtime_config(local_import_dir=local_root):
+                status, data = self._post(
+                    "/api/pipeline/import-local",
+                    {"request_id": 205, "source_path": album},
+                )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], LOCAL_RESULT_PROCESSING_LOCKED)
+        self.assertEqual(data["reason"], LOCAL_RESULT_PROCESSING_LOCKED)
         self.assertEqual(data["processing_owner"], {
             "job_id": owner.id,
             "status": owner.status,

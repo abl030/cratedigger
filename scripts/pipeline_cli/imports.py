@@ -1,13 +1,14 @@
 """pipeline-cli import commands (#495 carve).
 
-``force-import`` / ``import-jobs`` / ``import-job-recovery`` / ``import-preview``
-— the import-queue operator surface: force a rejected download through,
-list recent queue jobs, and preview
-whether an import would pass without actually running one.
+``force-import`` / ``import-local`` / ``import-jobs`` / ``import-job-recovery``
+/ ``import-preview`` — the import-queue operator surface: force a rejected
+download through, import a folder already on disk against a request's exact
+release (issue #1176 PR3), list recent queue jobs, and preview whether an
+import would pass without actually running one.
 
-``force-import`` and ``import-preview --download-log-id`` both open a
-DB-owned quarantine path under the private ``0700`` processing tree, so
-both execute through their canonical web routes over the permissioned
+``force-import``, ``import-local``, and ``import-preview --download-log-id``
+all open a DB-owned/configured path under a private ``0700`` tree, so all
+three execute through their canonical web routes over the permissioned
 Unix socket (issue #1063). ``import-preview``'s other two modes stay
 in-process on purpose and neither is a fallback for a routed one:
 ``--values`` is a pure decision that touches no filesystem, and
@@ -105,6 +106,61 @@ def cmd_force_import(_db: object, args: argparse.Namespace) -> int:
             body={"download_log_id": int(args.download_log_id)},
         ),
         render=_render_force_import,
+        json_output=False,
+        timeout_seconds=TIMEOUT_ENQUEUE_SECONDS,
+    )
+
+
+def _render_import_local(status: int, payload: dict[str, object]) -> None:
+    if 200 <= status < 300:
+        job = payload.get("job")
+        job_status = job.get("status") if is_str_object_dict(job) else None
+        deduped = " existing" if payload.get("deduped") else ""
+        print(
+            f"  [OK] Queued{deduped} import job "
+            f"#{payload.get('job_id')} ({job_status})."
+        )
+        return
+    if payload.get("processing_owner") is not None:
+        print(json.dumps(payload, sort_keys=True))
+        return
+    error = payload.get("error") or payload.get("detail")
+    print(f"  Local import rejected: {error or status}.")
+
+
+def cmd_import_local(_db: object, args: argparse.Namespace) -> int:
+    """Import a folder already on disk against a request's exact release.
+
+    Thin adapter over ``POST /api/pipeline/import-local`` (issue #1176
+    PR3), the one execution path for both surfaces — mirrors
+    ``cmd_force_import``'s shape. The route's authority preflight opens the
+    configured local-import root as the service identity, which is the
+    only identity that can.
+
+    Exit codes, derived from ``LOCAL_IMPORT_HTTP_STATUS``:
+      * 0 — 202 queued
+      * 2 — 404 request missing
+      * 3 — 422 missing release id, local-import lane not configured, or
+            unauthorized path (outside the configured root, or inside a
+            Cratedigger-owned subtree)
+      * 4 — 409 processing-locked, OR ``already_queued_different_path``
+            (this request already has a DIFFERENT local-import folder
+            actively queued — the response names the one actually queued;
+            resubmitting the SAME path keeps deduping to 0)
+      * 5 — 503 ``path_unavailable`` (the local-import authority could not
+            OBSERVE the folder — permissions, I/O; retryable, and never a
+            claim that the path is wrong or gone)
+    """
+    return relay_rendered(
+        args.api_endpoint,
+        _ApiMutation(
+            path="/api/pipeline/import-local",
+            body={
+                "request_id": int(args.request_id),
+                "source_path": str(args.source_path),
+            },
+        ),
+        render=_render_import_local,
         json_output=False,
         timeout_seconds=TIMEOUT_ENQUEUE_SECONDS,
     )
@@ -343,14 +399,25 @@ def cmd_import_preview(
 def add_imports_subparsers(
     sub: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
-    """Add ``force-import`` / ``import-jobs`` / ``import-job-recovery`` /
-    ``import-preview`` (#521 carve out of ``routes_meta._build_parser``,
-    verbatim argument definitions)."""
+    """Add ``force-import`` / ``import-local`` / ``import-jobs`` /
+    ``import-job-recovery`` / ``import-preview`` (#521 carve out of
+    ``routes_meta._build_parser``, verbatim argument definitions)."""
     # force-import
     p_force = sub.add_parser("force-import", help="Force-import a rejected download by download_log ID")
     p_force.add_argument("download_log_id", type=int, help="Download log ID")
     p_force.add_argument("--verified-lossless-target",
                          help="Override the runtime verified-lossless target for this import")
+
+    # import-local (issue #1176 PR3)
+    p_local = sub.add_parser(
+        "import-local",
+        help="Import a folder already on disk against a request's exact release",
+    )
+    p_local.add_argument("request_id", type=int, help="Album request ID")
+    p_local.add_argument(
+        "source_path",
+        help="Absolute path under the configured local-import root",
+    )
 
     # import-jobs
     p_jobs = sub.add_parser("import-jobs", help="List recent import queue jobs")

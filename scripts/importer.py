@@ -12,9 +12,12 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
-from typing import Any, Protocol, assert_never, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, assert_never, runtime_checkable
 
 import msgspec
+
+if TYPE_CHECKING:
+    from lib.pipeline_db import DownloadLogOutcome
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -66,10 +69,12 @@ from lib.import_manifest import audio_relative_paths
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
+    IMPORT_JOB_LOCAL,
     IMPORT_JOB_RECOVERY_REQUIRED,
     IMPORT_JOB_YOUTUBE,
     ForceImportPayload,
     ImportJob,
+    LocalImportPayload,
     YoutubeImportPayload,
 )
 from lib.mb_canonical import configure_canonical_release_lookup
@@ -457,10 +462,23 @@ def _cleanup_terminal_force_action(job: ImportJob) -> dict[str, object] | None:
         return None
     try:
         from lib.config import read_runtime_config
-        from lib.import_preview import cleanup_force_action_copy_for_job
+        from lib.import_preview import (
+            ACTION_COPY_PREFIX_BY_JOB_TYPE,
+            cleanup_force_action_copy_for_job,
+        )
 
         cfg = read_runtime_config()
-        cleanup_force_action_copy_for_job(action_path, cfg, import_job_id=job.id)
+        # issue #1176 PR3 F5: this call used to hardcode force's own
+        # "force-action-" prefix, so it compared every local-import action
+        # path against the WRONG job type's deterministic name and raised
+        # before ever touching the filesystem — the copy leaked forever and
+        # re-raised on every subsequent importer startup recovery sweep.
+        # ``ACTION_COPY_PREFIX_BY_JOB_TYPE`` is the same table
+        # scripts/import_preview_worker.py's sibling cleanup already uses.
+        prefix = ACTION_COPY_PREFIX_BY_JOB_TYPE.get(job.job_type, "force-action-")
+        cleanup_force_action_copy_for_job(
+            action_path, cfg, import_job_id=job.id, prefix=prefix,
+        )
         return {"action_path": action_path, "removed": True}
     except Exception as exc:
         logger.exception("Failed to remove retained force action copy %s", action_path)
@@ -686,6 +704,111 @@ def _record_terminal_force_wrong_match_cleanup(
         return None
 
 
+def _execute_action_copy_dispatch(
+    db: PipelineDB,
+    job: ImportJob,
+    *,
+    request_id: int,
+    action_prefix: str,
+    source_reference_path: str | None,
+    source_username: str | None,
+    source_dirs: list[str] | None,
+    download_log_id: int | None,
+    distance_threshold_fn: Callable[[CratediggerConfig], float | None],
+    scenario: DownloadLogOutcome,
+    ctx: object,
+    cancellation_token: CancellationToken | None,
+    owner_session_identity: OwnerSessionIdentity | None,
+    force_dispatch_fn: Callable[..., DispatchOutcome] | None,
+    force_runtime_config: CratediggerConfig | None,
+) -> DispatchOutcome:
+    """Shared job-scoped-action-copy dispatch body for force/local-import
+    (issue #1176 PR3).
+
+    Delegates straight to ``dispatch_import_from_db``, which already
+    returns a terminal ``DispatchOutcome`` from its own decision tree — no
+    ``CompletionResult`` in the middle, so nothing here is parallel to
+    ``_dispatch_outcome_from_completion`` below. See that function's
+    docstring (issue #510) for why this isn't unified further.
+
+    Every parameter that differs between force-import and local-import is
+    passed explicitly by the caller; everything else (resolve config,
+    verify the retained action copy is the job's own deterministic one,
+    the cancellation/session pairing, the two-shaped dispatch call) is
+    identical and lives here once.
+    """
+    from lib.dispatch import dispatch_import_from_db
+    force_dispatch = force_dispatch_fn or dispatch_import_from_db
+
+    from lib.config import read_runtime_config
+    from lib.import_preview import force_action_copy_path
+
+    # F9 (issue #1176 PR3 review round): this helper serves BOTH lanes, but
+    # its two operator-facing strings below were hardcoded to "force" even
+    # for a local-import job — one raises a ValueError whose text surfaces
+    # verbatim in the Recents crash audit
+    # ("Executor crashed: ValueError: ...") via
+    # _terminalize_non_automation_failure, the other is a requeue reason.
+    lane_label = "local-import" if job.job_type == IMPORT_JOB_LOCAL else "force"
+
+    if (cancellation_token is None) != (owner_session_identity is None):
+        raise ValueError(
+            f"{lane_label} job cancellation and pinned session must be paired"
+        )
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
+    runtime_config = (
+        force_runtime_config
+        or getattr(ctx, "cfg", None)
+        or read_runtime_config()
+    )
+    action_path = _force_action_path(job)
+    expected_action_path = force_action_copy_path(
+        runtime_config, job.id, prefix=action_prefix,
+    )
+    if (
+        action_path is None
+        or action_path != expected_action_path
+        or not os.path.isdir(action_path)
+    ):
+        return _requeue_import_job_to_preview(
+            db,
+            import_job_id=job.id,
+            reason=f"{lane_label} action copy unavailable; preview must rebuild it",
+        )
+    resolved_distance_threshold = distance_threshold_fn(runtime_config)
+    if cancellation_token is None:
+        return force_dispatch(
+            db,
+            request_id=request_id,
+            failed_path=action_path,
+            source_reference_path=source_reference_path,
+            source_username=source_username,
+            source_dirs=source_dirs,
+            import_job_id=job.id,
+            download_log_id=download_log_id,
+            cfg=runtime_config,
+            distance_threshold=resolved_distance_threshold,
+            scenario=scenario,
+        )
+    assert owner_session_identity is not None
+    return force_dispatch(
+        db,
+        request_id=request_id,
+        failed_path=action_path,
+        source_reference_path=source_reference_path,
+        source_username=source_username,
+        source_dirs=source_dirs,
+        import_job_id=job.id,
+        download_log_id=download_log_id,
+        cancellation_token=cancellation_token,
+        owner_session_identity=owner_session_identity,
+        cfg=runtime_config,
+        distance_threshold=resolved_distance_threshold,
+        scenario=scenario,
+    )
+
+
 def execute_import_job(
     db: PipelineDB,
     job: ImportJob,
@@ -705,73 +828,61 @@ def execute_import_job(
         )
 
     if job.job_type == IMPORT_JOB_FORCE:
-        # FORCE delegates straight to dispatch_import_from_db, which
-        # already returns a terminal DispatchOutcome from its own decision
-        # tree — no CompletionResult in the middle, so nothing here is
-        # parallel to _dispatch_outcome_from_completion below. See that
-        # function's docstring (issue #510) for why this isn't unified
-        # further.
-        from lib.dispatch import dispatch_import_from_db
-        force_dispatch = force_dispatch_fn or dispatch_import_from_db
-
         if not isinstance(job.payload, ForceImportPayload):
             raise AssertionError("force_import payload type mismatch")
         payload = job.payload
-        from lib.config import read_runtime_config
-        from lib.import_preview import force_action_copy_path
-
-        if (cancellation_token is None) != (owner_session_identity is None):
-            raise ValueError(
-                "force job cancellation and pinned session must be paired"
-            )
-        if cancellation_token is not None:
-            cancellation_token.raise_if_cancelled()
-        runtime_config = (
-            force_runtime_config
-            or getattr(ctx, "cfg", None)
-            or read_runtime_config()
-        )
-        action_path = _force_action_path(job)
-        expected_action_path = force_action_copy_path(runtime_config, job.id)
-        if (
-            action_path is None
-            or action_path != expected_action_path
-            or not os.path.isdir(action_path)
-        ):
-            return _requeue_import_job_to_preview(
-                db,
-                import_job_id=job.id,
-                reason="force action copy unavailable; preview must rebuild it",
-            )
         source_dirs = (
             [source_dir for source_dir in payload.source_dirs if source_dir]
             or None
         )
-        if cancellation_token is None:
-            return force_dispatch(
-                db,
-                request_id=job.request_id,
-                failed_path=action_path,
-                source_reference_path=payload.failed_path,
-                source_username=payload.source_username,
-                source_dirs=source_dirs,
-                import_job_id=job.id,
-                download_log_id=payload.download_log_id,
-                cfg=runtime_config,
-            )
-        assert owner_session_identity is not None
-        return force_dispatch(
+        return _execute_action_copy_dispatch(
             db,
+            job,
             request_id=job.request_id,
-            failed_path=action_path,
+            action_prefix="force-action-",
             source_reference_path=payload.failed_path,
             source_username=payload.source_username,
             source_dirs=source_dirs,
-            import_job_id=job.id,
             download_log_id=payload.download_log_id,
+            distance_threshold_fn=lambda cfg: None,
+            scenario="force_import",
+            ctx=ctx,
             cancellation_token=cancellation_token,
             owner_session_identity=owner_session_identity,
-            cfg=runtime_config,
+            force_dispatch_fn=force_dispatch_fn,
+            force_runtime_config=force_runtime_config,
+        )
+
+    if job.job_type == IMPORT_JOB_LOCAL:
+        # LOCAL delegates through the same dispatch_import_from_db entry
+        # point as FORCE (issue #1176 PR3), differing in the 3 documented
+        # ways: no operator-path audit exposure (source_reference_path=
+        # None — CLAUDE.md decision 2), the strict automation distance
+        # threshold instead of FORCE_IMPORT_DISTANCE_THRESHOLD (decision
+        # 3), and its own attempt scenario (decision 4). There is no
+        # Soulseek peer behind a local import, so source_username/
+        # source_dirs stay unset — mirrors youtube_import, which never
+        # populates them either.
+        if not isinstance(job.payload, LocalImportPayload):
+            raise AssertionError("local_import payload type mismatch")
+        from lib.import_preview import LOCAL_IMPORT_ACTION_PREFIX
+
+        return _execute_action_copy_dispatch(
+            db,
+            job,
+            request_id=job.request_id,
+            action_prefix=LOCAL_IMPORT_ACTION_PREFIX,
+            source_reference_path=None,
+            source_username=None,
+            source_dirs=None,
+            download_log_id=None,
+            distance_threshold_fn=lambda cfg: cfg.beets_distance_threshold,
+            scenario="local_import",
+            ctx=ctx,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
+            force_dispatch_fn=force_dispatch_fn,
+            force_runtime_config=force_runtime_config,
         )
 
     if job.job_type == IMPORT_JOB_AUTOMATION:
@@ -1296,6 +1407,10 @@ class _AutomationStageDB(_AutomationOwnerDB, Protocol):
 
 @runtime_checkable
 class _ForceStageDB(Protocol):
+    """Claim-stage DB surface shared by force-import and local-import
+    (issue #1176 PR3): both are request-scoped, IMPORT-pinned claims that
+    differ only in which method names the job type."""
+
     def _pin_owner_session(
         self,
         cancellation_token: CancellationToken,
@@ -1315,7 +1430,39 @@ class _ForceStageDB(Protocol):
         worker_id: str | None,
     ) -> ImportJob | None: ...
 
+    def claim_local_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None: ...
+
     def close(self) -> None: ...
+
+
+def _claim_force_import(
+    stage_db: _ForceStageDB,
+    job_id: int,
+    *,
+    request_id: int,
+    worker_id: str | None,
+) -> ImportJob | None:
+    return stage_db.claim_force_import_job_under_lock(
+        job_id, request_id=request_id, worker_id=worker_id,
+    )
+
+
+def _claim_local_import(
+    stage_db: _ForceStageDB,
+    job_id: int,
+    *,
+    request_id: int,
+    worker_id: str | None,
+) -> ImportJob | None:
+    return stage_db.claim_local_import_job_under_lock(
+        job_id, request_id=request_id, worker_id=worker_id,
+    )
 
 
 def _self_heal_automation_world_failure(
@@ -1598,8 +1745,15 @@ def _process_force_claim(
     stage_db_factory: Callable[[str], object],
     execute_fn: Callable[..., DispatchOutcome] = execute_import_job,
     claim_callback: Callable[[], None] | None = None,
+    claim_fn: Callable[..., ImportJob | None] = _claim_force_import,
 ) -> ImportJob | None:
-    """Claim and run force effects on one pinned IMPORT session."""
+    """Claim and run force/local-import effects on one pinned IMPORT session.
+
+    ``claim_fn`` (issue #1176 PR3) defaults to force's own claim method so
+    every existing caller stays byte-identical; the local-import lane
+    passes ``_claim_local_import`` instead — the ONE difference between the
+    two claims.
+    """
     if candidate.request_id is None:
         return None
     stage_db = stage_db_factory(dsn)
@@ -1616,7 +1770,8 @@ def _process_force_claim(
                 token.raise_if_cancelled()
                 if not acquired:
                     return None
-                job = stage_db.claim_force_import_job_under_lock(
+                job = claim_fn(
+                    stage_db,
                     candidate.id,
                     request_id=candidate.request_id,
                     worker_id=worker_id,
@@ -1646,7 +1801,7 @@ def _terminalize_non_automation_failure(
     message: str,
     result: dict[str, object],
 ) -> ImportJob | None:
-    """Persist one failed force/YouTube attempt and its Recents audit atomically."""
+    """Persist one failed force/local-import/YouTube attempt and its Recents audit atomically."""
     terminal = db.persist_import_terminal_outcome(
         non_automation_failure_terminal_outcome(
             job,
@@ -1671,16 +1826,28 @@ def process_claimed_job(
 ) -> ImportJob | None:
     """Execute a claimed job and persist its terminal queue status.
 
-    This is the single queue-outcome mapper all three job types (automation,
-    force, youtube) route through: whichever job-type executor
+    This is the single queue-outcome mapper all four job types (automation,
+    force, local-import, youtube) route through: whichever job-type executor
     produced ``outcome``, the success/requeue/failure -> terminal
     ``ImportJob`` status conversion below is one shared path (see
     ``_dispatch_outcome_from_completion``'s docstring for why the
     completion-result -> DispatchOutcome conversion is instead scoped to
     just automation + youtube, issue #510).
+
+    ``is_force`` (issue #1176 PR3: widened to also cover ``local_import``)
+    gates pinned-session/cancellation handling for every job type claimed
+    via ``_process_force_claim`` — which now includes local-import, since
+    it claims through the SAME pinned-IMPORT-session helper as force (see
+    ``run_once``'s ``elif candidate.job_type == IMPORT_JOB_LOCAL:`` branch).
+    YouTube stays outside this flag: it claims through the plain
+    ``db.claim_import_job_candidate`` path with no pinned session at all,
+    exactly as before. Narrowing this check back to force-only would
+    silently drop local-import's pinned ``cancellation_token`` /
+    ``owner_session_identity`` on every real dispatch — the job would still
+    run, just without graceful-shutdown cancellation support.
     """
     is_automation = job.job_type == IMPORT_JOB_AUTOMATION
-    is_force = job.job_type == IMPORT_JOB_FORCE
+    is_force = job.job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL)
     if is_automation and execution_lease is None:
         raise ValueError(
             "automation job processing requires exact execution authority"
@@ -1752,9 +1919,10 @@ def process_claimed_job(
                 reason=crash,
                 expected_execution_lease=current_lease,
             )
-        # Force and YouTube jobs do not own their request's ``processing``
-        # status. Their shared terminal command records the failed attempt in
-        # Recents while leaving that request exactly as the operator left it.
+        # Force, local-import, and YouTube jobs do not own their request's
+        # ``processing`` status. Their shared terminal command records the
+        # failed attempt in Recents while leaving that request exactly as
+        # the operator left it.
         failed = _terminalize_non_automation_failure(
             db,
             job,
@@ -1960,7 +2128,7 @@ def process_claimed_job(
                 if merged is not None:
                     terminal_job = merged
             return _record_terminal_force_action_cleanup(db, job, terminal_job)
-        # A force/YouTube success without a bundle is recorded, not parked: the
+        # A force/local-import/YouTube success without a bundle is recorded, not parked: the
         # job never owned the request's ``processing`` status, so the terminal
         # completed status is the whole surface this outcome needs.
         completed = db.mark_import_job_completed(
@@ -2055,7 +2223,7 @@ def process_claimed_job(
                 outcome,
             )
         return _record_terminal_force_action_cleanup(db, job, terminal_job)
-    # A bundle-less force/YouTube failure is recorded terminally rather than
+    # A bundle-less force/local-import/YouTube failure is recorded terminally rather than
     # parked. No request is stopped by it, and the producer diagnostic stays
     # intact for the Recents audit.
     failed = _terminalize_non_automation_failure(
@@ -2100,7 +2268,7 @@ def run_once(
     try:
         execution_lease = capture(systemd_unit=IMPORTER_SYSTEMD_UNIT)
     except ValueError:
-        # Non-systemd development runs may still process Force/YouTube jobs.
+        # Non-systemd development runs may still process Force/local-import/YouTube jobs.
         # Automation stays invisible without a complete invocation lease.
         execution_lease = None
     candidates = db.peek_import_job_candidates(
@@ -2146,6 +2314,20 @@ def run_once(
                 stage_db_factory=stage_db_factory or PipelineDB,
                 execute_fn=execute_fn,
                 claim_callback=claim_state.mark,
+            )
+        elif candidate.job_type == IMPORT_JOB_LOCAL:
+            dsn = getattr(db, "dsn", None)
+            if not dsn:
+                continue
+            result = _process_force_claim(
+                candidate,
+                dsn=str(dsn),
+                worker_id=worker_id,
+                ctx=ctx,
+                stage_db_factory=stage_db_factory or PipelineDB,
+                execute_fn=execute_fn,
+                claim_callback=claim_state.mark,
+                claim_fn=_claim_local_import,
             )
         else:
             job = db.claim_import_job_candidate(

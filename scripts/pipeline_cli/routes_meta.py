@@ -93,7 +93,7 @@ def _build_parser(
     # quality / repair-spectral
     add_quality_subparsers(sub)
 
-    # force-import / import-jobs / import-preview
+    # force-import / import-local / import-jobs / import-preview
     add_imports_subparsers(sub)
 
     # wrong-match-triage / -triage-cancel / -delete / -delete-group

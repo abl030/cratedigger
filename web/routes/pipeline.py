@@ -11,7 +11,8 @@ resolve-rg/replace release-identity endpoints were split out (#522) into
 ``web/routes/pipeline_dashboard.py``, ``web/routes/decisions.py``,
 ``web/routes/beets_distance.py``, and
 ``web/routes/release_identity_routes.py``. The CRUD mutation cluster
-(add/update/upgrade/set-quality/set-intent/ban-source/force-import/delete)
+(add/update/upgrade/set-quality/set-intent/ban-source/force-import/
+import-local/delete)
 was split out (#546 W4) into ``web/routes/pipeline_mutations.py``.
 """
 

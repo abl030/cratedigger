@@ -192,6 +192,38 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                     worker_id=worker_id,
                 )
 
+            # _ForceStageDB / _RequestScopedPreviewStageDB's
+            # runtime_checkable isinstance check uses getattr_static, which
+            # does NOT invoke __getattr__ — the local-import claim methods
+            # must be declared explicitly too, even though this generated
+            # property only ever exercises the force-import claim_fn
+            # (issue #1176 PR3).
+            def claim_local_import_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+            ) -> ImportJob | None:
+                return db.claim_local_import_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                )
+
+            def claim_local_import_preview_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+            ) -> ImportJob | None:
+                return db.claim_local_import_preview_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                )
+
             def close(self) -> None:
                 return None
 
@@ -303,6 +335,24 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                     worker_id=worker_id,
                 )
 
+            # _ForceStageDB's runtime_checkable isinstance check uses
+            # getattr_static, which does NOT invoke __getattr__ — the
+            # local-import claim method must be declared explicitly too,
+            # even though this test only ever exercises the force-import
+            # claim_fn (issue #1176 PR3).
+            def claim_local_import_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+            ) -> ImportJob | None:
+                return db.claim_local_import_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                )
+
             def close(self) -> None:
                 return None
 
@@ -405,6 +455,38 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                 worker_id: str | None,
             ) -> ImportJob | None:
                 return db.claim_force_import_preview_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                )
+
+            # _ForceStageDB / _RequestScopedPreviewStageDB's
+            # runtime_checkable isinstance check uses getattr_static, which
+            # does NOT invoke __getattr__ — the local-import claim methods
+            # must be declared explicitly too, even though this generated
+            # property only ever exercises the force-import claim_fn
+            # (issue #1176 PR3).
+            def claim_local_import_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+            ) -> ImportJob | None:
+                return db.claim_local_import_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                )
+
+            def claim_local_import_preview_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+            ) -> ImportJob | None:
+                return db.claim_local_import_preview_job_under_lock(
                     job_id,
                     request_id=request_id,
                     worker_id=worker_id,

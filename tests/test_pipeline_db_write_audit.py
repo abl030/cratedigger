@@ -195,6 +195,12 @@ ALLOWLIST: dict[str, str] = {
         "owner-fenced status CAS; no dict payload",
     "claim_force_import_preview_job_under_lock":
         "owner-fenced status CAS; no dict payload",
+    "claim_local_import_job_under_lock":
+        "owner-fenced status CAS; no dict payload (issue #1176 PR3, "
+        "mirrors claim_force_import_job_under_lock)",
+    "claim_local_import_preview_job_under_lock":
+        "owner-fenced status CAS; no dict payload (issue #1176 PR3, "
+        "mirrors claim_force_import_preview_job_under_lock)",
     "claim_current_v0_research_attempt":
         "single-attempt CAS returning bool; no dict payload",
     "claim_next_youtube_pending":

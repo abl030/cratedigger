@@ -231,6 +231,108 @@ behavior load-bearing rather than incidental:
   skips the decision). Replay must reach that identical no-op, not invent
   a verdict the live path never made.
 
+## Local-import outcomes (issue #1176 PR3)
+
+`local_import` is a **dispatch-attempt scenario** (`dispatch_import_core`'s
+`scenario` parameter / `FORCE_IMPORT_SCENARIOS` namespace), not a
+rejection-scenario literal in the events table above — the same namespace
+`force_import` and `auto_import` live in, neither of which is a table row
+either. It never appears as `validation_result->>'scenario'` and never
+reaches `outcome.post_commit_wrong_match_scenario`; when a producer file
+above spells a rejection scenario for a local-import attempt, it is
+*exactly* one of the strings already in the events table (see below) — no
+new rejection-scenario vocabulary exists (`tests/test_wrong_match_scenario_
+producer_audit.py`'s registered producer files —
+`lib/beets.py`/`lib/download_validation.py`/`lib/download_processing.py`/
+`lib/dispatch/manifest_guard.py` — spell no new literal for this lane).
+
+- **Deliberately excluded from `FORCE_IMPORT_SCENARIOS`** (unlike
+  `force_import`), so `lib.dispatch.helpers._should_cleanup_path` always
+  returns `True` for it: for any outcome that reaches `dispatch_import_core`
+  (accept, or a reject in the evidence pipeline downstream of the
+  strict-validation guard), the private action copy is cleaned up on
+  every one of THOSE — exactly like an auto-import's disposable
+  processing-owner source, never only on success the way force's is. This
+  is a correctness requirement, not a convenience: the action copy is
+  ordinarily Cratedigger's own disposable scratch, not the operator's
+  quarantine folder, so there is no reason to preserve it for review. The
+  strict-validation guard's OWN reject (below) never reaches
+  `dispatch_import_core` at all, so `_should_cleanup_path` is never
+  consulted for it. But it is still a terminal failure bundle, so
+  `scripts/importer.py::_cleanup_terminal_force_action` DOES run for it —
+  it just finds nothing, because relocation into `wrong_matches/` (below)
+  always runs FIRST, synchronously, before the terminal bundle is ever
+  persisted. That ordering is the safety, not an incidental detail: it is
+  what stops cleanup from ever finding the relocated folder still at its
+  original private-copy path and deleting it there. Its `force_action_
+  cleanup.removed: true` receipt is therefore misleading in isolation
+  (nothing was removed by that specific call) but harmless, since the
+  crash-recovery replay sweep it feeds correctly reads `true` as "nothing
+  left to reap" either way.
+- **A strict-validation reject reuses the manifest guard's own writer**
+  (`lib.dispatch.manifest_guard._guard_reject`, extended with an optional
+  `distance` parameter for this caller) rather than a parallel one. The
+  local-import entry point (`lib/dispatch/entry_points.py`) runs
+  `validate_release_with_merge_redirect` at the request's ORDINARY
+  `beets_distance_threshold` — never `FORCE_IMPORT_DISTANCE_THRESHOLD` — and
+  when the verdict is invalid, rejects with `scenario=validation.result
+  .scenario` (beets_validate's own vocabulary: `extra_tracks` /
+  `high_distance` / `mbid_not_found` / `no_choose_match` / …) and the real
+  measured `distance`. That reject lands in the SAME table rows above, with
+  the SAME worklist-visibility and cleanup-lane-admission routing automation
+  gets for the identical scenario. Unlike force, local-import does NOT
+  ignore an invalid verdict — "import despite the verdict" is what force is;
+  strict pressing identity is what local-import is (CLAUDE.md decision 3 for
+  #1176). Force-importing the resulting Wrong Matches row remains the
+  already-built escape hatch.
+- **`audit_source_path` is always `None`** (`source_reference_path` is never
+  set for this lane — CLAUDE.md decision 2 for #1176), so `_guard_reject`'s
+  `failed_path = audit_source_path or failed_path` always falls back to the
+  disposable private action copy. No Wrong Matches row this lane writes ever
+  carries the operator's real folder as `failed_path`.
+  Unlike force — whose `failed_path` fallback is always an EXISTING
+  `wrong_matches/`-rooted folder, since force always acts on a row already
+  there — local-import has no pre-existing quarantine source at all, so an
+  unmoved action copy would name a folder with no `wrong_matches` path
+  component, making the row invisible to `open_configured_quarantine_
+  directory` (the gate `enqueue_force_import`, `wrong-match-delete[-group]`,
+  `-converge`, and the autonomous reducer all open the row's path through)
+  and worklist-visible with literally no action able to touch it (issue
+  #1176 PR3 review round, F4). The strict-validation guard therefore
+  relocates the action copy into `<processing_dir>/albums/wrong_matches/`
+  (`lib.import_manifest.move_failed_import_whole` — whole, not curated,
+  since no validated audio manifest exists yet at this pre-evidence guard)
+  BEFORE calling `_guard_reject`, so `failed_path` names that new location.
+  A relocation failure never blocks the rejection itself; it just leaves
+  the audit naming the unmoved path, exactly as it did before this fix.
+- **Never consumes a Wrong Matches source on success or failure** — unlike
+  force's D7 routing above. `scripts/importer.py::
+  _force_job_wrong_match_payload` returns `None` for any job whose
+  `job_type != 'force_import'` BY CONSTRUCTION, so `_dismiss_successful_
+  force_import` / `_cleanup_failed_force_import` are no-ops for every
+  local-import job regardless of outcome — there is no "original quarantine
+  folder" for this lane to consume; a local import's REAL source is the
+  operator's folder, which this lane never deletes, moves, or otherwise
+  mutates. `lib/pipeline_db/import_jobs.py::
+  list_terminal_force_wrong_match_cleanup_jobs` (the D7 crash-recovery
+  replay sweep) stays `job_type = 'force_import'`-only for the same reason —
+  widening it would cost nothing functionally (the same no-op guard applies)
+  but would misstate what the query is for.
+- **The job-scoped private action copy IS reaped on crash**, mirroring D7's
+  OTHER receipt: `lib/pipeline_db/import_jobs.py::
+  list_terminal_force_action_cleanup_jobs` is widened to `job_type IN
+  ('force_import', 'local_import')`, since both retain an identically-shaped
+  private copy under `processing/albums/` (`force-action-<job_id>` /
+  `local-import-action-<job_id>`) that needs the same crash-safe convergence.
+  `scripts/importer.py::_cleanup_terminal_force_action` (the live cleanup
+  call this sweep replays) resolves each job's own prefix from
+  `lib.import_preview.ACTION_COPY_PREFIX_BY_JOB_TYPE` before calling
+  `cleanup_force_action_copy_for_job` — a PR3 review round found this call
+  hardcoding force's own prefix, so every local-import cleanup compared its
+  path against the WRONG job type's deterministic name, raised before ever
+  touching the filesystem, and re-raised identically on every subsequent
+  replay of this same sweep (issue #1176 PR3 review round, F5).
+
 ## The `wrong_match_triage` audit block is reducer-only
 
 `download_log.validation_result.wrong_match_triage` is written by exactly one

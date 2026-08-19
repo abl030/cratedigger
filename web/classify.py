@@ -1711,6 +1711,22 @@ def _classify(
             "Force imported after manual review",
         )
 
+    # --- Local import (issue #1176 PR3): operator points at a folder
+    # already on disk, strictly validated against the request's own
+    # threshold (never overridden, unlike force_import above) — a genuine
+    # accepted import, not a rejection. With no branch here this fell
+    # through to the "Unknown outcome" catch-all below, which renders
+    # badge-rejected (misleadingly red/rejection-styled) for a successful
+    # import — the exact raw-token-fallback shape issue #885 was about, one
+    # layer inside Python rather than at the JS fallback. Shares
+    # badge-force's blue with force_import (both are manual operator
+    # actions), distinguished by label/verdict text.
+    if entry.outcome == "local_import":
+        return _Classification(
+            "Local imported", "badge-force", "#46a",
+            "Imported from a local folder after strict validation",
+        )
+
     # --- Curator ban (#188 follow-up: bad-rip click is just another event) ---
     if entry.outcome == "curator_ban":
         # validation_result JSONB carries hashes_recorded and the banned

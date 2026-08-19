@@ -5,6 +5,7 @@ log rows, denylist). Seam tests verify argv/config wiring.
 """
 
 import os
+import shutil
 import tempfile
 import unittest
 from unittest.mock import MagicMock, create_autospec, patch
@@ -1086,6 +1087,61 @@ class TestDispatchFromDbStorageAuthority(unittest.TestCase):
                     beets_library_db_path=db_path,
                     beets_library_root=library_root,
                 )
+
+
+class TestLocalImportRelocationContainment(unittest.TestCase):
+    """Containment guard on the strict-validation guard's relocation call
+    (issue #1176 PR3 review round, LOW).
+
+    Extracted as its own pure function precisely so it is testable without
+    any ``PipelineDB``/dispatch fixture at all — no fake DB, no advisory
+    lock, no config-reading patch.
+    """
+
+    def _cfg(self, processing_dir: str) -> CratediggerConfig:
+        return CratediggerConfig(
+            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+            pipeline_db_enabled=True,
+            processing_dir=processing_dir,
+        )
+
+    def test_the_jobs_own_action_copy_is_accepted(self) -> None:
+        from lib.dispatch.entry_points import (
+            _assert_local_import_relocation_containment,
+        )
+
+        root = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        processing_dir = os.path.join(root, "processing")
+        action_path = os.path.join(processing_dir, "albums", "local-import-action-1")
+        os.makedirs(action_path)
+
+        # Does not raise.
+        _assert_local_import_relocation_containment(
+            action_path, self._cfg(processing_dir),
+        )
+
+    def test_a_path_outside_processing_albums_is_refused(self) -> None:
+        """Known-bad self-test: the exact Hazard A shape a future caller
+        passing a lane path directly would hit — proves the guard actually
+        trips, not merely that it exists."""
+        from lib.dispatch.entry_points import (
+            _assert_local_import_relocation_containment,
+        )
+        from lib.fs_authority import FilesystemAuthorityError
+
+        root = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        processing_dir = os.path.join(root, "processing")
+        operator_path = os.path.join(root, "operator", "Rip")
+        os.makedirs(operator_path)
+
+        with self.assertRaisesRegex(
+            FilesystemAuthorityError, "outside the private processing tree",
+        ):
+            _assert_local_import_relocation_containment(
+                operator_path, self._cfg(processing_dir),
+            )
 
 
 class TestDispatchFromDbPrecondition(unittest.TestCase):
