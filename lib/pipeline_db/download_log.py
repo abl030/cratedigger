@@ -392,17 +392,31 @@ class _DownloadLogMixin(_PipelineDBBase):
                      # Migration 037 discriminator (``'slskd'`` / ``'youtube'``
                      # / ``'local'`` as of migration 080). Defaults to
                      # ``'slskd'`` so every existing DIRECT caller of this
-                     # method is unaffected. This parameter is NOT the writer
-                     # of the operator-visible TERMINAL ``download_log`` row —
-                     # that row is written by
-                     # ``_insert_terminal_download_audit``
-                     # (lib/pipeline_db/terminal_outcomes.py), which derives
-                     # ``source`` from the linked ``import_jobs.job_type`` in
-                     # its own SQL CASE (widened for ``'local_import'`` ->
-                     # ``'local'`` alongside this migration, issue #1176 PR1
-                     # round 2). ``insert_youtube_running`` is a third, wholly
-                     # separate INSERT — the queue-only ``'youtube_running'``
-                     # writer — and is unrelated to either of the above.
+                     # method is unaffected. TWO writers reach the
+                     # operator-visible TERMINAL ``download_log`` row,
+                     # selected by whether the terminal outcome carries an
+                     # ``import_job_id``:
+                     #   - job-BACKED outcomes never call this method at
+                     #     all — they go through
+                     #     ``_insert_terminal_download_audit``
+                     #     (lib/pipeline_db/terminal_outcomes.py), which
+                     #     derives ``source`` from the linked
+                     #     ``import_jobs.job_type`` in its own SQL CASE
+                     #     (widened for ``'local_import'`` -> ``'local'``
+                     #     alongside this migration, issue #1176 PR1
+                     #     round 2);
+                     #   - job-LESS outcomes (e.g.
+                     #     ``lib/dispatch/outcome_actions.py``'s
+                     #     ``_finalize_request_and_log_rejection``, reached
+                     #     when ``import_job_id`` is absent) call THIS
+                     #     method directly, so THIS parameter genuinely IS
+                     #     the writer for those rows — currently always the
+                     #     ``'slskd'`` default, since no job-less caller
+                     #     passes ``source=`` yet.
+                     # ``insert_youtube_running`` is a third, wholly
+                     # separate INSERT — the queue-only
+                     # ``'youtube_running'`` writer — unrelated to either
+                     # lane above.
                      source: str = "slskd",
                      ) -> int:
         beets_distance_value, beets_scenario_value = derive_validation_log_columns(

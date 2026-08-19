@@ -107,7 +107,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "caller input or mutates album_requests. Issue #1022 projects a "
         "shared row's current-only lineage to NULL on this read surface"
     ),
-    ("lib/pipeline_db/download_log.py", 800, "2d2cba8bbf4b379f"): (
+    ("lib/pipeline_db/download_log.py", 814, "2d2cba8bbf4b379f"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(#867 intentionally added terminal/evidence projection and moved final "
         "classification after same-path DISTINCT). Issue #829 PR4/N3 CHANGED "
@@ -123,19 +123,19 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "shifted this line only — fingerprint unchanged, confirming the SQL "
         "itself is untouched"
     ),
-    ("lib/pipeline_db/download_log.py", 864, "e0154e89026dc8ef"): (
+    ("lib/pipeline_db/download_log.py", 878, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
         "#1077 F2's column removal, and issue #1176 PR1's ``log_download`` "
         "``source`` parameter above each shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 882, "13517e08e7db52f3"): (
+    ("lib/pipeline_db/download_log.py", 896, "13517e08e7db52f3"): (
         "validation key is closed vocabulary and IN list is value placeholders "
         "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
         "#1077 F2's column removal, and issue #1176 PR1's ``log_download`` "
         "``source`` parameter above each shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 899, "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", 913, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary "
         "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
         "#1077 F2's column removal, and issue #1176 PR1's ``log_download`` "
