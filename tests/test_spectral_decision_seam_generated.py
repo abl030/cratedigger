@@ -51,6 +51,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.quality import (
+    EVIDENCE_SUBJECT_INSTALLED,
+    EVIDENCE_SUBJECT_SOURCE,
     SPECTRAL_AFFIRMATIVE_GRADES,
     AlbumQualityEvidence,
     AudioQualityMeasurement,
@@ -65,10 +67,12 @@ from lib.quality import (
     decision_class_kbps,
     full_pipeline_decision_from_evidence,
     interpret_measurement,
+    ladder_class_kbps,
     measurement_rank,
     spectral_classes_comparable,
 )
 from lib.quality.ranks import _codec_family_of
+from lib.quality.spectral_interpretation import _family_from_label
 from tests.helpers import (
     build_parity_candidate_evidence,
     build_parity_current_evidence,
@@ -464,6 +468,15 @@ def _one_sided_bound_licence_failures(
 
     The property drives ``compare_quality`` without a target contract, so
     ``classed.format`` is the production comparison hint.
+
+    Pre-existing gap, not introduced by this PR: this checker's "does the
+    bound bind" clause below uses ``_selected_bitrate`` (the plain
+    tolerance-comparison helper), while production
+    (``_one_sided_spectral_bitrates``) uses
+    ``_selected_quality_bitrate_with_source`` with the caller's V0 probe.
+    The two agree UNLESS a ``lossless_source`` V0 probe is present, which
+    this checker's callers never supply — so this checker cannot patrol a
+    V0-probe-influenced bind/non-bind boundary.
     """
     failures: list[str] = []
     if not classed_spectral.decision_grade:
@@ -474,6 +487,45 @@ def _one_sided_bound_licence_failures(
         failures.append("a side carries an explicit contract label")
     if _codec_family_of(classed.format) != _codec_family_of(raw.format):
         failures.append("sides are not in one codec family")
+    classed_label_family = _family_from_label(classed.format)
+    if (
+        classed_label_family is not None
+        and classed_spectral.codec_family != classed_label_family
+    ):
+        # Restates the ``lib/quality/compare.py::_one_sided_spectral_bitrates``
+        # SELF gate (issue #1204 defect 1, amended invariant). The raw-label
+        # check just above is not enough on its own: a persisted
+        # ``codec_family`` can override the label on the CLASSED side
+        # (``resolve_measured_codec_family`` rule 2), so the classed side's
+        # raw label can agree with the raw side's label while the classed
+        # side's own INTERPRETED family disagrees with that same label —
+        # the exact shape that survived this checker before this clause
+        # existed, and the shape ``quality_rank(classed.format, ...)`` will
+        # actually classify the returned class value through.
+        #
+        # Compared via ``_family_from_label`` — the SAME resolver
+        # ``resolve_measured_codec_family`` uses for labels, not the
+        # ranks-module ``_codec_family_of`` the cross-family clause above
+        # uses (coarser: bare container tokens like "ogg"/"m4a" resolve to
+        # "unknown" there). An unresolvable label is no-opinion, never a
+        # failure — only two RESOLVED families that disagree trip this
+        # clause, mirroring production exactly.
+        #
+        # Deliberately checks ONLY the classed side, never the raw side's
+        # interpreted FAMILY — that family never licenses the bound and
+        # never classifies a returned value; the only thing consumed from
+        # the raw side's interpretation is the required ABSENCE of a class
+        # (the clause below). An earlier version of this checker also
+        # compared the classed side's interpreted family against the RAW
+        # side's interpreted family — review proved that cross-side check
+        # fail-open on the R19 converted-lineage cohort
+        # (``resolve_measured_codec_family`` rule 3: a converted raw row
+        # legitimately resolves to its SOURCE's family while its label
+        # describes the on-disk derivative) — gating on it patrolled a
+        # requirement production does not enforce.
+        failures.append(
+            "classed side's interpreted family disagrees with its own raw "
+            "label")
     if raw.spectral_grade not in SPECTRAL_AFFIRMATIVE_GRADES:
         failures.append("raw encode is not affirmatively known clean")
     if decision_class_kbps(raw_spectral) is not None:
@@ -592,6 +644,80 @@ class TestClampComparabilityCheckerSelfTest(unittest.TestCase):
                 planted, unmeasured, classed, context="planted")
         self.assertIn("unlicensed one-sided bound", str(caught.exception))
 
+    def test_classed_side_interpreted_family_disagrees_with_own_label_trips(self):
+        # The fuzz-shrunk counterexample this fix's own burst found (issue
+        # #1204 defect 1 World D): BOTH sides carry the SAME persisted
+        # ``codec_family="mp3"``, and both raw LABELS agree ("FLAC" ==
+        # "FLAC") — a pre-#1204 raw-label-only gate licenses this pair — but
+        # the classed side's own interpreted family ('mp3') disagrees with
+        # its OWN raw label ('flac'), which is the label
+        # ``quality_rank(classed.format, ...)`` will actually classify its
+        # bound value through. Every OTHER clause passes: the classed side
+        # is decision-grade (cliff_hz=11000 on the mp3 ladder -> class 96),
+        # authorized ("suspect"), neither side carries an explicit contract
+        # label, the raw side is affirmatively clean ("genuine") with no
+        # class of its own, and the class (96) binds under the classed
+        # side's own raw metric (96) — so only the SELF clause can trip here.
+        classed = AudioQualityMeasurement(
+            min_bitrate_kbps=96, avg_bitrate_kbps=96, format="FLAC",
+            is_cbr=False, spectral_grade="suspect",
+            spectral_bitrate_kbps=None, spectral_subject="source",
+            spectral_provenance="measured", cliff_hz=11000,
+            codec_family="mp3",
+        )
+        raw = AudioQualityMeasurement(
+            min_bitrate_kbps=32, avg_bitrate_kbps=32, format="FLAC",
+            is_cbr=False, spectral_grade="genuine",
+            spectral_bitrate_kbps=None, spectral_subject="installed",
+            spectral_provenance="measured", codec_family="mp3",
+        )
+        planted = QualityComparisonBasis(
+            verdict="worse", branch="spectral_candidate_bound",
+            new_rank="lossless", existing_rank="lossless",
+            spectral_clamped=True,
+        )
+        with self.assertRaises(AssertionError) as caught:
+            assert_clamp_requires_comparability(
+                planted, classed, raw, context="planted")
+        self.assertIn(
+            "disagrees with its own raw label", str(caught.exception))
+
+    def test_only_the_classed_side_mismatches_its_label_trips(self):
+        """World D above is not enough on its own (review F5): its RAW side
+        also mismatches its own label (``codec_family="mp3"`` vs "FLAC"), so
+        a SIDE-SWAP mutant — reading ``raw``/``raw_spectral`` instead of
+        ``classed``/``classed_spectral`` in the clause under test — would
+        ALSO trip on World D and survive undetected. This world (issue
+        #1204 defect 1 World C) is the discriminator: ONLY the classed side
+        mismatches — the raw side's own interpretation ('vorbis') agrees
+        with its own label ("Vorbis") — so a side-swapped clause reads a
+        MATCH on the raw side and never appends a failure, while the real
+        clause (reading the classed side) correctly trips.
+        """
+        classed = AudioQualityMeasurement(
+            min_bitrate_kbps=320, avg_bitrate_kbps=320, format="Vorbis",
+            is_cbr=True, spectral_grade="likely_transcode",
+            spectral_bitrate_kbps=None, spectral_subject="source",
+            spectral_provenance="measured", cliff_hz=11000,
+            codec_family="mp3",
+        )
+        raw = AudioQualityMeasurement(
+            min_bitrate_kbps=320, avg_bitrate_kbps=320, format="Vorbis",
+            is_cbr=True, spectral_grade="genuine",
+            spectral_bitrate_kbps=None, spectral_subject="installed",
+            spectral_provenance="measured",
+        )
+        planted = QualityComparisonBasis(
+            verdict="worse", branch="spectral_candidate_bound",
+            new_rank="acceptable", existing_rank="transparent",
+            spectral_clamped=True,
+        )
+        with self.assertRaises(AssertionError) as caught:
+            assert_clamp_requires_comparability(
+                planted, classed, raw, context="planted")
+        self.assertIn(
+            "disagrees with its own raw label", str(caught.exception))
+
     def test_unclamped_basis_is_always_fine(self):
         m = AudioQualityMeasurement(min_bitrate_kbps=192, format="MP3")
         assert_clamp_requires_comparability(
@@ -612,10 +738,49 @@ _FORMAT_LABELS: tuple[str, ...] = (
 )
 
 
+#: Conversion lineage a real row can legitimately carry
+#: (``resolve_measured_codec_family`` rule 3): ``format`` describes the
+#: on-disk DERIVATIVE while ``was_converted_from`` names the pre-conversion
+#: SOURCE container. The R19 cohort (issue #1204 defect 1's amended
+#: invariant) is 15,368 live rows this way; 15,333 of them carry
+#: ``spectral_provenance='carried'`` (the common shape
+#: ``build_parity_current_evidence``'s ``was_converted_from`` param
+#: matches). ``_family_from_label`` RESOLVES ``flac``/``wav``/``wave``/
+#: ``alac``/``aiff``/``aif``/``ape`` (all -> lossless, alac alone 5 live
+#: rows) plus ``mp3``/``aac``/``opus``/``vorbis``/``wma``; it does NOT
+#: resolve ``m4a`` (nor ``mp4``/``ogg``/``oga``) — those are AMBIGUOUS
+#: containers (``_AMBIGUOUS_FORMAT_TOKENS``) and return ``None``. Drawing
+#: "m4a" here therefore exercises the UNRESOLVED-source branch of rule 3
+#: (``MeasuredCodecFamilyResolution(None, "unresolved")``), not a second
+#: resolving token — both branches are real production paths worth
+#: covering.
+_WAS_CONVERTED_FROM: st.SearchStrategy[str | None] = st.one_of(
+    st.none(), st.sampled_from(("flac", "m4a")))
+_SPECTRAL_SUBJECT: st.SearchStrategy[EvidenceSubject] = st.sampled_from(
+    (EVIDENCE_SUBJECT_SOURCE, EVIDENCE_SUBJECT_INSTALLED))
+
+
 @st.composite
 def measurement_pairs(draw) -> tuple[AudioQualityMeasurement, AudioQualityMeasurement]:
-    """Two freely-drawn measurements — any codec against any other codec."""
-    def _side(subject: EvidenceSubject) -> AudioQualityMeasurement:
+    """Two freely-drawn measurements — any codec against any other codec.
+
+    ``spectral_subject`` and ``was_converted_from`` are drawn independently
+    per side, not pinned to the side's comparison role (candidate vs
+    existing) — a pre-#1204-review version of this strategy pinned
+    ``spectral_subject`` to "source"/"installed" by role, which made the
+    R19 converted-lineage shape (``resolve_measured_codec_family`` rule 3:
+    ``spectral_subject == SOURCE`` + ``was_converted_from`` set) reachable
+    only on the candidate side. This widening feeds the CHECKER's world
+    space (``TestClampRequiresComparability`` — the ``spectral_clamped
+    ⇒ licensed`` direction), which it does patrol either way a converted
+    row lands. It does NOT, on its own, patrol the licensed-fires direction
+    a regression like the resurrected CROSS gate needs (reverting this
+    widening alone still passes every test here — review proved it): that
+    is ``licensed_one_sided_worlds`` below, a CONSTRUCTIVE strategy that
+    builds worlds already satisfying every one-sided licence gate,
+    including a converted raw side.
+    """
+    def _side() -> AudioQualityMeasurement:
         fmt = draw(st.sampled_from(_FORMAT_LABELS))
         grade = draw(st.sampled_from(_GRADES))
         bitrate = draw(st.integers(min_value=32, max_value=1200))
@@ -629,12 +794,15 @@ def measurement_pairs(draw) -> tuple[AudioQualityMeasurement, AudioQualityMeasur
             spectral_grade=grade,
             spectral_bitrate_kbps=(
                 draw(_STORED) if grade is not None else None),
-            spectral_subject=subject if grade is not None else None,
+            spectral_subject=(
+                draw(_SPECTRAL_SUBJECT) if grade is not None else None),
             spectral_provenance="measured" if grade is not None else None,
             cliff_hz=draw(_CLIFF_HZ) if grade is not None else None,
             codec_family=family if grade is not None else None,
+            was_converted_from=(
+                draw(_WAS_CONVERTED_FROM) if grade is not None else None),
         )
-    return _side("source"), _side("installed")
+    return _side(), _side()
 
 
 #: The shrunk mixed-derivation world. Both sides are decision-grade MP3
@@ -679,12 +847,132 @@ _CROSS_CODEC_LEGACY_PAIR = (
     ),
 )
 
+#: Issue #1204 defect 1, World A — verbatim from the 2026-08-18/19 overnight
+#: journal (both nights, first run after PR #1187). The EXISTING side's raw
+#: label reads "FLAC", but its persisted ``codec_family="mp3"`` resolves
+#: (rule 2) to a decision-grade MP3-ladder class (cliff_hz=11000 -> 96) —
+#: while the NEW side is a genuinely lossless, unmeasured-class FLAC.
+#:
+#: PRODUCTION (current, post-fix): ``_one_sided_spectral_bitrates`` refuses
+#: this pair via the SELF gate — the EXISTING side's interpreted family
+#: ('mp3') disagrees with its own raw label ('FLAC' -> lossless) — so
+#: ``compare_quality`` never clamps it, whatever its terminal branch turns
+#: out to be.
+#:
+#: THE CHECKER, historically (how the overnight fuzz actually found this,
+#: pre-fix): the pre-#1204 raw-label-only gate compared "FLAC" == "FLAC"
+#: and licensed the bound; both sides' RAW labels were still "FLAC", so
+#: ``quality_rank`` put both at LOSSLESS regardless of the wrongly-bound
+#: values, collapsing the terminal branch to ``lossless_same_rank`` while
+#: still carrying ``spectral_clamped=True`` — the one-sided branch NAME
+#: disappeared, so ``assert_clamp_requires_comparability`` routed through
+#: the SYMMETRIC licence (``spectral_classes_comparable``) instead of
+#: ``_one_sided_bound_licence_failures`` directly, and THAT symmetric check
+#: (the NEW side is not decision-grade) is what actually tripped.
+_ONE_SIDED_LABEL_MASKED_LOSSLESS_CLIFF_PAIR = (
+    AudioQualityMeasurement(
+        min_bitrate_kbps=32, avg_bitrate_kbps=32, format="FLAC", is_cbr=False,
+        spectral_grade="genuine", spectral_bitrate_kbps=None,
+        spectral_subject="source", spectral_provenance="measured",
+        cliff_hz=None, codec_family=None,
+    ),
+    AudioQualityMeasurement(
+        min_bitrate_kbps=96, avg_bitrate_kbps=96, format="FLAC", is_cbr=False,
+        spectral_grade="suspect", spectral_bitrate_kbps=None,
+        spectral_subject="installed", spectral_provenance="measured",
+        cliff_hz=11000, codec_family="mp3",
+    ),
+)
+
+#: Issue #1204 defect 1, World B — the same shape via a legacy STORED bucket
+#: instead of a raw ``cliff_hz``: the EXISTING side's ``codec_family="mp3"``
+#: resolves its stored ``spectral_bitrate_kbps=128`` to a decision-grade
+#: class through the ``stored_bucket`` derivation. Both raw labels are
+#: "FLAC" again, so this is the second overnight-journal shrink of the same
+#: bug, not a second bug.
+_ONE_SIDED_LABEL_MASKED_LOSSLESS_STORED_PAIR = (
+    AudioQualityMeasurement(
+        min_bitrate_kbps=357, avg_bitrate_kbps=357, format="FLAC",
+        is_cbr=False, spectral_grade="marginal", spectral_bitrate_kbps=96,
+        spectral_subject="source", spectral_provenance="measured",
+        cliff_hz=None, codec_family=None,
+    ),
+    AudioQualityMeasurement(
+        min_bitrate_kbps=1130, avg_bitrate_kbps=1130, format="FLAC",
+        is_cbr=False, spectral_grade="likely_transcode",
+        spectral_bitrate_kbps=128, spectral_subject="installed",
+        spectral_provenance="measured", cliff_hz=None, codec_family="mp3",
+    ),
+)
+
+#: Issue #1204 defect 1, World C — the CHECKER-EVADING variant (not from the
+#: journal; constructed to prove the checker lockstep matters). Both raw
+#: labels are "Vorbis" (not "FLAC"), so ``quality_rank`` does NOT collapse
+#: both sides to LOSSLESS: the classed side's bound value (96) and the raw
+#: side's own metric (320) land in different Vorbis rank bands (ACCEPTABLE
+#: vs TRANSPARENT), so the terminal branch KEEPS the one-sided name
+#: ("spectral_candidate_bound") instead of losing it to
+#: ``lossless_same_rank`` the way World A/B do. That means this pair reaches
+#: ``_one_sided_bound_licence_failures`` DIRECTLY — and before this PR's new
+#: clause, every existing clause in that checker passes it (raw labels
+#: "Vorbis" == "Vorbis"), so the checker agreed with the bug by construction.
+#: This is exactly the gap issue #1204 named: "a variant like classed side
+#: format='Vorbis' + codec_family='mp3' vs clean Vorbis raw side keeps the
+#: one-sided branch name and survives the property today."
+_ONE_SIDED_LABEL_MASKED_LOSSY_PAIR = (
+    AudioQualityMeasurement(
+        min_bitrate_kbps=320, avg_bitrate_kbps=320, format="Vorbis",
+        is_cbr=True, spectral_grade="likely_transcode",
+        spectral_bitrate_kbps=None, spectral_subject="source",
+        spectral_provenance="measured", cliff_hz=11000, codec_family="mp3",
+    ),
+    AudioQualityMeasurement(
+        min_bitrate_kbps=320, avg_bitrate_kbps=320, format="Vorbis",
+        is_cbr=True, spectral_grade="genuine", spectral_bitrate_kbps=None,
+        spectral_subject="installed", spectral_provenance="measured",
+        cliff_hz=None, codec_family=None,
+    ),
+)
+
+#: Issue #1204 defect 1, World D — NOT from the journal; a genuine gap found
+#: by this PR's OWN fuzz burst while qualifying an EARLIER, since-dropped
+#: cross-side check (``class_spectral.codec_family != raw_spectral.codec_
+#: family``): both sides here carry the SAME persisted ``codec_family=
+#: "mp3"``, so that (now-removed) check alone would have passed ('mp3' ==
+#: 'mp3') even though BOTH sides' raw labels read "FLAC". The class value
+#: (96, from the NEW side's cliff_hz=11000) is about to be classified via
+#: ``quality_rank("FLAC", 96, cfg)``, which is LOSSLESS regardless of the
+#: number — the exact mis-classification the SELF gate exists to prevent.
+#: Fixed by (and still the reason for) the SELF check:
+#: ``class_spectral.codec_family != class_family`` (the classed side's
+#: interpreted family must match its OWN raw label) — the surviving gate
+#: after the issue's amended invariant dropped the cross-side check as
+#: fail-open on the R19 converted-lineage cohort.
+_ONE_SIDED_SHARED_MISLABELED_FAMILY_PAIR = (
+    AudioQualityMeasurement(
+        min_bitrate_kbps=96, avg_bitrate_kbps=96, format="FLAC", is_cbr=False,
+        spectral_grade="suspect", spectral_bitrate_kbps=None,
+        spectral_subject="source", spectral_provenance="measured",
+        cliff_hz=11000, codec_family="mp3",
+    ),
+    AudioQualityMeasurement(
+        min_bitrate_kbps=32, avg_bitrate_kbps=32, format="FLAC", is_cbr=False,
+        spectral_grade="genuine", spectral_bitrate_kbps=None,
+        spectral_subject="installed", spectral_provenance="measured",
+        cliff_hz=None, codec_family="mp3",
+    ),
+)
+
 
 class TestClampRequiresComparability(unittest.TestCase):
     """Invariant 3 — cutoff Hz is not a common currency."""
 
     @example(pair=_MIXED_BASIS_PAIR)
     @example(pair=_CROSS_CODEC_LEGACY_PAIR)
+    @example(pair=_ONE_SIDED_LABEL_MASKED_LOSSLESS_CLIFF_PAIR)
+    @example(pair=_ONE_SIDED_LABEL_MASKED_LOSSLESS_STORED_PAIR)
+    @example(pair=_ONE_SIDED_LABEL_MASKED_LOSSY_PAIR)
+    @example(pair=_ONE_SIDED_SHARED_MISLABELED_FAMILY_PAIR)
     @given(pair=measurement_pairs())
     def test_compare_quality_never_clamps_a_non_comparable_pair(self, pair):
         new, existing = pair
@@ -716,6 +1004,279 @@ class TestClampRequiresComparability(unittest.TestCase):
                 # ...and the clamp really is withheld end to end.
                 self.assertFalse(
                     compare_quality(new, existing, CFG).spectral_clamped)
+
+    def test_the_label_masked_pins_reach_the_one_sided_licence_gate(self):
+        """Rule C sibling for the four World A/B/C/D one-sided pins.
+
+        Unlike ``_MIXED_BASIS_PAIR``/``_CROSS_CODEC_LEGACY_PAIR`` (both
+        sides decision-grade, refused by the SYMMETRIC licence), each of
+        these pins has exactly ONE decision-grade side and is refused by
+        the ONE-SIDED licence's SELF gate (the classed side's own
+        interpreted family disagrees with its own raw label) — all four,
+        per the issue's amended invariant: an earlier CROSS gate (classed
+        vs raw interpreted families) was dropped after review proved it
+        fail-open on the R19 converted-lineage cohort; SELF alone refuses
+        every one of these worlds. Every pin (a) really would have passed
+        the pre-#1204 raw-label-only gate — same raw ``format`` family on
+        both sides — and (b) really trips the SELF clause, asserted by
+        ATTRIBUTION (calling the real checker and requiring its SELF
+        failure string), not by inferring it from a world property such as
+        "the two interpreted families differ" — a world can have that
+        property for reasons unrelated to the clause under test.
+        """
+        cases = (
+            ("world_a_cliff", _ONE_SIDED_LABEL_MASKED_LOSSLESS_CLIFF_PAIR,
+             False, True, "lossless", "mp3", 96, "lossless_same_rank"),
+            ("world_b_stored", _ONE_SIDED_LABEL_MASKED_LOSSLESS_STORED_PAIR,
+             False, True, "lossless", "mp3", 128, "lossless_same_rank"),
+            ("world_c_vorbis_label", _ONE_SIDED_LABEL_MASKED_LOSSY_PAIR,
+             True, False, "mp3", "vorbis", 96, "metric_tiebreak"),
+            ("world_d_shared_mislabel", _ONE_SIDED_SHARED_MISLABELED_FAMILY_PAIR,
+             True, False, "mp3", "mp3", 96, "lossless_same_rank"),
+        )
+        for (
+            name, pair, new_is_classed, existing_is_classed,
+            new_family, existing_family, expected_class, expected_branch,
+        ) in cases:
+            new, existing = pair
+            with self.subTest(world=name):
+                new_spectral = interpret_measurement(new)
+                existing_spectral = interpret_measurement(existing)
+                self.assertEqual(new_spectral.decision_grade, new_is_classed)
+                self.assertEqual(
+                    existing_spectral.decision_grade, existing_is_classed)
+                classed, raw = (
+                    (new, existing) if new_is_classed else (existing, new))
+                classed_spectral, raw_spectral = (
+                    (new_spectral, existing_spectral) if new_is_classed
+                    else (existing_spectral, new_spectral))
+                self.assertEqual(
+                    decision_class_kbps(classed_spectral), expected_class)
+                # (a) the raw LABEL family is identical on both sides — the
+                # pre-#1204 gate has nothing to refuse this pair on.
+                self.assertEqual(
+                    _codec_family_of(new.format), _codec_family_of(existing.format))
+                self.assertEqual(new_spectral.codec_family, new_family)
+                self.assertEqual(existing_spectral.codec_family, existing_family)
+                # (b) attribution: the real checker names the SELF clause.
+                failures = _one_sided_bound_licence_failures(
+                    classed, raw, classed_spectral, raw_spectral)
+                self.assertIn(
+                    "classed side's interpreted family disagrees with its "
+                    "own raw label", failures)
+                # ...and, post-fix, the clamp is withheld end to end and the
+                # decision lands on the expected unclamped terminal branch.
+                basis = compare_quality(new, existing, CFG)
+                self.assertFalse(basis.spectral_clamped)
+                self.assertEqual(basis.branch, expected_branch)
+
+
+@st.composite
+def licensed_one_sided_worlds(
+    draw,
+) -> tuple[AudioQualityMeasurement, AudioQualityMeasurement, str]:
+    """Construct a world that passes EVERY one-sided licence gate BY
+    CONSTRUCTION, for both roles.
+
+    Invariant 3's missing POSITIVE direction (review F4):
+    ``assert_clamp_requires_comparability`` is one-directional —
+    ``spectral_clamped ⇒ licensed`` — so it can NEVER catch a regression
+    that withholds MORE than production actually withholds; over-refusing
+    is always 'safe' to a checker that only ever asks "if clamped, was it
+    licensed". Only a property that asserts the bound actually FIRES can
+    catch that shape — exactly the resurrected-CROSS regression review
+    found: before this property existed, the R19 must-still-work pin below
+    was the ONLY thing killing that mutant.
+
+    The classed side is built to satisfy every gate: its interpreted
+    family (resolved from its bare label, no persisted ``codec_family``
+    override) agrees with its own label, its grade authorizes an
+    accusation, and its cliff derives a class that binds under its own raw
+    metric. The raw side is independently free to be a converted row
+    (``was_converted_from`` set, resolving through a DIFFERENT family than
+    its own label via rule 3) — SELF must never refuse on that basis; only
+    a resurrected CROSS gate would.
+    """
+    class_is_new = draw(st.booleans())
+    family: CodecFamily = draw(st.sampled_from(("mp3", "vorbis")))
+    label = "MP3" if family == "mp3" else "Vorbis"
+    grade = draw(st.sampled_from(("suspect", "likely_transcode")))
+    cliff_hz = draw(st.integers(min_value=11000, max_value=22000))
+    class_value = ladder_class_kbps(family, cliff_hz)
+    assert class_value is not None  # mp3/vorbis always bucket somewhere
+    raw_grade = draw(st.sampled_from(("genuine", "marginal")))
+    raw_bitrate = draw(st.integers(min_value=32, max_value=1200))
+    # Never below raw_bitrate: when class_is_new, a transcode-grade "new"
+    # with a lower REAL (unclamped) rank than a non-transcode "existing"
+    # is refused by ``_transcode_candidate_real_rank_regresses`` BEFORE
+    # ``_one_sided_spectral_bitrates`` ever runs — a real, earlier gate
+    # this property must construct AROUND, not one it exists to patrol.
+    class_bitrate = (
+        max(class_value, raw_bitrate)
+        + draw(st.integers(min_value=0, max_value=400)))
+    raw_was_converted_from = draw(st.one_of(
+        st.none(),
+        st.sampled_from(("flac", "m4a", "aac", "opus", "vorbis", "mp3"))))
+    raw_subject = (
+        EVIDENCE_SUBJECT_SOURCE if raw_was_converted_from is not None
+        else draw(_SPECTRAL_SUBJECT))
+
+    classed_measurement = AudioQualityMeasurement(
+        min_bitrate_kbps=class_bitrate, avg_bitrate_kbps=class_bitrate,
+        format=label, is_cbr=draw(st.booleans()),
+        spectral_grade=grade, cliff_hz=cliff_hz,
+        spectral_subject=EVIDENCE_SUBJECT_SOURCE,
+        spectral_provenance="measured",
+    )
+    raw_measurement = AudioQualityMeasurement(
+        min_bitrate_kbps=raw_bitrate, avg_bitrate_kbps=raw_bitrate,
+        format=label, is_cbr=draw(st.booleans()),
+        spectral_grade=raw_grade,
+        spectral_subject=raw_subject, spectral_provenance="measured",
+        was_converted_from=raw_was_converted_from,
+    )
+    if class_is_new:
+        return classed_measurement, raw_measurement, "spectral_candidate_bound"
+    return raw_measurement, classed_measurement, "spectral_existing_bound"
+
+
+#: The reviewer's exact R19 repro, pinned as an ``@example`` so the
+#: converted-raw-with-differing-family shape is always tested
+#: deterministically, not left to fuzz probability.
+_R19_LICENSED_EXAMPLE = (
+    AudioQualityMeasurement(
+        min_bitrate_kbps=320, avg_bitrate_kbps=320, format="MP3",
+        is_cbr=True, spectral_grade="likely_transcode",
+        spectral_bitrate_kbps=160, spectral_subject="source",
+        spectral_provenance="measured",
+    ),
+    AudioQualityMeasurement(
+        min_bitrate_kbps=245, avg_bitrate_kbps=245, format="MP3",
+        is_cbr=False, spectral_grade="genuine",
+        was_converted_from="flac", spectral_subject="source",
+        spectral_provenance="carried",
+    ),
+    "spectral_candidate_bound",
+)
+
+
+class TestLicensedOneSidedWorldsAlwaysFire(unittest.TestCase):
+    """Invariant 3's missing POSITIVE direction — see the strategy above."""
+
+    @example(world=_R19_LICENSED_EXAMPLE)
+    @given(world=licensed_one_sided_worlds())
+    def test_a_licensed_one_sided_world_always_fires(self, world):
+        new, existing, expected_branch = world
+        basis = compare_quality(new, existing, CFG)
+        self.assertTrue(
+            basis.spectral_clamped,
+            f"licensed world was NOT clamped: new={new!r} existing={existing!r} "
+            f"basis={basis!r}")
+        self.assertEqual(basis.branch, expected_branch)
+
+
+class TestR19ConvertedLineageMustStillWork(unittest.TestCase):
+    """Must-still-work: dropping the CROSS gate did not disarm SELF.
+
+    Issue #1204 defect 1's amended invariant: an earlier version of
+    ``_one_sided_spectral_bitrates`` also required the RAW side's
+    interpreted family to match the classed side's (the CROSS gate).
+    Review proved that fail-open on the R19 converted-lineage cohort
+    (15,368 live rows; 134 eligible as the known-clean raw side of this
+    exact comparison; 8 of their requests currently ``wanted``):
+    ``resolve_measured_codec_family`` rule 3 legitimately resolves a
+    converted row (``spectral_subject='source'`` + ``was_converted_from``
+    set) to its SOURCE's family while its ``format`` label still names the
+    on-disk derivative — CROSS then refused a licensed bound the ORIGINAL
+    raw-label-only gate (and today's SELF-only gate) both license, letting
+    a fake CBR-320/class-160 candidate displace a genuine converted
+    MP3-245 copy. These pins drive the REAL decider
+    (``full_pipeline_decision_from_evidence``), not ``compare_quality``
+    directly, because the consequence that matters is what the pipeline
+    DECIDES to do, not an intermediate comparison basis.
+    """
+
+    def test_the_r19_shape_correctly_rejects_the_fake_transcode(self):
+        """Reviewer's exact repro, both directions of "the shape holds"."""
+        fake_candidate = build_parity_candidate_evidence(
+            is_flac=False, native_format="MP3", native_codec="mp3",
+            min_bitrate=320, avg_bitrate=320, is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate=160,
+        )
+        converted_have = build_parity_current_evidence(
+            min_bitrate=245, avg_bitrate=245, format="MP3", is_cbr=False,
+            spectral_grade="genuine", was_converted_from="flac",
+        )
+        assert converted_have is not None
+        decision = full_pipeline_decision_from_evidence(
+            fake_candidate, converted_have)
+        basis = decision.get("comparison_basis")
+        assert isinstance(basis, dict)
+        self.assertEqual(basis.get("branch"), "spectral_candidate_bound")
+        self.assertEqual(basis.get("verdict"), "worse")
+        self.assertFalse(decision.get("imported"))
+
+    def test_the_control_documents_the_like_shape_without_conversion(self):
+        """Same pair, ``was_converted_from=None`` — the outcome must not move.
+
+        NOT a general claim that conversion lineage is never
+        decision-relevant — it can be, because lineage decides which SIDE
+        of a comparison gets classed at all (review F2): a candidate MP3
+        245 genuine versus a HAVE MP3 320 suspect/cliff-11000 flips from
+        `spectral_existing_bound`/better when the HAVE is native to
+        `rank`/worse when the SAME HAVE is converted-from-FLAC — because a
+        converted row's interpretation runs through its LOSSLESS source
+        (rule 3), and lossless interpretations never reach
+        ``decision_grade=True`` (155 ``suspect`` + 453 ``likely_transcode``
+        live rows sit in that exact shape). This test isolates the
+        narrower claim the R19 pin actually needs: with an affirmatively
+        ``genuine`` grade, the HAVE has no class in EITHER lineage — SELF
+        never reads the raw side's interpretation, so there is nothing left
+        that COULD move the outcome between native and converted for this
+        specific pair.
+        """
+        fake_candidate = build_parity_candidate_evidence(
+            is_flac=False, native_format="MP3", native_codec="mp3",
+            min_bitrate=320, avg_bitrate=320, is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate=160,
+        )
+        native_have = build_parity_current_evidence(
+            min_bitrate=245, avg_bitrate=245, format="MP3", is_cbr=False,
+            spectral_grade="genuine",
+        )
+        assert native_have is not None
+        decision = full_pipeline_decision_from_evidence(
+            fake_candidate, native_have)
+        basis = decision.get("comparison_basis")
+        assert isinstance(basis, dict)
+        self.assertEqual(basis.get("branch"), "spectral_candidate_bound")
+        self.assertEqual(basis.get("verdict"), "worse")
+        self.assertFalse(decision.get("imported"))
+
+    def test_a_plainly_licensed_one_sided_world_fires_in_both_roles(self):
+        """SELF-only still licenses the ordinary one-sided bound either way.
+
+        Dropping CROSS must not have weakened the ordinary, non-anomalous
+        case: a decision-grade MP3 class against a known-clean same-family
+        MP3 raw side still binds whichever side carries the class.
+        """
+        classed_mp3 = AudioQualityMeasurement(
+            min_bitrate_kbps=320, avg_bitrate_kbps=320, format="MP3",
+            is_cbr=True, spectral_grade="suspect",
+            spectral_bitrate_kbps=160, spectral_subject="source",
+            spectral_provenance="measured",
+        )
+        clean_mp3 = AudioQualityMeasurement(
+            min_bitrate_kbps=128, avg_bitrate_kbps=128, format="MP3",
+            is_cbr=True, spectral_grade="genuine",
+            spectral_subject="installed", spectral_provenance="measured",
+        )
+        candidate_bound = compare_quality(classed_mp3, clean_mp3, CFG)
+        self.assertTrue(candidate_bound.spectral_clamped)
+        self.assertEqual(candidate_bound.branch, "spectral_candidate_bound")
+        existing_bound = compare_quality(clean_mp3, classed_mp3, CFG)
+        self.assertTrue(existing_bound.spectral_clamped)
+        self.assertEqual(existing_bound.branch, "spectral_existing_bound")
 
 
 # ===========================================================================

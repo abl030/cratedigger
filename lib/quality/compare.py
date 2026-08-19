@@ -27,6 +27,7 @@ from lib.quality.ranks import (
 )
 from lib.quality.spectral_interpretation import (
     SpectralInterpretation,
+    _family_from_label,
     decision_class_kbps,
     interpret_measurement,
     spectral_classes_comparable,
@@ -338,10 +339,17 @@ def _one_sided_spectral_bitrates(
 
     ``_shared_spectral_bitrates`` still owns two decision-grade classes. This
     helper is exactly-one-class only and preserves the Fall 2007 safeguards:
-    the raw side is affirmatively known non-transcode, both sides are bare
-    measurements in one codec family, and the class actually bounds its own
-    raw metric. Unmeasured, explicit-label, inadmissible-codec, cross-family,
-    and non-clean worlds withhold this comparison.
+    the raw side is affirmatively known non-transcode AND carries no class of
+    its own — the only two facts this comparison consumes from the raw
+    side's spectral interpretation; never its FAMILY (see the SELF gate
+    below for why) — both sides are bare measurements in one codec family by
+    raw LABEL (the cross-family check below), the CLASSED side's own
+    interpretation additionally must agree with the label ``quality_rank``
+    will actually consume for it (SELF gate, issue #1204 defect 1's amended
+    invariant), and the class actually bounds its own raw metric.
+    Unmeasured, explicit-label, inadmissible-codec, cross-family (by label),
+    self-inconsistent-class (SELF), and non-clean worlds withhold this
+    comparison.
 
     Returns effective new/existing values and their truthful branch name, or
     None when a gate declines. The caller applies ordinary rank and
@@ -363,6 +371,67 @@ def _one_sided_spectral_bitrates(
         return None
     class_family = _codec_family_of(class_format)
     if class_family != _codec_family_of(raw_format):
+        return None
+    # SELF gate (issue #1204 defect 1, amended by the issue-comment
+    # invariant amendment after review found the original two-gate design
+    # fail-open, then hardened once more after review found a vocabulary
+    # mismatch below): the CLASS this bound licenses came from the
+    # codec-aware INTERPRETATION (``decision_class_kbps``/``class_spectral``),
+    # not from a label. SELF must gate on exactly the label ``quality_rank``
+    # will actually consume for the returned value — that is ``class_format``
+    # (``new_format`` when the classed side is the candidate, which is the
+    # TARGET CONTRACT's format when one is supplied, not necessarily
+    # ``new.format`` itself — "its own raw label" undersells this when a
+    # target contract is in play), never a re-derivation that assumes no
+    # target contract exists.
+    #
+    # Compared in ONE vocabulary — ``_family_from_label``, the SAME resolver
+    # ``resolve_measured_codec_family`` itself uses for labels — not the
+    # ranks-module ``_codec_family_of`` the cross-family check above uses:
+    # that vocabulary is coarser (bare container tokens like "ogg"/"m4a"
+    # resolve to "unknown" there, never to a real family), so comparing
+    # across the two vocabularies spuriously refused a LEGITIMATE bound
+    # whenever the label was a bare container token with a genuinely correct
+    # persisted ``codec_family`` (e.g. ``format="ogg"``,
+    # ``codec_family="vorbis"`` — Vorbis-in-Ogg is real and common;
+    # ``_codec_family_of("ogg")`` is "unknown" and would never match it) —
+    # the same label-vs-interpretation defect class this whole gate exists
+    # to fix, in the PROTECTION-REMOVING direction. An unresolvable label
+    # (``_family_from_label`` returns ``None`` — ogg/m4a/mp4/oga) has no
+    # opinion of its own and never triggers a refusal here; only two
+    # RESOLVED families that actively disagree do. ``class_spectral
+    # .codec_family`` is always resolved once a class exists (only the
+    # ladder codecs mp3/vorbis ever reach ``decision_grade=True``), so this
+    # gate's only source of ``None`` is the label side.
+    #
+    # This checks ONLY the classed side, deliberately never the raw side's
+    # interpreted FAMILY — that family never licenses this bound and never
+    # classifies a returned value; the only thing this comparison consumes
+    # from the raw side's interpretation is the required ABSENCE of a class
+    # (checked separately below). An earlier version of this gate also
+    # required the raw side's interpreted family to match the classed
+    # side's — which proved fail-open on the R19 converted-lineage cohort
+    # (15,368 live rows): ``resolve_measured_codec_family`` rule 3
+    # legitimately resolves a converted row (``spectral_subject='source'``
+    # + ``was_converted_from`` set) to its SOURCE's family while its label
+    # still names the on-disk derivative — e.g. an on-disk "MP3" wearing its
+    # pre-conversion FLAC source's clean spectral verdict. Gating the raw
+    # side on that interpretation let a fake CBR-320/class-160 candidate
+    # displace a genuine converted MP3-245 copy (`spectral_candidate_bound`/
+    # worse/`imported=False` correctly, until the extra raw-side gate
+    # flipped it to `rank`/better/`imported=True`). Rule 2 (a persisted
+    # ``codec_family`` capture overriding the label) is the rarer ANOMALY
+    # this SELF gate exists to catch on the CLASSED side; rule 3 (conversion
+    # lineage) is the DOMINANT legitimate producer of the same label/
+    # interpretation divergence, but only ever relevant on the RAW side of
+    # this comparison — exactly why the raw side is never gated on it.
+    # Withholding is never a rejection; the caller falls through to rank and
+    # the other evidence exactly as any other refusal here does.
+    class_label_family = _family_from_label(class_format)
+    if (
+        class_label_family is not None
+        and class_spectral.codec_family != class_label_family
+    ):
         return None
     # The known-clean grade is intentionally read raw. An AAC cliff cannot
     # produce a class, but an affirmative ``genuine`` verdict can still be

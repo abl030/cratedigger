@@ -46,6 +46,7 @@ from lib.quality import (
     DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
     DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
     DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
+    EVIDENCE_PROVENANCE_CARRIED,
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
@@ -902,11 +903,25 @@ def build_parity_current_evidence(
     cliff_hz: int | None = None,
     codec_family: CodecFamily | None = None,
     filetype_band: str | None = None,
+    was_converted_from: str | None = None,
 ) -> AlbumQualityEvidence | None:
     """Build the existing-album evidence row for parity scenarios.
 
     Returns ``None`` when ``min_bitrate`` is ``None`` — the fresh-request
     shape where no current album exists.
+
+    ``was_converted_from`` builds the R19 converted-lineage shape (issue
+    #1204 defect 1's amended invariant): a row whose ``format`` names the
+    on-disk DERIVATIVE (e.g. an MP3 converted from FLAC) but whose spectral
+    facts describe the pre-conversion SOURCE. Matching production
+    (``resolve_measured_codec_family``'s ``converted`` branch requires
+    BOTH), setting it also switches ``spectral_subject`` from the ordinary
+    installed-row default to ``EVIDENCE_SUBJECT_SOURCE`` and
+    ``spectral_provenance`` to ``EVIDENCE_PROVENANCE_CARRIED`` — the
+    overwhelming majority live shape for this R19 cohort specifically
+    (15,333 of 15,368 rows; this is NOT the same population as the
+    general verified-lossless-proof carried-provenance count elsewhere
+    in this file).
     """
     if min_bitrate is None:
         return None
@@ -930,16 +945,27 @@ def build_parity_current_evidence(
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate,
             spectral_subject=(
-                EVIDENCE_SUBJECT_INSTALLED
+                (
+                    EVIDENCE_SUBJECT_SOURCE
+                    if was_converted_from is not None
+                    else EVIDENCE_SUBJECT_INSTALLED
+                )
                 if spectral_grade is not None
                 else None
             ),
             spectral_provenance=(
-                EVIDENCE_PROVENANCE_MEASURED
+                (
+                    EVIDENCE_PROVENANCE_CARRIED
+                    if was_converted_from is not None
+                    else EVIDENCE_PROVENANCE_MEASURED
+                )
                 if spectral_grade is not None else None
             ),
             cliff_hz=cliff_hz if spectral_grade is not None else None,
             codec_family=codec_family if spectral_grade is not None else None,
+            was_converted_from=(
+                was_converted_from if spectral_grade is not None else None
+            ),
             spectral_measurement_version=(
                 2
                 if spectral_grade is not None
