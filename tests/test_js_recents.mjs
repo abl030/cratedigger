@@ -229,7 +229,7 @@ console.log('renderImportItems() shows server-classified uncertain preview failu
 {
   const html = __test__.renderImportItems([{
     id: 78,
-    job_type: 'manual_import',
+    job_type: 'force_import',
     status: 'failed',
     preview_status: 'uncertain',
     badge: 'Uncertain',

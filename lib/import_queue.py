@@ -20,6 +20,14 @@ IMPORT_JOB_AUTOMATION = "automation_import"
 # the existing per-job pipeline (preview measurement, quality gate,
 # beets distance, wrong-matches OR auto-import, ``mark_imported_with_rescue``).
 IMPORT_JOB_YOUTUBE = "youtube_import"
+# Local import lane (PR1 of issue #1176). Vocabulary-only for now: no writer
+# enqueues this job_type yet (PR2 adds the path authority, PR3 adds the lane
+# that actually writes it). A local import has no originating slskd transfer
+# or YT worker behind it — the operator names a request ID and a folder
+# already on disk. It has no ``download_log`` row to dedupe against either
+# (unlike ``force_import``/``youtube_import``), so its dedupe key and its
+# partial unique index (migration 080) are both keyed on the request instead.
+IMPORT_JOB_LOCAL = "local_import"
 IMPORT_JOB_RECOVERY_REQUIRED = "recovery_required"
 IMPORT_PREVIEW_REQUEUE_INITIAL_DELAY = timedelta(minutes=1)
 IMPORT_PREVIEW_REQUEUE_MAX_DELAY = timedelta(minutes=30)
@@ -60,6 +68,7 @@ IMPORT_JOB_TYPES = frozenset({
     IMPORT_JOB_FORCE,
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_YOUTUBE,
+    IMPORT_JOB_LOCAL,
 })
 IMPORT_JOB_STATUSES = frozenset({
     "queued",
@@ -159,8 +168,23 @@ class YoutubeImportPayload(msgspec.Struct, kw_only=True, forbid_unknown_fields=T
     download_log_id: _PositiveInt
 
 
+class LocalImportPayload(msgspec.Struct, kw_only=True, forbid_unknown_fields=True):
+    """The strict JSONB contract for a ``local_import`` queue row.
+
+    No ``download_log_id``: unlike ``force_import``/``youtube_import``, a
+    local import has no originating ``download_log`` row — the operator
+    names a request ID and a folder already on disk.
+    """
+
+    source_path: _NonEmptyStr
+    request_id: _PositiveInt
+
+
 ImportJobPayload = (
-    ForceImportPayload | AutomationImportPayload | YoutubeImportPayload
+    ForceImportPayload
+    | AutomationImportPayload
+    | YoutubeImportPayload
+    | LocalImportPayload
 )
 
 
@@ -173,6 +197,8 @@ def decode_import_job_payload(job_type: str, value: Any) -> ImportJobPayload:
         return msgspec.convert(value, type=AutomationImportPayload)
     if job_type == IMPORT_JOB_YOUTUBE:
         return msgspec.convert(value, type=YoutubeImportPayload)
+    if job_type == IMPORT_JOB_LOCAL:
+        return msgspec.convert(value, type=LocalImportPayload)
     raise AssertionError(f"validated unknown import job type: {job_type}")
 
 
@@ -514,6 +540,19 @@ def youtube_import_dedupe_key(download_log_id: int) -> str:
     return f"{IMPORT_JOB_YOUTUBE}:download_log:{int(download_log_id)}"
 
 
+def local_import_dedupe_key(request_id: int) -> str:
+    """Dedupe-key for a ``local_import`` job_type row.
+
+    A local import has no originating ``download_log`` row to key on
+    (unlike ``force_import``/``youtube_import``) — the operator names a
+    request ID and a folder directly. The request is the natural grain,
+    matching the partial unique index ``one_active_local_import_per_request``
+    (migration 080), which is also request-scoped rather than
+    download_log-scoped.
+    """
+    return f"{IMPORT_JOB_LOCAL}:request:{int(request_id)}"
+
+
 def force_import_payload(
     *,
     download_log_id: int,
@@ -555,4 +594,26 @@ def youtube_import_payload(
         request_id=request_id,
         browse_id=browse_id,
         download_log_id=download_log_id,
+    ))
+
+
+def local_import_payload(
+    *,
+    source_path: str,
+    request_id: int,
+) -> dict[str, object]:
+    """Build the payload for a ``local_import`` job.
+
+    The positive request ID and nonempty source path are validated from the
+    same Struct immediately before the queue write, mirroring every other
+    ``*_payload`` builder in this module. Typed ``dict[str, object]`` rather
+    than this module's usual ``dict[str, Any]`` (the typing-ratchet
+    convergence rule in code-quality.md forbids adding a NEW ``Any``
+    occurrence to a file without also reducing ten pre-existing ones in the
+    same PR; a fully-decoded, JSON-shaped payload dict has no need for
+    ``Any``'s permissiveness anyway — ``object`` is the more precise type).
+    """
+    return _payload_to_builtins(LocalImportPayload(
+        source_path=source_path,
+        request_id=request_id,
     ))

@@ -4250,6 +4250,7 @@ class FakePipelineDB:
                      existing_v0_probe_median_bitrate: int | None = None,
                      transfer_detail: Any = None,
                      source_download_log_id: int | None = None,
+                     source: str = "slskd",
                      **extra: Any) -> int:
         """Record a download_log row.
 
@@ -4333,6 +4334,7 @@ class FakePipelineDB:
             id=new_log_id,
             candidate_contributor_usernames=normalized_contributors,
             source_download_log_id=source_download_log_id,
+            source=source,
             extra=auxiliary,
         ))
         return new_log_id
@@ -6680,8 +6682,19 @@ class FakePipelineDB:
                 job.get("request_id") == request_id
                 and job.get("status") == "completed"
                 and job.get("job_type") in (
-                    "automation_import", "force_import", "manual_import",
-                    "youtube_import",
+                    # Mirrors _CAPTURE_AND_EVIDENCE_SELECT
+                    # (lib/pipeline_db/requests.py): migration 080 (issue
+                    # #1176 PR1) retired the job_type value 'manual_import'
+                    # entirely — it is no longer even historically valid on
+                    # import_jobs.job_type (contrast with the download_log
+                    # outcome of the same name, below, which is unaffected).
+                    # PR1 round 2 added 'local_import' here: a successful
+                    # local import genuinely is a capture (the album was
+                    # acquired and installed), so it must confer
+                    # has_captured_history exactly as force_import and
+                    # youtube_import already do.
+                    "automation_import", "force_import", "youtube_import",
+                    "local_import",
                 )
                 for job in self._import_jobs
             )

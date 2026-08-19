@@ -107,7 +107,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "caller input or mutates album_requests. Issue #1022 projects a "
         "shared row's current-only lineage to NULL on this read surface"
     ),
-    ("lib/pipeline_db/download_log.py", 784, "2d2cba8bbf4b379f"): (
+    ("lib/pipeline_db/download_log.py", 814, "2d2cba8bbf4b379f"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(#867 intentionally added terminal/evidence projection and moved final "
         "classification after same-path DISTINCT). Issue #829 PR4/N3 CHANGED "
@@ -119,22 +119,27 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "``e.audio_corrupt AS candidate_audio_corrupt`` projection — an "
         "incidental fact about linked evidence used to hide an otherwise-kept, "
         "visible row, which the removal fixes; still read-only, no new caller "
-        "input"
+        "input. Issue #1176 PR1's ``log_download`` ``source`` parameter above "
+        "shifted this line only — fingerprint unchanged, confirming the SQL "
+        "itself is untouched"
     ),
-    ("lib/pipeline_db/download_log.py", 848, "e0154e89026dc8ef"): (
+    ("lib/pipeline_db/download_log.py", 878, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary "
-        "(issue #835, issue #829 PR4, the source-semantic proof gate, and "
-        "issue #1077 F2's column removal above each shifted this line only)"
+        "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
+        "#1077 F2's column removal, and issue #1176 PR1's ``log_download`` "
+        "``source`` parameter above each shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 866, "13517e08e7db52f3"): (
+    ("lib/pipeline_db/download_log.py", 896, "13517e08e7db52f3"): (
         "validation key is closed vocabulary and IN list is value placeholders "
-        "(issue #835, issue #829 PR4, the source-semantic proof gate, and "
-        "issue #1077 F2's column removal above each shifted this line only)"
+        "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
+        "#1077 F2's column removal, and issue #1176 PR1's ``log_download`` "
+        "``source`` parameter above each shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 883, "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", 913, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary "
-        "(issue #835, issue #829 PR4, the source-semantic proof gate, and "
-        "issue #1077 F2's column removal above each shifted this line only)"
+        "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
+        "#1077 F2's column removal, and issue #1176 PR1's ``log_download`` "
+        "``source`` parameter above each shifted this line only)"
     ),
     ("lib/pipeline_db/import_jobs.py", 590, "ecf3d1844c67f653"): (
         "optional job filter is a fixed literal WHERE clause "
@@ -178,7 +183,15 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "array parameters, then filters strict identities in Python; the "
         "Library contract no longer selects structured CD proof while the "
         "pointed current-evidence release-id gate remains for exact "
-        "verified/provisional facts"
+        "verified/provisional facts. Issue #1176 PR1 round 1 retired the "
+        "dead ``job_type = 'manual_import'`` arm from the embedded "
+        "``_CAPTURE_AND_EVIDENCE_SELECT`` predicate (zero live import_jobs "
+        "rows ever carried it; migration 080 also drops it from the "
+        "job_type CHECK); round 2 added ``'local_import'`` to the same list "
+        "(a successful local import is a capture too, decided in review) — "
+        "net line position unchanged from before PR1. Neither edit touches "
+        "the interpolation site itself, so the fingerprint (which "
+        "normalizes the ``{dynamic}`` slot) is unaffected by either change"
     ),
     ("lib/pipeline_db/requests.py", 356, "fc57192d01989af4"): (
         "MusicBrainz request lookup uses the fixed shared presentation "
@@ -227,26 +240,40 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "projections with a static UUID-aware fallback predicate; the Library "
         "contract no longer selects structured CD proof while the pointed "
         "current-evidence release-id gate remains for exact verified/provisional "
-        "facts"
+        "facts. Issue #1176 PR1 round 1 retired the dead "
+        "``job_type = 'manual_import'`` arm from the embedded "
+        "``_CAPTURE_AND_EVIDENCE_SELECT`` predicate; round 2 added "
+        "``'local_import'`` to the same list — the interpolation site is "
+        "unchanged throughout, so the fingerprint is unaffected by either "
+        "change"
     ),
     ("lib/pipeline_db/requests.py", 1834, "f59ded429883f2ec"): (
         "artist-name fallback uses the fixed presentation and capture/evidence "
         "projections with one escaped value placeholder; the Library contract "
         "no longer selects structured CD proof while the pointed current-evidence "
-        "release-id gate remains for exact verified/provisional facts"
+        "release-id gate remains for exact verified/provisional facts. Issue "
+        "#1176 PR1 round 1 retired the dead ``job_type = 'manual_import'`` arm "
+        "from the embedded ``_CAPTURE_AND_EVIDENCE_SELECT`` predicate; round 2 "
+        "added ``'local_import'`` to the same list — the interpolation site is "
+        "unchanged throughout, so the fingerprint is unaffected by either change"
     ),
     ("lib/pipeline_db/requests.py", 1865, "fdbd2821ab3cbb5a"): (
         "attempt kind is validated against the fixed retry-counter vocabulary "
         "and every value remains a direct placeholder; an attached processing "
         "owner makes the compare-and-set a zero-write conflict"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1141, "ebb50341a8d836f6"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1142, "ebb50341a8d836f6"): (
         "processing-terminal metadata keys use the validated request-field "
         "vocabulary while exact request and owner predicates retain authority; "
         "the static owner-clearing status CAS remains the final request write "
         "(review #2: identity moved because the enclosing method now reads "
         "retry-counter policy from the canonical VALID_TRANSITIONS table "
-        "instead of zeroing counters inline — no SQL-shape change here)"
+        "instead of zeroing counters inline — no SQL-shape change here. Issue "
+        "#1176 PR1 round 2 added a ``WHEN job_type = 'local_import'`` arm to "
+        "``_insert_terminal_download_audit``'s unrelated download_log-facing "
+        "CASE, earlier in this same file — that statement never mentions "
+        "album_requests and is outside this audit's scope, but it shifted "
+        "this line only)"
     ),
 }
 
@@ -283,7 +310,7 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 457, "9b11fb540dfe44e3"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1168, "6674811fa5453c86"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1169, "6674811fa5453c86"): (
         "automation terminalization performs the final exact processing-owner "
         "CAS and clears the owner in the same static request write "
         "(review #2: retry counters are now policy-derived placeholders read "
@@ -291,7 +318,10 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "zeros, so `processing -> wanted` retains them and automatic backoff "
         "keeps growing; the exact `status = 'processing' AND "
         "active_automation_import_job_id = %s` predicate and the "
-        "owner-clearing final write are unchanged)"
+        "owner-clearing final write are unchanged. Issue #1176 PR1 round 2's "
+        "``local_import`` CASE arm in ``_insert_terminal_download_audit``, "
+        "earlier in this file, shifted this line only — that statement is "
+        "download_log-facing and never mentions album_requests)"
     ),
     ("lib/pipeline_db/requests.py", 530, "a2f3083f8cbe8885"): (
         "Replace holds the row lock and CASes the captured active source status "

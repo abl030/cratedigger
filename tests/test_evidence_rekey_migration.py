@@ -215,7 +215,7 @@ class _Mig021CaseBase(unittest.TestCase):
             INSERT INTO import_jobs (
                 job_type, status, request_id, payload, preview_status
             )
-            VALUES ('manual_import', 'queued', %s, %s::jsonb, 'waiting')
+            VALUES ('force_import', 'queued', %s, %s::jsonb, 'waiting')
             RETURNING id
             """,
             (request_id, json.dumps({"failed_path": failed_path})),
@@ -518,7 +518,7 @@ class TestMigration021Orphans(_Mig021CaseBase):
                 job_type, status, payload, preview_status, request_id
             )
             VALUES (
-                'manual_import', 'queued', %s::jsonb, 'waiting', NULL
+                'force_import', 'queued', %s::jsonb, 'waiting', NULL
             )
             RETURNING id
             """,

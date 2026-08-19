@@ -60,8 +60,8 @@ _CAPTURE_AND_EVIDENCE_SELECT = """
             WHERE capture_job.request_id = request_row.id
               AND capture_job.status = 'completed'
               AND capture_job.job_type IN (
-                  'automation_import', 'force_import', 'manual_import',
-                  'youtube_import'
+                  'automation_import', 'force_import', 'youtube_import',
+                  'local_import'
               )
         )
     ) AS has_captured_history,

@@ -88,7 +88,31 @@ class TerminalDownloadAudit:
     source_download_log_id: int | None = None
 
     def as_log_kwargs(self) -> dict[str, object]:
-        """Return the exact public ``log_download`` keyword projection."""
+        """Project every dataclass field onto its matching ``log_download``
+        keyword parameter, by name.
+
+        NOT exact — never was, and issue #1176 PR1 widened the gap further:
+        ``log_download`` also accepts ``transfer_detail`` (never carried by
+        this terminal-outcome Struct) and, as of migration 080, ``source``
+        (also absent here).
+
+        This method has exactly ONE production caller:
+        ``_record_have_analysis_error``'s job-less branch
+        (``lib/dispatch/outcome_actions.py``, reached when
+        ``import_job_id is None``), which spreads this dict into a DIRECT
+        ``db.log_download(request_id=..., **kwargs)`` call via
+        ``_finalize_request_and_log_rejection``. For THAT row,
+        ``log_download``'s own ``source`` parameter genuinely is the
+        writer — and since neither this Struct nor that call site ever
+        passes ``source=``, it lands as the ``'slskd'`` default
+        regardless of what caused the rejection. The job-BACKED branch of
+        the same caller (``import_job_id is not None``) returns earlier,
+        before this method is ever invoked, as a
+        ``PendingImportTerminalOutcome`` — its row is written later by
+        ``_insert_terminal_download_audit``'s job_type-derived SQL CASE
+        (``lib/pipeline_db/terminal_outcomes.py``), a wholly separate
+        writer this dict never reaches.
+        """
         return {item.name: getattr(self, item.name) for item in fields(self)}
 
 

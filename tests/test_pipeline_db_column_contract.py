@@ -342,6 +342,12 @@ class TestDownloadLogRowRuntimeContract(unittest.TestCase):
             transfer_detail=[
                 {"filename": "01 track.flac", "reason": "timed_out"},
             ],
+            # Deliberately NOT the 'slskd' default: log_download's default
+            # parameter value would make this assertion pass identically
+            # whether the kwarg is honoured or silently ignored (issue
+            # #1176 PR1 round 2 review finding). 'local' proves the value
+            # actually reaches the INSERT.
+            source="local",
         )
 
         converted = download_log_row(self._raw_row(log_id))
@@ -350,7 +356,7 @@ class TestDownloadLogRowRuntimeContract(unittest.TestCase):
         self.assertEqual(converted["request_id"], self.req_id)
         self.assertEqual(converted["soulseek_username"], "contract-user")
         self.assertEqual(converted["outcome"], "success")
-        self.assertEqual(converted["source"], "slskd")
+        self.assertEqual(converted["source"], "local")
         self.assertIsNone(converted["youtube_metadata"])
         self.assertIsNone(converted["candidate_evidence_id"])
         self.assertIsInstance(converted["created_at"], datetime)
