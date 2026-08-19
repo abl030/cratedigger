@@ -1953,6 +1953,35 @@ _LOCAL_IMPORT_MUST_SUCCEED_WORLDS: frozenset[str] = frozenset({
     "lookalike_processing",
 })
 
+#: Worlds that must NEVER come back authorized, independent of where the
+#: candidate sits. Issue #1176 PR2 review round 2 finding 4: the "not
+#: configured" worlds (lane disabled, root unset, root relative/degenerate)
+#: were first given a candidate INSIDE the sandbox root — but
+#: :func:`assert_local_import_authorization_is_earned` only judges
+#: AUTHORIZED worlds against containment, so a gate-bypass mutant that
+#: authorizes a validly-contained candidate is invisible to it (the
+#: candidate genuinely IS under root and outside every owned subtree, so
+#: "authorization implies containment" holds even though the LANE should
+#: have refused before containment was ever relevant). Moving the
+#: candidate OUTSIDE the sandbox (as first tried) does not fix this either:
+#: it then gets refused for the ordinary "outside root" reason regardless
+#: of whether the not-configured gate itself fired, which is the SAME
+#: masking one layer up. Neither candidate placement can prove this world
+#: refuses BECAUSE it is unconfigured — only a direct "must be refused"
+#: assertion can, so these worlds keep the candidate INSIDE the sandbox
+#: (the world that would be legitimately authorized if the gate were
+#: bypassed) and the test method asserts non-authorization directly,
+#: mirroring how ``_LOCAL_IMPORT_MUST_SUCCEED_WORLDS`` exists because the
+#: same checker cannot see an over-eager refusal either.
+_LOCAL_IMPORT_MUST_REFUSE_WORLDS: frozenset[str] = frozenset({
+    "not_configured_disabled",
+    "not_configured_no_dir",
+    "root_is_slash",
+    "root_double_slash",
+    "root_triple_slash",
+    "root_relative",
+})
+
 
 def assert_local_import_authorization_is_earned(
     *,
@@ -2175,16 +2204,21 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
                 candidate = os.path.join(processing + "-old", "albums", leaf)
                 os.makedirs(candidate, exist_ok=True)
             elif world in ("not_configured_disabled", "not_configured_no_dir"):
-                # Issue #1176 PR2 review round 2 finding 4: this candidate
-                # used to sit INSIDE the sandbox ``root`` — deleting
-                # ``not enabled`` (or, pre-finding-1-fix, ``not root``)
-                # from the gate then falls through to an ordinary
-                # present-and-contained candidate, which the checker
-                # cannot distinguish from a legitimately authorized one.
-                # Same fix as ``root_is_slash`` below: a candidate OUTSIDE
-                # the sandbox is the only one the checker can call out as
-                # wrongly authorized if the gate is bypassed.
-                candidate = "/etc"
+                # Deliberately INSIDE the sandbox root, unlike the
+                # degenerate/relative-root worlds below: for THESE two
+                # worlds the configured root never changes (it stays the
+                # real, well-formed sandbox ``root``), so an outside-
+                # sandbox candidate would be refused for the ordinary
+                # "outside root" reason regardless of whether the
+                # not-configured gate itself fired — the same masking one
+                # layer up (issue #1176 PR2 review round 2 finding 4,
+                # second pass). This candidate is exactly what a
+                # gate-bypass mutant WOULD authorize; only the direct
+                # ``_LOCAL_IMPORT_MUST_REFUSE_WORLDS`` assertion below can
+                # tell the difference, so it — not candidate placement —
+                # is what proves this world.
+                candidate = os.path.join(root, "cd-rip", leaf)
+                os.makedirs(candidate, exist_ok=True)
             elif world == "root_is_slash":
                 # Deliberately NOT under the sandbox ``root``: if the
                 # ``local_import_dir == "/"`` guard were ever bypassed, a
@@ -2248,6 +2282,12 @@ class TestGeneratedLocalImportAuthorization(unittest.TestCase):
                     held_display_path,
                     f"world={world!r} is a legitimate sibling of an owned "
                     f"subtree and must still be authorized")
+
+            if world in _LOCAL_IMPORT_MUST_REFUSE_WORLDS:
+                self.assertIsNone(
+                    held_display_path,
+                    f"world={world!r} is an unconfigured/unsafe lane and "
+                    f"must never be authorized, regardless of containment")
 
             assert_local_import_authorization_is_earned(
                 world=world, root=root, owned_subtrees=owned,
