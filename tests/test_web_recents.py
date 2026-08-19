@@ -938,6 +938,12 @@ class TestClassifyBadge(unittest.TestCase):
         self.assertEqual(result.badge, "Force imported")
         self.assertEqual(result.badge_class, "badge-force")
 
+    def test_local_import(self):
+        """Issue #1176 PR3: must not fall through to badge-rejected."""
+        result = classify_log_entry(_entry(outcome="local_import"))
+        self.assertEqual(result.badge, "Local imported")
+        self.assertEqual(result.badge_class, "badge-force")
+
     def test_curator_ban_with_username(self):
         """#188 follow-up: bad-rip click surfaces as a download_log event."""
         result = classify_log_entry(_entry(
@@ -1043,6 +1049,10 @@ class TestClassifyBorderColor(unittest.TestCase):
 
     def test_force_import_blue_border(self):
         result = classify_log_entry(_entry(outcome="force_import"))
+        self.assertEqual(result.border_color, "#46a")
+
+    def test_local_import_blue_border(self):
+        result = classify_log_entry(_entry(outcome="local_import"))
         self.assertEqual(result.border_color, "#46a")
 
 
@@ -1322,6 +1332,18 @@ class TestClassifyVerdict(unittest.TestCase):
     def test_force_import_verdict(self):
         result = classify_log_entry(_entry(outcome="force_import"))
         self.assertIn("force", result.verdict.lower())
+
+    def test_local_import_verdict(self):
+        # The raw-token fallback would ALSO produce a verdict containing
+        # "local" (it's a literal substring of "local_import"), so this
+        # asserts the full sentence the local_import branch actually
+        # writes — the only string that distinguishes it from the
+        # catch-all's raw token.
+        result = classify_log_entry(_entry(outcome="local_import"))
+        self.assertEqual(
+            result.verdict,
+            "Imported from a local folder after strict validation",
+        )
 
 
 # ============================================================================
