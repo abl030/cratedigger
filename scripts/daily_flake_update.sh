@@ -29,8 +29,22 @@ finalize() {
     fi
     daily_resource_monitor_finish
     resource_status=$?
-    if ((command_status == 0 && resource_status != 0)); then
-        command_status=$resource_status
+    # The resource receipt's validity is independent of the gate's own
+    # pass/fail (issue #1214 gap 4): an invalid receipt used to be silently
+    # absorbed into whatever exit code the candidate gates already produced,
+    # so the one run that most needed its telemetry called out was
+    # indistinguishable from an ordinary gate failure. The stderr call-out
+    # below always fires when the receipt is invalid, including on the
+    # INT/TERM signal exits. Only PROMOTING it into the process's own exit
+    # code is unchanged from before: that still happens only when the gates
+    # were otherwise green (command_status == 0), so a signal exit's exact
+    # code (130/143 below), which is contractual, is never overwritten.
+    if ((resource_status != 0)); then
+        echo "daily unstable gate: resource receipt invalid" \
+            "(command exit $command_status)" >&2
+        if ((command_status == 0)); then
+            command_status=$resource_status
+        fi
     fi
     exit "$command_status"
 }

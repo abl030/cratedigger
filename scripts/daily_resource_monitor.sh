@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
 # Phase-correlated cgroup and private-scratch receipts for the daily gate.
+#
+# The monitor's OWN bookkeeping (samples.tsv, the phase pointer, locks) must
+# never live on the filesystem it is measuring (issue #1214): on 2026-08-20
+# the measured scratch tmpfs filled, the monitor's own state directory was
+# mktemp'd inside that same tmpfs, its writes hit ENOSPC alongside the
+# workload's, and the run's entire per-phase breakdown was lost for exactly
+# the one night it was needed. State now lives under a separately-verified
+# root (see daily_resource_monitor_start), proven distinct from the measured
+# scratch by filesystem identity rather than assumed by path convention. A
+# single failed sample write is recorded and skipped rather than discarding
+# the whole run's receipt (see _daily_resource_note_dropped_sample).
 
 _daily_resource_invalid() {
     local reason="$1"
@@ -12,6 +23,7 @@ _daily_resource_invalid() {
 
 daily_resource_summarize_samples() {
     local samples_file="$1"
+    local dropped_samples="${2:-0}"
     local timestamp_ns phase memory_current memory_peak swap_current swap_peak
     local anon file_bytes shmem kernel scratch_bytes scratch_byte_limit
     local scratch_inodes scratch_inode_limit extra value field
@@ -38,6 +50,11 @@ daily_resource_summarize_samples() {
     local -A phase_memory_peak_timestamp=()
     local -A phase_scratch_byte_peak=()
     local -A phase_scratch_inode_peak=()
+
+    if [[ ! "$dropped_samples" =~ ^[0-9]+$ ]]; then
+        _daily_resource_invalid summarize_arguments_invalid
+        return
+    fi
 
     if [[ ! -r "$samples_file" ]]; then
         _daily_resource_invalid samples_unreadable
@@ -183,7 +200,13 @@ daily_resource_summarize_samples() {
         printf ' memory_current_peak_timestamp_ns=%d\n' "${phase_memory_peak_timestamp[$phase]}"
     done
 
-    printf '%s' 'CRATEDIGGER_DAILY_RESOURCE_RECEIPT schema=1 status=valid'
+    printf '%s' 'CRATEDIGGER_DAILY_RESOURCE_RECEIPT schema=1'
+    if ((dropped_samples > 0)); then
+        printf ' status=degraded reason=partial_sample_loss'
+    else
+        printf ' status=valid'
+    fi
+    printf ' dropped_samples=%d' "$dropped_samples"
     printf ' samples=%d phases=%d' "$sample_count" "${#phase_order[@]}"
     printf ' memory_peak_bytes=%d memory_peak_owner=%s' \
         "$global_memory_peak" "$memory_peak_owner"
@@ -204,11 +227,32 @@ _daily_resource_record_sample_once() {
     # Capture the ordering witness before reading metrics. Parent boundary
     # samples and the periodic child may overlap, so terminal aggregation sorts
     # by this timestamp instead of trusting concurrent append order.
-    timestamp_ns="$(date +%s%N)" || return 1
-    memory_current="$(<"$_CRATEDIGGER_RESOURCE_CGROUP_DIR/memory.current")" || return 1
-    memory_peak="$(<"$_CRATEDIGGER_RESOURCE_CGROUP_DIR/memory.peak")" || return 1
-    swap_current="$(<"$_CRATEDIGGER_RESOURCE_CGROUP_DIR/memory.swap.current")" || return 1
-    swap_peak="$(<"$_CRATEDIGGER_RESOURCE_CGROUP_DIR/memory.swap.peak")" || return 1
+    #
+    # Every failure branch below labels _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR
+    # so a caller that treats this as a droppable single-sample loss (rather
+    # than aborting the run) can still say specifically why the sample was
+    # lost — issue #1214 gap 3.
+    _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR=""
+    timestamp_ns="$(date +%s%N)" || {
+        _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR=timestamp_unavailable
+        return 1
+    }
+    memory_current="$(<"$_CRATEDIGGER_RESOURCE_CGROUP_DIR/memory.current")" || {
+        _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR=cgroup_unreadable
+        return 1
+    }
+    memory_peak="$(<"$_CRATEDIGGER_RESOURCE_CGROUP_DIR/memory.peak")" || {
+        _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR=cgroup_unreadable
+        return 1
+    }
+    swap_current="$(<"$_CRATEDIGGER_RESOURCE_CGROUP_DIR/memory.swap.current")" || {
+        _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR=cgroup_unreadable
+        return 1
+    }
+    swap_peak="$(<"$_CRATEDIGGER_RESOURCE_CGROUP_DIR/memory.swap.peak")" || {
+        _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR=cgroup_unreadable
+        return 1
+    }
     while read -r key value; do
         case "$key" in
             anon) anon="$value" ;;
@@ -216,20 +260,28 @@ _daily_resource_record_sample_once() {
             shmem) shmem="$value" ;;
             kernel) kernel="$value" ;;
         esac
-    done < "$_CRATEDIGGER_RESOURCE_CGROUP_DIR/memory.stat" || return 1
+    done < "$_CRATEDIGGER_RESOURCE_CGROUP_DIR/memory.stat" || {
+        _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR=cgroup_unreadable
+        return 1
+    }
     if [[ -z "$anon" || -z "$file_bytes" || -z "$shmem" || -z "$kernel" ]]; then
+        _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR=cgroup_unreadable
         return 1
     fi
     # memory.current and memory.stat are separate kernel reads. Churn can make
     # a cross-read breakdown internally impossible; do not publish negative
     # non-shmem attribution from that transient world.
     if ((shmem > file_bytes || shmem > memory_current)); then
+        _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR=cgroup_transient_skew
         return 1
     fi
     read -r blocks free_blocks block_size total_inodes free_inodes < <(
         stat --file-system --format='%b %f %S %c %d' -- \
             "$_CRATEDIGGER_RESOURCE_SCRATCH"
-    ) || return 1
+    ) || {
+        _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR=scratch_stat_failed
+        return 1
+    }
     scratch_bytes=$(((blocks - free_blocks) * block_size))
     scratch_inodes=$((total_inodes - free_inodes))
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -237,7 +289,10 @@ _daily_resource_record_sample_once() {
         "$swap_current" "$swap_peak" "$anon" "$file_bytes" "$shmem" \
         "$kernel" "$scratch_bytes" "$((blocks * block_size))" \
         "$scratch_inodes" "$total_inodes" \
-        >> "$_CRATEDIGGER_RESOURCE_SAMPLES"
+        >> "$_CRATEDIGGER_RESOURCE_SAMPLES" || {
+        _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR=state_store_write_failed
+        return 1
+    }
 }
 
 _daily_resource_record_sample_unlocked() {
@@ -250,6 +305,20 @@ _daily_resource_record_sample_unlocked() {
         sleep 0.01
     done
     return 1
+}
+
+# Best-effort: note that a single sample write was abandoned (after retries)
+# without treating it as fatal to the run. Losing one sample is acceptable;
+# losing the whole phase breakdown because of it is the #1214 defect. The
+# reason comes from whatever _daily_resource_record_sample_once last set;
+# callers that fail for a different reason (lock contention, an unreadable
+# phase pointer) set _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR themselves
+# before invoking this. The append itself is allowed to fail silently: if
+# the state store is broken badly enough that even this write fails, that
+# is surfaced through the state-store-write guards elsewhere, not here.
+_daily_resource_note_dropped_sample() {
+    local reason="${_CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR:-sample_write_failed}"
+    printf '%s\n' "$reason" >> "$_CRATEDIGGER_RESOURCE_DROPPED" 2>/dev/null || true
 }
 
 _daily_resource_lock() {
@@ -286,12 +355,18 @@ _daily_resource_record_sample_locked() {
 _daily_resource_record_current_phase_locked() {
     local phase=""
     local status=0
-    _daily_resource_lock || return 1
+    if ! _daily_resource_lock; then
+        _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR=state_store_lock_failed
+        return 1
+    fi
     phase="$(<"$_CRATEDIGGER_RESOURCE_PHASE")" || status=1
     if [[ -z "$phase" ]]; then
         status=1
+        _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR=state_store_phase_unreadable
     elif ((status == 0)); then
         _daily_resource_record_sample_unlocked "$phase" || status=1
+    else
+        _CRATEDIGGER_RESOURCE_LAST_SAMPLE_ERROR=state_store_phase_unreadable
     fi
     _daily_resource_unlock || status=1
     return "$status"
@@ -305,17 +380,19 @@ _daily_resource_write_phase() {
 }
 
 _daily_resource_monitor_loop() {
+    # A single failed sample (cgroup churn, a transient state-store write
+    # failure) is recorded and skipped, never fatal to the loop — issue
+    # #1214 gap 2. The loop only ever stops on the parent's own stop signal.
     while [[ ! -e "$_CRATEDIGGER_RESOURCE_STOP" ]]; do
-        if ! _daily_resource_record_current_phase_locked; then
-            printf '%s\n' sample_failed > "$_CRATEDIGGER_RESOURCE_FAILURE"
-            return 1
-        fi
+        _daily_resource_record_current_phase_locked \
+            || _daily_resource_note_dropped_sample
         sleep 0.25
     done
 }
 
 daily_resource_monitor_start() {
     local hierarchy controllers relative="" file filesystem
+    local state_root state_root_filesystem_id scratch_filesystem_id
 
     _CRATEDIGGER_RESOURCE_STARTED=starting
     _CRATEDIGGER_RESOURCE_TERMINAL_EMITTED=0
@@ -354,9 +431,42 @@ daily_resource_monitor_start() {
         fi
     done
 
+    # The monitor's own bookkeeping must survive the exact exhaustion it
+    # exists to diagnose, so it cannot live under $_CRATEDIGGER_RESOURCE_SCRATCH
+    # (that IS the tmpfs under measurement). ${TMPDIR:-/tmp} is the same
+    # "durable scratch outside the measured tmpfs" convention this script's
+    # own caller already uses for its checkout workdir
+    # (daily_flake_update.sh's `work_root`) and daily_beets_tip_update.sh
+    # uses for the same purpose — on the deployed daily-checks unit that
+    # resolves to the host's real, much larger ext4 /tmp (PrivateTmp=yes),
+    # distinct from the private 16G tmpfs bound to $XDG_RUNTIME_DIR. This is
+    # not assumed distinct by path convention alone: the filesystem-identity
+    # check below fails closed if a caller ever points both at the same
+    # filesystem, which would silently recreate the #1214 defect.
+    state_root="${TMPDIR:-/tmp}"
+    if [[ ! -d "$state_root" || ! -w "$state_root" ]]; then
+        _daily_resource_invalid state_root_unavailable
+        return
+    fi
+    state_root_filesystem_id="$(
+        stat --file-system --format='%i' -- "$state_root" 2>/dev/null
+    )" || true
+    scratch_filesystem_id="$(
+        stat --file-system --format='%i' -- "$_CRATEDIGGER_RESOURCE_SCRATCH" \
+            2>/dev/null
+    )" || true
+    if [[ -z "$state_root_filesystem_id" || -z "$scratch_filesystem_id" ]]; then
+        _daily_resource_invalid state_root_unavailable
+        return
+    fi
+    if [[ "$state_root_filesystem_id" == "$scratch_filesystem_id" ]]; then
+        _daily_resource_invalid state_root_shares_scratch_filesystem
+        return
+    fi
+
     _CRATEDIGGER_RESOURCE_DIR="$(
         mktemp -d \
-            "$_CRATEDIGGER_RESOURCE_SCRATCH/cratedigger-daily-resource.XXXXXX"
+            "$state_root/cratedigger-daily-resource.XXXXXX"
     )" || {
         _daily_resource_invalid monitor_state_unavailable
         return
@@ -366,16 +476,18 @@ daily_resource_monitor_start() {
     _CRATEDIGGER_RESOURCE_STOP="$_CRATEDIGGER_RESOURCE_DIR/stop"
     _CRATEDIGGER_RESOURCE_FAILURE="$_CRATEDIGGER_RESOURCE_DIR/failure"
     _CRATEDIGGER_RESOURCE_LOCK="$_CRATEDIGGER_RESOURCE_DIR/sample.lock"
+    _CRATEDIGGER_RESOURCE_DROPPED="$_CRATEDIGGER_RESOURCE_DIR/dropped"
     : > "$_CRATEDIGGER_RESOURCE_SAMPLES"
     : > "$_CRATEDIGGER_RESOURCE_FAILURE"
     : > "$_CRATEDIGGER_RESOURCE_LOCK"
+    : > "$_CRATEDIGGER_RESOURCE_DROPPED"
     _CRATEDIGGER_RESOURCE_CURRENT_PHASE=bootstrap
     if ! _daily_resource_write_phase "$_CRATEDIGGER_RESOURCE_CURRENT_PHASE" \
         || ! _daily_resource_record_sample_unlocked \
             "$_CRATEDIGGER_RESOURCE_CURRENT_PHASE";
     then
         rm -rf -- "$_CRATEDIGGER_RESOURCE_DIR"
-        _daily_resource_invalid initial_sample_failed
+        _daily_resource_invalid state_store_bootstrap_failed
         return
     fi
     _daily_resource_monitor_loop &
@@ -385,7 +497,6 @@ daily_resource_monitor_start() {
 
 daily_resource_monitor_set_phase() {
     local phase="$1"
-    local status=0
     if [[ "${_CRATEDIGGER_RESOURCE_STARTED:-0}" != 1 ]]; then
         return 1
     fi
@@ -394,28 +505,31 @@ daily_resource_monitor_set_phase() {
         return 1
     fi
     if ! _daily_resource_lock; then
-        printf '%s\n' phase_transition_failed > "$_CRATEDIGGER_RESOURCE_FAILURE"
+        printf '%s\n' phase_lock_failed > "$_CRATEDIGGER_RESOURCE_FAILURE"
         return 1
     fi
-    _daily_resource_record_sample_unlocked \
-        "$_CRATEDIGGER_RESOURCE_CURRENT_PHASE" || status=1
-    if ((status == 0)); then
-        _daily_resource_write_phase "$phase" || status=1
+    # A boundary sample is a droppable single sample, same as the periodic
+    # loop's (#1214 gap 2): note and continue rather than abandoning the
+    # phase transition itself, which would leave the shared phase pointer
+    # stuck on the old phase and mis-attribute every later sample.
+    _daily_resource_record_sample_unlocked "$_CRATEDIGGER_RESOURCE_CURRENT_PHASE" \
+        || _daily_resource_note_dropped_sample
+    if ! _daily_resource_write_phase "$phase"; then
+        _daily_resource_unlock
+        printf '%s\n' phase_state_write_failed > "$_CRATEDIGGER_RESOURCE_FAILURE"
+        return 1
     fi
-    if ((status == 0)); then
-        _CRATEDIGGER_RESOURCE_CURRENT_PHASE="$phase"
-        _daily_resource_record_sample_unlocked \
-            "$_CRATEDIGGER_RESOURCE_CURRENT_PHASE" || status=1
-    fi
-    _daily_resource_unlock || status=1
-    if ((status != 0)); then
-        printf '%s\n' phase_transition_failed > "$_CRATEDIGGER_RESOURCE_FAILURE"
+    _CRATEDIGGER_RESOURCE_CURRENT_PHASE="$phase"
+    _daily_resource_record_sample_unlocked "$_CRATEDIGGER_RESOURCE_CURRENT_PHASE" \
+        || _daily_resource_note_dropped_sample
+    if ! _daily_resource_unlock; then
+        printf '%s\n' phase_unlock_failed > "$_CRATEDIGGER_RESOURCE_FAILURE"
         return 1
     fi
 }
 
 daily_resource_monitor_finish() {
-    local monitor_status=0 summary_status=0 reason=""
+    local monitor_status=0 summary_status=0 reason="" dropped_samples=0
     if [[ "${_CRATEDIGGER_RESOURCE_STARTED:-0}" != 1 ]]; then
         if [[ -n "${_CRATEDIGGER_RESOURCE_PID:-}" ]]; then
             [[ -n "${_CRATEDIGGER_RESOURCE_STOP:-}" ]] \
@@ -431,23 +545,26 @@ daily_resource_monitor_finish() {
         fi
         return 1
     fi
-    if ! _daily_resource_record_sample_locked \
-        "$_CRATEDIGGER_RESOURCE_CURRENT_PHASE";
-    then
-        printf '%s\n' final_sample_failed > "$_CRATEDIGGER_RESOURCE_FAILURE"
-    fi
+    _daily_resource_record_sample_locked \
+        "$_CRATEDIGGER_RESOURCE_CURRENT_PHASE" \
+        || _daily_resource_note_dropped_sample
     : > "$_CRATEDIGGER_RESOURCE_STOP"
     if ! wait "$_CRATEDIGGER_RESOURCE_PID"; then
         monitor_status=1
+    fi
+    if [[ -s "$_CRATEDIGGER_RESOURCE_DROPPED" ]]; then
+        dropped_samples="$(wc -l < "$_CRATEDIGGER_RESOURCE_DROPPED")"
     fi
     if [[ -s "$_CRATEDIGGER_RESOURCE_FAILURE" ]]; then
         reason="$(<"$_CRATEDIGGER_RESOURCE_FAILURE")"
         _daily_resource_invalid "$reason"
         summary_status=1
     elif ((monitor_status != 0)); then
-        _daily_resource_invalid monitor_failed
+        _daily_resource_invalid monitor_process_died
         summary_status=1
-    elif ! daily_resource_summarize_samples "$_CRATEDIGGER_RESOURCE_SAMPLES"; then
+    elif ! daily_resource_summarize_samples \
+        "$_CRATEDIGGER_RESOURCE_SAMPLES" "$dropped_samples";
+    then
         summary_status=1
     fi
     rm -rf -- "$_CRATEDIGGER_RESOURCE_DIR"
@@ -459,11 +576,11 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     set -euo pipefail
     case "${1:-}" in
         summarize)
-            if [[ "$#" -ne 2 ]]; then
+            if [[ "$#" -lt 2 || "$#" -gt 3 ]]; then
                 _daily_resource_invalid summarize_arguments_invalid
                 exit 1
             fi
-            daily_resource_summarize_samples "$2"
+            daily_resource_summarize_samples "$2" "${3:-0}"
             ;;
         *)
             _daily_resource_invalid command_invalid

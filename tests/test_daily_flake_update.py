@@ -24,6 +24,7 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.fake = FakeDailyFlakeUpdateCommands(Path(self.tempdir.name))
+        self.addCleanup(self.fake.close)
 
     def fake_environment(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -70,6 +71,8 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
             "CRATEDIGGER_DAILY_RESOURCE_RECEIPT schema=1 status=valid",
             proc.stdout,
         )
+        self.assertIn("dropped_samples=0", proc.stdout)
+        self.assertNotIn("resource receipt invalid", proc.stderr)
         for phase in (
             "deterministic_suite",
             "stable_nix",
@@ -139,6 +142,11 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
             "CRATEDIGGER_DAILY_RESOURCE_RECEIPT schema=1 status=valid",
             proc.stdout,
         )
+        self.assertIn("dropped_samples=0", proc.stdout)
+        # A healthy monitor on an ordinary gate failure gets no invalid-
+        # receipt diagnostic -- issue #1214 gap 4 is about an INVALID
+        # receipt surfacing, not every failing run growing new output.
+        self.assertNotIn("resource receipt invalid", proc.stderr)
 
     def test_unchanged_lock_still_runs_gates_without_commit(self) -> None:
         self.fake.update_state(lock_changed=False)
@@ -266,6 +274,37 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertIn("status=invalid reason=scratch_not_tmpfs", proc.stdout)
         self.assertNotIn("scratch_byte_peak=0", proc.stdout)
 
+    def test_invalid_receipt_surfaces_even_when_the_command_already_failed(
+        self,
+    ) -> None:
+        """Regression pin for issue #1214 gap 4: an invalid resource receipt
+        must surface on its own, not be silently absorbed into whatever
+        exit code the run already had. finalize()'s union logic used to
+        promote an invalid receipt into the process's own exit code only
+        when the command had otherwise succeeded (command_status == 0) --
+        when the command was already failing, nothing distinguished
+        'ordinary red' from 'red AND we lost telemetry for it'.
+        XDG_RUNTIME_DIR pointed outside a tmpfs fails the monitor before
+        any candidate gate runs at all, so command_status is already
+        non-zero (the top-level `exit 1`) by the time finalize() sees it
+        -- exactly the branch that used to go unremarked.
+
+        Mutant proof (both directions; run manually during review, not
+        committed): reverting finalize()'s new unconditional
+        `if ((resource_status != 0))` diagnostic back to only firing
+        inside the `if ((command_status == 0 ...))` branch (the pre-#1214
+        shape) makes this test's stderr assertion fail -- the invalid
+        receipt still prints to stdout (unchanged), but nothing on stderr
+        calls it out when the command was already failing."""
+        proc = self.fake.run(
+            SCRIPT,
+            extra_env={"XDG_RUNTIME_DIR": str(REPO_ROOT)},
+        )
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("status=invalid reason=scratch_not_tmpfs", proc.stdout)
+        self.assertIn("resource receipt invalid", proc.stderr)
+
     def test_process_group_term_emits_one_terminal_receipt_without_deadlock(
         self,
     ) -> None:
@@ -294,7 +333,9 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
             stdout.count("CRATEDIGGER_DAILY_RESOURCE_RECEIPT "), 1,
             stdout,
         )
-        self.assertRegex(stdout, r"status=(?:valid|invalid) ")
+        # A signal can race a boundary sample write; issue #1214 gap 2 means
+        # that can now legitimately degrade rather than invalidate.
+        self.assertRegex(stdout, r"status=(?:valid|degraded|invalid) ")
 
     def test_red_tip_canary_cannot_block_green_nixpkgs_candidate(self) -> None:
         # The fault must name the canary's CURRENT stage, or this test

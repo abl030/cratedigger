@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -172,8 +173,20 @@ class FakeDailyFlakeUpdateCommands:
         self.fake_bin.mkdir()
         self.state_path = root / "state.json"
         self.automation_state = root / "automation-state"
-        self.tmpdir = root / "tmp"
-        self.tmpdir.mkdir()
+        # Real disk, deliberately NOT under `root` (which itself resolves
+        # under whatever ambient TMPDIR the enclosing nix-shell/test suite
+        # set, e.g. its own private tmpfs scratch). This is the runner's
+        # own TMPDIR/work_root -- production leaves TMPDIR unset so it
+        # falls back to the daily-checks unit's real host /tmp
+        # (PrivateTmp=yes), genuinely separate from XDG_RUNTIME_DIR's
+        # private tmpfs scratch. Faking that separation for real is what
+        # lets the resource monitor's own state-root-isolation guard
+        # (issue #1214 gap 1) run in these tests instead of tripping on a
+        # test-harness artifact that production never has.
+        self._tmp_root = tempfile.TemporaryDirectory(
+            dir="/tmp", prefix="cratedigger-fake-tmpdir-"
+        )
+        self.tmpdir = Path(self._tmp_root.name)
         command = self.fake_bin / "command"
         command.write_text(_FAKE_COMMAND, encoding="utf-8")
         command.chmod(0o755)
@@ -222,6 +235,10 @@ class FakeDailyFlakeUpdateCommands:
                 "hold_seconds": 0.25,
             }
         )
+
+    def close(self) -> None:
+        """Release the real-disk TMPDIR this fake allocated outside `root`."""
+        self._tmp_root.cleanup()
 
     @property
     def state(self) -> dict[str, Any]:

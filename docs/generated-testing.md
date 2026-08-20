@@ -695,7 +695,25 @@ a disk-backed scratch root, zero limits, malformed samples, and regressing
 kernel peaks produce one terminal `status=invalid` receipt rather than zeros.
 The runner's EXIT path emits the terminal receipt after its owned checkout
 cleanup even when a test stage fails or the later live-world post-step makes
-the systemd unit red.
+the systemd unit red. An invalid receipt now also prints an explicit
+`resource receipt invalid` line to stderr regardless of whether the candidate
+gates themselves passed or failed (issue #1214 gap 4) — it used to be silently
+absorbed into an already-nonzero exit code on a failing run, which is exactly
+the run where losing the telemetry matters most.
+
+The monitor's own bookkeeping (samples, the phase pointer, its lock) lives
+under `${TMPDIR:-/tmp}`, verified by filesystem identity to be distinct from
+the private scratch tmpfs it measures (`$XDG_RUNTIME_DIR`), never inside it —
+a full scratch tmpfs on 2026-08-20 took the monitor's own state down with it
+and erased the one night's telemetry that would have diagnosed the overflow
+(issue #1214). A single sample write that still fails after retries (cgroup
+churn, a transient state-store write failure) is recorded and skipped rather
+than discarding the run: the terminal receipt then reads `status=degraded
+reason=partial_sample_loss dropped_samples=<N>` while keeping every other
+field a clean run has. Only a structural failure of the monitor's own
+coordination state (the phase pointer itself, not a sample) — or a scratch
+root, cgroup, or state root that never worked at all — still produces a fully
+`status=invalid` receipt with no phase breakdown.
 
 It is pure and safe: no prod DB, no slskd, no beets, no network. Green runs
 write disposable state only to tmpfs. Repeat runs add entropy; there is
