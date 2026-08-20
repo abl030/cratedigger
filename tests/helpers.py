@@ -1505,13 +1505,17 @@ def patch_dispatch_externals():
     """Patch external edges shared by all dispatch_import_core tests.
 
     Patches: sp.run, the evidence-rejection cleanup seam, trigger_plex_scan,
-    and trigger_jellyfin_scan.
+    trigger_jellyfin_scan, and notify_library_delete (the vanished-replaced-
+    album-path reconciler, issue #1203 item 2 — ``lib/dispatch/core.py``
+    imports it locally inside the function it's called from, exactly like
+    the two trigger_*_scan seams above, so this module-level patch works the
+    same way).
 
     Does NOT patch parse_import_result, _check_quality_gate_core,
     BeetsDB, or read_runtime_config — callers nest those as needed.
 
-    Yields a SimpleNamespace with attributes: run, cleanup, plex, jellyfin.
-    run is pre-configured with returncode=0, stdout="", stderr="".
+    Yields a SimpleNamespace with attributes: run, cleanup, plex, jellyfin,
+    reconcile. run is pre-configured with returncode=0, stdout="", stderr="".
 
     Importer post-commit cleanup is exercised through real inputs or its
     dedicated queue-owner seam; this helper does not patch that owned code.
@@ -1520,11 +1524,13 @@ def patch_dispatch_externals():
     with patch("lib.dispatch.subprocess_runner.sp.run") as run, \
          patch("lib.dispatch.outcome_actions._cleanup_staged_dir", cleanup), \
          patch("lib.util.trigger_plex_scan") as plex, \
-         patch("lib.util.trigger_jellyfin_scan") as jellyfin:
+         patch("lib.util.trigger_jellyfin_scan") as jellyfin, \
+         patch("lib.library_delete_notifiers.notify_library_delete") as reconcile:
         run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        reconcile.return_value = ()
         yield types.SimpleNamespace(
             run=run, cleanup=cleanup, plex=plex,
-            jellyfin=jellyfin)
+            jellyfin=jellyfin, reconcile=reconcile)
 class _PinnedDispatchDB(Protocol):
     _owner_session_pin: tuple[OwnerSessionIdentity, CancellationToken] | None
 

@@ -66,6 +66,39 @@ and emits a warning when the item was never observable or remains present.
 Failures are surfaced as warnings on the already completed delete rather than
 rolling library state back.
 
+### Post-import vanished-path reconciliation (issue #1203 item 2)
+
+A path-changing re-import (see `docs/beets-primer.md` § the `path_disambig`
+recurrence hazard) renames an album's folder without deleting anything. The
+`Media/Updated` call above only ever names the NEW path, so Jellyfin never
+learns the OLD path is gone — its `MusicAlbum` item there survives a
+completed full scan and shows no artwork, because item identity is a hash of
+the path and the rename minted a brand-new item at the new path instead of
+migrating the old one (live incident: request 8964's David Bowie import,
+`catalognum` populated for the first time, `1969 - David Bowie [1969]` →
+`[SBL 7912]`).
+
+After both "Recently Added" pin captures and both new-path notifiers run
+(`lib/dispatch/core.py::_trigger_post_import_notifiers`), Cratedigger calls
+`lib.library_delete_notifiers.notify_library_delete` once per distinct
+pre-upgrade path still present in `postflight.replaced_albums` (skipping any
+path whose normalized form equals the new imported path) — the SAME function
+the destructive library-delete flow above uses, since the reconciliation work
+is identical: find the item by its former path, submit a targeted refresh,
+observe whether it went away. It is called with `allow_escalation=False`,
+which forbids the library-deletion fallback described above: when the item
+isn't found by its former path, the reconciler submits NO refresh at all —
+it never falls back to the configured library item the way the destructive
+delete path does — because a routine post-import notification must never
+become a collection refresh. Refusing that escalation still records a
+`skipped` result naming why; it never silently no-ops.
+
+This call MUST run after the Jellyfin pin capture below, never before:
+`capture_jellyfin_date_created_pin` reads these same old paths synchronously
+to find the pre-upgrade item and snapshot its date. Reconciling — and
+potentially removing — that item first would destroy the very item the
+capture needs, resurfacing the upgrade at the top of "Recently Added".
+
 ### "Recently Added" pin on upgrades (migrations 046 + 053, issue #574)
 
 An upgrade re-import replaces an album's on-disk files. The Jellyfin rescan

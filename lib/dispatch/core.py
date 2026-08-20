@@ -100,8 +100,9 @@ if TYPE_CHECKING:
         CandidateEvidenceActionResult,
         CurrentEvidenceActionResult,
     )
+    from lib.library_delete_notifiers import DeleteNotification
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
-    from lib.quality import SpectralDetail
+    from lib.quality import DuplicateRemoveCandidate, SpectralDetail
 
 logger = logging.getLogger("cratedigger")
 
@@ -524,6 +525,79 @@ def _should_cleanup_action_file(
     )
 
 
+def _normalize_media_server_path(path: str) -> str:
+    """Comparison key for a beets album path: whitespace/trailing-slash/``.``
+    segment differences must not count as "the path changed". Pure string
+    normalization only (no filesystem access) — safe to call in a generated
+    property with paths that don't exist."""
+    stripped = path.strip()
+    return os.path.normpath(stripped) if stripped else ""
+
+
+def _paths_needing_media_server_reconciliation(
+    imported_path: str | None,
+    replaced_albums: Sequence[DuplicateRemoveCandidate],
+) -> list[str]:
+    """The pre-upgrade album paths (issue #1203 item 2) a path-changing
+    import left behind in Plex/Jellyfin, gated to exactly the ones a media
+    server can still be pointed at usefully: non-blank, distinct from the
+    (normalized) new imported path, and deduplicated. Order-preserving over
+    ``replaced_albums``. Most imports keep the same path, so the common case
+    returns an empty list at zero cost."""
+    imported_norm = _normalize_media_server_path(imported_path or "")
+    out: list[str] = []
+    seen: set[str] = set()
+    for candidate in replaced_albums:
+        old_path = candidate.album_path
+        if not old_path:
+            continue
+        old_norm = _normalize_media_server_path(old_path)
+        if not old_norm or old_norm == imported_norm or old_norm in seen:
+            continue
+        seen.add(old_norm)
+        out.append(old_path)
+    return out
+
+
+def _reconcile_vanished_replaced_album_paths(
+    cfg: CratediggerConfig,
+    *,
+    imported_path: str | None,
+    replaced_albums: Sequence[DuplicateRemoveCandidate],
+    notify_fn: Callable[..., tuple[DeleteNotification, ...]] | None = None,
+) -> None:
+    """Tell Plex/Jellyfin about every pre-upgrade path a path-changing import
+    left behind (issue #1203 item 2).
+
+    MUST run last in ``_trigger_post_import_notifiers`` — after BOTH pin
+    captures and BOTH new-path notifiers. ``capture_jellyfin_date_created_pin``
+    reads these same old paths synchronously to find the pre-upgrade Jellyfin
+    item (item identity is a hash of the path); reconciling a path before that
+    capture runs would destroy the very item the capture needs, resurfacing
+    the upgrade in "Recently Added".
+
+    Reuses ``notify_library_delete`` — the destructive-delete notifier already
+    does exactly this work (Plex: scan the nearest existing ancestor of the
+    vanished path; Jellyfin: targeted refresh + re-observe by former path) —
+    with ``allow_escalation=False``: a routine post-import notification must
+    never fall back to a Plex library-root scan or a Jellyfin collection-wide
+    refresh, unlike an operator-authorized destructive delete. Best-effort:
+    a failure here never fails an import that already succeeded.
+    """
+    from lib.library_delete_notifiers import notify_library_delete
+
+    notify = notify_fn or notify_library_delete
+    for old_path in _paths_needing_media_server_reconciliation(
+        imported_path, replaced_albums,
+    ):
+        try:
+            notify(cfg, old_path, allow_escalation=False)
+        except Exception:
+            logger.exception(
+                "MEDIA SERVER RECONCILE: vanished-path reconciliation "
+                "failed for %r (non-fatal)", old_path)
+
+
 def _trigger_post_import_notifiers(
     cfg: CratediggerConfig,
     db: PipelineDB,
@@ -535,7 +609,8 @@ def _trigger_post_import_notifiers(
     cancellation_token: CancellationToken | None,
     owner_session_identity: OwnerSessionIdentity | None,
 ) -> None:
-    """Capture historical pins, then refresh both configured media servers."""
+    """Capture historical pins, refresh both configured media servers, then
+    reconcile any pre-upgrade path a path-changing import left behind."""
     from lib.util import trigger_jellyfin_scan as trigger_jellyfin
     from lib.util import trigger_plex_scan as trigger_plex
 
@@ -580,6 +655,14 @@ def _trigger_post_import_notifiers(
     except Exception:
         logger.exception("JELLYFIN PIN: capture wiring failed (non-fatal)")
     trigger_jellyfin(cfg, imported_path)
+
+    # MUST run last — see _reconcile_vanished_replaced_album_paths docstring
+    # for why this cannot move before the Jellyfin pin capture above.
+    _reconcile_vanished_replaced_album_paths(
+        cfg,
+        imported_path=imported_path,
+        replaced_albums=import_result.postflight.replaced_albums,
+    )
 
 
 def _resolve_dispatch_beets_paths(

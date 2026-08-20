@@ -131,6 +131,17 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^web\.server\.(mb_api|discogs_api|_real_beets_db|check_beets_library|check_pipeline|get_library_artist|_beets_db|mb)"),
     # Notifier helpers — fire-and-forget, no return value to mock meaningfully
     re.compile(r"lib\.util\.trigger_(plex|jellyfin)_scan$"),
+    # Vanished-replaced-album-path reconciler (issue #1203 item 2) — called
+    # from the SAME post-import notifier site as the two trigger_*_scan
+    # notifiers above, for the identical reason: fire-and-forget, its return
+    # value is discarded, every failure is best-effort. Its own decision
+    # logic (which paths, ordering, escalation refusal) is unit- and
+    # generated-tested directly in tests/test_library_delete_notifiers*.py
+    # and tests/test_media_server_reconcile_generated.py; this allowlist
+    # entry only lets dispatch-level tests assert WIRING (paths/kwargs/
+    # ordering reaching the seam) without making real Plex/Jellyfin HTTP
+    # calls.
+    re.compile(r"^lib\.library_delete_notifiers\.notify_library_delete$"),
     # Thin urllib GET wrapper (documented "Network leaf seam") — patched so
     # dispatch slices exercise the REAL jellyfin find/children code paths.
     re.compile(r"lib\.util\._jellyfin_get_json$"),

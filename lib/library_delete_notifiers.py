@@ -54,16 +54,38 @@ def _nearest_existing_ancestor(path: str, root: str) -> str | None:
     return str(candidate) if candidate.exists() else None
 
 
+def _is_configured_root(path: str, root: str) -> bool:
+    """Whether ``path`` (an already-resolved ancestor) IS the configured
+    library root itself, rather than a narrower folder beneath it."""
+    return Path(path).resolve(strict=False) == Path(root).resolve(strict=False)
+
+
 def notify_library_delete(
     cfg: CratediggerConfig,
     former_album_path: str,
     *,
+    allow_escalation: bool = True,
     plex_find_fn: PlexFindFn = plex_find_album_by_path,
     plex_scan_fn: PlexScanFn = request_plex_scan,
     jellyfin_find_fn: JellyfinFindFn = jellyfin_find_album_by_path,
     jellyfin_refresh_fn: JellyfinRefreshFn = request_jellyfin_refresh,
 ) -> tuple[DeleteNotification, ...]:
-    """Tell Plex/Jellyfin after the destructive advisory locks are released."""
+    """Tell Plex/Jellyfin after the destructive advisory locks are released.
+
+    ``allow_escalation`` (default ``True``) preserves that operator-authorized
+    destructive-delete behavior: Plex may scan the configured root itself when
+    no narrower existing ancestor survives, and Jellyfin may fall back to
+    ``cfg.jellyfin_library_id`` when the item isn't found by its former path.
+
+    Pass ``allow_escalation=False`` for a routine, non-destructive caller
+    (issue #1203 item 2: post-import reconciliation of a path-changing
+    upgrade's vanished old album path) — a collection-wide Jellyfin refresh or
+    a Plex library-root scan would be a product violation there, matching the
+    "no collection refresh and no broad fallback" contract
+    ``trigger_jellyfin_scan`` already documents for post-import notification.
+    Refusing an escalation still records a ``skipped`` ``DeleteNotification``
+    naming why — it never silently no-ops.
+    """
     outcomes: list[DeleteNotification] = []
 
     if cfg.plex_url and cfg.resolved_plex_token():
@@ -76,6 +98,11 @@ def notify_library_delete(
             outcomes.append(DeleteNotification(
                 "plex", "warning",
                 "former album path is outside the configured Beets root"))
+        elif not allow_escalation and _is_configured_root(ancestor, plex_root):
+            outcomes.append(DeleteNotification(
+                "plex", "skipped",
+                "refused to escalate to a library-root scan (no narrower "
+                "existing ancestor survives)", ancestor))
         else:
             ref = None
             find_warning = ""
@@ -112,50 +139,56 @@ def notify_library_delete(
         except Exception as exc:  # noqa: BLE001 -- refresh can still run
             find_warning = f"; identity lookup failed: {type(exc).__name__}: {exc}"
             log.warning("JELLYFIN DELETE: identity lookup failed: %s", exc)
-        try:
-            item_id = ref.item_id if ref else cfg.jellyfin_library_id
-            submitted = jellyfin_refresh_fn(cfg, item_id)
-            if submitted is None:
-                outcomes.append(DeleteNotification(
-                    "jellyfin", "skipped", "Jellyfin is not fully configured"))
-            else:
-                status, target = submitted
-                observed_absent = False
-                post_warning = ""
-                if ref is not None:
-                    try:
-                        observed_absent = (
-                            jellyfin_find_fn(cfg, former_album_path) is None
-                        )
-                    except Exception as exc:  # noqa: BLE001 -- visible warning
-                        post_warning = (
-                            "; post-refresh observation failed: "
-                            f"{type(exc).__name__}: {exc}"
-                        )
-                if ref is None:
-                    detail = (
-                        f"HTTP {status}; album item was not observable by former "
-                        "path, so refresh submission is not reconciliation proof"
-                    ) + find_warning
-                    outcome_status: Literal["submitted", "warning"] = "warning"
-                elif observed_absent:
-                    detail = (
-                        f"HTTP {status}; exact album item {ref.item_id} is now "
-                        "absent by former path"
-                    )
-                    outcome_status = "submitted"
-                else:
-                    detail = (
-                        f"HTTP {status}; exact album item {ref.item_id} remains "
-                        "observable after refresh submission"
-                    ) + post_warning
-                    outcome_status = "warning"
-                outcomes.append(DeleteNotification(
-                    "jellyfin", outcome_status, detail, target))
-        except Exception as exc:  # noqa: BLE001 -- best effort
-            log.warning("JELLYFIN DELETE: refresh failed: %s", exc)
+        if ref is None and not allow_escalation:
             outcomes.append(DeleteNotification(
-                "jellyfin", "warning", f"{type(exc).__name__}: {exc}"))
+                "jellyfin", "skipped",
+                "refused to escalate to a collection-wide refresh (album "
+                "item not found by former path)" + find_warning))
+        else:
+            try:
+                item_id = ref.item_id if ref else cfg.jellyfin_library_id
+                submitted = jellyfin_refresh_fn(cfg, item_id)
+                if submitted is None:
+                    outcomes.append(DeleteNotification(
+                        "jellyfin", "skipped", "Jellyfin is not fully configured"))
+                else:
+                    status, target = submitted
+                    observed_absent = False
+                    post_warning = ""
+                    if ref is not None:
+                        try:
+                            observed_absent = (
+                                jellyfin_find_fn(cfg, former_album_path) is None
+                            )
+                        except Exception as exc:  # noqa: BLE001 -- visible warning
+                            post_warning = (
+                                "; post-refresh observation failed: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                    if ref is None:
+                        detail = (
+                            f"HTTP {status}; album item was not observable by former "
+                            "path, so refresh submission is not reconciliation proof"
+                        ) + find_warning
+                        outcome_status: Literal["submitted", "warning"] = "warning"
+                    elif observed_absent:
+                        detail = (
+                            f"HTTP {status}; exact album item {ref.item_id} is now "
+                            "absent by former path"
+                        )
+                        outcome_status = "submitted"
+                    else:
+                        detail = (
+                            f"HTTP {status}; exact album item {ref.item_id} remains "
+                            "observable after refresh submission"
+                        ) + post_warning
+                        outcome_status = "warning"
+                    outcomes.append(DeleteNotification(
+                        "jellyfin", outcome_status, detail, target))
+            except Exception as exc:  # noqa: BLE001 -- best effort
+                log.warning("JELLYFIN DELETE: refresh failed: %s", exc)
+                outcomes.append(DeleteNotification(
+                    "jellyfin", "warning", f"{type(exc).__name__}: {exc}"))
     else:
         outcomes.append(DeleteNotification(
             "jellyfin", "skipped", "Jellyfin is not configured"))

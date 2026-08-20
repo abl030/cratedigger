@@ -411,6 +411,24 @@ match:
 plugins: musicbrainz mbsync discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline permissions
 ```
 
+**Recurrence hazard: an ordinary import can rename a folder (issue #1203
+item 2).** `%aunique` only emits a bracket when a `path_disambig` value is
+present, and it renders the FIRST time any higher-priority field in that
+`albumdisambig or releasegroupdisambig or catalognum or label or str(year)`
+chain gets populated for an album that already collided with a sibling
+pressing — this is not limited to a beets config change. Any ordinary import
+that fills in `catalognum` (or `label`, or `albumdisambig`) for the first
+time on an album with a same-artist/same-title sibling renames its folder
+mid-collection, e.g. `1969 - David Bowie [1969]` → `[SBL 7912]` when
+`catalognum` first arrives (live incident, request 8964). Nothing in beets
+itself notices the rename affects Plex/Jellyfin, which is why
+`lib/dispatch/core.py` reconciles every vanished pre-upgrade path with both
+media servers after every import — see `docs/plex-primer.md` and
+`docs/jellyfin-primer.md` § "Post-import vanished-path reconciliation". The
+blast radius is exactly the intentional multi-pressing cohort (CLAUDE.md
+invariant 5, curated duplicate editions) — large and permanent, not a
+one-time migration artifact.
+
 ### Active Plugins
 
 | Plugin | Purpose | Auto? |

@@ -151,6 +151,133 @@ class TestDeleteNotifierTargeting(unittest.TestCase):
             ))
 
 
+class TestDeleteNotifierEscalationRefusal(unittest.TestCase):
+    """``allow_escalation=False`` (issue #1203 item 2): a routine post-import
+    reconciliation caller must never fall back to a Plex library-root scan
+    or a Jellyfin collection-wide refresh — only the operator-authorized
+    destructive-delete caller (the default, ``allow_escalation=True``) may."""
+
+    def _cfg(self, root: str) -> MagicMock:
+        cfg = MagicMock()
+        cfg.beets_directory = root
+        cfg.plex_url = "http://plex"
+        cfg.plex_library_section_id = "3"
+        cfg.plex_path_map = f"{root}:/prom_music"
+        cfg.resolved_plex_token.return_value = "plex-token"
+        cfg.jellyfin_url = "http://jellyfin"
+        cfg.jellyfin_library_id = "stale-library-id"
+        cfg.jellyfin_path_map = f"{root}:/jf_music"
+        cfg.resolved_jellyfin_token.return_value = "jf-token"
+        return cfg
+
+    def test_plex_refuses_a_library_root_scan(self) -> None:
+        """The sole-album-artist-rename world: neither the vanished album
+        folder NOR its parent artist folder survives, so the only existing
+        ancestor is the configured root itself — the forbidden escalation."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            former = root / "Artist" / "Deleted Album"
+            cfg = self._cfg(raw)
+            submissions: list[str] = []
+
+            outcomes = notify_library_delete(
+                cfg,
+                str(former),
+                allow_escalation=False,
+                plex_find_fn=lambda _cfg, _path: None,
+                plex_scan_fn=lambda _cfg, path: (
+                    submissions.append(path) or (200, path)),
+                jellyfin_find_fn=lambda _cfg, _path: None,
+                jellyfin_refresh_fn=lambda _cfg, item_id=None: (
+                    204, "/Library/Refresh"),
+            )
+
+            self.assertEqual(submissions, [])
+            plex = next(item for item in outcomes if item.provider == "plex")
+            self.assertEqual(plex.status, "skipped")
+            self.assertIn("library-root scan", plex.detail)
+
+    def test_plex_still_scans_a_narrower_surviving_ancestor(self) -> None:
+        """Must-still-work: forbidding escalation does not forbid the
+        ordinary narrower-ancestor scan (e.g. the artist folder) that a
+        genuine path-changing rename leaves intact."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artist = root / "Artist"
+            artist.mkdir()
+            former = artist / "Deleted Album"
+            cfg = self._cfg(raw)
+            submissions: list[str] = []
+
+            outcomes = notify_library_delete(
+                cfg,
+                str(former),
+                allow_escalation=False,
+                plex_find_fn=lambda _cfg, _path: PlexAlbumRef("77", 1),
+                plex_scan_fn=lambda _cfg, path: (
+                    submissions.append(path) or (200, path)),
+                jellyfin_find_fn=lambda _cfg, _path: None,
+                jellyfin_refresh_fn=lambda _cfg, item_id=None: (
+                    204, "/Library/Refresh"),
+            )
+
+            self.assertEqual(submissions, [str(artist)])
+            plex = next(item for item in outcomes if item.provider == "plex")
+            self.assertEqual(plex.status, "submitted")
+
+    def test_jellyfin_refuses_a_collection_wide_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            former = Path(raw) / "Artist" / "Deleted Album"
+            cfg = self._cfg(raw)
+            refreshes: list[str | None] = []
+
+            outcomes = notify_library_delete(
+                cfg,
+                str(former),
+                allow_escalation=False,
+                plex_find_fn=lambda _cfg, _path: None,
+                plex_scan_fn=lambda _cfg, path: (200, path),
+                jellyfin_find_fn=lambda _cfg, _path: None,
+                jellyfin_refresh_fn=lambda _cfg, item_id=None: (
+                    refreshes.append(item_id) or (204, "/Library/Refresh")),
+            )
+
+            self.assertEqual(refreshes, [])
+            jellyfin = next(
+                item for item in outcomes if item.provider == "jellyfin")
+            self.assertEqual(jellyfin.status, "skipped")
+            self.assertIn("collection-wide refresh", jellyfin.detail)
+
+    def test_jellyfin_still_refreshes_an_exact_found_item(self) -> None:
+        """Must-still-work: an exact targeted item refresh (never a
+        collection-wide one) still runs with escalation forbidden."""
+        with tempfile.TemporaryDirectory() as raw:
+            former = Path(raw) / "Artist" / "Deleted Album"
+            cfg = self._cfg(raw)
+            refreshes: list[str | None] = []
+            # First lookup (identity) finds the item; the second, post-refresh
+            # observation call finds it gone — mirrors the destructive-delete
+            # "is now absent by former path" test above.
+            lookups = [JellyfinAlbumRef("exact-album", "date"), None]
+
+            outcomes = notify_library_delete(
+                cfg,
+                str(former),
+                allow_escalation=False,
+                plex_find_fn=lambda _cfg, _path: None,
+                plex_scan_fn=lambda _cfg, path: (200, path),
+                jellyfin_find_fn=lambda _cfg, _path: lookups.pop(0),
+                jellyfin_refresh_fn=lambda _cfg, item_id=None: (
+                    refreshes.append(item_id) or (
+                        204, f"/Items/{item_id}/Refresh")),
+            )
+
+            self.assertEqual(refreshes, ["exact-album"])
+            jellyfin = next(
+                item for item in outcomes if item.provider == "jellyfin")
+            self.assertEqual(jellyfin.status, "submitted")
+
+
 class TestJellyfinRefreshFallback(unittest.TestCase):
     @patch("lib.util.urllib.request.urlopen")
     def test_target_404_falls_back_to_full_library_refresh(self, urlopen) -> None:

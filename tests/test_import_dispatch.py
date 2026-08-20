@@ -4442,6 +4442,166 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
         self.assertEqual(pin["request_id"], 42)
 
 
+class TestVanishedPathReconciliation(unittest.TestCase):
+    """Issue #1203 item 2. Invariant: after a path-changing import, every
+    replaced album path (``postflight.replaced_albums``) whose normalized
+    form differs from the imported path is reconciled with both media
+    servers exactly once, never before the Jellyfin pin capture has read
+    those paths, and never by escalating to a Plex library-root scan or a
+    Jellyfin collection-wide refresh.
+
+    ``notify_library_delete`` is patched (via ``patch_dispatch_externals``)
+    rather than driven for real here — the escalation-refusal MECHANICS are
+    covered by ``tests/test_library_delete_notifiers*.py`` and the composed
+    generated property in ``tests/test_media_server_reconcile_generated.py``.
+    This class is the WIRING pin: the right paths reach the right seam, with
+    ``allow_escalation=False``, in the right order.
+    """
+
+    def _dispatch(self, ir, *, cfg=None, configure_ext=None):
+        """Drive a real accepting ``dispatch_import_core`` call. Returns the
+        ``patch_dispatch_externals()`` namespace (``ext.reconcile`` is the
+        ``notify_library_delete`` mock) and the ``FakePipelineDB``."""
+        from lib.dispatch import dispatch_import_core
+
+        cfg = cfg or _full_dispatch_config()
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
+                handle.write(b"fixture audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42, status="downloading", mb_release_id="test-mbid",
+                active_download_state={
+                    "files": [], "filetype": "mp3", "current_path": tmpdir,
+                },
+            ))
+            claimed, candidate_result, execution_lease = _claim_dispatch_job(
+                db, path=tmpdir, release_id="test-mbid")
+            cancellation_token = CancellationToken()
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.dispatch.subprocess_runner.parse_import_result",
+                       return_value=ir), \
+                 pinned_dispatch_authority(
+                     db, execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
+                if configure_ext is not None:
+                    configure_ext(ext)
+                outcome = dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id="test-mbid",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # pyright: ignore[reportArgumentType]
+                    dl_info=DownloadInfo(filetype="mp3"),
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Track.mp3")],
+                    cfg=cfg,
+                    quality_gate_fn=noop_quality_gate,
+                    candidate_import_job_id=claimed.id,
+                    prevalidated_candidate_result=candidate_result,
+                    execution_lease=execution_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    run_import_fn=_owned_test_runner,
+                )
+            finalize_claimed_dispatch(db, claimed, outcome)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        return ext, db
+
+    def test_every_distinct_changed_replaced_path_is_reconciled_once(self):
+        imported_path = (
+            "/mnt/virtio/Music/Beets/David Bowie/2026 - Album [SBL 7912]")
+        old_path = "/mnt/virtio/Music/Beets/David Bowie/1969 - Album [1969]"
+        ir = make_import_result(decision="import", imported_path=imported_path)
+        ir.postflight.replaced_albums = [
+            DuplicateRemoveCandidate(beets_album_id=1, album_path=old_path),
+            # Trailing-slash duplicate of the same real path — dedupe.
+            DuplicateRemoveCandidate(
+                beets_album_id=2, album_path=old_path + "/"),
+            # Same as the NEW path — must not be reconciled.
+            DuplicateRemoveCandidate(
+                beets_album_id=3, album_path=imported_path),
+            # Blank — must not be reconciled.
+            DuplicateRemoveCandidate(beets_album_id=4, album_path=""),
+        ]
+        ext, _db = self._dispatch(ir)
+        self.assertEqual(ext.reconcile.call_count, 1)
+        call = ext.reconcile.call_args
+        self.assertEqual(call.args[1], old_path)
+        self.assertEqual(call.kwargs, {"allow_escalation": False})
+
+    def test_unchanged_replaced_path_produces_no_reconciliation(self):
+        imported_path = "/mnt/virtio/Music/Beets/Artist/2026 - Album"
+        ir = make_import_result(decision="import", imported_path=imported_path)
+        ir.postflight.replaced_albums = [
+            DuplicateRemoveCandidate(
+                beets_album_id=1, album_path=imported_path),
+        ]
+        ext, _db = self._dispatch(ir)
+        ext.reconcile.assert_not_called()
+
+    def test_no_replaced_albums_produces_no_reconciliation(self):
+        ir = make_import_result(
+            decision="import",
+            imported_path="/mnt/virtio/Music/Beets/Artist/2026 - Album")
+        ext, _db = self._dispatch(ir)
+        ext.reconcile.assert_not_called()
+
+    def test_reconciliation_runs_after_the_jellyfin_pin_capture(self):
+        """``capture_jellyfin_date_created_pin`` reads the replaced albums'
+        old paths synchronously to find the pre-upgrade Jellyfin item (item
+        identity is a hash of the path) — reconciling a path before that
+        capture runs would destroy the very item the capture needs. Drives
+        the REAL capture function (only its true HTTP leaf,
+        ``lib.util._jellyfin_get_json``, is faked — the same seam
+        ``TestDispatchJellyfinPinCaptureSlice`` uses) rather than mocking our
+        own orchestration code, per the leaf-seam-only mock policy."""
+        order: list[str] = []
+
+        def _fake_get_json(cfg, path, **params):
+            order.append("jellyfin_pin_capture_http")
+            return {"Items": []}
+
+        def _configure(ext):
+            ext.jellyfin.side_effect = (
+                lambda *a, **k: order.append("trigger_jellyfin"))
+
+            def _reconcile(*_a, **_k):
+                order.append("reconcile")
+                return ()
+
+            ext.reconcile.side_effect = _reconcile
+
+        imported_path = (
+            "/mnt/virtio/Music/Beets/David Bowie/2026 - Album [SBL 7912]")
+        old_path = "/mnt/virtio/Music/Beets/David Bowie/1969 - Album [1969]"
+        ir = make_import_result(decision="import", imported_path=imported_path)
+        ir.postflight.replaced_albums = [
+            DuplicateRemoveCandidate(beets_album_id=1, album_path=old_path),
+        ]
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+            jellyfin_url="http://jf:8096",
+            jellyfin_token="tok",
+            jellyfin_path_map="/mnt/virtio/Music/Beets:/jf",
+        )
+        with patch("lib.util._jellyfin_get_json", side_effect=_fake_get_json):
+            self._dispatch(ir, cfg=cfg, configure_ext=_configure)
+
+        capture_indices = [
+            i for i, v in enumerate(order) if v == "jellyfin_pin_capture_http"]
+        self.assertTrue(capture_indices, order)
+        self.assertLess(max(capture_indices), order.index("trigger_jellyfin"))
+        self.assertLess(order.index("trigger_jellyfin"), order.index("reconcile"))
+
+
 class _RecordingProcessGroup:
     """Typed stand-in for the injected child-supervision group."""
 
