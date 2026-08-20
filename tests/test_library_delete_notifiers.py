@@ -154,8 +154,14 @@ class TestDeleteNotifierTargeting(unittest.TestCase):
 class TestDeleteNotifierEscalationRefusal(unittest.TestCase):
     """``allow_escalation=False`` (issue #1203 item 2): a routine post-import
     reconciliation caller must never fall back to a Plex library-root scan
-    or a Jellyfin collection-wide refresh — only the operator-authorized
-    destructive-delete caller (the default, ``allow_escalation=True``) may."""
+    — only the operator-authorized destructive-delete caller (the default,
+    ``allow_escalation=True``) may. On Jellyfin the difference runs deeper
+    than an escalation refusal: with ``allow_escalation=False``,
+    ``jellyfin_refresh_fn`` is never called at all (see
+    ``lib.library_delete_notifiers.notify_library_delete``'s own docstring
+    for the source-level reason a targeted refresh cannot reap a vanished
+    item and would instead delete its child rows); the reconciler finds the
+    item by its former path and reports it, nothing more."""
 
     def _cfg(self, root: str) -> MagicMock:
         cfg = MagicMock()
@@ -225,7 +231,11 @@ class TestDeleteNotifierEscalationRefusal(unittest.TestCase):
             plex = next(item for item in outcomes if item.provider == "plex")
             self.assertEqual(plex.status, "submitted")
 
-    def test_jellyfin_refuses_a_collection_wide_refresh(self) -> None:
+    def test_jellyfin_reports_not_found_without_any_refresh_call(self) -> None:
+        """No item found by former path (``allow_escalation=False``): report
+        it, never call ``jellyfin_refresh_fn`` at all — not even the item's
+        own targeted refresh, let alone the ``cfg.jellyfin_library_id``
+        collection-wide fallback the ``True`` mode would use here."""
         with tempfile.TemporaryDirectory() as raw:
             former = Path(raw) / "Artist" / "Deleted Album"
             cfg = self._cfg(raw)
@@ -238,19 +248,64 @@ class TestDeleteNotifierEscalationRefusal(unittest.TestCase):
                 plex_find_fn=lambda _cfg, _path: None,
                 plex_scan_fn=lambda _cfg, path: (200, path),
                 jellyfin_find_fn=lambda _cfg, _path: None,
-                jellyfin_refresh_fn=lambda _cfg, item_id=None: (
-                    refreshes.append(item_id) or (204, "/Library/Refresh")),
+                jellyfin_refresh_fn=(
+                    lambda _cfg, item_id=None: (
+                        refreshes.append(item_id) or (204, "/Library/Refresh"))),
             )
 
             self.assertEqual(refreshes, [])
             jellyfin = next(
                 item for item in outcomes if item.provider == "jellyfin")
             self.assertEqual(jellyfin.status, "skipped")
-            self.assertIn("collection-wide refresh", jellyfin.detail)
+            self.assertIn("no Jellyfin item found", jellyfin.detail)
 
-    def test_jellyfin_still_refreshes_an_exact_found_item(self) -> None:
-        """Must-still-work: an exact targeted item refresh (never a
-        collection-wide one) still runs with escalation forbidden."""
+    def test_jellyfin_found_item_is_reported_not_refreshed(self) -> None:
+        """Issue #1203 item 2 review (source-level finding against Jellyfin
+        10.11): a targeted refresh of a stale album can never reap it —
+        deletion is computed by the PARENT folder's own child-set diff, not
+        the item's own refresh — and the vanished directory makes that
+        refresh instead empty the item's child rows. So with
+        ``allow_escalation=False`` a FOUND item is reported, and
+        ``jellyfin_refresh_fn`` is never called for it either — this is not
+        merely an escalation refusal, it is a different action entirely
+        from the ``allow_escalation=True`` mode."""
+        with tempfile.TemporaryDirectory() as raw:
+            former = Path(raw) / "Artist" / "Deleted Album"
+            cfg = self._cfg(raw)
+            refreshes: list[str | None] = []
+
+            outcomes = notify_library_delete(
+                cfg,
+                str(former),
+                allow_escalation=False,
+                plex_find_fn=lambda _cfg, _path: None,
+                plex_scan_fn=lambda _cfg, path: (200, path),
+                jellyfin_find_fn=(
+                    lambda _cfg, _path: JellyfinAlbumRef("exact-album", "date")),
+                jellyfin_refresh_fn=(
+                    lambda _cfg, item_id=None: (
+                        refreshes.append(item_id) or (
+                            204, f"/Items/{item_id}/Refresh"))),
+            )
+
+            self.assertEqual(refreshes, [])
+            jellyfin = next(
+                item for item in outcomes if item.provider == "jellyfin")
+            self.assertEqual(jellyfin.status, "warning")
+            self.assertEqual(jellyfin.target, "exact-album")
+            self.assertIn("exact-album", jellyfin.detail)
+            self.assertIn(str(former), jellyfin.detail)
+            self.assertIn("NOT refreshed", jellyfin.detail)
+
+    def test_jellyfin_refreshes_an_exact_found_item_when_escalation_allowed(
+        self,
+    ) -> None:
+        """Must-still-work, re-pointed to ``allow_escalation=True`` (issue
+        #1203 item 2 review): the destructive-delete caller's find →
+        refresh → re-observe behavior is UNCHANGED. Only the routine
+        post-import reconciler (``allow_escalation=False``,
+        ``test_jellyfin_found_item_is_reported_not_refreshed`` above) skips
+        the refresh entirely."""
         with tempfile.TemporaryDirectory() as raw:
             former = Path(raw) / "Artist" / "Deleted Album"
             cfg = self._cfg(raw)
@@ -263,13 +318,14 @@ class TestDeleteNotifierEscalationRefusal(unittest.TestCase):
             outcomes = notify_library_delete(
                 cfg,
                 str(former),
-                allow_escalation=False,
+                allow_escalation=True,
                 plex_find_fn=lambda _cfg, _path: None,
                 plex_scan_fn=lambda _cfg, path: (200, path),
                 jellyfin_find_fn=lambda _cfg, _path: lookups.pop(0),
-                jellyfin_refresh_fn=lambda _cfg, item_id=None: (
-                    refreshes.append(item_id) or (
-                        204, f"/Items/{item_id}/Refresh")),
+                jellyfin_refresh_fn=(
+                    lambda _cfg, item_id=None: (
+                        refreshes.append(item_id) or (
+                            204, f"/Items/{item_id}/Refresh"))),
             )
 
             self.assertEqual(refreshes, ["exact-album"])

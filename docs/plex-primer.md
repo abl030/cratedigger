@@ -173,10 +173,19 @@ import, `catalognum` populated for the first time, renaming
 track, reaped only by a manual targeted folder scan).
 
 After both "Recently Added" pin captures and both new-path notifiers run
-(`lib/dispatch/core.py::_trigger_post_import_notifiers`), Cratedigger calls
-`lib.library_delete_notifiers.notify_library_delete` once per distinct
-pre-upgrade path still present in `postflight.replaced_albums` (skipping any
-path whose normalized form equals the new imported path) — the SAME function
+(`lib/dispatch/core.py::_trigger_post_import_notifiers`), Cratedigger
+snapshots every album directory Beets currently holds for the request's
+release id BOTH before Beets launch and again here, and diffs the two
+(`lib.beets_db.BeetsDB.get_current_album_directories`,
+`lib.dispatch.core._vanished_album_directories`) — this before/after diff is
+the PRIMARY, authoritative source of vanished pre-upgrade paths.
+`postflight.replaced_albums` (the harness's mid-import serialization) is only
+a SECONDARY source unioned in: it can already show the album's NEW path by
+the time it's captured (measured live: 182 of 232 historical
+`replaced_albums` records show `album_path == imported_path`, including the
+Bowie row above), so it cannot be trusted alone. For each distinct vanished
+path from either source, Cratedigger calls
+`lib.library_delete_notifiers.notify_library_delete` — the SAME function
 "Library deletion refresh" above uses: walk up to the nearest existing
 ancestor within the configured root and submit a partial scan there. It is
 called with `allow_escalation=False`, which forbids exactly one thing the
@@ -188,6 +197,14 @@ Refusing that escalation still records a `skipped` result naming why; it
 never silently no-ops. Every ordinary narrower-ancestor scan (the artist
 folder, the common case) still runs exactly as it does for a destructive
 delete.
+
+**Measured against the live library (doc2, 8,507 album directories, 93,846
+tracks): zero orphans.** Unlike the Jellyfin leg (`docs/jellyfin-primer.md`),
+which deliberately only finds the item and reports it — never refreshes,
+since a source-level finding proved a targeted Jellyfin refresh cannot reap a
+vanished item and instead deletes its child rows — this Plex mechanism
+genuinely self-heals: the nearest-existing-ancestor partial scan is exactly
+what Plex needs to notice the vanished child and reconcile it.
 
 ### Useful endpoints
 

@@ -919,10 +919,36 @@ Three facts that each cost a wasted batch if learned the hard way:
   `embedart` has no `minwidth` of its own, and it auto-embeds off the `art_set`
   event that `beet fetchart` itself fires — so simply lowering `minwidth` embeds
   the small image into every track. `-P embedart` is how a one-shot writes a
-  small folder `cover.jpg` while leaving the tracks untouched. That result is
-  self-protecting: on any later re-import the deployed `minwidth` rejects the
-  same file as a `filesystem` candidate, `art_set` never fires, and it is still
-  never embedded.
+  small folder `cover.jpg` while leaving the tracks untouched.
+
+  **Manual art is an operator lane with a lifecycle precondition (issue #1203
+  item 3).** When no configured source clears `minwidth: 300` — the exact
+  Discogs primary is itself below the floor and there is no better
+  pressing-exact candidate — the only remedy is an operator applying art by
+  hand with the overlay recipe above. Safe only AFTER the request has reached
+  `status = 'imported'`: `PipelineDB.get_wanted`
+  (`lib/pipeline_db/requests.py:1607`) selects `WHERE status = 'wanted'` and
+  nothing else, so an `imported` request is never re-searched or
+  automatically re-imported — manually applied art survives every automatic
+  pipeline behavior. It does NOT survive an operator-INITIATED re-import of
+  the same album (Replace, a Bad Rip re-acquisition, a fresh request for the
+  same release): beets' duplicate removal deletes the old album's items and
+  its `artpath` outright, and the deployed `minwidth: 300` again rejects
+  every candidate, so the album silently returns to art-less. Cratedigger
+  deliberately does not try to preserve manual art across a re-import — that
+  would be new machinery at the import seam, and the archivist frame is to
+  surface state rather than auto-decide (CLAUDE.md). If this ever needs
+  enforcing, the honest shape is a census listing art-less albums (the
+  pattern the existing `cratedigger-retag-census` daily oneshot already
+  uses), not import-time logic — read the gap as intentional, not an
+  oversight.
+
+  The seven beets album ids remediated this way for issue #1203 item 3
+  (2026-08-20): cratedigger#1200's pressing-exact remediation correctly set
+  `cover_art_url` for all 101 affected albums, but these 7 still produced no
+  art at all, because their exact Discogs primary image (150×150 to 284×284)
+  never clears the floor.
+  **10520, 11722, 14345, 18569, 18576, 19587, 19803.**
 - **Set a private `TMPDIR`.** beets caches downloads under
   `$TMPDIR/beets/<plugin>`, and the service already owns `/tmp/beets` as
   `cratedigger:users` mode 0755. An operator running as another account gets

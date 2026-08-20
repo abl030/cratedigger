@@ -79,25 +79,63 @@ migrating the old one (live incident: request 8964's David Bowie import,
 `[SBL 7912]`).
 
 After both "Recently Added" pin captures and both new-path notifiers run
-(`lib/dispatch/core.py::_trigger_post_import_notifiers`), Cratedigger calls
-`lib.library_delete_notifiers.notify_library_delete` once per distinct
-pre-upgrade path still present in `postflight.replaced_albums` (skipping any
-path whose normalized form equals the new imported path) — the SAME function
-the destructive library-delete flow above uses, since the reconciliation work
-is identical: find the item by its former path, submit a targeted refresh,
-observe whether it went away. It is called with `allow_escalation=False`,
-which forbids the library-deletion fallback described above: when the item
-isn't found by its former path, the reconciler submits NO refresh at all —
-it never falls back to the configured library item the way the destructive
-delete path does — because a routine post-import notification must never
-become a collection refresh. Refusing that escalation still records a
-`skipped` result naming why; it never silently no-ops.
+(`lib/dispatch/core.py::_trigger_post_import_notifiers`), Cratedigger snapshots
+every album directory Beets currently holds for the request's release id
+BOTH before Beets launch and again here, and diffs the two
+(`lib.beets_db.BeetsDB.get_current_album_directories`,
+`lib.dispatch.core._vanished_album_directories`) — this before/after diff is
+the PRIMARY, authoritative source of vanished pre-upgrade paths.
+`postflight.replaced_albums` (the harness's mid-import serialization) is only
+a SECONDARY source unioned in: it can already show the album's NEW path by
+the time it's captured (the measured live defect — 182 of 232 historical
+`replaced_albums` records show `album_path == imported_path`, including the
+Bowie row above), so it cannot be trusted alone. For each distinct vanished
+path from either source, Cratedigger calls
+`lib.library_delete_notifiers.notify_library_delete` with
+`allow_escalation=False`.
 
-This call MUST run after the Jellyfin pin capture below, never before:
-`capture_jellyfin_date_created_pin` reads these same old paths synchronously
-to find the pre-upgrade item and snapshot its date. Reconciling — and
-potentially removing — that item first would destroy the very item the
-capture needs, resurfacing the upgrade at the top of "Recently Added".
+**On Jellyfin this call never refreshes anything — it only finds the item by
+its former path and reports what it found.** That is not merely "the
+collection-wide fallback is refused"; it is a different action from the
+destructive-delete caller's find → refresh → re-observe flow entirely. The
+reason is a source-level finding against Jellyfin 10.11
+(`MediaBrowser.Controller/Entities/Folder.cs::ValidateChildrenInternal2`):
+deletion of a vanished item is computed as the PARENT folder's own disk-vs-DB
+child-set diff, so an item is never deleted by refreshing ITSELF —
+`POST /Items/{id}/Refresh` validates that item's own children, and is
+structurally incapable of reaping the item. Worse, the album's directory is
+already gone by the time this call would run, so enumerating it during that
+refresh raises `DirectoryNotFoundException`; the same method's `IOException`
+handler logs and swallows it instead of returning, so the refresh proceeds
+with an EMPTY observed disk and deletes every one of the album's child
+`Audio` rows (files on disk are untouched — Jellyfin's `DeleteFileLocation`
+stays false — but their Jellyfin metadata/user-data is gone). Live-verified
+against a real Jellyfin 10.11.11 instance: a probe `/Items/{id}/Refresh`
+against one of the live orphans this issue describes deleted 17 `Audio` rows
+outright, while the album item itself persisted throughout — consistent with
+deletion being computed one level up, at the parent.
+
+So the reconciler's Jellyfin outcome is one of two shapes, and both are
+final — neither is a "try again later":
+
+- The item is found by its former path: a `warning` `DeleteNotification`
+  naming the exact item id and former path, stating it was found but NOT
+  refreshed and that reaping it is an operator action.
+- No item is found by its former path: a `skipped` `DeleteNotification`.
+
+Whether Cratedigger should ever be authorized to delete a Jellyfin item
+directly, or to refresh the parent artist (risking every sibling album on a
+broken/slow mount, since Jellyfin gives that scope no fail-safe), are both
+operator decisions tracked separately — this reconciler does neither, on
+purpose. **Contrast with Plex**, whose equivalent leg genuinely self-heals —
+see `docs/plex-primer.md`.
+
+This snapshot-diff-and-reconcile call MUST run after the Jellyfin pin capture
+below, never before: `capture_jellyfin_date_created_pin` reads
+`postflight.replaced_albums`'s old paths synchronously to find the
+pre-upgrade item and snapshot its date. This is kept as a standing ordering
+guarantee for every media-server action this reconciler could ever take, not
+a claim that today's find-only Jellyfin action is itself destructive.
 
 ### "Recently Added" pin on upgrades (migrations 046 + 053, issue #574)
 

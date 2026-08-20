@@ -164,6 +164,14 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/misc.py", 186, "12cfdd83a367c90e"): (
         "track-count batch IN list contains only psycopg value placeholders"
     ),
+    ("lib/beets_db.py", 847, "4b59d19eb8727dff"): (
+        "issue #1203 item 2: get_current_album_directories's batch IN list "
+        "contains only sqlite3 '?' value placeholders (album_ids, a list of "
+        "int primary keys already resolved by _matching_album_ids). This is "
+        "the deployment-owned Beets SQLite items table, not the pipeline DB "
+        "-- album_requests is not reachable from this connection at all, "
+        "and the query is a read-only SELECT"
+    ),
     ("lib/pipeline_db/misc.py", 399, "0a14fd5e6252e398"): (
         "bulk VALUES fragment contains only fixed value-placeholder tuples "
         "(issue #784: add_denylist/get_denylisted_users annotated above, "
