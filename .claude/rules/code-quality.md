@@ -392,13 +392,20 @@ automated launcher of the canonical suite (`scripts/test.sh`,
 `scripts/run_final_gate.sh`, `scripts/daily_flake_update.sh`'s
 `deterministic_suite` stage, and `scripts/daily_beets_tip_update.sh`, which
 runs the same suite through `nix develop .#tip` — grep for BOTH
-`nix-shell --run .*run_tests.sh` and `nix develop .* run_tests.sh`, since the
-tip canary enters its shell the flake way) sets
+`nix-shell --run` and `nix develop`, since only the daily-gate stages still
+enter the shell the legacy way) sets
 `CRATEDIGGER_SUITE_OWNS_HEADROOM=1` before its own shell invocation,
 which tells that shellHook check to skip only its free-bytes refusal
 (everything else in `setup_cratedigger_test_tmpfs` still runs); `run_suite`'s
 own post-lock headroom precondition is then the single enforcement point for
-every suite run launched this way. The documented DIRECT command
+every suite run launched this way. Issue #1229 moved the first two of those
+launchers from `nix-shell --run` to `nix develop --command` — the same
+derivation either way (`flake.nix`'s `devShells.default` IS `./nix/shell.nix`),
+but only the flake path gets Nix's own eval cache, worth ~4.7s per invocation
+on a clean tree. The two daily-gate stages deliberately did NOT move: they are
+unattended nightly jobs where the saving is irrelevant, and moving them would
+mean teaching their fake `nix` shim a new subcommand for no operator-visible
+gain. The documented DIRECT command
 (`nix-shell --run "bash scripts/run_tests.sh"`, CLAUDE.md/README.md/this
 file's own code block above) deliberately stays as-is: a human running it
 interactively gets the entry guard on purpose, since nothing there is

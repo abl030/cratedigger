@@ -158,8 +158,16 @@ run_gate() {
     command=$(canonical_command)
     # See scripts/test.sh for why: run_suite()'s own post-lock headroom
     # precondition is the single enforcement point for suite runs; the
-    # nix-shell shellHook entry guard defers to it here too (issue #1111 M2).
-    gate_argv=(env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 nix-shell --run "$command")
+    # dev-shell shellHook entry guard defers to it here too (issue #1111 M2).
+    # `nix develop` rather than `nix-shell` for the eval-cache reason
+    # documented in full at scripts/test.sh (issue #1229). The gate is the
+    # best case for it: it already refuses to run on anything but a
+    # committed clean tree (below), which is exactly the state whose flake
+    # fingerprint Nix can cache -- ~4.7s off every gate invocation.
+    # `canonical_command` is unchanged, so the receipt still records the
+    # same canonical `bash scripts/run_tests.sh` and `status` still
+    # compares it the same way; only the launcher around it moved.
+    gate_argv=(env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 nix develop --command bash -c "$command")
     receipt=$(mktemp -d "$runtime/cratedigger-final-gate.XXXXXXXX") \
         || die "cannot create final-gate receipt beneath $runtime"
     chmod 700 "$receipt" || die "cannot secure receipt directory: $receipt"
