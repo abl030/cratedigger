@@ -714,26 +714,31 @@ in order — the caller's own `TMPDIR`, then `/tmp` — verified by filesystem
 identity to be distinct from the private scratch tmpfs it measures
 (`$XDG_RUNTIME_DIR`), never inside it: a full scratch tmpfs on 2026-08-20 took
 the monitor's own state down with it and erased the one night's telemetry
-that would have diagnosed the overflow (issue #1214). Sample loss is REPORTED
-by the writer that experienced it, never inferred from the surviving data
-after the fact (review C1: a gap in a writer's own sequence numbers is only
-observable when a LATER row from that writer survives, so a permanent,
-never-recovered failure — EACCES/EROFS, a persistent lock or cgroup-read
-failure, anything from partway through the run to the very end — left no
-hole to see and a false `status=valid`). The caller's own bootstrap/boundary/
-final samples run in the same process that prints the receipt, so their
-failures are counted in-process directly; the periodic background loop --
-already a child `daily_resource_monitor_finish` `wait`s on -- counts its own
-failed attempts in-process and reports the final total to the parent through
-a kernel pipe (a fifo opened once at start, while the state store is
+that would have diagnosed the overflow (issue #1214). A CLEANLY-REJECTED
+write (nothing lands at all) is REPORTED by the writer that experienced it,
+never inferred from a gap in the surviving samples (review C1: a gap in a
+writer's own sequence numbers is only observable when a LATER row from
+that writer survives, so a permanent, never-recovered failure —
+EACCES/EROFS, a persistent lock or cgroup-read failure, anything from
+partway through the run to the very end — left no hole to see and a false
+`status=valid`). The caller's own bootstrap/boundary/final samples run in
+the same process that prints the receipt, so their failures are counted
+in-process directly; the periodic background loop -- already a child
+`daily_resource_monitor_finish` `wait`s on -- counts its own failed
+attempts in-process and reports the final total to the parent through a
+kernel pipe (a fifo opened once at start, while the state store is
 known-healthy), never through a file write that could fail with the exact
-store it would be reporting on. Sequence numbers and a writer identity
-still ride on every row as a corruption/reordering signal: a real full
-filesystem does not reject a
-write atomically — a partial page can land and the next append then
-concatenates onto its unterminated tail (review F2, measured) — so a row with
-the wrong shape or a non-numeric field is skipped and counted rather than
-discarding every other row's evidence for one corrupt line. A phase whose
+store it would be reporting on. A write that lands but PARTIALLY is a
+different case, and the one place this mechanism genuinely does infer loss
+after the fact rather than report it: a real full filesystem does not
+reject a write atomically — a partial page can land and the next append
+then concatenates onto its unterminated tail (review F2, measured) — so
+nothing reports that failure, because nothing observed it happen; instead
+a row with the wrong shape or a non-numeric field is DETECTED from the
+surviving data itself and counted as corruption rather than discarding
+every other row's evidence for one corrupt line. Sequence numbers and a
+writer identity ride on every row as a further corruption/reordering
+signal but are never themselves the source of a reported drop. A phase whose
 every sample was lost this way still cannot vanish silently (review F4):
 every phase transition is independently durable via the phase-history file
 (a second write, not a free extension of the phase-pointer write — review

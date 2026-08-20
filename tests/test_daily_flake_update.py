@@ -327,32 +327,55 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         makes this test fail -- the receipt still prints
         status=degraded on stdout, but the process exits 0 and stderr has
         no diagnostic at all, exactly the regression C5 named."""
-        process = subprocess.Popen(
-            ["bash", str(SCRIPT)],
-            cwd=self.fake.root,
-            env=self.fake_environment(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
-        self.addCleanup(lambda: process.poll() is None and process.kill())
-        self.fake.update_state(hold_stage="suite", hold_seconds=0.4)
-        deadline = time.monotonic() + 5
-        while "suite" not in self.fake.state["stage_started"]:
-            self.assertIsNone(process.poll(), "daily runner exited before suite")
-            self.assertLess(time.monotonic(), deadline, "daily runner never reached suite")
-            time.sleep(0.02)
+        # issue #1214 review C2: globbing shared /tmp for the monitor's
+        # state directory is unsound -- another test's timed-out/SIGKILLed
+        # monitor run leaks its mktemp'd directory there permanently (it is
+        # removed only by daily_resource_monitor_finish, which a kill or a
+        # timeout never reaches), so a stray leftover makes this assertion
+        # fail on that host forever, not just flake. Reproduced both ways:
+        # concurrently with this module's own other tests, and
+        # deterministically with pre-planted leftover directories and zero
+        # concurrency. Fix: give this run its OWN isolated TMPDIR, on a
+        # filesystem distinct from $XDG_RUNTIME_DIR (real disk, not the
+        # fake's ambient tmpfs-backed one -- in the ordinary dev shell that
+        # ambient TMPDIR shares a filesystem with $XDG_RUNTIME_DIR, so F9's
+        # /tmp fallback is this test's live path, not an edge case), so the
+        # real monitor's own candidate-list logic (F9) resolves the state
+        # root to exactly this directory -- never the shared fallback -- and
+        # glob only inside it.
+        with tempfile.TemporaryDirectory(
+            dir="/tmp", prefix="cratedigger-c5-isolated-tmpdir-"
+        ) as isolated_tmpdir:
+            env = self.fake_environment()
+            env["TMPDIR"] = isolated_tmpdir
+            process = subprocess.Popen(
+                ["bash", str(SCRIPT)],
+                cwd=self.fake.root,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            self.addCleanup(lambda: process.poll() is None and process.kill())
+            self.fake.update_state(hold_stage="suite", hold_seconds=0.4)
+            deadline = time.monotonic() + 5
+            while "suite" not in self.fake.state["stage_started"]:
+                self.assertIsNone(process.poll(), "daily runner exited before suite")
+                self.assertLess(time.monotonic(), deadline, "daily runner never reached suite")
+                time.sleep(0.02)
 
-        # The state root is whichever candidate the real monitor picked
-        # (TMPDIR or its /tmp fallback -- issue #1214 review F9); glob
-        # both rather than assume one.
-        candidates = list(self.fake.tmpdir.glob("cratedigger-daily-resource.*/samples.tsv"))
-        candidates += list(Path("/tmp").glob("cratedigger-daily-resource.*/samples.tsv"))
-        self.assertEqual(len(candidates), 1, candidates)
-        candidates[0].chmod(0o400)
+            candidates = list(
+                Path(isolated_tmpdir).glob("cratedigger-daily-resource.*/samples.tsv")
+            )
+            self.assertEqual(len(candidates), 1, candidates)
+            candidates[0].chmod(0o400)
 
-        stdout, stderr = process.communicate(timeout=15)
+            # The subprocess -- and its use of isolated_tmpdir as the
+            # monitor's own state root -- must finish before the `with`
+            # block above tears that directory down.
+            stdout, stderr = process.communicate(timeout=15)
+
         state = self.fake.state
 
         # Resource monitoring is purely observational and never gates the

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -937,6 +938,68 @@ daily_resource_monitor_finish
         self.assertGreaterEqual(int(receipt["dropped_samples"]), 3)
         self.assertEqual(missing, [])
 
+    def test_parent_drop_sites_are_each_individually_counted(self) -> None:
+        """Regression pin for issue #1214 review C1: every prior test only
+        lower-bounded dropped_samples (>=), so removing any of the three
+        parent-writer drop-counting sites -- or all three together -- left
+        the whole module green, including the exact site review C6 named
+        as previously uncovered (the final sample write in finish()).
+        _daily_resource_monitor_loop is stubbed to report 0 drops
+        immediately: no real periodic sampling, no race against its first
+        stop-file check. (Review C1's own suggested alternative -- touch
+        the stop file right after start() so the loop's first check sees
+        it -- was measured unreliable here: 7 of 8 runs still squeezed in
+        one real loop tick before the flag was visible, an inherent fork
+        race, not a flake in this test.) That isolates the count to
+        exactly the three PARENT sites: the two boundary attempts in one
+        set_phase call (close bootstrap + open alpha) plus the one final
+        attempt in finish(). Asserts the EXACT count, not a floor -- and
+        since alpha's every attempt fails under the same chmod, it also
+        pins that a fully-lost phase is correctly named as missing rather
+        than silently absent.
+
+        Mutant proof (all four variants; empirically run during review,
+        not committed): removing any ONE of the three `|| _CRATEDIGGER_
+        RESOURCE_PARENT_DROPPED=...` sites drops the observed count from
+        3 to 2; removing all three together drops it to 0 (and the
+        receipt reports status=valid instead of degraded). The exact
+        `== "3"` assertion catches every variant; a `>=` floor catches
+        none of them, since the stubbed loop's own 0 never provides a
+        margin to hide a missed parent site behind."""
+        harness = r'''
+set -euo pipefail
+source "$1"
+_daily_resource_monitor_loop() {
+    printf "%d\n" 0 >&"${_CRATEDIGGER_RESOURCE_LOOP_REPORT_FD}"
+}
+export XDG_RUNTIME_DIR="$2"
+export TMPDIR="$3"
+
+daily_resource_monitor_start
+chmod 400 "$_CRATEDIGGER_RESOURCE_SAMPLES"
+daily_resource_monitor_set_phase alpha
+daily_resource_monitor_finish
+'''
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as scratch, \
+            tempfile.TemporaryDirectory() as state:
+            completed = subprocess.run(
+                ["bash", "-c", harness, "bash", str(MONITOR), scratch, state],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        phases, receipt, missing = parsed_summary(
+            completed, allowed_statuses={"degraded"}
+        )
+        self.assertEqual(receipt["dropped_samples"], "3")
+        self.assertEqual(missing, ["alpha"])
+        self.assertIn("bootstrap", phases)
+        self.assertNotIn("alpha", phases)
+
     def test_persistent_write_failure_through_end_of_run_is_still_reported(
         self,
     ) -> None:
@@ -981,6 +1044,55 @@ daily_resource_monitor_finish
         self.assertGreaterEqual(int(receipt["dropped_samples"]), 4)
         self.assertEqual(missing, [])
         self.assertIn("alpha", phases)
+
+    def test_unwritable_failure_marker_does_not_launder_a_lost_loop_report(
+        self,
+    ) -> None:
+        """Regression pin for issue #1214 review C5: if the loop-report
+        marker write ITSELF fails (not just the report read), the caller
+        must not fall through with loop_dropped silently at its
+        seemingly-harmless "0" default -- that combination previously
+        produced a false status=valid over a genuinely lost loop report.
+        Combines review C4's real SIGKILL-then-repoint technique (a real
+        child process that exits 0 without ever writing to the fifo) with
+        chmod 400 on the real failure-marker file (a real EACCES on that
+        specific write, nothing else).
+
+        Mutant proof (both directions; empirically run during review, not
+        committed): reverting the `|| monitor_status=1` fallback (so the
+        marker write's own failure is silently swallowed, the pre-fix
+        shape) makes this test fail -- the exact same world produces
+        `status=valid dropped_samples=0`, exit 0, with the failure
+        marker's own "Permission denied" the only sign anything went
+        wrong."""
+        harness = r'''
+set -euo pipefail
+source "$1"
+export XDG_RUNTIME_DIR="$2"
+export TMPDIR="$3"
+
+daily_resource_monitor_start
+chmod 400 "$_CRATEDIGGER_RESOURCE_FAILURE"
+kill -9 "$_CRATEDIGGER_RESOURCE_PID"
+wait "$_CRATEDIGGER_RESOURCE_PID" 2>/dev/null || true
+sleep 0.05 &
+_CRATEDIGGER_RESOURCE_PID=$!
+daily_resource_monitor_finish
+'''
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as scratch, \
+            tempfile.TemporaryDirectory() as state:
+            completed = subprocess.run(
+                ["bash", "-c", harness, "bash", str(MONITOR), scratch, state],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=15,
+            )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("status=invalid", completed.stdout)
+        self.assertNotIn("status=valid", completed.stdout)
 
     def test_missing_phase_via_real_write_path_is_named(self) -> None:
         """issue #1214 review C2: the unit-level missing-phase test hands
@@ -1040,6 +1152,52 @@ daily_resource_monitor_finish
         self.assertIn("alpha", phases)
         self.assertIn("gamma", phases)
         self.assertNotIn("beta", phases)
+
+    def test_loop_report_unavailable_is_a_distinguishable_reason(self) -> None:
+        """Known-bad self-test for issue #1214 review C4: if the loop
+        somehow exits cleanly (wait sees 0) without ever writing its
+        report, finish() must not silently treat that as "0 dropped" --
+        it has to say so. The ORIGINAL loop is SIGKILLed and reaped (a
+        real crash, not what this test is pinning), then
+        _CRATEDIGGER_RESOURCE_PID is repointed at a genuinely fresh `sleep
+        0.05 &` child: a real process that exits 0 on its own, without
+        ever touching the fifo, standing in for "the loop returned
+        normally but the report never arrived" without needing a
+        production mutant to construct it. This exercises the
+        `read -t 5` timeout for real (proven by wall-clock time, not
+        just the reason string) -- removing that timeout would hang this
+        exact scenario forever instead of degrading after 5s."""
+        harness = r'''
+set -euo pipefail
+source "$1"
+export XDG_RUNTIME_DIR="$2"
+export TMPDIR="$3"
+
+daily_resource_monitor_start
+kill -9 "$_CRATEDIGGER_RESOURCE_PID"
+wait "$_CRATEDIGGER_RESOURCE_PID" 2>/dev/null || true
+sleep 0.05 &
+_CRATEDIGGER_RESOURCE_PID=$!
+daily_resource_monitor_finish
+'''
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as scratch, \
+            tempfile.TemporaryDirectory() as state:
+            started = time.monotonic()
+            completed = subprocess.run(
+                ["bash", "-c", harness, "bash", str(MONITOR), scratch, state],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=15,
+            )
+            elapsed = time.monotonic() - started
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "status=invalid reason=loop_report_unavailable", completed.stdout
+        )
+        self.assertGreaterEqual(elapsed, 4.5)
 
     def test_state_store_bootstrap_failure_is_a_distinguishable_reason(
         self,

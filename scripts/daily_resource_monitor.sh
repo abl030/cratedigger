@@ -12,24 +12,30 @@
 # by filesystem identity, with a fallback candidate list rather than a
 # single hardcoded path.
 #
-# Loss is REPORTED by the writer that experienced it, never inferred after
-# the fact (issue #1214 review C1: gap-inference in the samples data
-# cannot see loss that persists to the end of a writer's own stream --
-# there is no later surviving row to reveal the hole, so a permanent
-# EACCES/EROFS/lock failure that never recovers produced a false
-# status=valid). The caller's own bootstrap/boundary/final samples run in
-# the SAME process that prints the receipt, so their failures are counted
-# in-process directly. The periodic loop is a background child that
-# daily_resource_monitor_finish already `wait`s on; it counts its own
-# failed attempts in-process and reports the final total to the parent
-# through a kernel pipe (a fifo opened once at start, while the state
-# store is known-healthy) -- never through a file write that could fail
-# with the exact store it would be reporting on.
+# A CLEANLY-REJECTED write (nothing lands at all) is REPORTED by the writer
+# that experienced it, never inferred from a gap in the surviving samples
+# (issue #1214 review C1: gap-inference from sequence numbers cannot see
+# loss that persists to the end of a writer's own stream -- there is no
+# later surviving row to reveal the hole, so a permanent EACCES/EROFS/lock
+# failure that never recovers produced a false status=valid). The caller's
+# own bootstrap/boundary/final samples run in the SAME process that prints
+# the receipt, so their failures are counted in-process directly. The
+# periodic loop is a background child that daily_resource_monitor_finish
+# already `wait`s on; it counts its own failed attempts in-process and
+# reports the final total to the parent through a kernel pipe (a fifo
+# opened once at start, while the state store is known-healthy) -- never
+# through a file write that could fail with the exact store it would be
+# reporting on.
 #
-# Sequence numbers and writer identity remain on every row as a
-# corruption/reordering signal (a shape or value that fails validation --
-# the signature a real, non-atomic full-filesystem write produces, review
-# F2/measured) but are no longer the source of the drop count.
+# A write that lands but PARTIALLY (a real full filesystem does not reject
+# a write atomically -- review F2, measured) is a different case: nothing
+# reports that one, because nothing observed it fail. It is instead
+# DETECTED from the surviving data itself -- the malformed shape/value the
+# concatenation with the next append produces -- and counted as corruption
+# (review C4), the one place this mechanism genuinely does infer loss
+# after the fact, not report it. Sequence numbers and writer identity
+# remain on every row as a further corruption/reordering signal but are
+# never the source of a REPORTED drop count.
 
 _daily_resource_invalid() {
     local reason="$1"
@@ -680,7 +686,18 @@ daily_resource_monitor_finish() {
         if ! IFS= read -r -t 5 -u "$_CRATEDIGGER_RESOURCE_LOOP_REPORT_FD" loop_dropped \
             || [[ ! "$loop_dropped" =~ ^[0-9]+$ ]]
         then
-            printf '%s\n' loop_report_unavailable > "$_CRATEDIGGER_RESOURCE_FAILURE"
+            # If even this marker write fails, do not let the caller fall
+            # through with loop_dropped still at its harmless-looking "0"
+            # default (issue #1214 review C5: `${4:-0}` in
+            # daily_resource_summarize_samples would silently launder that
+            # empty value into a clean zero -- a false status=valid over a
+            # loop report that was never actually read). Forcing
+            # monitor_status here routes to the monitor_process_died
+            # fallback below instead of a silent pass-through; the reason
+            # is less precise in this doubly-failed corner, but it is
+            # never `valid`.
+            printf '%s\n' loop_report_unavailable > "$_CRATEDIGGER_RESOURCE_FAILURE" \
+                || monitor_status=1
         fi
     fi
     # Grouped, not bare -- see the comment at the first occurrence of this
