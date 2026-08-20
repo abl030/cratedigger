@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import os
 import sys
 import tempfile
@@ -585,14 +587,23 @@ class TestWorldModelReplayDatabase(unittest.TestCase):
             (canonical / "important").write_text("keep", encoding="utf-8")
             output = root / "output"
 
-            status = main((
-                "--database", str(canonical),
-                "--output-dir", str(output),
-                "--examples", "1",
-                "--steps", "1",
-                "--jobs", "1",
-                "--seed", "7",
-            ))
+            # Independent review B1 (BLOCKING): check_headroom=None (the
+            # production default) drives the REAL private_runtime_dir()/
+            # _check_suite_headroom(), coupling this test -- which is NOT
+            # about headroom -- to whatever the shared tmpfs root happens
+            # to have free at test time. Pin it to an always-satisfied
+            # no-op; the tests that ARE about headroom inject their own.
+            status = main(
+                (
+                    "--database", str(canonical),
+                    "--output-dir", str(output),
+                    "--examples", "1",
+                    "--steps", "1",
+                    "--jobs", "1",
+                    "--seed", "7",
+                ),
+                check_headroom=lambda: None,
+            )
 
             self.assertEqual(status, 1)
             run_directories = tuple(output.glob("run.*"))
@@ -620,6 +631,8 @@ class TestWorldModelReplayDatabase(unittest.TestCase):
             ) -> None:
                 raise OSError("injected corpus commit failure")
 
+            # Independent review B1 (BLOCKING): see the sibling test above
+            # -- this one is not about headroom either.
             status = main(
                 (
                     "--database", str(canonical),
@@ -630,6 +643,7 @@ class TestWorldModelReplayDatabase(unittest.TestCase):
                     "--seed", "8",
                 ),
                 replace_canonical=fail_commit,
+                check_headroom=lambda: None,
             )
 
             self.assertEqual(status, 1)
@@ -713,35 +727,60 @@ class TestWorldModelReplayDatabase(unittest.TestCase):
         a real, non-tmpfs directory via XDG_RUNTIME_DIR: test-fidelity
         Rule B, since test_preflight_non_ram_root_error_returns_two's fake
         only proves the except clause's own handling, never the real raise
-        site. dir=repo_root deliberately: TMPDIR is itself tmpfs inside
-        this nix-shell, so a bare tempfile.TemporaryDirectory() would land
-        ON tmpfs and never trip the check this test exists to prove; the
-        repo checkout itself is real disk-backed storage.
+        site. dir="/var/tmp" deliberately (independent review B9): TMPDIR
+        is itself tmpfs inside this nix-shell, so a bare
+        tempfile.TemporaryDirectory() would land ON tmpfs and never trip
+        the check this test exists to prove; /var/tmp is real disk-backed
+        storage that is also outside the git-tracked worktree, so a hard
+        kill mid-test cannot leave stray debris in the repo checkout.
         """
-        repo_root = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory(dir=str(repo_root)) as fake_runtime_dir:
+        # Independent review B8: this used to assert only the exit code,
+        # with no stdout/stderr capture at all -- so it could not tell "the
+        # intended infrastructure-precondition abort ran" apart from "some
+        # other unrelated path also happens to return 2" (e.g.
+        # test_preflight_non_ram_root_error_returns_two's own generic
+        # RuntimeError branch). Captured and asserted the same way the
+        # fuzz twin (tests/test_fuzz_burst.py::TestFuzzMainMidRunHeadroom::
+        # test_unavailable_runtime_dir_aborts_cleanly_not_as_a_raw_traceback)
+        # already does.
+        # dir="/var/tmp" deliberately (independent review B9, mirroring
+        # the fuzz twin's own fix): real disk-backed (non-tmpfs, so this
+        # actually trips the check under test) but NOT inside the
+        # git-tracked worktree, so a hard kill mid-test -- which skips
+        # TemporaryDirectory's own context-manager cleanup -- cannot leave
+        # stray debris in the repo checkout the way an earlier
+        # dir=repo_root version could.
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as fake_runtime_dir:
             original = os.environ.get("XDG_RUNTIME_DIR")
             os.environ["XDG_RUNTIME_DIR"] = fake_runtime_dir
             try:
                 with tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary)
-                    status = main(
-                        (
-                            "--database", str(root / "canonical"),
-                            "--output-dir", str(root / "output"),
-                            "--examples", "1",
-                            "--steps", "1",
-                            "--jobs", "1",
-                            "--seed", "13",
-                        ),
-                    )
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stdout(
+                        stdout
+                    ), contextlib.redirect_stderr(stderr):
+                        status = main(
+                            (
+                                "--database", str(root / "canonical"),
+                                "--output-dir", str(root / "output"),
+                                "--examples", "1",
+                                "--steps", "1",
+                                "--jobs", "1",
+                                "--seed", "13",
+                            ),
+                        )
+                    output = stdout.getvalue() + stderr.getvalue()
             finally:
                 if original is None:
                     os.environ.pop("XDG_RUNTIME_DIR", None)
                 else:
                     os.environ["XDG_RUNTIME_DIR"] = original
 
-        self.assertEqual(status, 2)
+        self.assertEqual(status, 2, output)
+        self.assertIn("infrastructure precondition failed", output)
+        self.assertIn("not tmpfs", output)
 
     def test_mid_run_headroom_exhaustion_aborts_and_labels_the_receipt(
         self,
@@ -792,6 +831,55 @@ class TestWorldModelReplayDatabase(unittest.TestCase):
             self.assertIn(TEST_RAM_ROOT_EXHAUSTED, receipt.coordinator_error or "")
             self.assertEqual(receipt.targets, ())
             self.assertGreaterEqual(calls["count"], 2)
+
+    def test_drain_phase_never_calls_check_headroom_once_pending_is_empty(
+        self,
+    ) -> None:
+        """Independent review B6: the fuzz burst's twin regression pin
+        (tests/test_fuzz_burst.py::TestFuzzTargetsMidRunHeadroom::
+        test_drain_phase_never_calls_check_headroom_once_pending_is_empty)
+        has no world-model-side equivalent, even though
+        scripts/run_world_model_burst.py's own admission loop carries the
+        SAME `if pending and not admission_aborted: check_headroom()` gate
+        (line ~1138). `--jobs 10` exceeds this manifest's total target
+        count (5 generated + 1 pins = 6 for --engine in-process), so every
+        target is admitted in the FIRST admission-loop iteration -- call
+        #1 is the preflight check, call #2 is that single admission
+        check. Every later outer-loop iteration only drains `active`
+        (`pending` is empty), so a correctly gated loop never calls
+        check_headroom again. The poison pill traps starting at call #3:
+        correct code lets the whole burst complete successfully; a mutant
+        that drops the `pending` condition (checking on EVERY outer-loop
+        iteration regardless) would trip it as each of the six targets
+        completes and the loop re-polls."""
+        calls = {"count": 0}
+
+        def check_headroom() -> None:
+            calls["count"] += 1
+            if calls["count"] > 2:
+                raise RamRootExhaustedError(
+                    "must never fire once pending is empty"
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            canonical = root / "canonical"
+            output = root / "output"
+
+            status = main(
+                (
+                    "--database", str(canonical),
+                    "--output-dir", str(output),
+                    "--examples", "1",
+                    "--steps", "1",
+                    "--jobs", "10",
+                    "--seed", "14",
+                ),
+                check_headroom=check_headroom,
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(calls["count"], 2)
 
     def test_nonempty_unowned_database_path_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

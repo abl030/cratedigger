@@ -1348,8 +1348,19 @@ def _classify_target_infrastructure_failure(
     of its workers vanishes unexpectedly, and
     ``available_memory_bytes() < minimum_memory_bytes`` is the
     corroborating measured state — never a scan of ``exc``'s text. Only
-    evaluated when the disk check already came back negative, since a
-    target cannot plausibly be both.
+    evaluated when the disk check already came back negative — a DELIBERATE
+    ORDERING CHOICE, not a claim that the two are physically distinct
+    (independent review B2, issue #1156): on a host where the shared tmpfs
+    RAM root is itself what "memory" mostly consists of (issue #1214's own
+    measurement — cgroup v2 ``memory.peak`` counts tmpfs pages, 69% of the
+    fuzz phase's peak was scratch tmpfs), genuine system-wide memory
+    pressure usually manifests as tmpfs exhaustion FIRST, so the disk-full
+    branch wins and this memory branch is largely inert under exactly the
+    pressure it exists to name. ``scripts/run_python_tests.py``'s own
+    `main` wiring below (issue #1156 review F10) already states the
+    correct, weaker fact: nothing stops a disk-full marker and a
+    memory-exhausted marker from BOTH occurring in the same run (on
+    different targets); this docstring must not contradict it.
 
     Residual, stated honestly (worse than the tmpfs case): an OOM kill
     FREES the killed worker's memory immediately, so by the time this

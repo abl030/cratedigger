@@ -131,7 +131,16 @@ class TestDiscogsArtistGlobalConcurrency(unittest.TestCase):
         self.assertEqual(attempts, ["discogs", "discogs"])
 
     def test_three_top_level_artist_reads_share_one_two_request_budget(self) -> None:
-        mirror = self._run_calls(3)
+        # Issue #1156 item 6: this test predates #1175's handler_exit_delay
+        # fix and was left on the bare mechanism -- exposed to the exact
+        # same trailing-teardown counted-window symptom #1175 fixed for
+        # test_slow_handler_teardown_does_not_inflate_the_measured_window
+        # below, just without that test's own name calling it out. At 20-24
+        # workers on a 16-thread host this failed reproducibly (a degenerate
+        # counted window reading 1 instead of 2, or a scheduling-starved
+        # reader failing to overlap at all). handler_exit_delay=0.02 mirrors
+        # #1175's own proven fix rather than loosening the assertion below.
+        mirror = self._run_calls(3, handler_exit_delay=0.02)
         # Saturation AND the cap in one assertion: with the budget honoured the
         # only value three concurrent readers can produce is the budget itself.
         # A degenerate counted window (reading 1) fails here just as a breached

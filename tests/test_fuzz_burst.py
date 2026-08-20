@@ -781,14 +781,22 @@ class TestFuzzMainMidRunHeadroom(unittest.TestCase):
     def test_main_reports_a_mid_run_trip_through_the_ordinary_failure_path(
         self,
     ) -> None:
+        """Independent review B4 (HIGH): the fake used to raise
+        ``f"{TEST_RAM_ROOT_EXHAUSTED}: synthetic mid-run trip"`` -- an
+        identity string ALREADY embedded in the exception's own message --
+        so a loose ``assertIn`` matched ``run_fuzz_targets``'s OWN separate
+        admission-loop print (`scripts/run_fuzz_tests.py` line ~959,
+        ``print(f"RAM ROOT EXHAUSTED mid-run: {exc}")``) regardless of
+        whether ``main()``'s OWN reporting block (lines ~1473-1499) ever
+        ran at all. The fake below deliberately carries NEITHER
+        ``TEST_RAM_ROOT_EXHAUSTED`` NOR the word "mid-run", so the
+        assertions can only pass via strings ``main()`` itself composes."""
         calls = {"count": 0}
 
         def flaky_check_headroom() -> None:
             calls["count"] += 1
             if calls["count"] >= 3:
-                raise RamRootExhaustedError(
-                    f"{TEST_RAM_ROOT_EXHAUSTED}: synthetic mid-run trip"
-                )
+                raise RamRootExhaustedError("xyzzy-unrelated-probe-marker")
 
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
@@ -799,8 +807,18 @@ class TestFuzzMainMidRunHeadroom(unittest.TestCase):
         output = stdout.getvalue()
 
         self.assertEqual(status, TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE, output)
-        self.assertIn(TEST_RAM_ROOT_EXHAUSTED, output)
-        self.assertIn("mid-run", output)
+        # main()'s own header line (scripts/run_fuzz_tests.py:1474) -- no
+        # other print site in the module emits this exact banner.
+        self.assertIn(f"--- {TEST_RAM_ROOT_EXHAUSTED} (mid-run) ---", output)
+        # main()'s own unique explanatory sentence (line ~1476-1478) --
+        # not duplicated by run_fuzz_targets's admission-loop print.
+        self.assertIn(
+            "already-running targets were drained and no new target "
+            "was started",
+            output,
+        )
+        # main()'s own terminal summary line (line ~1494-1499).
+        self.assertIn("property verdict invalid", output)
         self.assertGreaterEqual(calls["count"], 3)
 
     def test_unavailable_runtime_dir_aborts_cleanly_not_as_a_raw_traceback(
@@ -816,13 +834,18 @@ class TestFuzzMainMidRunHeadroom(unittest.TestCase):
         fake in test_preflight_non_ram_root_error_returns_two only proves
         the except clause's own handling, never the real raise site.
         """
-        # dir=REPO_ROOT deliberately: TMPDIR is itself tmpfs inside this
+        # dir="/var/tmp" deliberately: TMPDIR is itself tmpfs inside this
         # nix-shell (scripts/test_tmpfs.sh's own shell-entry scratch), so a
         # bare tempfile.TemporaryDirectory() would land ON tmpfs and never
-        # trip the check this test exists to prove. The repo checkout
-        # itself is real disk-backed storage (ext4 on doc1 and in this
-        # worktree), guaranteed non-tmpfs.
-        with tempfile.TemporaryDirectory(dir=str(REPO_ROOT)) as fake_runtime_dir:
+        # trip the check this test exists to prove. /var/tmp is real
+        # disk-backed storage (ext4 on doc1 and in this worktree),
+        # guaranteed non-tmpfs -- AND, unlike an earlier version of this
+        # test that used dir=REPO_ROOT, it is NOT inside the git-tracked
+        # checkout (independent review B9): a hard kill mid-test (the
+        # TemporaryDirectory context manager's own cleanup never runs on
+        # SIGKILL) used to risk leaving a stray directory inside the repo
+        # worktree; /var/tmp is real disk but outside anything git tracks.
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as fake_runtime_dir:
             original = os.environ.get("XDG_RUNTIME_DIR")
             os.environ["XDG_RUNTIME_DIR"] = fake_runtime_dir
             try:
@@ -1087,6 +1110,24 @@ class TestBurstDepthReport(unittest.TestCase):
 
 class TestFuzzRunnerProcess(unittest.TestCase):
     def setUp(self) -> None:
+        # Independent review B1 (BLOCKING): main()'s production default
+        # (check_headroom=None) now calls the REAL private_runtime_dir()/
+        # _check_suite_headroom() with a flat 1 GiB floor. Every subprocess
+        # test in this class that does not deliberately test headroom
+        # inherited a live ambient-free-space precondition, coupling them
+        # to whatever the shared tmpfs root happens to have free at test
+        # time -- reproduced live (4/460 targets failed on doc1 with
+        # 1002692608 bytes free, needs 1073741824). Pin the floor to "0"
+        # (always satisfied, real code path, no DI) for the whole class;
+        # the one test that is actually ABOUT headroom
+        # (test_preflight_headroom_exhaustion_aborts_before_any_discovery)
+        # overrides it back to an impossible value in its OWN env dict,
+        # which wins over this class-level default.
+        self._original_ram_min_bytes = os.environ.get(
+            "CRATEDIGGER_TEST_RAM_MIN_BYTES"
+        )
+        os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = "0"
+        self.addCleanup(self._restore_ram_min_bytes)
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
@@ -1231,6 +1272,12 @@ class TestFuzzRunnerProcess(unittest.TestCase):
         self.database = self.root / "persistent-database"
         self.database.mkdir()
         (self.database / "seed-marker").write_text("seed", encoding="utf-8")
+
+    def _restore_ram_min_bytes(self) -> None:
+        if self._original_ram_min_bytes is None:
+            os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+        else:
+            os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = self._original_ram_min_bytes
 
     def run_burst(self, *, failing: bool) -> subprocess.CompletedProcess[str]:
         env = {

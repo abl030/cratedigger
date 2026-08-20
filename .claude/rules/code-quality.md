@@ -572,7 +572,9 @@ ordinary `scripts/test.sh` dev-loop run waits on). Both pass
 worker-scaled one: neither burst has a MEASURED per-worker tmpfs footprint
 the way the deterministic suite's #1131 model does — a worker-scaled
 attempt sized by the fuzz burst's own default worker count (up to 60 on a
-30-core host) demanded over 4 GiB, more than a normal interactive dev
+30-core host) demanded EXACTLY 4 GiB (256 MiB base + 64 MiB/worker * 60
+workers = 4096 MiB, independent review B7 item 2 — "over 4 GiB" overstated
+it), more than a normal interactive dev
 tmpfs actually has free (see `headroom_floor_bytes`'s docstring). Tripping
 either guard stops ADMISSION only — already-running targets keep
 consuming the reserve regardless, so this is a correct label and exit code

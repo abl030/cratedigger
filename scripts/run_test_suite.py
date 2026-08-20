@@ -1094,8 +1094,9 @@ def headroom_floor_bytes(worker_count: int) -> int:
     suite's own multiplier to them would be an unjustified guess dressed
     up as a measurement — confirmed live: sizing the fuzz burst's floor by
     its own default worker count (up to 60 on a 30-core host) demanded
-    over 4 GiB, more than this repository's own 3.1 GiB interactive dev
-    tmpfs actually has free. Reusing the SAME flat floor
+    EXACTLY 4 GiB (256 MiB base + 64 MiB/worker * 60 workers = 4096 MiB,
+    independent review B7 item 2 — "over 4 GiB" overstated it), more than
+    this repository's own 3.1 GiB interactive dev tmpfs actually has free. Reusing the SAME flat floor
     ``scripts/test_tmpfs.sh``'s shell-entry guard already enforces for
     them today just moves the check from "one-shot at shell entry" to "a
     real coordinator precondition, with a mid-run recheck," without
@@ -1151,10 +1152,16 @@ def _check_suite_headroom(runtime: Path, *, minimum_bytes: int) -> None:
     ONLY, a trip fails the whole suite once and never mid-run. Issue #1156
     item 3: the fuzz burst (``scripts/run_fuzz_tests.py``) and the
     world-model burst (``scripts/run_world_model_burst.py``) also call
-    this SAME function, but each one calls it TWICE per coordinator run —
-    once as their own preflight, and again inside their own admission
-    loop, genuinely mid-run — so "never mid-run" is a property of
-    ``run_suite``'s own call site, not of this function itself.
+    this SAME function, but NOT exactly twice per coordinator run
+    (independent review B7 item 1 — corrected): each makes exactly one
+    preflight call, plus one call per outer admission-loop iteration for
+    as long as ``pending`` remains non-empty — as few as one such mid-run
+    call when the whole pool is admitted in a single cycle (two calls
+    total), or several more when admission is staggered across multiple
+    cycles because the worker pool or the separate PostgreSQL ceiling is
+    already full. What stays true regardless of the exact count: "never
+    mid-run" is a property of ``run_suite``'s own call site, not of this
+    function itself.
     """
     target = Path(os.environ.get("CRATEDIGGER_TEST_RAM_ROOT") or runtime)
     available = shutil.disk_usage(target).free

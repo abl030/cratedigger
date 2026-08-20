@@ -922,8 +922,14 @@ def run_fuzz_targets(
 ) -> FuzzTargetBatch:
     """Run a bounded queue and stop admission after infrastructure loss.
 
-    ``check_headroom`` is called once per admission cycle, right before any
-    new target would be admitted (issue #1156 item 3): the production
+    ``check_headroom`` is called once per outer admission-loop iteration,
+    while ``pending`` is still non-empty (issue #1156 item 3) — NOT only on
+    a cycle that goes on to actually admit a new target. Independent
+    review B7: with the worker pool already full (or every pending target
+    blocked on the separate PostgreSQL ceiling),
+    ``select_fuzz_admissions`` can legitimately return zero admissions for
+    a cycle, and this check still fires that cycle; "right before any new
+    target would be admitted" overstated the guarantee. The production
     caller (``main`` below) binds it to the same
     ``_check_suite_headroom``/``headroom_floor_bytes`` precondition the
     coordinator already ran once, before any work, so a run admitted at

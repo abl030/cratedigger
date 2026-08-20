@@ -130,12 +130,27 @@ async function handle() {
         self.assertFalse(worker.is_running)
 
     def test_timeout_terminates_child_and_fails_closed(self) -> None:
+        """Issue #1156 item 6: the original 0.1s timeout_seconds governs
+        BOTH the deliberate hang below AND this worker's own Node startup
+        handshake (NodeJsonlWorker.__init__ reuses the same budget for the
+        "ready" response) -- at 20-24 workers on a 16-thread host, Node
+        interpreter startup alone can exceed 0.1s under real CPU
+        contention, raising NodeJsonlWorkerError OUT OF THE CONSTRUCTOR,
+        before the `with self.assertRaisesRegex(...)` block below is even
+        entered (it only wraps `worker.request`, not construction) --
+        reproducing exactly the "fails reproducibly past the worker knee"
+        symptom the issue names, as a raw ERROR rather than a clean
+        assertion failure. 2.0s (matching this file's own
+        test_stderr_flood_is_drained_without_deadlocking_response) gives
+        real startup headroom under load while the deliberate hang
+        (`await new Promise(() => {})`, which never resolves) still makes
+        the timeout the only possible outcome."""
         source = """
 async function handle() {
   await new Promise(() => {});
 }
 """
-        worker = NodeJsonlWorker(source, cwd=ROOT, timeout_seconds=0.1)
+        worker = NodeJsonlWorker(source, cwd=ROOT, timeout_seconds=2.0)
         self.addCleanup(worker.close)
 
         with self.assertRaisesRegex(NodeJsonlWorkerError, "timed out"):

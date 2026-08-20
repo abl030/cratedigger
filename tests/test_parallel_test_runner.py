@@ -49,6 +49,7 @@ from scripts.run_python_tests import (
     _classify_test_infrastructure_error,
     _collapse_disk_full_failures,
     _collapse_memory_exhausted_failures,
+    _default_min_memory_headroom_bytes,
     _iter_test_cases,
     _measure_available_memory_bytes,
     _measure_tempdir_available_bytes,
@@ -214,7 +215,18 @@ class TestWorkerMemoryExhaustionClassification(unittest.TestCase):
     by exception SHAPE (BrokenProcessPool) narrowed by MEASURED system
     memory -- never a scan of the exception's text, and never triggered by
     measured state alone (unlike disk_full, which does not care what the
-    exception is)."""
+    exception is).
+
+    Independent review B2 (discovered while verifying the named fix):
+    every case below pins `minimum_bytes=0` explicitly. `_classify_target_
+    infrastructure_failure` checks disk_full BEFORE memory, and disk_full's
+    own floor falls back to the ambient CRATEDIGGER_TEST_RAM_MIN_BYTES when
+    no `minimum_bytes` is given -- so without the pin, a large-enough
+    ambient floor (e.g. a suite run forcing it to prove B2's OWN fix) makes
+    every `available_bytes=10 GiB` fixture here read as disk_full and
+    short-circuit the memory branch these tests exist to exercise. Pinning
+    the disk floor to 0 makes disk_full unreachable at 10 GiB regardless of
+    the ambient value, so only the memory branch under test is live."""
 
     def test_broken_process_pool_with_low_memory_is_memory_exhausted(
         self,
@@ -223,6 +235,7 @@ class TestWorkerMemoryExhaustionClassification(unittest.TestCase):
             _target("tests.test_alpha"),
             BrokenProcessPool("a worker was terminated abruptly"),
             available_bytes=lambda: 10 * 1024 * 1024 * 1024,
+            minimum_bytes=0,
             available_memory_bytes=lambda: 1,
         )
 
@@ -236,6 +249,7 @@ class TestWorkerMemoryExhaustionClassification(unittest.TestCase):
             _target("tests.test_alpha"),
             BrokenProcessPool("a worker was terminated abruptly"),
             available_bytes=lambda: 10 * 1024 * 1024 * 1024,
+            minimum_bytes=0,
             available_memory_bytes=lambda: 10 * 1024 * 1024 * 1024,
         )
 
@@ -251,14 +265,18 @@ class TestWorkerMemoryExhaustionClassification(unittest.TestCase):
             _target("tests.test_alpha"),
             RuntimeError("ordinary worker crash, unrelated to memory"),
             available_bytes=lambda: 10 * 1024 * 1024 * 1024,
+            minimum_bytes=0,
             available_memory_bytes=lambda: 1,
         )
 
         self.assertFalse(failure.memory_exhausted)
 
     def test_disk_full_takes_priority_over_memory_exhaustion(self) -> None:
-        """Mutual exclusivity: a target cannot plausibly be both, so the
-        disk check short-circuits the memory one."""
+        """The disk check short-circuits the memory one by construction
+        (a deliberate ORDERING choice in the classifier, not a claim the
+        two are physically distinct -- independent review B2: on this
+        host's own topology the tmpfs RAM root often IS memory pressure,
+        per issue #1214's own cgroup measurement)."""
         failure = _classify_target_infrastructure_failure(
             _target("tests.test_alpha"),
             BrokenProcessPool("a worker was terminated abruptly"),
@@ -274,6 +292,7 @@ class TestWorkerMemoryExhaustionClassification(unittest.TestCase):
             _target("tests.test_alpha"),
             BrokenProcessPool("a worker was terminated abruptly"),
             available_bytes=lambda: 10 * 1024 * 1024 * 1024,
+            minimum_bytes=0,
             available_memory_bytes=lambda: None,
         )
 
@@ -287,6 +306,7 @@ class TestWorkerMemoryExhaustionClassification(unittest.TestCase):
                 _target("tests.test_alpha"),
                 BrokenProcessPool("a worker was terminated abruptly"),
                 available_bytes=lambda: 10 * 1024 * 1024 * 1024,
+                minimum_bytes=0,
                 available_memory_bytes=lambda: 123455,
             )
         finally:
@@ -304,6 +324,7 @@ class TestWorkerMemoryExhaustionClassification(unittest.TestCase):
             _target("tests.test_alpha"),
             BrokenProcessPool("a worker was terminated abruptly"),
             available_bytes=lambda: 10 * 1024 * 1024 * 1024,
+            minimum_bytes=0,
             available_memory_bytes=lambda: 100 * 1024 * 1024,
             minimum_memory_bytes=10 * 1024 * 1024,
         )
@@ -326,6 +347,7 @@ class TestWorkerMemoryExhaustionClassification(unittest.TestCase):
                 _target("tests.test_alpha"),
                 BrokenProcessPool("a worker was terminated abruptly"),
                 available_bytes=lambda: 10 * 1024 * 1024 * 1024,
+                minimum_bytes=0,
                 available_memory_bytes=lambda: 200 * 1024 * 1024,
             )
         finally:
@@ -343,6 +365,7 @@ class TestWorkerMemoryExhaustionClassification(unittest.TestCase):
             _target("tests.test_alpha"),
             BrokenProcessPool("a worker was terminated abruptly"),
             available_bytes=lambda: 10 * 1024 * 1024 * 1024,
+            minimum_bytes=0,
             available_memory_bytes=lambda: 10 * 1024 * 1024,
             minimum_memory_bytes=10 * 1024 * 1024,
         )
@@ -359,6 +382,7 @@ class TestWorkerMemoryExhaustionClassification(unittest.TestCase):
             _target("tests.test_alpha"),
             BrokenProcessPool("a worker was terminated abruptly"),
             available_bytes=lambda: 10 * 1024 * 1024 * 1024,
+            minimum_bytes=0,
             available_memory_bytes=lambda: 0,
         )
 
@@ -410,6 +434,46 @@ class TestWorkerMemoryExhaustionClassification(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         self.assertGreater(result, 0)
+
+    def test_negative_memory_floor_override_fails_closed(self) -> None:
+        """Independent review B5 (MEDIUM): known-bad self-test for
+        `_default_min_memory_headroom_bytes`'s negative-override guard
+        clause, which shipped with no test at all -- mirroring the
+        sibling disk-floor guard's own message-asserting shape."""
+        original = os.environ.get("CRATEDIGGER_TEST_MEMORY_MIN_BYTES")
+        try:
+            os.environ["CRATEDIGGER_TEST_MEMORY_MIN_BYTES"] = "-1"
+            with self.assertRaisesRegex(
+                ValueError,
+                "CRATEDIGGER_TEST_MEMORY_MIN_BYTES must be a "
+                "non-negative integer",
+            ):
+                _default_min_memory_headroom_bytes()
+        finally:
+            if original is None:
+                os.environ.pop("CRATEDIGGER_TEST_MEMORY_MIN_BYTES", None)
+            else:
+                os.environ["CRATEDIGGER_TEST_MEMORY_MIN_BYTES"] = original
+
+    def test_non_integer_memory_floor_override_fails_closed(self) -> None:
+        """A malformed (non-integer) override is coerced to the same
+        fail-closed ValueError as an explicit negative one -- proving the
+        `except ValueError: value = -1` fallback actually reaches the
+        guard clause rather than silently returning a bogus floor."""
+        original = os.environ.get("CRATEDIGGER_TEST_MEMORY_MIN_BYTES")
+        try:
+            os.environ["CRATEDIGGER_TEST_MEMORY_MIN_BYTES"] = "not-a-number"
+            with self.assertRaisesRegex(
+                ValueError,
+                "CRATEDIGGER_TEST_MEMORY_MIN_BYTES must be a "
+                "non-negative integer",
+            ):
+                _default_min_memory_headroom_bytes()
+        finally:
+            if original is None:
+                os.environ.pop("CRATEDIGGER_TEST_MEMORY_MIN_BYTES", None)
+            else:
+                os.environ["CRATEDIGGER_TEST_MEMORY_MIN_BYTES"] = original
 
 
 class TestCollapseDiskFullFailures(unittest.TestCase):
@@ -1454,7 +1518,7 @@ class TestRunnerProcessContract(unittest.TestCase):
         )
 
     def _run_worker_death_fixture(
-        self, *, count: int = 2
+        self, *, count: int = 2, env_overrides: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[str]:
         """Kill `count` INDEPENDENT ProcessPoolExecutor worker processes
         (not the nested per-target subprocess `_run_test_target` spawns)
@@ -1467,6 +1531,15 @@ class TestRunnerProcessContract(unittest.TestCase):
         "folded into one marker" from "there was only ever one failure to
         report" -- count>1 real, independent deaths is required to prove
         the fold actually collapses N>1 into ONE.
+
+        Independent review B2 (HIGH): CRATEDIGGER_TEST_RAM_MIN_BYTES is
+        pinned to "0" by default -- disk_full is checked BEFORE memory in
+        `_classify_target_infrastructure_failure`, so leaving it ambient
+        left this fixture coupled to the host's own real free tmpfs bytes
+        (measured on doc1: the ambient worker-scaled floor, 1,744,830,464,
+        classified both deaths disk_full instead of memory_exhausted).
+        `env_overrides` lets callers (e.g. a pure disk-full scenario) flip
+        which resource actually trips.
         """
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -1485,7 +1558,9 @@ class TestRunnerProcessContract(unittest.TestCase):
                 )
             env = {
                 **os.environ,
+                "CRATEDIGGER_TEST_RAM_MIN_BYTES": "0",
                 "CRATEDIGGER_TEST_MEMORY_MIN_BYTES": str(10**18),
+                **(env_overrides or {}),
             }
             return subprocess.run(
                 [
@@ -1531,6 +1606,66 @@ class TestRunnerProcessContract(unittest.TestCase):
         )
         self.assertIn(TEST_HOST_MEMORY_EXHAUSTED, result.stdout)
         self.assertIn("BrokenProcessPool", result.stdout)
+        marker_line = next(
+            line
+            for line in result.stdout.splitlines()
+            if line.startswith(FAILURE_MARKER_PREFIX)
+        )
+        marker = msgspec.json.decode(
+            marker_line.removeprefix(FAILURE_MARKER_PREFIX),
+            type=CheckFailureMarker,
+        )
+        self.assertEqual(
+            set(marker.test_ids),
+            {"fixture_tests.test_alpha0", "fixture_tests.test_alpha1"},
+        )
+
+    def test_worker_deaths_classified_pure_disk_full_never_reach_the_memory_bucket(
+        self,
+    ) -> None:
+        """Independent review B3: the composition test in
+        TestCollapseMemoryExhaustedFailures (test_disk_full_and_memory_
+        exhausted_are_each_folded_exactly_once) reimplements main()'s own
+        wiring inline rather than driving it -- it would stay green even if
+        main() itself fed `_collapse_memory_exhausted_failures` the RAW
+        `infrastructure_failures` list instead of the disk-full-FILTERED
+        `remaining_infrastructure_failures` (line ~1706). This test drives
+        the real subprocess end-to-end instead: TWO real, independent
+        BrokenProcessPool deaths, both forced disk_full via an impossibly
+        high CRATEDIGGER_TEST_RAM_MIN_BYTES (the memory floor is left at
+        the fixture's own high default, but never evaluated -- disk_full
+        short-circuits the memory branch in _classify_target_infrastructure_
+        failure). Correct wiring: both fold into ONE ram-root marker, exit
+        TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE, no memory marker at all. The
+        named mutant (raw list instead of the filtered remainder) would
+        instead leave both targets in `remaining_infrastructure_failures`
+        (since neither has memory_exhausted=True) -- printed a SECOND time
+        as ordinary per-target failures on top of the folded marker, and
+        the exit code would fall through to plain `1` because
+        `remaining_infrastructure_failures` is no longer empty."""
+        result = self._run_worker_death_fixture(
+            count=2,
+            env_overrides={"CRATEDIGGER_TEST_RAM_MIN_BYTES": str(10**18)},
+        )
+
+        self.assertEqual(
+            result.returncode,
+            TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
+            result.stdout + result.stderr,
+        )
+        self.assertEqual(
+            result.stdout.count(FAILURE_MARKER_PREFIX),
+            1,
+            "both disk-full-classified deaths must fold into ONE marker, "
+            "never double-reported alongside an ordinary per-target entry",
+        )
+        self.assertIn(TEST_RAM_ROOT_EXHAUSTED, result.stdout)
+        self.assertNotIn(
+            TEST_HOST_MEMORY_EXHAUSTED,
+            result.stdout,
+            "disk_full short-circuits the memory branch -- no memory "
+            "marker should appear at all",
+        )
         marker_line = next(
             line
             for line in result.stdout.splitlines()
