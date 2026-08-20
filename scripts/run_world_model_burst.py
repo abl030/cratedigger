@@ -38,7 +38,17 @@ if str(REPO_ROOT) not in sys.path:
 
 from lib.ephemeral_postgres import EphemeralPostgres
 from lib.migrator import apply_migrations
-from scripts.run_python_tests import RecordingTextTestResult
+from scripts.run_python_tests import (
+    TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
+    RecordingTextTestResult,
+)
+from scripts.run_test_suite import (
+    TEST_RAM_ROOT_EXHAUSTED,
+    RamRootExhaustedError,
+    _check_suite_headroom,
+    headroom_floor_bytes,
+    private_runtime_dir,
+)
 
 DEFAULT_EXAMPLES = 25
 DEFAULT_STEPS = 100
@@ -1001,6 +1011,7 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     replace_canonical: _ReplaceCanonical = replace_canonical_database,
+    check_headroom: Callable[[], None] | None = None,
 ) -> int:
     os.environ.pop("TEST_DB_DSN", None)
     os.environ.pop(_SCHEMA_READY_ENV, None)
@@ -1034,6 +1045,27 @@ def main(
         print(f"output_dir={args.output_dir}")
         return 0
 
+    if check_headroom is None:
+        runtime = private_runtime_dir()
+        # worker_count=1 deliberately, not jobs: see headroom_floor_bytes's
+        # docstring (issue #1156 item 3) for why the world-model burst does
+        # not extend the suite's per-worker multiplier to itself.
+        headroom_minimum = headroom_floor_bytes(1)
+        check_headroom = lambda: _check_suite_headroom(
+            runtime, minimum_bytes=headroom_minimum
+        )
+    try:
+        check_headroom()
+    except RamRootExhaustedError as error:
+        print(f"world-model burst: {error}", file=sys.stderr)
+        return TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
+    except (OSError, RuntimeError, ValueError) as error:
+        print(
+            f"world-model burst: infrastructure precondition failed: {error}",
+            file=sys.stderr,
+        )
+        return 2
+
     canonical_database = _resolved_path(args.database)
     output_root = _resolved_path(args.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -1046,6 +1078,7 @@ def main(
     planned_targets: tuple[WorldTarget, ...] = ()
     admission_aborted = False
     coordinator_error: str | None = None
+    ram_root_exhausted = False
     try:
         prepare_canonical_database(canonical_database)
         with tempfile.TemporaryDirectory(prefix="cratedigger_world_burst_") as temporary_name:
@@ -1071,6 +1104,8 @@ def main(
                 with ThreadPoolExecutor(max_workers=jobs) as executor:
                     active: dict[Future[TargetOutcome], tuple[int, WorldTarget]] = {}
                     while active or (pending and not admission_aborted):
+                        if pending and not admission_aborted:
+                            check_headroom()
                         while pending and len(active) < jobs and not admission_aborted:
                             index, target = pending.pop(0)
                             future = executor.submit(
@@ -1127,6 +1162,14 @@ def main(
                         tuple(outcome.database_path for outcome in outcomes),
                         owned_key_paths,
                     )
+    except RamRootExhaustedError as error:
+        coordinator_error = f"{TEST_RAM_ROOT_EXHAUSTED}: {error}"
+        admission_aborted = True
+        ram_root_exhausted = True
+        (logs / "coordinator-error.log").write_text(
+            traceback.format_exc(), encoding="utf-8"
+        )
+        print(f"world-model burst: {coordinator_error}", file=sys.stderr)
     except Exception as error:  # noqa: BLE001 - coordinator fail-closed boundary
         coordinator_error = f"{type(error).__name__}: {error}"
         admission_aborted = True
@@ -1190,12 +1233,13 @@ def main(
     )
     _write_replay_receipt(run_directory / "replay.json", replay)
     if coordinator_error is not None:
+        label = TEST_RAM_ROOT_EXHAUSTED if ram_root_exhausted else "INFRASTRUCTURE ABORT"
         print(
-            f"world-model burst: INFRASTRUCTURE ABORT after {elapsed:.1f}s "
+            f"world-model burst: {label} after {elapsed:.1f}s "
             f"({len(outcomes)} completed; {len(not_started)} not started; "
             f"receipts={run_directory})"
         )
-        return 1
+        return TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE if ram_root_exhausted else 1
     if failures:
         infra = any(outcome.outcome == "infrastructure_error" for outcome in failures)
         properties = any(

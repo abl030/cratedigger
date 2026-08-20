@@ -45,6 +45,7 @@ from scripts.run_test_suite import (
     acquire_suite_admission,
     admission_lock_path,
     dirty_state_fingerprint,
+    headroom_floor_bytes,
     reap_stale_check_bundles,
     reap_stale_final_gate_receipts,
     run_suite,
@@ -2226,6 +2227,54 @@ class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
             os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = "not-a-number"
             with self.assertRaises(ValueError):
                 _default_min_headroom_bytes()
+        finally:
+            if original is None:
+                os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+            else:
+                os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original
+
+    def test_headroom_floor_bytes_rejects_a_worker_count_below_one(self) -> None:
+        """Known-bad self-test for headroom_floor_bytes's own guard clause
+        (issue #1156 item 3): every OTHER clause in this function is
+        already covered indirectly via _default_min_headroom_bytes's own
+        tests below, but THIS clause only trips when a caller passes a
+        non-positive worker_count directly -- _default_min_headroom_bytes
+        can never reach it, since _expected_worker_count always returns at
+        least 1."""
+        original = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+        try:
+            with self.assertRaisesRegex(
+                ValueError, "worker_count must be at least 1"
+            ):
+                headroom_floor_bytes(0)
+        finally:
+            if original is not None:
+                os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original
+
+    def test_headroom_floor_bytes_scales_with_the_given_worker_count(self) -> None:
+        """Issue #1156 item 3: headroom_floor_bytes is the SAME formula
+        _default_min_headroom_bytes wraps, but callable directly with an
+        explicit worker_count -- the fuzz and world-model bursts each size
+        their own floor this way rather than through the deterministic
+        suite's own worker-count prediction."""
+        original = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+        try:
+            self.assertEqual(
+                headroom_floor_bytes(40),
+                _HEADROOM_BASE_BYTES + _HEADROOM_PER_WORKER_BYTES * 40,
+            )
+            self.assertEqual(headroom_floor_bytes(1), DEFAULT_MIN_HEADROOM_BYTES)
+        finally:
+            if original is not None:
+                os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original
+
+    def test_headroom_floor_bytes_honors_explicit_override_regardless_of_worker_count(
+        self,
+    ) -> None:
+        original = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+        try:
+            os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = "7000000"
+            self.assertEqual(headroom_floor_bytes(200), 7000000)
         finally:
             if original is None:
                 os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)

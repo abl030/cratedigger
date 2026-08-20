@@ -399,7 +399,16 @@ coordinator-owned ephemeral PostgreSQL cluster is migrated once, then every
 active target gets a distinct cloned database. Each target also runs in a fresh
 interpreter with private Beets and Hypothesis paths. Ambient `TEST_DB_DSN` is
 replaced with an owned clone DSN and children cannot stop the shared cluster.
-The mirror-harness engine remains separately capped at two jobs.
+The mirror-harness engine remains separately capped at two jobs. A shared
+tmpfs-headroom precondition (`headroom_floor_bytes`/`_check_suite_headroom`,
+the same primitives `scripts/run_test_suite.py::run_suite` and the fuzz burst
+use) runs once before any work and again inside the admission loop before
+every new target; either trip aborts the run under the `test RAM root
+exhausted` identity rather than surfacing as an opaque coordinator crash
+(issue #1156 item 3). Like the fuzz burst, it uses the flat, override-
+respecting default floor (`CRATEDIGGER_TEST_RAM_MIN_BYTES`), not one scaled
+by its own job count: no MEASURED per-worker tmpfs footprint exists for this
+coordinator's own worker pool.
 
 Every run prints a random 64-bit root seed before storage starts; `--seed`
 recreates that schedule. Target seeds derive only from the root seed, logical
@@ -563,13 +572,24 @@ the module's other properties or pins. An exact-budget check rejects any
 schedule that omits a test, repeats a pin, changes a property's combined example
 count, exceeds a resource shard limit, or invents an ID.
 
-The queue defaults to twice the host's core count because these targets mix
-Python with subprocess and filesystem waits. PostgreSQL-backed targets have a
+The queue defaults to twice the host's core count, capped at `MAX_FUZZ_JOBS`
+(64) regardless of host size (issue #1156 item 1 — the only worker formula in
+the repository with no prior ceiling), because these targets mix Python with
+subprocess and filesystem waits. PostgreSQL-backed targets have a
 separate bounded lane (24 targets on doc1's 30-core host); admission fills that
 lane before ordinary capacity so PostgreSQL work cannot accumulate into a
 low-utilization tail. Any `ENOSPC`, PostgreSQL `DiskFull`, or unexpected loss of
 an ephemeral database aborts further admission and reports that the property
-verdict is invalid. Set `CRATEDIGGER_FUZZ_JOBS` to cap all concurrent processes,
+verdict is invalid. A shared tmpfs-headroom precondition
+(`headroom_floor_bytes`/`_check_suite_headroom`, the same primitives
+`scripts/run_test_suite.py::run_suite` uses) runs once before any work and
+again inside the admission loop before every new target; either trip aborts
+the same way, under the `test RAM root exhausted` identity, before the burst
+can silently ENOSPC deep into a run (issue #1156 item 3). Unlike the
+deterministic suite's own worker-scaled floor, the fuzz burst uses the flat,
+override-respecting default (`CRATEDIGGER_TEST_RAM_MIN_BYTES`): there is no
+equivalent measured per-worker tmpfs footprint for its own, much larger and
+differently-shaped worker pool. Set `CRATEDIGGER_FUZZ_JOBS` to cap all concurrent processes,
 `CRATEDIGGER_FUZZ_POSTGRES_JOBS` to cap the PostgreSQL lane, or
 `CRATEDIGGER_FUZZ_PROPERTY_SHARDS` to override automatic entropy fan-out. On
 doc1's 30-core VM on 2026-07-23, the complete 71-module,

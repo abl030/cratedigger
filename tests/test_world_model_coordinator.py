@@ -17,6 +17,8 @@ from hypothesis.database import DirectoryBasedExampleDatabase
 from hypothesis.stateful import RuleBasedStateMachine, rule
 
 import tests._hypothesis_profiles  # noqa: F401 - required profile side effect
+from scripts.run_python_tests import TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
+from scripts.run_test_suite import TEST_RAM_ROOT_EXHAUSTED, RamRootExhaustedError
 from scripts.run_world_model_burst import (
     ChildReceipt,
     ReplayReceipt,
@@ -641,6 +643,105 @@ class TestWorldModelReplayDatabase(unittest.TestCase):
             self.assertEqual(len(receipt.targets), 6)
             self.assertEqual({target.outcome for target in receipt.targets}, {"passed"})
             self.assertEqual(receipt.not_started, ())
+
+    def test_preflight_headroom_exhaustion_returns_before_any_work(self) -> None:
+        """Issue #1156 item 3: the fail-fast, before-any-work precondition.
+
+        Distinct from the mid-run trip below: this fake always raises, so
+        it must trip on `main`'s very first `check_headroom()` call, before
+        `canonical_database`/`output_root` are even created.
+        """
+
+        def always_fail() -> None:
+            raise RamRootExhaustedError(
+                f"{TEST_RAM_ROOT_EXHAUSTED}: synthetic preflight trip"
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            canonical = root / "canonical"
+            output = root / "output"
+
+            status = main(
+                (
+                    "--database", str(canonical),
+                    "--output-dir", str(output),
+                    "--examples", "1",
+                    "--steps", "1",
+                    "--jobs", "1",
+                    "--seed", "10",
+                ),
+                check_headroom=always_fail,
+            )
+
+            self.assertEqual(status, TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE)
+            self.assertFalse(output.exists())
+            self.assertFalse(canonical.exists())
+
+    def test_preflight_non_ram_root_error_returns_two(self) -> None:
+        def boom() -> None:
+            raise RuntimeError("synthetic infrastructure boom")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            status = main(
+                (
+                    "--database", str(root / "canonical"),
+                    "--output-dir", str(root / "output"),
+                    "--examples", "1",
+                    "--steps", "1",
+                    "--jobs", "1",
+                    "--seed", "11",
+                ),
+                check_headroom=boom,
+            )
+
+            self.assertEqual(status, 2)
+
+    def test_mid_run_headroom_exhaustion_aborts_and_labels_the_receipt(
+        self,
+    ) -> None:
+        """The admission loop's OWN check, not the preflight one: the fake
+        passes on call 1 (preflight) and trips on call 2 (the first
+        admission-loop iteration), proving the loop really consults it a
+        second time rather than only once at the top."""
+        calls = {"count": 0}
+
+        def flaky_check_headroom() -> None:
+            calls["count"] += 1
+            if calls["count"] >= 2:
+                raise RamRootExhaustedError(
+                    f"{TEST_RAM_ROOT_EXHAUSTED}: synthetic mid-run trip"
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            canonical = root / "canonical"
+            output = root / "output"
+
+            status = main(
+                (
+                    "--database", str(canonical),
+                    "--output-dir", str(output),
+                    "--examples", "1",
+                    "--steps", "1",
+                    "--jobs", "1",
+                    "--seed", "12",
+                ),
+                check_headroom=flaky_check_headroom,
+            )
+
+            self.assertEqual(status, TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE)
+            run_directory, = output.glob("run.*")
+            receipt = msgspec.json.decode(
+                (run_directory / "replay.json").read_bytes(),
+                type=ReplayReceipt,
+            )
+            self.assertTrue(receipt.admission_aborted)
+            self.assertIn(TEST_RAM_ROOT_EXHAUSTED, receipt.coordinator_error or "")
+            self.assertEqual(receipt.targets, ())
+            self.assertGreaterEqual(calls["count"], 2)
 
     def test_nonempty_unowned_database_path_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
