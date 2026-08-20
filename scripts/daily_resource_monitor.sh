@@ -27,15 +27,45 @@
 # through a file write that could fail with the exact store it would be
 # reporting on.
 #
+# daily_resource_monitor_set_phase's own bookkeeping failures (an invalid
+# phase name, a stuck lock, a failed phase-pointer/history write, a failed
+# unlock) are reported the SAME way finish's own loop-report-unavailable
+# case is, and for the same reason, but even more directly: set_phase and
+# daily_resource_monitor_finish always run in the ONE parent process
+# (nothing here is forked), so the reason travels as a plain in-process
+# variable (_CRATEDIGGER_RESOURCE_FAILURE_REASON), never a marker FILE.
+# issue #1214 review C-F1 found the previous file-based marker itself
+# reachably unwritable: four bare
+# `printf ... > $_CRATEDIGGER_RESOURCE_FAILURE` sites could each
+# independently fail in a world where creating new files in the state dir
+# is denied but already-open files (samples.tsv) can still be appended to
+# -- reproduced live, and it produced a false status=valid over a run that
+# lost an entire phase transition, because neither dropped_samples nor
+# missing_phases moved in that world. A bash variable assignment cannot
+# fail the way a filesystem write can, so this class of compound failure
+# is no longer constructible, not merely patched at the four sites it was
+# found at.
+#
 # A write that lands but PARTIALLY (a real full filesystem does not reject
-# a write atomically -- review F2, measured) is a different case: nothing
-# reports that one, because nothing observed it fail. It is instead
-# DETECTED from the surviving data itself -- the malformed shape/value the
-# concatenation with the next append produces -- and counted as corruption
-# (review C4), the one place this mechanism genuinely does infer loss
-# after the fact, not report it. Sequence numbers and writer identity
-# remain on every row as a further corruption/reordering signal but are
-# never the source of a REPORTED drop count.
+# a write atomically -- review F2, measured) is a different case again:
+# the writer's own attempt still returns nonzero for that call (issue
+# #1214 review C-F2: the failure IS observed, and IS reported through the
+# ordinary per-writer dropped-sample counting above -- "nothing observed
+# it fail" overstated the mechanism), so it counts once as a REPORTED
+# drop. But the partial bytes already written are never rolled back, and
+# the next append -- whichever attempt eventually lands -- concatenates
+# onto that unterminated tail, producing a further malformed row that
+# summarization DETECTS from the surviving data itself (review C4), the
+# one place the dropped_samples TOTAL counts something inferred rather
+# than reported. One lost sample this way therefore counts TWICE (the
+# reported attempt, the detected corruption) -- inflation, never a hole.
+# Sequence numbers and writer identity remain on every row as a further
+# corruption/reordering signal. `missing_phases` and
+# `corrupted_history_lines` are their own, independently
+# `degraded`-triggering after-the-fact inferences (review C-F3): the
+# corrupted-row term of dropped_samples is the one place THAT FIELD infers
+# rather than reports, not a claim that the whole mechanism never infers
+# anything.
 
 _daily_resource_invalid() {
     local reason="$1"
@@ -467,6 +497,7 @@ daily_resource_monitor_start() {
     _CRATEDIGGER_RESOURCE_STARTED=starting
     _CRATEDIGGER_RESOURCE_TERMINAL_EMITTED=0
     _CRATEDIGGER_RESOURCE_PARENT_DROPPED=0
+    _CRATEDIGGER_RESOURCE_FAILURE_REASON=""
     _CRATEDIGGER_RESOURCE_SCRATCH="${XDG_RUNTIME_DIR:-}"
     if [[ -z "$_CRATEDIGGER_RESOURCE_SCRATCH" \
         || ! -d "$_CRATEDIGGER_RESOURCE_SCRATCH" ]]; then
@@ -567,12 +598,10 @@ daily_resource_monitor_start() {
     _CRATEDIGGER_RESOURCE_PHASE="$_CRATEDIGGER_RESOURCE_DIR/phase"
     _CRATEDIGGER_RESOURCE_PHASE_HISTORY="$_CRATEDIGGER_RESOURCE_DIR/phase-history"
     _CRATEDIGGER_RESOURCE_STOP="$_CRATEDIGGER_RESOURCE_DIR/stop"
-    _CRATEDIGGER_RESOURCE_FAILURE="$_CRATEDIGGER_RESOURCE_DIR/failure"
     _CRATEDIGGER_RESOURCE_LOCK="$_CRATEDIGGER_RESOURCE_DIR/sample.lock"
     _CRATEDIGGER_RESOURCE_LOOP_REPORT="$_CRATEDIGGER_RESOURCE_DIR/loop-report"
     : > "$_CRATEDIGGER_RESOURCE_SAMPLES"
     : > "$_CRATEDIGGER_RESOURCE_PHASE_HISTORY"
-    : > "$_CRATEDIGGER_RESOURCE_FAILURE"
     : > "$_CRATEDIGGER_RESOURCE_LOCK"
     if ! mkfifo -m 600 "$_CRATEDIGGER_RESOURCE_LOOP_REPORT" 2>/dev/null; then
         rm -rf -- "$_CRATEDIGGER_RESOURCE_DIR"
@@ -619,11 +648,11 @@ daily_resource_monitor_set_phase() {
         return 1
     fi
     if [[ ! "$phase" =~ ^[a-z][a-z0-9_]*$ ]]; then
-        printf '%s\n' phase_invalid > "$_CRATEDIGGER_RESOURCE_FAILURE"
+        _CRATEDIGGER_RESOURCE_FAILURE_REASON=phase_invalid
         return 1
     fi
     if ! _daily_resource_lock; then
-        printf '%s\n' phase_lock_failed > "$_CRATEDIGGER_RESOURCE_FAILURE"
+        _CRATEDIGGER_RESOURCE_FAILURE_REASON=phase_lock_failed
         return 1
     fi
     # A boundary sample is a droppable single sample, same as the periodic
@@ -637,7 +666,7 @@ daily_resource_monitor_set_phase() {
         || _CRATEDIGGER_RESOURCE_PARENT_DROPPED=$((_CRATEDIGGER_RESOURCE_PARENT_DROPPED + 1))
     if ! _daily_resource_write_phase "$phase"; then
         _daily_resource_unlock
-        printf '%s\n' phase_state_write_failed > "$_CRATEDIGGER_RESOURCE_FAILURE"
+        _CRATEDIGGER_RESOURCE_FAILURE_REASON=phase_state_write_failed
         return 1
     fi
     _CRATEDIGGER_RESOURCE_CURRENT_PHASE="$phase"
@@ -646,7 +675,7 @@ daily_resource_monitor_set_phase() {
         parent "$_CRATEDIGGER_RESOURCE_PARENT_SEQ" \
         || _CRATEDIGGER_RESOURCE_PARENT_DROPPED=$((_CRATEDIGGER_RESOURCE_PARENT_DROPPED + 1))
     if ! _daily_resource_unlock; then
-        printf '%s\n' phase_unlock_failed > "$_CRATEDIGGER_RESOURCE_FAILURE"
+        _CRATEDIGGER_RESOURCE_FAILURE_REASON=phase_unlock_failed
         return 1
     fi
 }
@@ -686,25 +715,22 @@ daily_resource_monitor_finish() {
         if ! IFS= read -r -t 5 -u "$_CRATEDIGGER_RESOURCE_LOOP_REPORT_FD" loop_dropped \
             || [[ ! "$loop_dropped" =~ ^[0-9]+$ ]]
         then
-            # If even this marker write fails, do not let the caller fall
-            # through with loop_dropped still at its harmless-looking "0"
-            # default (issue #1214 review C5: `${4:-0}` in
-            # daily_resource_summarize_samples would silently launder that
-            # empty value into a clean zero -- a false status=valid over a
-            # loop report that was never actually read). Forcing
-            # monitor_status here routes to the monitor_process_died
-            # fallback below instead of a silent pass-through; the reason
-            # is less precise in this doubly-failed corner, but it is
-            # never `valid`.
-            printf '%s\n' loop_report_unavailable > "$_CRATEDIGGER_RESOURCE_FAILURE" \
-                || monitor_status=1
+            # Plain in-process assignment (issue #1214 review
+            # C-F1/C-F4): this cannot itself fail the way the old
+            # file-based marker could, so daily_resource_summarize_samples's
+            # `${4:-0}` default (review C5) never gets a chance to launder
+            # a loop report that was never actually read, and the
+            # monitor_process_died fallback below is reachable ONLY when
+            # the loop's own `wait` genuinely reports a crash -- never as
+            # an imprecise stand-in for a doubly-failed marker write.
+            _CRATEDIGGER_RESOURCE_FAILURE_REASON=loop_report_unavailable
         fi
     fi
     # Grouped, not bare -- see the comment at the first occurrence of this
     # pattern in daily_resource_monitor_start.
     { exec {_CRATEDIGGER_RESOURCE_LOOP_REPORT_FD}<&-; } 2>/dev/null || true
-    if [[ -s "$_CRATEDIGGER_RESOURCE_FAILURE" ]]; then
-        reason="$(<"$_CRATEDIGGER_RESOURCE_FAILURE")"
+    if [[ -n "$_CRATEDIGGER_RESOURCE_FAILURE_REASON" ]]; then
+        reason="$_CRATEDIGGER_RESOURCE_FAILURE_REASON"
         _daily_resource_invalid "$reason"
         summary_status=1
     elif ((monitor_status != 0)); then

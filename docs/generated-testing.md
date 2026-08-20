@@ -728,17 +728,42 @@ in-process directly; the periodic background loop -- already a child
 attempts in-process and reports the final total to the parent through a
 kernel pipe (a fifo opened once at start, while the state store is
 known-healthy), never through a file write that could fail with the exact
-store it would be reporting on. A write that lands but PARTIALLY is a
-different case, and the one place this mechanism genuinely does infer loss
-after the fact rather than report it: a real full filesystem does not
-reject a write atomically — a partial page can land and the next append
-then concatenates onto its unterminated tail (review F2, measured) — so
-nothing reports that failure, because nothing observed it happen; instead
-a row with the wrong shape or a non-numeric field is DETECTED from the
-surviving data itself and counted as corruption rather than discarding
-every other row's evidence for one corrupt line. Sequence numbers and a
-writer identity ride on every row as a further corruption/reordering
-signal but are never themselves the source of a reported drop. A phase whose
+store it would be reporting on. `daily_resource_monitor_set_phase`'s own
+bookkeeping failures (an invalid phase name, a stuck lock, a failed
+phase-pointer/history write, a failed unlock) travel the same way but even
+more directly, as a plain in-process variable rather than a marker file:
+`set_phase` and `finish` always run in the ONE parent process, so nothing
+here is ever forked, and a bash variable assignment cannot itself fail the
+way a filesystem write can (review C-F1 found the file-based marker this
+mechanism used through round 4 reachably unwritable — four sites could
+each independently fail in a world where creating new files in the state
+dir is denied but already-open files can still be appended to, previously
+producing a false `status=valid` over a run that lost an entire phase
+transition).
+
+A write that lands but PARTIALLY is a different case again: a real full
+filesystem does not reject a write atomically — a partial page can land
+and the next append then concatenates onto its unterminated tail (review
+F2, measured) — but the writer's own attempt still returns nonzero for
+that call, so it IS observed and IS reported once through the ordinary
+per-writer drop counting above (review C-F2 corrected an earlier claim
+that "nothing observed it fail"). The partial bytes already written are
+never rolled back, though, so the next append that lands concatenates
+onto that unterminated tail, producing a further malformed row that
+summarization DETECTS from the surviving data itself rather than any
+writer reporting it (review C4) — the one place the `dropped_samples`
+TOTAL counts something inferred rather than reported. One lost sample
+this way therefore counts TWICE (the reported attempt, the detected
+corruption): inflation, never a hole. A row with the wrong shape or a
+non-numeric field is skipped and counted as corruption rather than
+discarding every other row's evidence for one corrupt line. Sequence
+numbers and a writer identity ride on every row as a further
+corruption/reordering signal but are never themselves the source of a
+reported drop. `missing_phases` and `corrupted_history_lines` below are
+their own, independently `degraded`-triggering after-the-fact inferences
+(review C-F3): the corrupted-row term of `dropped_samples` is the one
+place THAT field infers rather than reports, not a claim that the whole
+mechanism never infers anything. A phase whose
 every sample was lost this way still cannot vanish silently (review F4):
 every phase transition is independently durable via the phase-history file
 (a second write, not a free extension of the phase-pointer write — review

@@ -157,15 +157,14 @@ _CRATEDIGGER_RESOURCE_DIR="$state"
 _CRATEDIGGER_RESOURCE_SAMPLES="$state/samples.tsv"
 _CRATEDIGGER_RESOURCE_PHASE="$state/phase"
 _CRATEDIGGER_RESOURCE_PHASE_HISTORY="$state/phase-history"
-_CRATEDIGGER_RESOURCE_FAILURE="$state/failure"
 _CRATEDIGGER_RESOURCE_LOCK="$state/sample.lock"
 _CRATEDIGGER_RESOURCE_STARTED=1
 _CRATEDIGGER_RESOURCE_CURRENT_PHASE=old_phase
 _CRATEDIGGER_RESOURCE_PARENT_SEQ=0
 _CRATEDIGGER_RESOURCE_PARENT_DROPPED=0
+_CRATEDIGGER_RESOURCE_FAILURE_REASON=""
 : > "$_CRATEDIGGER_RESOURCE_SAMPLES"
 : > "$_CRATEDIGGER_RESOURCE_PHASE_HISTORY"
-: > "$_CRATEDIGGER_RESOURCE_FAILURE"
 : > "$_CRATEDIGGER_RESOURCE_LOCK"
 printf '%s\n' old_phase > "$_CRATEDIGGER_RESOURCE_PHASE"
 printf '%s\n' old_phase >> "$_CRATEDIGGER_RESOURCE_PHASE_HISTORY"
@@ -708,8 +707,10 @@ daily_resource_monitor_start
         real state directory blocks creating the phase pointer's real
         rename-into-place temp file (a real EACCES, not a reimplementation)
         while leaving already-existing files (samples.tsv, the phase
-        history, the lock, the failure marker, the loop report fifo)
-        writable, isolating exactly this failure mode."""
+        history, the lock, the loop report fifo) writable, isolating
+        exactly this failure mode. (The failure REASON itself no longer
+        touches the filesystem at all -- issue #1214 review C-F1 -- so
+        this world only needs to isolate the phase-pointer write.)"""
         harness = r'''
 set -euo pipefail
 source "$1"
@@ -958,14 +959,49 @@ daily_resource_monitor_finish
         pins that a fully-lost phase is correctly named as missing rather
         than silently absent.
 
-        Mutant proof (all four variants; empirically run during review,
-        not committed): removing any ONE of the three `|| _CRATEDIGGER_
-        RESOURCE_PARENT_DROPPED=...` sites drops the observed count from
-        3 to 2; removing all three together drops it to 0 (and the
-        receipt reports status=valid instead of degraded). The exact
-        `== "3"` assertion catches every variant; a `>=` floor catches
-        none of them, since the stubbed loop's own 0 never provides a
-        margin to hide a missed parent site behind."""
+        Mutant proof (all four variants -- any ONE of the three sites
+        alone, and all three together -- empirically run during review,
+        not committed; issue #1214 review C-F3 corrected two successive
+        false versions of this docstring's claim, both asserted from
+        reading the diff rather than the actual observed output. This is
+        the third version, and every claim in it was re-run fresh
+        immediately before being written down). Every one of the four
+        variants produces the IDENTICAL observable failure, not a
+        shrinking count: each site's guard is a bare top-level statement
+        of the form `command || _CRATEDIGGER_RESOURCE_PARENT_DROPPED=...`
+        with no enclosing if/while/`&&` -- removing the `||` leaves a
+        bare, unprotected statement whose nonzero exit (samples.tsv is
+        chmod 400) trips this script's own `set -euo pipefail`
+        immediately, at that exact line, regardless of which of the three
+        sites it is. The caller that reaches it -- `set_phase` for the
+        two boundary sites, `finish` for the final one -- dies mid-
+        function without ever reaching the code that prints a receipt,
+        and since the harness itself calls `daily_resource_monitor_set_phase
+        alpha` and `daily_resource_monitor_finish` as bare (non-`if`-
+        guarded) statements, that abort propagates to kill the WHOLE
+        harness script the same way. Confirmed identical across all four
+        variants: `completed.returncode == 1`, `completed.stdout == ""`
+        (no receipt of any kind), `completed.stderr` holding "Permission
+        denied" lines from the write's own retry loop (three for a
+        single-site removal, three for a three-site removal -- one
+        write's own retries, not one line per site), and the process
+        exits quickly rather than hanging (the stubbed loop has no
+        infinite `while` of its own to orphan, unlike the real loop other
+        tests in this module rely on for their deadlock-shaped mutants).
+        This test's own `parsed_summary()` call is what kills all four
+        variants, failing closed with "expected one terminal receipt, got
+        0" before the exact `== "3"` count assertion ever runs against
+        mutated code -- that assertion still executes, and still matters,
+        on every GREEN run against the real, unmutated three-site
+        implementation; it is not exercised by this particular mutant
+        class. A `>=` floor is still strictly weaker here: since no
+        variant of this specific mutant class ever reaches a partial
+        (nonzero, undercounted) receipt to floor-check in the first
+        place, both assertion styles catch these four mutants equally --
+        but only the exact assertion also catches a DIFFERENT class of
+        bug this test does not separately mutate for: a counting-logic
+        defect (off-by-one, double-count) that still produces a receipt,
+        where a `>=` floor would silently pass a wrong number."""
         harness = r'''
 set -euo pipefail
 source "$1"
@@ -1045,26 +1081,54 @@ daily_resource_monitor_finish
         self.assertEqual(missing, [])
         self.assertIn("alpha", phases)
 
-    def test_unwritable_failure_marker_does_not_launder_a_lost_loop_report(
+    def test_set_phase_failure_reason_survives_total_state_dir_lockout(
         self,
     ) -> None:
-        """Regression pin for issue #1214 review C5: if the loop-report
-        marker write ITSELF fails (not just the report read), the caller
-        must not fall through with loop_dropped silently at its
-        seemingly-harmless "0" default -- that combination previously
-        produced a false status=valid over a genuinely lost loop report.
-        Combines review C4's real SIGKILL-then-repoint technique (a real
-        child process that exits 0 without ever writing to the fifo) with
-        chmod 400 on the real failure-marker file (a real EACCES on that
-        specific write, nothing else).
+        """Regression pin for issue #1214 review C-F1. The previous
+        file-based failure marker was itself reachably unwritable: four
+        bare `printf ... > $_CRATEDIGGER_RESOURCE_FAILURE` sites inside
+        daily_resource_monitor_set_phase had no `|| ...` fallback of their
+        own, so a compound world (new-file creation denied AND the marker
+        file itself unwritable) let a lost phase transition report
+        `status=valid dropped_samples=0 missing_phases=0` -- reproduced
+        live by the reviewer. This test drives the now-strictly-stronger
+        replacement: `alpha` is entered normally, then the ENTIRE real
+        state directory is chmod 000'd -- not just blocking new-file
+        creation, but removing the directory's own execute/search bit, so
+        no path-based filesystem operation of any kind can succeed inside
+        it, including opening the ALREADY-EXISTING lock file
+        _daily_resource_lock needs for "beta". The failure reason must
+        still surface correctly, because it now travels as a plain
+        in-process bash variable (_CRATEDIGGER_RESOURCE_FAILURE_REASON)
+        that never touches the filesystem at all -- a strictly harder
+        world than the reviewer's own reproduction, and the old marker
+        file mechanism no longer exists to chmod.
 
         Mutant proof (both directions; empirically run during review, not
-        committed): reverting the `|| monitor_status=1` fallback (so the
-        marker write's own failure is silently swallowed, the pre-fix
-        shape) makes this test fail -- the exact same world produces
-        `status=valid dropped_samples=0`, exit 0, with the failure
-        marker's own "Permission denied" the only sign anything went
-        wrong."""
+        committed): reverting set_phase's
+        `_CRATEDIGGER_RESOURCE_FAILURE_REASON=phase_lock_failed` back to
+        the pre-fix `printf '%s\n' phase_lock_failed >
+        "$_CRATEDIGGER_RESOURCE_FAILURE"` (no `||` guard, matching the
+        original four call sites -- note `_CRATEDIGGER_RESOURCE_FAILURE`
+        itself no longer has any assignment anywhere in the fixed script,
+        so the mutant also reintroduces a reference to a variable nothing
+        sets) makes this test fail, but NOT with the clean
+        `status=valid` this docstring first predicted from reading the
+        code -- verified empirically, not asserted. Observed mechanism:
+        under this script's own `set -euo pipefail`, expanding the
+        never-assigned `$_CRATEDIGGER_RESOURCE_FAILURE` trips `set -u`'s
+        unbound-variable guard immediately, which aborts the harness
+        script mid-function -- even though the failing printf sits inside
+        an `if ... ; then` condition, `set -u`'s abort is not the same
+        control-flow guard `set -e` respects there. The harness never
+        reaches its own `chmod 700` / `daily_resource_monitor_finish`
+        lines, so the background loop is never signalled to stop and is
+        orphaned still holding the captured stdout/stderr pipes open --
+        the same deadlock shape several other tests in this module name
+        for their own mutants. `subprocess.communicate()` hangs until this
+        test's own 10s timeout, raising `TimeoutExpired`: still a hard
+        test failure, just a different one than a first read of the code
+        suggests."""
         harness = r'''
 set -euo pipefail
 source "$1"
@@ -1072,11 +1136,12 @@ export XDG_RUNTIME_DIR="$2"
 export TMPDIR="$3"
 
 daily_resource_monitor_start
-chmod 400 "$_CRATEDIGGER_RESOURCE_FAILURE"
-kill -9 "$_CRATEDIGGER_RESOURCE_PID"
-wait "$_CRATEDIGGER_RESOURCE_PID" 2>/dev/null || true
-sleep 0.05 &
-_CRATEDIGGER_RESOURCE_PID=$!
+daily_resource_monitor_set_phase alpha
+chmod 000 "$_CRATEDIGGER_RESOURCE_DIR"
+if daily_resource_monitor_set_phase beta; then
+    echo UNEXPECTED_SUCCESS
+fi
+chmod 700 "$_CRATEDIGGER_RESOURCE_DIR"
 daily_resource_monitor_finish
 '''
         with tempfile.TemporaryDirectory(dir="/dev/shm") as scratch, \
@@ -1087,12 +1152,14 @@ daily_resource_monitor_finish
                 text=True,
                 capture_output=True,
                 check=False,
-                timeout=15,
+                timeout=10,
             )
 
+        self.assertNotIn("UNEXPECTED_SUCCESS", completed.stdout)
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("status=invalid", completed.stdout)
-        self.assertNotIn("status=valid", completed.stdout)
+        self.assertIn(
+            "status=invalid reason=phase_lock_failed", completed.stdout
+        )
 
     def test_missing_phase_via_real_write_path_is_named(self) -> None:
         """issue #1214 review C2: the unit-level missing-phase test hands
