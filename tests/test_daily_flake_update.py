@@ -24,7 +24,6 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.fake = FakeDailyFlakeUpdateCommands(Path(self.tempdir.name))
-        self.addCleanup(self.fake.close)
 
     def fake_environment(self) -> dict[str, str]:
         env = os.environ.copy()

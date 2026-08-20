@@ -17,7 +17,6 @@ class TestDailyBeetsTipUpdateScript(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.fake = FakeDailyFlakeUpdateCommands(Path(self.tempdir.name))
-        self.addCleanup(self.fake.close)
 
     def test_green_tip_canary_proves_the_suite_and_publishes_nothing(self) -> None:
         proc = self.fake.run(SCRIPT)
