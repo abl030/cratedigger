@@ -14,8 +14,9 @@ import tempfile
 import threading
 import time
 import unittest
-from collections.abc import Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar, TypedDict, cast
@@ -92,10 +93,20 @@ def requires_postgres(cls):
 # ``TRUNCATE <21 explicitly-named tables> CASCADE`` used to reach, now spelled
 # out explicitly rather than left to three tables' worth of implicit cascade
 # (``album_quality_evidence_files``, ``search_plans``, ``search_plan_items``).
-# Order matters (see ``tests.helpers.delete_all_rows``'s docstring):
-# ``album_requests`` and ``processing_cleanup_journal`` must both precede
-# ``import_jobs`` — the only two ``ON DELETE RESTRICT`` foreign keys in the
-# schema, both checked immediately rather than deferred to commit.
+#
+# Order matters (see ``tests.helpers.delete_all_rows``'s docstring for the
+# full mechanism, including why an explicit transaction is required here at
+# all, independent of ordering): ``album_requests`` must precede
+# ``import_jobs`` — one of THREE ``ON DELETE RESTRICT`` foreign keys in the
+# schema (the other two: ``processing_cleanup_journal`` -> ``import_jobs``,
+# and the self-referencing ``album_requests.replaces_request_id`` ->
+# ``album_requests``, resolved for free since a single DELETE clears its
+# whole table in one statement) — checked immediately rather than deferred
+# to commit, regardless of any DEFERRABLE declaration on the constraint.
+# ``processing_cleanup_journal`` is kept before ``import_jobs`` too, for the
+# simplest correct mental model, though once ``album_requests`` precedes
+# ``import_jobs`` its own position relative to ``import_jobs`` is not
+# independently load-bearing (proven empirically both ways).
 _ALL_TABLES = [
     "album_requests",
     "processing_cleanup_journal",
@@ -140,7 +151,6 @@ def make_db():
 class _RecordingTestConnection:
     def __init__(self) -> None:
         self.commit_count = 0
-        self.autocommit = True
 
     def commit(self) -> None:
         self.commit_count += 1
@@ -150,9 +160,15 @@ class _RecordingTestDB:
     def __init__(self) -> None:
         self.statements: list[str] = []
         self.conn = _RecordingTestConnection()
+        self.atomic_entered = 0
 
     def _execute(self, sql: str) -> None:
         self.statements.append(sql)
+
+    @contextmanager
+    def _atomic(self) -> Generator[_RecordingTestConnection]:
+        self.atomic_entered += 1
+        yield self.conn
 
 
 class TestMakeDbIsolation(unittest.TestCase):
@@ -163,10 +179,12 @@ class TestMakeDbIsolation(unittest.TestCase):
 
         self.assertIs(result, db)
         self.assertEqual(db.statements, [f"DELETE FROM {t}" for t in _ALL_TABLES])
-        # delete_all_rows commits exactly once (all deletes in one
-        # transaction) and restores autocommit to its prior value.
+        # delete_all_rows runs every DELETE inside one db._atomic() call and
+        # commits exactly once inside it (issue #1156 item 7 P3-F4: this
+        # delegates to PipelineDB's own transaction/reconnect/rollback
+        # machinery instead of duplicating a second, untested copy of it).
+        self.assertEqual(db.atomic_entered, 1)
         self.assertEqual(db.conn.commit_count, 1)
-        self.assertTrue(db.conn.autocommit)
 
 
 def _seed_restrict_and_self_reference_scenario(db: PipelineDB) -> None:
@@ -302,6 +320,44 @@ class TestDeleteAllRowsRealPostgresRegression(unittest.TestCase):
             "expected the dropped table's row to survive — if it didn't, "
             "the 'leaves nothing behind' pins above are not falsifiable",
         )
+
+    def test_missing_predecessor_raises_and_leaves_the_world_untouched(
+        self,
+    ) -> None:
+        """Failure-path pin (issue #1156 item 7 P3-F5): the precondition
+        ``delete_all_rows``'s docstring documents — a table list that
+        includes ``album_requests`` on a world with a live processing
+        owner must also include ``import_jobs`` and
+        ``processing_cleanup_journal`` in the SAME call — is real, and the
+        failure it raises leaves nothing partially committed and the
+        connection usable for the next test. Exercises ``db._atomic()``'s
+        own rollback/autocommit-restore machinery, not a second
+        hand-rolled copy of it (P3-F4: the duplicate copy this pin
+        replaces silently dropped both dead-connection guards and never
+        called ``_ensure_conn()``).
+        """
+        _seed_restrict_and_self_reference_scenario(self.db)
+        before = self.db._execute(
+            "SELECT count(*) AS n FROM album_requests"
+        ).fetchone()["n"]
+        self.assertGreater(before, 0)
+
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            delete_all_rows(self.db, ["album_requests"])
+
+        # The deferred constraint trigger fires at COMMIT and PostgreSQL
+        # rolls back the whole transaction on failure — nothing was
+        # partially deleted.
+        after = self.db._execute(
+            "SELECT count(*) AS n FROM album_requests"
+        ).fetchone()["n"]
+        self.assertEqual(after, before)
+
+        # db._atomic() restores autocommit and the connection stays usable
+        # (Critical rule 7: PipelineDB must run autocommit=True).
+        self.assertTrue(self.db.conn.autocommit)
+        row = self.db._execute("SELECT 1 AS ok").fetchone()
+        self.assertEqual(row["ok"], 1)
 
 
 def _link_projection_evidence(

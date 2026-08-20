@@ -82,9 +82,10 @@ class EphemeralPostgres:
             f"-k {self._socket_dir}",
             "-c listen_addresses=''",
             # PostgreSQL defers unlinking relation files replaced by TRUNCATE
-            # until a checkpoint (rare on this cluster now that most per-test
-            # resets DELETE instead — issue #1156 item 7 — but not the only
-            # source of dirty pages a checkpoint reclaims). Bound that
+            # until a checkpoint — no longer triggered by any test-reset
+            # call site (issue #1156 item 7 replaced every one with DELETE)
+            # but still a general protection against checkpoint-triggered
+            # dirty-page buildup from any workload. Bound that
             # disposable-test scratch lifetime instead of relying on the
             # five-minute production default.
             "-c checkpoint_timeout=30s",
@@ -157,13 +158,13 @@ class EphemeralPostgres:
             # over a database's working lifetime. Nothing here has one: the
             # whole cluster is destroyed in minutes, so a stats-driven
             # planner has nothing to learn from and nowhere to use it.
-            # Most per-test resets DELETE now, not TRUNCATE (issue #1156
+            # Every per-test reset DELETEs now, not TRUNCATEs (issue #1156
             # item 7), so this workload DOES leave dead tuples autovacuum
             # would otherwise reclaim — but measured over 2000 real reset
             # cycles that cost stayed at 9.6MB total db size, smaller than
-            # TRUNCATE's own catalog-relfilenode churn (20.1MB, unreclaimed
-            # by the same autovacuum=off) ever was. Turning autovacuum on to
-            # chase a reclaim this short-lived cluster never needs would
+            # TRUNCATE's own +10.5MB catalog-relfilenode growth (unreclaimed
+            # by the same autovacuum=off) ever cost. Turning autovacuum on
+            # to chase a reclaim this short-lived cluster never needs would
             # spend CPU (autovacuum workers, planner ANALYZE) this disposable
             # workload has better uses for.
             "-c autovacuum=off",
