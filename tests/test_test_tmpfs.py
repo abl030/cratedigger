@@ -5,13 +5,20 @@ from __future__ import annotations
 import ast
 import os
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
 
+from scripts.run_test_suite import (
+    SCRATCH_TREE_OWNER_MARKER_NAME,
+    SCRATCH_TREE_PREFIX,
+    _scratch_tree_owner_dead,
+)
 from tests._source_pins import pinned_source
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -19,6 +26,10 @@ TMPFS_SETUP = REPO_ROOT / "scripts" / "test_tmpfs.sh"
 NIX_SHELL = REPO_ROOT / "nix" / "shell.nix"
 TMPFS_SETUP_AND_PRINT_TMPDIR = (
     'source "$1" && setup_cratedigger_test_tmpfs && printf "%s" "$TMPDIR"'
+)
+TMPFS_SETUP_AND_HOLD = (
+    'source "$1" && setup_cratedigger_test_tmpfs '
+    '&& printf "%s\n" "$TMPDIR" && read -r _cratedigger_test_tmpfs_hold_line'
 )
 LOW_HEADROOM_MINIMUM_BYTES = 1 << 50
 
@@ -41,6 +52,36 @@ def run_tmpfs_setup_and_print_tmpdir(
         capture_output=True,
         text=True,
         check=False,
+    )
+
+
+def run_tmpfs_setup_and_hold(
+    *,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.Popen[str]:
+    """Drive the real shell helper and keep the owning shell alive, blocked
+    on stdin, until the caller lets it proceed.
+
+    Issue #1208 review D1: ``run_tmpfs_setup_and_print_tmpdir`` prints
+    TMPDIR then lets the whole script exit immediately, firing the EXIT
+    trap before a caller can observe anything about the still-live tree —
+    useless for proving the ownership marker's PRODUCER (this file) agrees
+    with its READER (``scripts.run_test_suite._scratch_tree_owner_dead``).
+    This variant blocks on a `read` after allocation so a test can inspect
+    the real ``.owner`` marker the real ``setup_cratedigger_test_tmpfs``
+    wrote, and the real process it names, while genuinely alive — then
+    either release it (closing stdin lets `read` return and the script
+    exit normally, EXIT trap fires) or SIGKILL it (trap skipped, matching
+    the founding incident).
+    """
+    return subprocess.Popen(
+        ["bash", "-c", TMPFS_SETUP_AND_HOLD, "bash", str(TMPFS_SETUP)],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
 
 
@@ -286,6 +327,183 @@ class TestTmpfsSetup(unittest.TestCase):
 
         self.assertIn("scripts/test_tmpfs.sh", source)
         self.assertIn("setup_cratedigger_test_tmpfs", source)
+
+
+class ScratchTreeOwnershipMarkerTestCase(unittest.TestCase):
+    """Issue #1208 review D1: nothing bound the ``.owner`` PRODUCER (this
+    file, ``scripts/test_tmpfs.sh``) to its READER
+    (``scripts.run_test_suite._scratch_tree_owner_dead``). Every existing
+    test of the reader hand-typed the marker content
+    (``tests/test_suite_coordinator.py``'s ``_write_owner_marker``), so a
+    one-character producer edit — the wrong ``/proc`` field, ``$$`` ->
+    ``$PPID``, the marker filename, the "<pid> <ticks>" delimiter — was
+    invisible to the whole suite. This class drives the REAL
+    ``setup_cratedigger_test_tmpfs`` and feeds the marker IT wrote
+    straight into the real reader (test-fidelity.md Rule C: the trigger
+    must come from the producer, never a literal)."""
+
+    def test_real_marker_reports_alive_then_dead_across_a_real_sigkill(
+        self,
+    ) -> None:
+        """THE producer<->reader binding proof. While the real owning
+        shell (blocked on `read`, genuinely alive) holds the tree,
+        ``_scratch_tree_owner_dead`` must read its real ``.owner`` marker
+        as NOT dead. SIGKILLing that same shell — the founding incident,
+        and the only signal that skips the EXIT trap — must flip the same
+        function's verdict to dead, proven against the real process the
+        marker actually names, not a hand-typed pid+ticks pair."""
+        proc = run_tmpfs_setup_and_hold(env=allocation_environment())
+        tree: Path | None = None
+        try:
+            assert proc.stdout is not None
+            tmpdir_line = proc.stdout.readline()
+            if not tmpdir_line:
+                # Only read stderr on the failure path: the child is still
+                # alive and blocked on `read` at this point on the happy
+                # path, so an unconditional proc.stderr.read() here would
+                # block until EOF — i.e. until the child exits, which it
+                # never will while blocked. An f-string argument to
+                # assertTrue is evaluated eagerly regardless of the
+                # assertion's outcome, so that shape deadlocks even when
+                # tmpdir_line IS truthy; this explicit branch is required,
+                # not stylistic.
+                self.fail(
+                    "no TMPDIR line from the real setup function; "
+                    f"stderr={proc.stderr.read() if proc.stderr else ''!r}"
+                )
+            tree = Path(tmpdir_line.strip())
+            self.assertTrue(tree.name.startswith(SCRATCH_TREE_PREFIX))
+
+            marker = tree / SCRATCH_TREE_OWNER_MARKER_NAME
+            deadline = time.monotonic() + 5.0
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(
+                marker.exists(),
+                "the real setup_cratedigger_test_tmpfs never wrote .owner",
+            )
+
+            self.assertFalse(
+                _scratch_tree_owner_dead(tree),
+                "the real owning shell is alive but the real marker it "
+                "wrote was read as dead",
+            )
+
+            proc.kill()
+            proc.wait(timeout=5)
+
+            self.assertTrue(
+                tree.exists(),
+                "SIGKILL must skip the EXIT trap, exactly like the "
+                "founding incident (only SIGKILL does)",
+            )
+            self.assertTrue(
+                _scratch_tree_owner_dead(tree),
+                "the real owning shell is confirmed dead (SIGKILLed and "
+                "reaped by wait()) but the real marker it wrote was read "
+                "as alive",
+            )
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
+            if tree is not None:
+                shutil.rmtree(tree, ignore_errors=True)
+
+    def test_owner_marker_write_failure_does_not_leak_a_stray_diagnostic(
+        self,
+    ) -> None:
+        """Issue #1208 review D5: bash redirections apply LEFT TO RIGHT,
+        so a naive ``>file 2>/dev/null`` order does NOT suppress a failed
+        OPEN of ``file`` — the diagnostic prints on the still-live
+        original stderr before ``2>/dev/null`` is even installed.
+        Overrides ``mktemp`` to chmod the real scratch tree read-only the
+        instant it is created, forcing the real ``.owner`` write inside
+        ``setup_cratedigger_test_tmpfs`` to fail exactly the way a
+        full/permission-denied tmpfs does — reproduced against the real
+        function, not a snippet in isolation. Uses the same held-shell
+        pattern as the round-trip test above (not a plain
+        ``subprocess.run``): the EXIT trap removes the read-only-but-empty
+        tree the instant the script would otherwise exit, so the marker's
+        absence can only be observed while the shell is still genuinely
+        alive and deliberately blocked before that point."""
+        override_mktemp_readonly = (
+            "mktemp() {\n"
+            "    local real_dir\n"
+            '    real_dir=$(command mktemp "$@") || return 1\n'
+            '    chmod 500 "$real_dir"\n'
+            '    printf "%s\\n" "$real_dir"\n'
+            "}\n"
+            "export -f mktemp\n"
+        )
+        proc = subprocess.Popen(
+            [
+                "bash",
+                "-c",
+                override_mktemp_readonly + TMPFS_SETUP_AND_HOLD,
+                "bash",
+                str(TMPFS_SETUP),
+            ],
+            cwd=REPO_ROOT,
+            env=allocation_environment(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        tree: Path | None = None
+        try:
+            assert proc.stdout is not None
+            tmpdir_line = proc.stdout.readline()
+            if not tmpdir_line:
+                self.fail(
+                    "no TMPDIR line from the real setup function; "
+                    f"stderr={proc.stderr.read() if proc.stderr else ''!r}"
+                )
+            tree = Path(tmpdir_line.strip())
+
+            # The shell is still blocked at `read` here — genuinely alive
+            # and holding the read-only tree open — so this observes the
+            # write's real outcome, not the EXIT trap's aftermath.
+            self.assertTrue(tree.exists())
+            self.assertFalse(
+                (tree / SCRATCH_TREE_OWNER_MARKER_NAME).exists(),
+                "the marker write should have failed on the read-only tree",
+            )
+
+            # A blank line, not a bare close: bash's `read` returns
+            # non-zero on EOF-without-a-line, which the EXIT trap would
+            # then propagate as this script's own exit status — nothing
+            # to do with the diagnostic-suppression fix under test, but a
+            # real newline lets `read` succeed normally so the script's
+            # actual exit code reflects the setup itself, not this
+            # release mechanism's own plumbing.
+            assert proc.stdin is not None
+            proc.stdin.write("\n")
+            proc.stdin.close()
+            stderr_output = proc.stderr.read() if proc.stderr else ""
+            proc.wait(timeout=5)
+
+            self.assertEqual(proc.returncode, 0, stderr_output)
+            self.assertEqual(
+                stderr_output,
+                "",
+                "the failed .owner write leaked a diagnostic instead of "
+                "being silently suppressed",
+            )
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
+            if tree is not None and tree.exists():
+                tree.chmod(0o700)
+                shutil.rmtree(tree, ignore_errors=True)
 
 
 if __name__ == "__main__":

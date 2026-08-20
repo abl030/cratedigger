@@ -112,6 +112,18 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "scripts/test.sh": (
         "tests.test_targeted_test_selection",
     ),
+    "scripts/test_tmpfs.sh": (
+        # Issue #1208 review D1: this file had NO entry at all — a solo
+        # producer-side edit here (the /proc field index, $$ vs $PPID, the
+        # marker filename/delimiter) selected nothing, so the two mutants
+        # review found surviving were also unreachable by targeted
+        # selection, not just by the test suite's own coverage.
+        # tests.test_test_tmpfs drives this file's real
+        # setup_cratedigger_test_tmpfs end to end, including the real
+        # ".owner" marker round-tripped through
+        # scripts.run_test_suite._scratch_tree_owner_dead.
+        "tests.test_test_tmpfs",
+    ),
     # Shared tests/ infrastructure (issue #1081): none of these are
     # discoverable test modules themselves, so each needs an explicit
     # mapping to the test(s) that actually exercise it. tests/structural_audits/

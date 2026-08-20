@@ -39,14 +39,18 @@ atomically writes `terminal` only after the command exits. The bundle — while
 it still exists — contains the typed summaries and complete per-phase logs.
 A second concurrently-launched canonical suite on this shared host waits on
 `run_suite`'s own admission lock rather than colliding with this one; once
-admitted it best-effort reaps check bundles idle past ~4 hours
-(`scripts/run_test_suite.py::DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS`), but never
-one this receipt still references — `status` (below) still stats the bundle
-path and fails visibly rather than silently reporting `pass` over evidence
-that no longer exists. A dangling receipt (bundle gone despite that
-protection) means something genuinely unusual happened to it outside the
-normal reap path — the honest response is to re-run the gate, not to trust
-the stale `terminal` verdict.
+admitted it first retires eligible receipts
+(`scripts/run_test_suite.py::reap_stale_final_gate_receipts`, issue #1208
+item 4 — a receipt whose lifecycle is provably over, `terminal` present or
+its recorded helper/gate process identities conclusively dead, AND older
+than a fixed 7-day floor), then best-effort reaps check bundles idle past
+~4 hours (`DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS`), but never one a still-
+present receipt references — `status` (below) still stats the bundle path
+and fails visibly rather than silently reporting `pass` over evidence that
+no longer exists. A dangling receipt (bundle gone despite that protection)
+means something genuinely unusual happened to it outside the normal reap
+path — the honest response is to re-run the gate, not to trust the stale
+`terminal` verdict.
 
 If the client detaches, recover the exact invocation from the same committed clean
 worktree:
@@ -58,7 +62,10 @@ still match; recover it rather than launching a duplicate. `pass` and `fail` are
 terminal; `incomplete` means no terminal result was recorded. A matching `pass`
 receipt prevents rerunning that unchanged gate. Never treat `fail` or
 `incomplete` as green; choose the next action explicitly. Receipts are never
-retried or deleted automatically.
+retried automatically, and a live or recent one is never deleted automatically
+either — only a receipt that is both conclusively finished-or-dead AND older
+than the 7-day retirement floor above is ever removed, and only by a later
+admitted suite run's own reap pass (issue #1208 item 4).
 
 The isolated final-gate worktree must remain exclusively owned for the entire
 gate. The receipt rechecks its HEAD and clean state immediately before terminal
