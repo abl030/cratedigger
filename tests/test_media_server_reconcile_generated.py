@@ -13,20 +13,25 @@ source-level finding against Jellyfin 10.11: a targeted refresh cannot reap
 a vanished item and would instead delete its child rows — the reconciler
 only ever finds and reports on Jellyfin, never refreshes).
 
-This composes the REAL production gating function
-(``lib.dispatch.core._paths_needing_media_server_reconciliation``, exercised
-indirectly through ``_reconcile_vanished_replaced_album_paths``) with the
-REAL ``notify_library_delete`` over a real temporary directory tree — only
-the Plex/Jellyfin HTTP leaf functions are faked. The deterministic wiring pin
-(exact reconciled set, ordering against the pin capture, escalation refusal
-at the seam level, the regression pin for the measured live defect) lives in
+This composes THREE REAL production stages, not just the gate: the pre/post
+SET-DIFF itself (``lib.dispatch.core._vanished_album_directories``, driven
+from generated ``(pre_import, post_import)`` directory-map pairs — issue
+#1203 item 2 review's final item, closing a pin+property gap where the
+property previously received a ready-made vanished-paths list and never
+called this function at all), the union/gate
+(``_paths_needing_media_server_reconciliation``, exercised indirectly
+through ``_reconcile_vanished_replaced_album_paths``), and ``notify_library_delete``
+— all over a real temporary directory tree, with only the Plex/Jellyfin HTTP
+leaf functions faked. The deterministic wiring pin (exact reconciled set,
+ordering against the pin capture, escalation refusal at the seam level, the
+regression pin for the measured live defect) lives in
 ``tests.test_import_dispatch.TestVanishedPathReconciliation``; the
 deterministic mechanics — including the Jellyfin found-item detect-and-report
 path (never a refresh call) this file's found-item strategy widening exists
 to reach structurally — live in ``tests.test_library_delete_notifiers``.
-This file patrols the domain: many shapes of (imported_path, snapshot-diff
-paths, replaced paths, surviving-ancestor depth, Jellyfin item
-found/not-found).
+This file patrols the domain: many shapes of (imported_path, per-album
+pre/post directory-map pairs, replaced paths, surviving-ancestor depth,
+Jellyfin item found/not-found).
 """
 
 from __future__ import annotations
@@ -43,7 +48,10 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.config import CratediggerConfig
-from lib.dispatch.core import _reconcile_vanished_replaced_album_paths
+from lib.dispatch.core import (
+    _reconcile_vanished_replaced_album_paths,
+    _vanished_album_directories,
+)
 from lib.library_delete_notifiers import notify_library_delete
 from lib.quality import DuplicateRemoveCandidate
 from lib.util import JellyfinAlbumRef
@@ -54,6 +62,32 @@ _JELLYFIN_LIBRARY_ID = "COLLECTION-WIDE-SENTINEL"
 def _norm(path: str) -> str:
     stripped = path.strip()
     return os.path.normpath(stripped) if stripped else ""
+
+
+def _expected_vanished_directories(
+    pre_import: dict[int, str], post_import: dict[int, str],
+) -> list[str]:
+    """Reference oracle for the pre/post SET-DIFF stage itself
+    (``lib.dispatch.core._vanished_album_directories``) — issue #1203 item 2
+    review's final item. Like ``_expected_reconciled_paths`` below, this is a
+    transliteration of the production diff, not an independently-derived
+    algorithm (a plain directory-membership set diff has essentially one
+    correct shape) — so it cannot catch a defect present in both. What DOES
+    make it a regression guard: the test drives the REAL
+    ``_vanished_album_directories`` over the SAME generated ``pre_import``/
+    ``post_import`` maps and asserts the union+gate law against THAT real
+    output, so a mutant changing the real diff's behavior (survival check
+    flipped, dedupe dropped, ...) without changing this oracle shows up as a
+    missing/extra-path violation exactly like any other production defect.
+    Before this, the property only ever received a ready-made
+    ``vanished_snapshot_paths`` list and never called
+    ``_vanished_album_directories`` at all — a wrong diff was invisible by
+    construction, no matter how the downstream union/gate stage behaved."""
+    post_norms = {_norm(v) for v in post_import.values()}
+    return [
+        path for path in pre_import.values()
+        if _norm(path) and _norm(path) not in post_norms
+    ]
 
 
 def _expected_reconciled_paths(
@@ -184,15 +218,21 @@ REPLACED_PATH_SHAPES = st.sampled_from((
     "outside_root",         # outside the configured Beets root entirely
 ))
 
-# Shapes for the PRIMARY source: paths the Beets before/after snapshot diff
-# reports vanished. "same_as_replaced" specifically exercises cross-source
-# dedupe (a path both the snapshot diff AND replaced_albums name must still
-# be reconciled exactly once).
-SNAPSHOT_PATH_SHAPES = st.sampled_from((
-    "distinct",             # a genuinely different vanished snapshot path
-    "same_as_replaced",     # overlaps the replaced_albums primary path
-    "same_as_imported",     # identical to the new path -- must be skipped
-    "blank",                # "" -- must be skipped
+# Shapes for the PRIMARY source: each names ONE ALBUM's (pre_import,
+# post_import) directory-map contribution, so the property drives the REAL
+# _vanished_album_directories (the pre/post SET DIFF itself) over generated
+# map pairs, rather than handing it a ready-made vanished-paths list — issue
+# #1203 item 2 review's final item. Every shape gets its own unique album id
+# (or two, for "rekeyed_same_dir") so multiple shapes in one world never
+# collide.
+ALBUM_SNAPSHOT_SHAPES = st.sampled_from((
+    "unchanged",                # same directory pre AND post -- must NOT reconcile
+    "moved",                    # present in pre, a DIFFERENT directory in post -- MUST reconcile
+    "moved_overlaps_replaced",  # old dir == the always-present replaced_paths[0] -- cross-source dedupe: reconciled exactly once from BOTH sources
+    "new_in_post_only",         # absent from pre, present in post (a genuinely new album) -- nothing to vanish
+    "rekeyed_same_dir",         # same directory, but a DIFFERENT album id owns it in post -- must NOT reconcile (a directory-VALUE diff, never keyed by album id)
+    "trailing_slash_survives",  # pre path + "/" -- normalizes equal to its own post entry -- must NOT reconcile
+    "blank_pre",                 # pre path is "" -- skipped regardless of post
 ))
 
 
@@ -203,7 +243,7 @@ class TestVanishedPathReconciliationGeneratedLaw(unittest.TestCase):
         album_old=SAFE_COMPONENT,
         artist_dir_survives=st.booleans(),
         extra_shapes=st.lists(REPLACED_PATH_SHAPES, max_size=4),
-        snapshot_shapes=st.lists(SNAPSHOT_PATH_SHAPES, max_size=3),
+        album_shapes=st.lists(ALBUM_SNAPSHOT_SHAPES, max_size=4),
         jellyfin_item_found=st.booleans(),
     )
     def test_reconciliation_law_holds(
@@ -213,7 +253,7 @@ class TestVanishedPathReconciliationGeneratedLaw(unittest.TestCase):
         album_old: str,
         artist_dir_survives: bool,
         extra_shapes: list[str],
-        snapshot_shapes: list[str],
+        album_shapes: list[str],
         jellyfin_item_found: bool,
     ) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -241,17 +281,44 @@ class TestVanishedPathReconciliationGeneratedLaw(unittest.TestCase):
                 elif shape == "outside_root":
                     replaced_paths.append(str(Path(raw) / "outside" / "Album"))
 
-            snapshot_paths: list[str] = []
-            for shape in snapshot_shapes:
-                if shape == "distinct":
-                    snapshot_paths.append(
-                        str(root / artist / (album_old + "SNAP")))
-                elif shape == "same_as_replaced":
-                    snapshot_paths.append(primary_old_path)
-                elif shape == "same_as_imported":
-                    snapshot_paths.append(imported_path)
-                elif shape == "blank":
-                    snapshot_paths.append("")
+            # Generate (pre_import, post_import) directory-map pairs
+            # directly, one album per shape, so the REAL
+            # _vanished_album_directories (not a ready-made list) drives the
+            # snapshot-diff stage below.
+            pre_import: dict[int, str] = {}
+            post_import: dict[int, str] = {}
+            next_album_id = 1
+            for shape in album_shapes:
+                album_id = next_album_id
+                next_album_id += 1
+                old_dir = str(root / artist / f"gen{album_id}-old")
+                new_dir = str(root / artist / f"gen{album_id}-new")
+                if shape == "unchanged":
+                    pre_import[album_id] = old_dir
+                    post_import[album_id] = old_dir
+                elif shape == "moved":
+                    pre_import[album_id] = old_dir
+                    post_import[album_id] = new_dir
+                elif shape == "moved_overlaps_replaced":
+                    pre_import[album_id] = primary_old_path
+                    post_import[album_id] = new_dir
+                elif shape == "new_in_post_only":
+                    post_import[album_id] = new_dir
+                elif shape == "rekeyed_same_dir":
+                    pre_import[album_id] = old_dir
+                    other_id = next_album_id
+                    next_album_id += 1
+                    post_import[other_id] = old_dir
+                elif shape == "trailing_slash_survives":
+                    pre_import[album_id] = old_dir
+                    post_import[album_id] = old_dir + "/"
+                elif shape == "blank_pre":
+                    pre_import[album_id] = ""
+
+            vanished_snapshot_paths = _vanished_album_directories(
+                pre_import, post_import)
+            expected_vanished = _expected_vanished_directories(
+                pre_import, post_import)
 
             cfg = _cfg(str(root))
 
@@ -291,12 +358,12 @@ class TestVanishedPathReconciliationGeneratedLaw(unittest.TestCase):
                     DuplicateRemoveCandidate(album_path=p)
                     for p in replaced_paths
                 ],
-                vanished_snapshot_paths=snapshot_paths,
+                vanished_snapshot_paths=vanished_snapshot_paths,
                 notify_fn=_notify,
             )
 
             expected = _expected_reconciled_paths(
-                imported_path, snapshot_paths, replaced_paths)
+                imported_path, expected_vanished, replaced_paths)
             violations = _reconciliation_law_violations(
                 expected_paths=expected,
                 reconciled_paths=reconciled_paths,
@@ -309,7 +376,8 @@ class TestVanishedPathReconciliationGeneratedLaw(unittest.TestCase):
                 raise AssertionError(
                     f"{'; '.join(violations)} "
                     f"(imported_path={imported_path!r}, "
-                    f"snapshot_paths={snapshot_paths!r}, "
+                    f"pre_import={pre_import!r}, post_import={post_import!r}, "
+                    f"vanished_snapshot_paths={vanished_snapshot_paths!r}, "
                     f"replaced_paths={replaced_paths!r}, "
                     f"artist_dir_survives={artist_dir_survives}, "
                     f"jellyfin_item_found={jellyfin_item_found})")

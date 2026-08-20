@@ -34,6 +34,7 @@ from lib.import_execution import (
     ProcessIdentity,
 )
 from lib.import_queue import ImportJob
+from lib.library_delete_notifiers import DeleteNotification
 from lib.quality import (
     QUALITY_FLAC_ONLY,
     QUALITY_UPGRADE_TIERS,
@@ -4436,7 +4437,8 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
                     # notify_library_delete against this test's real
                     # jellyfin_url — stub it out directly via the kwarg-DI
                     # seam rather than a module patch.
-                    media_server_notify_fn=MagicMock(return_value=()),
+                    media_server_notify_fn=MagicMock(
+                        return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES),
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -4450,6 +4452,130 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
         self.assertEqual(pin["children_item_ids"], ["tr-old-1"])
         self.assertEqual(pin["original_date_created"], self.ORIGINAL)
         self.assertEqual(pin["request_id"], 42)
+
+    def test_snapshot_old_path_reaches_capture_when_replaced_albums_is_stale(
+        self,
+    ) -> None:
+        """Issue #1203 item 2 review finding 3: ``pre_import_album_directories``
+        (the PRIMARY, authoritative source) must reach the pin capture too,
+        not only ``postflight.replaced_albums`` (the secondary source).
+        When ``replaced_albums`` is STALE — already shows the NEW path, the
+        exact live defect this PR fixes elsewhere — the snapshot source is
+        the only thing left that can find the pre-upgrade Jellyfin item.
+        Without this union, the capture degrades to a floor pin
+        (``album_item_id`` NULL) instead of the true historical
+        ``DateCreated`` — exactly the fingerprint measured live (3 of 262
+        ``jellyfin_date_created_pins`` rows)."""
+        from lib.dispatch import dispatch_import_core
+        from lib.dispatch.types import EvidenceImportGate
+
+        assert _HERMETIC_BEETS_PAIR is not None
+        beets_library_db, beets_library_root = _HERMETIC_BEETS_PAIR
+        release_id = "pin-union-stale-mbid"
+        old_dir = os.path.join(
+            beets_library_root, "Test Artist", "2007 - Test Album")
+        new_rel = "Test Artist/0000 - Test Album"
+        new_dir = os.path.join(beets_library_root, new_rel)
+        album_id = _seed_beets_album(
+            beets_library_db, beets_library_root,
+            mb_release_id=release_id, album_dir=old_dir)
+        self.addCleanup(_delete_beets_album, beets_library_db, album_id)
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="downloading",
+            active_download_state={"files": [], "filetype": "mp3"}))
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+            beets_library_db=beets_library_db,
+            beets_directory=beets_library_root,
+            jellyfin_url="http://jf:8096",
+            jellyfin_token="tok",
+            jellyfin_path_map=f"{beets_library_root}:/jf",
+        )
+        ir = make_import_result(decision="import", imported_path=new_rel)
+        # STALE: replaced_albums already shows the NEW path -- it
+        # contributes nothing to the union; the snapshot source alone must
+        # still find the old item.
+        ir.postflight.replaced_albums = [DuplicateRemoveCandidate(
+            beets_album_id=album_id, album_path=new_rel)]
+
+        def _fake_get_json(cfg, path, **params):
+            if path == "/Items" and params.get("includeItemTypes") == "MusicAlbum":
+                return {"Items": [{
+                    "Id": "alb-old", "Path": self.OLD_CONTAINER,
+                    "DateCreated": self.ORIGINAL, "Name": "Test Album",
+                    "AlbumArtist": "Test Artist",
+                }]}
+            if path == "/Items" and params.get("includeItemTypes") == "MusicArtist":
+                return {"Items": []}
+            if path == "/Items" and "parentId" in params:
+                return {"Items": [
+                    {"Id": "tr-old-1", "DateCreated": self.ORIGINAL}]}
+            return {"Items": []}
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
+                handle.write(b"fixture audio")
+            claimed, candidate, execution_lease = _claim_dispatch_job(
+                db, path=tmpdir, release_id=release_id)
+            cancellation_token = CancellationToken()
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.dispatch.subprocess_runner.parse_import_result",
+                       return_value=ir), \
+                 patch("lib.util._jellyfin_get_json",
+                       side_effect=_fake_get_json), \
+                 pinned_dispatch_authority(
+                     db, execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
+                def _move(*_a, **_k):
+                    _move_beets_album_item(beets_library_db, album_id, new_dir)
+                    return MagicMock(returncode=0, stdout="", stderr="")
+                ext.run.side_effect = _move
+                dispatch_import_core(
+                    path=tmpdir,
+                    mb_release_id=release_id,
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=_HARNESS,
+                    db=db,  # pyright: ignore[reportArgumentType]
+                    dl_info=DownloadInfo(filetype="mp3"),
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[MagicMock(username="user1",
+                                     filename="01 - Track.mp3")],
+                    cfg=cfg,
+                    quality_gate_fn=noop_quality_gate,
+                    candidate_import_job_id=claimed.id,
+                    prevalidated_candidate_result=candidate,
+                    # A real Beets row now exists for this release, so the
+                    # REAL evidence gate would try to spectrally measure it
+                    # (not real audio) -- bypass, matching
+                    # TestVanishedPathReconciliation's own pattern. This
+                    # test is about the pin capture, not evidence gating.
+                    evidence_gate_fn=(
+                        lambda *_a, **_kw: EvidenceImportGate(
+                            candidate=candidate.evidence)),
+                    beets_library_db_path=beets_library_db,
+                    beets_library_root=beets_library_root,
+                    execution_lease=execution_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    run_import_fn=_owned_test_runner,
+                    media_server_notify_fn=MagicMock(
+                        return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES),
+                )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        self.assertEqual(len(db.jellyfin_date_created_pins), 1)
+        pin = db.jellyfin_date_created_pins[0]
+        self.assertEqual(pin["album_item_id"], "alb-old")
+        self.assertEqual(pin["children_item_ids"], ["tr-old-1"])
+        self.assertEqual(pin["original_date_created"], self.ORIGINAL)
 
 
 def _seed_beets_album(
@@ -4528,6 +4654,19 @@ def _delete_beets_album(beets_library_db: str, album_id: int) -> None:
         conn.close()
 
 
+# The REAL notify_library_delete always returns exactly one DeleteNotification
+# per provider (two total) -- never (). A MagicMock(return_value=()) fake
+# for media_server_notify_fn is a Rule-B violation (test-fidelity.md): it is
+# strictly more permissive than the production edge it stands in for, and it
+# is what let a mutant deleting the entire outcome-logging loop in
+# _reconcile_vanished_replaced_album_paths survive every test in this class
+# (issue #1203 item 2 review). Every WIRING test below returns this shape.
+_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES = (
+    DeleteNotification("plex", "skipped", "Plex is not configured"),
+    DeleteNotification("jellyfin", "skipped", "Jellyfin is not configured"),
+)
+
+
 class TestVanishedPathReconciliation(unittest.TestCase):
     """Issue #1203 item 2. Invariant: after a successful import that
     triggers notifiers, every album directory Beets previously held for
@@ -4545,12 +4684,18 @@ class TestVanishedPathReconciliation(unittest.TestCase):
     ``lib.dispatch.core._vanished_album_directories``) is the PRIMARY,
     authoritative source. ``postflight.replaced_albums`` (the harness's
     mid-import serialization) is a SECONDARY source unioned in — it can
-    already show the album's NEW path by the time it is captured (the live
-    defect this class's regression pin reproduces: request 8964's David
-    Bowie import — 182 of 232 historical ``replaced_albums`` rows already
-    show ``album_path == imported_path``), but the secondary source still
-    covers a replaced album whose OWN identity differs from the one being
-    imported. See ``lib.dispatch.core._paths_needing_media_server_reconciliation``.
+    already show the album's NEW path by the time it is captured. Verified
+    live (the defect this class's regression pin reproduces): request
+    8964's David Bowie import (``download_log`` 40213) recorded
+    ``replaced_albums[0].album_path`` as the OLD path for removed beets
+    album 19881, which beets album 19882 now occupies — a stale record is
+    NOT the general case (an ordinary same-path upgrade legitimately shows
+    ``album_path == imported_path``, since beets' own path template doesn't
+    change), but it is real, and ``jellyfin_date_created_pins``'s 3 (of 262
+    live) ``album_item_id IS NULL`` floor-pin rows are its signature
+    fingerprinted three more times. The secondary source still covers a
+    replaced album whose OWN identity differs from the one being imported.
+    See ``lib.dispatch.core._paths_needing_media_server_reconciliation``.
 
     ``media_server_notify_fn`` (``dispatch_import_core``'s kwarg-DI seam,
     forwarded to ``_reconcile_vanished_replaced_album_paths``'s own
@@ -4674,7 +4819,8 @@ class TestVanishedPathReconciliation(unittest.TestCase):
             # Blank — must not be reconciled.
             DuplicateRemoveCandidate(beets_album_id=4, album_path=""),
         ]
-        notify_fn = MagicMock(return_value=())
+        notify_fn = MagicMock(
+            return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES)
         self._dispatch(ir, media_server_notify_fn=notify_fn)
         self.assertEqual(notify_fn.call_count, 1)
         call = notify_fn.call_args
@@ -4688,7 +4834,8 @@ class TestVanishedPathReconciliation(unittest.TestCase):
             DuplicateRemoveCandidate(
                 beets_album_id=1, album_path=imported_path),
         ]
-        notify_fn = MagicMock(return_value=())
+        notify_fn = MagicMock(
+            return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES)
         self._dispatch(ir, media_server_notify_fn=notify_fn)
         notify_fn.assert_not_called()
 
@@ -4696,7 +4843,8 @@ class TestVanishedPathReconciliation(unittest.TestCase):
         ir = make_import_result(
             decision="import",
             imported_path="/mnt/virtio/Music/Beets/Artist/2026 - Album")
-        notify_fn = MagicMock(return_value=())
+        notify_fn = MagicMock(
+            return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES)
         self._dispatch(ir, media_server_notify_fn=notify_fn)
         notify_fn.assert_not_called()
 
@@ -4721,7 +4869,7 @@ class TestVanishedPathReconciliation(unittest.TestCase):
 
         def _notify(*_a, **_k):
             order.append("reconcile")
-            return ()
+            return _PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES
 
         imported_path = (
             "/mnt/virtio/Music/Beets/David Bowie/2026 - Album [SBL 7912]")
@@ -4748,20 +4896,61 @@ class TestVanishedPathReconciliation(unittest.TestCase):
         self.assertLess(max(capture_indices), order.index("trigger_jellyfin"))
         self.assertLess(order.index("trigger_jellyfin"), order.index("reconcile"))
 
+    def test_reconciliation_outcomes_are_logged(self) -> None:
+        """Issue #1203 item 2 review: deleting the entire ``for outcome in
+        outcomes: log_fn(...)`` loop in
+        ``_reconcile_vanished_replaced_album_paths`` survived every test in
+        this class, because every ``media_server_notify_fn`` fake returned
+        ``()`` — a shape the REAL ``notify_library_delete`` can never
+        produce (it always returns exactly one ``DeleteNotification`` per
+        provider, two total). This is the reconciler's only
+        operator-facing output; drive a fake that returns the real
+        two-outcome shape and assert the journal actually receives both
+        lines."""
+        imported_path = "/mnt/virtio/Music/Beets/Artist/2026 - Album [NEW]"
+        old_path = "/mnt/virtio/Music/Beets/Artist/2007 - Album [OLD]"
+        ir = make_import_result(decision="import", imported_path=imported_path)
+        ir.postflight.replaced_albums = [
+            DuplicateRemoveCandidate(beets_album_id=1, album_path=old_path),
+        ]
+        outcomes = (
+            DeleteNotification(
+                "plex", "submitted", "HTTP 200; test-marker-plex-detail"),
+            DeleteNotification(
+                "jellyfin", "warning", "test-marker-jellyfin-detail"),
+        )
+        notify_fn = MagicMock(return_value=outcomes)
+
+        with self.assertLogs("cratedigger", level="INFO") as cm:
+            self._dispatch(ir, media_server_notify_fn=notify_fn)
+
+        joined = "\n".join(cm.output)
+        self.assertIn("MEDIA SERVER RECONCILE", joined)
+        self.assertIn("test-marker-plex-detail", joined)
+        self.assertIn("test-marker-jellyfin-detail", joined)
+
     # -- primary source: the Beets before/after snapshot diff ----------
 
     def test_snapshot_diff_reconciles_even_when_replaced_albums_is_stale(self):
         """THE REGRESSION PIN for the measured live defect (#1203 item 2
         review). The harness's mid-import ``replaced_albums`` serialization
-        can already show the album's NEW path (live measurement: 182 of 232
-        historical replaced-album records show ``album_path ==
-        imported_path``, including request 8964's David Bowie import — the
-        one that motivated this issue). The Beets before/after snapshot
-        proves the directory moved regardless of what the stale secondary
-        source claims. RED against commit 4d81a0fa (replaced_albums-only):
-        the old gating filtered this exact candidate out because its
-        recorded path already equalled imported_path, so reconciliation
-        never fired for the live incident."""
+        can already show the album's NEW path — verified live for request
+        8964's David Bowie import (``download_log`` 40213, the one that
+        motivated this issue): ``replaced_albums[0].album_path`` recorded
+        the OLD path for removed beets album 19881, which beets album 19882
+        now occupies, and ``jellyfin_date_created_pins`` carries 3 (of 262
+        live) ``album_item_id IS NULL`` floor-pin rows — the signature of a
+        path-changing upgrade whose old path could not be found. (Most
+        ``replaced_albums`` rows legitimately show ``album_path ==
+        imported_path`` — an ordinary same-path upgrade's beets path
+        template genuinely doesn't change — so that shape alone is not the
+        defect; this pin fixes the specific stale-record case.) The Beets
+        before/after snapshot proves the directory moved regardless of what
+        the stale secondary source claims. RED against commit 4d81a0fa
+        (replaced_albums-only): the old gating filtered this exact
+        candidate out because its recorded path already equalled
+        imported_path, so reconciliation never fired for the live
+        incident."""
         assert _HERMETIC_BEETS_PAIR is not None
         beets_library_db, beets_library_root = _HERMETIC_BEETS_PAIR
         release_id = "recon-defect-mbid"
@@ -4788,7 +4977,8 @@ class TestVanishedPathReconciliation(unittest.TestCase):
                 return MagicMock(returncode=0, stdout="", stderr="")
             ext.run.side_effect = _move
 
-        notify_fn = MagicMock(return_value=())
+        notify_fn = MagicMock(
+            return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES)
         self._dispatch(
             ir, release_id=release_id, configure_ext=_configure,
             media_server_notify_fn=notify_fn,
@@ -4822,7 +5012,8 @@ class TestVanishedPathReconciliation(unittest.TestCase):
                 return MagicMock(returncode=0, stdout="", stderr="")
             ext.run.side_effect = _move
 
-        notify_fn = MagicMock(return_value=())
+        notify_fn = MagicMock(
+            return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES)
         self._dispatch(
             ir, release_id=release_id, configure_ext=_configure,
             media_server_notify_fn=notify_fn,
@@ -4833,18 +5024,36 @@ class TestVanishedPathReconciliation(unittest.TestCase):
 
     def test_unchanged_beets_path_produces_no_reconciliation(self) -> None:
         """No rename between the pre- and post-import snapshot — the common
-        case, at zero reconciliation cost."""
+        case, at zero reconciliation cost.
+
+        Issue #1203 item 2 review finding 5: a single unmoved album whose
+        directory happens to equal ``imported_path`` patrols a bystander —
+        deleting ``_vanished_album_directories``'s own survival check (``or
+        norm in post_normalized``) makes it report EVERY pre-import
+        directory as vanished, but that one still gets filtered downstream
+        by ``_paths_needing_media_server_reconciliation``'s
+        distinct-from-``imported_path`` gate, so the mutant survives. A
+        SECOND unmoved album at a genuinely different directory is not
+        equal to ``imported_path`` and so is not caught by that downstream
+        gate — only ``_vanished_album_directories`` correctly recognizing
+        its survival keeps it out of ``notify_fn``."""
         assert _HERMETIC_BEETS_PAIR is not None
         beets_library_db, beets_library_root = _HERMETIC_BEETS_PAIR
         release_id = "recon-unchanged-mbid"
         album_dir = os.path.join(beets_library_root, "Artist", "2026 - Album")
+        other_dir = os.path.join(beets_library_root, "Artist", "Other Album")
         album_id = _seed_beets_album(
             beets_library_db, beets_library_root,
             mb_release_id=release_id, album_dir=album_dir)
         self.addCleanup(_delete_beets_album, beets_library_db, album_id)
+        other_album_id = _seed_beets_album(
+            beets_library_db, beets_library_root,
+            mb_release_id=release_id, album_dir=other_dir)
+        self.addCleanup(_delete_beets_album, beets_library_db, other_album_id)
 
         ir = make_import_result(decision="import", imported_path=album_dir)
-        notify_fn = MagicMock(return_value=())
+        notify_fn = MagicMock(
+            return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES)
         self._dispatch(
             ir, release_id=release_id, media_server_notify_fn=notify_fn,
             bypass_current_evidence_measurement=True)
@@ -4883,7 +5092,8 @@ class TestVanishedPathReconciliation(unittest.TestCase):
                 return MagicMock(returncode=0, stdout="", stderr="")
             ext.run.side_effect = _move
 
-        notify_fn = MagicMock(return_value=())
+        notify_fn = MagicMock(
+            return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES)
         self._dispatch(
             ir, release_id=release_id, configure_ext=_configure,
             media_server_notify_fn=notify_fn,
@@ -4908,7 +5118,8 @@ class TestVanishedPathReconciliation(unittest.TestCase):
         ir.postflight.replaced_albums = [
             DuplicateRemoveCandidate(beets_album_id=1, album_path=old_path),
         ]
-        notify_fn = MagicMock(return_value=())
+        notify_fn = MagicMock(
+            return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES)
         _ext, db = self._dispatch(
             ir, media_server_notify_fn=notify_fn,
             album_directory_snapshot_fn=_raise)

@@ -927,10 +927,13 @@ Three facts that each cost a wasted batch if learned the hard way:
   pressing-exact candidate — the only remedy is an operator applying art by
   hand with the overlay recipe above. Safe only AFTER the request has reached
   `status = 'imported'`: `PipelineDB.get_wanted`
-  (`lib/pipeline_db/requests.py:1607`) selects `WHERE status = 'wanted'` and
-  nothing else, so an `imported` request is never re-searched or
-  automatically re-imported — manually applied art survives every automatic
-  pipeline behavior. It does NOT survive an operator-INITIATED re-import of
+  (`lib/pipeline_db/requests.py:1607`) selects `WHERE status = 'wanted' AND
+  (next_retry_after IS NULL OR next_retry_after <= now)` — `next_retry_after`
+  only narrows WHEN an eligible `wanted` row is picked up; `status = 'wanted'`
+  is the hard requirement either way, so an `imported` request is never
+  re-searched or automatically re-imported regardless of retry timing —
+  manually applied art survives every automatic pipeline behavior. It does
+  NOT survive an operator-INITIATED re-import of
   the same album (Replace, a Bad Rip re-acquisition, a fresh request for the
   same release): beets' duplicate removal deletes the old album's items and
   its `artpath` outright, and the deployed `minwidth: 300` again rejects

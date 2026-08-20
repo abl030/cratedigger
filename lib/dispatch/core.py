@@ -782,10 +782,21 @@ def _trigger_post_import_notifiers(
             imported_path,
             request_id,
             historical_added_at=plex_original_added_at,
+            # Union the PRIMARY snapshot source (issue #1203 item 2) ahead of
+            # the secondary postflight.replaced_albums source, same ordering
+            # convention as the reconciler itself. pre_import_album_directories
+            # is already computed and in scope; the POST-import snapshot is
+            # deliberately NOT used here -- it isn't needed to find the
+            # pre-upgrade item (this capture runs before any post-import
+            # snapshot exists) and using it would violate the ordering
+            # constraint _reconcile_vanished_replaced_album_paths documents.
             replaced_album_paths=[
-                candidate.album_path
-                for candidate in import_result.postflight.replaced_albums
-                if candidate.album_path
+                *pre_import_album_directories.values(),
+                *(
+                    candidate.album_path
+                    for candidate in import_result.postflight.replaced_albums
+                    if candidate.album_path
+                ),
             ],
         )
     except Exception:
@@ -953,10 +964,16 @@ def dispatch_import_core(
         )
     )
 
-    # Snapshot every album directory Beets currently holds for this release
-    # BEFORE any beets mutation can occur (issue #1203 item 2) — this is the
-    # authoritative "before" half of the post-import reconciler's diff.
-    # Best-effort: see _capture_album_directory_snapshot.
+    # Snapshot every album directory Beets currently holds for this release,
+    # before THIS dispatch's own beets-mutating subprocess launches
+    # (issue #1203 item 2) — the authoritative "before" half of the
+    # post-import reconciler's diff. On the automation lane the caller
+    # already holds the RELEASE advisory lock (acquired outer, before
+    # dispatch_import_core was even called), so this snapshot is fenced
+    # against a concurrent writer there; on the force/local lane this point
+    # is still BEFORE the lock is first acquired below, so it is not fenced
+    # against a fully concurrent external writer on that lane. Best-effort:
+    # see _capture_album_directory_snapshot.
     pre_import_album_directories = _capture_album_directory_snapshot(
         album_directory_snapshot_fn,
         beets_library_db_path=effective_beets_library_db_path,
