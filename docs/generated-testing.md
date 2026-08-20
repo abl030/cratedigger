@@ -695,48 +695,64 @@ an unreachable scratch or state root, and a violated cross-sample invariant
 (a scratch/inode limit of zero or one that changes mid-run, usage above the
 limit, a cgroup peak below its own current value, an impossible memory
 breakdown, or a regressing memory/swap peak) still produce one terminal
-`status=invalid` receipt with no phase breakdown at all, rather than zeros.
-The runner's EXIT path emits the terminal receipt after its owned checkout
-cleanup even when a test stage fails or the later live-world post-step makes
-the systemd unit red. An invalid receipt now also prints an explicit
-`resource receipt invalid` line to stderr regardless of whether the candidate
-gates themselves passed or failed (issue #1214 gap 4) — it used to be silently
-absorbed into an already-nonzero exit code on a failing run, which is exactly
-the run where losing the telemetry matters most.
+`status=invalid` receipt with no phase breakdown at all, rather than zeros; so
+does a structural failure of the monitor's own coordination state (the phase
+pointer/history write itself, never a mere sample). The runner's EXIT path
+emits the terminal receipt after its owned checkout cleanup even when a test
+stage fails or the later live-world post-step makes the systemd unit red. A
+receipt that is not clean (`status=invalid` OR `status=degraded`, see below)
+also prints an explicit `resource receipt degraded or invalid` line to stderr
+regardless of whether the candidate gates themselves passed or failed (issue
+#1214 gap 4, extended to `degraded` by review C5) — an invalid receipt used to
+be silently absorbed into an already-nonzero exit code on a failing run, and a
+degraded one used to exit 0 with no stderr at all, in both cases exactly the
+run where the telemetry matters most.
 
 The monitor's own bookkeeping (samples, the phase pointer and its durable
-history, its lock) lives under a state root tried in order — the caller's own
-`TMPDIR`, then `/tmp` — verified by filesystem identity to be distinct from
-the private scratch tmpfs it measures (`$XDG_RUNTIME_DIR`), never inside it: a
-full scratch tmpfs on 2026-08-20 took the monitor's own state down with it and
-erased the one night's telemetry that would have diagnosed the overflow
-(issue #1214). Loss detection does not depend on a side journal surviving the
-same exhaustion it would be reporting on (2026-08-20 review F1): every sample
-row carries a writer identity (the periodic background loop, or the caller's
-own bootstrap/boundary/final samples) and a per-writer monotonic sequence
-number, assigned in-process and consumed whether or not the write lands, so a
-cleanly-rejected write leaves a detectable gap in the surviving data itself.
-A real full filesystem does not reject a write atomically — a partial page
-can land and the next append then concatenates onto its unterminated tail
-(review F2, measured) — so a row with the wrong shape or a non-numeric field
-is skipped and counted rather than discarding every other row's evidence for
-one corrupt line. A phase whose every sample was lost this way still cannot
-vanish silently (review F4): every phase transition is independently durable
-via the phase-history file, and a phase present there with zero surviving
-samples is reported by name in a `CRATEDIGGER_DAILY_RESOURCE_PHASE_MISSING`
-line, counted in the terminal receipt's `missing_phases` field. Any of these
-three loss signals — a sequence gap, a skipped corrupt row, or a missing
+history, its lock, the loop's report channel) lives under a state root tried
+in order — the caller's own `TMPDIR`, then `/tmp` — verified by filesystem
+identity to be distinct from the private scratch tmpfs it measures
+(`$XDG_RUNTIME_DIR`), never inside it: a full scratch tmpfs on 2026-08-20 took
+the monitor's own state down with it and erased the one night's telemetry
+that would have diagnosed the overflow (issue #1214). Sample loss is REPORTED
+by the writer that experienced it, never inferred from the surviving data
+after the fact (review C1: a gap in a writer's own sequence numbers is only
+observable when a LATER row from that writer survives, so a permanent,
+never-recovered failure — EACCES/EROFS, a persistent lock or cgroup-read
+failure, anything from partway through the run to the very end — left no
+hole to see and a false `status=valid`). The caller's own bootstrap/boundary/
+final samples run in the same process that prints the receipt, so their
+failures are counted in-process directly; the periodic background loop --
+already a child `daily_resource_monitor_finish` `wait`s on -- counts its own
+failed attempts in-process and reports the final total to the parent through
+a kernel pipe (a fifo opened once at start, while the state store is
+known-healthy), never through a file write that could fail with the exact
+store it would be reporting on. Sequence numbers and a writer identity
+still ride on every row as a corruption/reordering signal: a real full
+filesystem does not reject a
+write atomically — a partial page can land and the next append then
+concatenates onto its unterminated tail (review F2, measured) — so a row with
+the wrong shape or a non-numeric field is skipped and counted rather than
+discarding every other row's evidence for one corrupt line. A phase whose
+every sample was lost this way still cannot vanish silently (review F4):
+every phase transition is independently durable via the phase-history file
+(a second write, not a free extension of the phase-pointer write — review
+C9b), and a phase present there with zero surviving samples is reported by
+name in a `CRATEDIGGER_DAILY_RESOURCE_PHASE_MISSING` line, counted in the
+terminal receipt's `missing_phases` field. A malformed phase-history LINE is
+its own kind of loss (phase-tracking integrity, not a sample) and gets its
+own `corrupted_history_lines` field rather than being folded into
+`dropped_samples`, which counts exactly one thing — sample attempts that
+produced no usable data point (review C4). Any of the three — a
+writer-reported drop, a skipped corrupt sample row, or a corrupt/missing
 phase — marks the terminal receipt `status=degraded reason=partial_sample_loss
-dropped_samples=<N> missing_phases=<N>` while keeping every other field (the
-full per-phase breakdown for every phase that has one) exactly as a clean run
-has; `status=valid` requires all three signals to be zero. Only a structural
-failure of the monitor's own coordination state (the phase pointer/history
-write itself, not a sample) — or a scratch root, cgroup, or state root that
-never worked at all — still produces a fully `status=invalid` receipt with no
-phase breakdown.
+dropped_samples=<N> missing_phases=<N> corrupted_history_lines=<N>` while
+keeping every other field (the full per-phase breakdown for every phase that
+has one) exactly as a clean run has; `status=valid` requires all three to be
+zero.
 
 It is pure and safe: no prod DB, no slskd, no beets, no network. Green runs
-write disposable state only to tmpfs for the measured scratch; the monitor's
+write disposable state only to the measured scratch tmpfs; the monitor's
 own bookkeeping deliberately does not (that is the whole fix). Repeat runs
 add entropy; there is nothing to resume and no seed cursor — coverage grows
 by improving strategies and invariants, not by consuming more seeds.

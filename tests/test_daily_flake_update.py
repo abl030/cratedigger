@@ -71,7 +71,7 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
             proc.stdout,
         )
         self.assertIn("dropped_samples=0", proc.stdout)
-        self.assertNotIn("resource receipt invalid", proc.stderr)
+        self.assertNotIn("resource receipt degraded or invalid", proc.stderr)
         for phase in (
             "deterministic_suite",
             "stable_nix",
@@ -142,10 +142,11 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
             proc.stdout,
         )
         self.assertIn("dropped_samples=0", proc.stdout)
-        # A healthy monitor on an ordinary gate failure gets no invalid-
-        # receipt diagnostic -- issue #1214 gap 4 is about an INVALID
-        # receipt surfacing, not every failing run growing new output.
-        self.assertNotIn("resource receipt invalid", proc.stderr)
+        # A healthy (zero-drop, valid) monitor on an ordinary gate failure
+        # gets no degraded/invalid-receipt diagnostic -- issue #1214 gap 4
+        # is about a NON-CLEAN receipt surfacing, not every failing run
+        # growing new output.
+        self.assertNotIn("resource receipt degraded or invalid", proc.stderr)
 
     def test_unchanged_lock_still_runs_gates_without_commit(self) -> None:
         self.fake.update_state(lock_changed=False)
@@ -302,7 +303,68 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
 
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("status=invalid reason=scratch_not_tmpfs", proc.stdout)
-        self.assertIn("resource receipt invalid", proc.stderr)
+        self.assertIn("resource receipt degraded or invalid", proc.stderr)
+
+    def test_degraded_receipt_surfaces_and_flips_an_otherwise_green_exit(
+        self,
+    ) -> None:
+        """Regression pin for issue #1214 review C5: before status=degraded
+        existed, a single failed sample write produced status=invalid and
+        flipped the gate's exit code even on an otherwise-green run; after
+        the original fix shipped, the same event exited 0 with nothing on
+        stderr, because daily_resource_summarize_samples returned 0 for a
+        degraded receipt just like a clean one. The gate's own rationale
+        for gap 4 ("that is exactly when the telemetry matters most")
+        applies to a real partial loss at least as strongly. This test
+        forces a REAL boundary sample to fail (chmod 400, real EACCES)
+        during an otherwise-green candidate run, and asserts the exit code
+        and stderr call-out both fire exactly as they do for a fully
+        invalid receipt.
+
+        Mutant proof (both directions; empirically run during review, not
+        committed): reverting daily_resource_summarize_samples's trailing
+        `if ((degraded)); then return 1; fi` (so it always returns 0)
+        makes this test fail -- the receipt still prints
+        status=degraded on stdout, but the process exits 0 and stderr has
+        no diagnostic at all, exactly the regression C5 named."""
+        process = subprocess.Popen(
+            ["bash", str(SCRIPT)],
+            cwd=self.fake.root,
+            env=self.fake_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        self.addCleanup(lambda: process.poll() is None and process.kill())
+        self.fake.update_state(hold_stage="suite", hold_seconds=0.4)
+        deadline = time.monotonic() + 5
+        while "suite" not in self.fake.state["stage_started"]:
+            self.assertIsNone(process.poll(), "daily runner exited before suite")
+            self.assertLess(time.monotonic(), deadline, "daily runner never reached suite")
+            time.sleep(0.02)
+
+        # The state root is whichever candidate the real monitor picked
+        # (TMPDIR or its /tmp fallback -- issue #1214 review F9); glob
+        # both rather than assume one.
+        candidates = list(self.fake.tmpdir.glob("cratedigger-daily-resource.*/samples.tsv"))
+        candidates += list(Path("/tmp").glob("cratedigger-daily-resource.*/samples.tsv"))
+        self.assertEqual(len(candidates), 1, candidates)
+        candidates[0].chmod(0o400)
+
+        stdout, stderr = process.communicate(timeout=15)
+        state = self.fake.state
+
+        # Resource monitoring is purely observational and never gates the
+        # candidate logic (the commit/push already happened, inside the
+        # main script body, before finalize() ever runs) -- only the
+        # PROCESS'S OWN exit code changes, exactly the original gap-4
+        # promotion path (command_status == 0, resource_status != 0).
+        self.assertEqual(state["commit_count"], 1)
+        self.assertEqual(state["push_count"], 1)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("status=degraded reason=partial_sample_loss", stdout)
+        self.assertIn("resource receipt degraded or invalid", stderr)
 
     def test_process_group_term_emits_one_terminal_receipt_without_deadlock(
         self,

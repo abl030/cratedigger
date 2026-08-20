@@ -63,7 +63,11 @@ def parse_fields(line: str, prefix: str) -> dict[str, str]:
 
 
 def summarize_samples(
-    rows: list[str], phase_history: list[str] | None = None
+    rows: list[str],
+    phase_history: list[str] | None = None,
+    *,
+    parent_dropped: int = 0,
+    loop_dropped: int = 0,
 ) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory() as temporary:
         samples = Path(temporary) / "samples.tsv"
@@ -86,7 +90,10 @@ def summarize_samples(
             "".join(f"{p}\n" for p in phase_history), encoding="utf-8"
         )
         return subprocess.run(
-            ["bash", str(MONITOR), "summarize", str(samples), str(history_path)],
+            [
+                "bash", str(MONITOR), "summarize", str(samples), str(history_path),
+                str(parent_dropped), str(loop_dropped),
+            ],
             cwd=REPO_ROOT,
             text=True,
             capture_output=True,
@@ -97,7 +104,7 @@ def summarize_samples(
 def parsed_summary(
     completed: subprocess.CompletedProcess[str], *, allowed_statuses: set[str]
 ) -> tuple[dict[str, dict[str, str]], dict[str, str], list[str]]:
-    if completed.returncode != 0:
+    if completed.returncode not in (0, 1):
         raise AssertionError(completed.stderr or completed.stdout)
     phase_rows: dict[str, dict[str, str]] = {}
     missing_phases: list[str] = []
@@ -118,6 +125,15 @@ def parsed_summary(
         raise AssertionError(
             f"resource receipt status not in {allowed_statuses}: {receipt}"
         )
+    # A valid summarize call returns 0 for status=valid, 1 for
+    # status=degraded (issue #1214 review C5) -- both are legitimate
+    # completions of daily_resource_summarize_samples, never a crash.
+    expected_returncode = 1 if receipt["status"] == "degraded" else 0
+    if completed.returncode != expected_returncode:
+        raise AssertionError(
+            f"status={receipt['status']} but returncode="
+            f"{completed.returncode} (expected {expected_returncode})"
+        )
     return phase_rows, receipt, missing_phases
 
 
@@ -127,6 +143,7 @@ def parsed_valid_summary(
     phases, receipt, missing = parsed_summary(completed, allowed_statuses={"valid"})
     assert missing == []
     return phases, receipt
+
 
 
 class TestDailyResourceSummary(unittest.TestCase):
@@ -144,6 +161,7 @@ _CRATEDIGGER_RESOURCE_LOCK="$state/sample.lock"
 _CRATEDIGGER_RESOURCE_STARTED=1
 _CRATEDIGGER_RESOURCE_CURRENT_PHASE=old_phase
 _CRATEDIGGER_RESOURCE_PARENT_SEQ=0
+_CRATEDIGGER_RESOURCE_PARENT_DROPPED=0
 : > "$_CRATEDIGGER_RESOURCE_SAMPLES"
 : > "$_CRATEDIGGER_RESOURCE_PHASE_HISTORY"
 : > "$_CRATEDIGGER_RESOURCE_FAILURE"
@@ -178,7 +196,7 @@ printf '%s\n' 200 > "$state/peak"
 _CRATEDIGGER_RESOURCE_PARENT_SEQ=$((_CRATEDIGGER_RESOURCE_PARENT_SEQ + 1))
 _daily_resource_record_sample_locked new_phase parent "$_CRATEDIGGER_RESOURCE_PARENT_SEQ"
 wait "$background"
-daily_resource_summarize_samples "$_CRATEDIGGER_RESOURCE_SAMPLES" "$_CRATEDIGGER_RESOURCE_PHASE_HISTORY"
+daily_resource_summarize_samples "$_CRATEDIGGER_RESOURCE_SAMPLES" "$_CRATEDIGGER_RESOURCE_PHASE_HISTORY" 0 0
 '''
         with tempfile.TemporaryDirectory() as temporary:
             completed = subprocess.run(
@@ -251,6 +269,7 @@ daily_resource_summarize_samples "$_CRATEDIGGER_RESOURCE_SAMPLES" "$_CRATEDIGGER
         self.assertEqual(receipt["phases"], "2")
         self.assertEqual(receipt["dropped_samples"], "0")
         self.assertEqual(receipt["missing_phases"], "0")
+        self.assertEqual(receipt["corrupted_history_lines"], "0")
 
     def test_zero_scratch_limits_are_invalid_not_empty_evidence(self) -> None:
         completed = summarize_samples(
@@ -314,60 +333,43 @@ daily_resource_summarize_samples "$_CRATEDIGGER_RESOURCE_SAMPLES" "$_CRATEDIGGER
         self.assertEqual(list(phases), ["stable_nix", "generated_fuzz"])
         self.assertEqual(receipt["memory_peak_owner"], "generated_fuzz")
 
-    def test_seq_gap_marks_the_receipt_degraded_not_silently_valid(self) -> None:
-        """issue #1214 review F1: loss is derived from a gap in the
-        surviving data's own sequence numbers, not from a side journal
-        that can go dark with the store it is reporting on. A cleanly
-        rejected write (seq 2 never landing) is exactly that kind of gap."""
+    def test_sequence_gap_alone_does_not_mark_degraded(self) -> None:
+        """issue #1214 review C1/C3: loss is no longer INFERRED from a gap
+        in the sequence numbers -- a permanent (never-recovered) outage
+        cannot be seen that way, since there is no later surviving row to
+        reveal the hole. Sequence numbers remain on the row purely as a
+        corruption/reordering signal; a gap with nothing reported by
+        either writer must NOT by itself flip the receipt to degraded --
+        that would be re-introducing the exact defect C1 found."""
         completed = summarize_samples(
             [
                 sample(1, 10, "generated_fuzz", memory_current=800, memory_peak=800),
-                # seq 2 never landed -- a clean write rejection, not corruption.
+                # seq 2 "missing" from the data, but nothing reported it.
                 sample(3, 30, "generated_fuzz", memory_current=600, memory_peak=800),
             ]
+        )
+
+        phases, receipt = parsed_valid_summary(completed)
+        self.assertEqual(receipt["dropped_samples"], "0")
+        self.assertIn("generated_fuzz", phases)
+
+    def test_reported_parent_and_loop_drops_mark_degraded(self) -> None:
+        """The drop count comes from what each writer reports about
+        itself (issue #1214 review C1), not from the sample data."""
+        completed = summarize_samples(
+            [sample(1, 10, "generated_fuzz", memory_current=1, memory_peak=1)],
+            parent_dropped=2,
+            loop_dropped=3,
         )
 
         phases, receipt, missing = parsed_summary(
             completed, allowed_statuses={"degraded"}
         )
         self.assertEqual(receipt["reason"], "partial_sample_loss")
-        self.assertEqual(receipt["dropped_samples"], "1")
+        self.assertEqual(receipt["dropped_samples"], "5")
         self.assertEqual(receipt["missing_phases"], "0")
-        self.assertEqual(receipt["samples"], "2")
+        self.assertEqual(missing, [])
         self.assertIn("generated_fuzz", phases)
-        self.assertEqual(missing, [])
-
-    def test_missing_leading_sequence_counts_as_dropped(self) -> None:
-        """A writer whose FIRST surviving row is not seq 1 lost its
-        opening attempts too; that must count, not just internal gaps."""
-        completed = summarize_samples(
-            [sample(4, 10, "stable_nix", memory_current=1, memory_peak=1)]
-        )
-
-        phases, receipt, missing = parsed_summary(
-            completed, allowed_statuses={"degraded"}
-        )
-        self.assertEqual(receipt["dropped_samples"], "3")
-        self.assertIn("stable_nix", phases)
-        self.assertEqual(missing, [])
-
-    def test_independent_writers_do_not_collide_in_gap_detection(self) -> None:
-        """Two writer identities (the periodic loop and the caller's own
-        boundary/finish samples) keep independent sequences; a healthy
-        interleaving of both must not manufacture a false gap."""
-        completed = summarize_samples(
-            [
-                sample(1, 10, "alpha", writer="parent", memory_current=1, memory_peak=1),
-                sample(1, 11, "alpha", writer="loop", memory_current=1, memory_peak=1),
-                sample(2, 12, "alpha", writer="loop", memory_current=1, memory_peak=1),
-                sample(2, 13, "alpha", writer="parent", memory_current=1, memory_peak=1),
-            ]
-        )
-
-        phases, receipt = parsed_valid_summary(completed)
-        self.assertEqual(receipt["dropped_samples"], "0")
-        self.assertEqual(receipt["samples"], "4")
-        self.assertIn("alpha", phases)
 
     def test_corrupted_shape_row_is_skipped_not_fatal(self) -> None:
         """issue #1214 review F2: a real full filesystem does not reject a
@@ -422,6 +424,49 @@ daily_resource_summarize_samples "$_CRATEDIGGER_RESOURCE_SAMPLES" "$_CRATEDIGGER
         self.assertIn("generated_fuzz", phases)
         self.assertEqual(missing, [])
 
+    def test_extra_trailing_fields_alone_is_rejected(self) -> None:
+        """Known-bad self-test, per CLAUSE (issue #1214 review C7): a row
+        with every field otherwise well-formed but two trailing extras --
+        the exact shape a partial-write-then-concatenation produces
+        (review F2) -- must trip the `extra`-non-empty clause specifically,
+        not ride along behind an earlier one."""
+        good = sample(1, 10, "generated_fuzz", memory_current=100, memory_peak=100)
+        well_formed_plus_extra = (
+            sample(2, 20, "generated_fuzz", memory_current=100, memory_peak=100)
+            + "\textra1\textra2"
+        )
+        completed = summarize_samples(
+            [good, well_formed_plus_extra], phase_history=["generated_fuzz"]
+        )
+
+        phases, receipt, missing = parsed_summary(
+            completed, allowed_statuses={"degraded"}
+        )
+        self.assertEqual(receipt["dropped_samples"], "1")
+        self.assertEqual(receipt["samples"], "1")
+        self.assertIn("generated_fuzz", phases)
+        self.assertEqual(missing, [])
+
+    def test_malformed_phase_field_alone_is_rejected(self) -> None:
+        """Known-bad self-test, per CLAUSE (issue #1214 review C7): every
+        field well-formed except phase itself, which must trip the phase
+        regex clause specifically."""
+        good = sample(1, 10, "generated_fuzz", memory_current=100, memory_peak=100)
+        bad_phase = sample(
+            2, 20, "Not A Valid Phase!", memory_current=100, memory_peak=100
+        )
+        completed = summarize_samples(
+            [good, bad_phase], phase_history=["generated_fuzz"]
+        )
+
+        phases, receipt, missing = parsed_summary(
+            completed, allowed_statuses={"degraded"}
+        )
+        self.assertEqual(receipt["dropped_samples"], "1")
+        self.assertEqual(receipt["samples"], "1")
+        self.assertIn("generated_fuzz", phases)
+        self.assertEqual(missing, [])
+
     def test_missing_phase_is_named_not_silently_dropped(self) -> None:
         """issue #1214 review F4: a phase whose every sample was lost must
         still be attributed by name, not silently absent from a receipt
@@ -443,7 +488,9 @@ daily_resource_summarize_samples "$_CRATEDIGGER_RESOURCE_SAMPLES" "$_CRATEDIGGER
         """A malformed history line is skipped and counted rather than
         aborting the summary -- but it IS evidence that phase tracking for
         that transition is not fully trustworthy, so it still degrades
-        the receipt rather than passing silently as valid."""
+        the receipt. It is its own kind of loss (issue #1214 review C4/
+        C9d), counted in corrupted_history_lines, never folded into
+        dropped_samples (which counts sample attempts specifically)."""
         completed = summarize_samples(
             [sample(1, 10, "stable_nix", memory_current=1, memory_peak=1)],
             phase_history=["stable_nix", "Not A Valid Phase Name!"],
@@ -452,13 +499,15 @@ daily_resource_summarize_samples "$_CRATEDIGGER_RESOURCE_SAMPLES" "$_CRATEDIGGER
         phases, receipt, missing = parsed_summary(
             completed, allowed_statuses={"degraded"}
         )
-        self.assertEqual(receipt["dropped_samples"], "1")
+        self.assertEqual(receipt["dropped_samples"], "0")
+        self.assertEqual(receipt["corrupted_history_lines"], "1")
         self.assertEqual(missing, [])
         self.assertIn("stable_nix", phases)
 
     def test_summarize_rejects_wrong_argument_count(self) -> None:
         """Known-bad self-test: the summarize subcommand now requires
-        exactly two file arguments (samples, phase history)."""
+        exactly four arguments (samples, phase history, parent-dropped,
+        loop-dropped)."""
         with tempfile.TemporaryDirectory() as temporary:
             samples = Path(temporary) / "samples.tsv"
             samples.write_text(
@@ -491,7 +540,7 @@ daily_resource_summarize_samples "$_CRATEDIGGER_RESOURCE_SAMPLES" "$_CRATEDIGGER
             completed = subprocess.run(
                 [
                     "bash", str(MONITOR), "summarize", str(samples),
-                    str(missing_history),
+                    str(missing_history), "0", "0",
                 ],
                 cwd=REPO_ROOT,
                 text=True,
@@ -503,6 +552,35 @@ daily_resource_summarize_samples "$_CRATEDIGGER_RESOURCE_SAMPLES" "$_CRATEDIGGER
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn(
             "status=invalid reason=phase_history_unreadable", completed.stdout
+        )
+
+    def test_summarize_rejects_malformed_dropped_count_arguments(self) -> None:
+        """Known-bad self-test for the new parent/loop-dropped input
+        validation -- the production caller only ever passes clean
+        non-negative integers, but a human or future caller could not."""
+        with tempfile.TemporaryDirectory() as temporary:
+            samples = Path(temporary) / "samples.tsv"
+            samples.write_text(
+                sample(1, 10, "stable_nix", memory_current=1, memory_peak=1) + "\n",
+                encoding="utf-8",
+            )
+            history = Path(temporary) / "phase-history"
+            history.write_text("stable_nix\n", encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    "bash", str(MONITOR), "summarize", str(samples), str(history),
+                    "not-a-number", "0",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "status=invalid reason=summarize_arguments_invalid", completed.stdout
         )
 
     def test_state_root_falls_back_to_tmp_when_tmpdir_collides(self) -> None:
@@ -629,8 +707,8 @@ daily_resource_monitor_start
         real state directory blocks creating the phase pointer's real
         rename-into-place temp file (a real EACCES, not a reimplementation)
         while leaving already-existing files (samples.tsv, the phase
-        history, the lock, the failure marker) writable, isolating exactly
-        this failure mode."""
+        history, the lock, the failure marker, the loop report fifo)
+        writable, isolating exactly this failure mode."""
         harness = r'''
 set -euo pipefail
 source "$1"
@@ -747,9 +825,12 @@ daily_resource_monitor_finish
         chmod 400 on the real samples file mid-run, restored afterward;
         'a write-failing path', one of the injection techniques the
         original issue names as legitimate for exercising the real
-        script. The run must degrade (a gap in the "parent" writer's
-        sequence), not discard the whole breakdown, and every phase the
-        run actually entered must still be named.
+        script. The run must degrade (its "parent" writer reports the two
+        failed boundary attempts directly -- issue #1214 review C1), not
+        discard the whole breakdown, and every phase the run actually
+        entered must still be named. A degraded receipt now also flips
+        daily_resource_monitor_finish's own exit code (review C5), so the
+        harness -- which ends on a bare finish() call -- exits 1, not 0.
 
         Mutant proof (both directions; empirically run during review, not
         committed): reverting daily_resource_monitor_set_phase to gate
@@ -790,7 +871,7 @@ daily_resource_monitor_finish
                 timeout=15,
             )
 
-        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.returncode, 1, completed.stderr)
         phases, receipt, missing = parsed_summary(
             completed, allowed_statuses={"degraded"}
         )
@@ -808,15 +889,18 @@ daily_resource_monitor_finish
         loop's own periodic sample writes to fail across an outage
         comfortably longer than several 0.25s ticks, then restores
         writability and proves MORE loop-writer samples land afterward --
-        the loop kept running, it did not die on the first failure.
+        the loop kept running, it did not die on the first failure, and
+        its own in-process count of the failed attempts is what the
+        receipt reports (issue #1214 review C1), not an inference.
 
-        Mutant proof (both directions; run manually during review, not
+        Mutant proof (both directions; empirically run during review, not
         committed): reverting _daily_resource_monitor_loop to return 1 on
         the first failed `_daily_resource_record_current_phase_locked`
         call (the pre-#1214 fatal shape) makes this test fail -- the
         background subshell dies at the first failed tick inside the
-        outage window, `wait` in daily_resource_monitor_finish then
-        observes a nonzero exit with no FAILURE marker content and
+        outage window without ever reaching its own report write, `wait`
+        in daily_resource_monitor_finish then observes a nonzero exit and
+        (since monitor_status != 0 skips the report read entirely)
         reports status=invalid reason=monitor_process_died, never even
         reaching a degraded receipt with a phase breakdown at all."""
         harness = r'''
@@ -845,13 +929,191 @@ daily_resource_monitor_finish
                 timeout=15,
             )
 
-        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.returncode, 1, completed.stderr)
         phases, receipt, missing = parsed_summary(
             completed, allowed_statuses={"degraded"}
         )
         self.assertGreaterEqual(int(phases["alpha"]["samples"]), 5)
         self.assertGreaterEqual(int(receipt["dropped_samples"]), 3)
         self.assertEqual(missing, [])
+
+    def test_persistent_write_failure_through_end_of_run_is_still_reported(
+        self,
+    ) -> None:
+        """Central regression pin for issue #1214 review C1: gap-inference
+        from the sample data cannot see loss that persists all the way to
+        the end of a writer's own stream -- there is no later surviving
+        row to reveal the hole. This is the exact reproduction the review
+        gave: a real, NEVER-restored EACCES from partway through the run
+        straight through daily_resource_monitor_finish's own final
+        sample write (also review C6's previously-uncovered site). The
+        run must still report an honest, non-zero dropped_samples count,
+        never status=valid."""
+        harness = r'''
+set -euo pipefail
+source "$1"
+export XDG_RUNTIME_DIR="$2"
+export TMPDIR="$3"
+
+daily_resource_monitor_start
+daily_resource_monitor_set_phase alpha
+sleep 0.3
+chmod 400 "$_CRATEDIGGER_RESOURCE_SAMPLES"
+sleep 1.5
+daily_resource_monitor_finish
+'''
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as scratch, \
+            tempfile.TemporaryDirectory() as state:
+            completed = subprocess.run(
+                ["bash", "-c", harness, "bash", str(MONITOR), scratch, state],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=15,
+            )
+
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        phases, receipt, missing = parsed_summary(
+            completed, allowed_statuses={"degraded"}
+        )
+        self.assertEqual(receipt["reason"], "partial_sample_loss")
+        self.assertGreaterEqual(int(receipt["dropped_samples"]), 4)
+        self.assertEqual(missing, [])
+        self.assertIn("alpha", phases)
+
+    def test_missing_phase_via_real_write_path_is_named(self) -> None:
+        """issue #1214 review C2: the unit-level missing-phase test hands
+        the summarizer a HAND-WRITTEN history file, so it never exercises
+        _daily_resource_write_phase's own production append at all -- a
+        phase that vanished from BOTH the samples and the history would
+        pass it silently. This test drives the real start/set_phase/
+        finish API: "beta" is entered and left for real (its phase-pointer
+        and phase-history writes both succeed normally) while every one of
+        its own sample attempts is forced to fail with a real EACCES, so
+        it ends up with a real, production-written history entry and zero
+        samples -- the exact shape review F4/C2 requires the summarizer to
+        catch. "alpha" and "gamma" bookend it with real surviving data,
+        proving this is not just "everything broke".
+
+        Mutant proof (both directions; empirically run during review, not
+        committed): replacing the phase-history append in
+        _daily_resource_write_phase (the `printf ... >> $..._PHASE_HISTORY`
+        line) with a no-op `:` makes this test fail -- "beta" never lands
+        in the production-written history file, so the summarizer's
+        history-minus-samples check has nothing to compare against and
+        reports missing_phases=0 / missing=[] instead of naming "beta"."""
+        harness = r'''
+set -euo pipefail
+source "$1"
+export XDG_RUNTIME_DIR="$2"
+export TMPDIR="$3"
+
+daily_resource_monitor_start
+daily_resource_monitor_set_phase alpha
+sleep 0.3
+chmod 400 "$_CRATEDIGGER_RESOURCE_SAMPLES"
+daily_resource_monitor_set_phase beta
+sleep 0.5
+daily_resource_monitor_set_phase gamma
+chmod 644 "$_CRATEDIGGER_RESOURCE_SAMPLES"
+sleep 0.3
+daily_resource_monitor_finish
+'''
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as scratch, \
+            tempfile.TemporaryDirectory() as state:
+            completed = subprocess.run(
+                ["bash", "-c", harness, "bash", str(MONITOR), scratch, state],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=15,
+            )
+
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        phases, receipt, missing = parsed_summary(
+            completed, allowed_statuses={"degraded"}
+        )
+        self.assertEqual(missing, ["beta"])
+        self.assertEqual(receipt["missing_phases"], "1")
+        self.assertIn("alpha", phases)
+        self.assertIn("gamma", phases)
+        self.assertNotIn("beta", phases)
+
+    def test_state_store_bootstrap_failure_is_a_distinguishable_reason(
+        self,
+    ) -> None:
+        """Known-bad self-test for state_store_bootstrap_failed: a state
+        root just barely large enough for mktemp -d to create the empty
+        directory, but not for the bootstrap writes that follow, forces
+        this specific path via a real (small, fixed-size) tmpfs -- one of
+        the legitimate ENOSPC-injection techniques -- not a
+        reimplementation."""
+        harness = r'''
+set -euo pipefail
+source "$1"
+scratch="$2"
+state="$3"
+mkdir -p "$state"
+mount -t tmpfs -o size=8k,mode=0777 tmpfs "$state"
+export XDG_RUNTIME_DIR="$scratch"
+export TMPDIR="$state"
+daily_resource_monitor_start
+'''
+        with tempfile.TemporaryDirectory() as base:
+            scratch = str(Path(base) / "scratch")
+            state = str(Path(base) / "state")
+            Path(scratch).mkdir()
+            completed = subprocess.run(
+                [
+                    "unshare", "--mount", "--map-root-user",
+                    "--propagation", "private", "--",
+                    "bash", "-c", harness, "bash", str(MONITOR), scratch, state,
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=15,
+            )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "status=invalid reason=state_store_bootstrap_failed", completed.stdout
+        )
+
+    def test_monitor_process_death_is_a_distinguishable_reason(self) -> None:
+        """Known-bad self-test for monitor_process_died: SIGKILL the real
+        background loop process directly (not a reimplementation of its
+        failure) and prove daily_resource_monitor_finish still terminates
+        (the report-fd read is skipped, not hung, when wait reports a
+        genuine crash) with this specific, distinguishable reason."""
+        harness = r'''
+set -euo pipefail
+source "$1"
+export XDG_RUNTIME_DIR="$2"
+export TMPDIR="$3"
+
+daily_resource_monitor_start
+kill -9 "$_CRATEDIGGER_RESOURCE_PID"
+daily_resource_monitor_finish
+'''
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as scratch, \
+            tempfile.TemporaryDirectory() as state:
+            completed = subprocess.run(
+                ["bash", "-c", harness, "bash", str(MONITOR), scratch, state],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "status=invalid reason=monitor_process_died", completed.stdout
+        )
 
 
 if __name__ == "__main__":
