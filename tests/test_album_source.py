@@ -21,7 +21,11 @@ from album_source import AlbumRecord, DatabaseSource
 from lib.grab_list import GrabListEntry
 from lib.quality import DownloadInfo, ValidationResult
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import (
+    REQUEST_CASCADE_RESET_TABLES,
+    delete_all_rows,
+    make_request_row,
+)
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 TEST_MB_WS2_BASE = "http://musicbrainz-mirror.test:5200/ws/2"
@@ -286,9 +290,7 @@ class TestDatabaseSource(unittest.TestCase):
         from lib.pipeline_db import PipelineDB
         assert TEST_DSN is not None, "conftest must set TEST_DB_DSN"
         db = PipelineDB(TEST_DSN)
-        for table in ["source_denylist", "download_log", "album_tracks", "album_requests"]:
-            db._execute(f"TRUNCATE {table} CASCADE")
-        db.conn.commit()
+        delete_all_rows(db, REQUEST_CASCADE_RESET_TABLES)
         source = DatabaseSource(
             TEST_DSN,
             musicbrainz_ws2_base=TEST_MB_WS2_BASE,

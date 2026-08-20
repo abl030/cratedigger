@@ -34,7 +34,8 @@ if TEST_DSN and os.environ.get("CRATEDIGGER_TEST_SCHEMA_READY") != "1":
     # Apply schema once at session start for either an externally supplied
     # TEST_DB_DSN or the ephemeral DB above. Parallel-suite module subprocesses
     # inherit an already-migrated worker-local DSN and explicitly skip this
-    # redundant step. Test helpers TRUNCATE between tests.
+    # redundant step. Test helpers DELETE between tests (issue #1156 item 7;
+    # see tests.helpers.delete_all_rows).
     from lib.migrator import apply_migrations
     try:
         apply_migrations(TEST_DSN)

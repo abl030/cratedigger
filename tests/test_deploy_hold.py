@@ -67,6 +67,7 @@ from scripts.cratedigger_deploy_hold import (
 from scripts.pipeline_cli.query import _render_query_table
 from tests._source_pins import pinned_source
 from tests.fakes.deploy_hold import FakeDeployHoldBackend
+from tests.helpers import REQUEST_CASCADE_RESET_TABLES
 
 INVOCATION = "a" * 32
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -159,16 +160,19 @@ class TestLifecyclePreflightPostgresContract(unittest.TestCase):
 
     def setUp(self) -> None:
         self.conn = psycopg2.connect(TEST_DSN)
-        with self.conn, self.conn.cursor() as cursor:
-            cursor.execute(
-                "TRUNCATE processing_cleanup_journal, import_jobs, "
-                "album_requests CASCADE"
-            )
+        self._reset_db()
         self.backend = _PostgresLifecyclePreflightBackend()
         self.request_sequence = 0
 
     def tearDown(self) -> None:
         self.conn.close()
+
+    def _reset_db(self) -> None:
+        # ``self.conn`` (plain psycopg2, not autocommit) already wraps this
+        # in a transaction via ``with self.conn:`` — issue #1156 item 7.
+        with self.conn, self.conn.cursor() as cursor:
+            for table in REQUEST_CASCADE_RESET_TABLES:
+                cursor.execute(f"DELETE FROM {table}")
 
     def _request(
         self,
@@ -251,11 +255,7 @@ class TestLifecyclePreflightPostgresContract(unittest.TestCase):
         )
         for marker, value in markers:
             with self.subTest(marker=marker):
-                with self.conn, self.conn.cursor() as cursor:
-                    cursor.execute(
-                        "TRUNCATE processing_cleanup_journal, import_jobs, "
-                        "album_requests CASCADE"
-                    )
+                self._reset_db()
                 self._request(
                     status="downloading",
                     active_download_state={
@@ -278,11 +278,7 @@ class TestLifecyclePreflightPostgresContract(unittest.TestCase):
         )
         for value in malformed:
             with self.subTest(value=value):
-                with self.conn, self.conn.cursor() as cursor:
-                    cursor.execute(
-                        "TRUNCATE processing_cleanup_journal, import_jobs, "
-                        "album_requests CASCADE"
-                    )
+                self._reset_db()
                 state: dict[str, object] = (
                     {} if value is None else {"enqueued_at": value}
                 )

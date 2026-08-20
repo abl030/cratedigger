@@ -19,6 +19,7 @@ from lib.pipeline_db import (
 )
 from lib.request_creation_service import RequestCreationInput, RequestCreationService
 from lib.search import SEARCH_PLAN_GENERATOR_ID
+from tests.helpers import REQUEST_CASCADE_RESET_TABLES, delete_all_rows
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
@@ -47,9 +48,7 @@ class TestRequestCreationVisibility(unittest.TestCase):
         assert TEST_DSN is not None
         self.writer = _PausePublicationDB(TEST_DSN)
         self.observer = PipelineDB(TEST_DSN)
-        for table in ("search_log", "search_plan_items", "search_plans", "album_tracks", "album_requests"):
-            self.writer._execute(f"TRUNCATE {table} CASCADE")
-        self.writer.conn.commit()
+        delete_all_rows(self.writer, REQUEST_CASCADE_RESET_TABLES)
 
     def tearDown(self) -> None:
         self.writer.close()

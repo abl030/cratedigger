@@ -17,15 +17,15 @@ from unittest.mock import MagicMock, patch
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
 
+from tests.helpers import REQUEST_CASCADE_RESET_TABLES, delete_all_rows
+
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
 
 def make_db():
     from lib.pipeline_db import PipelineDB
     db = PipelineDB(TEST_DSN)
-    for table in ["source_denylist", "download_log", "album_tracks", "album_requests"]:
-        db._execute(f"TRUNCATE {table} CASCADE")
-    db.conn.commit()
+    delete_all_rows(db, REQUEST_CASCADE_RESET_TABLES)
     return db
 
 

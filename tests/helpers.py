@@ -86,6 +86,148 @@ _DEPLOYED_BEETS_DB_PATHS = frozenset({
 })
 
 
+# Every table ``TRUNCATE album_requests CASCADE`` reaches transitively on the
+# live schema (verified against the real FK graph via ``pg_constraint``, not
+# hand-traced): CASCADE follows every table with an FK pointing at
+# ``album_requests`` -- directly or, like ``processing_cleanup_journal`` via
+# ``import_jobs``, several hops away -- regardless of that FK's own ON DELETE
+# action (CASCADE/SET NULL/RESTRICT all get pulled in by TRUNCATE's CASCADE,
+# unlike a plain DELETE's cascade, which only follows ON DELETE CASCADE).
+# Every test-reset call site that used to TRUNCATE some subset of
+# {album_requests, import_jobs, processing_cleanup_journal, download_log,
+# album_tracks, source_denylist, search_log, search_plans,
+# search_plan_items} plus CASCADE landed on this identical 13-table closure
+# regardless of which subset it spelled out, because ``album_requests`` was
+# always one of the seeds and already dominates it.
+#
+# Table order within this list is only independently load-bearing for
+# ``album_requests`` preceding ``import_jobs`` -- proven empirically, not
+# merely read off the DDL (see ``delete_all_rows``'s docstring for the full
+# mechanism). ``processing_cleanup_journal`` is kept before ``import_jobs``
+# anyway, for the simplest correct mental model.
+REQUEST_CASCADE_RESET_TABLES: tuple[str, ...] = (
+    "album_requests",
+    "processing_cleanup_journal",
+    "import_jobs",
+    "album_quality_evidence_files",
+    "album_quality_evidence",
+    "search_plan_items",
+    "search_plans",
+    "album_request_field_resolutions",
+    "album_tracks",
+    "download_log",
+    "search_log",
+    "source_denylist",
+    "bad_audio_hashes",
+)
+
+
+class _ResettableConnection(Protocol):
+    def commit(self) -> None: ...
+
+
+class _ResettableDB(Protocol):
+    conn: _ResettableConnection
+    def _execute(self, sql: str) -> object: ...
+    def _atomic(self) -> AbstractContextManager[object]: ...
+
+
+def delete_all_rows(db: _ResettableDB, tables: Sequence[str]) -> None:
+    """Empty ``tables``, replacing a per-test ``TRUNCATE ... CASCADE`` reset.
+
+    Ephemeral test clusters run ``autovacuum=off`` (``lib/ephemeral_postgres.py``)
+    because a disposable cluster is destroyed within minutes -- but TRUNCATE
+    assigns each truncated table a new relfilenode, which is a catalog
+    UPDATE, and with autovacuum off nothing ever reclaims those dead catalog
+    tuples. Over thousands of per-test resets that bloats
+    ``pg_class``/``pg_attribute`` for a benefit (immediate data-file space
+    reclaim) this disposable workload never needed. The real win this buys,
+    measured against a live ephemeral cluster running the actual
+    ``make_db()`` reset call: ~2.2x faster than TRUNCATE (issue #1156 item
+    7). A cruder synthetic loop of bare ``TRUNCATE``/``DELETE`` statements
+    against no schema, no triggers, and no ``_atomic()`` overhead measured
+    ~19x in the issue that motivated this change -- that 19x is the
+    statement-level figure, not what this helper itself costs; quote 2.2x
+    for this function.
+
+    Runs every ``DELETE FROM`` inside ``db._atomic()`` -- the SAME explicit-
+    transaction helper every other multi-row ``PipelineDB`` write already
+    uses (``lib/pipeline_db/_core.py``) -- for TWO INDEPENDENT reasons, not
+    merely atomicity for its own sake:
+
+    1. Constraint triggers, not just FK actions. Migration 066 installs
+       three constraint triggers
+       (``album_requests_complete_processing_owner``,
+       ``import_jobs_complete_processing_owner``,
+       ``processing_cleanup_journal_exact_owner`` -- all ``AFTER INSERT OR
+       DELETE OR UPDATE ... FOR EACH ROW DEFERRABLE INITIALLY DEFERRED``)
+       that validate cross-table album_requests/import_jobs/
+       processing_cleanup_journal consistency on every row change to any of
+       those three tables. TRUNCATE never fires row-level triggers at all
+       (a documented PostgreSQL behavior -- only TRUNCATE-specific triggers
+       fire, and none are declared here), so this reset boundary was
+       invisible to the old TRUNCATE-based implementation; DELETE fires
+       them. Proven empirically, not merely inferred: with the shipped
+       table order but autocommit left on (no transaction wrap), deleting a
+       world with a live processing owner raises
+       ``psycopg2.errors.CheckViolation`` ("cleanup journal must belong to
+       the exact active processing owner") the moment ``album_requests`` is
+       deleted -- the SET NULL cascade to ``import_jobs.request_id`` fires
+       the trigger immediately, and ``processing_cleanup_journal`` has not
+       been deleted yet. Only wrapping the whole reset in one transaction
+       defers the (DEFERRABLE INITIALLY DEFERRED) trigger checks past the
+       point the world is consistent again -- fully empty.
+
+       PRECONDITION this puts on every caller: a table list that includes
+       ``album_requests`` on a world with a live processing owner MUST also
+       include ``import_jobs`` and ``processing_cleanup_journal`` in the
+       SAME call. A caller-supplied list missing one of the three still
+       raises the same ``CheckViolation``, now at THIS call's own commit.
+
+    2. ``ON DELETE RESTRICT`` table order, independent of the transaction
+       wrap. RESTRICT is the one action PostgreSQL documents as never
+       deferrable, regardless of a ``DEFERRABLE INITIALLY DEFERRED``
+       declaration on the constraint (that flag governs the referencing
+       row's existence check, not the referenced row's delete-time
+       RESTRICT action): it is checked at the end of the statement that
+       changed the REFERENCED table, transaction or no. Proven
+       empirically: even wrapped in ``_atomic()``, deleting ``import_jobs``
+       before ``album_requests`` still raises
+       ``psycopg2.errors.RestrictViolation`` (the
+       ``album_requests_active_automation_owner_fk`` edge). A caller
+       passing ``tables`` that include both ``import_jobs`` and
+       ``album_requests`` MUST order the latter first (see
+       ``REQUEST_CASCADE_RESET_TABLES`` above). ``processing_cleanup_journal``'s
+       OWN position relative to ``import_jobs`` is NOT independently
+       load-bearing once ``album_requests`` precedes ``import_jobs`` --
+       proven empirically the other way too: reordering it after
+       ``import_jobs`` survives, because its FK's ON UPDATE side (implicit
+       "NO ACTION", genuinely deferrable) is satisfied by the same
+       transaction-wide commit reason 1 already requires. It is kept first
+       anyway, for the simplest correct mental model. ``ON DELETE
+       CASCADE``/``SET NULL`` fire exactly as they always do for a DELETE,
+       independent of order. The two NOT DEFERRABLE self-referencing
+       foreign keys (``album_requests.replaces_request_id``,
+       ``download_log.source_download_log_id``) need no special ordering
+       either, because each table's entire content is cleared by a single
+       DELETE statement rather than row by row, and that same
+       end-of-statement check already sees every row in the same table
+       deleted together.
+
+    ``db`` is any ``_ResettableDB``-shaped object (``PipelineDB`` satisfies
+    it structurally): ``._execute(sql)``, ``._atomic()``, and a ``.conn``
+    exposing ``commit()``. Delegating to ``db._atomic()`` -- rather than a
+    hand-rolled autocommit flip/restore -- also means a connection closed
+    between tests reconnects correctly (``_ensure_conn()``, inside
+    ``_atomic()``) and a mid-reset failure rolls back and restores
+    autocommit without a second, untested copy of that logic living here.
+    """
+    with db._atomic():
+        for table in tables:
+            db._execute(f"DELETE FROM {table}")
+        db.conn.commit()
+
+
 def make_socket_file(path: str) -> None:
     """Plant one Unix-domain socket file at ``path``, at any depth.
 

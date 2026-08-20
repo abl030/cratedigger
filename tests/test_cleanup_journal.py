@@ -16,6 +16,7 @@ from lib.pipeline_db import (
     PipelineDB,
     ProcessingCleanupJournalRow,
 )
+from tests.helpers import REQUEST_CASCADE_RESET_TABLES, delete_all_rows
 
 TEST_DSN = os.environ["TEST_DB_DSN"]
 
@@ -44,10 +45,7 @@ class CleanupJournalPostgresCase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.db = PipelineDB(TEST_DSN)
-        self.db._execute(
-            "TRUNCATE processing_cleanup_journal, import_jobs, "
-            "album_requests CASCADE"
-        )
+        delete_all_rows(self.db, REQUEST_CASCADE_RESET_TABLES)
 
     def tearDown(self) -> None:
         self.db.close()

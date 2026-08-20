@@ -51,7 +51,11 @@ from lib.release_identity import (
 # the injected band_fn (not a service constant).
 BAND_UNKNOWN = "unknown"
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import (
+    REQUEST_CASCADE_RESET_TABLES,
+    delete_all_rows,
+    make_request_row,
+)
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
@@ -478,9 +482,7 @@ class TestLongTailCohortRoundTrip(unittest.TestCase):
     def setUp(self) -> None:
         from lib import pipeline_db
         self.db = pipeline_db.PipelineDB(TEST_DSN)
-        for table in ("download_log", "album_requests"):
-            self.db._execute(f"TRUNCATE {table} CASCADE")
-        self.db.conn.commit()
+        delete_all_rows(self.db, REQUEST_CASCADE_RESET_TABLES)
 
     def tearDown(self) -> None:
         self.db.close()

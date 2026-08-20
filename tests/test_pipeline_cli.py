@@ -36,6 +36,8 @@ from scripts.pipeline_cli import api_mutations
 from scripts.pipeline_cli.api_mutations import TcpApiEndpoint
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
+    REQUEST_CASCADE_RESET_TABLES,
+    delete_all_rows,
     handoff_automation_owner,
     make_album_quality_evidence,
     make_request_row,
@@ -85,9 +87,7 @@ SAMPLE_MB_RELEASE = {
 def make_db():
     from lib.pipeline_db import PipelineDB
     db = PipelineDB(TEST_DSN)
-    for table in ["import_jobs", "source_denylist", "download_log", "album_tracks", "album_requests"]:
-        db._execute(f"TRUNCATE {table} CASCADE")
-    db.conn.commit()
+    delete_all_rows(db, REQUEST_CASCADE_RESET_TABLES)
     return db
 
 
