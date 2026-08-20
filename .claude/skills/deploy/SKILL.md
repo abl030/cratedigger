@@ -35,8 +35,8 @@ git commit -m "<message>"
 git push
 ```
 
-2. Before pinning, resolve the revision to pin, confirm this session's own
-work actually reached `origin/main`, and check whether a previous deploy was
+2. Before pinning, resolve the revision to pin, sanity-check the current
+checkout against `origin/main`, and check whether a previous deploy was
 silently dropped. **Pin `origin/main`'s own resolved tip, never a locally
 computed `HEAD`.** The house workflow merges PRs as merge commits from
 feature worktrees, so right after `gh pr merge` the local checkout's `HEAD`
@@ -45,23 +45,36 @@ is typically the merged branch's own head commit, not the merge commit
 else merged in the meantime, and it also poisons the drop-detector below: a
 locked revision that is never itself an `origin/main` commit makes
 `DEPLOYED..origin/main` list at least the merge commit forever, turning the
-detector into a permanent false alarm. Pinning `origin/main` directly does
-not, on its own, prove the merge that was just attempted actually landed --
-`gh pr merge --delete-branch` exits 1 from a worktree checkout even when the
-remote merge itself succeeded, so that command's own exit code proves
-nothing about whether the merge landed -- assert instead that the local
-`HEAD` under review is an ancestor of the resolved `origin/main` before
-treating anything else as done; this is a real gate, fail closed. The drop
-check that follows it is a report, not a gate (#1203:
-PR #1201 sat merged-but-undeployed for ~14 hours until an unrelated pin
-swept it up as an ancestor):
+detector into a permanent false alarm. An ancestry check of the current
+checkout's `HEAD` against the resolved tip is a useful smoke test, but be
+precise about what it proves: when it passes, it only means this checkout
+carries nothing `origin/main` lacks -- not that any particular merge landed,
+and a stale checkout already sitting exactly on `origin/main` passes
+trivially without having tested this session's work at all. When it fails,
+there are two real, indistinguishable-by-the-check causes: the merge
+genuinely did not land (`gh pr merge --delete-branch` exits 1 from a
+worktree checkout even when the remote merge itself succeeded, so its own
+exit code is not evidence either way), OR this checkout carries commits that
+were never meant to be pinned here -- a `.claude/memory/` commit, made
+locally per CLAUDE.md's own mandate ahead of its own separate push, is the
+expected example, not a corner case, since it shares this exact checkout.
+Because that second cause is routine and sanctioned, a hard `exit 1` here
+would block a correct deploy on a regular basis, so this stays a loud
+diagnostic the reader must consciously clear rather than an automatic stop:
+inspect `git log --oneline origin/main..HEAD`, and proceed only once
+everything listed is either about to be pinned or is deliberately-unpushed
+local work with nothing to do with this deploy. The drop check that follows
+it is a report, not a gate (#1203: PR #1201 sat merged-but-undeployed for
+~14 hours until an unrelated pin swept it up as an ancestor):
 ```bash
 set -euo pipefail
 CRATEDIGGER_REPO=$(git rev-parse --show-toplevel)
 git -C "$CRATEDIGGER_REPO" fetch origin '+refs/heads/main:refs/remotes/origin/main'
 CRATEDIGGER_REV=$(git -C "$CRATEDIGGER_REPO" rev-parse origin/main)
-git -C "$CRATEDIGGER_REPO" merge-base --is-ancestor HEAD "$CRATEDIGGER_REV" \
-  || { echo "local HEAD did not land on origin/main -- the merge may not have succeeded" >&2; exit 1; }
+git -C "$CRATEDIGGER_REPO" merge-base --is-ancestor HEAD "$CRATEDIGGER_REV" || {
+  echo "local HEAD is not an ancestor of origin/main -- EITHER the merge did not land, OR this checkout carries commits never meant to be pinned here (a .claude/memory/ commit is the expected example)." >&2
+  echo "Inspect: git -C \"$CRATEDIGGER_REPO\" log --oneline origin/main..HEAD -- proceed only if everything listed is deliberately-unpushed local work unrelated to this deploy." >&2
+}
 git -C ~/nixosconfig fetch origin '+refs/heads/master:refs/remotes/origin/master'
 DEPLOYED_CRATEDIGGER_REV=$(git -C ~/nixosconfig show \
   origin/master:flake.lock | jq -er '.nodes["cratedigger-src"].locked.rev')
