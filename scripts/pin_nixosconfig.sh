@@ -116,6 +116,16 @@ cratedigger_override_ref() {
   local revision=$2
   local node_type owner repo extra_keys
 
+  # This allowlist is deliberately over-strict: a legitimate cratedigger-src
+  # input could add `ref` (for example, pinning the input to
+  # `github:abl030/cratedigger/main` in flake.nix) without being wrong in
+  # any way this script cares about -- an explicit 40-hex --override-input
+  # always supersedes a branch ref regardless, so there is no correctness
+  # gap to loosen for. Don't loosen it anyway: any change to the
+  # cratedigger-src input's shape in flake.nix (a new key here, in
+  # particular) requires updating this allowlist to match, or every
+  # subsequent pin fails here -- known constraint, not a mystery deploy
+  # failure.
   if ! extra_keys=$(jq -er '(.nodes["cratedigger-src"].original | keys)
     - ["type", "owner", "repo"] | join(",")' "$lock_file"); then
     die "cratedigger-src input's original node is missing or not an object in $lock_file"

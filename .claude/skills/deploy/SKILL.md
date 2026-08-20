@@ -35,32 +35,45 @@ git commit -m "<message>"
 git push
 ```
 
-2. Before pinning, resolve the revision to pin and check whether a previous
-deploy was silently dropped. **Pin `origin/main`'s own resolved tip, never a
-locally computed `HEAD`.** The house workflow merges PRs as merge commits
-from feature worktrees, so right after `gh pr merge` the local checkout's
-`HEAD` is typically the merged branch's own head commit, not the merge
-commit `origin/main` actually carries -- pinning that would silently omit
-anything else merged in the meantime, and it also poisons the drop-detector
-below: a locked revision that is never itself an `origin/main` commit makes
+2. Before pinning, resolve the revision to pin, confirm this session's own
+work actually reached `origin/main`, and check whether a previous deploy was
+silently dropped. **Pin `origin/main`'s own resolved tip, never a locally
+computed `HEAD`.** The house workflow merges PRs as merge commits from
+feature worktrees, so right after `gh pr merge` the local checkout's `HEAD`
+is typically the merged branch's own head commit, not the merge commit
+`origin/main` actually carries -- pinning that would silently omit anything
+else merged in the meantime, and it also poisons the drop-detector below: a
+locked revision that is never itself an `origin/main` commit makes
 `DEPLOYED..origin/main` list at least the merge commit forever, turning the
-detector into a permanent false alarm. The drop check itself is a report,
-not a gate (#1203: PR #1201 sat merged-but-undeployed for ~14 hours until an
-unrelated pin swept it up as an ancestor):
+detector into a permanent false alarm. Pinning `origin/main` directly does
+not, on its own, prove the merge that was just attempted actually landed --
+`gh pr merge --delete-branch` exits 1 from a worktree checkout even when the
+remote merge itself succeeded, so that command's own exit code proves
+nothing about whether the merge landed -- assert instead that the local
+`HEAD` under review is an ancestor of the resolved `origin/main` before
+treating anything else as done; this is a real gate, fail closed. The drop
+check that follows it is a report, not a gate (#1203:
+PR #1201 sat merged-but-undeployed for ~14 hours until an unrelated pin
+swept it up as an ancestor):
 ```bash
 set -euo pipefail
 CRATEDIGGER_REPO=$(git rev-parse --show-toplevel)
 git -C "$CRATEDIGGER_REPO" fetch origin '+refs/heads/main:refs/remotes/origin/main'
 CRATEDIGGER_REV=$(git -C "$CRATEDIGGER_REPO" rev-parse origin/main)
+git -C "$CRATEDIGGER_REPO" merge-base --is-ancestor HEAD "$CRATEDIGGER_REV" \
+  || { echo "local HEAD did not land on origin/main -- the merge may not have succeeded" >&2; exit 1; }
 git -C ~/nixosconfig fetch origin '+refs/heads/master:refs/remotes/origin/master'
 DEPLOYED_CRATEDIGGER_REV=$(git -C ~/nixosconfig show \
   origin/master:flake.lock | jq -er '.nodes["cratedigger-src"].locked.rev')
 git -C "$CRATEDIGGER_REPO" log --oneline "$DEPLOYED_CRATEDIGGER_REV..origin/main"
 ```
-Read the range: once `CRATEDIGGER_REV` is always `origin/main`'s own tip,
-this correctly goes empty on every deploy that landed everything pending, so
-anything it DOES list here is unexpected -- a previous deploy was dropped;
-deal with it before pinning.
+Read the range for commits this session did not just merge. It is never
+empty in the ordinary case -- it always includes the very work you are about
+to pin, since that is the whole reason this deploy is happening, so do not
+expect (or wait for) an empty range. The only question is whether it ALSO
+holds something you do not recognise: a commit from an earlier session's
+merge that never got picked up is a previous deploy that was silently
+dropped; deal with it before pinning.
 
 Then invoke the checked Bash entrypoint with the exact revision to pin. The
 entrypoint runs the complete nixosconfig
