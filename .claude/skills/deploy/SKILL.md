@@ -35,22 +35,31 @@ git commit -m "<message>"
 git push
 ```
 
-2. Before pinning, check whether a previous deploy was silently dropped: a
-revision can merge to `origin/main` and sit there undeployed for a long time
-if nobody runs this step (#1203: PR #1201 was merged but never pinned, and
-only reached production ~14 hours later when an unrelated pin swept it up as
-an ancestor). This is a report, not a gate:
+2. Before pinning, run two preflight checks in the pushed Cratedigger
+checkout. The first is a gate: confirm the revision is reachable from
+`origin/main` -- the helper below now pins exactly the revision it is given
+rather than following the flake input's branch tip, so proving it is merged
+is the caller's job, not the helper's. The second is a report, not a gate:
+whether a previous deploy was silently dropped (#1203: PR #1201 sat
+merged-but-undeployed for ~14 hours until an unrelated pin swept it up as an
+ancestor):
 ```bash
-git -C ~/nixosconfig fetch origin master
+set -euo pipefail
+CRATEDIGGER_REPO=$(git rev-parse --show-toplevel)
+CRATEDIGGER_REV=$(git rev-parse HEAD)
+git -C "$CRATEDIGGER_REPO" fetch origin '+refs/heads/main:refs/remotes/origin/main'
+git -C "$CRATEDIGGER_REPO" merge-base --is-ancestor "$CRATEDIGGER_REV" origin/main \
+  || { echo "refusing to pin unmerged revision $CRATEDIGGER_REV" >&2; exit 1; }
+git -C ~/nixosconfig fetch origin '+refs/heads/master:refs/remotes/origin/master'
 DEPLOYED_CRATEDIGGER_REV=$(git -C ~/nixosconfig show \
   origin/master:flake.lock | jq -er '.nodes["cratedigger-src"].locked.rev')
-git log --oneline "$DEPLOYED_CRATEDIGGER_REV..origin/main"
+git -C "$CRATEDIGGER_REPO" log --oneline "$DEPLOYED_CRATEDIGGER_REV..origin/main"
 ```
-If that range holds commits this session did not just merge, a previous
+If that log range holds commits this session did not just merge, a previous
 deploy was dropped -- deal with it before pinning.
 
-Then, from the pushed Cratedigger checkout, invoke the checked Bash entrypoint
-with the exact revision to pin. The entrypoint runs the complete nixosconfig
+Then invoke the checked Bash entrypoint with the exact revision to pin. The
+entrypoint runs the complete nixosconfig
 fetch → detached worktree → `cratedigger-src`-only lock update, pinned to the
 exact requested revision rather than the input's branch tip → SSH-signature
 verification → token-header Forgejo push → exact remote-SHA verification →
