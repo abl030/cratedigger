@@ -1004,7 +1004,7 @@ class TestModuleScheduling(unittest.TestCase):
         )
         # tests.test_nix_module is frontloaded but deliberately NOT
         # method_batch-sharded (issue #1131 review round 2): its nix-eval
-        # tests are cost-grouped into two exception-memoizing cached
+        # tests are cost-grouped into three exception-memoizing cached
         # helpers, which only pay off when every one of a group's
         # consumers runs in the same worker process. A blind method_batch
         # split could land more than one of the module's heavy nix-eval
@@ -1012,14 +1012,25 @@ class TestModuleScheduling(unittest.TestCase):
         # unshard (this issue's own round 1) serializes every merged world
         # onto one target instead (measured: main's own worst-case
         # bin-packed batch is 61.6s, a full unshard is 118.3s).
-        # HOTSPOT_ISOLATED_METHODS below is the narrower fix: carve the
-        # single heaviest consumer into its own target, bundle everything
-        # else into one remainder target — floor level with main (not
-        # better), at most TWO concurrent heavy nix-eval subprocesses
-        # instead of up to five, which is what makes raising the suite's
-        # worker count affordable (main's own worker-count sweep shows
-        # this module's pole inflating hard with concurrency: 88.0s at 8
-        # workers, 122.7s at 12, 147.7s at 16, 152.3s at 20).
+        # HOTSPOT_ISOLATED_METHODS below is the narrower fix: originally
+        # (issue #1131) carved the single heaviest consumer into its own
+        # target, bundling everything else into one remainder target — at
+        # most TWO concurrent heavy nix-eval subprocesses instead of up to
+        # five, which is what made raising the suite's worker count
+        # affordable in the first place (main's own worker-count sweep
+        # shows this module's pole inflating hard with concurrency: 88.0s
+        # at 8 workers, 122.7s at 12, 147.7s at 16, 152.3s at 20). Issue
+        # #1156 item 1 split that single heaviest consumer's own world
+        # matrix into two roughly-balanced halves (below), raising the count
+        # to THREE — measured (three interleaved baseline/candidate full-
+        # suite pairs) as a real, if modest, net win: the module's worst
+        # single target dropped from a mean of 105.9s to 92.4s (-13%,
+        # every pair individually improved, no runaway blowup), and the
+        # suite's python-phase wall time moved from a mean of 118.6s to
+        # 113.8s (-4%, noisier — baseline alone spanned 107.5-137.0s from
+        # ambient host contention). See
+        # ``_shared_module_worlds_web_auth_matrix_part1``'s docstring in
+        # ``tests/test_nix_module.py`` for the full numbers.
         self.assertEqual(
             HOTSPOT_SHARD_POLICIES,
             {
@@ -1035,7 +1046,11 @@ class TestModuleScheduling(unittest.TestCase):
                 "tests.test_nix_module": frozenset({
                     (
                         "tests.test_nix_module.TestWebAuthenticationModuleContract."
-                        "test_basic_and_insecure_mode_matrix_is_evaluated"
+                        "test_basic_and_insecure_mode_matrix_is_evaluated_part1"
+                    ),
+                    (
+                        "tests.test_nix_module.TestWebAuthenticationModuleContract."
+                        "test_basic_and_insecure_mode_matrix_is_evaluated_part2"
                     ),
                 }),
             },

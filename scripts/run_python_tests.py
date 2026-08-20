@@ -82,26 +82,53 @@ WORLD_MODEL_MODULE = "tests.world_model.state_machine"
 # late enough to become the deterministic suite's tail.
 AUDITED_FRONTLOAD_MODULES = frozenset({"tests.test_nix_module"})
 #: tests.test_nix_module (issue #1131) is NOT method_batch here on purpose.
-#: Its nix-eval tests are cost-grouped into two ``functools``-free,
+#: Its nix-eval tests are cost-grouped into three ``functools``-free,
 #: exception-memoizing cached helpers in the test module
-#: (``_shared_module_worlds_web_auth_matrix`` / ``_shared_module_worlds_rest``)
-#: — a cache only pays off when every one of its consumers runs in the same
-#: worker PROCESS. method_batch splits methods across separate processes by
-#: TEST COUNT, blind to cost, and a naive full unshard (this issue's own
-#: round 1) serializes every merged world onto ONE target instead. Measured
-#: (round 2 review, quiet 30-core host): main's own method_batch worst case
-#: is 61.6s; a full unshard is 118.3s (+92%); this module's own
-#: HOTSPOT_ISOLATED_METHODS carve-out below restores a 2-target floor level
-#: with main (~61-65s), not better. The CPU merging saves is modest — on
-#: the order of a few seconds, bounded by the sub-1s shared preamble each
-#: eliminated `nix eval` call no longer pays, NOT the gap between each
-#: world's SOLO measured time and one combined run. The real payoff is
-#: capping this module at AT MOST TWO concurrent heavy nix-eval
-#: subprocesses instead of up to five under main's own scheme: a
-#: worker-count sweep on main shows this module's pole inflating hard with
-#: concurrency (88.0s at 8 workers, 122.7s at 12, 147.7s at 16, 152.3s at
-#: 20), so bounding its own concurrency is what makes raising the suite's
-#: worker count affordable — the next lever on this issue, not this PR.
+#: (``_shared_module_worlds_web_auth_matrix_part1`` /
+#: ``_shared_module_worlds_web_auth_matrix_part2`` /
+#: ``_shared_module_worlds_rest``) — a cache only pays off when every one of
+#: a given helper's consumers runs in the same worker PROCESS. method_batch
+#: splits methods across separate processes by TEST COUNT, blind to cost,
+#: and a naive full unshard (issue #1131's own round 1) serializes every
+#: merged world onto ONE target instead. Measured (round 2 review, quiet
+#: 30-core host): main's own method_batch worst case is 61.6s; a full
+#: unshard is 118.3s (+92%); the original HOTSPOT_ISOLATED_METHODS
+#: carve-out (one ``webAuthMatrix`` singleton + one ``_rest`` bundle)
+#: restored a 2-target floor level with main (~61-65s), not better. The CPU
+#: merging saves is modest — on the order of a few seconds, bounded by the
+#: sub-1s shared preamble each eliminated `nix eval` call no longer pays,
+#: NOT the gap between each world's SOLO measured time and one combined
+#: run.
+#:
+#: Issue #1156 item 1 split the single ``webAuthMatrix`` singleton itself
+#: into ``_part1``/``_part2`` (``missing``...``rootAccessGroup`` /
+#: ``wheelAccessGroup``...``nginxRestartDisabled``), raising this module's
+#: own concurrently-schedulable heavy-nix-eval target count
+#: from two to THREE — exactly the axis the original 2-target design
+#: capped, and exactly what the worker-count sweep below warns is
+#: sensitive to concurrency. Measured before shipping it (three interleaved
+#: baseline/candidate pairs of full ``run_tests.sh`` runs, ambient sibling
+#: contention acknowledged and visible in the spread): the worst single
+#: target this module contributes to a run dropped from a 100.1s/114.3s/
+#: 103.3s baseline (mean 105.9s) to a 95.0s/96.4s/85.7s candidate (mean
+#: 92.4s, -13%, every pair individually improved) with no runaway blowup —
+#: neither new half ever exceeded ~62s even competing against two heavy
+#: siblings instead of one. The suite-level python-phase wall time moved
+#: from a mean of 118.6s to 113.8s (-4%, noisier than the per-target
+#: number — baseline's own three runs alone spanned 107.5-137.0s from
+#: ambient contention before this change touches anything). A real, if
+#: modest, net win, not the dramatic headline number the solo floor alone
+#: (58.5s mean down to ~30s per half) would suggest. See
+#: ``_shared_module_worlds_web_auth_matrix_part1``'s own docstring in
+#: ``tests/test_nix_module.py`` for the full numbers.
+#:
+#: A worker-count sweep on PRE-#1156-item-1 main showed this module's pole
+#: inflating hard with concurrency (88.0s at 8 workers, 122.7s at 12,
+#: 147.7s at 16, 152.3s at 20) — bounding this module's own concurrent
+#: heavy-eval count is what makes raising the suite's worker count
+#: affordable in the first place; that headroom is why item 1's move from
+#: two to three concurrent heavy targets was safe to measure rather than
+#: assumed unsafe outright.
 HOTSPOT_SHARD_POLICIES = {
     "tests.test_beets_destructive_configs_generated": "method_batch",
     "tests.test_deploy_pin_generated": "method_batch",
@@ -110,13 +137,16 @@ HOTSPOT_SHARD_POLICIES = {
 }
 HOTSPOT_CLASS_BATCHES = 8
 HOTSPOT_METHOD_BATCHES = 12
-#: Issue #1131 review round 2: exact test IDs that must run as their OWN
-#: singleton target, isolated from the rest of their module. Unlike
-#: HOTSPOT_SHARD_POLICIES (a generic, cost-BLIND split balanced by test
-#: count), this is a manually audited, cost-AWARE carve-out — the named
-#: test is this module's single most expensive nix-eval consumer, and its
-#: own cached helper (see ``_shared_module_worlds_web_auth_matrix`` in
-#: ``tests/test_nix_module.py``) is scoped so this target pays for exactly
+#: Issue #1131 review round 2 (extended by #1156 item 1): exact test IDs
+#: that must run as their OWN singleton target, isolated from the rest of
+#: their module. Unlike HOTSPOT_SHARD_POLICIES (a generic, cost-BLIND split
+#: balanced by test count), this is a manually audited, cost-AWARE
+#: carve-out — the two named tests below are this module's most expensive
+#: nix-eval consumers (issue #1156 item 1 split the original single
+#: consumer in two), and each one's own cached helper (see
+#: ``_shared_module_worlds_web_auth_matrix_part1`` /
+#: ``_shared_module_worlds_web_auth_matrix_part2`` in
+#: ``tests/test_nix_module.py``) is scoped so its target pays for exactly
 #: the nix eval it needs, never a bundled neighbour's. A module named here
 #: with no ``HOTSPOT_SHARD_POLICIES`` entry bundles every OTHER discovered
 #: test into one remainder target (see ``hotspot_targets``).
@@ -124,7 +154,11 @@ HOTSPOT_ISOLATED_METHODS: Mapping[str, frozenset[str]] = {
     "tests.test_nix_module": frozenset({
         (
             "tests.test_nix_module.TestWebAuthenticationModuleContract."
-            "test_basic_and_insecure_mode_matrix_is_evaluated"
+            "test_basic_and_insecure_mode_matrix_is_evaluated_part1"
+        ),
+        (
+            "tests.test_nix_module.TestWebAuthenticationModuleContract."
+            "test_basic_and_insecure_mode_matrix_is_evaluated_part2"
         ),
     }),
 }
