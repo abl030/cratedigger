@@ -407,13 +407,18 @@ class TestTargetedSuiteWiring(unittest.TestCase):
     def test_shell_entrypoint_sets_the_suite_owns_headroom_env_var(self) -> None:
         """Issue #1111 review MAJOR-3: the M2 producer side is otherwise
         unpinned — deleting `env CRATEDIGGER_SUITE_OWNS_HEADROOM=1` from
-        scripts/test.sh's own nix-shell invocation would leave every other
+        scripts/test.sh's own dev-shell invocation would leave every other
         test green while M2 silently reverts to the old shell-entry-dies-
-        under-contention shape."""
+        under-contention shape.
+
+        Issue #1229 moved the launcher from `nix-shell --run` to `nix
+        develop --command` for Nix's flake eval cache; the var must be set
+        on whichever one is there, so both the var AND the launcher it
+        prefixes are pinned together."""
         source = pinned_source(REPO_ROOT / "scripts" / "test.sh")
 
         self.assertIn(
-            "env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 nix-shell", source
+            "env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 nix develop", source
         )
 
     def test_targeted_runner_takes_the_same_suite_admission_lock(self) -> None:

@@ -15,22 +15,22 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 HELPER = REPO_ROOT / "scripts" / "run_final_gate.sh"
 
 
-_FAKE_NIX_SHELL = """#!/usr/bin/env bash
+_FAKE_NIX = """#!/usr/bin/env bash
 set -u
-printf '%s\\n' "$@" > "$FAKE_NIX_SHELL_RECORD"
-printf '%s' "${CRATEDIGGER_SUITE_OWNS_HEADROOM:-}" > "$FAKE_NIX_SHELL_HEADROOM_ENV_RECORD"
+printf '%s\\n' "$@" > "$FAKE_NIX_RECORD"
+printf '%s' "${CRATEDIGGER_SUITE_OWNS_HEADROOM:-}" > "$FAKE_NIX_HEADROOM_ENV_RECORD"
 printf 'gate output\\n'
 printf 'gate error\\n' >&2
-if [[ "${2:-}" == "bash scripts/run_tests.sh" ]]; then
-    printf 'bundle: %s\\n' "$FAKE_NIX_SHELL_BUNDLE"
+if [[ "${5:-}" == "bash scripts/run_tests.sh" ]]; then
+    printf 'bundle: %s\\n' "$FAKE_NIX_BUNDLE"
 fi
-case "$FAKE_NIX_SHELL_MODE" in
-    exit) exit "$FAKE_NIX_SHELL_EXIT" ;;
+case "$FAKE_NIX_MODE" in
+    exit) exit "$FAKE_NIX_EXIT" ;;
     sleep) sleep 30 ;;
     term) kill -TERM "$$" ;;
     kill) kill -KILL "$$" ;;
-    dirty) touch "$FAKE_NIX_SHELL_REPO/dirty" ;;
-    head-change) git -C "$FAKE_NIX_SHELL_REPO" commit --allow-empty -qm changed ;;
+    dirty) touch "$FAKE_NIX_REPO/dirty" ;;
+    head-change) git -C "$FAKE_NIX_REPO" commit --allow-empty -qm changed ;;
     *) exit 126 ;;
 esac
 """
@@ -50,11 +50,13 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         )
         self.bundle.chmod(0o700)
         (self.bundle / "summary.json").write_text("{}\n", encoding="utf-8")
-        fake_nix_shell = Path(self.fake_bin.name) / "nix-shell"
-        fake_nix_shell.write_text(_FAKE_NIX_SHELL)
-        fake_nix_shell.chmod(0o755)
-        self.record = Path(self.fake_bin.name) / "nix-shell.argv"
-        self.headroom_env_record = Path(self.fake_bin.name) / "nix-shell.headroom-env"
+        # Issue #1229: the gate launches `nix develop --command bash -c ...`,
+        # so the binary to fake is `nix`, not `nix-shell`.
+        fake_nix = Path(self.fake_bin.name) / "nix"
+        fake_nix.write_text(_FAKE_NIX)
+        fake_nix.chmod(0o755)
+        self.record = Path(self.fake_bin.name) / "nix.argv"
+        self.headroom_env_record = Path(self.fake_bin.name) / "nix.headroom-env"
         self.created_receipts: list[Path] = []
         self._git("init", "-q")
         self._git("config", "user.email", "tests@example.invalid")
@@ -90,12 +92,12 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         env |= {
             "XDG_RUNTIME_DIR": str(self.runtime),
             "PATH": f"{self.fake_bin.name}:{os.environ['PATH']}",
-            "FAKE_NIX_SHELL_RECORD": str(self.record),
-            "FAKE_NIX_SHELL_HEADROOM_ENV_RECORD": str(self.headroom_env_record),
-            "FAKE_NIX_SHELL_MODE": mode,
-            "FAKE_NIX_SHELL_EXIT": str(exit_code),
-            "FAKE_NIX_SHELL_REPO": self.repo.name,
-            "FAKE_NIX_SHELL_BUNDLE": str(self.bundle),
+            "FAKE_NIX_RECORD": str(self.record),
+            "FAKE_NIX_HEADROOM_ENV_RECORD": str(self.headroom_env_record),
+            "FAKE_NIX_MODE": mode,
+            "FAKE_NIX_EXIT": str(exit_code),
+            "FAKE_NIX_REPO": self.repo.name,
+            "FAKE_NIX_BUNDLE": str(self.bundle),
         }
         return env
 
@@ -146,7 +148,10 @@ class FinalGateReceiptTestCase(unittest.TestCase):
 
         self.assertEqual(process.returncode, 0, stderr)
         self.assertIn("final gate: pass (exit 0)", stdout)
-        self.assertEqual(self.record.read_text(), "--run\nbash scripts/run_tests.sh\n")
+        self.assertEqual(
+            self.record.read_text(),
+            "develop\n--command\nbash\n-c\nbash scripts/run_tests.sh\n",
+        )
         self.assertEqual(self._status(receipt), "pass")
         self.assertEqual((receipt / "terminal").read_text(), "pass 0\n")
         self.assertIn("gate output", (receipt / "output.log").read_text())
@@ -162,8 +167,8 @@ class FinalGateReceiptTestCase(unittest.TestCase):
     def test_gate_sets_the_suite_owns_headroom_env_var(self) -> None:
         """Issue #1111 review MAJOR-3: the M2 producer side is otherwise
         unpinned — deleting `env CRATEDIGGER_SUITE_OWNS_HEADROOM=1` from
-        run_final_gate.sh's own nix-shell invocation would leave every
-        other test green while M2 silently reverts. The fake nix-shell
+        run_final_gate.sh's own dev-shell invocation would leave every
+        other test green while M2 silently reverts. The fake `nix`
         records the var's value from its OWN received environment, not the
         argv (an `env VAR=val cmd` prefix doesn't change `cmd`'s argv at
         all, only its environment)."""
