@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -593,6 +595,80 @@ class TestMigrateRanForThisSwitch(unittest.TestCase):
         self.assertTrue(ssh_events)
         for event in ssh_events:
             self.assertIn("IdentityAgent=none", event)
+
+
+class TestDeployCycleFakeShimCaching(unittest.TestCase):
+    """Pins for the shared-module fake-command shape (issue #1156 item 5):
+    the fake ``ssh`` is a tiny stub importing a shared ``_shim.py``, so
+    CPython caches its compiled bytecode across every fake ssh invocation
+    instead of recompiling on each one."""
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.fake = FakeDeployCycleCommands(Path(self.tempdir.name))
+
+    def fake_environment(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{self.fake.fake_bin}:{env['PATH']}",
+                "DEPLOY_CYCLE_FAKE_STATE": str(self.fake.state_path),
+            }
+        )
+        return env
+
+    def test_ssh_stub_is_tiny_and_shares_one_cached_shim_module(self) -> None:
+        shim_path = self.fake.fake_bin / "_shim.py"
+        self.assertTrue(shim_path.exists())
+        shim_size = shim_path.stat().st_size
+        stub_size = (self.fake.fake_bin / "ssh").stat().st_size
+        # A regression back to writing the full body into the fake ssh
+        # command (the pre-#1156-item-5 shape) would make the stub as
+        # large as the shim itself.
+        self.assertLess(stub_size, 300, "ssh stub is not tiny")
+        self.assertLess(stub_size * 5, shim_size,
+                         "ssh stub looks like a full shim copy")
+
+        pycache = self.fake.fake_bin / "__pycache__"
+        self.assertFalse(pycache.exists())
+
+        proc = subprocess.run(
+            [
+                str(self.fake.fake_bin / "ssh"), "doc2", "systemctl", "show",
+                "cratedigger-db-migrate.service", "--property=ActiveState",
+            ],
+            env=self.fake_environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "ActiveState=active")
+
+        cached = list(pycache.glob("_shim.*.pyc"))
+        self.assertEqual(
+            len(cached), 1,
+            "expected the shim's bytecode to be cached in __pycache__ "
+            f"after one call, found {cached}",
+        )
+
+    def test_ssh_stub_fails_loudly_without_the_shared_shim_module(self) -> None:
+        (self.fake.fake_bin / "_shim.py").unlink()
+
+        proc = subprocess.run(
+            [
+                str(self.fake.fake_bin / "ssh"), "doc2", "systemctl", "show",
+                "cratedigger-db-migrate.service", "--property=ActiveState",
+            ],
+            env=self.fake_environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("ModuleNotFoundError", proc.stderr)
+        self.assertIn("_shim", proc.stderr)
 
 
 if __name__ == "__main__":

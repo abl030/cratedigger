@@ -8,7 +8,11 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-_FAKE_COMMAND = r'''#!/usr/bin/env python3
+_SHIM_MODULE = r'''# Shared body for the daily-flake-update fake git/nix/nix-shell commands.
+# Imported by a tiny stub (never executed directly as __main__) so CPython
+# compiles it once and caches the bytecode in __pycache__ across every fake
+# command invocation within one fixture directory, instead of recompiling
+# on every single subprocess spawn (issue #1156 items 4/5).
 import fcntl
 import json
 import os
@@ -16,150 +20,178 @@ import sys
 import time
 from pathlib import Path
 
-state_path = Path(os.environ["DAILY_UPDATE_FAKE_STATE"])
-with state_path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    command = Path(sys.argv[0]).name
-    args = sys.argv[1:]
 
-    def save():
-        state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+def main():
+    state_path = Path(os.environ["DAILY_UPDATE_FAKE_STATE"])
+    with state_path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        command = Path(sys.argv[0]).name
+        args = sys.argv[1:]
 
-    def fail(message):
-        print(message, file=sys.stderr)
-        save()
-        raise SystemExit(1)
+        def save():
+            state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
 
-    state["events"].append([command, *args])
-
-    if command == "git":
-        if args[:1] == ["clone"]:
-            clone_path = Path(args[-1])
-            clone_path.mkdir(parents=True)
-            clone_path.joinpath(".git").mkdir()
-            clone_path.joinpath("flake.lock").write_text(
-                json.dumps(state["seed_lock"], sort_keys=True), encoding="utf-8"
-            )
-            state["clone_path"] = str(clone_path)
-            state["lock_before"] = state["seed_lock"]
-        elif args == ["diff", "--quiet", "--", "flake.lock"]:
+        def fail(message):
+            print(message, file=sys.stderr)
             save()
-            raise SystemExit(1 if state["lock_changed"] else 0)
-        elif args[:2] == ["commit", "--only"]:
-            if state.get("fault") == "commit":
-                fail("fake commit failed")
-            state["commit_count"] += 1
-            state["commit_args"] = args
-            state["lock_at_commit"] = json.loads(
-                Path.cwd().joinpath("flake.lock").read_text(encoding="utf-8")
-            )
-        elif args[:2] == ["pull", "--rebase"]:
-            if state.get("fault") == "pull":
-                fail("fake rebase failed")
-            # A concurrent push to the branch is ordinary, not a canary
-            # failure: the runner rebases its lock-only commit onto it and
-            # the push that follows fast-forwards.
-            state["pull_count"] += 1
-            state["remote_moved"] = False
-        elif args[:2] == ["push", "origin"]:
-            if state.get("fault") == "push":
-                fail("fake push failed")
-            if state["remote_moved"]:
-                fail(
-                    "fake push rejected: remote contains work you do not have "
-                    "(the runner must rebase onto the branch before pushing)"
-                )
-            state["push_count"] += 1
-            state["push_ref"] = args[2]
-        else:
-            fail(f"unexpected git argv: {args!r}")
-        save()
-        raise SystemExit(0)
+            raise SystemExit(1)
 
-    if command == "nix":
-        if args[:2] == ["flake", "update"] and args[2:]:
-            targets = args[2:]
-            unknown = [t for t in targets if t not in state["seed_lock"]["nodes"]]
-            if unknown:
-                fail(f"unexpected flake update targets: {unknown!r}")
-            if state.get("fault") == "update":
-                fail("fake flake update failed")
-            if state["lock_changed"]:
-                lock_path = Path.cwd().joinpath("flake.lock")
-                lock = json.loads(lock_path.read_text(encoding="utf-8"))
-                for target in targets:
-                    lock["nodes"][target]["locked"]["rev"] = "new-" + target
-                lock_path.write_text(json.dumps(lock, sort_keys=True), encoding="utf-8")
-                state["lock_after_update"] = lock
+        state["events"].append([command, *args])
+
+        if command == "git":
+            if args[:1] == ["clone"]:
+                clone_path = Path(args[-1])
+                clone_path.mkdir(parents=True)
+                clone_path.joinpath(".git").mkdir()
+                clone_path.joinpath("flake.lock").write_text(
+                    json.dumps(state["seed_lock"], sort_keys=True), encoding="utf-8"
+                )
+                state["clone_path"] = str(clone_path)
+                state["lock_before"] = state["seed_lock"]
+            elif args == ["diff", "--quiet", "--", "flake.lock"]:
+                save()
+                raise SystemExit(1 if state["lock_changed"] else 0)
+            elif args[:2] == ["commit", "--only"]:
+                if state.get("fault") == "commit":
+                    fail("fake commit failed")
+                state["commit_count"] += 1
+                state["commit_args"] = args
+                state["lock_at_commit"] = json.loads(
+                    Path.cwd().joinpath("flake.lock").read_text(encoding="utf-8")
+                )
+            elif args[:2] == ["pull", "--rebase"]:
+                if state.get("fault") == "pull":
+                    fail("fake rebase failed")
+                # A concurrent push to the branch is ordinary, not a canary
+                # failure: the runner rebases its lock-only commit onto it and
+                # the push that follows fast-forwards.
+                state["pull_count"] += 1
+                state["remote_moved"] = False
+            elif args[:2] == ["push", "origin"]:
+                if state.get("fault") == "push":
+                    fail("fake push failed")
+                if state["remote_moved"]:
+                    fail(
+                        "fake push rejected: remote contains work you do not have "
+                        "(the runner must rebase onto the branch before pushing)"
+                    )
+                state["push_count"] += 1
+                state["push_ref"] = args[2]
+            else:
+                fail(f"unexpected git argv: {args!r}")
             save()
             raise SystemExit(0)
-        if args == [
-            "build",
-            ".#checks.x86_64-linux.beetsStableCandidate",
-            "--print-build-logs",
-        ]:
-            stage = "stable-candidate"
-        elif args == [
-            "develop",
-            ".#tip",
-            "--command",
-            "bash",
-            "scripts/run_tests.sh",
-        ]:
-            stage = "tip-suite"
-        else:
-            fail(f"unexpected nix argv: {args!r}")
-    elif command == "nix-shell":
-        if args[:1] != ["--run"] or len(args) != 2:
-            fail(f"unexpected nix-shell argv: {args!r}")
-        shell_command = args[1]
-        if shell_command == "bash scripts/run_tests.sh":
-            stage = "suite"
-        elif shell_command == "bash scripts/fuzz_burst.sh":
-            stage = "fuzz"
-        elif shell_command == "bash scripts/world_model_burst.sh":
-            stage = (
-                "mirror"
-                if os.environ.get("CRATEDIGGER_WORLD_ENGINE") == "mirror-harness"
-                else "world"
-            )
-        else:
-            fail(f"unexpected nix-shell command: {shell_command!r}")
-    else:
-        fail(f"unexpected fake command: {command}")
 
-    state["stage_started"].append(stage)
-    save()
-    if state.get("hold_stage") == stage:
-        time.sleep(float(state.get("hold_seconds", 0.25)))
-    state["stages"].append(stage)
-    state["stage_env"][stage] = {
-        "TEST_DB_DSN": os.environ.get("TEST_DB_DSN"),
-        "CRATEDIGGER_WORLD_DATABASE": os.environ.get(
-            "CRATEDIGGER_WORLD_DATABASE"
-        ),
-        "CRATEDIGGER_WORLD_ENGINE": os.environ.get("CRATEDIGGER_WORLD_ENGINE"),
-        "CRATEDIGGER_WORLD_MIRROR_URL": os.environ.get(
-            "CRATEDIGGER_WORLD_MIRROR_URL"
-        ),
-        "CRATEDIGGER_WORLD_EXAMPLES": os.environ.get(
-            "CRATEDIGGER_WORLD_EXAMPLES"
-        ),
-        "CRATEDIGGER_WORLD_STEPS": os.environ.get("CRATEDIGGER_WORLD_STEPS"),
-        "HYPOTHESIS_STORAGE_DIRECTORY": os.environ.get(
-            "HYPOTHESIS_STORAGE_DIRECTORY"
-        ),
-        "CRATEDIGGER_FUZZ_OUTPUT_DIR": os.environ.get(
-            "CRATEDIGGER_FUZZ_OUTPUT_DIR"
-        ),
-        "CRATEDIGGER_FUZZ_MAX_EXAMPLES": os.environ.get(
-            "CRATEDIGGER_FUZZ_MAX_EXAMPLES"
-        ),
-    }
-    if state.get("fault") == stage:
-        fail(f"fake {stage} failed")
-    save()
+        if command == "nix":
+            if args[:2] == ["flake", "update"] and args[2:]:
+                targets = args[2:]
+                unknown = [t for t in targets if t not in state["seed_lock"]["nodes"]]
+                if unknown:
+                    fail(f"unexpected flake update targets: {unknown!r}")
+                if state.get("fault") == "update":
+                    fail("fake flake update failed")
+                if state["lock_changed"]:
+                    lock_path = Path.cwd().joinpath("flake.lock")
+                    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+                    for target in targets:
+                        lock["nodes"][target]["locked"]["rev"] = "new-" + target
+                    lock_path.write_text(json.dumps(lock, sort_keys=True), encoding="utf-8")
+                    state["lock_after_update"] = lock
+                save()
+                raise SystemExit(0)
+            if args == [
+                "build",
+                ".#checks.x86_64-linux.beetsStableCandidate",
+                "--print-build-logs",
+            ]:
+                stage = "stable-candidate"
+            elif args == [
+                "develop",
+                ".#tip",
+                "--command",
+                "bash",
+                "scripts/run_tests.sh",
+            ]:
+                stage = "tip-suite"
+            else:
+                fail(f"unexpected nix argv: {args!r}")
+        elif command == "nix-shell":
+            if args[:1] != ["--run"] or len(args) != 2:
+                fail(f"unexpected nix-shell argv: {args!r}")
+            shell_command = args[1]
+            if shell_command == "bash scripts/run_tests.sh":
+                stage = "suite"
+            elif shell_command == "bash scripts/fuzz_burst.sh":
+                stage = "fuzz"
+            elif shell_command == "bash scripts/world_model_burst.sh":
+                stage = (
+                    "mirror"
+                    if os.environ.get("CRATEDIGGER_WORLD_ENGINE") == "mirror-harness"
+                    else "world"
+                )
+            else:
+                fail(f"unexpected nix-shell command: {shell_command!r}")
+        else:
+            fail(f"unexpected fake command: {command}")
+
+        state["stage_started"].append(stage)
+        save()
+        if state.get("hold_stage") == stage:
+            time.sleep(float(state.get("hold_seconds", 0.25)))
+        state["stages"].append(stage)
+        state["stage_env"][stage] = {
+            "TEST_DB_DSN": os.environ.get("TEST_DB_DSN"),
+            "CRATEDIGGER_WORLD_DATABASE": os.environ.get(
+                "CRATEDIGGER_WORLD_DATABASE"
+            ),
+            "CRATEDIGGER_WORLD_ENGINE": os.environ.get("CRATEDIGGER_WORLD_ENGINE"),
+            "CRATEDIGGER_WORLD_MIRROR_URL": os.environ.get(
+                "CRATEDIGGER_WORLD_MIRROR_URL"
+            ),
+            "CRATEDIGGER_WORLD_EXAMPLES": os.environ.get(
+                "CRATEDIGGER_WORLD_EXAMPLES"
+            ),
+            "CRATEDIGGER_WORLD_STEPS": os.environ.get("CRATEDIGGER_WORLD_STEPS"),
+            "HYPOTHESIS_STORAGE_DIRECTORY": os.environ.get(
+                "HYPOTHESIS_STORAGE_DIRECTORY"
+            ),
+            "CRATEDIGGER_FUZZ_OUTPUT_DIR": os.environ.get(
+                "CRATEDIGGER_FUZZ_OUTPUT_DIR"
+            ),
+            "CRATEDIGGER_FUZZ_MAX_EXAMPLES": os.environ.get(
+                "CRATEDIGGER_FUZZ_MAX_EXAMPLES"
+            ),
+        }
+        if state.get("fault") == stage:
+            fail(f"fake {stage} failed")
+        save()
+'''
+
+# `command` stays a tiny stub, not the shim body itself -- the body lives in
+# one shared `_shim.py` module written once per fixture instance (see
+# FakeDailyFlakeUpdateCommands.__init__). CPython never caches bytecode for
+# a script run directly as __main__, so leaving the shim body inline here
+# would recompile it from source on every fake command invocation; importing
+# it instead lets CPython write `__pycache__/_shim.cpython-*.pyc` once and
+# reuse it for the rest (issue #1156 item 5, same fix as item 4's
+# tests/fakes/deploy_pin.py). `-S` skips `site` for faster startup (issue
+# #1156 item 5 also brings this sibling onto the #1152 startup fix). `-S`
+# does not remove the interpreter's own insertion of the running script's
+# directory as sys.path[0] -- that happens regardless of `site` -- but the
+# mechanism is made explicit here (via `__file__`) rather than relied on
+# implicitly. `git`/`nix`/`nix-shell` remain symlinks to this one file, same
+# as before; a symlink's own path (not its target) is what `__file__`
+# resolves to for a directly-run script, so this still finds `_shim.py`
+# alongside the symlink itself.
+_STUB_COMMAND = r'''#!/usr/bin/env -S python3 -S
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _shim
+
+_shim.main()
 '''
 
 
@@ -184,8 +216,12 @@ class FakeDailyFlakeUpdateCommands:
         # test-only relocation should paper over.
         self.tmpdir = root / "tmp"
         self.tmpdir.mkdir()
+        # The heavy shim body is written once as an importable module so
+        # CPython caches its compiled bytecode in __pycache__ across every
+        # fake command invocation (issue #1156 item 5).
+        (self.fake_bin / "_shim.py").write_text(_SHIM_MODULE, encoding="utf-8")
         command = self.fake_bin / "command"
-        command.write_text(_FAKE_COMMAND, encoding="utf-8")
+        command.write_text(_STUB_COMMAND, encoding="utf-8")
         command.chmod(0o755)
         for name in ("git", "nix", "nix-shell"):
             (self.fake_bin / name).symlink_to(command)

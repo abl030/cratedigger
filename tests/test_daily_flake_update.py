@@ -468,5 +468,76 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertLess(daily_push, update_tip)
 
 
+class TestDailyFlakeUpdateFakeShimCaching(unittest.TestCase):
+    """Pins for the shared-module fake-command shape (issue #1156 item 5):
+    git/nix/nix-shell remain symlinks to one tiny stub that imports a shared
+    ``_shim.py``, so CPython caches its compiled bytecode across every fake
+    command invocation instead of recompiling on each one."""
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.fake = FakeDailyFlakeUpdateCommands(Path(self.tempdir.name))
+
+    def fake_environment(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{self.fake.fake_bin}:{env['PATH']}",
+                "DAILY_UPDATE_FAKE_STATE": str(self.fake.state_path),
+            }
+        )
+        return env
+
+    def test_command_stub_is_tiny_and_shares_one_cached_shim_module(self) -> None:
+        shim_path = self.fake.fake_bin / "_shim.py"
+        self.assertTrue(shim_path.exists())
+        shim_size = shim_path.stat().st_size
+        stub_path = self.fake.fake_bin / "command"
+        stub_size = stub_path.stat().st_size
+        # A regression back to writing the full body into the shared
+        # "command" file (the pre-#1156-item-5 shape) would make the stub
+        # as large as the shim itself.
+        self.assertLess(stub_size, 300, "command stub is not tiny")
+        self.assertLess(stub_size * 5, shim_size,
+                         "command stub looks like a full shim copy")
+        for name in ("git", "nix", "nix-shell"):
+            self.assertTrue((self.fake.fake_bin / name).is_symlink())
+
+        pycache = self.fake.fake_bin / "__pycache__"
+        self.assertFalse(pycache.exists())
+
+        self.fake.update_state(lock_changed=False)
+        proc = subprocess.run(
+            [str(self.fake.fake_bin / "git"), "diff", "--quiet", "--", "flake.lock"],
+            env=self.fake_environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        cached = list(pycache.glob("_shim.*.pyc"))
+        self.assertEqual(
+            len(cached), 1,
+            "expected the shim's bytecode to be cached in __pycache__ "
+            f"after one call, found {cached}",
+        )
+
+    def test_command_stub_fails_loudly_without_the_shared_shim_module(self) -> None:
+        (self.fake.fake_bin / "_shim.py").unlink()
+
+        proc = subprocess.run(
+            [str(self.fake.fake_bin / "git"), "diff", "--quiet", "--", "flake.lock"],
+            env=self.fake_environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("ModuleNotFoundError", proc.stderr)
+        self.assertIn("_shim", proc.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
