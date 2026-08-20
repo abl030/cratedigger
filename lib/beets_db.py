@@ -814,6 +814,51 @@ class BeetsDB:
             return []
         return list(self._matching_album_ids(identity))
 
+    def get_current_album_directories(self, release_id: str) -> dict[int, str]:
+        """Return ``{album_id: album_directory}`` for every album Beets
+        currently holds for ``release_id`` (issue #1203 item 2).
+
+        This is the authoritative before/after snapshot the post-import
+        media-server reconciler diffs to find vanished pre-upgrade
+        directories — replacing sole reliance on the harness's mid-import
+        ``postflight.replaced_albums`` serialization, which can already show
+        the album's NEW path by the time it is captured (live incident:
+        request 8964's David Bowie import).
+
+        Same identity dispatch as ``get_all_album_ids_for_release`` /
+        ``locate()``: numeric id → ``discogs_albumid`` OR ``mb_albumid``
+        (dual Discogs storage generation); UUID → ``mb_albumid`` only; empty
+        → ``{}``. A release currently held by several albums (the curated
+        duplicate-pressing collection, CLAUDE.md invariant 5, or the
+        split-brain "multiple same-identity rows" state
+        ``get_all_album_ids_for_release`` guards against) returns every one.
+        Each album's directory is the dirname of its first ``(disc, track)``
+        item path — the same derivation ``get_album_detail`` uses. An album
+        with no resolvable item path is omitted; there is nothing a media
+        server can be pointed at for it.
+        """
+        identity = _lookup_identity(release_id)
+        if identity is None:
+            return {}
+        album_ids = self._matching_album_ids(identity)
+        if not album_ids:
+            return {}
+        placeholders = ",".join("?" for _ in album_ids)
+        rows = self._conn.execute(
+            "SELECT album_id, path FROM items "
+            f"WHERE album_id IN ({placeholders}) "
+            "ORDER BY album_id, disc, track",
+            album_ids,
+        ).fetchall()
+        directories: dict[int, str] = {}
+        for raw_album_id, raw_path in rows:
+            album_id = int(raw_album_id)
+            if album_id in directories or not raw_path:
+                continue
+            path = self._resolve_path(raw_path)
+            directories[album_id] = os.path.dirname(path)
+        return directories
+
     def _batch_lookup_album_ids(
         self, release_ids: list[str]
     ) -> dict[str, int]:

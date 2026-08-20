@@ -83,8 +83,26 @@ def notify_library_delete(
     a Plex library-root scan would be a product violation there, matching the
     "no collection refresh and no broad fallback" contract
     ``trigger_jellyfin_scan`` already documents for post-import notification.
-    Refusing an escalation still records a ``skipped`` ``DeleteNotification``
-    naming why — it never silently no-ops.
+    Refusing an escalation still records a ``skipped``/``warning``
+    ``DeleteNotification`` naming why — it never silently no-ops.
+
+    Jellyfin's leg is asymmetric by design, not merely by an escalation
+    guard: with ``allow_escalation=False`` this function never calls
+    ``jellyfin_refresh_fn`` AT ALL — no ``/Items/{id}/Refresh``, no
+    ``/Library/Refresh``. A source-level read of Jellyfin 10.11
+    (``MediaBrowser.Controller/Entities/Folder.cs::ValidateChildrenInternal2``)
+    found that deletion of a vanished item is computed as the PARENT
+    folder's own disk-vs-DB child-set diff — an item is never deleted by
+    refreshing itself, so a targeted refresh is structurally incapable of
+    reaping the album this function is called about. Worse: the album's
+    directory is already gone, so enumerating it during that refresh raises
+    ``DirectoryNotFoundException``; the same method's ``IOException`` handler
+    logs and swallows it rather than returning, so the refresh proceeds
+    with an EMPTY observed disk and deletes every one of the album's child
+    ``Audio`` rows (files untouched, their Jellyfin metadata/user-data is
+    not). A routine post-import notification must never trigger that. It
+    finds the item by its former path and reports what it found — reaping
+    is an operator decision, tracked separately.
     """
     outcomes: list[DeleteNotification] = []
 
@@ -139,11 +157,26 @@ def notify_library_delete(
         except Exception as exc:  # noqa: BLE001 -- refresh can still run
             find_warning = f"; identity lookup failed: {type(exc).__name__}: {exc}"
             log.warning("JELLYFIN DELETE: identity lookup failed: %s", exc)
-        if ref is None and not allow_escalation:
-            outcomes.append(DeleteNotification(
-                "jellyfin", "skipped",
-                "refused to escalate to a collection-wide refresh (album "
-                "item not found by former path)" + find_warning))
+        if not allow_escalation:
+            # Detect and report ONLY — never call jellyfin_refresh_fn. See
+            # this function's own docstring: a targeted refresh cannot
+            # reap a vanished item (Jellyfin computes deletion from the
+            # PARENT folder's own child-set diff) and instead empties the
+            # item's child rows when its directory is already gone.
+            if ref is not None:
+                outcomes.append(DeleteNotification(
+                    "jellyfin", "warning",
+                    f"exact album item {ref.item_id} found at former path "
+                    f"{former_album_path!r} but NOT refreshed — Jellyfin "
+                    "cannot reap an item whose directory vanished via a "
+                    "targeted refresh, and attempting one would delete its "
+                    "child rows instead; this requires an operator action"
+                    + find_warning,
+                    ref.item_id))
+            else:
+                outcomes.append(DeleteNotification(
+                    "jellyfin", "skipped",
+                    "no Jellyfin item found by former path" + find_warning))
         else:
             try:
                 item_id = ref.item_id if ref else cfg.jellyfin_library_id
