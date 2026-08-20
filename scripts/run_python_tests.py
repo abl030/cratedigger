@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import errno
 import io
+import math
 import multiprocessing
 import os
 import shutil
@@ -42,6 +43,7 @@ from scripts.run_test_suite import (
     CheckFailureMarker,
     CheckMetricsMarker,
     _default_min_headroom_bytes,
+    private_runtime_dir,
     recommended_worker_count,
 )
 
@@ -964,6 +966,117 @@ def select_test_targets(
     return tuple(targets)
 
 
+#: Issue #1229: the LAST of the packing loss, and the only thing that can
+#: reach it. `schedule_modules` orders by `_line_weight` (line count) with
+#: `AUDITED_FRONTLOAD_MODULES` as a hand-audited override, and that override
+#: is MEASURED SATURATED: replaying a real 464-target duration map through
+#: the real scheduler, every membership variant tried landed between 81.0s
+#: and 82.3s against a longest-processing-time bound of 76.2s. Membership
+#: cannot close a gap that comes from ordering WITHIN the early group, so
+#: the only way to reach the bound is an actual per-target cost.
+#:
+#: The honest source of that cost is the previous run's own measurement.
+#: A committed table was considered and rejected in #1226: 464 numbers that
+#: drift on every test change is a worse trade than the seconds it buys.
+#: This cache has no such problem -- it is written by the run that measured
+#: it, and a tree change simply leaves the changed targets unknown.
+#:
+#: This is a SCHEDULING HINT and never a correctness boundary. Every target
+#: still runs; `assert_exact_target_schedule` compares by name as a SET, so
+#: it is order-insensitive by construction. A missing, stale, or corrupt
+#: cache costs some packing efficiency and nothing else, and the no-cache
+#: path is exactly the pre-#1229 behaviour.
+TARGET_DURATION_CACHE_NAME = "cratedigger-target-durations.json"
+
+
+def load_target_durations(runtime_dir: Path) -> dict[str, float]:
+    """Read the previous run's per-target seconds, or ``{}`` if unusable.
+
+    Every failure mode degrades to ``{}`` (schedule as before) rather than
+    raising: this file is an optimisation hint written by a previous
+    process, so a truncated write, a foreign format, or no file at all must
+    never be able to fail a test run.
+    """
+    path = runtime_dir / TARGET_DURATION_CACHE_NAME
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return {}
+    try:
+        decoded = msgspec.json.decode(raw, type=dict[str, float])
+    except (msgspec.DecodeError, msgspec.ValidationError):
+        return {}
+    return {
+        name: seconds
+        for name, seconds in decoded.items()
+        if seconds >= 0.0
+    }
+
+
+def store_target_durations(
+    runtime_dir: Path,
+    results: Sequence[TargetRunResult],
+) -> None:
+    """Merge this run's measured target seconds into the ordering cache.
+
+    Merged, not replaced, so a `--test`-selected partial run refines the
+    cache instead of discarding every target it did not run. Written to a
+    temporary file and renamed, so a concurrent reader sees either the old
+    map or the new one, never a half-written one. Best effort throughout.
+    """
+    if not results:
+        return
+    merged = load_target_durations(runtime_dir)
+    for result in results:
+        merged[result.target.test_name] = round(result.elapsed_seconds, 3)
+    path = runtime_dir / TARGET_DURATION_CACHE_NAME
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=runtime_dir,
+            prefix=f"{TARGET_DURATION_CACHE_NAME}.",
+            delete=False,
+        ) as handle:
+            handle.write(msgspec.json.encode(merged))
+            temporary = Path(handle.name)
+    except OSError:
+        return
+    try:
+        temporary.replace(path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+
+
+def order_targets_by_measured_cost(
+    schedule: Sequence[TestTarget],
+    durations: Mapping[str, float],
+) -> tuple[TestTarget, ...]:
+    """Longest-processing-time-first, using the previous run's measurements.
+
+    An UNKNOWN target (new, renamed, or resharded since the cache was
+    written) sorts as if it were the most expensive known one, so it is
+    admitted early. That is the fail-safe direction: admitting an unknown
+    target early costs almost nothing when it turns out to be cheap, while
+    admitting a genuinely expensive one late is exactly the tail this
+    ordering exists to prevent. Python's sort is stable, so targets of
+    equal cost -- including every target when the cache is empty -- keep
+    the incoming heuristic order untouched.
+    """
+    if not durations:
+        return tuple(schedule)
+    # Strictly greater than every known cost, not equal to the largest: a
+    # stable sort keeps ties in their incoming order, so `max(...)` would
+    # leave an unknown target sitting BEHIND the dearest known one — the
+    # opposite of the fail-safe direction this is documented to take.
+    # (Caught by this function's own test, not by review.)
+    unknown_cost = math.inf
+    return tuple(
+        sorted(
+            schedule,
+            key=lambda target: -durations.get(target.test_name, unknown_cost),
+        )
+    )
+
+
 def assert_exact_target_schedule(
     expected: Sequence[TestTarget],
     actual: Sequence[TestTarget],
@@ -1772,6 +1885,33 @@ def main(
         schedule = build_test_targets(module_schedule, listed_test_ids)
     worker_count = min(args.jobs, len(schedule))
 
+    # Issue #1229: reorder by the previous run's measured per-target cost.
+    # Hint only — see TARGET_DURATION_CACHE_NAME. Announced rather than
+    # silent, so a run whose wall time differs from a sibling's is
+    # explainable instead of mysterious.
+    # RuntimeError is the one `private_runtime_dir` actually raises for every
+    # unusable-root case (missing, symlink, wrong owner, wrong mode, not
+    # tmpfs); OSError covers the stat/resolve paths underneath it. Catching
+    # BOTH matters because this module is also runnable directly, without
+    # `run_suite`'s admission lock having already demanded that root — an
+    # ordering hint must never be the thing that fails such a run.
+    try:
+        runtime_dir = private_runtime_dir()
+    except (OSError, RuntimeError):
+        runtime_dir = None
+    measured_durations = (
+        load_target_durations(runtime_dir) if runtime_dir is not None else {}
+    )
+    if measured_durations:
+        schedule = order_targets_by_measured_cost(schedule, measured_durations)
+        known = sum(
+            1 for target in schedule if target.test_name in measured_durations
+        )
+        print(
+            f"Order: longest-first from {len(measured_durations)} cached "
+            f"target timings ({known}/{len(schedule)} known)"
+        )
+
     print(
         f"Python suite: {len({target.module.name for target in schedule})} "
         f"modules across {worker_count} workers "
@@ -1792,6 +1932,9 @@ def main(
         durations=args.durations,
     )
     wall_seconds = time.monotonic() - started_at
+
+    if runtime_dir is not None:
+        store_target_durations(runtime_dir, results)
 
     failed_results = [result for result in results if not result.successful]
     for result in sorted(results, key=lambda item: item.elapsed_seconds, reverse=True)[

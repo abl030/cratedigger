@@ -33,6 +33,7 @@ from scripts.run_python_tests import (
     HOTSPOT_SHARD_POLICIES,
     HYPOTHESIS_CASE_STATUSES,
     STRATEGY_SPACE_EXHAUSTED,
+    TARGET_DURATION_CACHE_NAME,
     TEST_HOST_MEMORY_EXHAUSTED,
     TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE,
     TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
@@ -64,12 +65,15 @@ from scripts.run_python_tests import (
     hotspot_targets,
     hypothesis_example_budgets,
     list_module_test_ids,
+    load_target_durations,
     main,
+    order_targets_by_measured_cost,
     recommended_worker_count,
     resolve_hypothesis_settings,
     schedule_modules,
     select_test_targets,
     shard_test_ids,
+    store_target_durations,
     test_subprocess_environment,
     worker_environment,
 )
@@ -862,27 +866,184 @@ class TestMeasureTempdirAvailableBytesTracksDiskUsage(unittest.TestCase):
     """
 
     def test_measured_value_tracks_a_real_consumption_delta(self) -> None:
-        before = _measure_tempdir_available_bytes()
-        self.assertIsNotNone(before)
-        assert before is not None
+        """Issue #1229: retried, because the quantity under test is SHARED.
 
+        The original single-shot form raced the suite's other 21 workers on
+        the one test RAM root and failed intermittently in a real gate
+        (`3235840 not greater than or equal to 16777216`): a sibling
+        RELEASING space inside the measurement window offsets this test's
+        own payload, and no fixed threshold can absorb that, since a
+        sibling freeing a whole scratch tree can dwarf any payload this
+        test is willing to write. Widening the tolerance would have been
+        the wrong fix -- it trades the mutant kill away to buy quiet.
+
+        Retrying keeps the kill exactly as strong while removing the race.
+        The `.total` mutant is a STATIC filesystem property: it never moves
+        when contents change, so it fails every attempt, however many are
+        allowed. Only the correct `.free` field can ever produce the drop,
+        and it needs just one window that no sibling happens to free space
+        inside.
+        """
         payload_bytes = 32 * 1024 * 1024
-        with tempfile.NamedTemporaryFile(dir=tempfile.gettempdir()) as scratch:
-            scratch.write(b"\0" * payload_bytes)
-            scratch.flush()
-            os.fsync(scratch.fileno())
+        observed: list[int] = []
 
-            after = _measure_tempdir_available_bytes()
+        for _ in range(8):
+            before = _measure_tempdir_available_bytes()
+            self.assertIsNotNone(before)
+            assert before is not None
 
-        self.assertIsNotNone(after)
-        assert after is not None
-        # `.total` would report the identical value before and after --
-        # real usage never changes it. `.free` (the correct field) must
-        # drop by roughly the payload size. A deliberately loose
-        # half-payload threshold absorbs concurrent sibling activity on
-        # the shared root without losing the ability to catch the
-        # swapped-field mutant, whose reported drop is ~0.
-        self.assertGreaterEqual(before - after, payload_bytes // 2)
+            with tempfile.NamedTemporaryFile(dir=tempfile.gettempdir()) as scratch:
+                scratch.write(b"\0" * payload_bytes)
+                scratch.flush()
+                os.fsync(scratch.fileno())
+
+                after = _measure_tempdir_available_bytes()
+
+            self.assertIsNotNone(after)
+            assert after is not None
+            drop = before - after
+            observed.append(drop)
+            if drop >= payload_bytes // 2:
+                return
+
+        self.fail(
+            "free bytes never tracked a real 32 MiB write across 8 attempts; "
+            f"observed drops: {observed}"
+        )
+
+
+class TestMeasuredCostOrdering(unittest.TestCase):
+    """Issue #1229: the duration cache is a scheduling HINT.
+
+    Every clause below is about ordering or about degrading safely. None of
+    them can change WHICH targets run — `assert_exact_target_schedule`
+    compares by name as a set, so coverage is order-insensitive by
+    construction and is covered by its own tests.
+    """
+
+    @staticmethod
+    def _target(name: str) -> TestTarget:
+        return TestTarget(TestModule(name, Path(f"/{name}.py"), 1), name)
+
+    def _schedule(self, *names: str) -> tuple[TestTarget, ...]:
+        return tuple(self._target(name) for name in names)
+
+    def test_longest_measured_target_is_admitted_first(self) -> None:
+        schedule = self._schedule("cheap", "dear", "middling")
+        ordered = order_targets_by_measured_cost(
+            schedule, {"cheap": 0.5, "dear": 40.0, "middling": 4.0}
+        )
+
+        self.assertEqual(
+            [target.test_name for target in ordered],
+            ["dear", "middling", "cheap"],
+        )
+
+    def test_an_unknown_target_is_admitted_before_every_known_one(self) -> None:
+        """The fail-safe direction. An unknown target is new, renamed, or
+        resharded; treating it as cheap would risk re-creating exactly the
+        late-admitted tail this ordering exists to remove."""
+        schedule = self._schedule("dear", "brand-new")
+        ordered = order_targets_by_measured_cost(schedule, {"dear": 40.0})
+
+        self.assertEqual(
+            [target.test_name for target in ordered], ["brand-new", "dear"]
+        )
+
+    def test_an_empty_cache_leaves_the_heuristic_order_untouched(self) -> None:
+        """Cold start must be exactly the pre-#1229 behaviour, not a
+        reshuffle: a stable sort over equal keys would still be a no-op,
+        but the empty cache short-circuits before sorting at all."""
+        schedule = self._schedule("first", "second", "third")
+
+        self.assertEqual(order_targets_by_measured_cost(schedule, {}), schedule)
+
+    def test_equal_costs_preserve_the_incoming_order(self) -> None:
+        schedule = self._schedule("alpha", "beta", "gamma")
+        ordered = order_targets_by_measured_cost(
+            schedule, {"alpha": 2.0, "beta": 2.0, "gamma": 2.0}
+        )
+
+        self.assertEqual(ordered, schedule)
+
+    def test_durations_round_trip_through_the_cache_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw)
+            store_target_durations(
+                runtime,
+                (
+                    TargetRunResult(
+                        target=self._target("dear"),
+                        worker_pid=1,
+                        successful=True,
+                        tests_run=1,
+                        elapsed_seconds=40.25,
+                        output="",
+                        failed_test_ids=(),
+                    ),
+                ),
+            )
+
+            self.assertEqual(load_target_durations(runtime), {"dear": 40.25})
+
+    def test_a_partial_run_refines_rather_than_discards_the_cache(self) -> None:
+        """A `--test`-selected run measures a handful of targets. Replacing
+        the file would throw away every other target's timing and silently
+        return the next full run to cold-start ordering."""
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw)
+            (runtime / TARGET_DURATION_CACHE_NAME).write_bytes(
+                b'{"untouched": 12.0, "dear": 1.0}'
+            )
+            store_target_durations(
+                runtime,
+                (
+                    TargetRunResult(
+                        target=self._target("dear"),
+                        worker_pid=1,
+                        successful=True,
+                        tests_run=1,
+                        elapsed_seconds=40.0,
+                        output="",
+                        failed_test_ids=(),
+                    ),
+                ),
+            )
+
+            self.assertEqual(
+                load_target_durations(runtime),
+                {"untouched": 12.0, "dear": 40.0},
+            )
+
+    def test_an_unreadable_or_corrupt_cache_degrades_to_no_ordering(self) -> None:
+        """Known-bad self-test, one world per degradation clause: this file
+        is written by a previous process, so nothing in it may ever be able
+        to fail a run."""
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw)
+
+            # 1. absent
+            self.assertEqual(load_target_durations(runtime), {})
+
+            # 2. not JSON at all (e.g. a truncated or clobbered write)
+            path = runtime / TARGET_DURATION_CACHE_NAME
+            path.write_bytes(b"{not json")
+            self.assertEqual(load_target_durations(runtime), {})
+
+            # 3. valid JSON of the wrong shape
+            path.write_bytes(b'{"dear": "forty"}')
+            self.assertEqual(load_target_durations(runtime), {})
+
+            # 4. a negative duration is not a measurement
+            path.write_bytes(b'{"dear": -1.0, "real": 2.0}')
+            self.assertEqual(load_target_durations(runtime), {"real": 2.0})
+
+    def test_storing_nothing_never_creates_a_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw)
+            store_target_durations(runtime, ())
+
+            self.assertFalse((runtime / TARGET_DURATION_CACHE_NAME).exists())
 
 
 class TestModuleDiscovery(unittest.TestCase):
