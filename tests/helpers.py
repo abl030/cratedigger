@@ -1508,7 +1508,19 @@ def patch_dispatch_externals():
     and trigger_jellyfin_scan.
 
     Does NOT patch parse_import_result, _check_quality_gate_core,
-    BeetsDB, or read_runtime_config — callers nest those as needed.
+    BeetsDB, read_runtime_config, or the vanished-replaced-album-path
+    reconciler (issue #1203 item 2) — callers nest those as needed. The
+    reconciler is a kwarg-DI seam on ``dispatch_import_core`` itself
+    (``media_server_notify_fn``), not a module patch: it now contains real
+    escalation-decision logic (``lib.library_delete_notifiers
+    .notify_library_delete``), so it no longer qualifies as a thin leaf-seam
+    wrapper for the mock-audit allowlist. Since ``sp.run`` below is always
+    mocked, no test using this helper ever mutates the real Beets DB, so the
+    reconciler's own before/after snapshot diff is empty by construction
+    unless a test deliberately mutates Beets out of band (as
+    ``tests.test_import_dispatch.TestVanishedPathReconciliation`` does) —
+    ordinary dispatch tests never reach the reconciler at all and need no
+    stand-in for it.
 
     Yields a SimpleNamespace with attributes: run, cleanup, plex, jellyfin.
     run is pre-configured with returncode=0, stdout="", stderr="".
@@ -1523,8 +1535,7 @@ def patch_dispatch_externals():
          patch("lib.util.trigger_jellyfin_scan") as jellyfin:
         run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         yield types.SimpleNamespace(
-            run=run, cleanup=cleanup, plex=plex,
-            jellyfin=jellyfin)
+            run=run, cleanup=cleanup, plex=plex, jellyfin=jellyfin)
 class _PinnedDispatchDB(Protocol):
     _owner_session_pin: tuple[OwnerSessionIdentity, CancellationToken] | None
 

@@ -411,6 +411,24 @@ match:
 plugins: musicbrainz mbsync discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline permissions
 ```
 
+**Recurrence hazard: an ordinary import can rename a folder (issue #1203
+item 2).** `%aunique` only emits a bracket when a `path_disambig` value is
+present, and it renders the FIRST time any higher-priority field in that
+`albumdisambig or releasegroupdisambig or catalognum or label or str(year)`
+chain gets populated for an album that already collided with a sibling
+pressing — this is not limited to a beets config change. Any ordinary import
+that fills in `catalognum` (or `label`, or `albumdisambig`) for the first
+time on an album with a same-artist/same-title sibling renames its folder
+mid-collection, e.g. `1969 - David Bowie [1969]` → `[SBL 7912]` when
+`catalognum` first arrives (live incident, request 8964). Nothing in beets
+itself notices the rename affects Plex/Jellyfin, which is why
+`lib/dispatch/core.py` reconciles every vanished pre-upgrade path with both
+media servers after every import — see `docs/plex-primer.md` and
+`docs/jellyfin-primer.md` § "Post-import vanished-path reconciliation". The
+blast radius is exactly the intentional multi-pressing cohort (CLAUDE.md
+invariant 5, curated duplicate editions) — large and permanent, not a
+one-time migration artifact.
+
 ### Active Plugins
 
 | Plugin | Purpose | Auto? |
@@ -872,6 +890,75 @@ new Plex/Jellyfin identities. Never run a collection-wide move as routine
 maintenance. Review one exact album, ensure notifier/rescan consequences are
 understood, and keep it outside a Cratedigger deployment or cutover. Concurrent
 plain-`beet` mutation is not locked against the importer.
+
+### One-shot config overlays — how an operator run overrides the deployment
+
+A one-shot does NOT have to wait on a deployed config change to get different
+behaviour. `beet` layers `-c/--config` **above** the deployment-owned immutable
+`BEETSDIR`, and `-P/--disable-plugins` drops a plugin for that run only. Keys
+the overlay omits are inherited from the deployed config, so an overlay states
+only what it changes:
+
+```bash
+# Overlay wins for the keys it names; everything else stays deployment-owned.
+printf 'fetchart:\n  minwidth: 0\n  sources: [cover_art_url]\n' > /tmp/art.yaml
+beet -c /tmp/art.yaml config | sed -n '/^fetchart:/,/^[a-z]/p'   # confirm first
+TMPDIR=~/beet-oneshot beet -c /tmp/art.yaml -P embedart fetchart 'id:14345'
+```
+
+Three facts that each cost a wasted batch if learned the hard way:
+
+- **`beet fetchart` exposes only `-f/--force` and `-q/--quiet`.** There is no
+  source-selection flag. The overlay above is how a one-shot pins its own
+  `fetchart.sources` order, which is what keeps an art run pressing-exact
+  (`cover_art_url` keys on the exact Discogs release id; `itunes` matches on
+  album-title string equality and collides sibling pressings — cratedigger#1200).
+- **The embed floor and the folder-art floor cannot be decoupled by config.**
+  `minwidth` is a `fetchart` option that rejects *candidates* before they become
+  art at all, so a below-floor image yields no folder art and no embedded art.
+  `embedart` has no `minwidth` of its own, and it auto-embeds off the `art_set`
+  event that `beet fetchart` itself fires — so simply lowering `minwidth` embeds
+  the small image into every track. `-P embedart` is how a one-shot writes a
+  small folder `cover.jpg` while leaving the tracks untouched.
+
+  **Manual art is an operator lane with a lifecycle precondition (issue #1203
+  item 3).** When no configured source clears `minwidth: 300` — the exact
+  Discogs primary is itself below the floor and there is no better
+  pressing-exact candidate — the only remedy is an operator applying art by
+  hand with the overlay recipe above. Safe only AFTER the request has reached
+  `status = 'imported'`: `PipelineDB.get_wanted`
+  (`lib/pipeline_db/requests.py:1607`) selects `WHERE status = 'wanted' AND
+  (next_retry_after IS NULL OR next_retry_after <= now)` — `next_retry_after`
+  only narrows WHEN an eligible `wanted` row is picked up; `status = 'wanted'`
+  is the hard requirement either way, so an `imported` request is never
+  re-searched or automatically re-imported regardless of retry timing —
+  manually applied art survives every automatic pipeline behavior. It does
+  NOT survive an operator-INITIATED re-import of
+  the same album (Replace, a Bad Rip re-acquisition, a fresh request for the
+  same release): beets' duplicate removal deletes the old album's items and
+  its `artpath` outright, and the deployed `minwidth: 300` again rejects
+  every candidate, so the album silently returns to art-less. Cratedigger
+  deliberately does not try to preserve manual art across a re-import — that
+  would be new machinery at the import seam, and the archivist frame is to
+  surface state rather than auto-decide (CLAUDE.md). If this ever needs
+  enforcing, the honest shape is a census listing art-less albums (the
+  pattern the existing `cratedigger-retag-census` daily oneshot already
+  uses), not import-time logic — read the gap as intentional, not an
+  oversight.
+
+  The seven beets album ids remediated this way for issue #1203 item 3
+  (2026-08-20): cratedigger#1200's pressing-exact remediation correctly set
+  `cover_art_url` for all 101 affected albums, but these 7 still produced no
+  art at all, because their exact Discogs primary image (150×150 to 284×284)
+  never clears the floor.
+  **10520, 11722, 14345, 18569, 18576, 19587, 19803.**
+- **Set a private `TMPDIR`.** beets caches downloads under
+  `$TMPDIR/beets/<plugin>`, and the service already owns `/tmp/beets` as
+  `cratedigger:users` mode 0755. An operator running as another account gets
+  `Permission denied`, reported as the misleading `no art found`.
+
+Queries do not OR by default: `beet fetchart 'id:1' 'id:2'` is an AND and
+matches nothing. Loop one album per invocation.
 
 ### Dangerous Commands — NEVER Use Without Approval
 

@@ -161,6 +161,65 @@ mapping still translates host to Plex paths. Results say `submitted` and expose
 the exact target; even HTTP 200 remains submission evidence, not proof a scan
 ran. Failures are visible warnings and do not roll back the completed delete.
 
+### Post-import vanished-path reconciliation (issue #1203 item 2)
+
+A path-changing re-import (see `docs/beets-primer.md` § the `path_disambig`
+recurrence hazard) renames an album's folder without deleting anything. The
+partial-scan trigger above only ever names the NEW path, so nothing tells
+Plex the old folder is gone — it kept a stale album pointing at the vanished
+folder in the incident that motivated this (request 8964's David Bowie
+import, `catalognum` populated for the first time, renaming
+`1969 - David Bowie [1969]` → `[SBL 7912]`; ratingKey 380609, 1 orphaned
+track, reaped only by a manual targeted folder scan).
+
+After both "Recently Added" pin captures and both new-path notifiers run
+(`lib/dispatch/core.py::_trigger_post_import_notifiers`), Cratedigger
+snapshots every album directory Beets currently holds for the request's
+release id BOTH before Beets launch and again here, and diffs the two
+(`lib.beets_db.BeetsDB.get_current_album_directories`,
+`lib.dispatch.core._vanished_album_directories`) — this before/after diff is
+the PRIMARY, authoritative source of vanished pre-upgrade paths.
+`postflight.replaced_albums` (the harness's mid-import serialization) is only
+a SECONDARY source unioned in: it reports only an album the import's dup-guard
+answered "remove" for — it structurally cannot report a directory that left
+the library for any OTHER reason. Verified live: the
+`…1969 - David Bowie [1969]` directory (the incident above) left the Beets
+library with NO `download_log` row anywhere in the corpus naming that path,
+so whatever removed it was not a dup-guard removal this pipeline ever
+recorded — `replaced_albums` had nothing to say about it. A before/after
+Beets directory snapshot observes what Beets actually held, so it catches a
+directory leaving the release regardless of the reason — exactly the
+property `replaced_albums` cannot have. For each distinct vanished path from
+either source, Cratedigger calls
+`lib.library_delete_notifiers.notify_library_delete` — the SAME function
+"Library deletion refresh" above uses: walk up to the nearest existing
+ancestor within the configured root and submit a partial scan there. It is
+called with `allow_escalation=False`, which forbids exactly one thing the
+destructive-delete walk above allows: scanning the configured root itself
+when no narrower existing ancestor survives (the degenerate case — a
+sole-album artist whose own folder also vanished). A routine post-import
+notification must never become the equivalent of a full library scan.
+Refusing that escalation still records a `skipped` result naming why; it
+never silently no-ops. Every ordinary narrower-ancestor scan (the artist
+folder, the common case) still runs exactly as it does for a destructive
+delete.
+
+**Measured against the live library (doc2, 8,507 album directories, 93,846
+tracks): zero orphans.** Unlike the Jellyfin leg (`docs/jellyfin-primer.md`),
+which deliberately only finds the item and reports it — never refreshes,
+since a source-level finding proved a targeted Jellyfin refresh cannot reap a
+vanished item and instead deletes its child rows — this Plex mechanism
+genuinely self-heals: the nearest-existing-ancestor partial scan is exactly
+what Plex needs to notice the vanished child and reconcile it. Every outcome
+(both providers, one line each) is logged
+(`lib/dispatch/core.py::_reconcile_vanished_replaced_album_paths`). This call
+runs inside `dispatch_import_core`, drained by `cratedigger-importer.service`,
+NOT the `cratedigger.service` timer unit:
+
+```bash
+journalctl -u cratedigger-importer | grep 'MEDIA SERVER RECONCILE:'
+```
+
 ### Useful endpoints
 
 ```bash

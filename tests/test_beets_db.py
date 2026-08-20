@@ -1182,6 +1182,89 @@ class TestGetItemPaths(unittest.TestCase):
         self.assertIn(".bak", bad[0][1])
 
 
+class TestGetCurrentAlbumDirectories(unittest.TestCase):
+    """Test get_current_album_directories — issue #1203 item 2's
+    authoritative before/after snapshot source for post-import media-server
+    reconciliation. Driven against a real SQLite test DB, per the New Work
+    Checklist's read-only-query carve-out (a fake stub alone would not catch
+    schema/query drift)."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "test.db")
+        _create_test_db(self.db_path)
+
+    def test_returns_directory_for_single_album(self) -> None:
+        _insert_album(self.db_path, 1, "abc", [
+            (320000, "/m/Artist/Album/01.mp3"),
+            (320000, "/m/Artist/Album/02.mp3"),
+        ])
+        with BeetsDB(self.db_path) as db:
+            dirs = db.get_current_album_directories("abc")
+        self.assertEqual(dirs, {1: "/m/Artist/Album"})
+
+    def test_release_held_by_two_albums_returns_both_directories(self) -> None:
+        """A release currently held by more than one beets album row (the
+        split-brain state ``get_all_album_ids_for_release`` also guards
+        against, or a curated duplicate-pressing collection) must report
+        every one, not just the first match."""
+        _insert_album(self.db_path, 1, "shared-mbid", [
+            (320000, "/m/Artist/Album A/01.mp3"),
+        ])
+        _insert_album(self.db_path, 2, "shared-mbid", [
+            (320000, "/m/Artist/Album B/01.mp3"),
+        ])
+        with BeetsDB(self.db_path) as db:
+            dirs = db.get_current_album_directories("shared-mbid")
+        self.assertEqual(dirs, {
+            1: "/m/Artist/Album A",
+            2: "/m/Artist/Album B",
+        })
+
+    def test_relative_paths_resolve_against_library_root(self) -> None:
+        _insert_album(self.db_path, 1, "rel-release", [
+            (128000, "Artist/Album/01.mp3"),
+        ])
+        library_root = "/mnt/virtio/Music/Beets"
+        with BeetsDB(self.db_path, library_root=library_root) as db:
+            dirs = db.get_current_album_directories("rel-release")
+        self.assertEqual(
+            dirs, {1: os.path.join(library_root, "Artist/Album")})
+
+    def test_not_found_returns_empty_dict(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            dirs = db.get_current_album_directories("nonexistent")
+        self.assertEqual(dirs, {})
+
+    def test_empty_release_id_returns_empty_dict(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            dirs = db.get_current_album_directories("")
+        self.assertEqual(dirs, {})
+
+    def test_discogs_numeric_id_matches_discogs_albumid(self) -> None:
+        """Discogs-sourced releases are stored under ``discogs_albumid``
+        (INTEGER), not ``mb_albumid`` — the pipeline DB's ``mb_release_id``
+        packs both kinds of identifier into one column (numeric string for
+        Discogs), so the snapshot must round-trip back to the right beets
+        column exactly like ``get_all_album_ids_for_release`` does."""
+        _insert_album(self.db_path, 10, "", [
+            (1411000, "/m/disc/Artist/Album/01.flac"),
+        ], discogs_albumid=12856590)
+        with BeetsDB(self.db_path) as db:
+            dirs = db.get_current_album_directories("12856590")
+        self.assertEqual(dirs, {10: "/m/disc/Artist/Album"})
+
+    def test_album_with_no_items_is_omitted(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO albums (id, mb_albumid) VALUES (1, 'no-items')")
+        conn.commit()
+        conn.close()
+        with BeetsDB(self.db_path) as db:
+            dirs = db.get_current_album_directories("no-items")
+        self.assertEqual(dirs, {})
+
+
 class TestCheckMbids(unittest.TestCase):
     """Test check_mbids — batch MBID existence check."""
 

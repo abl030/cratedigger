@@ -43,7 +43,11 @@ def assert_deploy_lifecycle_invariants(
 
     if state["receipt_rev"] is not None:
         assert state["receipt_rev"] in state["commits"]
-        assert state["commits"][state["receipt_rev"]]["target"] == target
+        pinned_target = state["commits"][state["receipt_rev"]]["target"]
+        assert pinned_target == target, (
+            f"pinned target mismatch: receipt={state['receipt_rev']!r} "
+            f"commit_target={pinned_target!r} requested={target!r}"
+        )
     pending_revision = state.get("pending_rev")
     if pending_revision is not None:
         assert pending_revision in state["commits"]
@@ -348,6 +352,26 @@ class TestDeployLifecycleCheckerKnownBad(unittest.TestCase):
                 verifier_available=True,
             )
 
+    def test_checker_rejects_receipt_commit_pinning_the_wrong_target(
+        self,
+    ) -> None:
+        """The single highest-value clause in this checker: the receipt's
+        own commit must pin the REQUESTED target, not merely some target.
+        Shaped to pass every earlier clause (a well-formed 4-element
+        update-ref event) so this is the FIRST clause that trips, and
+        asserted by its own message so a survivor at an earlier clause
+        cannot masquerade as proof of this one (#1203 correction round)."""
+        bad = {
+            "events": [
+                ["commit", "a"],
+                ["update-ref", "refs/cratedigger-deploy/cratedigger-src", "a", ""],
+            ],
+            "commits": {"a": {"target": "wrong-target", "signature_material": "good"}},
+            "receipt_rev": "a",
+        }
+        with self.assertRaisesRegex(AssertionError, "pinned target mismatch"):
+            assert_deploy_lifecycle_invariants(bad, target="requested-target")
+
     def test_checker_rejects_second_pin_commit(self) -> None:
         bad = {
             "events": [
@@ -437,44 +461,87 @@ class TestGeneratedDeployPinLifecycle(unittest.TestCase):
             ("unchanged", "pending", "descendant", "other")
         ),
         recovery_verifier=st.sampled_from(("available", "unknown")),
+        # #1203 correction round: without this, every generated world left
+        # the fake's nix simulation pinning exactly the requested target by
+        # construction (branch_tip defaulted to TARGET_REV), which made the
+        # checker's "receipt commit pins the requested target" clause
+        # unfalsifiable -- true regardless of what production actually did.
+        # Varying it drives worlds where a tip-following implementation and
+        # an exact-override implementation would diverge.
+        branch_tip_matches_target=st.booleans(),
     )
     @example(
         first_fault="push",
         remote_after_failure="unchanged",
         recovery_verifier="available",
+        branch_tip_matches_target=True,
     )
     @example(
         first_fault="post_commit_rev_parse",
         remote_after_failure="unchanged",
         recovery_verifier="available",
+        branch_tip_matches_target=True,
     )
     @example(
         first_fault="signal_after_commit",
         remote_after_failure="unchanged",
         recovery_verifier="unknown",
+        branch_tip_matches_target=True,
     )
     @example(
         first_fault="cleanup",
         remote_after_failure="pending",
         recovery_verifier="available",
+        branch_tip_matches_target=True,
     )
     @example(
         first_fault="cleanup",
         remote_after_failure="descendant",
         recovery_verifier="available",
+        branch_tip_matches_target=True,
+    )
+    @example(
+        # The decisive world: an uninterrupted run whose branch tip is NOT
+        # the requested target. A tip-following implementation cannot
+        # produce a signed receipt here at all; an exact-override
+        # implementation always can. Pinned as an @example so the
+        # derandomized `suite` tier always exercises it, not only `fuzz`.
+        first_fault=None,
+        remote_after_failure="unchanged",
+        recovery_verifier="available",
+        branch_tip_matches_target=False,
     )
     def test_retry_never_silently_creates_a_second_signed_pin(
         self,
         first_fault: str | None,
         remote_after_failure: str,
         recovery_verifier: str,
+        branch_tip_matches_target: bool,
     ) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             fake = FakeDeployPinCommands(Path(tempdir))
+            if not branch_tip_matches_target:
+                fake.update_state(branch_tip="9" * 40)
             fake.update_state(fault=first_fault)
             fake.run(SCRIPT)
             after_first = fake.state
             pending = after_first["receipt_rev"] or after_first["pending_rev"]
+
+            if first_fault is None:
+                # An uninterrupted run must succeed regardless of
+                # branch_tip: pinning is by exact --override-input, never
+                # by following the branch tip. This is the liveness half
+                # that makes the checker's target-match clause meaningful --
+                # without it, "if a receipt exists, it pins the right
+                # target" is checked over a world where a broken,
+                # tip-following implementation simply never produces a
+                # receipt at all, so the clause never gets to see the
+                # divergence.
+                self.assertIsNotNone(
+                    after_first["receipt_rev"],
+                    "an uninterrupted run must produce a signed receipt "
+                    "even when branch_tip differs from the requested target",
+                )
 
             if pending is not None and remote_after_failure != "unchanged":
                 if remote_after_failure == "pending":

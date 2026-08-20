@@ -75,6 +75,11 @@ def lock_payload(revision):
     return json.dumps({
         "nodes": {
             "cratedigger-src": {
+                # Mirrors the real flake input's unpinned `original` node
+                # (github:abl030/cratedigger, no ref) -- production derives
+                # its `--override-input` ref from exactly this shape, never
+                # a hardcoded string, so the fake must carry it too.
+                "original": dict(state["cratedigger_input_original"]),
                 "locked": {"rev": revision},
             },
         },
@@ -135,12 +140,40 @@ if command == "nix":
         state = json.loads(_f.read())
     if state.get("fault") == "nix":
         fail("fake nix update failed")
-    if raw_args != ["flake", "update", "cratedigger-src"]:
+    override_marker = ["--override-input", "cratedigger-src"]
+    if raw_args[:3] == ["flake", "update", "cratedigger-src"] and (
+        raw_args[3:5] == override_marker
+    ):
+        # Production derives this ref from flake.lock's own cratedigger-src
+        # `original` node and never hardcodes it -- parse it back out here
+        # so a test can prove the SCRIPT actually derived it (rather than
+        # this fake just trusting DEPLOY_PIN_FAKE_TARGET), and so a mutant
+        # that reverts to a plain `nix flake update cratedigger-src` (no
+        # override) is caught: that shape falls through to the branch_tip
+        # case below instead of pinning the requested revision.
+        if len(raw_args) != 6:
+            fail(f"unexpected nix argv: {raw_args!r}")
+        ref = raw_args[5]
+        scheme, _, path = ref.partition(":")
+        segments = path.split("/")
+        if scheme != "github" or len(segments) != 3 or not segments[2]:
+            fail(f"unparseable override-input ref: {ref!r}")
+        revision = segments[2]
+        if state.get("fault") == "nix_missing_revision":
+            fail(f"fake nix: revision does not exist on remote: {revision}")
+        target_pin = revision
+    elif raw_args == ["flake", "update", "cratedigger-src"]:
+        # The plain (no-override) form now models what production used to
+        # do: follow whatever the branch currently resolves to, which is
+        # NOT necessarily the requested target. Reachable only by a mutant
+        # that drops the --override-input argv.
+        target_pin = state["branch_tip"]
+    else:
         fail(f"unexpected nix argv: {raw_args!r}")
     if state["remote_move_on_nix"]:
         move_live_remote()
     with open(os.path.join(os.getcwd(), "flake.lock"), "w", encoding="utf-8") as _f:
-        _f.write(lock_payload(os.environ["DEPLOY_PIN_FAKE_TARGET"]))
+        _f.write(lock_payload(target_pin))
     save()
     raise SystemExit(0)
 
@@ -430,6 +463,8 @@ class FakeDeployPinCommands:
     OLD_TARGET = "2" * 40
     TARGET_REV = "3" * 40
     OTHER_REV = "4" * 40
+    DEFAULT_INPUT_OWNER = "abl030"
+    DEFAULT_INPUT_REPO = "cratedigger"
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -458,6 +493,18 @@ class FakeDeployPinCommands:
             "git_common_dir": str(self.repo / ".git"),
             "fault": None,
             "nix_delay_seconds": 0,
+            # Default keeps every test that never exercises the plain
+            # (no-override) `nix flake update` path passing unchanged: real
+            # production now always passes --override-input, so branch_tip
+            # only matters to the tests written specifically to probe it (and
+            # to a reverted-to-plain-update mutant, which this is what makes
+            # detectable).
+            "branch_tip": self.TARGET_REV,
+            "cratedigger_input_original": {
+                "type": "github",
+                "owner": self.DEFAULT_INPUT_OWNER,
+                "repo": self.DEFAULT_INPUT_REPO,
+            },
             "remote_rev": self.BASE_REV,
             "remote_parent": "0" * 40,
             "remote_target": self.OLD_TARGET,
@@ -536,6 +583,12 @@ class FakeDeployPinCommands:
     def environment(
         self, target: str, *, extra_env: dict[str, str] | None = None
     ) -> dict[str, str]:
+        # `target` is unused here: the fake `nix` binary now derives the
+        # pinned revision from the `--override-input` argv the script itself
+        # passes it (mirroring production, which reads it from
+        # $target_revision), never from an env-var side channel. Kept as a
+        # parameter for call-site symmetry with the script's own argv.
+        del target
         env = {
             **os.environ,
             "PATH": f"{self.fake_bin}:{os.environ['PATH']}",
@@ -543,7 +596,6 @@ class FakeDeployPinCommands:
             "TMPDIR": str(self.tmp),
             "NIXOSCONFIG_TOKEN_FILE": str(self.token_file),
             "DEPLOY_PIN_FAKE_STATE": str(self.state_path),
-            "DEPLOY_PIN_FAKE_TARGET": target,
         }
         env.update(extra_env or {})
         return env

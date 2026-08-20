@@ -90,6 +90,73 @@ commit_locked_revision() {
     | locked_cratedigger_revision
 }
 
+cratedigger_override_ref() {
+  # Derive the exact overridable `github:<owner>/<repo>/<revision>` flake ref
+  # from flake.lock's OWN cratedigger-src `original` node, rather than
+  # hardcoding `github:abl030/cratedigger` a second time here -- a second
+  # hardcoded copy would silently pin the wrong repository if the flake
+  # input's origin ever changed without this script being updated to match.
+  # Fails closed on any input shape this script does not understand,
+  # INCLUDING keys it has never heard of. A `github` flake input can also
+  # carry `host` (a private mirror), `dir`, or `ref`; silently dropping any
+  # of those would still build a `github:owner/repo/<revision>` ref that
+  # LOOKS valid but resolves at github.com regardless of what the original
+  # node actually said -- precisely the "silently pin the wrong repository"
+  # failure this function exists to prevent.
+  #
+  # This function is itself invoked via command substitution
+  # (`ref=$(cratedigger_override_ref ...)`), which runs it in a subshell.
+  # Bash does not honour `set -e` for failures INSIDE a command
+  # substitution unless `shopt -s inherit_errexit` is set (it is not, here
+  # or anywhere else in this script) -- so every internal failure below
+  # must be checked explicitly with `if ! ...; then die ...; return 1; fi`,
+  # never a bare `cmd || die ...`. The bare form silently falls through to
+  # the next statement instead of stopping the function.
+  local lock_file=$1
+  local revision=$2
+  local node_type owner repo extra_keys
+
+  # This allowlist is deliberately over-strict: a legitimate cratedigger-src
+  # input could add `ref` (for example, pinning the input to
+  # `github:abl030/cratedigger/main` in flake.nix) without being wrong in
+  # any way this script cares about -- an explicit 40-hex --override-input
+  # always supersedes a branch ref regardless, so there is no correctness
+  # gap to loosen for. Don't loosen it anyway: any change to the
+  # cratedigger-src input's shape in flake.nix (a new key here, in
+  # particular) requires updating this allowlist to match, or every
+  # subsequent pin fails here -- known constraint, not a mystery deploy
+  # failure.
+  if ! extra_keys=$(jq -er '(.nodes["cratedigger-src"].original | keys)
+    - ["type", "owner", "repo"] | join(",")' "$lock_file"); then
+    die "cratedigger-src input's original node is missing or not an object in $lock_file"
+    return 1
+  fi
+  if [[ -n "$extra_keys" ]]; then
+    die "cratedigger-src input has unrecognised keys ($extra_keys) in $lock_file"
+    return 1
+  fi
+  if ! node_type=$(jq -er '.nodes["cratedigger-src"].original.type
+    | select(type == "string")' "$lock_file"); then
+    die "cratedigger-src input has no readable original.type in $lock_file"
+    return 1
+  fi
+  if [[ "$node_type" != 'github' ]]; then
+    die "cratedigger-src input type must be github (actual=$node_type)"
+    return 1
+  fi
+  if ! owner=$(jq -er '.nodes["cratedigger-src"].original.owner
+    | select(type == "string" and test("^[A-Za-z0-9._-]+$"))' "$lock_file"); then
+    die "cratedigger-src input owner is missing or malformed in $lock_file"
+    return 1
+  fi
+  if ! repo=$(jq -er '.nodes["cratedigger-src"].original.repo
+    | select(type == "string" and test("^[A-Za-z0-9._-]+$"))' "$lock_file"); then
+    die "cratedigger-src input repo is missing or malformed in $lock_file"
+    return 1
+  fi
+  printf 'github:%s/%s/%s' "$owner" "$repo" "$revision"
+}
+
 verify_ssh_signature() {
   local revision=$1
   local signature_status commit_object
@@ -241,7 +308,7 @@ main() {
   local receipt_parent_target status_output
   local previous_receipt=''
   local candidate_revision git_common_dir origin_url verification_rc
-  local fetch_url_output push_url_output
+  local fetch_url_output push_url_output cratedigger_flake_ref
   local -a fetch_urls push_urls
 
   (($# == 2)) \
@@ -403,7 +470,7 @@ main() {
           "$receipt_revision" "$remote_revision"; then
         verify_stable_remote_pin "$remote_revision"
         [[ "$VERIFIED_REMOTE_TARGET" == "$VERIFIED_TARGET" ]] \
-          || die "different pin is still pending: requested=$target_revision pending_target=$VERIFIED_TARGET pending=$receipt_revision base=$VERIFIED_PARENT remote=$remote_revision"
+          || die "different pin is still pending: requested=$target_revision pending_target=$VERIFIED_TARGET pending=$receipt_revision base=$VERIFIED_PARENT remote=$remote_revision -- this pending pin never reached Forgejo master; re-run with target=$VERIFIED_TARGET first to land it, then re-run with target=$target_revision"
       fi
     fi
   fi
@@ -433,9 +500,26 @@ main() {
     "$WORKTREE" "$remote_revision"
   git -C "$WORKTREE" symbolic-ref HEAD "$PENDING_REF"
 
+  cratedigger_flake_ref=$(cratedigger_override_ref \
+    "$WORKTREE/flake.lock" "$target_revision")
   (
     cd "$WORKTREE"
-    nix flake update cratedigger-src
+    # Pin the exact requested revision instead of following
+    # github:abl030/cratedigger's branch tip: the input carries no fixed ref,
+    # so a plain `nix flake update cratedigger-src` can only ever reproduce
+    # whatever the tip happens to be right now, and any requested target that
+    # is not that tip is physically unproducible. That was the root cause of
+    # the #1203 pin-receipt deadlock: a pending receipt whose target had
+    # fallen behind cratedigger main could re-request neither the new
+    # target (blocked by the receipt-divergence guard earlier in main())
+    # nor its own old target (the tip had already moved past it too), with
+    # no sanctioned exit. Honest tradeoff: this also removes a real race
+    # that existed before -- anyone merging to cratedigger main between this
+    # helper's fetch and its own flake update used to make the run fail
+    # outright; overriding the exact revision makes that race impossible by
+    # construction.
+    nix flake update cratedigger-src \
+      --override-input cratedigger-src "$cratedigger_flake_ref"
   )
   status_output=$(git -C "$WORKTREE" status --porcelain)
   [[ "$status_output" == ' M flake.lock' ]] \

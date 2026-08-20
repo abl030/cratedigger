@@ -16,7 +16,7 @@ import subprocess as sp
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from lib import transitions
 from lib.dispatch.evidence_gate import (
@@ -100,8 +100,9 @@ if TYPE_CHECKING:
         CandidateEvidenceActionResult,
         CurrentEvidenceActionResult,
     )
+    from lib.library_delete_notifiers import DeleteNotification
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
-    from lib.quality import SpectralDetail
+    from lib.quality import DuplicateRemoveCandidate, SpectralDetail
 
 logger = logging.getLogger("cratedigger")
 
@@ -524,18 +525,239 @@ def _should_cleanup_action_file(
     )
 
 
+def _normalize_media_server_path(path: str) -> str:
+    """Comparison key for a beets album path: whitespace/trailing-slash/``.``
+    segment differences must not count as "the path changed". Pure string
+    normalization only (no filesystem access) — safe to call in a generated
+    property with paths that don't exist."""
+    stripped = path.strip()
+    return os.path.normpath(stripped) if stripped else ""
+
+
+def _snapshot_current_album_directories(
+    *,
+    beets_library_db_path: str,
+    beets_library_root: str,
+    mb_release_id: str,
+) -> dict[int, str]:
+    """Open Beets read-only and return every album directory it currently
+    holds for ``mb_release_id`` (issue #1203 item 2's authoritative
+    before/after snapshot source — see
+    ``BeetsDB.get_current_album_directories``). May raise; the caller
+    (``_capture_album_directory_snapshot``) owns the best-effort boundary so
+    an injected test replacement is held to the identical contract as
+    production."""
+    if not mb_release_id:
+        return {}
+    from lib.beets_db import BeetsDB
+
+    with BeetsDB(
+        beets_library_db_path, library_root=beets_library_root,
+    ) as beets_db:
+        return beets_db.get_current_album_directories(mb_release_id)
+
+
+def _capture_album_directory_snapshot(
+    snapshot_fn: Callable[..., dict[int, str]],
+    *,
+    beets_library_db_path: str,
+    beets_library_root: str,
+    mb_release_id: str,
+    when: Literal["pre-import", "post-import"],
+) -> dict[int, str]:
+    """Best-effort call boundary around ``snapshot_fn`` (default
+    ``_snapshot_current_album_directories``): a failure here logs and yields
+    an empty snapshot rather than failing an import that already succeeded
+    (issue #1203 item 2). ``when`` names which side of the diff failed, for
+    the log line."""
+    try:
+        return snapshot_fn(
+            beets_library_db_path=beets_library_db_path,
+            beets_library_root=beets_library_root,
+            mb_release_id=mb_release_id,
+        )
+    except Exception:
+        logger.exception(
+            "MEDIA SERVER RECONCILE: %s album-directory snapshot failed "
+            "for %r (non-fatal)", when, mb_release_id)
+        return {}
+
+
+def _vanished_album_directories(
+    pre_import: dict[int, str],
+    post_import: dict[int, str],
+) -> list[str]:
+    """Every pre-import album directory Beets no longer holds for this
+    release (issue #1203 item 2's primary, authoritative source) — a plain
+    directory-SET comparison, not keyed by album id. A directory that moved
+    to a different album id, or whose album vanished entirely, is caught the
+    same way: it just isn't in the post-import directory set any more. This
+    is also why a same-path upgrade needs no special-casing against
+    ``imported_path``: the new path is simply still present in the post-
+    import set. A release held by several albums, with only one moved,
+    reports only that one album's old directory — the others' directories
+    are unchanged in both snapshots. Order-preserving over ``pre_import``'s
+    own iteration order (ascending album id — the order
+    ``BeetsDB.get_current_album_directories`` returns)."""
+    post_normalized = {
+        _normalize_media_server_path(path) for path in post_import.values()
+    }
+    out: list[str] = []
+    for old_path in pre_import.values():
+        norm = _normalize_media_server_path(old_path)
+        if not norm or norm in post_normalized:
+            continue
+        out.append(old_path)
+    return out
+
+
+def _paths_needing_media_server_reconciliation(
+    imported_path: str | None,
+    replaced_albums: Sequence[DuplicateRemoveCandidate],
+    vanished_snapshot_paths: Sequence[str],
+) -> list[str]:
+    """The pre-upgrade album paths (issue #1203 item 2) a path-changing
+    import left behind in Plex/Jellyfin.
+
+    ``vanished_snapshot_paths`` (the Beets before/after directory-set diff,
+    ``_vanished_album_directories``) is the PRIMARY, authoritative source.
+    ``replaced_albums`` (``postflight.replaced_albums``, the harness's
+    mid-import serialization) is a SECONDARY source unioned in — it still
+    names a replaced album whose identity differs from the one being
+    imported (a duplicate-by-title removal, or a merge-retag), which the
+    release-id-keyed snapshot can never see because it only ever queries
+    under the CURRENT release's own identity.
+
+    Both sources are gated identically: non-blank, distinct from the
+    (normalized) new imported path, and deduplicated across both sources
+    combined. Order-preserving: snapshot paths first, then any additional
+    replaced-album paths. Most imports keep the same path and have no
+    replaced albums, so the common case returns an empty list at zero cost.
+    """
+    imported_norm = _normalize_media_server_path(imported_path or "")
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _consider(path: str | None) -> None:
+        if not path:
+            return
+        norm = _normalize_media_server_path(path)
+        if not norm or norm == imported_norm or norm in seen:
+            return
+        seen.add(norm)
+        out.append(path)
+
+    for path in vanished_snapshot_paths:
+        _consider(path)
+    for candidate in replaced_albums:
+        _consider(candidate.album_path)
+    return out
+
+
+def _reconcile_vanished_replaced_album_paths(
+    cfg: CratediggerConfig,
+    *,
+    imported_path: str | None,
+    replaced_albums: Sequence[DuplicateRemoveCandidate],
+    vanished_snapshot_paths: Sequence[str] = (),
+    notify_fn: Callable[..., tuple[DeleteNotification, ...]] | None = None,
+) -> None:
+    """Tell Plex/Jellyfin about every pre-upgrade path a path-changing import
+    left behind (issue #1203 item 2).
+
+    MUST run last in ``_trigger_post_import_notifiers`` — after BOTH pin
+    captures and BOTH new-path notifiers. ``capture_jellyfin_date_created_pin``
+    reads ``replaced_albums``'s old paths synchronously to find the
+    pre-upgrade Jellyfin item (item identity is a hash of the path); this
+    call must never run before that capture, as a standing ordering
+    guarantee for every media-server action this reconciler could ever take
+    — see ``docs/jellyfin-primer.md`` for exactly what the Jellyfin leg does
+    today (detect-and-report only) and why even that is kept behind the pin
+    capture rather than relying on it being currently non-destructive.
+
+    Reuses ``notify_library_delete`` with ``allow_escalation=False``: a
+    routine post-import notification must never fall back to a Plex
+    library-root scan, and on Jellyfin must never call the refresh endpoint
+    at all — Jellyfin's own deletion model (a source-level finding, see
+    ``lib/library_delete_notifiers.py::notify_library_delete``'s own
+    docstring) makes a targeted refresh both incapable of reaping the
+    vanished item and liable to delete its child rows instead. Plex still
+    submits its nearest-existing-ancestor partial scan (the same mechanism
+    the destructive-delete caller uses); Jellyfin only finds the item by its
+    former path and reports what it found. Best-effort: a failure here never
+    fails an import that already succeeded.
+
+    Every outcome ``notify_library_delete`` returns is logged at a level an
+    operator would actually see — a reconciler that silently no-ops on every
+    upgrade (the common ``skipped``/``warning`` case: Plex/Jellyfin not
+    configured, or Jellyfin's found-but-not-refreshed report) would
+    otherwise be invisible in the journal.
+    """
+    from lib.library_delete_notifiers import notify_library_delete
+
+    notify = notify_fn or notify_library_delete
+    for old_path in _paths_needing_media_server_reconciliation(
+        imported_path, replaced_albums, vanished_snapshot_paths,
+    ):
+        try:
+            outcomes = notify(cfg, old_path, allow_escalation=False)
+        except Exception:
+            logger.exception(
+                "MEDIA SERVER RECONCILE: vanished-path reconciliation "
+                "failed for %r (non-fatal)", old_path)
+            continue
+        for outcome in outcomes:
+            log_fn = (
+                logger.warning if outcome.status == "warning"
+                else logger.info
+            )
+            log_fn(
+                "MEDIA SERVER RECONCILE: %s %s for %r: %s",
+                outcome.provider, outcome.status, old_path, outcome.detail)
+
+
 def _trigger_post_import_notifiers(
     cfg: CratediggerConfig,
     db: PipelineDB,
     *,
     import_result: ImportResult,
     request_id: int,
+    mb_release_id: str,
     import_job_id: int | None,
     execution_lease: ExecutionLeaseSnapshot | None,
     cancellation_token: CancellationToken | None,
     owner_session_identity: OwnerSessionIdentity | None,
+    beets_library_db_path: str,
+    beets_library_root: str,
+    pre_import_album_directories: dict[int, str],
+    album_directory_snapshot_fn: Callable[..., dict[int, str]],
+    media_server_notify_fn: (
+        Callable[..., tuple[DeleteNotification, ...]] | None
+    ) = None,
 ) -> None:
-    """Capture historical pins, then refresh both configured media servers."""
+    """Capture historical pins, refresh both configured media servers, then
+    reconcile any pre-upgrade path a path-changing import left behind.
+
+    ``pre_import_album_directories`` is the snapshot ``dispatch_import_core``
+    captured before Beets launch; this function takes the matching
+    POST-import snapshot and diffs the two (issue #1203 item 2) —
+    ``_vanished_album_directories``'s output is the authoritative primary
+    source for vanished directories, ahead of the secondary
+    ``postflight.replaced_albums`` source.
+
+    Beets state is already final by the time this function runs — the
+    import subprocess that could mutate it already completed before
+    ``dispatch_import_core`` ever calls this — so the snapshot diff itself
+    is taken up front, not at the reconciler call. This is deliberate: it
+    lets the SAME vanished-directory set reach BOTH the Jellyfin pin
+    capture below and the reconciler at the end, instead of the pin capture
+    seeing every album the release still holds (see the pin capture call
+    site for why that would be wrong). Only the media-server NOTIFY call
+    itself carries the ordering constraint — it MUST stay last, after both
+    pin captures and both new-path notifiers (see
+    ``_reconcile_vanished_replaced_album_paths`` docstring for why);
+    reading Beets earlier does not.
+    """
     from lib.util import trigger_jellyfin_scan as trigger_jellyfin
     from lib.util import trigger_plex_scan as trigger_plex
 
@@ -546,6 +768,18 @@ def _trigger_post_import_notifiers(
         cancellation_token=cancellation_token,
         owner_session_identity=owner_session_identity,
     )
+
+    post_import_album_directories = _capture_album_directory_snapshot(
+        album_directory_snapshot_fn,
+        beets_library_db_path=beets_library_db_path,
+        beets_library_root=beets_library_root,
+        mb_release_id=mb_release_id,
+        when="post-import",
+    )
+    vanished_directories = _vanished_album_directories(
+        pre_import_album_directories, post_import_album_directories,
+    )
+
     imported_path = import_result.postflight.imported_path
     plex_original_added_at: int | None = None
     try:
@@ -571,15 +805,43 @@ def _trigger_post_import_notifiers(
             imported_path,
             request_id,
             historical_added_at=plex_original_added_at,
+            # Union the PRIMARY snapshot source (issue #1203 item 2) ahead of
+            # the secondary postflight.replaced_albums source, same ordering
+            # convention as the reconciler itself. ``vanished_directories``
+            # (computed above) is the GENUINELY-vanished set only -- never
+            # the raw pre_import_album_directories.values(). That distinction
+            # matters: pre_import_album_directories holds EVERY album the
+            # release still holds, not just ones that left. A release held
+            # by several albums (a surviving sibling under the same
+            # identity) would otherwise leak the sibling's own directory in
+            # here, and capture_jellyfin_date_created_pin would then pin a
+            # genuinely-new import against the SIBLING's Jellyfin item and
+            # date, clamping the new album's DateCreated backwards and
+            # hiding it from Recently Added.
             replaced_album_paths=[
-                candidate.album_path
-                for candidate in import_result.postflight.replaced_albums
-                if candidate.album_path
+                *vanished_directories,
+                *(
+                    candidate.album_path
+                    for candidate in import_result.postflight.replaced_albums
+                    if candidate.album_path
+                ),
             ],
         )
     except Exception:
         logger.exception("JELLYFIN PIN: capture wiring failed (non-fatal)")
     trigger_jellyfin(cfg, imported_path)
+
+    # MUST run last — see _reconcile_vanished_replaced_album_paths docstring
+    # for why this cannot move before the Jellyfin pin capture above. The
+    # snapshot diff itself (vanished_directories) was already computed at
+    # the top of this function; only the notify call is ordering-sensitive.
+    _reconcile_vanished_replaced_album_paths(
+        cfg,
+        imported_path=imported_path,
+        replaced_albums=import_result.postflight.replaced_albums,
+        vanished_snapshot_paths=vanished_directories,
+        notify_fn=media_server_notify_fn,
+    )
 
 
 def _resolve_dispatch_beets_paths(
@@ -692,6 +954,12 @@ def dispatch_import_core(
     execution_lease: ExecutionLeaseSnapshot | None = None,
     cancellation_token: CancellationToken | None = None,
     owner_session_identity: OwnerSessionIdentity | None = None,
+    album_directory_snapshot_fn: Callable[
+        ..., dict[int, str]
+    ] = _snapshot_current_album_directories,
+    media_server_notify_fn: (
+        Callable[..., tuple[DeleteNotification, ...]] | None
+    ) = None,
 ) -> DispatchOutcome:
     """Core import dispatch — takes plain params + PipelineDB directly.
 
@@ -715,6 +983,24 @@ def dispatch_import_core(
             db_path=beets_library_db_path,
             library_root=beets_library_root,
         )
+    )
+
+    # Snapshot every album directory Beets currently holds for this release,
+    # before THIS dispatch's own beets-mutating subprocess launches
+    # (issue #1203 item 2) — the authoritative "before" half of the
+    # post-import reconciler's diff. On the automation lane the caller
+    # already holds the RELEASE advisory lock (acquired outer, before
+    # dispatch_import_core was even called), so this snapshot is fenced
+    # against a concurrent writer there; on the force/local lane this point
+    # is still BEFORE the lock is first acquired below, so it is not fenced
+    # against a fully concurrent external writer on that lane. Best-effort:
+    # see _capture_album_directory_snapshot.
+    pre_import_album_directories = _capture_album_directory_snapshot(
+        album_directory_snapshot_fn,
+        beets_library_db_path=effective_beets_library_db_path,
+        beets_library_root=effective_beets_library_root,
+        mb_release_id=mb_release_id,
+        when="pre-import",
     )
 
     # Operation identity is distinct from the eventual download-log outcome:
@@ -1432,10 +1718,16 @@ def dispatch_import_core(
                         db,
                         import_result=ir,
                         request_id=request_id,
+                        mb_release_id=mb_release_id,
                         import_job_id=candidate_import_job_id,
                         execution_lease=active_execution_lease,
                         cancellation_token=cancellation_token,
                         owner_session_identity=owner_session_identity,
+                        beets_library_db_path=effective_beets_library_db_path,
+                        beets_library_root=effective_beets_library_root,
+                        pre_import_album_directories=pre_import_album_directories,
+                        album_directory_snapshot_fn=album_directory_snapshot_fn,
+                        media_server_notify_fn=media_server_notify_fn,
                     )
                 if action.cleanup and _should_cleanup_path(scenario, action):
                     # Issue #89: force-import passes the user's
