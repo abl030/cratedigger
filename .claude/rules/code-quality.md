@@ -563,10 +563,18 @@ is for a SECOND invocation inside an already-entered shell (interactive
 dev use, or any caller that skips the wrapper `.sh` and its shellHook),
 where nothing else re-checks headroom between shell entry and that call.
 Neither burst takes `acquire_suite_admission`'s exclusive lock or
-`reap_stale_check_bundles`'s scratch reaping; each `main`'s own docstring
-records the reasoning (both are long-running, variable-duration bursts
-that would starve or force raising the timeout on the bounded queue an
-ordinary `scripts/test.sh` dev-loop run waits on). Both pass
+`reap_stale_check_bundles`'s scratch reaping. Independent review B-4 (third
+round, issue #1156): these are two SEPARATE decisions, and only the lock one
+is where this paragraph previously claimed both were -- each `main`'s own
+docstring records the lock reasoning (both are long-running, variable-
+duration bursts that would starve or force raising the timeout on the
+bounded queue an ordinary `scripts/test.sh` dev-loop run waits on); neither
+docstring mentions `reap_stale_check_bundles` at all. The reaping decision
+is simpler and stated here instead: `reap_stale_check_bundles` only reaps
+`cratedigger-checks.*`/fixture-prefixed scratch under the ADMISSION LOCK
+(`scripts/run_test_suite.py::run_suite`, called for neither burst), so a
+burst that never takes that lock has no reap call to make in the first
+place -- there is no burst-specific tradeoff to document. Both pass
 `worker_count=1` to `headroom_floor_bytes`
 (the flat, override-respecting `DEFAULT_MIN_HEADROOM_BYTES` floor), not a
 worker-scaled one: neither burst has a MEASURED per-worker tmpfs footprint

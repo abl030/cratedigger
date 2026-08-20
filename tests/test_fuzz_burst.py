@@ -819,6 +819,13 @@ class TestFuzzMainMidRunHeadroom(unittest.TestCase):
         )
         # main()'s own terminal summary line (line ~1494-1499).
         self.assertIn("property verdict invalid", output)
+        # Independent review B-2 (third round): the OTHER identity token in
+        # main()'s own terminal summary (line ~1500-1501) was previously
+        # unconstrained -- replacing TEST_RAM_ROOT_EXHAUSTED with a generic
+        # literal there survived every existing assertion above.
+        self.assertIn(
+            f"fuzz burst: {TEST_RAM_ROOT_EXHAUSTED} mid-run after", output
+        )
         self.assertGreaterEqual(calls["count"], 3)
 
     def test_unavailable_runtime_dir_aborts_cleanly_not_as_a_raw_traceback(

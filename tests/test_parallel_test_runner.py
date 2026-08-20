@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import errno
 import io
@@ -10,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import replace
 from pathlib import Path
@@ -63,6 +64,7 @@ from scripts.run_python_tests import (
     hotspot_targets,
     hypothesis_example_budgets,
     list_module_test_ids,
+    main,
     recommended_worker_count,
     resolve_hypothesis_settings,
     schedule_modules,
@@ -152,10 +154,16 @@ class TestWorkerCrashClassification(unittest.TestCase):
         self.assertIn("FileNotFoundError", failure.detail)
 
     def test_ample_measured_headroom_is_an_ordinary_worker_failure(self) -> None:
+        # Independent review B-6 (third round): pins minimum_bytes=0 --
+        # the identical ambient-CRATEDIGGER_TEST_RAM_MIN_BYTES-coupling
+        # shape B2 fixed in TestWorkerMemoryExhaustionClassification next
+        # door. Without it, a large-enough ambient floor makes this
+        # available_bytes=10 GiB fixture read as disk_full too.
         failure = _classify_target_infrastructure_failure(
             _target("tests.test_alpha"),
             RuntimeError("target subprocess exited 1: traceback"),
             available_bytes=lambda: 10 * 1024 * 1024 * 1024,
+            minimum_bytes=0,
         )
 
         self.assertFalse(failure.disk_full)
@@ -1679,6 +1687,92 @@ class TestRunnerProcessContract(unittest.TestCase):
             set(marker.test_ids),
             {"fixture_tests.test_alpha0", "fixture_tests.test_alpha1"},
         )
+
+    def test_both_markers_present_falls_through_to_the_ordinary_failure_code(
+        self,
+    ) -> None:
+        """Independent review B-3 (third round): the two-clause promotion
+        guard in main() (`... and ram_root_marker is not None and
+        memory_marker is None` / the mirrored clause for memory) implements
+        the documented F10 residual -- BOTH markers present is a
+        HETEROGENEOUS failure set, so promotion is skipped and the run
+        falls through to plain `return 1`. Deleting either `is None` clause
+        survived every prior test, since none seeded BOTH markers in one
+        run.
+
+        A REAL subprocess reproduction of this scenario was tried first
+        and abandoned: a killed ProcessPoolExecutor worker poisons the
+        WHOLE pool for every future still tracked at that moment
+        (concurrent.futures' own documented semantics), including a
+        SEPARATE target's already-in-flight ENOSPC classification --
+        reproduced deterministically (3/3 runs, both --jobs 2 racing the
+        two targets and --jobs 1 sequencing them) as BOTH targets folding
+        into the SAME memory_exhausted marker, never the heterogeneous
+        scenario this guard exists to handle. `run_targets_fn` (mirroring
+        the burst `main`s' own `check_headroom` DI seam, issue #1156 item
+        3) replaces exactly that one real subprocess boundary with two
+        pre-built failures -- one disk_full, one memory_exhausted, using
+        the REAL schedule main() itself discovers -- while every other
+        line of main() (CLI parsing, discovery, scheduling, both collapse
+        helpers, printing, exit-code selection) runs unmocked."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            tests_dir = root / "fixture_tests"
+            tests_dir.mkdir()
+            (tests_dir / "__init__.py").write_text("", encoding="utf-8")
+            (tests_dir / "test_alpha.py").write_text(
+                "import unittest\n\n"
+                "class Alpha(unittest.TestCase):\n"
+                "    def test_ok(self):\n"
+                "        pass\n",
+                encoding="utf-8",
+            )
+            (tests_dir / "test_beta.py").write_text(
+                "import unittest\n\n"
+                "class Beta(unittest.TestCase):\n"
+                "    def test_ok(self):\n"
+                "        pass\n",
+                encoding="utf-8",
+            )
+
+            def seeded_run_targets(
+                schedule: Sequence[TestTarget], **_kwargs: object
+            ) -> tuple[
+                tuple[TargetRunResult, ...],
+                tuple[TargetInfrastructureFailure, ...],
+            ]:
+                targets = tuple(schedule)
+                self.assertEqual(len(targets), 2)
+                disk_failure = TargetInfrastructureFailure(
+                    target=targets[0],
+                    detail="temporary filesystem has 0 bytes free",
+                    disk_full=True,
+                )
+                memory_failure = TargetInfrastructureFailure(
+                    target=targets[1],
+                    detail=(
+                        "system memory has 0 bytes available; "
+                        "BrokenProcessPool: fake worker death"
+                    ),
+                    memory_exhausted=True,
+                )
+                return (), (disk_failure, memory_failure)
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                status = main(
+                    (
+                        "--start-directory", str(tests_dir),
+                        "--top-level-directory", str(root),
+                        "--jobs", "2",
+                    ),
+                    run_targets_fn=seeded_run_targets,
+                )
+            output = stdout.getvalue()
+
+        self.assertEqual(status, 1, output)
+        self.assertIn(TEST_RAM_ROOT_EXHAUSTED, output)
+        self.assertIn(TEST_HOST_MEMORY_EXHAUSTED, output)
 
     def test_each_module_gets_a_fresh_python_interpreter(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

@@ -1622,7 +1622,31 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    run_targets_fn: Callable[
+        ...,
+        tuple[tuple[TargetRunResult, ...], tuple[TargetInfrastructureFailure, ...]],
+    ] = _run_targets,
+) -> int:
+    """Run the deterministic Python suite phase's CLI entry point.
+
+    ``run_targets_fn`` mirrors the ``check_headroom`` DI seam on the fuzz
+    and world-model bursts' own ``main`` functions (issue #1156 item 3):
+    ``_run_targets`` (the production default) is the ONE real boundary that
+    talks to a genuine ``ProcessPoolExecutor`` and its subprocess-level
+    worker-death semantics -- a worker dying poisons the WHOLE pool for
+    every still-tracked future, so two independently-classified real
+    deaths (one disk_full, one memory_exhausted) cannot be produced
+    deterministically in a single real run. Independent review B-3 (third
+    round): the two-clause promotion guard below needs exactly that
+    heterogeneous-marker scenario to prove its own `is None` clauses are
+    load-bearing; the test seeds it by replacing this ONE real boundary
+    with pre-built results, while every other line of `main` -- CLI
+    parsing, discovery, scheduling, the collapse helpers, printing, exit
+    code selection -- runs for real, unmocked.
+    """
     args = _parser().parse_args(argv)
     top = args.top_level_directory.resolve()
     start = args.start_directory
@@ -1672,7 +1696,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"({sharded_target_count} audited hotspot targets)"
     )
     started_at = time.monotonic()
-    results, infrastructure_failures = _run_targets(
+    results, infrastructure_failures = run_targets_fn(
         schedule,
         worker_count=worker_count,
         top_level_directory=top,
