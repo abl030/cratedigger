@@ -285,23 +285,29 @@ def _cached_nix_eval_json(expression: str) -> dict[str, object]:
 def _shared_module_worlds_web_auth_matrix_part1() -> dict[str, object]:
     """The first of two bounded ``webAuthMatrix`` nix evals (issue #1156 item 1).
 
-    Splits the 39 independent, equal-cost worlds this module's single
+    Splits the independent, roughly-balanced worlds this module's single
     heaviest target used to force in one ``nix eval`` subprocess (measured
     57.2-61.0s solo across three quiet-host runs, mean ~58.5s; the prior
     #1131 docstring's 65.44s was this same target measured on an earlier
-    host state) into two roughly-balanced halves so the target's own solo
-    floor drops without changing what is evaluated or asserted. This half
-    carries the first 20 worlds in declaration order (``missing`` through
-    ``rootAccessGroup``); :func:`_shared_module_worlds_web_auth_matrix_part2`
-    carries the remaining 19.
+    host state) into two halves so the target's own solo floor drops
+    without changing what is evaluated or asserted. This half carries
+    ``missing`` through ``rootAccessGroup`` in declaration order;
+    :func:`_shared_module_worlds_web_auth_matrix_part2` carries
+    ``wheelAccessGroup`` through ``nginxRestartDisabled``.
 
     Measured solo (quiet host): this half alone 31.9s, the other half alone
-    28.3s (59.0s summed vs the original single target's ~58.5s mean -- the
-    ~1s preamble each half now pays independently is exactly the modest,
-    bounded cost #1131's own docstring already priced in). Measured
-    concurrently (both halves launched together, no other suite load):
-    33.2s wall -- close to the per-half floor, confirming the two
-    subprocesses barely interfere with each other in isolation.
+    28.3s -- 60.2s summed vs the original single target's ~58.5s mean,
+    +1.7s (an earlier draft of this sentence reported a wrong sum here;
+    corrected). Splitting pays exactly ONE additional shared preamble
+    (``getFlake`` + ``import nixpkgs`` + ``import ./nix/beets.nix``,
+    measured well under 1s standalone) -- one before the split, two after
+    -- not one per half, so the predicted overhead is ~1s; the measured
+    +1.7s is close to that (independent review's own measurement
+    corroborates the same shape: 59.75s base vs 33.85s + 28.13s = 61.98s
+    split, +2.23s/+3.7%). Measured concurrently (both halves launched
+    together, no other suite load): 33.2s wall -- close to the per-half
+    floor, confirming the two subprocesses barely interfere with each
+    other in isolation.
 
     That isolation number was NOT what decided this split -- three
     interleaved (baseline, candidate) pairs of full ``run_tests.sh``
@@ -328,16 +334,34 @@ def _shared_module_worlds_web_auth_matrix_part1() -> dict[str, object]:
     ambient contention, before this change touches anything) -- a real,
     if modest, net win with no evidence of the feared regression, not the
     dramatic headline number the solo floor alone would suggest.
+    Independent review's own controlled paired probes (real evals plus
+    synthetic CPU spinners held at fixed concurrency, isolating the
+    concurrency effect from ambient host noise) confirmed the same
+    direction more sharply: -22.6%/-29.5% at ~21-22 busy (this suite's real
+    worker count) and 72.3s -> 57.6s (-20.4%) at ~29-30 busy (at/over core
+    count), four paired runs all favouring the split; ``_rest`` was NOT
+    hurt by gaining a third competitor, and measured memory never dropped
+    below 21 of 32 GB.
 
-    Two of the original test method's assertion groups spanned this 20/21
-    world boundary (a 3-tuple checking "must be dedicated" across
-    ``serviceGroupOverlap``, ``nginxGroupOverlap``, ``secretGroupOverlap``,
-    and a 2-tuple checking "forbidden authority group" across
-    ``rootAccessGroup``, ``wheelAccessGroup``). Each was split into its own
-    half's assertions on the same message substrings against the same
-    worlds -- a partitioning change, not a coverage change: every world
-    this module ever evaluated is still evaluated, by exactly one half, and
-    asserted with the identical check it always got.
+    The ``serviceGroupOverlap``/``nginxGroupOverlap``/``secretGroupOverlap``
+    "must be dedicated" check and the ``rootAccessGroup``/
+    ``wheelAccessGroup`` "forbidden authority group" check both originally
+    lived in one ``for`` loop spanning the ``rootAccessGroup``/
+    ``wheelAccessGroup`` boundary this split introduces. Every one of the
+    original method's 39 ``worlds[...]`` references names exactly one
+    world -- there is no cross-world comparison anywhere in the base
+    method, so splitting a same-substring-check loop across that boundary
+    cannot weaken anything; each check now runs once, in whichever half
+    holds the world it names, on the identical message substring it
+    always checked. Independent review planted three mutants directly
+    against this claim; all three killed cleanly on both halves (record
+    in the shipping commit's kill matrix): dropping the ``accessGroup``
+    exclusion in ``nix/module.nix`` failed ``serviceGroupOverlap`` in this
+    half and ``secretGroupOverlap`` in the other; removing "root"/"wheel"
+    from the forbidden-group set failed ``rootAccessGroup`` here and
+    ``wheelAccessGroup`` there, independently; deleting a world's own
+    block from either half's expression failed that half with a
+    ``KeyError`` on the deleted world's name.
 
     See ``HOTSPOT_ISOLATED_METHODS`` in ``scripts/run_python_tests.py`` for
     the scheduler half of this split: both this function's sole consumer
@@ -345,6 +369,18 @@ def _shared_module_worlds_web_auth_matrix_part1() -> dict[str, object]:
     same reason the original single-target carve-out did -- the whole
     point is defeated if either ever shares a worker process with a
     neighbour it was not measured against.
+
+    The ~45-line Nix preamble (``getFlake``/``nixpkgs``/``beetsPackage``
+    header plus the shared ``evaluate`` base-world definition) is
+    byte-identical between this function and
+    :func:`_shared_module_worlds_web_auth_matrix_part2` today, with
+    nothing enforcing that beyond this claim -- the per-world assertions
+    above are same-world substring checks and so cannot detect one half's
+    base world silently drifting from the other's.
+    ``TestWebAuthMatrixPreamblesStayIdentical`` below pins the two
+    expressions' non-world regions equal so a future edit to one half's
+    base world cannot pass unnoticed while every existing assertion still
+    goes green.
     """
     expression = r'''
       let
@@ -557,7 +593,7 @@ def _shared_module_worlds_web_auth_matrix_part2() -> dict[str, object]:
     item 1). See :func:`_shared_module_worlds_web_auth_matrix_part1` for the
     full rationale, the measured solo/concurrent/under-load numbers, and why
     this split is a measured boundary decision, not merely half the file.
-    This half carries the remaining 19 worlds in declaration order
+    This half carries the remaining worlds in declaration order
     (``wheelAccessGroup`` through ``nginxRestartDisabled``). Measured solo
     (quiet host): 28.3s. Under full-suite load across the same three
     interleaved pairs, this half itself measured 46.3s / 48.3s / 53.0s.
@@ -799,6 +835,139 @@ def _shared_module_worlds_web_auth_matrix_part2() -> dict[str, object]:
     return _cached_nix_eval_json(expression)
 
 
+_WEB_AUTH_MATRIX_PART1_FIRST_WORLD_MARKER = "missing = evaluate {"
+_WEB_AUTH_MATRIX_PART2_FIRST_WORLD_MARKER = "wheelAccessGroup = evaluate {"
+
+
+def _web_auth_matrix_expression_source(function_name: str) -> str:
+    """The literal ``expression = r'''...'''`` string inside ``function_name``.
+
+    Static AST extraction of the source, not execution -- this module's own
+    established idiom for source-level Nix content checks (``_nix_source``,
+    :func:`strip_line_comments`). Reading the literal avoids paying for a
+    ``nix eval`` just to compare two Python string constants.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            for stmt in node.body:
+                if (
+                    isinstance(stmt, ast.Assign)
+                    and len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], ast.Name)
+                    and stmt.targets[0].id == "expression"
+                    and isinstance(stmt.value, ast.Constant)
+                    and isinstance(stmt.value.value, str)
+                ):
+                    return stmt.value.value
+    raise AssertionError(
+        f"no literal `expression = r'''...'''` assignment found in {function_name}"
+    )
+
+
+def _assert_web_auth_matrix_preambles_equal(
+    part1_expression: str,
+    part2_expression: str,
+    *,
+    part1_marker: str = _WEB_AUTH_MATRIX_PART1_FIRST_WORLD_MARKER,
+    part2_marker: str = _WEB_AUTH_MATRIX_PART2_FIRST_WORLD_MARKER,
+) -> None:
+    """Issue #1156 item 1 review F3: the two split halves DUPLICATE (not
+    share) the ~45-line Nix preamble (``getFlake``/``nixpkgs``/
+    ``beetsPackage`` header plus the shared ``evaluate`` base-world
+    definition) -- nothing else keeps the two copies equal, and every
+    per-world assertion in both halves is a same-world substring check, so
+    none of them can detect one copy's base world silently drifting from
+    the other's. This is the guard that closes that gap.
+
+    Pure function so the pin test can drive it against the real file AND a
+    known-bad self-test can drive it against fabricated, controlled input
+    without touching disk or paying for a fresh ``nix eval``.
+    """
+    part1_header, part1_sep, _ = part1_expression.partition(part1_marker)
+    part2_header, part2_sep, _ = part2_expression.partition(part2_marker)
+    if not part1_sep:
+        raise AssertionError(f"part1 world-list marker not found: {part1_marker!r}")
+    if not part2_sep:
+        raise AssertionError(f"part2 world-list marker not found: {part2_marker!r}")
+    normalized_part1 = part1_header.replace(
+        "webAuthMatrixPart1 =", "webAuthMatrixPartN ="
+    )
+    normalized_part2 = part2_header.replace(
+        "webAuthMatrixPart2 =", "webAuthMatrixPartN ="
+    )
+    if normalized_part1 != normalized_part2:
+        raise AssertionError(
+            "the two webAuthMatrix halves' shared Nix preamble/evaluate "
+            "base world has drifted -- see "
+            "_shared_module_worlds_web_auth_matrix_part1's docstring for "
+            "why no per-world assertion can catch this"
+        )
+
+
+class TestWebAuthMatrixPreamblesStayIdentical(unittest.TestCase):
+    """Issue #1156 item 1 review F3. See
+    :func:`_assert_web_auth_matrix_preambles_equal`.
+    """
+
+    def test_real_halves_are_identical_today(self) -> None:
+        _assert_web_auth_matrix_preambles_equal(
+            _web_auth_matrix_expression_source(
+                "_shared_module_worlds_web_auth_matrix_part1"
+            ),
+            _web_auth_matrix_expression_source(
+                "_shared_module_worlds_web_auth_matrix_part2"
+            ),
+        )
+
+    def test_a_diverged_base_world_is_caught(self) -> None:
+        """Known-bad self-test: a base-world edit present in only one half
+        must fail this guard, even though it would pass every per-world
+        assertion in both halves (that is precisely the drift this guard
+        exists to catch)."""
+        part1 = (
+            "        webAuthMatrixPart1 =\n"
+            "          let\n"
+            "            evaluate = extra: /* base world */ null;\n"
+            "          in {\n"
+            "            missing = evaluate {};\n"
+        )
+        part2_diverged = (
+            "        webAuthMatrixPart2 =\n"
+            "          let\n"
+            "            evaluate = extra: /* DIFFERENT base world */ null;\n"
+            "          in {\n"
+            "            wheelAccessGroup = evaluate {};\n"
+        )
+        with self.assertRaisesRegex(AssertionError, "has drifted"):
+            _assert_web_auth_matrix_preambles_equal(part1, part2_diverged)
+
+    def test_identical_halves_pass(self) -> None:
+        """Must-still-work control for the self-test above."""
+        part1 = (
+            "        webAuthMatrixPart1 =\n"
+            "          let\n"
+            "            evaluate = extra: /* base world */ null;\n"
+            "          in {\n"
+            "            missing = evaluate {};\n"
+        )
+        part2_same = (
+            "        webAuthMatrixPart2 =\n"
+            "          let\n"
+            "            evaluate = extra: /* base world */ null;\n"
+            "          in {\n"
+            "            wheelAccessGroup = evaluate {};\n"
+        )
+        _assert_web_auth_matrix_preambles_equal(part1, part2_same)
+
+    def test_missing_marker_fails_closed(self) -> None:
+        """Known-bad self-test for the marker-not-found guard clauses."""
+        with self.assertRaisesRegex(AssertionError, "part1 world-list marker not found"):
+            _assert_web_auth_matrix_preambles_equal("no marker here", "wheelAccessGroup = evaluate {")
+        with self.assertRaisesRegex(AssertionError, "part2 world-list marker not found"):
+            _assert_web_auth_matrix_preambles_equal("missing = evaluate {", "no marker here")
+
+
 def _shared_module_worlds_rest() -> dict[str, object]:
     """The other five nix-eval worlds this module's tests still merge.
 
@@ -812,10 +981,21 @@ def _shared_module_worlds_rest() -> dict[str, object]:
     main's own worst-case bin-packed batch (~61.6s), not better. Issue
     #1156 item 1 later split that single ``webAuthMatrix`` target into
     ``_part1``/``_part2``, so this function is now one of THREE heavy
-    targets the module contributes rather than two — see
+    targets the module contributes rather than two, AND — because it did
+    not itself shrink while gaining a third competitor — this module's own
+    pole. Measured across the same three interleaved baseline/candidate
+    ``run_tests.sh`` pairs #1156 item 1's own shipping commit used: this
+    target ran 88.3s / 107.1s / 92.7s (mean 96.0s) before the split and
+    95.0s / 96.4s / 85.7s (mean 92.4s) after, competing against ONE extra
+    heavy sibling (-3.8%, not hurt by the extra competitor). On the
+    receipt bundle from the shipping commit's own ``check`` run, this
+    target (87.5s) was the single SLOWEST of all 463 targets in the whole
+    canonical suite, by 26s over the next entry — this module's own pole
+    is now the suite's own tail, which is the next lever if this module's
+    contribution is revisited. See
     :func:`_shared_module_worlds_web_auth_matrix_part1` for the measured
-    effect of that split on this target's own under-load time and on the
-    module's total contribution. Merging these four
+    effect of the split on the OTHER two targets this module contributes.
+    Merging these four
     also eliminates 3 of the 4 redundant ``getFlake`` + ``import nixpkgs``
     + ``import ./nix/beets.nix`` preambles they used to pay independently
     — each measured at well under 1s standalone, so the CPU this merge
@@ -1340,17 +1520,18 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
     """The enabled web surface has one fail-closed module-owned perimeter."""
 
     def test_basic_and_insecure_mode_matrix_is_evaluated_part1(self) -> None:
-        """Worlds 1-20 of the 39-world matrix (issue #1156 item 1).
+        """The ``missing``...``rootAccessGroup`` half of the webAuthMatrix
+        assertion matrix (issue #1156 item 1).
 
         See :func:`_shared_module_worlds_web_auth_matrix_part1` for why this
         is now two methods/targets instead of one, and
         ``test_basic_and_insecure_mode_matrix_is_evaluated_part2`` for the
         rest. The ``serviceGroupOverlap``/``nginxGroupOverlap``/
         ``secretGroupOverlap`` and ``rootAccessGroup``/``wheelAccessGroup``
-        checks straddled the 20/21 world boundary in the original single
-        method; each is now asserted once, in whichever half holds the
-        world it names, on the identical message substring it always
-        checked.
+        checks straddled the ``rootAccessGroup``/``wheelAccessGroup``
+        boundary in the original single method; each is now asserted once,
+        in whichever half holds the world it names, on the identical
+        message substring it always checked.
         """
         worlds = _shared_module_worlds_web_auth_matrix_part1()["webAuthMatrixPart1"]
         assert isinstance(worlds, dict)
@@ -1422,7 +1603,8 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         )
 
     def test_basic_and_insecure_mode_matrix_is_evaluated_part2(self) -> None:
-        """Worlds 21-39 of the 39-world matrix (issue #1156 item 1).
+        """The ``wheelAccessGroup``...``nginxRestartDisabled`` half of the
+        webAuthMatrix assertion matrix (issue #1156 item 1).
 
         See ``test_basic_and_insecure_mode_matrix_is_evaluated_part1`` for
         the split rationale and the two straddling checks this method

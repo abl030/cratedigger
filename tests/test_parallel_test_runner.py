@@ -1021,7 +1021,7 @@ class TestModuleScheduling(unittest.TestCase):
         # shows this module's pole inflating hard with concurrency: 88.0s
         # at 8 workers, 122.7s at 12, 147.7s at 16, 152.3s at 20). Issue
         # #1156 item 1 split that single heaviest consumer's own world
-        # matrix into two cost-balanced halves (below), raising the count
+        # matrix into two roughly-balanced halves (below), raising the count
         # to THREE — measured (three interleaved baseline/candidate full-
         # suite pairs) as a real, if modest, net win: the module's worst
         # single target dropped from a mean of 105.9s to 92.4s (-13%,

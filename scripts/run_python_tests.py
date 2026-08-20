@@ -101,8 +101,9 @@ AUDITED_FRONTLOAD_MODULES = frozenset({"tests.test_nix_module"})
 #: run.
 #:
 #: Issue #1156 item 1 split the single ``webAuthMatrix`` singleton itself
-#: into ``_part1``/``_part2`` (20/19 of its 39 independent worlds), raising
-#: this module's own concurrently-schedulable heavy-nix-eval target count
+#: into ``_part1``/``_part2`` (``missing``...``rootAccessGroup`` /
+#: ``wheelAccessGroup``...``nginxRestartDisabled``), raising this module's
+#: own concurrently-schedulable heavy-nix-eval target count
 #: from two to THREE — exactly the axis the original 2-target design
 #: capped, and exactly what the worker-count sweep below warns is
 #: sensitive to concurrency. Measured before shipping it (three interleaved
