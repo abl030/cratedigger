@@ -952,8 +952,9 @@ class TestMeasuredCostOrdering(unittest.TestCase):
 
     def test_an_empty_cache_leaves_the_heuristic_order_untouched(self) -> None:
         """Cold start must be exactly the pre-#1229 behaviour, not a
-        reshuffle: a stable sort over equal keys would still be a no-op,
-        but the empty cache short-circuits before sorting at all."""
+        reshuffle. There is no short-circuit for this case: every target is
+        unknown, so every sort key is equal and the stable sort returns the
+        incoming order. This drives the real sort, not a guard around it."""
         schedule = self._schedule("first", "second", "third")
 
         self.assertEqual(order_targets_by_measured_cost(schedule, {}), schedule)

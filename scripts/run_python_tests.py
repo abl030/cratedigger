@@ -1061,13 +1061,17 @@ def order_targets_by_measured_cost(
     equal cost -- including every target when the cache is empty -- keep
     the incoming heuristic order untouched.
     """
-    if not durations:
-        return tuple(schedule)
     # Strictly greater than every known cost, not equal to the largest: a
     # stable sort keeps ties in their incoming order, so `max(...)` would
     # leave an unknown target sitting BEHIND the dearest known one — the
     # opposite of the fail-safe direction this is documented to take.
     # (Caught by this function's own test, not by review.)
+    #
+    # This also makes an empty cache need no special case: every target is
+    # then unknown, every key is equal, and a stable sort returns the
+    # incoming order untouched. An `if not durations: return` short-circuit
+    # was written here first and removed — a planted mutant proved it had
+    # no observable behaviour at all, only a redundant branch to maintain.
     unknown_cost = math.inf
     return tuple(
         sorted(
