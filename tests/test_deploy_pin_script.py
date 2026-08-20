@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import time
 import unittest
@@ -837,6 +838,67 @@ class TestDeployPinScript(unittest.TestCase):
                 self.assertNotIn("token", proc.stderr.lower())
                 self.assertFalse(any(event[0] in {"fetch", "push"}
                                      for event in state["events"]))
+
+
+class TestDeployPinFakeShimCaching(unittest.TestCase):
+    """Pins for the shared-module fake-command shape (issue #1156 item 4):
+    each fake command (git/nix/hostname) is a tiny stub importing one shared
+    ``_shim.py``, so CPython caches its compiled bytecode across the ~28
+    subprocess spawns per script run instead of recompiling the whole body
+    on every one."""
+
+    def test_stubs_are_tiny_and_share_one_cached_shim_module(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            fake = FakeDeployPinCommands(Path(td))
+            shim_path = fake.fake_bin / "_shim.py"
+            self.assertTrue(shim_path.exists())
+            shim_size = shim_path.stat().st_size
+            for name in ("git", "nix", "hostname"):
+                stub_size = (fake.fake_bin / name).stat().st_size
+                # A regression back to writing the full body into every fake
+                # command (the pre-#1156-item-4 shape) would make each stub
+                # as large as the shim itself.
+                self.assertLess(stub_size, 300, f"{name} stub is not tiny")
+                self.assertLess(stub_size * 5, shim_size,
+                                 f"{name} stub looks like a full shim copy")
+
+            pycache = fake.fake_bin / "__pycache__"
+            self.assertFalse(pycache.exists())
+
+            proc = subprocess.run(
+                [str(fake.fake_bin / "hostname")],
+                env=fake.environment(fake.TARGET_REV),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.stdout.strip(), "proxmox-vm")
+
+            cached = list(pycache.glob("_shim.*.pyc"))
+            self.assertEqual(
+                len(cached), 1,
+                "expected the shim's bytecode to be cached in __pycache__ "
+                f"after one call, found {cached} -- check for an ambient "
+                "PYTHONDONTWRITEBYTECODE or PYTHONPYCACHEPREFIX in your "
+                "environment, either of which silently defeats this caching",
+            )
+
+    def test_stub_fails_loudly_without_the_shared_shim_module(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            fake = FakeDeployPinCommands(Path(td))
+            (fake.fake_bin / "_shim.py").unlink()
+
+            proc = subprocess.run(
+                [str(fake.fake_bin / "hostname")],
+                env=fake.environment(fake.TARGET_REV),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("ModuleNotFoundError", proc.stderr)
+            self.assertIn("_shim", proc.stderr)
 
 
 if __name__ == "__main__":

@@ -8,110 +8,129 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-_FAKE_SSH = r'''#!/usr/bin/env python3
+_SHIM_MODULE = r'''# Shared body for the deploy-cycle-verifier fake ssh command. Imported by a
+# tiny stub (never executed directly as __main__) so CPython compiles it
+# once and caches the bytecode in __pycache__ across every fake ssh
+# invocation, instead of recompiling on each one (issue #1156 item 5).
 import json
 import os
 import re
 import sys
 from pathlib import Path
 
-state_path = Path(os.environ["DEPLOY_CYCLE_FAKE_STATE"])
-state = json.loads(state_path.read_text(encoding="utf-8"))
-args = sys.argv[1:]
-remote = " ".join(args)
-state["events"].append(["ssh", *args])
 
+def main():
+    state_path = Path(os.environ["DEPLOY_CYCLE_FAKE_STATE"])
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    args = sys.argv[1:]
+    remote = " ".join(args)
+    state["events"].append(["ssh", *args])
 
-def save():
-    state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+    def save():
+        state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
 
-
-agent_disabled = any(
-    args[index] == "-o"
-    and index + 1 < len(args)
-    and args[index + 1] == "IdentityAgent=none"
-    for index in range(len(args))
-) or "-oIdentityAgent=none" in args
-if state["forced_agent_present"] and not agent_disabled:
-    state["forced_command_hits"] += 1
-    save()
-    raise SystemExit(0)
-
-
-# A real read can fail outright: an unreachable host, a systemctl that exits
-# non-zero. The verifier's `die "could not read ..."` branches exist for that
-# world, so the fake has to be able to produce it -- otherwise those branches
-# are unreachable from every test and a regression there is invisible (#1172
-# item 6). Exit 255 is ssh's own transport-failure code.
-for fragment in state["ssh_failures"]:
-    if fragment in remote:
-        print(f"ssh: connect to host: {fragment}", file=sys.stderr)
+    agent_disabled = any(
+        args[index] == "-o"
+        and index + 1 < len(args)
+        and args[index + 1] == "IdentityAgent=none"
+        for index in range(len(args))
+    ) or "-oIdentityAgent=none" in args
+    if state["forced_agent_present"] and not agent_disabled:
+        state["forced_command_hits"] += 1
         save()
-        raise SystemExit(255)
+        raise SystemExit(0)
 
+    # A real read can fail outright: an unreachable host, a systemctl that exits
+    # non-zero. The verifier's `die "could not read ..."` branches exist for that
+    # world, so the fake has to be able to produce it -- otherwise those branches
+    # are unreachable from every test and a regression there is invisible (#1172
+    # item 6). Exit 255 is ssh's own transport-failure code.
+    for fragment in state["ssh_failures"]:
+        if fragment in remote:
+            print(f"ssh: connect to host: {fragment}", file=sys.stderr)
+            save()
+            raise SystemExit(255)
 
-def show_properties(current):
-    """Emit only the properties the command actually asked for, in the order
-    real `systemctl show` uses. Printing all four unconditionally would let a
-    dropped `--property=` survive every test while breaking every real deploy
-    (the caller's sed would yield an empty value)."""
-    for key in ("ActiveState", "SubState", "InvocationID", "Result"):
-        if f"--property={key}" in remote:
-            print(f"{key}={current.get(key, '')}")
+    def show_properties(current):
+        """Emit only the properties the command actually asked for, in the order
+        real `systemctl show` uses. Printing all four unconditionally would let a
+        dropped `--property=` survive every test while breaking every real deploy
+        (the caller's sed would yield an empty value)."""
+        for key in ("ActiveState", "SubState", "InvocationID", "Result"):
+            if f"--property={key}" in remote:
+                print(f"{key}={current.get(key, '')}")
 
-
-if "systemctl show cratedigger-db-migrate.service" in remote:
-    states = state["migrate_states"]
-    index = min(state["migrate_state_index"], len(states) - 1)
-    current = states[index]
-    state["migrate_state_index"] += 1
-    show_properties(current)
-    save()
-    raise SystemExit(0)
-
-if "systemctl show cratedigger.service" in remote:
-    states = state["system_states"]
-    index = min(state["system_state_index"], len(states) - 1)
-    current = states[index]
-    state["system_state_index"] += 1
-    show_properties(current)
-    save()
-    raise SystemExit(0)
-
-if "journalctl" in remote and "--show-cursor" in remote:
-    print("-- No entries --")
-    print(f"-- cursor: {state['cursor']}")
-    save()
-    raise SystemExit(0)
-
-if "journalctl" in remote and "--after-cursor=" in remote:
-    snapshots = state["start_journal_snapshots"]
-    index = min(state["start_journal_index"], len(snapshots) - 1)
-    state["start_journal_index"] += 1
-    for record in snapshots[index]:
-        print(json.dumps(record, sort_keys=True))
-    save()
-    raise SystemExit(0)
-
-if "journalctl" in remote and "--invocation=" in remote:
-    match = re.search(r"--invocation=([0-9a-f]{32})", remote)
-    if match is None:
-        print(f"invalid invocation command: {remote}", file=sys.stderr)
+    if "systemctl show cratedigger-db-migrate.service" in remote:
+        states = state["migrate_states"]
+        index = min(state["migrate_state_index"], len(states) - 1)
+        current = states[index]
+        state["migrate_state_index"] += 1
+        show_properties(current)
         save()
-        raise SystemExit(2)
-    invocation = match.group(1)
-    snapshots = state["journal_snapshots"].get(invocation, [[]])
-    journal_indexes = state["journal_indexes"]
-    index = min(journal_indexes.get(invocation, 0), len(snapshots) - 1)
-    journal_indexes[invocation] = index + 1
-    for record in snapshots[index]:
-        print(json.dumps(record, sort_keys=True))
-    save()
-    raise SystemExit(0)
+        raise SystemExit(0)
 
-print(f"unexpected fake ssh command: {args!r}", file=sys.stderr)
-save()
-raise SystemExit(2)
+    if "systemctl show cratedigger.service" in remote:
+        states = state["system_states"]
+        index = min(state["system_state_index"], len(states) - 1)
+        current = states[index]
+        state["system_state_index"] += 1
+        show_properties(current)
+        save()
+        raise SystemExit(0)
+
+    if "journalctl" in remote and "--show-cursor" in remote:
+        print("-- No entries --")
+        print(f"-- cursor: {state['cursor']}")
+        save()
+        raise SystemExit(0)
+
+    if "journalctl" in remote and "--after-cursor=" in remote:
+        snapshots = state["start_journal_snapshots"]
+        index = min(state["start_journal_index"], len(snapshots) - 1)
+        state["start_journal_index"] += 1
+        for record in snapshots[index]:
+            print(json.dumps(record, sort_keys=True))
+        save()
+        raise SystemExit(0)
+
+    if "journalctl" in remote and "--invocation=" in remote:
+        match = re.search(r"--invocation=([0-9a-f]{32})", remote)
+        if match is None:
+            print(f"invalid invocation command: {remote}", file=sys.stderr)
+            save()
+            raise SystemExit(2)
+        invocation = match.group(1)
+        snapshots = state["journal_snapshots"].get(invocation, [[]])
+        journal_indexes = state["journal_indexes"]
+        index = min(journal_indexes.get(invocation, 0), len(snapshots) - 1)
+        journal_indexes[invocation] = index + 1
+        for record in snapshots[index]:
+            print(json.dumps(record, sort_keys=True))
+        save()
+        raise SystemExit(0)
+
+    print(f"unexpected fake ssh command: {args!r}", file=sys.stderr)
+    save()
+    raise SystemExit(2)
+'''
+
+# `ssh` stays a tiny stub, not the shim body itself -- the body lives in one
+# shared `_shim.py` module written once per fixture instance (see
+# FakeDeployCycleCommands.__init__). CPython never caches bytecode for a
+# script run directly as __main__, so leaving the shim body inline here
+# would recompile it from source on every fake ssh invocation; importing it
+# instead lets CPython write `__pycache__/_shim.cpython-*.pyc` once and
+# reuse it for the rest (issue #1156 item 5, same fix as item 4's
+# tests/fakes/deploy_pin.py). `-S` skips `site` for faster startup (issue
+# #1156 item 5 also brings this sibling onto the #1152 startup fix). No
+# explicit sys.path manipulation: the interpreter inserts the running
+# script's own directory as sys.path[0] before user code executes, `-S`
+# does not change that, and `_shim.py` always sits beside this stub in the
+# same fixture directory -- so a bare `import _shim` already resolves.
+_STUB_SSH = r'''#!/usr/bin/env -S python3 -S
+import _shim
+
+_shim.main()
 '''
 
 
@@ -137,8 +156,12 @@ class FakeDeployCycleCommands:
         self.fake_bin = root / "bin"
         self.state_path = root / "state.json"
         self.fake_bin.mkdir()
+        # The heavy shim body is written once as an importable module so
+        # CPython caches its compiled bytecode in __pycache__ across every
+        # fake ssh invocation (issue #1156 item 5).
+        (self.fake_bin / "_shim.py").write_text(_SHIM_MODULE, encoding="utf-8")
         ssh = self.fake_bin / "ssh"
-        ssh.write_text(_FAKE_SSH, encoding="utf-8")
+        ssh.write_text(_STUB_SSH, encoding="utf-8")
         ssh.chmod(0o755)
         self.write_state(
             system_states=[self.system_state(self.OLD)],
@@ -264,12 +287,7 @@ class FakeDeployCycleCommands:
             encoding="utf-8",
         )
 
-    def run(
-        self,
-        script: Path,
-        *args: str,
-        max_polls: int = 4,
-    ) -> subprocess.CompletedProcess[str]:
+    def environment(self, *, max_polls: int = 4) -> dict[str, str]:
         env = os.environ.copy()
         env.update(
             {
@@ -280,11 +298,19 @@ class FakeDeployCycleCommands:
                 "CRATEDIGGER_CYCLE_VERIFY_TIMEOUT_SECONDS": "60",
             }
         )
+        return env
+
+    def run(
+        self,
+        script: Path,
+        *args: str,
+        max_polls: int = 4,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [str(script), *args],
             text=True,
             capture_output=True,
-            env=env,
+            env=self.environment(max_polls=max_polls),
             check=False,
         )
 
