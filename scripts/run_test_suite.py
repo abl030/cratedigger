@@ -326,8 +326,18 @@ def admission_lock_path(runtime: Path) -> Path:
 
 def _read_proc_stat(pid: int) -> str:
     """Real ``/proc/<pid>/stat`` reader — the sole production default for
-    ``_proc_stat_start_ticks`` below."""
-    return Path(f"/proc/{pid}/stat").read_text()
+    ``_proc_stat_start_ticks`` below.
+
+    Issue #1208 review D-F7: ``Path.read_text()`` with the default codec
+    can raise ``UnicodeDecodeError`` — a ``ValueError``, not an
+    ``OSError`` — which would escape ``_proc_stat_start_ticks``'s
+    ``except OSError`` and abort the whole suite rather than degrading to
+    "cannot verify" like every other read failure here.
+    ``errors="replace"`` makes a decode failure produce mangled-but-valid
+    text instead (which then correctly fails the caller's field-count /
+    digit checks), never an exception this reader's caller cannot catch.
+    """
+    return Path(f"/proc/{pid}/stat").read_text(errors="replace")
 
 
 def _proc_stat_start_ticks(
@@ -361,6 +371,19 @@ def _proc_stat_start_ticks(
     non-``FileNotFoundError`` OSError branch and the malformed-content
     branch, neither of which is constructible against a real ``/proc``
     entry without root or a user-namespace remap.
+
+    Acknowledged residual (issue #1208 review D6 follow-up): ``ENOENT``
+    means "no such pid IN THIS PROCESS'S OWN PID NAMESPACE" — an owner
+    process alive in a DIFFERENT pid namespace (one this reader cannot
+    see into) would read as ``ENOENT`` here too, and be treated as
+    ``confirmed_absent=True`` exactly like a genuinely dead process.
+    Unreachable today: nothing in this repository ever enters a pid
+    namespace (the ``unshare`` calls elsewhere in this test suite remap
+    USER namespaces only, for uid manipulation — a completely different
+    namespace kind — never pid namespaces), so every real caller and
+    every real owning shell share the host's single pid namespace. Stated
+    here rather than defended against, since there is nothing in this
+    codebase that could construct the scenario to defend against.
     """
     try:
         raw = read_stat(pid)
@@ -563,13 +586,28 @@ def _scratch_tree_last_activity(tree: Path) -> float:
     one timestamp can silently stop tracking real activity long before
     writing actually stops, exactly the "mtime cannot distinguish
     abandoned from just idle" argument the ownership-marker design itself
-    makes, just one level deeper. Walks the whole tree and returns the
-    maximum mtime observed on any entry (falling back to the tree's own
-    mtime on an empty tree or any walk error), so ongoing nested activity
-    is never mistaken for staleness. Deliberately does NOT check
-    ``summary.json`` — nothing writes one inside a scratch tree today, and
-    checking it here would silently key the age gate on a file that
-    happens to share a name with an unrelated concept.
+    makes, just one level deeper. Walks the whole tree, seeds ``latest``
+    with the tree's own top-level mtime, and takes the maximum observed
+    across every entry, so ongoing nested activity that WRITES within
+    ``max_age_seconds`` is never mistaken for staleness.
+
+    Stated limitation (issue #1208 review D-F4): this only helps when a
+    descendant WRITES. A descendant that is alive but genuinely quiet — a
+    shell blocked on ``read``/``sleep`` while holding the tree open, with
+    nothing touching any mtime — falls back to exactly the mtime
+    heuristic this rationale argues against; the owner-death marker is
+    what actually distinguishes "abandoned" from "idle" for the SHELL
+    itself, but says nothing about a descendant of a dead owner that is
+    still alive and simply not writing. Reproduced directly: a real
+    SIGKILLed owner whose ``bash``/``sleep`` descendants were still alive
+    and holding ``$TMPDIR`` was reaped anyway, because they were quiet.
+    Not a defect this function can fix on its own — recorded as a known
+    residual of the composed design.
+
+    Deliberately does NOT check ``summary.json`` — nothing writes one
+    inside a scratch tree today, and checking it here would silently key
+    the age gate on a file that happens to share a name with an unrelated
+    concept.
     """
     latest = 0.0
     try:
@@ -674,7 +712,11 @@ def _scratch_tree_owner_dead(
     except OSError:
         return False
     parts = content.split()
-    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+    # issue #1208 review D-F7: isdigit() (not isdecimal()) would accept
+    # e.g. the superscript "²" — True for isdigit(), but int("²") raises
+    # ValueError, escaping uncaught and aborting the whole suite.
+    # isdecimal() is the correct predicate for "int() can parse this".
+    if len(parts) != 2 or not all(part.isdecimal() for part in parts):
         return False
     pid_str, ticks = parts
     confirmed_absent, current_ticks = proc_stat(int(pid_str))
@@ -769,11 +811,13 @@ def _receipt_process_field_live(
     ``_read_lock_holder_identity`` already takes for the admission lock.
     """
     try:
-        pid_text = (receipt / pid_field).read_text().strip()
-        ticks_text = (receipt / ticks_field).read_text().strip()
+        pid_text = (receipt / pid_field).read_text(errors="replace").strip()
+        ticks_text = (receipt / ticks_field).read_text(errors="replace").strip()
     except OSError:
         return False
-    if not pid_text.isdigit() or not ticks_text.isdigit():
+    # issue #1208 review D-F7: isdecimal(), not isdigit() — see
+    # _scratch_tree_owner_dead's identical fix for why.
+    if not pid_text.isdecimal() or not ticks_text.isdecimal():
         return False
     return _proc_start_ticks(int(pid_text)) == ticks_text
 
@@ -875,8 +919,10 @@ def reap_stale_check_bundles(
     never reaped regardless of age, and a missing/malformed marker is
     treated as unknown liveness, never as abandoned. Every other prefix
     keeps the pure age gate described above; only this one has a
-    provable-death precondition, because only this one has an owning
-    process capable of writing it one. Its age itself is also computed
+    provable-death precondition (issue #1208 review D-F8: every prefix's
+    creator is, in principle, a process capable of writing an ownership
+    marker — this one is simply the only prefix whose creator actually
+    DOES). Its age itself is also computed
     differently (``_scratch_tree_last_activity``, not
     ``_bundle_last_activity``): a scratch tree's own top-level directory
     mtime does not move when something writes into an existing nested

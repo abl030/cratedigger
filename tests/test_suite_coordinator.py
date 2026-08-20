@@ -963,6 +963,83 @@ class SuiteAdmissionTestCase(unittest.TestCase):
         self.assertEqual(lock_path.read_text().strip(), "")
 
 
+def _chown_via_user_namespace(
+    path: Path, owner: str, *, recursive: bool = False
+) -> None:
+    """Remap ``path``'s ownership through an unprivileged user namespace.
+
+    Issue #1208 review D-F1: an earlier version of the foreign-uid guard
+    tests here (and this commit's own message) claimed constructing a
+    genuinely foreign-uid directory "requires root or a user-namespace
+    remap, neither available to this test user" — false. The remap IS
+    available: this is the exact ``unshare --map-root-user --map-auto
+    chown`` technique ``tests/fakes/beets_contract.py``'s ``_chown_path``
+    already uses, load-bearing, on every run of this suite. ``owner``
+    values are uid:gid pairs INSIDE the namespace — ``--map-root-user``
+    maps namespace uid 0 back to this process's own real uid, so
+    ``"0:0"`` restores real ownership (the unseal direction) and any
+    other pair (e.g. ``"1:1"``) lands on a genuinely different,
+    auto-allocated subordinate uid outside the namespace — no root
+    required, matching the review's own reproduction (``st_uid=100000``
+    from ``chown -R 1:1``).
+    """
+    recursive_flag = ["-R"] if recursive else []
+    subprocess.run(
+        [
+            "unshare", "--map-root-user", "--map-auto", "chown",
+            *recursive_flag, owner, str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _run_in_uid_remapped_namespace(script: str) -> subprocess.CompletedProcess[str]:
+    """Run ``script`` (a self-contained Python source string) as fake-root
+    inside a fresh, unprivileged user namespace.
+
+    Issue #1208 review D-F1, second correction: a delete attempt run from
+    a NORMAL (non-namespaced) process against a directory chowned via
+    ``_chown_via_user_namespace`` above is invisible to the foreign-uid
+    guard clause, because ordinary POSIX permission bits (mode 0700,
+    foreign owner) already block ``shutil.rmtree`` with a plain
+    ``PermissionError`` before the software guard is ever reached —
+    empirically verified: this repository's own reap functions catch
+    that ``OSError`` and silently continue, so the guard-removed mutant
+    is unobservable that way, the same redundancy D6 already documented
+    honestly for the symlink/non-directory clauses. That is NOT the
+    world the review's own reproduction table describes.
+
+    The actual discriminating world: `unshare --map-root-user` makes the
+    CALLING process uid 0 (fake-root) WITHIN the new namespace, and
+    Linux root has ``DAC_OVERRIDE`` for any file owned by a uid the
+    namespace's own mapping covers — so a directory chowned to a
+    DIFFERENT in-namespace uid (``os.chown(path, 1, 1)``, run from
+    inside this same namespace) is fully readable, writable, and
+    deletable by that fake-root process. There, POSIX permissions grant
+    NOTHING — the software guard (``info.st_uid != os.getuid()``) is the
+    ONLY thing between it and deletion. Verified directly: inside such a
+    namespace, ``os.getuid()`` reads 0, a directory chowned to uid 1
+    reports ``st_uid=1``, and ``shutil.rmtree`` on it succeeds outright
+    (no exception at all) — the exact shape a caller of this reaper
+    could produce by never having remapped uid 1 to anything, or a
+    future refactor that lost the guard.
+
+    This runs the real reap function inside exactly that world and
+    reports a ``RESULT:PASS``/``RESULT:FAIL`` marker on stdout so the
+    caller can assert on it without itself needing namespace access.
+    """
+    return subprocess.run(
+        ["unshare", "--map-root-user", "--map-auto", sys.executable, "-c", script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
 class StaleCheckBundleReapTestCase(unittest.TestCase):
     """Contracts for admission-time cleanup of stale check bundles (#1111)."""
 
@@ -1120,6 +1197,49 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
         self.assertTrue(referenced.exists())
         self.assertFalse(unreferenced.exists())
 
+    def test_never_reaps_a_bundle_owned_by_a_foreign_uid(self) -> None:
+        """Issue #1208 review D-F1: the foreign-uid guard
+        (``info.st_uid != os.getuid()``) here — see
+        ``_run_in_uid_remapped_namespace`` for why the delete attempt
+        must run INSIDE the same user namespace that performed the
+        chown to actually exercise this clause (a normal-process delete
+        attempt is already blocked by ordinary POSIX permissions,
+        vacuously)."""
+        bundle = self.runtime / "cratedigger-checks.foreignowner"
+        script = (
+            "import os\n"
+            "import time\n"
+            "from pathlib import Path\n"
+            "from scripts.run_test_suite import reap_stale_check_bundles\n"
+            "\n"
+            f"runtime = Path({str(self.runtime)!r})\n"
+            f"bundle = Path({str(bundle)!r})\n"
+            "bundle.mkdir(mode=0o700)\n"
+            "summary = bundle / 'summary.json'\n"
+            "summary.write_text('{}\\n')\n"
+            "now = time.time()\n"
+            "stamp = now - 999\n"
+            "os.utime(summary, (stamp, stamp))\n"
+            "os.chown(bundle, 1, 1)\n"
+            "\n"
+            "reaped = reap_stale_check_bundles(\n"
+            "    runtime, max_age_seconds=100, reference_time=now\n"
+            ")\n"
+            "ok = reaped == () and bundle.exists()\n"
+            "print('RESULT:' + ('PASS' if ok else 'FAIL'))\n"
+        )
+        try:
+            completed = _run_in_uid_remapped_namespace(script)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn(
+                "RESULT:PASS",
+                completed.stdout,
+                f"stdout={completed.stdout!r} stderr={completed.stderr!r}",
+            )
+        finally:
+            if bundle.exists():
+                _chown_via_user_namespace(bundle, "0:0", recursive=True)
+
     # --- Issue #1208 item 1: ownership-marker liveness for
     # SCRATCH_TREE_PREFIX ("cratedigger-tests.*"), the dev shell's own main
     # scratch TMPDIR. A prior attempt reaped these on mtime alone and was
@@ -1183,6 +1303,12 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
             ("three fields", "12345 6789 extra"),
             ("non-digit pid", "abc 6789"),
             ("non-digit ticks", "12345 abc"),
+            # issue #1208 review D-F7: a superscript "\u00b9" IS
+            # str.isdigit() (True) but is NOT str.isdecimal() (False) and
+            # int("\u00b9") raises ValueError — the guard must use
+            # isdecimal(), or this case crashes the whole suite instead
+            # of degrading to "not dead".
+            ("unicode digit that int() cannot parse", "\u00b9 6789"),
         )
         for index, (desc, content) in enumerate(CASES):
             with self.subTest(desc=desc):
@@ -1259,13 +1385,39 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
                 )
 
     def test_proc_stat_start_ticks_reads_real_ticks_on_success(self) -> None:
-        """The happy path, still through the real default reader — proves
-        the DI seam's default is wired to the real function, not just
-        that the seam itself can be overridden."""
+        """The happy path, through the real default reader. Issue #1208
+        review D-F2: an earlier version of this docstring claimed this
+        "proves the DI seam's default is wired to the real function" —
+        false. It compared against ``_proc_start_ticks``, which shares
+        the exact SAME ``_read_proc_stat`` default, so a fake reader
+        returning a constant stat line would pass both sides identically
+        in isolation — agree-by-construction, not proof. That real
+        producer-vs-reader binding is already proven by
+        ``test_real_marker_reports_alive_then_dead_across_a_real_sigkill``
+        in ``tests/test_test_tmpfs.py`` (an independent awk-based
+        producer). This test instead compares against a genuinely
+        independent oracle — bash + awk reading the same ``/proc`` entry,
+        not Python, and not this module's own parsing code."""
+        independent = subprocess.run(
+            [
+                "bash",
+                "-c",
+                (
+                    f'stat=$(cat /proc/{os.getpid()}/stat); '
+                    'stat=${stat##*) }; '
+                    "awk '{print $20}' <<<\"$stat\""
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        expected = independent.stdout.strip()
+
         confirmed_absent, ticks = _proc_stat_start_ticks(os.getpid())
 
         self.assertFalse(confirmed_absent)
-        self.assertEqual(ticks, _proc_start_ticks(os.getpid()))
+        self.assertEqual(ticks, expected)
 
     def test_scratch_tree_owner_dead_is_false_when_liveness_cannot_be_verified(
         self,
@@ -1457,6 +1609,76 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
 
         self.assertEqual(reaped, (tree,))
         self.assertFalse(tree.exists())
+
+    def test_reap_keeps_a_dead_owned_tree_when_a_recent_entry_precedes_stale_ones_in_walk_order(
+        self,
+    ) -> None:
+        """Issue #1208 review D-F3: a ``latest = entry_mtime`` mutant
+        (last-entry-wins, not ``max()``) is invisible if the fixture's
+        only recent entry happens to be visited LAST in ``os.walk``'s
+        traversal order — the earlier two D3 tests both had that shape
+        by accident. ``os.walk`` in topdown mode (the default, used here)
+        guarantees a directory's own direct children are yielded in ONE
+        tuple BEFORE any subdirectory's contents are yielded in a LATER
+        tuple — so a recent entry placed directly in ``tree`` (yielded
+        first) followed by a stale entry nested one level deeper (yielded
+        later) deterministically orders "recent, then stale" regardless
+        of within-directory listing order, which "last wins" gets
+        backwards."""
+        now = time.time()
+        old = now - 999
+        tree = self._scratch_tree(
+            "cratedigger-tests.recentfirst", age_seconds=999, now=now
+        )
+        self._write_owner_marker(tree, 999999999, "123456")
+        nested = tree / "nested"
+        nested.mkdir()
+        (nested / "old.tmp").write_text("x")
+        self._restamp_recursive(tree, old)
+        # Created AFTER the restamp, directly inside `tree` — visited in
+        # os.walk's FIRST yield, strictly before `nested`'s own contents
+        # in a later yield. Genuinely recent.
+        (tree / "recent.tmp").write_text("x")
+
+        reaped = reap_stale_check_bundles(
+            self.runtime, max_age_seconds=100, reference_time=now
+        )
+
+        self.assertEqual(reaped, ())
+        self.assertTrue(tree.exists())
+
+    def test_reap_keeps_a_dead_owned_tree_whose_only_recent_entry_is_a_directory(
+        self,
+    ) -> None:
+        """Issue #1208 review D-F3: a ``for name in files`` mutant
+        (dropping directory names from the walk targets) is invisible if
+        the recent activity happens to also touch a surviving FILE. An
+        orphaned descendant that creates and deletes scratch files inside
+        a nested directory bumps only that DIRECTORY's own mtime — no
+        file with a recent mtime survives to be walked, so the recent
+        entry must be found among ``dirs``, not only ``files``."""
+        now = time.time()
+        old = now - 999
+        tree = self._scratch_tree(
+            "cratedigger-tests.dirchurn", age_seconds=999, now=now
+        )
+        self._write_owner_marker(tree, 999999999, "123456")
+        nested = tree / "nested"
+        nested.mkdir()
+        self._restamp_recursive(tree, old)
+        # Create then delete a scratch file inside `nested` — bumps ONLY
+        # `nested`'s own directory mtime to "now"; nothing recent
+        # survives as a walkable file.
+        churn_file = nested / "scratch.tmp"
+        churn_file.write_text("x")
+        churn_file.unlink()
+
+        reaped = reap_stale_check_bundles(
+            self.runtime, max_age_seconds=100, reference_time=now
+        )
+
+        self.assertEqual(reaped, ())
+        self.assertTrue(tree.exists())
 
 
 class FinalGateReceiptRetirementTestCase(unittest.TestCase):
@@ -1651,6 +1873,33 @@ class FinalGateReceiptRetirementTestCase(unittest.TestCase):
         self.assertEqual(retired, (receipt,))
         self.assertFalse(receipt.exists())
 
+    def test_retirement_does_not_crash_on_a_non_decimal_unicode_digit_identity(
+        self,
+    ) -> None:
+        """Issue #1208 review D-F7: the identical isdigit()-vs-isdecimal()
+        bug in ``_receipt_process_field_live`` — a superscript "\u00b9"
+        passes ``str.isdigit()`` but ``int("\u00b9")`` raises
+        ``ValueError``, which would abort the whole suite instead of
+        degrading to "not live", same as the fix for
+        ``_scratch_tree_owner_dead``. A malformed identity degrades
+        gracefully to "not live" (retirement proceeds), never crashes."""
+        now = time.time()
+        receipt = self._receipt(
+            "cratedigger-final-gate.baddigit",
+            age_seconds=999,
+            now=now,
+            terminal=False,
+            helper_identity=("\u00b9", "123456"),
+            gate_identity=self._dead_identity(),
+        )
+
+        retired = reap_stale_final_gate_receipts(
+            self.runtime, max_age_seconds=100, reference_time=now
+        )
+
+        self.assertEqual(retired, (receipt,))
+        self.assertFalse(receipt.exists())
+
     def test_retiring_a_receipt_releases_its_bundle_protection(self) -> None:
         """Retirement and bundle reaping run in the SAME admitted pass —
         run_suite calls reap_stale_final_gate_receipts before
@@ -1733,13 +1982,52 @@ class FinalGateReceiptRetirementTestCase(unittest.TestCase):
         self.assertEqual(retired, ())
         self.assertTrue(stray_file.exists())
 
-    # The third guard clause (`info.st_uid != os.getuid()`) has no test
-    # here: constructing a receipt-shaped directory genuinely owned by a
-    # DIFFERENT real uid requires root or a user-namespace remap, neither
-    # available to this test user. Recorded as an honest, stated residual
-    # (issue #1208 review D6) rather than a fabricated or skipped test —
-    # `reap_stale_check_bundles` carries the identical, equally untested
-    # clause already, so this is not a new gap.
+    def test_never_retires_a_receipt_owned_by_a_foreign_uid(self) -> None:
+        """Issue #1208 review D-F1: the third guard clause
+        (``info.st_uid != os.getuid()``) — D6 originally recorded this as
+        untestable without root; that claim was false, closed via
+        ``_chown_via_user_namespace``. A second correction: a delete
+        attempt run from a normal process against that chowned directory
+        is ALSO invisible to this specific clause, because ordinary
+        POSIX permissions already block it — see
+        ``_run_in_uid_remapped_namespace`` for the actual discriminating
+        world (the delete attempt run AS fake-root INSIDE the same
+        namespace that performed the chown, where only the software
+        guard stands between it and deletion)."""
+        receipt = self.runtime / "cratedigger-final-gate.foreignowner"
+        script = (
+            "import os\n"
+            "import time\n"
+            "from pathlib import Path\n"
+            "from scripts.run_test_suite import reap_stale_final_gate_receipts\n"
+            "\n"
+            f"runtime = Path({str(self.runtime)!r})\n"
+            f"receipt = Path({str(receipt)!r})\n"
+            "receipt.mkdir(mode=0o700)\n"
+            "terminal = receipt / 'terminal'\n"
+            "terminal.write_text('pass 0\\n')\n"
+            "now = time.time()\n"
+            "stamp = now - 999\n"
+            "os.utime(terminal, (stamp, stamp))\n"
+            "os.chown(receipt, 1, 1)\n"
+            "\n"
+            "retired = reap_stale_final_gate_receipts(\n"
+            "    runtime, max_age_seconds=100, reference_time=now\n"
+            ")\n"
+            "ok = retired == () and receipt.exists()\n"
+            "print('RESULT:' + ('PASS' if ok else 'FAIL'))\n"
+        )
+        try:
+            completed = _run_in_uid_remapped_namespace(script)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn(
+                "RESULT:PASS",
+                completed.stdout,
+                f"stdout={completed.stdout!r} stderr={completed.stderr!r}",
+            )
+        finally:
+            if receipt.exists():
+                _chown_via_user_namespace(receipt, "0:0", recursive=True)
 
     def test_default_retirement_floor_is_seven_days(self) -> None:
         """Pins the documented constant directly — a change here is a

@@ -468,6 +468,31 @@ override and the reaper looks in a different directory than the scratch
 trees it exists to reap. Latent: nothing in this repository sets that
 override outside tests and one doc recipe.
 
+Two more known residuals of the same design (issue #1208 review D-F4,
+D-F6):
+
+- The recursive walk (`_scratch_tree_last_activity`) only helps when a
+  descendant WRITES within `max_age_seconds`. A descendant that is alive
+  but genuinely quiet — a shell blocked on `read`/`sleep`, holding the
+  tree open with nothing touching any mtime — falls back to exactly the
+  mtime heuristic this design otherwise argues against; the owner-death
+  marker distinguishes "abandoned" from "idle" for the SHELL itself, but
+  says nothing about a live-but-quiet descendant of an already-dead
+  owner. Reproduced directly: a real SIGKILLed owner whose `bash`/`sleep`
+  descendants were still alive and holding `$TMPDIR` was reaped anyway,
+  because they were quiet.
+- **Operationally important**: every `cratedigger-tests.*` tree created
+  by a shell running BEFORE this fix lands has no `.owner` marker at
+  all — fail-closed means such a tree is never reaped, forever, by this
+  mechanism (a missing marker is "unknown", never "abandoned"). The
+  founding incident's own leaked-tree cohort is exactly this shape.
+  Deploying this fix does not retroactively clean up that cohort; it
+  only stops the leak going forward. A one-time manual sweep of
+  markerless `cratedigger-tests.*` trees whose owning shell is
+  genuinely gone (per scope.md: an operator/agent-run one-shot, never
+  committed machinery) clears the pre-existing backlog once, after this
+  lands.
+
 The 4-hour floor protects the bundle's detailed EVIDENCE (per-phase logs,
 summary.md), not receipt reuse itself: `run_final_gate.sh status` checks a
 receipt's `bundle` FILE (a path string) and now separately stats the

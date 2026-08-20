@@ -150,11 +150,18 @@ setup_cratedigger_test_tmpfs() {
         # `>file 2>/dev/null` order does NOT suppress a failed open of
         # `file` — bash reports that diagnostic on the still-live original
         # stderr before the `2>/dev/null` redirection is even installed.
-        # Reproduced on a full/permission-denied tmpfs: every dev-shell
-        # entry printed an unexplained "Permission denied" naming this
-        # hidden dotfile. `2>/dev/null` FIRST makes stderr point at
-        # /dev/null before the `>` open is attempted, so its failure
-        # diagnostic (like everything else here) is genuinely silent.
+        # Issue #1208 review D-F5: this ".owner" write is new in this PR
+        # and has never actually run in a real dev shell in the failing
+        # state described below — the finding is a controlled
+        # reproduction, not observed production history. Forcing the
+        # write to fail (a read-only scratch tree) with the OLD ordering
+        # printed an unexplained "Permission denied" naming this hidden
+        # dotfile on real stderr; shell entry itself still succeeded
+        # (TMPDIR still exported) either way. `2>/dev/null` FIRST makes
+        # stderr point at /dev/null before the `>` open is attempted, so
+        # that failure diagnostic (like everything else here) is
+        # genuinely silent — verified the same way, with the corrected
+        # ordering.
         printf '%s %s\n' "$$" "$_cratedigger_test_tmpfs_owner_ticks" \
             2>/dev/null >"$_CRATEDIGGER_TEST_TMPDIR/.owner" || true
     fi
