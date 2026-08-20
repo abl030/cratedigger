@@ -95,10 +95,15 @@ class TestBeetsContractWorldLifetimeBoundToExample(unittest.TestCase):
             # variation only, not a reproduction of any production site's
             # own strategy: of the 42 real `with BeetsContractWorld(...)`
             # call sites this issue fixed, 34 pass no role at all, 1 passes
-            # a fixed literal ("importer"), and 7 vary it via a
-            # Hypothesis-drawn `st.sampled_from(...)` role strategy -- none
-            # use a modulo-4 index. seed % 4 here is just a cheap way to
-            # touch all four roles across the run.
+            # a fixed literal ("importer"), 6 pass `role=role` drawn
+            # directly from a Hypothesis `st.sampled_from(...)` role
+            # strategy, and 1 more derives role from a DIFFERENT drawn
+            # value via a conditional expression
+            # (`test_beets_config_contract_generated.py`'s
+            # `role="web" if mutation == "importer_readonly" else
+            # "importer"`) rather than a role strategy directly -- none use
+            # a modulo-4 index. seed % 4 here is just a cheap way to touch
+            # all four roles across the run.
             role = ("importer", "preview", "web", "main")[seed % 4]
             with BeetsContractWorld(role=role) as world:
                 created.append(world)

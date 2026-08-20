@@ -1011,10 +1011,14 @@ may still patrol nothing; only review and mutant-kill counts show that.
   `self.addCleanup(...)`/`self.enterContext(...)`.** Hypothesis re-executes
   the body once per EXAMPLE; `addCleanup`/`enterContext` fire once per test
   METHOD. A resource constructed directly in the body and registered there
-  leaks one live copy per example until the method finally returns (issue
-  #1214: 2491 concurrently-live `BeetsContractWorld` fixtures, 1.59 GB, from
-  ONE test method at the daily gate's real budget — the exposure that OOM'd
-  `cratedigger-daily-checks.service` in production).
+  leaks one live copy per example until the method finally returns. Issue
+  #1214: a fresh re-measurement found 2491 concurrently-live
+  `BeetsContractWorld` fixtures, 1.59 GB, from ONE test method at the daily
+  gate's real budget (issue #1214 itself first measured 2469 / 1576.99 MB
+  from a slightly different run). That was the exposure that filled
+  `cratedigger-daily-checks.service`'s tmpfs — `OSError: [Errno 28] No
+  space left on device`, an ENOSPC exception, NOT a host OOM kill; issue
+  #1214 states explicitly that no host OOM kill occurred.
   `tests/test_given_body_cleanup_audit.py` enforces the direct-construction
   shape of this mistake, but cannot see through a helper method the body
   merely calls by name (a bounded syntactic audit, not a call-graph tracer

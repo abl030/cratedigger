@@ -279,38 +279,71 @@ class BeetsContractWorld:
     ``/dev/shm`` and a declared leaf trips the very ancestor-ownership check
     the sealed/admitted baseline needs to pass.
 
-    The unavoidable consequence: if this process is SIGKILLed (OOM-killed --
-    the exact #1214 incident scenario) while a world is sealed, its
-    authority tree is left owned by that subordinate uid, mode
-    ``dr-xr-x---`` -- unremovable by this process's own real uid via any
-    ordinary tool (``rm -rf``, plain ``chown``), because ``chmod``/``chown``
-    require OWNERSHIP, which the real uid no longer has. No in-process
+    **What actually happened in #1214 (review finding A2 -- correcting an
+    earlier draft of this docstring, which called it an OOM kill): an
+    ENOSPC exception, not a process kill.** Issue #1214 states explicitly
+    that there were no host OOM kills; the symptom was
+    ``OSError: [Errno 28] No space left on device`` from
+    ``cratedigger-daily-checks.service`` filling the tmpfs the fuzz phase
+    runs on. That distinction matters here specifically: an ``OSError``
+    raised while EXECUTING INSIDE an already-entered
+    ``with BeetsContractWorld() as world:`` block is an ordinary Python
+    exception -- the ``with`` statement's normal unwinding semantics
+    guarantee ``__exit__`` (and therefore ``close()``, therefore
+    ``unseal()``) runs regardless of what exception type propagates through
+    the block. So the failure mode that actually occurred in production is
+    fully handled by this issue's core fix; this docstring must not argue
+    the fix is weaker than it is by resting its case on an event that did
+    not happen.
+
+    What remains a genuinely open, narrower, UNCONFIRMED residual: a
+    process-level kill the interpreter cannot catch at all (a real SIGKILL
+    or OOM-killer action -- distinct from, and not what occurred in, the
+    #1214 incident), or disk exhaustion striking mid-``_seal()``'s own
+    ``unshare``/``chown`` subprocess call -- i.e. DURING ``__init__``,
+    BEFORE the ``with`` statement's ``__enter__`` even completes, so no
+    context-manager protocol is active yet to catch it. No in-process
     mechanism -- not ``close()``'s own ``finally``, not an ``atexit`` hook,
     not a ``weakref.finalize`` callback, not a caught-signal handler -- runs
-    on SIGKILL; the kernel terminates the process before any of that code
-    can execute. Reclaiming such a directory requires deliberately
-    re-running the same ``unshare --map-root-user --map-auto chown`` trick
-    against it -- reaper machinery this issue's review explicitly declines
-    to add here (owned, if wanted, by the test-suite runner's own scratch
-    lifecycle, a separate worktree/workstream -- not this fixture).
+    on an uncatchable kill; the kernel terminates the process before any of
+    that code can execute. If either of these narrower cases strands a
+    world, its authority tree is left owned by that subordinate uid, mode
+    ``dr-xr-x---`` -- unremovable by this process's own real uid via any
+    ordinary tool (``rm -rf``, plain ``chown``), because ``chmod``/``chown``
+    require OWNERSHIP, which the real uid no longer has. Reclaiming such a
+    directory requires deliberately re-running the same
+    ``unshare --map-root-user --map-auto chown`` trick this fixture's own
+    ``_chown_path`` uses. **This residual is accepted and currently
+    UNOWNED** -- no existing or planned workstream reclaims a stranded
+    sealed authority tree (an earlier draft of this docstring named the
+    test-suite runner's own scratch-reaper work as the owner; that claim
+    was checked and is false -- that workstream contains no reference to
+    ``/dev/shm`` or this fixture, and structurally could not reclaim one
+    with an ordinary ``rmtree`` regardless, since only the exact
+    ``unshare``-based chown this class itself uses can undo the seal).
+    Each stranded tree costs about 16 KB of tmpfs (measured: one sealed
+    ``authority_root``, ``du -sh`` block accounting on ``/dev/shm``) --
+    small enough, and the window narrow enough (see below), that this is a
+    reasoned, bounded, accepted gap, not an oversight.
 
     What IS fixed, and is the real lever available without weakening the
-    tested contract: the SIZE of the exposure window. Before issue #1214's
-    core fix, every ``@given`` example's world leaked past its own example
-    (``addCleanup`` fires once per test METHOD, but Hypothesis re-executes
-    the body once per EXAMPLE) and stayed alive -- sealed -- for the rest of
-    the method, so up to ``max_examples`` worlds (2491 measured at the daily
-    gate's real budget, ``CRATEDIGGER_FUZZ_MAX_EXAMPLES=2500``) were
-    simultaneously sealed at any instant a kill could land. Binding each
-    world's lifetime to the example that created it
+    tested contract: the SIZE of the exposure window for that narrower
+    residual. Before issue #1214's core fix, every ``@given`` example's
+    world leaked past its own example (``addCleanup`` fires once per test
+    METHOD, but Hypothesis re-executes the body once per EXAMPLE) and
+    stayed alive -- sealed -- for the rest of the method, so up to
+    ``max_examples`` worlds (a fresh re-measurement found 2491 at the daily
+    gate's real budget, ``CRATEDIGGER_FUZZ_MAX_EXAMPLES=2500``; issue #1214
+    itself first measured 2469 from a slightly different run) were
+    simultaneously sealed at any instant an uncatchable kill could land.
+    Binding each world's lifetime to the example that created it
     (``with BeetsContractWorld() as world:``) means ``close()`` -- and
     therefore ``unseal()`` -- runs before the NEXT example's world is even
     constructed, so at most ONE world is ever sealed and resident at a time.
     That is roughly a 2500x reduction in the instantaneous exposure surface
-    for the same failure class, without touching the ownership semantics the
-    contract tests depend on. A residual, bounded-to-one-world SIGKILL race
-    is accepted as unavoidable given the above; it is not evidence of an
-    incomplete fix.
+    for the narrower, unconfirmed hard-kill residual described above -- it
+    is not a claim about the actual #1214 incident, which this fix handles
+    completely by ordinary exception unwinding.
     """
 
     _scratch_validated = False
