@@ -172,6 +172,16 @@ class FakeDailyFlakeUpdateCommands:
         self.fake_bin.mkdir()
         self.state_path = root / "state.json"
         self.automation_state = root / "automation-state"
+        # `root` itself resolves under whatever ambient TMPDIR the
+        # enclosing nix-shell/test suite set (its own private tmpfs
+        # scratch), so this fake's own TMPDIR/work_root can collide with
+        # $XDG_RUNTIME_DIR the same way this repo's interactive dev shell
+        # does. That is deliberately NOT worked around here: the resource
+        # monitor's own state-root candidate list (issue #1214 review F9)
+        # is what falls back past a colliding TMPDIR to a genuinely
+        # distinct filesystem -- proving that fallback fires for real,
+        # through this same fake harness, is the point, not something a
+        # test-only relocation should paper over.
         self.tmpdir = root / "tmp"
         self.tmpdir.mkdir()
         command = self.fake_bin / "command"

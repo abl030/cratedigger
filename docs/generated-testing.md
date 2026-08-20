@@ -691,16 +691,72 @@ subtract independently observed maxima to attribute working memory.
 The monitor does not enumerate processes, enter the namespace from outside,
 reset cgroup state, or change phase commands, worker counts, shard counts,
 PostgreSQL admission, example budgets, or tmpfs limits. Missing cgroup files,
-a disk-backed scratch root, zero limits, malformed samples, and regressing
-kernel peaks produce one terminal `status=invalid` receipt rather than zeros.
-The runner's EXIT path emits the terminal receipt after its owned checkout
-cleanup even when a test stage fails or the later live-world post-step makes
-the systemd unit red.
+an unreachable scratch or state root, and a violated cross-sample invariant
+(a scratch/inode limit of zero or one that changes mid-run, usage above the
+limit, a cgroup peak below its own current value, an impossible memory
+breakdown, or a regressing memory/swap peak) still produce one terminal
+`status=invalid` receipt with no phase breakdown at all, rather than zeros. A
+receipt that is not clean (`status=invalid`) also prints an explicit
+`resource receipt invalid` line to stderr regardless of whether the
+candidate gates themselves passed or failed (issue #1214 gap 4) — an
+invalid receipt used to be silently absorbed into an already-nonzero exit
+code on a failing run, exactly the run where the telemetry matters most.
+
+**The invariant is binary, not quantified: a receipt must never say
+`status=valid` if anything failed to record.** The monitor's own
+bookkeeping (samples, the phase pointer, its lock) lives under a state
+root tried in order — the caller's own `TMPDIR`, then `/tmp` — verified by
+filesystem identity to be distinct from the private scratch tmpfs it
+measures (`$XDG_RUNTIME_DIR`), never inside it: a full scratch tmpfs on
+2026-08-20 took the monitor's own state down with it and erased the one
+night's telemetry that would have diagnosed the overflow (issue #1214).
+That is the whole fix. Issue #1214's rounds 2-4 (reviews F1-F9, C1-C9,
+C-F1-C-F5) layered an increasingly elaborate loss-accounting system on top
+of it — writer identity, per-sample sequence numbers, a fifo report
+channel from the periodic loop, parent/loop drop counters, a
+`dropped_samples`/`missing_phases`/`corrupted_history_lines` receipt
+triple, a `degraded` status, a phase-history file — and each round's fix
+for that layer re-introduced the same class of bug one call site over
+(review C-F1 found the fourth such site: four bare marker-file writes
+inside `daily_resource_monitor_set_phase` with no fallback of their own).
+That was a design smell, not a testing gap, and the whole layer was
+removed in a round-6 strip-back: once the state root is verified off the
+measured filesystem, a write failure there is a rare, genuinely
+exceptional event, not routine disk pressure, so it is handled the plain
+way this monitor used before issue #1214's accounting rounds — a writer
+that fails just says so, and the run is `invalid`. No counting.
+
+`daily_resource_monitor_set_phase`'s own structural failures (an invalid
+phase name, a stuck lock, a failed phase-pointer write, a failed unlock)
+are reported through a plain in-process bash variable
+(`_CRATEDIGGER_RESOURCE_FAILURE_REASON`), never a marker file: `set_phase`
+and `daily_resource_monitor_finish` always run in the ONE parent process
+(nothing here is forked except the periodic loop itself), so a bash
+variable assignment — which cannot itself fail the way a filesystem write
+can — is sufficient. The periodic loop is a genuinely separate, forked
+process with no report channel of any kind: on its first failed sample
+write it simply stops (matching this file's own pre-accounting shape),
+and `daily_resource_monitor_finish`'s ordinary `wait` on its PID observes
+that exit status directly — no inter-process signaling required. Either
+path forces the terminal receipt to `status=invalid`, but — this is the
+part rounds 2-4 existed to protect and the strip-back keeps — the
+per-phase breakdown for whatever DID survive is still printed above it,
+because losing that breakdown for the one run that needed it is the
+entire reason this file exists.
+
+A row that lands but is malformed (a real full filesystem does not reject
+a write atomically — review F2, measured; a partial page can land and the
+next append then concatenates onto its unterminated tail) is skipped and
+the summary keeps going, rather than discarding every other row's
+evidence for one corrupt line — this is what makes the receipt useful
+under real ENOSPC pressure on the state store itself, the difference
+between "we have the phase breakdown" and "we have nothing."
 
 It is pure and safe: no prod DB, no slskd, no beets, no network. Green runs
-write disposable state only to tmpfs. Repeat runs add entropy; there is
-nothing to resume and no seed cursor — coverage grows by improving strategies
-and invariants, not by consuming more seeds.
+write disposable state only to the measured scratch tmpfs; the monitor's
+own bookkeeping deliberately does not (that is the whole fix). Repeat runs
+add entropy; there is nothing to resume and no seed cursor — coverage grows
+by improving strategies and invariants, not by consuming more seeds.
 
 ## Promotion policy — failures become named tests, not artifacts
 
