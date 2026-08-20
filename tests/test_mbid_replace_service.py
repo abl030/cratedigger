@@ -11,6 +11,8 @@ import os
 import sys
 import tempfile
 import unittest
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
@@ -290,16 +292,24 @@ class _ServiceCase(unittest.TestCase):
             preserved_paths=(),
         )
 
-    def _patch_externals(self):
-        """Patch wrong-match cleanup and the two rescan notifiers.
-
-        Beets deletion is injected through the service constructor; missing
-        current authority is the ordinary no-op default for unrelated tests.
-        Register cleanup via
-        ``self.addCleanup``. Returns the patched mocks as a list so tests
-        can assert on them. Scoped per-test — unlike ``patch.stopall``
-        which would stop EVERY active patch in the process."""
-        patches = [
+    @staticmethod
+    def _external_patches():
+        """The three service-boundary patches every _replace() run needs:
+        wrong-match cleanup and the two rescan notifiers. The one shared
+        source location _patch_externals (addCleanup-scoped, per test
+        METHOD) and _patch_externals_scoped (context-manager-scoped, per
+        Hypothesis EXAMPLE, issue #1214) both start from, rather than each
+        writing their own patch() calls -- so adding
+        _patch_externals_scoped did not add a second new patch() occurrence
+        of the delete_wrong_match_group target for
+        tests/_mock_audit_scanner.py's MULTILINE_PATCH_BASELINE ratchet to
+        count. That same target is also patched inline, pre-existing and
+        unrelated to this helper, at several other sites in this file
+        (already counted in the ratchet's baseline of 9) -- this docstring
+        is about the two Hypothesis-era callers of _external_patches, not a
+        claim that no other patch of this target exists anywhere in the
+        file."""
+        return [
             patch(
                 "lib.mbid_replace_service.delete_wrong_match_group",
                 MagicMock(side_effect=_empty_wrong_match_summary),
@@ -310,11 +320,33 @@ class _ServiceCase(unittest.TestCase):
                 MagicMock(),
             ),
         ]
+
+    def _patch_externals(self):
+        """Patch wrong-match cleanup and the two rescan notifiers.
+
+        Beets deletion is injected through the service constructor; missing
+        current authority is the ordinary no-op default for unrelated tests.
+        Register cleanup via
+        ``self.addCleanup``. Returns the patched mocks as a list so tests
+        can assert on them. Scoped per-test — unlike ``patch.stopall``
+        which would stop EVERY active patch in the process."""
         mocks = []
-        for p in patches:
+        for p in self._external_patches():
             mocks.append(p.start())
             self.addCleanup(p.stop)
         return mocks
+
+    @contextmanager
+    def _patch_externals_scoped(self) -> Iterator[list[MagicMock]]:
+        """Same three patches as _patch_externals, scoped to a with-block
+        instead of self.addCleanup. addCleanup fires once per test METHOD;
+        Hypothesis re-executes an @given method body once per EXAMPLE, so a
+        helper using addCleanup from inside such a body leaves every
+        earlier example's patches stacked until the whole method returns
+        (issue #1214 defect class). Use this from an @given body instead."""
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in self._external_patches()]
+            yield mocks
 
     def _assert_slskd_untouched(self, slskd: object) -> None:
         """Assert FakeSlskdAPI recorded zero calls across every surface.
@@ -329,6 +361,48 @@ class _ServiceCase(unittest.TestCase):
         self.assertEqual(slskd.transfers.get_all_downloads_calls, [])
         self.assertEqual(slskd.users.directory_calls, [])
         self.assertEqual(slskd.users.status_calls, [])
+
+
+class TestPatchExternalsScopedPatchesTheSameTargets(_ServiceCase):
+    """Issue #1214 review finding F3: prove ``_patch_externals_scoped()``
+    patches the SAME three module attributes ``_patch_externals()`` does,
+    not merely that both call ``_external_patches()`` by construction.
+    Two mutants at ``_external_patches()``/``_patch_externals_scoped()``
+    left every other test in this module green (review finding F3):
+    dropping the ``delete_wrong_match_group`` entry from the shared list,
+    and making the scoped helper yield fresh, never-entered ``MagicMock()``
+    objects. This test fails on both -- see the issue #1214 kill matrix."""
+
+    def test_patch_externals_scoped_patches_the_same_three_targets(
+        self,
+    ) -> None:
+        import lib.mbid_replace_service as svc_mod
+
+        original_delete = svc_mod.delete_wrong_match_group
+        original_plex = svc_mod.trigger_plex_scan
+        original_jellyfin = svc_mod.trigger_jellyfin_scan
+
+        with self._patch_externals_scoped() as mocks:
+            self.assertEqual(len(mocks), 3)
+            # Each module attribute really was replaced by the SAME mock
+            # _patch_externals_scoped() handed back -- not three fresh,
+            # disconnected MagicMock()s nothing ever entered.
+            self.assertIs(svc_mod.delete_wrong_match_group, mocks[0])
+            self.assertIs(svc_mod.trigger_plex_scan, mocks[1])
+            self.assertIs(svc_mod.trigger_jellyfin_scan, mocks[2])
+            self.assertIsNot(svc_mod.delete_wrong_match_group, original_delete)
+            self.assertIsNot(svc_mod.trigger_plex_scan, original_plex)
+            self.assertIsNot(svc_mod.trigger_jellyfin_scan, original_jellyfin)
+            # The delete_wrong_match_group mock keeps _external_patches()'s
+            # own side_effect -- proves this came from the SAME shared list
+            # _patch_externals() uses, not an independently-invented patch.
+            self.assertIs(mocks[0].side_effect, _empty_wrong_match_summary)
+
+        # Restored after the with-block exits -- the same contract
+        # _patch_externals() gives via self.addCleanup(p.stop).
+        self.assertIs(svc_mod.delete_wrong_match_group, original_delete)
+        self.assertIs(svc_mod.trigger_plex_scan, original_plex)
+        self.assertIs(svc_mod.trigger_jellyfin_scan, original_jellyfin)
 
 
 class TestReplaceOutcomeMatrix(_ServiceCase):
@@ -1371,20 +1445,26 @@ class TestReplaceHappyPath(_ServiceCase):
         space, Replace always routes a uniquely resolved current album through
         pinned exact deletion. Status is lifecycle; displacement keys on the
         fresh identity snapshot."""
-        self._patch_externals()
-        beets = self._installed_beets()
-        exact_delete = MagicMock(side_effect=self._completed_delete)
-        _db, _, svc = self._replace(
-            old_status=old_status,
-            beets_db_factory=lambda: beets,
-            beets_delete_fn=exact_delete,
-        )
-        result = svc.replace_request_mbid(
-            42, target_mb_release_id=NEW_MBID,
-        )
-        self.assertEqual(result.outcome, RESULT_REPLACED)
-        exact_delete.assert_called_once()
-        self.assertEqual(exact_delete.call_args.args[0].album_id, 77)
+        # Scoped locally (not via self._patch_externals()/addCleanup) --
+        # Hypothesis re-executes this method body once per example, and
+        # addCleanup only fires once per method (issue #1214 defect class):
+        # _patch_externals_scoped() shares its patch() calls with
+        # _patch_externals() (see _external_patches) but stops them at the
+        # end of this with-block instead.
+        with self._patch_externals_scoped():
+            beets = self._installed_beets()
+            exact_delete = MagicMock(side_effect=self._completed_delete)
+            _db, _, svc = self._replace(
+                old_status=old_status,
+                beets_db_factory=lambda: beets,
+                beets_delete_fn=exact_delete,
+            )
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID,
+            )
+            self.assertEqual(result.outcome, RESULT_REPLACED)
+            exact_delete.assert_called_once()
+            self.assertEqual(exact_delete.call_args.args[0].album_id, 77)
 
     def test_happy_path_downloading_skips_staging_logs_warning(self):
         self._patch_externals()

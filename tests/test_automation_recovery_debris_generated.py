@@ -20,6 +20,7 @@ from __future__ import annotations
 import functools
 import os
 import sys
+import tempfile
 import unittest
 from typing import Self
 
@@ -154,56 +155,64 @@ class TestRecoveryDebrisWorldGenerated(_StartupRecoveryBuilders, unittest.TestCa
     ) -> None:
         self._fresh_state()
         case = self._case()
-        path = self._album_dir("world", "01 - Track.mp3")
+        # Scoped locally per example, not via self._album_dir() -- that
+        # helper's addCleanup binds to the whole @given test METHOD, not
+        # each Hypothesis example (issue #1214 defect class). Mirrors
+        # _album_dir("world", "01 - Track.mp3")'s exact layout.
+        with tempfile.TemporaryDirectory(prefix="startup-recovery-") as root:
+            path = os.path.join(root, "albums", "world")
+            os.makedirs(path)
+            with open(os.path.join(path, "01 - Track.mp3"), "wb") as handle:
+                handle.write(b"audio")
 
-        if launched:
-            owner, lease = self._launched_owner(path)
-        else:
-            owner, lease = self._preview_owner(path)
-        if journal_present:
-            self._journal(owner.id, path)
+            if launched:
+                owner, lease = self._launched_owner(path)
+            else:
+                owner, lease = self._preview_owner(path)
+            if journal_present:
+                self._journal(owner.id, path)
 
-        item_paths = (
-            self._item_paths_for(path_world, source_path=path)
-            if album_present
-            else None
-        )
-        stub_delete = _RecordingBeetsDelete()
-        debris_fn = functools.partial(
-            remove_recovery_debris,
-            beets_db_factory=lambda: _FastBeetsDB(item_paths),
-            beets_delete_fn=stub_delete,
-        )
+            item_paths = (
+                self._item_paths_for(path_world, source_path=path)
+                if album_present
+                else None
+            )
+            stub_delete = _RecordingBeetsDelete()
+            debris_fn = functools.partial(
+                remove_recovery_debris,
+                beets_db_factory=lambda: _FastBeetsDB(item_paths),
+                beets_delete_fn=stub_delete,
+            )
 
-        self._recover(owner.id, lease, debris_removal_fn=debris_fn)
+            self._recover(owner.id, lease, debris_removal_fn=debris_fn)
 
-        # CLAUSE no_denylist: this recovery path writes ZERO source_denylist
-        # rows in EVERY world — proven at a finer grain (a planted
-        # `add_denylist` mutant in both the real PipelineDB and the fake
-        # mirror) by the #1089 review's own mutant kill matrix.
-        case.assertEqual(
-            self.db.list_denylist_rows(),
-            [],
-            f"world: album_present={album_present} path_world={path_world} "
-            f"journal_present={journal_present} launched={launched}",
-        )
-
-        # CLAUSE never_remove_unconfined: the admitted delete lane is only
-        # ever reached when this job actually authorized a Beets launch AND
-        # every item path is confined to that exact launch source — never
-        # for a library-root or mixed world, whatever else varies.
-        should_reach_delete_lane = (
-            launched and album_present and path_world == "all_source"
-        )
-        if should_reach_delete_lane:
-            case.assertEqual(len(stub_delete.requests), 1)
-        else:
+            # CLAUSE no_denylist: this recovery path writes ZERO source_denylist
+            # rows in EVERY world — proven at a finer grain (a planted
+            # `add_denylist` mutant in both the real PipelineDB and the fake
+            # mirror) by the #1089 review's own mutant kill matrix.
             case.assertEqual(
-                stub_delete.requests,
+                self.db.list_denylist_rows(),
                 [],
                 f"world: album_present={album_present} path_world={path_world} "
                 f"journal_present={journal_present} launched={launched}",
             )
+
+            # CLAUSE never_remove_unconfined: the admitted delete lane is only
+            # ever reached when this job actually authorized a Beets launch AND
+            # every item path is confined to that exact launch source — never
+            # for a library-root or mixed world, whatever else varies.
+            should_reach_delete_lane = (
+                launched and album_present and path_world == "all_source"
+            )
+            if should_reach_delete_lane:
+                case.assertEqual(len(stub_delete.requests), 1)
+            else:
+                case.assertEqual(
+                    stub_delete.requests,
+                    [],
+                    f"world: album_present={album_present} path_world={path_world} "
+                    f"journal_present={journal_present} launched={launched}",
+                )
 
 
 if __name__ == "__main__":

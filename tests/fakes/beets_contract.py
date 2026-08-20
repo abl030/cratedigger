@@ -10,6 +10,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Self
 
 import yaml
 
@@ -249,7 +250,101 @@ def snapshot_contract_world(world: BeetsContractWorld) -> dict[str, object]:
 
 
 class BeetsContractWorld:
-    """One real file/config world; filesystem permissions are the capability."""
+    """One real file/config world; filesystem permissions are the capability.
+
+    **Issue #1214 review finding F6 -- the sealed-authority-tree residual,
+    analyzed and accepted, not papered over.** While sealed (from the end of
+    ``__init__`` until ``close()``/``unseal()`` runs), ``authority_root`` and
+    its interior directories are chown'd via
+    ``unshare --map-root-user --map-auto chown`` to a subordinate uid, NOT
+    this process's own real uid. That is not cosmetic:
+    ``lib.beets_config_contract._has_app_owned_component`` walks every
+    ancestor of a declared authority path (``authority_root`` is always one,
+    since ``beets_dir``/``secret_dir``/``state_dir`` all live directly under
+    it) and treats ANY ancestor owned by the running process's own euid as
+    "app-owned" -- i.e. mutable, unsafe -- and real production call sites
+    depend on exactly this (``_immutable_declared_file`` on ``runtime.ini``
+    and the secret/main-config sources; ``_nonreplaceable_declared_path`` on
+    ``state_file``). Leaving ``authority_root`` (or any directory between it
+    and a declared leaf) real-user-owned, even with every write bit stripped
+    by ``chmod``, would make every "this authority tree is safely immutable"
+    test scenario fail against real production logic, because
+    chmod-without-chown is always self-reversible by its owner (``chmod()``
+    only requires ownership, not the CURRENT mode bits) -- exactly the
+    mutability the contract exists to detect. So genuine foreign ownership,
+    not merely restrictive permissions, is load-bearing for every test that
+    exercises the sealed/admitted path, not just the handful of explicit
+    tamper-detection tests. No directory layout change moves this
+    requirement: any real-user-owned buffer directory anywhere between
+    ``/dev/shm`` and a declared leaf trips the very ancestor-ownership check
+    the sealed/admitted baseline needs to pass.
+
+    **What actually happened in #1214 (review finding A2 -- correcting an
+    earlier draft of this docstring, which called it an OOM kill): an
+    ENOSPC exception, not a process kill.** Issue #1214 states explicitly
+    that there were no host OOM kills; the symptom was
+    ``OSError: [Errno 28] No space left on device`` from
+    ``cratedigger-daily-checks.service`` filling the tmpfs the fuzz phase
+    runs on. That distinction matters here specifically: an ``OSError``
+    raised while EXECUTING INSIDE an already-entered
+    ``with BeetsContractWorld() as world:`` block is an ordinary Python
+    exception -- the ``with`` statement's normal unwinding semantics
+    guarantee ``__exit__`` (and therefore ``close()``, therefore
+    ``unseal()``) runs regardless of what exception type propagates through
+    the block. So the failure mode that actually occurred in production is
+    fully handled by this issue's core fix; this docstring must not argue
+    the fix is weaker than it is by resting its case on an event that did
+    not happen.
+
+    What remains a genuinely open, narrower, UNCONFIRMED residual: a
+    process-level kill the interpreter cannot catch at all (a real SIGKILL
+    or OOM-killer action -- distinct from, and not what occurred in, the
+    #1214 incident), or disk exhaustion striking mid-``_seal()``'s own
+    ``unshare``/``chown`` subprocess call -- i.e. DURING ``__init__``,
+    BEFORE the ``with`` statement's ``__enter__`` even completes, so no
+    context-manager protocol is active yet to catch it. No in-process
+    mechanism -- not ``close()``'s own ``finally``, not an ``atexit`` hook,
+    not a ``weakref.finalize`` callback, not a caught-signal handler -- runs
+    on an uncatchable kill; the kernel terminates the process before any of
+    that code can execute. If either of these narrower cases strands a
+    world, its authority tree is left owned by that subordinate uid, mode
+    ``dr-xr-x---`` -- unremovable by this process's own real uid via any
+    ordinary tool (``rm -rf``, plain ``chown``), because ``chmod``/``chown``
+    require OWNERSHIP, which the real uid no longer has. Reclaiming such a
+    directory requires deliberately re-running the same
+    ``unshare --map-root-user --map-auto chown`` trick this fixture's own
+    ``_chown_path`` uses. **This residual is accepted and currently
+    UNOWNED** -- no existing or planned workstream reclaims a stranded
+    sealed authority tree (an earlier draft of this docstring named the
+    test-suite runner's own scratch-reaper work as the owner; that claim
+    was checked and is false -- that workstream contains no reference to
+    ``/dev/shm`` or this fixture, and structurally could not reclaim one
+    with an ordinary ``rmtree`` regardless, since only the exact
+    ``unshare``-based chown this class itself uses can undo the seal).
+    Each stranded tree costs about 16 KB of tmpfs (measured: one sealed
+    ``authority_root``, ``du -sh`` block accounting on ``/dev/shm``) --
+    small enough, and the window narrow enough (see below), that this is a
+    reasoned, bounded, accepted gap, not an oversight.
+
+    What IS fixed, and is the real lever available without weakening the
+    tested contract: the SIZE of the exposure window for that narrower
+    residual. Before issue #1214's core fix, every ``@given`` example's
+    world leaked past its own example (``addCleanup`` fires once per test
+    METHOD, but Hypothesis re-executes the body once per EXAMPLE) and
+    stayed alive -- sealed -- for the rest of the method, so up to
+    ``max_examples`` worlds (a fresh re-measurement found 2491 at the daily
+    gate's real budget, ``CRATEDIGGER_FUZZ_MAX_EXAMPLES=2500``; issue #1214
+    itself first measured 2469 from a slightly different run) were
+    simultaneously sealed at any instant an uncatchable kill could land.
+    Binding each world's lifetime to the example that created it
+    (``with BeetsContractWorld() as world:``) means ``close()`` -- and
+    therefore ``unseal()`` -- runs before the NEXT example's world is even
+    constructed, so at most ONE world is ever sealed and resident at a time.
+    That is roughly a 2500x reduction in the instantaneous exposure surface
+    for the narrower, unconfirmed hard-kill residual described above -- it
+    is not a claim about the actual #1214 incident, which this fix handles
+    completely by ordinary exception unwinding.
+    """
 
     _scratch_validated = False
 
@@ -620,6 +715,12 @@ class BeetsContractWorld:
     def assert_readonly(path: Path) -> None:
         if path.stat().st_mode & stat.S_IWUSR:
             raise AssertionError(f"expected readonly fixture component: {path}")
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
 
     def close(self) -> None:
         if self._closed:

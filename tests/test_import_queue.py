@@ -10,7 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime, timedelta
@@ -10509,133 +10509,136 @@ class TestForceWrongMatchReceiptStartupReplayGenerated(unittest.TestCase):
     have selected and replayed against live production data.
     """
 
+    @contextmanager
     def _world(
         self,
         outcome: str,
         *,
         source_already_deleted: bool,
-    ) -> tuple[FakePipelineDB, str, ImportJob]:
+    ) -> Iterator[tuple[FakePipelineDB, str, ImportJob]]:
         db = FakePipelineDB()
         root, source = _make_failed_import_source()
-        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
-        with open(os.path.join(source, "01.mp3"), "wb") as handle:
-            handle.write(b"generated wrong-match audio")
-        db.seed_request(make_request_row(id=42, status="wanted"))
-        db.log_download(
-            42,
-            soulseek_username="alice",
-            outcome="rejected",
-            validation_result={
-                "scenario": "high_distance", "failed_path": source,
-            },
-        )
-        log_id = db.download_logs[-1].id
-        job = db.enqueue_import_job(
-            IMPORT_JOB_FORCE,
-            request_id=42,
-            dedupe_key=(
-                f"generated-wrong-match:{outcome}:{source_already_deleted}"
-            ),
-            payload=force_import_payload(
-                download_log_id=log_id, failed_path=source,
-            ),
-        )
-
-        if outcome in _WRONG_MATCH_REPLAY_OUTCOMES:
-            status, result, error = _wrong_match_replay_terminal_result(
-                outcome,
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"generated wrong-match audio")
+            db.seed_request(make_request_row(id=42, status="wanted"))
+            db.log_download(
+                42,
+                soulseek_username="alice",
+                outcome="rejected",
+                validation_result={
+                    "scenario": "high_distance", "failed_path": source,
+                },
             )
-            message = str(result["message"])
-            if status == "completed":
+            log_id = db.download_logs[-1].id
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=(
+                    f"generated-wrong-match:{outcome}:{source_already_deleted}"
+                ),
+                payload=force_import_payload(
+                    download_log_id=log_id, failed_path=source,
+                ),
+            )
+
+            if outcome in _WRONG_MATCH_REPLAY_OUTCOMES:
+                status, result, error = _wrong_match_replay_terminal_result(
+                    outcome,
+                )
+                message = str(result["message"])
+                if status == "completed":
+                    db.mark_import_job_completed(
+                        job.id, result=result, message=message,
+                    )
+                else:
+                    db.mark_import_job_failed(
+                        job.id, error=error, result=result, message=message,
+                    )
+            elif outcome == "historical_completed_no_marker":
+                # Live-row evidence: 477 of the 619 pre-feature rows doc2
+                # measured were exactly this shape — a 'completed' force job
+                # from before ``_job_result`` ever wrote the era marker. The
+                # measured live shape is the older three-key
+                # ``{deferred, message, success}`` payload (review round 3,
+                # MINOR-2), not a bare ``{"success": True}`` — selection is
+                # identical either way (both lack the marker), but the fixture
+                # should say what was actually measured.
                 db.mark_import_job_completed(
-                    job.id, result=result, message=message,
+                    job.id,
+                    result={
+                        "deferred": False, "message": "imported",
+                        "success": True,
+                    },
+                    message="imported",
                 )
-            else:
+            elif outcome == "historical_executor_crash":
+                # The literal shape ``process_claimed_job``'s own top-level
+                # exception handler writes (``scripts/importer.py``, BEFORE
+                # ``_job_result`` is ever computed) — constructed directly
+                # rather than driving that call chain live, since doing so
+                # would need a new ``cast(Any, ...)`` escape hatch for one
+                # shape a deterministic pin in this same file
+                # (``test_crashed_force_job_is_failed_not_parked``) already
+                # exercises end-to-end through the real code path.
                 db.mark_import_job_failed(
-                    job.id, error=error, result=result, message=message,
+                    job.id, error="RuntimeError: generated executor crash",
+                    result={"success": False},
                 )
-        elif outcome == "historical_completed_no_marker":
-            # Live-row evidence: 477 of the 619 pre-feature rows doc2
-            # measured were exactly this shape — a 'completed' force job
-            # from before ``_job_result`` ever wrote the era marker. The
-            # measured live shape is the older three-key
-            # ``{deferred, message, success}`` payload (review round 3,
-            # MINOR-2), not a bare ``{"success": True}`` — selection is
-            # identical either way (both lack the marker), but the fixture
-            # should say what was actually measured.
-            db.mark_import_job_completed(
-                job.id,
-                result={
-                    "deferred": False, "message": "imported",
-                    "success": True,
-                },
-                message="imported",
-            )
-        elif outcome == "historical_executor_crash":
-            # The literal shape ``process_claimed_job``'s own top-level
-            # exception handler writes (``scripts/importer.py``, BEFORE
-            # ``_job_result`` is ever computed) — constructed directly
-            # rather than driving that call chain live, since doing so
-            # would need a new ``cast(Any, ...)`` escape hatch for one
-            # shape a deterministic pin in this same file
-            # (``test_crashed_force_job_is_failed_not_parked``) already
-            # exercises end-to-end through the real code path.
-            db.mark_import_job_failed(
-                job.id, error="RuntimeError: generated executor crash",
-                result={"success": False},
-            )
-        elif outcome == "historical_operator_cleanup":
-            # Real producer: the actual ``mark_import_job_failed`` DB
-            # method, called directly with no ``result`` kwarg — mirrors
-            # ``tests/test_wrong_matches_cleanup.py``'s own "operator
-            # cancelled" pattern for an ad hoc administrative
-            # terminalization outside the adjudicating decision path.
-            db.mark_import_job_failed(job.id, error="operator cancelled")
-        elif outcome == "historical_preview_shape":
-            # Real producer (review round 3, MEDIUM-1 corrected a false
-            # "no current producer" claim): TWO live paths write the
-            # literal ``{"preview": <preview_result>}`` shape into
-            # ``result`` —
-            # ``lib/pipeline_db/import_jobs.py::mark_import_job_preview_failed``
-            # (called from ``scripts/import_preview_worker.py``'s
-            # ``job.request_id is None or request is None`` branch) and
-            # ``lib/pipeline_db/terminal_outcomes.py::
-            # persist_preview_terminal_outcome``'s non-automation branch
-            # (called via ``lib.dispatch._record_preview_measurement_failed``,
-            # ``import_preview_worker.py:952``). Live proof: force job
-            # 59313 (2026-07-25). Driven directly through the simpler of
-            # the two real producers — the write method itself decides
-            # the exact ``result`` shape, so calling it directly is the
-            # real producer, not a stand-in for it (freshly enqueued
-            # ``job`` is already ``status='queued',
-            # preview_status='waiting'``, exactly this method's
-            # precondition).
-            db.mark_import_job_preview_failed(
-                job.id,
-                preview_status="measurement_failed",
-                error="measurement_crashed",
-                preview_result={
-                    "reason": "measurement_crashed",
-                    "detail": "measurement_failed",
-                    "source_path": "",
-                },
-                message="Preview measurement failed: measurement_crashed",
-            )
-        elif outcome == "historical_null_result":
-            # A genuinely NULL ``result`` column has no public-API
-            # constructor — reach into the fake's own row store directly,
-            # mirroring the real-PG test's raw ``UPDATE ... result = NULL``.
-            db.mark_import_job_failed(job.id, error="unknown")
-            for row in db._import_jobs:
-                if row["id"] == job.id:
-                    row["result"] = None
-                    break
-        else:
-            raise AssertionError(f"unrecognised outcome {outcome!r}")
+            elif outcome == "historical_operator_cleanup":
+                # Real producer: the actual ``mark_import_job_failed`` DB
+                # method, called directly with no ``result`` kwarg — mirrors
+                # ``tests/test_wrong_matches_cleanup.py``'s own "operator
+                # cancelled" pattern for an ad hoc administrative
+                # terminalization outside the adjudicating decision path.
+                db.mark_import_job_failed(job.id, error="operator cancelled")
+            elif outcome == "historical_preview_shape":
+                # Real producer (review round 3, MEDIUM-1 corrected a false
+                # "no current producer" claim): TWO live paths write the
+                # literal ``{"preview": <preview_result>}`` shape into
+                # ``result`` —
+                # ``lib/pipeline_db/import_jobs.py::mark_import_job_preview_failed``
+                # (called from ``scripts/import_preview_worker.py``'s
+                # ``job.request_id is None or request is None`` branch) and
+                # ``lib/pipeline_db/terminal_outcomes.py::
+                # persist_preview_terminal_outcome``'s non-automation branch
+                # (called via ``lib.dispatch._record_preview_measurement_failed``,
+                # ``import_preview_worker.py:952``). Live proof: force job
+                # 59313 (2026-07-25). Driven directly through the simpler of
+                # the two real producers — the write method itself decides
+                # the exact ``result`` shape, so calling it directly is the
+                # real producer, not a stand-in for it (freshly enqueued
+                # ``job`` is already ``status='queued',
+                # preview_status='waiting'``, exactly this method's
+                # precondition).
+                db.mark_import_job_preview_failed(
+                    job.id,
+                    preview_status="measurement_failed",
+                    error="measurement_crashed",
+                    preview_result={
+                        "reason": "measurement_crashed",
+                        "detail": "measurement_failed",
+                        "source_path": "",
+                    },
+                    message="Preview measurement failed: measurement_crashed",
+                )
+            elif outcome == "historical_null_result":
+                # A genuinely NULL ``result`` column has no public-API
+                # constructor — reach into the fake's own row store directly,
+                # mirroring the real-PG test's raw ``UPDATE ... result = NULL``.
+                db.mark_import_job_failed(job.id, error="unknown")
+                for row in db._import_jobs:
+                    if row["id"] == job.id:
+                        row["result"] = None
+                        break
+            else:
+                raise AssertionError(f"unrecognised outcome {outcome!r}")
 
-        if source_already_deleted:
-            shutil.rmtree(source)
-        return db, source, job
+            if source_already_deleted:
+                shutil.rmtree(source)
+            yield db, source, job
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     @given(
         outcome=st.sampled_from(_WRONG_MATCH_REPLAY_ALL_WORLDS),
@@ -10648,31 +10651,31 @@ class TestForceWrongMatchReceiptStartupReplayGenerated(unittest.TestCase):
     ) -> None:
         from scripts import importer
 
-        db, source, job = self._world(
+        with self._world(
             outcome, source_already_deleted=source_already_deleted,
-        )
-        source_existed_before = os.path.isdir(source)
+        ) as (db, source, job):
+            source_existed_before = os.path.isdir(source)
 
-        importer.recover_abandoned_running_jobs(db)
+            importer.recover_abandoned_running_jobs(db)
 
-        converged = db.get_import_job(job.id)
-        assert converged is not None
-        result = converged.result or {}
-        raw_wrong_match_dismissal = result.get("wrong_match_dismissal")
-        raw_cleanup = result.get("cleanup")
-        raw_receipt = (
-            raw_wrong_match_dismissal
-            if raw_wrong_match_dismissal is not None else raw_cleanup
-        )
-        receipt = raw_receipt if isinstance(raw_receipt, dict) else None
-        violations = wrong_match_replay_violations(
-            outcome=outcome,
-            source_existed_before_replay=source_existed_before,
-            source_exists_after_replay=os.path.exists(source),
-            wrong_match_visible_after_replay=bool(db.get_wrong_matches()),
-            receipt=receipt,
-        )
-        self.assertEqual(violations, [], violations)
+            converged = db.get_import_job(job.id)
+            assert converged is not None
+            result = converged.result or {}
+            raw_wrong_match_dismissal = result.get("wrong_match_dismissal")
+            raw_cleanup = result.get("cleanup")
+            raw_receipt = (
+                raw_wrong_match_dismissal
+                if raw_wrong_match_dismissal is not None else raw_cleanup
+            )
+            receipt = raw_receipt if isinstance(raw_receipt, dict) else None
+            violations = wrong_match_replay_violations(
+                outcome=outcome,
+                source_existed_before_replay=source_existed_before,
+                source_exists_after_replay=os.path.exists(source),
+                wrong_match_visible_after_replay=bool(db.get_wrong_matches()),
+                receipt=receipt,
+            )
+            self.assertEqual(violations, [], violations)
 
 
 class TestWrongMatchReplayViolationsTripOnViolations(unittest.TestCase):
