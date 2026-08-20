@@ -250,7 +250,68 @@ def snapshot_contract_world(world: BeetsContractWorld) -> dict[str, object]:
 
 
 class BeetsContractWorld:
-    """One real file/config world; filesystem permissions are the capability."""
+    """One real file/config world; filesystem permissions are the capability.
+
+    **Issue #1214 review finding F6 -- the sealed-authority-tree residual,
+    analyzed and accepted, not papered over.** While sealed (from the end of
+    ``__init__`` until ``close()``/``unseal()`` runs), ``authority_root`` and
+    its interior directories are chown'd via
+    ``unshare --map-root-user --map-auto chown`` to a subordinate uid, NOT
+    this process's own real uid. That is not cosmetic:
+    ``lib.beets_config_contract._has_app_owned_component`` walks every
+    ancestor of a declared authority path (``authority_root`` is always one,
+    since ``beets_dir``/``secret_dir``/``state_dir`` all live directly under
+    it) and treats ANY ancestor owned by the running process's own euid as
+    "app-owned" -- i.e. mutable, unsafe -- and real production call sites
+    depend on exactly this (``_immutable_declared_file`` on ``runtime.ini``
+    and the secret/main-config sources; ``_nonreplaceable_declared_path`` on
+    ``state_file``). Leaving ``authority_root`` (or any directory between it
+    and a declared leaf) real-user-owned, even with every write bit stripped
+    by ``chmod``, would make every "this authority tree is safely immutable"
+    test scenario fail against real production logic, because
+    chmod-without-chown is always self-reversible by its owner (``chmod()``
+    only requires ownership, not the CURRENT mode bits) -- exactly the
+    mutability the contract exists to detect. So genuine foreign ownership,
+    not merely restrictive permissions, is load-bearing for every test that
+    exercises the sealed/admitted path, not just the handful of explicit
+    tamper-detection tests. No directory layout change moves this
+    requirement: any real-user-owned buffer directory anywhere between
+    ``/dev/shm`` and a declared leaf trips the very ancestor-ownership check
+    the sealed/admitted baseline needs to pass.
+
+    The unavoidable consequence: if this process is SIGKILLed (OOM-killed --
+    the exact #1214 incident scenario) while a world is sealed, its
+    authority tree is left owned by that subordinate uid, mode
+    ``dr-xr-x---`` -- unremovable by this process's own real uid via any
+    ordinary tool (``rm -rf``, plain ``chown``), because ``chmod``/``chown``
+    require OWNERSHIP, which the real uid no longer has. No in-process
+    mechanism -- not ``close()``'s own ``finally``, not an ``atexit`` hook,
+    not a ``weakref.finalize`` callback, not a caught-signal handler -- runs
+    on SIGKILL; the kernel terminates the process before any of that code
+    can execute. Reclaiming such a directory requires deliberately
+    re-running the same ``unshare --map-root-user --map-auto chown`` trick
+    against it -- reaper machinery this issue's review explicitly declines
+    to add here (owned, if wanted, by the test-suite runner's own scratch
+    lifecycle, a separate worktree/workstream -- not this fixture).
+
+    What IS fixed, and is the real lever available without weakening the
+    tested contract: the SIZE of the exposure window. Before issue #1214's
+    core fix, every ``@given`` example's world leaked past its own example
+    (``addCleanup`` fires once per test METHOD, but Hypothesis re-executes
+    the body once per EXAMPLE) and stayed alive -- sealed -- for the rest of
+    the method, so up to ``max_examples`` worlds (2491 measured at the daily
+    gate's real budget, ``CRATEDIGGER_FUZZ_MAX_EXAMPLES=2500``) were
+    simultaneously sealed at any instant a kill could land. Binding each
+    world's lifetime to the example that created it
+    (``with BeetsContractWorld() as world:``) means ``close()`` -- and
+    therefore ``unseal()`` -- runs before the NEXT example's world is even
+    constructed, so at most ONE world is ever sealed and resident at a time.
+    That is roughly a 2500x reduction in the instantaneous exposure surface
+    for the same failure class, without touching the ownership semantics the
+    contract tests depend on. A residual, bounded-to-one-world SIGKILL race
+    is accepted as unavoidable given the above; it is not evidence of an
+    incomplete fix.
+    """
 
     _scratch_validated = False
 

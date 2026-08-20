@@ -1006,6 +1006,27 @@ may still patrol nothing; only review and mutant-kill counts show that.
   `class`/`def`** — that is what wires the module into the suite/fuzz tiers,
   and both `tests/test_hypothesis_profile_audit.py` and the suite runner's
   own `assert_hypothesis_deadlines_disabled` fail without it.
+- **A resource built inside a `@given` body is example-scoped, not
+  method-scoped — bind its lifetime with a `with` block, never
+  `self.addCleanup(...)`/`self.enterContext(...)`.** Hypothesis re-executes
+  the body once per EXAMPLE; `addCleanup`/`enterContext` fire once per test
+  METHOD. A resource constructed directly in the body and registered there
+  leaks one live copy per example until the method finally returns (issue
+  #1214: 2491 concurrently-live `BeetsContractWorld` fixtures, 1.59 GB, from
+  ONE test method at the daily gate's real budget — the exposure that OOM'd
+  `cratedigger-daily-checks.service` in production).
+  `tests/test_given_body_cleanup_audit.py` enforces the direct-construction
+  shape of this mistake, but cannot see through a helper method the body
+  merely calls by name (a bounded syntactic audit, not a call-graph tracer
+  — `.claude/rules/code-quality.md` § "Semantic source scanners are
+  prohibited"), so review still owns that shape. This is the OPPOSITE of
+  `NodeJsonlWorker`'s pattern above — that worker is deliberately built
+  ONCE per method in `setUp()` and REUSED across every example, so
+  method-scoped `addCleanup` is exactly right there. The rule follows the
+  resource's own intended lifetime, not a blanket ban on `addCleanup` near
+  `@given`: a resource meant to be fresh per example needs a `with` block
+  inside the body; a resource meant to be shared across the whole method's
+  examples is correctly `addCleanup`-scoped in `setUp()`.
 - Discard an unanswerable world with `assume(...)`, never a bare `return`.
   A `return` spends the example as a PASS and silently shrinks the real
   budget; `assume` marks it invalid so Hypothesis refills. Issue #882 found

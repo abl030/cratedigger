@@ -295,15 +295,20 @@ class _ServiceCase(unittest.TestCase):
     @staticmethod
     def _external_patches():
         """The three service-boundary patches every _replace() run needs:
-        wrong-match cleanup and the two rescan notifiers. The ONLY source
-        location that spells these three patch() calls -- both
-        _patch_externals (addCleanup-scoped, per test METHOD) and
-        _patch_externals_scoped (context-manager-scoped, per Hypothesis
-        EXAMPLE, issue #1214) start this SAME list rather than each writing
-        their own patch() calls, so tests/_mock_audit_scanner.py's
-        MULTILINE_PATCH_BASELINE ratchet for
-        lib.mbid_replace_service.delete_wrong_match_group sees exactly one
-        occurrence here, not two."""
+        wrong-match cleanup and the two rescan notifiers. The one shared
+        source location _patch_externals (addCleanup-scoped, per test
+        METHOD) and _patch_externals_scoped (context-manager-scoped, per
+        Hypothesis EXAMPLE, issue #1214) both start from, rather than each
+        writing their own patch() calls -- so adding
+        _patch_externals_scoped did not add a second new patch() occurrence
+        of the delete_wrong_match_group target for
+        tests/_mock_audit_scanner.py's MULTILINE_PATCH_BASELINE ratchet to
+        count. That same target is also patched inline, pre-existing and
+        unrelated to this helper, at several other sites in this file
+        (already counted in the ratchet's baseline of 9) -- this docstring
+        is about the two Hypothesis-era callers of _external_patches, not a
+        claim that no other patch of this target exists anywhere in the
+        file."""
         return [
             patch(
                 "lib.mbid_replace_service.delete_wrong_match_group",
@@ -356,6 +361,48 @@ class _ServiceCase(unittest.TestCase):
         self.assertEqual(slskd.transfers.get_all_downloads_calls, [])
         self.assertEqual(slskd.users.directory_calls, [])
         self.assertEqual(slskd.users.status_calls, [])
+
+
+class TestPatchExternalsScopedPatchesTheSameTargets(_ServiceCase):
+    """Issue #1214 review finding F3: prove ``_patch_externals_scoped()``
+    patches the SAME three module attributes ``_patch_externals()`` does,
+    not merely that both call ``_external_patches()`` by construction.
+    Two mutants at ``_external_patches()``/``_patch_externals_scoped()``
+    left every other test in this module green (review finding F3):
+    dropping the ``delete_wrong_match_group`` entry from the shared list,
+    and making the scoped helper yield fresh, never-entered ``MagicMock()``
+    objects. This test fails on both -- see the issue #1214 kill matrix."""
+
+    def test_patch_externals_scoped_patches_the_same_three_targets(
+        self,
+    ) -> None:
+        import lib.mbid_replace_service as svc_mod
+
+        original_delete = svc_mod.delete_wrong_match_group
+        original_plex = svc_mod.trigger_plex_scan
+        original_jellyfin = svc_mod.trigger_jellyfin_scan
+
+        with self._patch_externals_scoped() as mocks:
+            self.assertEqual(len(mocks), 3)
+            # Each module attribute really was replaced by the SAME mock
+            # _patch_externals_scoped() handed back -- not three fresh,
+            # disconnected MagicMock()s nothing ever entered.
+            self.assertIs(svc_mod.delete_wrong_match_group, mocks[0])
+            self.assertIs(svc_mod.trigger_plex_scan, mocks[1])
+            self.assertIs(svc_mod.trigger_jellyfin_scan, mocks[2])
+            self.assertIsNot(svc_mod.delete_wrong_match_group, original_delete)
+            self.assertIsNot(svc_mod.trigger_plex_scan, original_plex)
+            self.assertIsNot(svc_mod.trigger_jellyfin_scan, original_jellyfin)
+            # The delete_wrong_match_group mock keeps _external_patches()'s
+            # own side_effect -- proves this came from the SAME shared list
+            # _patch_externals() uses, not an independently-invented patch.
+            self.assertIs(mocks[0].side_effect, _empty_wrong_match_summary)
+
+        # Restored after the with-block exits -- the same contract
+        # _patch_externals() gives via self.addCleanup(p.stop).
+        self.assertIs(svc_mod.delete_wrong_match_group, original_delete)
+        self.assertIs(svc_mod.trigger_plex_scan, original_plex)
+        self.assertIs(svc_mod.trigger_jellyfin_scan, original_jellyfin)
 
 
 class TestReplaceOutcomeMatrix(_ServiceCase):
