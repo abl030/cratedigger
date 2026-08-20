@@ -10,6 +10,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Self
 
 import yaml
 
@@ -620,6 +621,12 @@ class BeetsContractWorld:
     def assert_readonly(path: Path) -> None:
         if path.stat().st_mode & stat.S_IWUSR:
             raise AssertionError(f"expected readonly fixture component: {path}")
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
 
     def close(self) -> None:
         if self._closed:

@@ -1371,20 +1371,33 @@ class TestReplaceHappyPath(_ServiceCase):
         space, Replace always routes a uniquely resolved current album through
         pinned exact deletion. Status is lifecycle; displacement keys on the
         fresh identity snapshot."""
-        self._patch_externals()
-        beets = self._installed_beets()
-        exact_delete = MagicMock(side_effect=self._completed_delete)
-        _db, _, svc = self._replace(
-            old_status=old_status,
-            beets_db_factory=lambda: beets,
-            beets_delete_fn=exact_delete,
-        )
-        result = svc.replace_request_mbid(
-            42, target_mb_release_id=NEW_MBID,
-        )
-        self.assertEqual(result.outcome, RESULT_REPLACED)
-        exact_delete.assert_called_once()
-        self.assertEqual(exact_delete.call_args.args[0].album_id, 77)
+        # Scoped locally (not via self._patch_externals()/addCleanup) --
+        # Hypothesis re-executes this method body once per example, and
+        # addCleanup only fires once per method (issue #1214 defect class).
+        with (
+            patch(
+                "lib.mbid_replace_service.delete_wrong_match_group",
+                MagicMock(side_effect=_empty_wrong_match_summary),
+            ),
+            patch("lib.mbid_replace_service.trigger_plex_scan", MagicMock()),
+            patch(
+                "lib.mbid_replace_service.trigger_jellyfin_scan",
+                MagicMock(),
+            ),
+        ):
+            beets = self._installed_beets()
+            exact_delete = MagicMock(side_effect=self._completed_delete)
+            _db, _, svc = self._replace(
+                old_status=old_status,
+                beets_db_factory=lambda: beets,
+                beets_delete_fn=exact_delete,
+            )
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID,
+            )
+            self.assertEqual(result.outcome, RESULT_REPLACED)
+            exact_delete.assert_called_once()
+            self.assertEqual(exact_delete.call_args.args[0].album_id, 77)
 
     def test_happy_path_downloading_skips_staging_logs_warning(self):
         self._patch_externals()

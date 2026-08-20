@@ -216,6 +216,9 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_beets_config_startup_generated",
         "tests.test_beets_config_contract",
         "tests.test_beets_config_contract_integration",
+        "tests.test_beets_config_contract_generated",
+        "tests.test_beets_config_contract_regressions_generated",
+        "tests.test_beets_contract_world_lifetime",
     ),
     "tests/fakes/daily_flake_update.py": (
         "tests.test_daily_flake_update",

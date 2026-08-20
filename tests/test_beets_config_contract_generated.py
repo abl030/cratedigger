@@ -154,28 +154,27 @@ class TestGeneratedDeclaredFileFailures(unittest.TestCase):
         case: tuple[str, str],
     ) -> None:
         authority, corruption = case
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        _corrupt_declared_authority(
-            world,
-            authority=authority,
-            corruption=corruption,
-        )
+        with BeetsContractWorld() as world:
+            _corrupt_declared_authority(
+                world,
+                authority=authority,
+                corruption=corruption,
+            )
 
-        if authority == "runtime":
-            with self.assertRaises(
-                (OSError, UnicodeError, configparser.Error, ValueError)
-            ):
-                world.cfg()
-            return
+            if authority == "runtime":
+                with self.assertRaises(
+                    (OSError, UnicodeError, configparser.Error, ValueError)
+                ):
+                    world.cfg()
+                return
 
-        if authority == "secret" and corruption == "nonmapping":
-            report = check_beets_config(world.cfg(), role="importer")
-            assert_hard_code(report.hard_failures, "secret_schema")
-            return
+            if authority == "secret" and corruption == "nonmapping":
+                report = check_beets_config(world.cfg(), role="importer")
+                assert_hard_code(report.hard_failures, "secret_schema")
+                return
 
-        with self.assertRaises(BeetsConfigError):
-            check_beets_config(world.cfg(), role="importer")
+            with self.assertRaises(BeetsConfigError):
+                check_beets_config(world.cfg(), role="importer")
 
 
 class TestGeneratedTokenOnlySecret(unittest.TestCase):
@@ -184,14 +183,12 @@ class TestGeneratedTokenOnlySecret(unittest.TestCase):
     @settings(max_examples=40)
     @given(st.text(min_size=1, max_size=60).map(lambda value: f"SECRET::{value}::TOKEN"))
     def test_any_scalar_token_remains_data_and_never_report_content(self, token: str) -> None:
-        world = BeetsContractWorld(token=token)
-        self.addCleanup(world.close)
+        with BeetsContractWorld(token=token) as world:
+            report = check_beets_config(world.cfg(), role="importer")
+            encoded = msgspec.json.encode(report).decode()
 
-        report = check_beets_config(world.cfg(), role="importer")
-        encoded = msgspec.json.encode(report).decode()
-
-        self.assertTrue(report.ok, report.hard_failures)
-        assert_token_absent_from_owned_report(encoded, token)
+            self.assertTrue(report.ok, report.hard_failures)
+            assert_token_absent_from_owned_report(encoded, token)
 
     @given(st.one_of(
         st.just(""),
@@ -203,84 +200,79 @@ class TestGeneratedTokenOnlySecret(unittest.TestCase):
         st.dictionaries(st.text(max_size=8), st.integers(), max_size=3),
     ))
     def test_invalid_designated_token_values_are_always_missing(self, token: object) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        world.unseal()
-        world.secret_include.write_text(
-            yaml.safe_dump({"discogs": {"user_token": token}}),
-            encoding="utf-8",
-        )
-        world._seal("importer")
+        with BeetsContractWorld() as world:
+            world.unseal()
+            world.secret_include.write_text(
+                yaml.safe_dump({"discogs": {"user_token": token}}),
+                encoding="utf-8",
+            )
+            world._seal("importer")
 
-        assert_discogs_token_missing(check_beets_config(world.cfg(), role="importer"))
+            assert_discogs_token_missing(check_beets_config(world.cfg(), role="importer"))
 
     @given(st.sampled_from(["library", "directory", "statefile", "import", "paths", "plugins"]))
     def test_any_extra_top_level_secret_authority_is_rejected(self, key: str) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        world.unseal()
-        world.secret_include.write_text(
-            yaml.safe_dump({"discogs": {"user_token": "safe"}, key: {}}),
-            encoding="utf-8",
-        )
-        world._seal("importer")
+        with BeetsContractWorld() as world:
+            world.unseal()
+            world.secret_include.write_text(
+                yaml.safe_dump({"discogs": {"user_token": "safe"}, key: {}}),
+                encoding="utf-8",
+            )
+            world._seal("importer")
 
-        report = check_beets_config(world.cfg(), role="importer")
+            report = check_beets_config(world.cfg(), role="importer")
 
-        self.assertEqual([finding.code for finding in report.hard_failures], ["secret_schema"])
+            self.assertEqual([finding.code for finding in report.hard_failures], ["secret_schema"])
 
     @given(st.integers(min_value=0, max_value=3))
     def test_designated_secret_requires_exactly_one_occurrence(self, count: int) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        world.unseal()
-        world._write_main_config(include=[str(world.secret_include)] * count)
-        world._seal("importer")
+        with BeetsContractWorld() as world:
+            world.unseal()
+            world._write_main_config(include=[str(world.secret_include)] * count)
+            world._seal("importer")
 
-        report = check_beets_config(world.cfg(), role="importer")
+            report = check_beets_config(world.cfg(), role="importer")
 
-        if count == 1:
-            self.assertTrue(report.ok, report.hard_failures)
-        else:
-            assert_hard_code(report.hard_failures, "secret_include_count")
+            if count == 1:
+                self.assertTrue(report.ok, report.hard_failures)
+            else:
+                assert_hard_code(report.hard_failures, "secret_include_count")
 
     @given(st.sampled_from(("discogs.yaml", "", 0, False, True)))
     def test_every_scalar_include_shape_is_rejected(self, include: object) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        world.unseal()
-        world._write_main_config(include=include)
-        world._seal("importer")
+        with BeetsContractWorld() as world:
+            world.unseal()
+            world._write_main_config(include=include)
+            world._seal("importer")
 
-        report = check_beets_config(world.cfg(), role="importer")
+            report = check_beets_config(world.cfg(), role="importer")
 
-        assert_hard_code(report.hard_failures, "include_shape")
+            assert_hard_code(report.hard_failures, "include_shape")
 
     @given(st.sampled_from(("top_level", "nested_token")))
     def test_duplicate_designated_secret_keys_are_always_rejected(
         self,
         duplicate_at: str,
     ) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        world.unseal()
-        if duplicate_at == "top_level":
-            raw = (
-                "discogs:\n  user_token: first\n"
-                "discogs:\n  user_token: second\n"
-            )
-        else:
-            raw = (
-                "discogs:\n"
-                "  user_token: first\n"
-                "  user_token: second\n"
-            )
-        world.secret_include.write_text(raw, encoding="utf-8")
-        world._seal("importer")
+        with BeetsContractWorld() as world:
+            world.unseal()
+            if duplicate_at == "top_level":
+                raw = (
+                    "discogs:\n  user_token: first\n"
+                    "discogs:\n  user_token: second\n"
+                )
+            else:
+                raw = (
+                    "discogs:\n"
+                    "  user_token: first\n"
+                    "  user_token: second\n"
+                )
+            world.secret_include.write_text(raw, encoding="utf-8")
+            world._seal("importer")
 
-        report = check_beets_config(world.cfg(), role="importer")
+            report = check_beets_config(world.cfg(), role="importer")
 
-        assert_hard_code(report.hard_failures, "secret_duplicate_key")
+            assert_hard_code(report.hard_failures, "secret_duplicate_key")
 
     @given(st.sampled_from((
         "? [discogs]\n: token\n",
@@ -290,15 +282,14 @@ class TestGeneratedTokenOnlySecret(unittest.TestCase):
         self,
         raw: str,
     ) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        world.unseal()
-        world.secret_include.write_text(raw, encoding="utf-8")
-        world._seal("importer")
+        with BeetsContractWorld() as world:
+            world.unseal()
+            world.secret_include.write_text(raw, encoding="utf-8")
+            world._seal("importer")
 
-        assert_native_config_rejection(
-            lambda: check_beets_config(world.cfg(), role="importer")
-        )
+            assert_native_config_rejection(
+                lambda: check_beets_config(world.cfg(), role="importer")
+            )
 
 
 class TestGeneratedEffectiveSettings(unittest.TestCase):
@@ -326,26 +317,25 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         authority: tuple[str, str],
         alias_depth: int,
     ) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        target = Path("/")
-        for index in range(alias_depth):
-            alias = world.root / f"root-alias-{index}"
-            alias.symlink_to(target)
-            target = alias
-        field, expected_code = authority
-        value = (
-            str(target / "beets-library.db")
-            if field == "beets_library_db"
-            else str(target)
-        )
+        with BeetsContractWorld() as world:
+            target = Path("/")
+            for index in range(alias_depth):
+                alias = world.root / f"root-alias-{index}"
+                alias.symlink_to(target)
+                target = alias
+            field, expected_code = authority
+            value = (
+                str(target / "beets-library.db")
+                if field == "beets_library_db"
+                else str(target)
+            )
 
-        report = check_beets_config(
-            replace(world.cfg(), **{field: value}),
-            role="importer",
-        )
+            report = check_beets_config(
+                replace(world.cfg(), **{field: value}),
+                role="importer",
+            )
 
-        assert_hard_code(report.hard_failures, expected_code)
+            assert_hard_code(report.hard_failures, expected_code)
 
     @given(
         field=st.sampled_from(RUNTIME_AUTHORITIES),
@@ -356,15 +346,13 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         field: str,
         role: BeetsRole,
     ) -> None:
-        world = BeetsContractWorld(role=role)
-        self.addCleanup(world.close)
+        with BeetsContractWorld(role=role) as world:
+            report = check_beets_config(
+                replace(world.cfg(), **{field: ""}),
+                role=role,
+            )
 
-        report = check_beets_config(
-            replace(world.cfg(), **{field: ""}),
-            role=role,
-        )
-
-        assert_hard_code(report.hard_failures, "runtime_authority_missing")
+            assert_hard_code(report.hard_failures, "runtime_authority_missing")
 
     @given(
         field=st.sampled_from(RUNTIME_AUTHORITIES),
@@ -375,29 +363,28 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         field: str,
         raw_case: str,
     ) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        ini_key = {
-            "beets_config_dir": "config_dir",
-            "beets_library_db": "library",
-            "beets_directory": "directory",
-            "beets_state_file": "state_file",
-            "beets_python": "python",
-            "beets_secret_include": "secret_include",
-        }[field]
-        world.unseal()
-        if raw_case == "missing":
-            parser = configparser.RawConfigParser()
-            parser.read(world.runtime_config, encoding="utf-8")
-            parser.remove_option("Beets", ini_key)
-            with world.runtime_config.open("w", encoding="utf-8") as handle:
-                parser.write(handle)
-        else:
-            blank = "" if raw_case == "empty" else " \t "
-            world._write_runtime_config(**{ini_key: blank})
-        world._seal("importer")
+        with BeetsContractWorld() as world:
+            ini_key = {
+                "beets_config_dir": "config_dir",
+                "beets_library_db": "library",
+                "beets_directory": "directory",
+                "beets_state_file": "state_file",
+                "beets_python": "python",
+                "beets_secret_include": "secret_include",
+            }[field]
+            world.unseal()
+            if raw_case == "missing":
+                parser = configparser.RawConfigParser()
+                parser.read(world.runtime_config, encoding="utf-8")
+                parser.remove_option("Beets", ini_key)
+                with world.runtime_config.open("w", encoding="utf-8") as handle:
+                    parser.write(handle)
+            else:
+                blank = "" if raw_case == "empty" else " \t "
+                world._write_runtime_config(**{ini_key: blank})
+            world._seal("importer")
 
-        assert_raw_authority_rejected(world.cfg)
+            assert_raw_authority_rejected(world.cfg)
 
     @given(st.sampled_from((
         ("python", "python_mismatch"),
@@ -410,32 +397,31 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         case: tuple[str, str],
     ) -> None:
         authority, expected_code = case
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        cfg = world.cfg()
-        if authority == "python":
-            cfg = replace(cfg, beets_python=str(world.root / "other-python"))
-        elif authority == "library":
-            other_library = world.root / "other-library.db"
-            other_library.write_bytes(world.library_db.read_bytes())
-            cfg = replace(cfg, beets_library_db=str(other_library))
-        elif authority == "directory":
-            other_directory = world.root / "other-library-root"
-            other_directory.mkdir()
-            cfg = replace(cfg, beets_directory=str(other_directory))
-        else:
-            other_state = world.root / "other-state.pickle"
-            other_state.write_bytes(b"other-state")
-            cfg = replace(cfg, beets_state_file=str(other_state))
+        with BeetsContractWorld() as world:
+            cfg = world.cfg()
+            if authority == "python":
+                cfg = replace(cfg, beets_python=str(world.root / "other-python"))
+            elif authority == "library":
+                other_library = world.root / "other-library.db"
+                other_library.write_bytes(world.library_db.read_bytes())
+                cfg = replace(cfg, beets_library_db=str(other_library))
+            elif authority == "directory":
+                other_directory = world.root / "other-library-root"
+                other_directory.mkdir()
+                cfg = replace(cfg, beets_directory=str(other_directory))
+            else:
+                other_state = world.root / "other-state.pickle"
+                other_state.write_bytes(b"other-state")
+                cfg = replace(cfg, beets_state_file=str(other_state))
 
-        if authority == "python":
-            with self.assertRaises(BeetsConfigError):
-                check_beets_config(cfg, role="importer")
-            return
+            if authority == "python":
+                with self.assertRaises(BeetsConfigError):
+                    check_beets_config(cfg, role="importer")
+                return
 
-        report = check_beets_config(cfg, role="importer")
+            report = check_beets_config(cfg, role="importer")
 
-        assert_hard_code(report.hard_failures, expected_code)
+            assert_hard_code(report.hard_failures, expected_code)
 
     @given(
         role=st.sampled_from(("main", "preview", "web")),
@@ -446,34 +432,32 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         role: BeetsRole,
         mode: int,
     ) -> None:
-        world = BeetsContractWorld(role=role)
-        self.addCleanup(world.close)
-        world.make_state_leaf_app_owned(mode)
-        before = world.state_file.read_bytes()
+        with BeetsContractWorld(role=role) as world:
+            world.make_state_leaf_app_owned(mode)
+            before = world.state_file.read_bytes()
 
-        report = check_beets_config(world.cfg(), role=role)
+            report = check_beets_config(world.cfg(), role=role)
 
-        assert_hard_code(report.hard_failures, "state_owned_by_reader")
-        self.assertNotIn(
-            "state_writable_by_reader",
-            [finding.code for finding in report.hard_failures],
-        )
-        world.state_file.chmod(mode | stat.S_IWUSR)
-        fd = os.open(world.state_file, os.O_WRONLY)
-        os.close(fd)
-        self.assertEqual(world.state_file.read_bytes(), before)
+            assert_hard_code(report.hard_failures, "state_owned_by_reader")
+            self.assertNotIn(
+                "state_writable_by_reader",
+                [finding.code for finding in report.hard_failures],
+            )
+            world.state_file.chmod(mode | stat.S_IWUSR)
+            fd = os.open(world.state_file, os.O_WRONLY)
+            os.close(fd)
+            self.assertEqual(world.state_file.read_bytes(), before)
 
     @given(mode=st.sampled_from((0o600, 0o620, 0o640, 0o660)))
     def test_importer_may_own_its_writable_state_leaf(self, mode: int) -> None:
-        world = BeetsContractWorld(role="importer")
-        self.addCleanup(world.close)
-        world.make_state_leaf_app_owned(mode)
+        with BeetsContractWorld(role="importer") as world:
+            world.make_state_leaf_app_owned(mode)
 
-        report = check_beets_config(world.cfg(), role="importer")
+            report = check_beets_config(world.cfg(), role="importer")
 
-        self.assertTrue(report.ok, report.hard_failures)
-        self.assertEqual(world.state_file.stat().st_uid, os.geteuid())
-        self.assertNotEqual(world.state_dir.stat().st_uid, os.geteuid())
+            self.assertTrue(report.ok, report.hard_failures)
+            self.assertEqual(world.state_file.stat().st_uid, os.geteuid())
+            self.assertNotEqual(world.state_dir.stat().st_uid, os.geteuid())
 
     @given(
         variant=st.sampled_from((
@@ -489,56 +473,54 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         self,
         variant: str,
     ) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        invocation = Path(sys.executable)
-        resolved = invocation.resolve()
-        self.assertNotEqual(invocation, resolved)
+        with BeetsContractWorld() as world:
+            invocation = Path(sys.executable)
+            resolved = invocation.resolve()
+            self.assertNotEqual(invocation, resolved)
 
-        if variant == "exact":
-            spelling = sys.executable
-            admitted = True
-        elif variant == "dot_segment":
-            spelling = f"{invocation.parent}/./{invocation.name}"
-            admitted = True
-        elif variant == "relative":
-            spelling = os.path.relpath(invocation, Path.cwd())
-            admitted = True
-        elif variant == "resolved_target":
-            spelling = str(resolved)
-            admitted = False
-        else:
-            alias_parent = world.root
-            if variant == "nested_app_symlink":
-                alias_parent = world.root / "python-aliases"
-                alias_parent.mkdir()
-            alias = alias_parent / "python"
-            alias.symlink_to(invocation)
-            spelling = str(alias)
-            admitted = False
+            if variant == "exact":
+                spelling = sys.executable
+                admitted = True
+            elif variant == "dot_segment":
+                spelling = f"{invocation.parent}/./{invocation.name}"
+                admitted = True
+            elif variant == "relative":
+                spelling = os.path.relpath(invocation, Path.cwd())
+                admitted = True
+            elif variant == "resolved_target":
+                spelling = str(resolved)
+                admitted = False
+            else:
+                alias_parent = world.root
+                if variant == "nested_app_symlink":
+                    alias_parent = world.root / "python-aliases"
+                    alias_parent.mkdir()
+                alias = alias_parent / "python"
+                alias.symlink_to(invocation)
+                spelling = str(alias)
+                admitted = False
 
-        report = check_beets_config(
-            replace(world.cfg(), beets_python=spelling),
-            role="importer",
-        )
+            report = check_beets_config(
+                replace(world.cfg(), beets_python=spelling),
+                role="importer",
+            )
 
-        if admitted:
-            self.assertTrue(report.ok, report.hard_failures)
-            self.assertEqual(report.authority.python, sys.executable)
-        else:
-            assert_hard_code(report.hard_failures, "python_mismatch")
-            if variant in {"app_symlink", "nested_app_symlink"}:
-                assert_hard_code(report.hard_failures, "mutable_python")
+            if admitted:
+                self.assertTrue(report.ok, report.hard_failures)
+                self.assertEqual(report.authority.python, sys.executable)
+            else:
+                assert_hard_code(report.hard_failures, "python_mismatch")
+                if variant in {"app_symlink", "nested_app_symlink"}:
+                    assert_hard_code(report.hard_failures, "mutable_python")
 
     @given(kind=st.sampled_from(("same_path", "hardlink")))
     def test_state_and_library_must_never_share_an_inode(self, kind: str) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        world.alias_state_to_library(kind)
+        with BeetsContractWorld() as world:
+            world.alias_state_to_library(kind)
 
-        report = check_beets_config(world.cfg(), role="importer")
+            report = check_beets_config(world.cfg(), role="importer")
 
-        assert_hard_code(report.hard_failures, "state_library_alias")
+            assert_hard_code(report.hard_failures, "state_library_alias")
 
     @given(
         field=st.sampled_from(RUNTIME_AUTHORITIES),
@@ -552,10 +534,7 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         field: str,
         value: str,
     ) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-
-        with self.assertRaises(BeetsConfigError):
+        with BeetsContractWorld() as world, self.assertRaises(BeetsConfigError):
             check_beets_config(
                 replace(world.cfg(), **{field: value}),
                 role="importer",
@@ -570,16 +549,15 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         kind: str,
         component: str,
     ) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        expected_code = world.put_app_owned_readonly_authority(
-            kind,
-            component=component,
-        )
+        with BeetsContractWorld() as world:
+            expected_code = world.put_app_owned_readonly_authority(
+                kind,
+                component=component,
+            )
 
-        report = check_beets_config(world.cfg(), role="importer")
+            report = check_beets_config(world.cfg(), role="importer")
 
-        assert_hard_code(report.hard_failures, expected_code)
+            assert_hard_code(report.hard_failures, expected_code)
 
     @given(st.sampled_from((
         "replaceable_parent",
@@ -587,61 +565,59 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         "replaceable_symlink",
     )))
     def test_state_identity_must_not_be_replaceable(self, mutation: str) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        world.unseal()
-        if mutation in {"replaceable_parent", "app_owned_readonly_parent"}:
-            state_dir = world.root / f"{mutation}-state"
-            state_dir.mkdir()
-            state = state_dir / "state.pickle"
-            state.write_bytes(world.state_file.read_bytes())
-            if mutation == "app_owned_readonly_parent":
-                state_dir.chmod(
-                    stat.S_IRUSR
-                    | stat.S_IXUSR
-                    | stat.S_IRGRP
-                    | stat.S_IXGRP
-                )
-        else:
-            state = world.runtime_dir / "state-link.pickle"
-            state.symlink_to(world.state_file)
-        world._write_runtime_config(state_file=str(state))
-        world._write_main_config(statefile=str(state))
-        world._seal("importer")
+        with BeetsContractWorld() as world:
+            world.unseal()
+            if mutation in {"replaceable_parent", "app_owned_readonly_parent"}:
+                state_dir = world.root / f"{mutation}-state"
+                state_dir.mkdir()
+                state = state_dir / "state.pickle"
+                state.write_bytes(world.state_file.read_bytes())
+                if mutation == "app_owned_readonly_parent":
+                    state_dir.chmod(
+                        stat.S_IRUSR
+                        | stat.S_IXUSR
+                        | stat.S_IRGRP
+                        | stat.S_IXGRP
+                    )
+            else:
+                state = world.runtime_dir / "state-link.pickle"
+                state.symlink_to(world.state_file)
+            world._write_runtime_config(state_file=str(state))
+            world._write_main_config(statefile=str(state))
+            world._seal("importer")
 
-        report = check_beets_config(world.cfg(), role="importer")
+            report = check_beets_config(world.cfg(), role="importer")
 
-        assert_hard_code(report.hard_failures, "state_replaceable")
+            assert_hard_code(report.hard_failures, "state_replaceable")
 
     @given(st.sampled_from(("main", "nonsecret_include")))
     def test_only_designated_secret_include_may_supply_discogs_token(
         self,
         source: str,
     ) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        world.unseal()
-        if source == "main":
-            world._write_main_config(
-                discogs={"user_token": "outside-designated-secret"}
-            )
-        else:
-            extra = world.beets_dir / "nonsecret-token.yaml"
-            extra.write_text(
-                "discogs:\n  user_token: outside-designated-secret\n",
-                encoding="utf-8",
-            )
-            world._write_main_config(
-                include=[str(extra), str(world.secret_include)]
-            )
-        world._seal("importer")
+        with BeetsContractWorld() as world:
+            world.unseal()
+            if source == "main":
+                world._write_main_config(
+                    discogs={"user_token": "outside-designated-secret"}
+                )
+            else:
+                extra = world.beets_dir / "nonsecret-token.yaml"
+                extra.write_text(
+                    "discogs:\n  user_token: outside-designated-secret\n",
+                    encoding="utf-8",
+                )
+                world._write_main_config(
+                    include=[str(extra), str(world.secret_include)]
+                )
+            world._seal("importer")
 
-        report = check_beets_config(world.cfg(), role="importer")
+            report = check_beets_config(world.cfg(), role="importer")
 
-        assert_hard_code(
-            report.hard_failures,
-            "discogs_token_outside_secret_include",
-        )
+            assert_hard_code(
+                report.hard_failures,
+                "discogs_token_outside_secret_include",
+            )
 
     @given(st.sampled_from((
         ("absent", "state_not_regular"),
@@ -655,29 +631,28 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         case: tuple[str, str],
     ) -> None:
         mutation, expected_code = case
-        world = BeetsContractWorld(
+        with BeetsContractWorld(
             role="web" if mutation == "importer_readonly" else "importer"
-        )
-        self.addCleanup(world.close)
-        if mutation in {"absent", "nonregular", "inside_config"}:
-            world.unseal()
-            if mutation == "absent":
-                state = world.state_dir / "absent-state.pickle"
-            elif mutation == "nonregular":
-                state = world.state_dir / "state-directory"
-                state.mkdir()
-            else:
-                state = world.beets_dir / "state.pickle"
-                state.write_bytes(b"state")
-            world._write_runtime_config(state_file=str(state))
-            world._write_main_config(statefile=str(state))
-            world._seal("importer")
-        elif mutation == "unreadable":
-            world.set_state_mode(0)
+        ) as world:
+            if mutation in {"absent", "nonregular", "inside_config"}:
+                world.unseal()
+                if mutation == "absent":
+                    state = world.state_dir / "absent-state.pickle"
+                elif mutation == "nonregular":
+                    state = world.state_dir / "state-directory"
+                    state.mkdir()
+                else:
+                    state = world.beets_dir / "state.pickle"
+                    state.write_bytes(b"state")
+                world._write_runtime_config(state_file=str(state))
+                world._write_main_config(statefile=str(state))
+                world._seal("importer")
+            elif mutation == "unreadable":
+                world.set_state_mode(0)
 
-        report = check_beets_config(world.cfg(), role="importer")
+            report = check_beets_config(world.cfg(), role="importer")
 
-        assert_hard_code(report.hard_failures, expected_code)
+            assert_hard_code(report.hard_failures, expected_code)
 
     @given(st.sampled_from((
         "",
@@ -690,29 +665,27 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         self,
         expected_endpoint: str,
     ) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        report = check_beets_config(
-            replace(world.cfg(), musicbrainz_api_base=expected_endpoint),
-            role="importer",
-        )
+        with BeetsContractWorld() as world:
+            report = check_beets_config(
+                replace(world.cfg(), musicbrainz_api_base=expected_endpoint),
+                role="importer",
+            )
 
-        self.assertTrue(report.ok, report.hard_failures)
-        assert_hard_code(report.warnings, "musicbrainz_endpoint_drift")
+            self.assertTrue(report.ok, report.hard_failures)
+            assert_hard_code(report.warnings, "musicbrainz_endpoint_drift")
 
     @given(st.sampled_from(("main", "importer", "preview", "web")))
     def test_missing_main_config_never_reaches_effective_loading(
         self,
         role: BeetsRole,
     ) -> None:
-        world = BeetsContractWorld(role=role)
-        self.addCleanup(world.close)
-        world.unseal()
-        world.main_config.unlink()
-        world._seal(role)
+        with BeetsContractWorld(role=role) as world:
+            world.unseal()
+            world.main_config.unlink()
+            world._seal(role)
 
-        with self.assertRaisesRegex(BeetsConfigError, "config.yaml"):
-            check_beets_config(world.cfg(), role=role)
+            with self.assertRaisesRegex(BeetsConfigError, "config.yaml"):
+                check_beets_config(world.cfg(), role=role)
 
     @given(
         additionally_absent=st.sets(
@@ -723,18 +696,17 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         self,
         additionally_absent: set[str],
     ) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        available_without_musicbrainz = frozenset(
-            name for name in BASELINE_PLUGINS if name != "musicbrainz"
-        ) - additionally_absent
-        report = check_beets_config(
-            world.cfg(),
-            role="importer",
-            available_plugins=lambda: available_without_musicbrainz,
-        )
+        with BeetsContractWorld() as world:
+            available_without_musicbrainz = frozenset(
+                name for name in BASELINE_PLUGINS if name != "musicbrainz"
+            ) - additionally_absent
+            report = check_beets_config(
+                world.cfg(),
+                role="importer",
+                available_plugins=lambda: available_without_musicbrainz,
+            )
 
-        assert_hard_code(report.hard_failures, "plugin_unavailable")
+            assert_hard_code(report.hard_failures, "plugin_unavailable")
 
     @given(
         keys=st.lists(
@@ -752,17 +724,16 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         self,
         keys: list[str],
     ) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        world.unseal()
-        config = yaml.safe_load(world.main_config.read_text(encoding="utf-8"))
-        config["import"]["duplicate_keys"]["album"] = keys
-        world.main_config.write_text(yaml.safe_dump(config), encoding="utf-8")
-        world._seal("importer")
+        with BeetsContractWorld() as world:
+            world.unseal()
+            config = yaml.safe_load(world.main_config.read_text(encoding="utf-8"))
+            config["import"]["duplicate_keys"]["album"] = keys
+            world.main_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+            world._seal("importer")
 
-        report = check_beets_config(world.cfg(), role="importer")
+            report = check_beets_config(world.cfg(), role="importer")
 
-        assert_hard_code(report.hard_failures, "duplicate_keys_unsafe")
+            assert_hard_code(report.hard_failures, "duplicate_keys_unsafe")
 
     @given(case=st.sampled_from((
         ("library", "missing", "library_not_regular"),
@@ -777,32 +748,31 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         case: tuple[str, str, str],
     ) -> None:
         authority, object_kind, expected = case
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        target = (
-            world.library_db if authority == "library" else world.library_root
-        )
-        if object_kind in ("missing", "wrong_type"):
-            if target.is_dir():
-                target.rmdir()
-            else:
-                target.unlink()
-        if object_kind == "wrong_type":
-            if authority == "library":
-                target.mkdir()
-            else:
-                target.write_bytes(b"not a directory")
-        elif object_kind == "empty":
-            target.write_bytes(b"")
-        elif object_kind == "corrupt":
-            target.write_bytes(b"not sqlite")
+        with BeetsContractWorld() as world:
+            target = (
+                world.library_db if authority == "library" else world.library_root
+            )
+            if object_kind in ("missing", "wrong_type"):
+                if target.is_dir():
+                    target.rmdir()
+                else:
+                    target.unlink()
+            if object_kind == "wrong_type":
+                if authority == "library":
+                    target.mkdir()
+                else:
+                    target.write_bytes(b"not a directory")
+            elif object_kind == "empty":
+                target.write_bytes(b"")
+            elif object_kind == "corrupt":
+                target.write_bytes(b"not sqlite")
 
-        report = check_beets_config(world.cfg(), role="importer")
+            report = check_beets_config(world.cfg(), role="importer")
 
-        assert_hard_code(
-            report.hard_failures,
-            expected,
-        )
+            assert_hard_code(
+                report.hard_failures,
+                expected,
+            )
 
     @settings(max_examples=40)
     @given(
@@ -820,61 +790,57 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         query_key: str,
         template: str,
     ) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        world.unseal()
-        world._write_main_config(paths={
-            "default": SAFE_DEFAULT_PATH,
-            "singleton": SAFE_SINGLETON_PATH,
-            "comp": SAFE_COMP_PATH,
-            query_key: template,
-        })
-        world._seal("importer")
+        with BeetsContractWorld() as world:
+            world.unseal()
+            world._write_main_config(paths={
+                "default": SAFE_DEFAULT_PATH,
+                "singleton": SAFE_SINGLETON_PATH,
+                "comp": SAFE_COMP_PATH,
+                query_key: template,
+            })
+            world._seal("importer")
 
-        report = check_beets_config(world.cfg(), role="importer")
+            report = check_beets_config(world.cfg(), role="importer")
 
-        assert_hard_code(report.hard_failures, "paths_keys_unsupported")
+            assert_hard_code(report.hard_failures, "paths_keys_unsupported")
 
     @given(st.sampled_from(_SETTING_MUTANTS))
     def test_every_generated_effective_mutant_is_rejected(
         self, mutant: tuple[str, dict[str, object], str]
     ) -> None:
         _name, overrides, expected_code = mutant
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        world.unseal()
-        world._write_main_config(**overrides)
-        world._seal("importer")
+        with BeetsContractWorld() as world:
+            world.unseal()
+            world._write_main_config(**overrides)
+            world._seal("importer")
 
-        report = check_beets_config(world.cfg(), role="importer")
+            report = check_beets_config(world.cfg(), role="importer")
 
-        assert_hard_code(report.hard_failures, expected_code)
+            assert_hard_code(report.hard_failures, expected_code)
 
     _ROLES: tuple[BeetsRole, ...] = ("main", "preview", "web", "importer")
 
     @given(st.sampled_from(_ROLES))
     def test_each_role_gets_only_its_statefile_capability(self, role: BeetsRole) -> None:
-        world = BeetsContractWorld(role=role)
-        self.addCleanup(world.close)
-        report = check_beets_config(world.cfg(), role=role)
-        self.assertTrue(report.ok, report.hard_failures)
+        with BeetsContractWorld(role=role) as world:
+            report = check_beets_config(world.cfg(), role=role)
+            self.assertTrue(report.ok, report.hard_failures)
 
     @given(st.booleans())
     def test_endpoint_drift_is_warning_only(self, drifted: bool) -> None:
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        world.unseal()
-        world._write_main_config(
-            musicbrainz={
-                "host": "mirror.invalid" if drifted else "musicbrainz.org",
-                "https": True,
-            }
-        )
-        world._seal("importer")
-        report = check_beets_config(world.cfg(), role="importer")
-        self.assertTrue(report.ok, report.hard_failures)
-        warning_codes = [warning.code for warning in report.warnings]
-        self.assertEqual(warning_codes, ["musicbrainz_endpoint_drift"] if drifted else [])
+        with BeetsContractWorld() as world:
+            world.unseal()
+            world._write_main_config(
+                musicbrainz={
+                    "host": "mirror.invalid" if drifted else "musicbrainz.org",
+                    "https": True,
+                }
+            )
+            world._seal("importer")
+            report = check_beets_config(world.cfg(), role="importer")
+            self.assertTrue(report.ok, report.hard_failures)
+            warning_codes = [warning.code for warning in report.warnings]
+            self.assertEqual(warning_codes, ["musicbrainz_endpoint_drift"] if drifted else [])
 
     _FETCHART_SOURCE_NAMES: tuple[str, ...] = (
         "coverart", "cover_art_url", "itunes", "amazon", "albumart",
@@ -932,30 +898,29 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         independently inactive) and asserts its warning emission agrees
         with an independently written oracle on every world, not merely the
         pinned ones."""
-        world = BeetsContractWorld()
-        self.addCleanup(world.close)
-        world.unseal()
-        fetchart_config: dict[str, object] = {"auto": True}
-        if sources is not None:
-            fetchart_config["sources"] = list(sources)
-        world._write_main_config(
-            plugins=[p for p in BASELINE_PLUGINS if p not in absent_plugins],
-            fetchart=fetchart_config,
-        )
-        world._seal("importer")
-
-        report = check_beets_config(world.cfg(), role="importer")
-
-        self.assertTrue(report.ok, report.hard_failures)
-        expected_warns = self._independent_oracle_expects_warning(
-            sources, absent_plugins
-        )
-        warning_codes = [warning.code for warning in report.warnings]
-        if expected_warns:
-            self.assertIn(
-                "fetchart_cover_art_url_ranked_after_itunes", warning_codes
+        with BeetsContractWorld() as world:
+            world.unseal()
+            fetchart_config: dict[str, object] = {"auto": True}
+            if sources is not None:
+                fetchart_config["sources"] = list(sources)
+            world._write_main_config(
+                plugins=[p for p in BASELINE_PLUGINS if p not in absent_plugins],
+                fetchart=fetchart_config,
             )
-        else:
-            self.assertNotIn(
-                "fetchart_cover_art_url_ranked_after_itunes", warning_codes
+            world._seal("importer")
+
+            report = check_beets_config(world.cfg(), role="importer")
+
+            self.assertTrue(report.ok, report.hard_failures)
+            expected_warns = self._independent_oracle_expects_warning(
+                sources, absent_plugins
             )
+            warning_codes = [warning.code for warning in report.warnings]
+            if expected_warns:
+                self.assertIn(
+                    "fetchart_cover_art_url_ranked_after_itunes", warning_codes
+                )
+            else:
+                self.assertNotIn(
+                    "fetchart_cover_art_url_ranked_after_itunes", warning_codes
+                )
