@@ -59,9 +59,11 @@ from tests.fakes import (
     FakeSlskdAPI,
 )
 from tests.helpers import (
+    REQUEST_CASCADE_RESET_TABLES,
     RecordingQualityGate,
     claim_next_import_job,
     claim_next_import_preview_job,
+    delete_all_rows,
     finalize_claimed_dispatch,
     handoff_automation_owner,
     hermetic_beets_config_defaults,
@@ -7955,13 +7957,12 @@ class TestProcessingOwnerPostgresFilesystemSlice(unittest.TestCase):
     def setUp(self) -> None:
         self.db = PipelineDB(_u7_test_dsn())
         self.addCleanup(self.db.close)
-        self._truncate_fixture()
-        self.addCleanup(self._truncate_fixture)
+        self._reset_fixture()
+        self.addCleanup(self._reset_fixture)
 
-    def _truncate_fixture(self) -> None:
+    def _reset_fixture(self) -> None:
         """Keep the production queue entrypoint isolated from prior PG tests."""
-        self.db._execute("TRUNCATE album_requests CASCADE")
-        self.db.conn.commit()
+        delete_all_rows(self.db, REQUEST_CASCADE_RESET_TABLES)
 
     def _handoff_through_preview(
         self,

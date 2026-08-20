@@ -43,7 +43,11 @@ from lib.import_queue import ImportJob
 from lib.pipeline_db.cleanup_journal import ProcessingCleanupJournalRow
 from lib.pipeline_db.rows import AlbumRequestRow
 from lib.release_identity import ReleaseIdentity
-from tests.helpers import make_request_row
+from tests.helpers import (
+    REQUEST_CASCADE_RESET_TABLES,
+    delete_all_rows,
+    make_request_row,
+)
 
 _RELEASE_ID = "75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0"
 _OBSERVED = datetime(2026, 7, 29, 1, 2, 3, tzinfo=UTC)
@@ -549,8 +553,7 @@ class TestAutomationRecoveryDetailPostgres(unittest.TestCase):
         from lib.pipeline_db import PipelineDB
 
         self.db = PipelineDB(TEST_DSN)
-        self.db._execute("TRUNCATE album_requests CASCADE")
-        self.db.conn.commit()
+        delete_all_rows(self.db, REQUEST_CASCADE_RESET_TABLES)
 
     def tearDown(self) -> None:
         self.db.close()

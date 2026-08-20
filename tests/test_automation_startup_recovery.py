@@ -64,8 +64,10 @@ from lib.terminal_outcomes import (
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
+    REQUEST_CASCADE_RESET_TABLES,
     claim_next_import_job,
     claim_next_import_preview_job,
+    delete_all_rows,
     handoff_automation_owner,
     make_album_quality_evidence,
     make_request_row,
@@ -1348,8 +1350,7 @@ class TestAutomationStartupRecoveryPostgres(
 ):
     def setUp(self) -> None:
         self.db = PipelineDB(TEST_DSN)
-        self.db._execute("TRUNCATE album_requests CASCADE")
-        self.db.conn.commit()
+        delete_all_rows(self.db, REQUEST_CASCADE_RESET_TABLES)
         self.mb_release_id = "cbb51c9f-5555-6666-7777-888888888888"
         self.request_id = self.db.add_request(
             "Startup Recovery",

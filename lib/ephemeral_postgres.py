@@ -82,8 +82,11 @@ class EphemeralPostgres:
             f"-k {self._socket_dir}",
             "-c listen_addresses=''",
             # PostgreSQL defers unlinking relation files replaced by TRUNCATE
-            # until a checkpoint. Bound that disposable-test scratch lifetime
-            # instead of relying on the five-minute production default.
+            # until a checkpoint (rare on this cluster now that most per-test
+            # resets DELETE instead — issue #1156 item 7 — but not the only
+            # source of dirty pages a checkpoint reclaims). Bound that
+            # disposable-test scratch lifetime instead of relying on the
+            # five-minute production default.
             "-c checkpoint_timeout=30s",
             "-c checkpoint_completion_target=0.1",
             # 128MB (the stock default) is sized for a real workload's
@@ -107,9 +110,12 @@ class EphemeralPostgres:
             # some replica-only record content for free. NOT a measured WAL
             # *volume* win: minimal's well-known same-transaction
             # create/truncate WAL-skip never triggers here — `PipelineDB`
-            # runs autocommit=True (lib/pipeline_db/_core.py) and the test
-            # helper's TRUNCATE is its own statement, so it commits before
-            # any test writes a row and every later INSERT is a different
+            # runs autocommit=True (lib/pipeline_db/_core.py), and the test
+            # helper's per-test reset (a short explicit transaction, several
+            # DELETE statements — issue #1156 item 7's
+            # `tests.helpers.delete_all_rows`, or historically a single
+            # autocommitted TRUNCATE statement) always commits before any
+            # test writes a row, and every later INSERT is a different
             # transaction. 100% of this PR's measured pg_wal reduction (see
             # the PR body) is the min/max_wal_size ceiling change below, not
             # this setting.
@@ -148,9 +154,18 @@ class EphemeralPostgres:
             # of this comment overstated, but a real and free reduction.
             "-c log_checkpoints=off",
             # Autovacuum exists to reclaim space and update planner stats
-            # over a database's working lifetime. Nothing here has one:
-            # tests TRUNCATE between runs (reclaiming space immediately,
-            # unlike DELETE) and the whole cluster is destroyed in minutes.
+            # over a database's working lifetime. Nothing here has one: the
+            # whole cluster is destroyed in minutes, so a stats-driven
+            # planner has nothing to learn from and nowhere to use it.
+            # Most per-test resets DELETE now, not TRUNCATE (issue #1156
+            # item 7), so this workload DOES leave dead tuples autovacuum
+            # would otherwise reclaim — but measured over 2000 real reset
+            # cycles that cost stayed at 9.6MB total db size, smaller than
+            # TRUNCATE's own catalog-relfilenode churn (20.1MB, unreclaimed
+            # by the same autovacuum=off) ever was. Turning autovacuum on to
+            # chase a reclaim this short-lived cluster never needs would
+            # spend CPU (autovacuum workers, planner ANALYZE) this disposable
+            # workload has better uses for.
             "-c autovacuum=off",
             # NOT one connection at a time: scripts/run_world_model_burst.py
             # runs ONE coordinator-owned EphemeralPostgres (this same class)

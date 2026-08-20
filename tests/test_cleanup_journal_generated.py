@@ -22,6 +22,7 @@ from lib.pipeline_db import (
     CleanupJournalIntent,
     PipelineDB,
 )
+from tests.helpers import REQUEST_CASCADE_RESET_TABLES, delete_all_rows
 
 TEST_DSN = os.environ["TEST_DB_DSN"]
 GuardMutation = Literal["none", "owner_blind", "revision_blind"]
@@ -73,10 +74,10 @@ class TestCleanupJournalGenerated(unittest.TestCase):
         self.db.close()
 
     def _reset(self) -> None:
-        self.db._execute(
-            "TRUNCATE processing_cleanup_journal, import_jobs, "
-            "album_requests CASCADE"
-        )
+        # Runs once per generated example (issue #1156 item 7) — the
+        # highest-frequency reset in the suite, and the reason DELETE
+        # replaced TRUNCATE here.
+        delete_all_rows(self.db, REQUEST_CASCADE_RESET_TABLES)
 
     def _owner(self, suffix: str) -> tuple[int, int]:
         with self.db._atomic():

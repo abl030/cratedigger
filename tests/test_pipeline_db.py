@@ -69,8 +69,10 @@ from lib.quality import (
 )
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
+    REQUEST_CASCADE_RESET_TABLES,
     claim_next_import_job,
     claim_next_import_preview_job,
+    delete_all_rows,
     handoff_automation_owner,
     make_album_quality_evidence,
     make_request_row,
@@ -85,45 +87,60 @@ def requires_postgres(cls):
     return cls
 
 
+# Every application table (every table but ``schema_migrations``), verified
+# against the live FK graph (issue #1156 item 7) — this is the closure
+# ``TRUNCATE <21 explicitly-named tables> CASCADE`` used to reach, now spelled
+# out explicitly rather than left to three tables' worth of implicit cascade
+# (``album_quality_evidence_files``, ``search_plans``, ``search_plan_items``).
+# Order matters (see ``tests.helpers.delete_all_rows``'s docstring):
+# ``album_requests`` and ``processing_cleanup_journal`` must both precede
+# ``import_jobs`` — the only two ``ON DELETE RESTRICT`` foreign keys in the
+# schema, both checked immediately rather than deferred to commit.
+_ALL_TABLES = [
+    "album_requests",
+    "processing_cleanup_journal",
+    "import_jobs",
+    "album_quality_evidence_files",
+    "album_quality_evidence",
+    "peer_observations",
+    "cycle_metrics",
+    "unfindable_run_metrics",
+    "bad_audio_hashes",
+    "user_cooldowns",
+    "source_denylist",
+    "search_plan_items",
+    "search_plans",
+    "search_log",
+    "download_log",
+    "album_request_field_resolutions",  # migration 030
+    "youtube_album_mappings",  # migration 034
+    "youtube_album_empty_resolutions",  # migration 035
+    "plex_added_at_pins",  # migration 040
+    "jellyfin_date_created_pins",  # migration 046
+    "slskd_event_cursor",  # migration 041
+    "slskd_search_ledger",  # migration 044
+    "slskd_transfer_ledger",  # migration 045
+    "album_tracks",
+]
+
+
 def make_db():
     """Create a PipelineDB connected to the test database, with clean tables.
 
     Schema is migrated once in conftest.py at session start. This helper
-    just truncates all tables for an isolated test slate.
+    just deletes every row from every table for an isolated test slate —
+    see ``tests.helpers.delete_all_rows`` for why DELETE replaced TRUNCATE.
     """
     from lib import pipeline_db
     db = pipeline_db.PipelineDB(TEST_DSN)
-    tables = [
-        "album_quality_evidence",
-        "peer_observations",
-        "cycle_metrics",
-        "unfindable_run_metrics",
-        "bad_audio_hashes",
-        "processing_cleanup_journal",
-        "import_jobs",
-        "user_cooldowns",
-        "source_denylist",
-        "search_log",
-        "download_log",
-        "album_request_field_resolutions",  # migration 030
-        "youtube_album_mappings",  # migration 034
-        "youtube_album_empty_resolutions",  # migration 035
-        "plex_added_at_pins",  # migration 040
-        "jellyfin_date_created_pins",  # migration 046
-        "slskd_event_cursor",  # migration 041
-        "slskd_search_ledger",  # migration 044
-        "slskd_transfer_ledger",  # migration 045
-        "album_tracks",
-        "album_requests",
-    ]
-    db._execute("TRUNCATE " + ", ".join(tables) + " CASCADE")
-    db.conn.commit()
+    delete_all_rows(db, _ALL_TABLES)
     return db
 
 
 class _RecordingTestConnection:
     def __init__(self) -> None:
         self.commit_count = 0
+        self.autocommit = True
 
     def commit(self) -> None:
         self.commit_count += 1
@@ -139,45 +156,152 @@ class _RecordingTestDB:
 
 
 class TestMakeDbIsolation(unittest.TestCase):
-    def test_truncates_the_exact_test_slate_once(self) -> None:
+    def test_deletes_the_exact_test_slate_once_in_one_transaction(self) -> None:
         db = _RecordingTestDB()
         with patch("lib.pipeline_db.PipelineDB", return_value=db):
             result = make_db()
 
         self.assertIs(result, db)
-        self.assertEqual(len(db.statements), 1)
-        sql = db.statements[0]
-        prefix = "TRUNCATE "
-        suffix = " CASCADE"
-        self.assertTrue(sql.startswith(prefix))
-        self.assertTrue(sql.endswith(suffix))
-        self.assertEqual(
-            sql.removeprefix(prefix).removesuffix(suffix).split(", "),
-            [
-                "album_quality_evidence",
-                "peer_observations",
-                "cycle_metrics",
-                "unfindable_run_metrics",
-                "bad_audio_hashes",
-                "processing_cleanup_journal",
-                "import_jobs",
-                "user_cooldowns",
-                "source_denylist",
-                "search_log",
-                "download_log",
-                "album_request_field_resolutions",
-                "youtube_album_mappings",
-                "youtube_album_empty_resolutions",
-                "plex_added_at_pins",
-                "jellyfin_date_created_pins",
-                "slskd_event_cursor",
-                "slskd_search_ledger",
-                "slskd_transfer_ledger",
-                "album_tracks",
-                "album_requests",
-            ],
-        )
+        self.assertEqual(db.statements, [f"DELETE FROM {t}" for t in _ALL_TABLES])
+        # delete_all_rows commits exactly once (all deletes in one
+        # transaction) and restores autocommit to its prior value.
         self.assertEqual(db.conn.commit_count, 1)
+        self.assertTrue(db.conn.autocommit)
+
+
+def _seed_restrict_and_self_reference_scenario(db: PipelineDB) -> None:
+    """Seed both ``ON DELETE RESTRICT`` edges and both NOT DEFERRABLE
+    self-referencing edges in the schema at once (issue #1156 item 7):
+
+    - ``album_requests.active_automation_import_job_id -> import_jobs``
+      AND ``processing_cleanup_journal -> import_jobs`` (both RESTRICT) —
+      a real "processing" owner plus its journal row, live together.
+    - ``album_requests.replaces_request_id -> album_requests`` (self, NOT
+      DEFERRABLE) — an old row replaced by a new one.
+    - ``download_log.source_download_log_id -> download_log`` (self, NOT
+      DEFERRABLE) — a force-import row lineage-linked to its source.
+    - one independent ``bad_audio_hashes`` row (SET NULL only, no RESTRICT
+      predecessor) as the known-bad self-test's drop target below.
+
+    This is exactly the world a wrong table order (or a table silently
+    dropped from the reset list) fails on — see
+    ``tests.helpers.delete_all_rows``'s docstring for why order matters,
+    and ``TestDeleteAllRowsRealPostgresRegression`` below for the pin.
+    """
+    with db._atomic():
+        old_req_id = db._execute(
+            "INSERT INTO album_requests (artist_name, album_title, source, "
+            "mb_release_id, status) VALUES (%s,%s,%s,%s,%s) RETURNING id",
+            ("Old Artist", "Old Album", "request", "mbid-1156-old", "replaced"),
+        ).fetchone()["id"]
+        new_req_id = db._execute(
+            "INSERT INTO album_requests (artist_name, album_title, source, "
+            "mb_release_id, status, replaces_request_id) "
+            "VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+            ("New Artist", "New Album", "request", "mbid-1156-new", "wanted",
+             old_req_id),
+        ).fetchone()["id"]
+        proc_req_id = db._execute(
+            "INSERT INTO album_requests (artist_name, album_title, source, "
+            "mb_release_id, status) VALUES (%s,%s,%s,%s,%s) RETURNING id",
+            ("Proc Artist", "Proc Album", "request", "mbid-1156-proc",
+             "downloading"),
+        ).fetchone()["id"]
+        job_id = db._execute(
+            "INSERT INTO import_jobs (job_type, status, request_id) "
+            "VALUES (%s,%s,%s) RETURNING id",
+            ("automation_import", "running", proc_req_id),
+        ).fetchone()["id"]
+        db._execute(
+            "UPDATE album_requests SET status='processing', "
+            "active_automation_import_job_id=%s WHERE id=%s",
+            (job_id, proc_req_id),
+        )
+        db._execute(
+            "INSERT INTO processing_cleanup_journal (job_id, request_id, "
+            "action, source_path, source_manifest, source_manifest_hash) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            (job_id, proc_req_id, "move", "/processing/1156", "[]",
+             "deadbeef1156"),
+        )
+        original_dl_id = db._execute(
+            "INSERT INTO download_log (request_id, outcome) VALUES (%s,%s) "
+            "RETURNING id",
+            (new_req_id, "success"),
+        ).fetchone()["id"]
+        db._execute(
+            "INSERT INTO download_log (request_id, outcome, "
+            "source_download_log_id) VALUES (%s,%s,%s)",
+            (new_req_id, "force_import", original_dl_id),
+        )
+        db._execute(
+            "INSERT INTO bad_audio_hashes (hash_value, audio_format) "
+            "VALUES (%s,%s)",
+            (bytes.fromhex("ab" * 32), "flac"),
+        )
+        db.conn.commit()
+
+
+@requires_postgres
+class TestDeleteAllRowsRealPostgresRegression(unittest.TestCase):
+    """Real-PG pin (issue #1156 item 7): after ``delete_all_rows``, the
+    RESTRICT/self-referencing scenario TRUNCATE ... CASCADE used to clear
+    for free is genuinely gone, not merely unreferenced.
+    """
+
+    def setUp(self) -> None:
+        self.db = make_db()
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    _SEEDED_TABLES = (
+        "album_requests", "import_jobs", "processing_cleanup_journal",
+        "download_log", "bad_audio_hashes",
+    )
+
+    def _assert_seeded_tables_empty(self) -> None:
+        for table in self._SEEDED_TABLES:
+            with self.subTest(table=table):
+                row = self.db._execute(
+                    f"SELECT count(*) AS n FROM {table}"
+                ).fetchone()
+                self.assertEqual(row["n"], 0, f"{table} was not fully cleared")
+
+    def test_request_cascade_reset_tables_leaves_nothing_behind(self) -> None:
+        _seed_restrict_and_self_reference_scenario(self.db)
+        delete_all_rows(self.db, REQUEST_CASCADE_RESET_TABLES)
+        self._assert_seeded_tables_empty()
+
+    def test_all_tables_leaves_nothing_behind(self) -> None:
+        _seed_restrict_and_self_reference_scenario(self.db)
+        delete_all_rows(self.db, _ALL_TABLES)
+        self._assert_seeded_tables_empty()
+
+    def test_known_bad_a_table_dropped_from_the_list_is_not_cleared(
+        self,
+    ) -> None:
+        """Known-bad self-test: proves ``_assert_seeded_tables_empty`` is
+        not vacuous. Mutates a LOCAL copy of the reset list (never the
+        shipped ``REQUEST_CASCADE_RESET_TABLES`` constant) by dropping
+        ``bad_audio_hashes`` — a table with no RESTRICT predecessor, so the
+        drop produces a silent leftover row rather than an exception — and
+        asserts the row survives. If this assertion ever started passing,
+        the "leaves nothing behind" pins above would no longer be
+        falsifiable."""
+        mutated = tuple(
+            t for t in REQUEST_CASCADE_RESET_TABLES if t != "bad_audio_hashes"
+        )
+        _seed_restrict_and_self_reference_scenario(self.db)
+        delete_all_rows(self.db, mutated)
+        row = self.db._execute(
+            "SELECT count(*) AS n FROM bad_audio_hashes"
+        ).fetchone()
+        self.assertEqual(
+            row["n"], 1,
+            "expected the dropped table's row to survive — if it didn't, "
+            "the 'leaves nothing behind' pins above are not falsifiable",
+        )
 
 
 def _link_projection_evidence(
