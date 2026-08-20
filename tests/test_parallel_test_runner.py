@@ -998,10 +998,28 @@ class TestModuleScheduling(unittest.TestCase):
         self.assertEqual(env["PATH"], "/bin")
 
     def test_audited_hotspots_split_at_the_narrowest_safe_boundary(self) -> None:
+        # Issue #1226 added the four measured-heavy, late-admitted modules
+        # below. They are frontloaded for SCHEDULING ONLY — unlike
+        # tests.test_nix_module they carry no sharding policy at all, so
+        # nothing about how they are split changes; only when they enter
+        # the queue does. See AUDITED_FRONTLOAD_MODULES' own comment in
+        # scripts/run_python_tests.py for the measured ordering loss.
         self.assertEqual(
             AUDITED_FRONTLOAD_MODULES,
-            frozenset({"tests.test_nix_module"}),
+            frozenset({
+                "tests.test_nix_module",
+                "tests.test_world_model_coordinator",
+                "tests.test_fuzz_burst",
+                "tests.test_targeted_test_selection",
+                "tests.test_aac_lattice",
+            }),
         )
+        # The scheduling-only additions must stay scheduling-only: a
+        # sharding policy or isolated-method carve-out for one of them
+        # would be a different, unaudited change wearing this one's name.
+        for module_name in AUDITED_FRONTLOAD_MODULES - {"tests.test_nix_module"}:
+            self.assertNotIn(module_name, HOTSPOT_SHARD_POLICIES)
+            self.assertNotIn(module_name, HOTSPOT_ISOLATED_METHODS)
         # tests.test_nix_module is frontloaded but deliberately NOT
         # method_batch-sharded (issue #1131 review round 2): its nix-eval
         # tests are cost-grouped into three exception-memoizing cached

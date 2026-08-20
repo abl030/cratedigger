@@ -285,6 +285,29 @@ def _cached_nix_eval_json(expression: str) -> dict[str, object]:
 def _shared_module_worlds_web_auth_matrix_part1() -> dict[str, object]:
     """The first of two bounded ``webAuthMatrix`` nix evals (issue #1156 item 1).
 
+    Issue #1226 (read this first — it supersedes the SIZES quoted below,
+    not the reasoning): every ``lib.nixosSystem`` in this module's
+    expressions now takes ``{ nixpkgs.pkgs = modulePkgs; }`` as its first
+    module, so all of a given eval's worlds share the ONE nixpkgs instance
+    the preamble already built for ``beetsPackage`` instead of each
+    instantiating its own. ``flake.nix``'s own eval-level guards
+    (``runtimeSrcPin``, ``packageSetPin``, ``moduleAssertions``) already
+    used exactly this idiom; these expressions were the odd ones out. It
+    changes nothing about what is evaluated or asserted -- the ``nix eval
+    --json`` stdout is BYTE-IDENTICAL before and after for all three
+    expressions, which is how the change was qualified -- and it is
+    fail-closed rather than silent if that ever stops being true, because
+    nixpkgs' own module errors out when ``nixpkgs.pkgs`` is set alongside a
+    ``nixpkgs.config``/``overlays``/``hostPlatform`` definition. Measured
+    solo on a quiet 30-core host, base vs candidate: this half 31.4s ->
+    13.9s (-55.7%), the other half 26.6s -> 12.2s (-54.3%),
+    :func:`_shared_module_worlds_rest` 44.0s -> 16.3s (-63.0%). The cost
+    removed was never the shared preamble (measured at 0.19s standalone --
+    see the paragraph below, which over-credited it); it was ~20 redundant
+    nixpkgs instantiations, one per world. A bare ``lib.nixosSystem``
+    reading only ``.config.assertions`` costs 0.21s marginal, so what each
+    world pays now is close to that floor.
+
     Splits the independent, roughly-balanced worlds this module's single
     heaviest target used to force in one ``nix eval`` subprocess (measured
     57.2-61.0s solo across three quiet-host runs, mean ~58.5s; the prior
@@ -398,6 +421,7 @@ def _shared_module_worlds_web_auth_matrix_part1() -> dict[str, object]:
                 system = lib.nixosSystem {
                   system = builtins.currentSystem;
                   modules = [
+                    { nixpkgs.pkgs = modulePkgs; }
                     f.nixosModules.default
                     ({ ... }: {
                       services.cratedigger = {
@@ -597,6 +621,10 @@ def _shared_module_worlds_web_auth_matrix_part2() -> dict[str, object]:
     (``wheelAccessGroup`` through ``nginxRestartDisabled``). Measured solo
     (quiet host): 28.3s. Under full-suite load across the same three
     interleaved pairs, this half itself measured 46.3s / 48.3s / 53.0s.
+
+    Issue #1226 superseded those sizes: with the shared nixpkgs instance
+    (see part1's own #1226 paragraph) this half is 12.2s solo and 24.8s
+    under full-suite load, byte-identical output either way.
     """
     expression = r'''
       let
@@ -614,6 +642,7 @@ def _shared_module_worlds_web_auth_matrix_part2() -> dict[str, object]:
                 system = lib.nixosSystem {
                   system = builtins.currentSystem;
                   modules = [
+                    { nixpkgs.pkgs = modulePkgs; }
                     f.nixosModules.default
                     ({ ... }: {
                       services.cratedigger = {
@@ -991,8 +1020,17 @@ def _shared_module_worlds_rest() -> dict[str, object]:
     receipt bundle from the shipping commit's own ``check`` run, this
     target (87.5s) was the single SLOWEST of all 463 targets in the whole
     canonical suite, by 26s over the next entry — this module's own pole
-    is now the suite's own tail, which is the next lever if this module's
-    contribution is revisited. See
+    was then the suite's own tail. Issue #1226 closed that without
+    splitting anything: sharing ONE nixpkgs instance across this
+    expression's eight ``lib.nixosSystem`` calls (see
+    :func:`_shared_module_worlds_web_auth_matrix_part1`'s own #1226
+    paragraph for the mechanism and the byte-identical-output proof) took
+    this eval from 44.0s to 16.3s solo, and this target from 95.0s to 38.9s
+    in a real phase run. It is no longer the suite's tail and this module
+    is no longer the phase's pole. Splitting this target further is now
+    the wrong lever regardless: with the pole gone the phase is
+    throughput-bound, so what costs wall time is total CPU and queue
+    order, not any one target's length. See
     :func:`_shared_module_worlds_web_auth_matrix_part1` for the measured
     effect of the split on the OTHER two targets this module contributes.
     Merging these four
@@ -1042,6 +1080,7 @@ def _shared_module_worlds_rest() -> dict[str, object]:
             system = lib.nixosSystem {
               system = builtins.currentSystem;
               modules = [
+                { nixpkgs.pkgs = modulePkgs; }
                 f.nixosModules.default
                 ({ ... }: {
                   services.cratedigger = {
@@ -1083,6 +1122,7 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                 system = lib.nixosSystem {
                   system = builtins.currentSystem;
                   modules = [
+                    { nixpkgs.pkgs = modulePkgs; }
                     f.nixosModules.default
                     ({ ... }: {
                       networking.enableIPv6 = enableIPv6;
@@ -1215,6 +1255,7 @@ def _shared_module_worlds_rest() -> dict[str, object]:
               let system = lib.nixosSystem {
                 system = builtins.currentSystem;
                 modules = [
+                  { nixpkgs.pkgs = modulePkgs; }
                   f.nixosModules.default
                   ({ ... }: {
                     services.cratedigger = {
@@ -1242,12 +1283,13 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                   system.config.assertions);
             disabled = lib.nixosSystem {
               system = builtins.currentSystem;
-              modules = [ f.nixosModules.default ];
+              modules = [ { nixpkgs.pkgs = modulePkgs; } f.nixosModules.default ];
             };
             identityFailures = user: group:
               let system = lib.nixosSystem {
                 system = builtins.currentSystem;
                 modules = [
+                  { nixpkgs.pkgs = modulePkgs; }
                   f.nixosModules.default
                   ({ ... }: {
                     services.cratedigger = {
@@ -1276,6 +1318,7 @@ def _shared_module_worlds_rest() -> dict[str, object]:
             defaultIdentity = let system = lib.nixosSystem {
               system = builtins.currentSystem;
               modules = [
+                { nixpkgs.pkgs = modulePkgs; }
                 f.nixosModules.default
                 ({ ... }: {
                   services.cratedigger = {
@@ -1364,6 +1407,7 @@ def _shared_module_worlds_rest() -> dict[str, object]:
             system = lib.nixosSystem {
               system = builtins.currentSystem;
               modules = [
+                { nixpkgs.pkgs = modulePkgs; }
                 f.nixosModules.default
                 ({ ... }: {
                   services.cratedigger = {
@@ -1426,6 +1470,7 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                 system = lib.nixosSystem {
                   system = builtins.currentSystem;
                   modules = [
+                    { nixpkgs.pkgs = modulePkgs; }
                     f.nixosModules.default
                     ({ ... }: {
                       services.cratedigger = {
@@ -1734,6 +1779,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
             system = f.inputs.nixpkgs.lib.nixosSystem {
               system = builtins.currentSystem;
               modules = [
+                { nixpkgs.pkgs = modulePkgs; }
                 f.nixosModules.default
                 ({ ... }: {
                   services.cratedigger = {
