@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 # Allocate one isolated RAM-backed scratch directory for the dev shell.
 
+# Field 22 of /proc/<pid>/stat (process start time in clock ticks since
+# boot) — same shape as scripts/run_final_gate.sh's proc_start_ticks and
+# scripts/run_test_suite.py's _proc_start_ticks, kept as its own copy here
+# since no shared shell lib exists yet in this repo.
+_cratedigger_test_tmpfs_proc_start_ticks() {
+    local pid=$1 stat
+    [[ -r "/proc/$pid/stat" ]] || return 1
+    stat=$(<"/proc/$pid/stat")
+    stat=${stat##*) }
+    awk '{print $20}' <<<"$stat"
+}
+
 _cleanup_cratedigger_test_tmpfs() {
     local scratch="${_CRATEDIGGER_TEST_TMPDIR:-}"
     local parent="${_CRATEDIGGER_TEST_TMP_PARENT:-}"
@@ -41,6 +53,7 @@ setup_cratedigger_test_tmpfs() {
     local filesystem_type
     local available_bytes
     local mode
+    local _cratedigger_test_tmpfs_owner_ticks
 
     if [[ ! "$minimum_bytes" =~ ^[0-9]+$ ]]; then
         echo "CRATEDIGGER_TEST_RAM_MIN_BYTES must be a non-negative integer" >&2
@@ -112,5 +125,27 @@ setup_cratedigger_test_tmpfs() {
         mktemp -d "$parent/cratedigger-tests.XXXXXX"
     )" || return 1
     export TMPDIR="$_CRATEDIGGER_TEST_TMPDIR"
+
+    # Ownership marker (issue #1208 item 1): a "<pid> <ticks>\n" pair naming
+    # THIS shell process, written immediately after mktemp so the window
+    # during which the directory exists with no marker at all is as small
+    # as possible. Same content shape as scripts/run_test_suite.py's
+    # admission-lock holder identity and scripts/run_final_gate.sh's own
+    # helper/gate identity. scripts/run_test_suite.py::_scratch_tree_owner_dead
+    # reads it on the reaping side and verifies liveness with the same
+    # pid-reuse-safe start-ticks comparison those two already use — never
+    # on readability alone. A missing or unparseable marker (this write
+    # failing, or a reap racing the tiny window before it lands) is read
+    # as "unknown, never reap", not "abandoned" — fail closed, not fail
+    # open, which is why this write is best-effort: a lost write leaves
+    # the tree unreaped forever rather than wrongly reaped while live.
+    _cratedigger_test_tmpfs_owner_ticks="$(
+        _cratedigger_test_tmpfs_proc_start_ticks "$$" 2>/dev/null
+    )" || _cratedigger_test_tmpfs_owner_ticks=""
+    if [[ -n "$_cratedigger_test_tmpfs_owner_ticks" ]]; then
+        printf '%s %s\n' "$$" "$_cratedigger_test_tmpfs_owner_ticks" \
+            >"$_CRATEDIGGER_TEST_TMPDIR/.owner" 2>/dev/null || true
+    fi
+
     trap _exit_cratedigger_test_tmpfs EXIT
 }

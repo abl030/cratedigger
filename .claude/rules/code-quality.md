@@ -428,29 +428,60 @@ legitimately needs to nest.) Only a genuinely interactive `nix-shell` entry,
 started outside any suite run, never has this var set and keeps its entry
 guard.
 
-Once admitted, `run_suite` best-effort reaps scratch directories nothing can
-still be writing (`reap_stale_check_bundles`, prefix set
-`_REAPABLE_PREFIXES`: `cratedigger-checks.*` bundles plus this test-infra
-change's own `cratedigger-{suite,admission,reap,headroom}-test-*` fixture
-directories, so a killed test process can't leak one forever) idle past
+Once admitted, `run_suite` first retires eligible final-gate receipts
+(`reap_stale_final_gate_receipts`, issue #1208 item 4), THEN best-effort
+reaps scratch directories nothing can still be writing
+(`reap_stale_check_bundles`, prefix set `_REAPABLE_PREFIXES`:
+`cratedigger-checks.*` bundles, this test-infra change's own
+`cratedigger-{suite,admission,reap,headroom}-test-*` fixture directories,
+and the dev shell's OWN main scratch `TMPDIR` (`SCRATCH_TREE_PREFIX`,
+`cratedigger-tests.*`, issue #1208 item 1) idle past
 `DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS` — safe for another `run_suite`'s own
 bundles specifically, because reaping happens exclusively under the same
 lock every `run_suite` call takes; it is NOT a claim about every possible
 creator of a matching prefix — `tests/test_final_gate_receipt.py` constructs
 a `cratedigger-checks.*` fixture directly, outside `run_suite` and outside
-the lock, and the age gate (not lock exclusivity) is what protects it. The
-4-hour floor protects the bundle's detailed EVIDENCE (per-phase logs,
+the lock, and the age gate (not lock exclusivity) is what protects it.
+
+`SCRATCH_TREE_PREFIX` is the one prefix the age gate alone does NOT protect:
+`scripts/test_tmpfs.sh` creates it at `nix-shell` entry, outside the
+admission lock, and cleans it up only via a shell EXIT trap — SIGTERM,
+SIGINT, and SIGHUP all run that trap correctly; only SIGKILL (the OOM
+killer, `kill -9`, host loss) skips it and leaks the tree forever, and a
+busy suite's own scratch root can go quiet (old mtime) for hours while very
+much in use, so mtime cannot distinguish "abandoned" from "just idle". A
+prior attempt reaped this prefix on mtime alone and was reverted after
+review found it reaping LIVE trees. The shipped design instead requires
+`_scratch_tree_owner_dead` to PROVE the owning shell process is gone before
+the age gate ever applies to a `cratedigger-tests.*` entry: `test_tmpfs.sh`
+writes a `.owner` marker (`"<pid> <ticks>\n"`, same content shape as the
+admission-lock holder identity below) immediately after `mktemp`, and
+`_scratch_tree_owner_dead` verifies it with the same pid-reuse-safe
+`_proc_start_ticks` comparison. A live owner is never touched regardless of
+age; a missing or malformed marker fails closed (treated as "unknown,
+never reap", not "abandoned") rather than falling back to age alone.
+
+The 4-hour floor protects the bundle's detailed EVIDENCE (per-phase logs,
 summary.md), not receipt reuse itself: `run_final_gate.sh status` checks a
 receipt's `bundle` FILE (a path string) and now separately stats the
 directory it names, failing visibly when it is gone rather than silently
 reporting `pass` over evidence that no longer exists — a receipt's own
 `terminal` verdict was always durable regardless of this floor. Before the
 age gate ever applies, `_receipt_protected_bundles` excludes any bundle path
-still named by a `cratedigger-final-gate.*/bundle` file (receipts are never
-themselves reaped — a different, unlisted prefix) — so a bundle a live
-receipt still references survives regardless of age, preserving both the
-verdict and its evidence for a long-running review (issue #1111 review
-m13). A receipt whose protected bundle turns out to be missing anyway is a
+still named by a `cratedigger-final-gate.*/bundle` file — so a bundle a
+still-present receipt still references survives regardless of age,
+preserving both the verdict and its evidence for a long-running review
+(issue #1111 review m13). Receipts are no longer permanently unreaped:
+`reap_stale_final_gate_receipts` deletes one once its `terminal` file
+exists OR its recorded helper/gate pid+start-ticks identities are
+conclusively dead — never one still live — AND it is older than
+`DEFAULT_RECEIPT_RETIREMENT_MAX_AGE_SECONDS` (a fixed 7-day constant, not
+an env-overridable knob). A retired receipt is gone from disk before
+`_receipt_protected_bundles` glob-scans `cratedigger-final-gate.*` on this
+same admitted pass, so retirement lapses that receipt's own bundle
+protection immediately, with no second cleanup path: the now-unprotected
+bundle ages out through this function's ordinary path like any other. A
+receipt whose protected bundle turns out to be missing anyway is a
 genuinely dangling receipt; the protection does not paper over that —
 `status`'s own stat check surfaces it, and the honest response is to
 re-run.

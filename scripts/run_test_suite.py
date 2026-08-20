@@ -488,27 +488,99 @@ def _bundle_last_activity(bundle: Path) -> float:
 #: fixture before ``tearDown`` can remove it, in the exact directory this PR
 #: exists to keep clean. Age-gated the same way as check bundles; a fresh
 #: fixture belonging to a currently-running test is never touched.
+#:
+#: ``SCRATCH_TREE_PREFIX`` (issue #1208 item 1) is the dev shell's OWN main
+#: scratch ``TMPDIR``: ``scripts/test_tmpfs.sh``'s ``setup_cratedigger_test_
+#: tmpfs`` creates it at ``nix-shell`` entry with
+#: ``mktemp -d "$parent/cratedigger-tests.XXXXXX"``, OUTSIDE the admission
+#: lock, and cleans it up only via a shell EXIT trap — SIGTERM/SIGINT/SIGHUP
+#: all run that trap correctly; only SIGKILL (the OOM killer, ``kill -9``,
+#: host loss) skips it and leaks the tree forever. Live incident
+#: 2026-08-19: two leaked trees (910M, 339M) starved a 3.1G RAM root to
+#: 1.9G free at idle and deterministically failed a headroom-measuring test
+#: on three consecutive otherwise-green gate runs.
+#:
+#: This prefix is deliberately NOT reaped on age alone. A prior attempt
+#: used directory mtime as the liveness signal and was reverted after
+#: review found it reaps LIVE trees: a busy suite's scratch root can go
+#: quiet (old mtime) for hours while very much in use, so mtime cannot
+#: distinguish "abandoned" from "just idle". Instead
+#: ``reap_stale_check_bundles`` requires ``_scratch_tree_owner_dead`` to
+#: PROVE the owning shell process is gone (pid+start-ticks, same
+#: pid-reuse-safe ``_proc_start_ticks`` precedent as the admission-lock
+#: holder identity and ``run_final_gate.sh``'s own helper/gate identity)
+#: before the age gate ever applies to a ``cratedigger-tests.*`` entry —
+#: a live owner is never touched regardless of age, and a missing or
+#: malformed marker fails closed (treated as "unknown, never reap", not
+#: "abandoned").
+SCRATCH_TREE_PREFIX = "cratedigger-tests."
 _REAPABLE_PREFIXES = (
     "cratedigger-checks.",
     "cratedigger-suite-test-",
     "cratedigger-admission-test-",
     "cratedigger-reap-test-",
     "cratedigger-headroom-test-",
+    SCRATCH_TREE_PREFIX,
 )
+
+#: Name of the ownership-marker file ``scripts/test_tmpfs.sh`` writes inside
+#: its own ``cratedigger-tests.*`` scratch tree, immediately after
+#: ``mktemp`` — same "<pid> <ticks>\n" content shape as the admission-lock
+#: holder identity file.
+SCRATCH_TREE_OWNER_MARKER_NAME = ".owner"
+
+
+def _scratch_tree_owner_dead(tree: Path) -> bool:
+    """True only when ``tree``'s recorded pid+start-ticks owner is PROVABLY gone.
+
+    Returns ``False`` — never eligible for reaping by this signal — for
+    every case that is not a proven death: a missing marker file (the
+    shell died before ``mktemp`` returned, or in the brief window before
+    the marker write in ``scripts/test_tmpfs.sh``), unreadable content, or
+    a malformed pid/ticks pair. ``False`` here means "unknown", not
+    "alive"; the caller must treat unknown exactly like alive. Only a
+    syntactically well-formed marker whose ``_proc_start_ticks(pid) !=
+    ticks`` (the process is gone, or — since start ticks make pid reuse
+    detectable, the same precedent ``_read_lock_holder_identity`` already
+    relies on — a different, unrelated process now holds that pid)
+    returns ``True``.
+
+    This is the fail-closed half of issue #1208 item 1's ownership-marker
+    design: the reverted mtime-based attempt reaped live trees because an
+    idle mtime is not a liveness signal. Here, "cannot prove dead" always
+    wins over "looks stale".
+    """
+    try:
+        content = (tree / SCRATCH_TREE_OWNER_MARKER_NAME).read_text().strip()
+    except OSError:
+        return False
+    parts = content.split()
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        return False
+    pid_str, ticks = parts
+    return _proc_start_ticks(int(pid_str)) != ticks
 
 
 def _receipt_protected_bundles(runtime: Path) -> frozenset[Path]:
     """Bundle paths a run_final_gate.sh receipt still references.
 
-    ``cratedigger-final-gate.*`` receipts are never themselves in
-    ``_REAPABLE_PREFIXES`` (a different prefix, never reaped), so protecting
-    the bundle path they name preserves both the pass/fail verdict AND its
-    evidence for a long-running review (issue #1111 review m13) — without
-    this, a review that outlives the age floor would lose the bundle out
-    from under a still-valid receipt. If a protected bundle is somehow gone
-    anyway, that is a genuinely dangling receipt; this function's exclusion
-    does not paper over it — ``run_final_gate.sh status``'s own stat check
-    (issue #1111 review m5) is what surfaces that honestly.
+    ``cratedigger-final-gate.*`` receipts are not in ``_REAPABLE_PREFIXES``
+    (a different prefix, not reaped by this function) — they have their own
+    age-gated retirement pass, ``reap_stale_final_gate_receipts`` (issue
+    #1208 item 4), which ``run_suite`` calls before this function on every
+    admitted run. A receipt still on disk when THIS function runs — whether
+    fresh, or old but not yet retired because its recorded helper/gate
+    process is still live — protects the bundle path it names, preserving
+    both the pass/fail verdict AND its evidence for a long-running review
+    (issue #1111 review m13) — without this, a review that outlives the age
+    floor would lose the bundle out from under a still-valid receipt.
+    Retiring a receipt (deleting it) naturally lapses this protection on the
+    very next call, with no second cleanup path: an unprotected bundle then
+    ages out through this function's ordinary age gate like any other. If a
+    protected bundle is somehow gone anyway, that is a genuinely dangling
+    receipt; this function's exclusion does not paper over it —
+    ``run_final_gate.sh status``'s own stat check (issue #1111 review m5) is
+    what surfaces that honestly.
     """
     protected: set[Path] = set()
     for receipt in sorted(runtime.glob("cratedigger-final-gate.*")):
@@ -519,6 +591,129 @@ def _receipt_protected_bundles(runtime: Path) -> frozenset[Path]:
         if content:
             protected.add(Path(content))
     return frozenset(protected)
+
+
+#: A run_final_gate.sh receipt survives at least this long before admission-
+#: time retirement may remove it (issue #1208 item 4) — well past any
+#: realistic review horizon. Unlike ``DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS``
+#: this is a fixed constant, not an env-overridable knob: shrinking receipt
+#: retention is not something an ambient env var should be able to do by
+#: accident. Before this, "Receipts are never retried or deleted
+#: automatically" (the ``check`` skill) was true without qualification —
+#: 61 of 68 receipts were pinning a bundle against the reaper in perpetuity
+#: on the live 2026-08-20 root, with no exit path at all.
+DEFAULT_RECEIPT_RETIREMENT_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+
+
+def _receipt_last_activity(receipt: Path) -> float:
+    """The receipt's most recent completion evidence, or its own mtime.
+
+    Mirrors ``_bundle_last_activity``'s shape. ``run_final_gate.sh``'s
+    ``run_gate`` writes ``terminal`` LAST, only after the suite itself has
+    finished and the tree-match check has passed — so its mtime is the true
+    "this receipt became final" timestamp for a completed run. A receipt
+    that never reached that point (crashed, interrupted) falls back to the
+    receipt directory's own mtime, which only ever gets older.
+    """
+    try:
+        return (receipt / "terminal").stat().st_mtime
+    except OSError:
+        pass
+    try:
+        return receipt.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _receipt_process_field_live(
+    receipt: Path, pid_field: str, ticks_field: str
+) -> bool:
+    """True only when the named pid+ticks pair names a process still alive.
+
+    Same shape ``run_final_gate.sh``'s own ``status_receipt`` uses
+    (``_proc_start_ticks(pid) == ticks``, defined above). A missing,
+    unreadable, or malformed identity is never treated as live — it is not
+    evidence a process is running, so it cannot block retirement either;
+    it is exactly the same "unverified is not live" posture
+    ``_read_lock_holder_identity`` already takes for the admission lock.
+    """
+    try:
+        pid_text = (receipt / pid_field).read_text().strip()
+        ticks_text = (receipt / ticks_field).read_text().strip()
+    except OSError:
+        return False
+    if not pid_text.isdigit() or not ticks_text.isdigit():
+        return False
+    return _proc_start_ticks(int(pid_text)) == ticks_text
+
+
+def _receipt_is_retirable(receipt: Path) -> bool:
+    """A receipt's lifecycle is provably over — the age gate decides the rest.
+
+    A ``terminal`` file is ``run_final_gate.sh``'s own completion marker,
+    written last; its mere presence is definitive, exactly as
+    ``status_receipt`` treats it (it never re-checks process liveness once
+    ``terminal`` exists). Without a ``terminal`` file the receipt is either
+    still an in-progress run or one that crashed before finishing —
+    retirement is safe only when BOTH its recorded helper
+    (``run_final_gate.sh`` itself) and gate (the ``nix-shell`` suite child)
+    process identities are conclusively not live. Either one still live
+    blocks retirement (issue #1208 item 4).
+    """
+    if (receipt / "terminal").exists():
+        return True
+    return not (
+        _receipt_process_field_live(receipt, "helper_pid", "helper_start_ticks")
+        or _receipt_process_field_live(receipt, "gate_pid", "gate_start_ticks")
+    )
+
+
+def reap_stale_final_gate_receipts(
+    runtime: Path,
+    *,
+    max_age_seconds: float = DEFAULT_RECEIPT_RETIREMENT_MAX_AGE_SECONDS,
+    reference_time: float | None = None,
+) -> tuple[Path, ...]:
+    """Age-gated retirement of run_final_gate.sh receipts (issue #1208 item 4).
+
+    Only ever called from ``run_suite``, while holding
+    ``acquire_suite_admission`` exclusively, and BEFORE
+    ``reap_stale_check_bundles`` — the same ownership precondition that
+    function documents for itself. Retiring a receipt here deletes it from
+    disk, so ``_receipt_protected_bundles``'s very next glob (inside
+    ``reap_stale_check_bundles``) naturally no longer sees it: a retired
+    receipt's bundle protection lapses on the same admitted pass, and the
+    now-unprotected bundle ages out through that function's ordinary path.
+    No second cleanup path exists for either receipts or bundles — this is
+    the one lifecycle owner for both.
+
+    A receipt is eligible only when ``_receipt_is_retirable`` proves its
+    lifecycle is over AND it is older than ``max_age_seconds``. Both
+    conditions are required: an old-but-still-live receipt is never touched,
+    and a dead-but-fresh receipt waits out the floor like everything else.
+    """
+    reference = reference_time if reference_time is not None else time.time()
+    retired: list[Path] = []
+    for candidate in sorted(runtime.glob("cratedigger-final-gate.*")):
+        try:
+            info = candidate.lstat()
+        except OSError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            continue
+        if info.st_uid != os.getuid():
+            continue
+        if not _receipt_is_retirable(candidate):
+            continue
+        age = reference - _receipt_last_activity(candidate)
+        if age < max_age_seconds:
+            continue
+        try:
+            shutil.rmtree(candidate)
+        except OSError:
+            continue
+        retired.append(candidate)
+    return tuple(retired)
 
 
 def reap_stale_check_bundles(
@@ -543,6 +738,14 @@ def reap_stale_check_bundles(
     prefixes above — a killed test process can leak one with no
     ``run_suite`` involved at all. A bundle a live receipt still references
     (``_receipt_protected_bundles``) is never reaped regardless of age.
+
+    ``SCRATCH_TREE_PREFIX`` (``cratedigger-tests.*``, issue #1208 item 1) is
+    additionally gated on ``_scratch_tree_owner_dead`` — a live owner is
+    never reaped regardless of age, and a missing/malformed marker is
+    treated as unknown liveness, never as abandoned. Every other prefix
+    keeps the pure age gate described above; only this one has a
+    provable-death precondition, because only this one has an owning
+    process capable of writing it one.
     """
     reference = reference_time if reference_time is not None else time.time()
     protected = _receipt_protected_bundles(runtime)
@@ -564,6 +767,10 @@ def reap_stale_check_bundles(
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             continue
         if info.st_uid != os.getuid():
+            continue
+        if candidate.name.startswith(
+            SCRATCH_TREE_PREFIX
+        ) and not _scratch_tree_owner_dead(candidate):
             continue
         age = reference - _bundle_last_activity(candidate)
         if age < max_age_seconds:
@@ -1453,10 +1660,11 @@ def run_suite(
     """Admit one canonical suite at a time, then run every phase (issue #1111).
 
     Validates the runtime tmpfs, then acquires the exclusive admission lock
-    (bounded wait, reported progress), reaps stale check bundles, and checks
-    headroom — all BEFORE any phase runs, so an unready environment fails
-    once, immediately, with its real reason instead of tripping deep into a
-    run after earlier phases already passed.
+    (bounded wait, reported progress), retires stale final-gate receipts,
+    reaps stale check bundles (and leaked scratch/test-fixture directories),
+    and checks headroom — all BEFORE any phase runs, so an unready
+    environment fails once, immediately, with its real reason instead of
+    tripping deep into a run after earlier phases already passed.
     """
     output = stream if stream is not None else sys.stdout
     root = repo_root.resolve(strict=True)
@@ -1476,6 +1684,19 @@ def run_suite(
         poll_seconds=admission_poll_seconds,
         progress_interval_seconds=admission_progress_interval_seconds,
     ):
+        # Retire eligible final-gate receipts BEFORE reaping check bundles:
+        # a retired receipt's own directory is gone from disk by the time
+        # reap_stale_check_bundles computes _receipt_protected_bundles, so
+        # its bundle protection lapses on this same admitted pass (issue
+        # #1208 item 4).
+        retired_receipts = reap_stale_final_gate_receipts(runtime)
+        if retired_receipts:
+            output.write(
+                f"retired {len(retired_receipts)} stale final-gate receipt(s): "
+                + ", ".join(str(path) for path in retired_receipts)
+                + "\n"
+            )
+            output.flush()
         reaped = reap_stale_check_bundles(
             runtime,
             max_age_seconds=reap_max_age_seconds,
