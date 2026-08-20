@@ -104,7 +104,17 @@ def _nix_web_attrs(world: ModeWorld) -> str:
 
 @functools.cache
 def _evaluate_mode_worlds() -> dict[str, dict[str, object]]:
-    """Evaluate all sixteen worlds against the real module in one nix eval."""
+    """Evaluate all sixteen worlds against the real module in one nix eval.
+
+    Issue #1226: the sixteen worlds share ONE nixpkgs instance
+    (``{ nixpkgs.pkgs = modulePkgs; }`` as each system's first module,
+    ``flake.nix``'s own established idiom) rather than each
+    ``lib.nixosSystem`` instantiating its own. Nothing about what is
+    evaluated or asserted changes; it took this module from 54.0s to 21.9s
+    in a real phase run. See
+    ``tests/test_nix_module.py::_shared_module_worlds_web_auth_matrix_part1``
+    for the mechanism and the byte-identical-output evidence.
+    """
     worlds = "\n            ".join(
         f"{world.key} = evaluate {{ {_nix_web_attrs(world)} }};"
         for world in MODE_WORLDS
@@ -122,6 +132,7 @@ def _evaluate_mode_worlds() -> dict[str, dict[str, object]]:
             system = lib.nixosSystem {{
               system = builtins.currentSystem;
               modules = [
+                {{ nixpkgs.pkgs = modulePkgs; }}
                 f.nixosModules.default
                 ({{ ... }}: {{
                   services.cratedigger = {{

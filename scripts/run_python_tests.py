@@ -80,7 +80,43 @@ TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE = 5
 WORLD_MODEL_MODULE = "tests.world_model.state_machine"
 # Method profiling showed the dominant Nix evaluation was otherwise admitted
 # late enough to become the deterministic suite's tail.
-AUDITED_FRONTLOAD_MODULES = frozenset({"tests.test_nix_module"})
+#
+# Issue #1226: ``schedule_modules`` below orders everything that is NOT
+# frontloaded by ``_line_weight`` — a module's LINE COUNT — which is only a
+# proxy for cost, and an actively misleading one for a small file that runs
+# real subprocesses. Once #1226's shared-``nixpkgs`` fix removed
+# ``test_nix_module`` as the phase's pole, the phase stopped being
+# pole-bound and became throughput-bound, at which point queue ORDER is
+# what costs wall time: a long target admitted late cannot be packed
+# against anything. Measured on doc1 (30 cores, quiet, 22 workers) from a
+# full per-target duration map of one real phase run, replayed through this
+# same scheduler: perfect packing 76.0s, this queue order 88.1s, and
+# longest-processing-time-first 76.2s — i.e. ~12s of the phase was pure
+# ordering loss. The four modules added below are the ones the map showed
+# were both expensive AND admitted late (measured target seconds, and their
+# position in a 464-target queue): test_world_model_coordinator 38.9s at
+# 256, test_fuzz_burst 33.6s at 211, test_targeted_test_selection 32.0s at
+# 311, test_aac_lattice 30.9s at 273. None of them ends in ``_generated``,
+# so nothing else pulls them forward. Replaying the map with exactly these
+# four frontloaded predicts 81.5s (-6.3s); adding further modules past
+# these four plateaus at ~81.4s and buys nothing, so the list stops here
+# rather than growing to track every heavy module. Measured rather than
+# only predicted: the real phase went 89.6s -> 82.6s on the same host,
+# within 1.1s of the replay's prediction.
+#
+# This list is a hand-audited scheduling HINT, never a correctness
+# boundary: a stale entry (a module that got cheap, or a new heavy one that
+# is missing) costs a little wall time and nothing else. Do NOT grow it
+# into a maintained per-target cost table — the remaining ~5s between the
+# prediction above and the LPT bound is not worth 464 committed numbers
+# that drift on every test change.
+AUDITED_FRONTLOAD_MODULES = frozenset({
+    "tests.test_nix_module",
+    "tests.test_world_model_coordinator",
+    "tests.test_fuzz_burst",
+    "tests.test_targeted_test_selection",
+    "tests.test_aac_lattice",
+})
 #: tests.test_nix_module (issue #1131) is NOT method_batch here on purpose.
 #: Its nix-eval tests are cost-grouped into three ``functools``-free,
 #: exception-memoizing cached helpers in the test module
@@ -129,6 +165,25 @@ AUDITED_FRONTLOAD_MODULES = frozenset({"tests.test_nix_module"})
 #: affordable in the first place; that headroom is why item 1's move from
 #: two to three concurrent heavy targets was safe to measure rather than
 #: assumed unsafe outright.
+#:
+#: Issue #1226 ended this module's reign as the pole, and NOT by splitting
+#: it again: it made each eval ~2.5x cheaper by sharing one nixpkgs
+#: instance across the worlds inside it (details and the byte-identical
+#: proof are in ``_shared_module_worlds_web_auth_matrix_part1``'s
+#: docstring). Measured on a quiet 30-core doc1 at the default 22 workers,
+#: this module's three targets went from 95.0s/65.6s/57.0s to
+#: 38.9s/31.1s/24.8s, and the python phase from 98.6s to 89.6s. Two things
+#: follow for anyone tuning this file next. First, the sweep above is now
+#: historical: it measured a pole that no longer exists at that size, so do
+#: not cite it as evidence about today's concurrency headroom without
+#: re-measuring. Second, the phase is no longer POLE-bound at all — its
+#: largest target (47.9s) is well under the perfect-packing floor
+#: (1673 measured core-seconds / 22 workers = 76.0s), so splitting any
+#: target further cannot move the phase. Raising the worker count cannot
+#: either, and was measured: 26 workers inflated total core-seconds by 11%
+#: (1673 -> 1860) for a 2% wall gain, because the host is already CPU-
+#: saturated. What is left is total CPU work, and queue ORDER — see
+#: ``AUDITED_FRONTLOAD_MODULES`` above.
 HOTSPOT_SHARD_POLICIES = {
     "tests.test_beets_destructive_configs_generated": "method_batch",
     "tests.test_deploy_pin_generated": "method_batch",
