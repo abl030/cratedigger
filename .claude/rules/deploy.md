@@ -1,6 +1,6 @@
 # Deployment Rules
 
-- All code deploys via Nix flake: push cratedigger (GitHub) → `nix flake update cratedigger-src` on doc1 → commit (SSH-signed) + push nixosconfig to **Forgejo** → from doc1 run `fleet-deploy doc2` through the locked-sibling forced-command boundary, then poll and verify the asynchronous update.
+- All code deploys via Nix flake: push cratedigger (GitHub) → `scripts/pin_nixosconfig.sh` pins nixosconfig's `cratedigger-src` input to that exact revision on doc1 (a `nix flake update --override-input` pin, never a bare `nix flake update`, which only ever follows the input's branch tip — #1203) → commit (SSH-signed) + push nixosconfig to **Forgejo** → from doc1 run `fleet-deploy doc2` through the locked-sibling forced-command boundary, then poll and verify the asynchronous update.
 - **Since the Forgejo cutover (2026-06-10), nixosconfig deploys come from Forgejo (`git.ablz.au`), NEVER `github:abl030/nixosconfig` — GitHub is a frozen, stale fallback.** The cratedigger repo itself still lives on GitHub; only the nixosconfig leg changed.
 - The Forgejo push needs a token header (gh's credential helper is github.com-only). Configure it through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0`, and `GIT_CONFIG_VALUE_0` in the environment, never a `git -c` argv value or remote URL. Never echo the token. The exact example is in `.claude/skills/deploy/SKILL.md`.
 - **Never pipe a result-bearing command through any downstream pipe target

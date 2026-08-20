@@ -35,9 +35,24 @@ git commit -m "<message>"
 git push
 ```
 
-2. From the pushed Cratedigger checkout, invoke the checked Bash entrypoint
+2. Before pinning, check whether a previous deploy was silently dropped: a
+revision can merge to `origin/main` and sit there undeployed for a long time
+if nobody runs this step (#1203: PR #1201 was merged but never pinned, and
+only reached production ~14 hours later when an unrelated pin swept it up as
+an ancestor). This is a report, not a gate:
+```bash
+git -C ~/nixosconfig fetch origin master
+DEPLOYED_CRATEDIGGER_REV=$(git -C ~/nixosconfig show \
+  origin/master:flake.lock | jq -er '.nodes["cratedigger-src"].locked.rev')
+git log --oneline "$DEPLOYED_CRATEDIGGER_REV..origin/main"
+```
+If that range holds commits this session did not just merge, a previous
+deploy was dropped -- deal with it before pinning.
+
+Then, from the pushed Cratedigger checkout, invoke the checked Bash entrypoint
 with the exact revision to pin. The entrypoint runs the complete nixosconfig
-fetch → detached worktree → `cratedigger-src`-only lock update → SSH-signature
+fetch → detached worktree → `cratedigger-src`-only lock update, pinned to the
+exact requested revision rather than the input's branch tip → SSH-signature
 verification → token-header Forgejo push → exact remote-SHA verification →
 cleanup lifecycle. It refuses to run anywhere except doc1 and never depends on
 the caller's interactive/default shell:
@@ -66,10 +81,20 @@ that target reports success; a verified remote at the receipt parent's target
 is a rejected candidate, so the helper creates one replacement from current
 master through the ordinary receipt compare-and-swap. The helper rechecks
 master before either transaction. Never delete or rewrite either private
-recovery ref by hand during a retry. A transient or inconclusive verification
-result (for example, unavailable allowed-signers configuration) retains the
-pending candidate; only a definitively bad or unsigned candidate is discarded
-so a later invocation can create a valid signed pin.
+recovery ref by hand during a retry -- if a receipt's own commit never
+reached Forgejo master and master has since advanced past its parent, the
+retry fails with `different pin is still pending`, and the sanctioned exit
+is a two-step re-run instead of a hand edit: first re-run with
+`target=<the pending_target the failure names>`, which replays the ordinary
+"replacing rejected pending revision" path and lands that exact old revision
+on Forgejo master -- possible at all only because the helper now pins the
+requested revision exactly, never the `cratedigger-src` branch tip; then
+re-run with the originally intended target, which now proceeds normally
+because the receipt is master. Both pins land back-to-back; only the second
+needs a `fleet-deploy`. A transient or inconclusive verification result (for
+example, unavailable allowed-signers configuration) retains the pending
+candidate; only a definitively bad or unsigned candidate is discarded so a
+later invocation can create a valid signed pin.
 
 The Forgejo token remains confined to the helper's fail-fast subshell
 environment and must never appear in an argv value, command-line `-c`

@@ -59,8 +59,12 @@ class TestDeployPinScript(unittest.TestCase):
         self.assertEqual(state["remote_target"], self.fake.TARGET_REV)
         self.assertEqual(state["remote_rev"], state["receipt_rev"])
         self.assertEqual(state["commit_count"], 1)
-        self.assertIn(["nix", "flake", "update", "cratedigger-src"],
-                      state["events"])
+        self.assertIn(
+            ["nix", "flake", "update", "cratedigger-src", "--override-input",
+             "cratedigger-src",
+             f"github:abl030/cratedigger/{self.fake.TARGET_REV}"],
+            state["events"],
+        )
         self.assertIn(["ls-remote"], state["events"])
         self.assertIsNone(state["worktree"])
         self.assertIn("signed nixosconfig revision", proc.stdout)
@@ -508,6 +512,183 @@ class TestDeployPinScript(unittest.TestCase):
                     ]
                 ]
                 self.assertEqual(receipt_updates[-1][3], rejected_candidate)
+
+    def test_override_input_pins_exact_target_when_branch_tip_differs(
+        self,
+    ) -> None:
+        """#1203 item 1. Production pins the exact requested revision via
+        ``nix flake update --override-input``, not the branch tip: setting
+        ``branch_tip`` to a revision distinct from the requested target and
+        still landing that exact target proves the override -- not a tip
+        coincidence -- did the pinning. Kills a mutant that reverts to plain
+        ``nix flake update cratedigger-src``: the fake's plain-form branch
+        pins ``branch_tip`` instead, which does not equal the requested
+        target and trips the existing post-update guard.
+        """
+        self.fake.update_state(branch_tip="9" * 40)
+
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(state["remote_target"], self.fake.TARGET_REV)
+        self.assertIn(
+            [
+                "nix", "flake", "update", "cratedigger-src",
+                "--override-input", "cratedigger-src",
+                f"github:abl030/cratedigger/{self.fake.TARGET_REV}",
+            ],
+            state["events"],
+        )
+
+    def test_two_step_recovery_lands_abandoned_receipt_then_the_intended_target(
+        self,
+    ) -> None:
+        """#1203 item 1, the exact deadlock. A prior session signed but never
+        pushed a receipt targeting an old revision; Forgejo master has since
+        advanced independently (still pinning the receipt's own parent
+        target), and the branch tip has moved to a THIRD revision, so the
+        old target is no longer the tip either. Before this fix, requesting
+        the new target hit ``different pin is still pending`` and requesting
+        the old target hit ``updated flake.lock does not pin requested
+        Cratedigger revision`` -- no sanctioned exit. The two-step recovery:
+        re-run with the receipt's own target first (lands it, since the
+        helper now pins exactly what is asked regardless of the tip), then
+        re-run with the originally intended target (proceeds normally, since
+        the receipt is now master).
+        """
+        abandoned_target = "8" * 40
+        intended_target = self.fake.TARGET_REV
+        receipt = self.fake.seed_divergent_receipt(receipt_target=abandoned_target)
+        self.fake.update_state(branch_tip="9" * 40)
+
+        step1 = self.fake.run(SCRIPT, target=abandoned_target)
+        state_after_step1 = self.fake.state
+        self.assertEqual(step1.returncode, 0, step1.stderr)
+        self.assertEqual(state_after_step1["remote_target"], abandoned_target)
+        self.assertEqual(
+            state_after_step1["receipt_rev"], state_after_step1["remote_rev"]
+        )
+        self.assertNotEqual(state_after_step1["receipt_rev"], receipt)
+        self.assertEqual(state_after_step1["commit_count"], 1)
+
+        step2 = self.fake.run(SCRIPT, target=intended_target)
+        state = self.fake.state
+        self.assertEqual(step2.returncode, 0, step2.stderr)
+        self.assertEqual(state["remote_target"], intended_target)
+        self.assertEqual(state["receipt_rev"], state["remote_rev"])
+        self.assertEqual(state["commit_count"], 2)
+        self.assertEqual(
+            sum(event[0] == "push" for event in state["events"]), 2
+        )
+
+    def test_divergent_receipt_failure_names_the_two_step_recovery(self) -> None:
+        """#1203 item 1. The surviving deadlock (requesting a new target
+        while an old, un-landed receipt diverges from an untrusted remote)
+        must name its own exit: re-running with the receipt's own pinned
+        target lands it first, after which the original request can be
+        retried. Every existing coordinate stays in the message.
+        """
+        receipt = self.fake.seed_divergent_receipt()
+        self.fake.update_state(remote_target="7" * 40)
+
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(state["receipt_rev"], receipt)
+        self.assertIn(f"requested={self.fake.TARGET_REV}", proc.stderr)
+        self.assertIn(f"pending_target={self.fake.OLD_TARGET}", proc.stderr)
+        self.assertIn(f"pending={receipt}", proc.stderr)
+        self.assertIn(f"base={self.fake.BASE_REV}", proc.stderr)
+        self.assertIn(f"remote={self.fake.OTHER_REV}", proc.stderr)
+        self.assertIn(
+            f"re-run with target={self.fake.OLD_TARGET} first to land it",
+            proc.stderr,
+        )
+        self.assertIn(
+            f"then re-run with target={self.fake.TARGET_REV}", proc.stderr
+        )
+
+    def test_nonexistent_requested_revision_fails_closed(self) -> None:
+        """Models the real failure of asking to override to a revision that
+        does not exist on GitHub: ``nix flake update --override-input``
+        exits nonzero, same fail-closed shape as any other pre-commit nix
+        failure -- no receipt, no push, no worktree left behind."""
+        self.fake.update_state(fault="nix_missing_revision")
+
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(state["remote_rev"], self.fake.BASE_REV)
+        self.assertIsNone(state["receipt_rev"])
+        self.assertIsNone(state["worktree"])
+        self.assertFalse(any(event[0] == "push" for event in state["events"]))
+
+    def test_override_ref_is_derived_from_flake_lock_original_not_hardcoded(
+        self,
+    ) -> None:
+        """The overridable flake ref is read from flake.lock's own
+        cratedigger-src ``original`` node, never a second hardcoded copy of
+        ``github:abl030/cratedigger`` -- a non-default owner/repo here must
+        show up verbatim in the ``nix`` argv."""
+        self.fake.update_state(cratedigger_input_original={
+            "type": "github", "owner": "example-org", "repo": "cratedigger-fork",
+        })
+
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(state["remote_target"], self.fake.TARGET_REV)
+        self.assertIn(
+            [
+                "nix", "flake", "update", "cratedigger-src",
+                "--override-input", "cratedigger-src",
+                f"github:example-org/cratedigger-fork/{self.fake.TARGET_REV}",
+            ],
+            state["events"],
+        )
+
+    def test_malformed_flake_lock_original_fails_closed(self) -> None:
+        cases = (
+            (
+                "non-github type",
+                {"type": "indirect", "owner": "abl030", "repo": "cratedigger"},
+                "must be github",
+            ),
+            (
+                "missing owner",
+                {"type": "github", "repo": "cratedigger"},
+                "owner is missing or malformed",
+            ),
+            (
+                "missing repo",
+                {"type": "github", "owner": "abl030"},
+                "repo is missing or malformed",
+            ),
+            (
+                "malformed owner",
+                {"type": "github", "owner": "abl/030", "repo": "cratedigger"},
+                "owner is missing or malformed",
+            ),
+        )
+        for name, original, message_fragment in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                fake = FakeDeployPinCommands(Path(td))
+                fake.update_state(cratedigger_input_original=original)
+
+                proc = fake.run(SCRIPT)
+                state = fake.state
+
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn(message_fragment, proc.stderr)
+                self.assertIsNone(state["receipt_rev"])
+                self.assertIsNone(state["worktree"])
+                self.assertFalse(
+                    any(event[0] == "push" for event in state["events"])
+                )
 
     def test_divergent_receipt_fails_closed_without_equivalent_verified_remote(
         self,
