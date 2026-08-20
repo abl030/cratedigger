@@ -96,7 +96,13 @@ cratedigger_override_ref() {
   # hardcoding `github:abl030/cratedigger` a second time here -- a second
   # hardcoded copy would silently pin the wrong repository if the flake
   # input's origin ever changed without this script being updated to match.
-  # Fails closed on any input shape this script does not understand.
+  # Fails closed on any input shape this script does not understand,
+  # INCLUDING keys it has never heard of. A `github` flake input can also
+  # carry `host` (a private mirror), `dir`, or `ref`; silently dropping any
+  # of those would still build a `github:owner/repo/<revision>` ref that
+  # LOOKS valid but resolves at github.com regardless of what the original
+  # node actually said -- precisely the "silently pin the wrong repository"
+  # failure this function exists to prevent.
   #
   # This function is itself invoked via command substitution
   # (`ref=$(cratedigger_override_ref ...)`), which runs it in a subshell.
@@ -108,8 +114,17 @@ cratedigger_override_ref() {
   # the next statement instead of stopping the function.
   local lock_file=$1
   local revision=$2
-  local node_type owner repo
+  local node_type owner repo extra_keys
 
+  if ! extra_keys=$(jq -er '(.nodes["cratedigger-src"].original | keys)
+    - ["type", "owner", "repo"] | join(",")' "$lock_file"); then
+    die "cratedigger-src input's original node is missing or not an object in $lock_file"
+    return 1
+  fi
+  if [[ -n "$extra_keys" ]]; then
+    die "cratedigger-src input has unrecognised keys ($extra_keys) in $lock_file"
+    return 1
+  fi
   if ! node_type=$(jq -er '.nodes["cratedigger-src"].original.type
     | select(type == "string")' "$lock_file"); then
     die "cratedigger-src input has no readable original.type in $lock_file"

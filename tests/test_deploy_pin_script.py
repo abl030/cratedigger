@@ -673,6 +673,20 @@ class TestDeployPinScript(unittest.TestCase):
                 {"type": "github", "owner": "abl/030", "repo": "cratedigger"},
                 "owner is missing or malformed",
             ),
+            (
+                # #1203 correction round, finding 3: the docstring promised
+                # "fails closed on any input shape this script does not
+                # understand" but only type/owner/repo were checked -- a
+                # `host` key (redirecting a github-type input at a private
+                # mirror) was silently dropped, building a ref that points
+                # at github.com regardless of what `host` said.
+                "unrecognised key",
+                {
+                    "type": "github", "owner": "abl030", "repo": "cratedigger",
+                    "host": "github.example.com",
+                },
+                "unrecognised keys",
+            ),
         )
         for name, original, message_fragment in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as td:

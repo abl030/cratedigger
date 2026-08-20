@@ -35,28 +35,32 @@ git commit -m "<message>"
 git push
 ```
 
-2. Before pinning, run two preflight checks in the pushed Cratedigger
-checkout. The first is a gate: confirm the revision is reachable from
-`origin/main` -- the helper below now pins exactly the revision it is given
-rather than following the flake input's branch tip, so proving it is merged
-is the caller's job, not the helper's. The second is a report, not a gate:
-whether a previous deploy was silently dropped (#1203: PR #1201 sat
-merged-but-undeployed for ~14 hours until an unrelated pin swept it up as an
-ancestor):
+2. Before pinning, resolve the revision to pin and check whether a previous
+deploy was silently dropped. **Pin `origin/main`'s own resolved tip, never a
+locally computed `HEAD`.** The house workflow merges PRs as merge commits
+from feature worktrees, so right after `gh pr merge` the local checkout's
+`HEAD` is typically the merged branch's own head commit, not the merge
+commit `origin/main` actually carries -- pinning that would silently omit
+anything else merged in the meantime, and it also poisons the drop-detector
+below: a locked revision that is never itself an `origin/main` commit makes
+`DEPLOYED..origin/main` list at least the merge commit forever, turning the
+detector into a permanent false alarm. The drop check itself is a report,
+not a gate (#1203: PR #1201 sat merged-but-undeployed for ~14 hours until an
+unrelated pin swept it up as an ancestor):
 ```bash
 set -euo pipefail
 CRATEDIGGER_REPO=$(git rev-parse --show-toplevel)
-CRATEDIGGER_REV=$(git rev-parse HEAD)
 git -C "$CRATEDIGGER_REPO" fetch origin '+refs/heads/main:refs/remotes/origin/main'
-git -C "$CRATEDIGGER_REPO" merge-base --is-ancestor "$CRATEDIGGER_REV" origin/main \
-  || { echo "refusing to pin unmerged revision $CRATEDIGGER_REV" >&2; exit 1; }
+CRATEDIGGER_REV=$(git -C "$CRATEDIGGER_REPO" rev-parse origin/main)
 git -C ~/nixosconfig fetch origin '+refs/heads/master:refs/remotes/origin/master'
 DEPLOYED_CRATEDIGGER_REV=$(git -C ~/nixosconfig show \
   origin/master:flake.lock | jq -er '.nodes["cratedigger-src"].locked.rev')
 git -C "$CRATEDIGGER_REPO" log --oneline "$DEPLOYED_CRATEDIGGER_REV..origin/main"
 ```
-If that log range holds commits this session did not just merge, a previous
-deploy was dropped -- deal with it before pinning.
+Read the range: once `CRATEDIGGER_REV` is always `origin/main`'s own tip,
+this correctly goes empty on every deploy that landed everything pending, so
+anything it DOES list here is unexpected -- a previous deploy was dropped;
+deal with it before pinning.
 
 Then invoke the checked Bash entrypoint with the exact revision to pin. The
 entrypoint runs the complete nixosconfig
@@ -68,7 +72,7 @@ the caller's interactive/default shell:
 ```bash
 set -euo pipefail
 CRATEDIGGER_REPO=$(git rev-parse --show-toplevel)
-CRATEDIGGER_REV=$(git rev-parse HEAD)
+CRATEDIGGER_REV=$(git -C "$CRATEDIGGER_REPO" rev-parse origin/main)
 "$CRATEDIGGER_REPO/scripts/pin_nixosconfig.sh" \
   "$CRATEDIGGER_REV" "cratedigger: <description>"
 ```
@@ -93,17 +97,37 @@ master before either transaction. Never delete or rewrite either private
 recovery ref by hand during a retry -- if a receipt's own commit never
 reached Forgejo master and master has since advanced past its parent, the
 retry fails with `different pin is still pending`, and the sanctioned exit
-is a two-step re-run instead of a hand edit: first re-run with
-`target=<the pending_target the failure names>`, which replays the ordinary
-"replacing rejected pending revision" path and lands that exact old revision
-on Forgejo master -- possible at all only because the helper now pins the
-requested revision exactly, never the `cratedigger-src` branch tip; then
-re-run with the originally intended target, which now proceeds normally
-because the receipt is master. Both pins land back-to-back; only the second
-needs a `fleet-deploy`. A transient or inconclusive verification result (for
-example, unavailable allowed-signers configuration) retains the pending
-candidate; only a definitively bad or unsigned candidate is discarded so a
-later invocation can create a valid signed pin.
+is a two-step re-run instead of a hand edit. **Before running step 1**,
+confirm two things about the receipt's own target: it is still reachable
+from `origin/main` (`git -C "$CRATEDIGGER_REPO" merge-base --is-ancestor
+<target> origin/main` -- unlike the ordinary path above, ancestry is exactly
+the right check here, because this target is deliberately not the tip), and
+it does not predate a forward-only migration boundary -- currently migration
+066 (processing ownership, #898): `.claude/rules/deploy.md` states plainly
+that cratedigger must never be repinned to a pre-#898 source, and step 1
+would push exactly that if the abandoned receipt is old enough to cross one.
+If either check fails or there is any doubt, escalate instead of running
+step 1. Step 1 re-runs with
+`target=<the pending_target the failure names>`, replaying the ordinary
+"replacing rejected pending revision" path to land that exact old revision
+on Forgejo master -- possible at all only because the helper pins the
+requested revision exactly, never the `cratedigger-src` branch tip. **That
+landing is real and fully deployable**: doc2's unattended
+`nixos-upgrade.timer` (`OnCalendar=04:00`, up to 60 minutes of
+`RandomizedDelaySec`, `Persistent=true`) will pull and deploy exactly that
+recovered target with no human present if nothing else happens first. Step 1
+and step 2 therefore run back-to-back in the same sitting -- step 2 re-runs
+with the originally intended target, which now proceeds normally because the
+receipt is master -- and the sitting is not over until step 2's own output
+confirms Forgejo master pins that intended target, not merely that the
+command exited zero. If step 2 fails for any reason (network, an
+inconclusive signature check, a dropped session), master is left pinning the
+OLD recovered target: treat that as an active incident, not a state to leave
+overnight, and keep re-running step 2 alone until it confirms the intended
+target, or escalate before ending the session. A transient or inconclusive
+verification result (for example, unavailable allowed-signers configuration)
+retains the pending candidate; only a definitively bad or unsigned candidate
+is discarded so a later invocation can create a valid signed pin.
 
 The Forgejo token remains confined to the helper's fail-fast subshell
 environment and must never appear in an argv value, command-line `-c`
