@@ -18,7 +18,11 @@ from unittest import mock
 
 import msgspec
 
-from scripts.run_python_tests import TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
+from scripts.run_python_tests import (
+    TEST_HOST_MEMORY_EXHAUSTED,
+    TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE,
+    TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
+)
 from scripts.run_targeted_tests import targeted_phases
 from scripts.run_test_suite import (
     _HEADROOM_BASE_BYTES,
@@ -45,6 +49,7 @@ from scripts.run_test_suite import (
     acquire_suite_admission,
     admission_lock_path,
     dirty_state_fingerprint,
+    headroom_floor_bytes,
     reap_stale_check_bundles,
     reap_stale_final_gate_receipts,
     run_suite,
@@ -745,6 +750,88 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         self.assertEqual(summary.phases[0].state, "infrastructure-failure")
         self.assertEqual(
             summary.phases[0].failures[0].identity, TEST_RAM_ROOT_EXHAUSTED
+        )
+
+    def test_memory_exhausted_exit_code_is_not_an_ordinary_python_failure_code(
+        self,
+    ) -> None:
+        """Independent review F2 (BLOCKING): mirrors
+        test_ram_root_exhausted_exit_code_is_not_an_ordinary_python_
+        failure_code above for the SIBLING constant -- issue #1111 shipped
+        TWO guard tests for TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE and this PR
+        mirrored neither for TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE.
+        Mutating 5 -> 1 (or -> 4, TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE's own
+        value) used to leave 121 tests across this module and
+        test_parallel_test_runner green, because nothing asserted this
+        constant's VALUE against anything other than itself
+        (assertEqual(result.returncode, TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE)
+        is tautological — the exact anti-pattern code-quality.md records
+        from #1088/#1090). This test instead asserts the constant's value
+        stays OUTSIDE the "python" phase's declared failure_exit_codes in
+        BOTH _default_phases() and targeted_phases(), and stays DISTINCT
+        from its sibling constant.
+        """
+        self.assertNotEqual(
+            TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE, TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
+        )
+        canonical_python = next(
+            phase for phase in _default_phases() if phase.name == "python"
+        )
+        targeted_python = next(
+            phase
+            for phase in targeted_phases(("tests.test_typing_ratchet",))
+            if phase.name == "python"
+        )
+        for desc, phase in (
+            ("canonical _default_phases", canonical_python),
+            ("targeted targeted_phases", targeted_python),
+        ):
+            with self.subTest(desc=desc):
+                self.assertNotIn(
+                    TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE, phase.failure_exit_codes
+                )
+
+    def test_pure_memory_exhaustion_promotes_the_suite_to_infrastructure_failure(
+        self,
+    ) -> None:
+        """Independent review F2 (BLOCKING): mirrors
+        test_pure_ram_root_exhaustion_promotes_the_suite_to_infrastructure_
+        failure above -- a "python" phase that emits the collapsed
+        memory-exhaustion marker and exits
+        TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE must promote the whole suite
+        to infrastructure-failure (exit 2), not an ordinary failed
+        (exit 1)."""
+        marker = msgspec.json.encode(
+            CheckFailureMarker(
+                identity=TEST_HOST_MEMORY_EXHAUSTED,
+                owner="",
+                detail=(
+                    "1 target(s) failed while the host's available system "
+                    "memory was exhausted"
+                ),
+                test_ids=("tests.test_alpha",),
+            )
+        ).decode()
+        phases = (
+            PhaseSpec(
+                "python",
+                _python_command(
+                    f"{FAILURE_MARKER_PREFIX}{marker}",
+                    TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE,
+                ),
+                "python3 scripts/run_python_tests.py",
+                "python",
+            ),
+        )
+
+        result, _terminal = self._run(phases)
+        summary = decode_summary(result.bundle / "summary.json")
+
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(summary.state, "infrastructure-failure")
+        self.assertEqual(summary.phases[0].state, "infrastructure-failure")
+        self.assertEqual(
+            summary.phases[0].failures[0].identity, TEST_HOST_MEMORY_EXHAUSTED
         )
 
 
@@ -2226,6 +2313,54 @@ class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
             os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = "not-a-number"
             with self.assertRaises(ValueError):
                 _default_min_headroom_bytes()
+        finally:
+            if original is None:
+                os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+            else:
+                os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original
+
+    def test_headroom_floor_bytes_rejects_a_worker_count_below_one(self) -> None:
+        """Known-bad self-test for headroom_floor_bytes's own guard clause
+        (issue #1156 item 3): every OTHER clause in this function is
+        already covered indirectly via _default_min_headroom_bytes's own
+        tests below, but THIS clause only trips when a caller passes a
+        non-positive worker_count directly -- _default_min_headroom_bytes
+        can never reach it, since _expected_worker_count always returns at
+        least 1."""
+        original = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+        try:
+            with self.assertRaisesRegex(
+                ValueError, "worker_count must be at least 1"
+            ):
+                headroom_floor_bytes(0)
+        finally:
+            if original is not None:
+                os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original
+
+    def test_headroom_floor_bytes_scales_with_the_given_worker_count(self) -> None:
+        """Issue #1156 item 3: headroom_floor_bytes is the SAME formula
+        _default_min_headroom_bytes wraps, but callable directly with an
+        explicit worker_count -- the fuzz and world-model bursts each size
+        their own floor this way rather than through the deterministic
+        suite's own worker-count prediction."""
+        original = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+        try:
+            self.assertEqual(
+                headroom_floor_bytes(40),
+                _HEADROOM_BASE_BYTES + _HEADROOM_PER_WORKER_BYTES * 40,
+            )
+            self.assertEqual(headroom_floor_bytes(1), DEFAULT_MIN_HEADROOM_BYTES)
+        finally:
+            if original is not None:
+                os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original
+
+    def test_headroom_floor_bytes_honors_explicit_override_regardless_of_worker_count(
+        self,
+    ) -> None:
+        original = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+        try:
+            os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = "7000000"
+            self.assertEqual(headroom_floor_bytes(200), 7000000)
         finally:
             if original is None:
                 os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)

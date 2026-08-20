@@ -12,7 +12,7 @@ import tempfile
 import time
 import unittest
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import (
     FIRST_COMPLETED,
     Future,
@@ -33,6 +33,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.run_python_tests import (
     HOTSPOT_SHARD_POLICIES,
     STRATEGY_SPACE_EXHAUSTED,
+    TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
     ChildTargetResult,
     HypothesisPropertyStats,
     TestModule,
@@ -42,6 +43,13 @@ from scripts.run_python_tests import (
     resolve_hypothesis_settings,
     settings_max_examples,
     shard_test_ids,
+)
+from scripts.run_test_suite import (
+    TEST_RAM_ROOT_EXHAUSTED,
+    RamRootExhaustedError,
+    _check_suite_headroom,
+    headroom_floor_bytes,
+    private_runtime_dir,
 )
 from tests.finite_domain_metadata import (
     FINITE_DOMAIN_ATTRIBUTE,
@@ -163,6 +171,11 @@ class FuzzTargetBatch:
     results: tuple[FuzzRunResult, ...]
     infrastructure_failures: tuple[FuzzInfrastructureFailure, ...]
     not_started: tuple[FuzzTarget, ...]
+    #: Set when the coordinator's own mid-run headroom check (issue #1156
+    #: item 3) tripped, rather than any individual target — a coordinator-
+    #: level abort, not a per-target infrastructure failure, so it is kept
+    #: out of ``infrastructure_failures``.
+    headroom_exhausted: bool = False
 
 
 class PersistedFuzzTarget(msgspec.Struct, frozen=True):
@@ -905,12 +918,37 @@ def run_fuzz_targets(
     postgres_worker_count: int,
     environment: Mapping[str, str],
     log_directory: Path,
+    check_headroom: Callable[[], None],
 ) -> FuzzTargetBatch:
-    """Run a bounded queue and stop admission after infrastructure loss."""
+    """Run a bounded queue and stop admission after infrastructure loss.
+
+    ``check_headroom`` is called once per outer admission-loop iteration,
+    while ``pending`` is still non-empty (issue #1156 item 3) — NOT only on
+    a cycle that goes on to actually admit a new target. Independent
+    review B7: with the worker pool already full (or every pending target
+    blocked on the separate PostgreSQL ceiling),
+    ``select_fuzz_admissions`` can legitimately return zero admissions for
+    a cycle, and this check still fires that cycle; "right before any new
+    target would be admitted" overstated the guarantee. The production
+    caller (``main`` below) binds it to the same
+    ``_check_suite_headroom``/``headroom_floor_bytes`` precondition the
+    coordinator already ran once, before any work, so a run admitted at
+    floor+ε does not silently ENOSPC deep into the burst — it aborts here,
+    under the same named identity, instead of surfacing as an opaque
+    per-target subprocess crash. A ``RamRootExhaustedError`` stops
+    admission exactly like an infrastructure failure (already-running
+    targets are drained, nothing new starts), but is reported through
+    ``FuzzTargetBatch.headroom_exhausted`` rather than
+    ``infrastructure_failures`` — it is a coordinator-level abort, not an
+    individual target's failure. No default: the real closure needs a
+    resolved runtime path only ``main`` owns; tests inject a controlled
+    fake.
+    """
     results: list[FuzzRunResult] = []
     infrastructure_failures: list[FuzzInfrastructureFailure] = []
     pending = list(enumerate(targets))
     infrastructure_aborted = False
+    headroom_exhausted = False
     completed_count = 0
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures: dict[
@@ -918,34 +956,41 @@ def run_fuzz_targets(
             tuple[int, FuzzTarget],
         ] = {}
         while futures or (pending and not infrastructure_aborted):
-            if not infrastructure_aborted:
-                active = tuple(target for _index, target in futures.values())
-                admitted_positions = select_fuzz_admissions(
-                    tuple(target for _index, target in pending),
-                    active,
-                    worker_count=worker_count,
-                    postgres_worker_count=postgres_worker_count,
-                )
-                admitted_position_set = set(admitted_positions)
-                admitted = tuple(
-                    item
-                    for position, item in enumerate(pending)
-                    if position in admitted_position_set
-                )
-                pending = [
-                    item
-                    for position, item in enumerate(pending)
-                    if position not in admitted_position_set
-                ]
-                for index, target in admitted:
-                    future = executor.submit(
-                        _execute_fuzz_target,
-                        index,
-                        target,
-                        environment=environment,
-                        log_directory=log_directory,
+            if pending and not infrastructure_aborted:
+                try:
+                    check_headroom()
+                except RamRootExhaustedError as exc:
+                    infrastructure_aborted = True
+                    headroom_exhausted = True
+                    print(f"RAM ROOT EXHAUSTED mid-run: {exc}", flush=True)
+                else:
+                    active = tuple(target for _index, target in futures.values())
+                    admitted_positions = select_fuzz_admissions(
+                        tuple(target for _index, target in pending),
+                        active,
+                        worker_count=worker_count,
+                        postgres_worker_count=postgres_worker_count,
                     )
-                    futures[future] = (index, target)
+                    admitted_position_set = set(admitted_positions)
+                    admitted = tuple(
+                        item
+                        for position, item in enumerate(pending)
+                        if position in admitted_position_set
+                    )
+                    pending = [
+                        item
+                        for position, item in enumerate(pending)
+                        if position not in admitted_position_set
+                    ]
+                    for index, target in admitted:
+                        future = executor.submit(
+                            _execute_fuzz_target,
+                            index,
+                            target,
+                            environment=environment,
+                            log_directory=log_directory,
+                        )
+                        futures[future] = (index, target)
             if not futures:
                 break
 
@@ -996,6 +1041,7 @@ def run_fuzz_targets(
         results=tuple(results),
         infrastructure_failures=tuple(infrastructure_failures),
         not_started=tuple(target for _index, target in pending),
+        headroom_exhausted=headroom_exhausted,
     )
 
 
@@ -1094,11 +1140,33 @@ def _parse_positive_int(value: str) -> int:
     return parsed
 
 
+#: Hard ceiling stacked on top of the doubling formula below (issue #1214,
+#: "Contributing gaps" item 1 -- NOT #1156 item 1, which is a different,
+#: unrelated finding about test_nix_module world-level sharding). Mixed
+#: subprocess/I/O fuzz targets tolerate CPU oversubscription
+#: far better than the deterministic suite's in-process workers, so
+#: ``recommended_worker_count``'s audited three-quarters-of-cores contract
+#: does not apply here — but nothing bounded the DOUBLING itself, so an
+#: arbitrarily large host could mint an arbitrarily large number of
+#: concurrent fuzz-target subprocesses, each importing its own Python
+#: interpreter and Hypothesis, and (for ephemeral-postgres targets,
+#: separately capped at ``EPHEMERAL_POSTGRES_TARGET_LIMIT``) test
+#: fixtures. Mirrors ``run_world_model_burst.py::IN_PROCESS_JOB_CAP``'s
+#: same shape — a flat ceiling stacked on top of a per-core formula — for
+#: the same reason: an unattended overnight/daily run has no operator
+#: watching worker counts climb. Chosen comfortably above every host
+#: measured in this repository's fleet to date (doc1 at 30 cores computes
+#: 60, well under this ceiling, so it never engages on hardware seen so
+#: far) — this exists for the next, larger host, not to shrink today's
+#: number.
+MAX_FUZZ_JOBS = 64
+
+
 def recommended_fuzz_jobs(cpu_count: int) -> int:
-    """Keep mixed subprocess/I/O targets runnable at twice host cores."""
+    """Keep mixed subprocess/I/O targets runnable at twice host cores, bounded."""
     if cpu_count < 1:
         raise ValueError("cpu_count must be at least 1")
-    return cpu_count * 2
+    return min(cpu_count * 2, MAX_FUZZ_JOBS)
 
 
 def recommended_postgres_jobs(cpu_count: int, worker_count: int) -> int:
@@ -1203,13 +1271,73 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    check_headroom: Callable[[], None] | None = None,
+) -> int:
+    """Run the fuzz burst.
+
+    ``check_headroom`` mirrors ``run_world_model_burst.py::main``'s own DI
+    seam (issue #1156 item 3): ``None`` (the production default) builds the
+    real ``_check_suite_headroom``/``headroom_floor_bytes`` closure below;
+    tests inject a controlled fake so BOTH the preflight call and the
+    SAME callable threaded into ``run_fuzz_targets`` for the mid-run
+    admission-loop check can be driven deterministically end-to-end,
+    including through this function's own post-run reporting.
+
+    Design note (issue #1156, task scoping explicitly left this call): this
+    coordinator does NOT take ``scripts/run_test_suite.py::
+    acquire_suite_admission``'s exclusive lock. It is long-running and
+    variable-duration (minutes interactively, up to the full overnight
+    ``CRATEDIGGER_FUZZ_MAX_EXAMPLES`` budget in the daily gate); folding it
+    into the SAME exclusive queue an ordinary, quick ``scripts/test.sh``
+    dev-loop run waits on (bounded at ``DEFAULT_ADMISSION_TIMEOUT_SECONDS``)
+    would either starve that bounded wait or force raising the timeout for
+    everyone. It gets its own independent headroom precondition instead —
+    real, but narrower in scope than full admission: it does not serialize
+    against a concurrently-running deterministic suite the way the lock
+    would.
+    """
     args = _parser().parse_args(argv)
     module_names = tuple(args.modules) or _default_modules()
     if not module_names:
         print("No generated fuzz modules found", file=sys.stderr)
         return 2
     worker_count = min(args.jobs, max(1, len(module_names)))
+
+    # issue #1156 review F3: private_runtime_dir() must be called INSIDE
+    # the try below, not before it -- it is the one production call site
+    # that can raise the plain RuntimeError this except tuple exists to
+    # catch (e.g. XDG_RUNTIME_DIR unset/non-tmpfs/wrong-owner), and a
+    # RuntimeError raised one line above a try is never caught by it.
+    # An unavailable runtime dir aborts loudly here (exit 2) rather than
+    # silently degrading and running without the guard -- matching
+    # run_test_suite.py::main's own top-level precondition for the exact
+    # same failure shape; silently skipping the guard when its own
+    # prerequisite is broken would defeat the guard's purpose.
+    try:
+        if check_headroom is None:
+            runtime = private_runtime_dir()
+            # worker_count=1 deliberately, not args.jobs: see
+            # headroom_floor_bytes's docstring (issue #1156 item 3) for why
+            # the fuzz burst does not extend the suite's per-worker
+            # multiplier to itself.
+            headroom_minimum = headroom_floor_bytes(1)
+            check_headroom = lambda: _check_suite_headroom(
+                runtime, minimum_bytes=headroom_minimum
+            )
+        check_headroom()
+    except RamRootExhaustedError as exc:
+        print(f"fuzz burst: {exc}", file=sys.stderr)
+        return TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(
+            f"fuzz burst: infrastructure precondition failed: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
     persistent_database = _persistent_path(
         os.environ.get("HYPOTHESIS_STORAGE_DIRECTORY"),
         REPO_ROOT / ".hypothesis",
@@ -1294,13 +1422,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             environment=child_environment,
             log_directory=log_directory,
+            check_headroom=check_headroom,
         )
         results = batch.results
         infrastructure_failures = batch.infrastructure_failures
         wall_seconds = time.monotonic() - started_at
 
+        # NOTE(#1156 item 3): batch.headroom_exhausted and
+        # infrastructure_failures are NOT mutually exclusive -- a target
+        # already admitted before the mid-run headroom check tripped can
+        # ALSO fail independently (e.g. its own worker crash) in the same
+        # drain. Both are folded into the SAME reporting block below so
+        # neither swallows the other's detail, mirroring
+        # _collapse_disk_full_failures's own "two separate entries" rule.
         failed_results = [result for result in results if not result.successful]
-        if not infrastructure_failures:
+        if not infrastructure_failures and not batch.headroom_exhausted:
             for result in sorted(
                 results,
                 key=lambda item: item.elapsed_seconds,
@@ -1319,8 +1455,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             ):
                 print(line)
-        if failed_results or infrastructure_failures:
-            if infrastructure_failures:
+        if failed_results or infrastructure_failures or batch.headroom_exhausted:
+            if infrastructure_failures or batch.headroom_exhausted:
                 if failed_results:
                     print(
                         f"\n{len(failed_results)} unittest-failed "
@@ -1340,7 +1476,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             ):
                 print(f"\n--- INFRASTRUCTURE FAIL {failure.target.label} ---")
                 print(failure.detail)
-            if not infrastructure_failures:
+            if batch.headroom_exhausted:
+                print(f"\n--- {TEST_RAM_ROOT_EXHAUSTED} (mid-run) ---")
+                print(
+                    "the coordinator's own headroom precondition tripped "
+                    "during admission; already-running targets were "
+                    "drained and no new target was started"
+                )
+            if not infrastructure_failures and not batch.headroom_exhausted:
                 _persist_failure_database(
                     active_database,
                     persistent_database,
@@ -1353,6 +1496,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 print(f"fuzz burst: complete module logs retained at {retained}")
             completed_targets = len(results) + len(infrastructure_failures)
+            if batch.headroom_exhausted:
+                print(
+                    f"fuzz burst: {TEST_RAM_ROOT_EXHAUSTED} mid-run after "
+                    f"{wall_seconds:.1f}s ({completed_targets} completed of "
+                    f"{len(targets)}; {len(batch.not_started)} not started; "
+                    "property verdict invalid)"
+                )
+                return TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
             if infrastructure_failures:
                 print(
                     f"fuzz burst: INFRASTRUCTURE ABORT after "

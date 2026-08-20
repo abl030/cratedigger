@@ -1063,27 +1063,47 @@ _HEADROOM_BASE_BYTES = 256 * 1024 * 1024
 _HEADROOM_PER_WORKER_BYTES = 64 * 1024 * 1024
 
 
-def _default_min_headroom_bytes() -> int:
-    """Read the same env var scripts/test_tmpfs.sh uses; the DEFAULT (no
-    override) scales with the Python phase's own expected worker count.
+def headroom_floor_bytes(worker_count: int) -> int:
+    """Worker-aware headroom floor, shared by every coordinator on this tmpfs.
 
-    Issue #1131 review N1: raising the default worker count means more
-    concurrent ephemeral PostgreSQL clusters, so a flat 1 GiB floor no
-    longer bounds a run's OWN peak tmpfs on a tight host — doc1 (30
-    cores, 3.2 GB root) measured a 1178 MB peak at 22 workers, above the
-    flat 1 GiB (1073.7 MB) floor a run could previously have been
-    admitted under. The unset-default floor is now
+    Reads the same ``CRATEDIGGER_TEST_RAM_MIN_BYTES`` env var
+    ``scripts/test_tmpfs.sh``'s own shell-entry guard uses; an EXPLICIT
+    override is honored exactly as given, with no worker-aware adjustment.
+    The unset-default floor is
     ``max(DEFAULT_MIN_HEADROOM_BYTES, _HEADROOM_BASE_BYTES +
-    _HEADROOM_PER_WORKER_BYTES * _expected_worker_count())`` — see
-    ``recommended_worker_count``'s docstring for the measured evidence.
-    An EXPLICIT ``CRATEDIGGER_TEST_RAM_MIN_BYTES`` override is still
-    respected exactly as given, with no worker-aware adjustment: this
-    scaling only fills in the unset default. ``scripts/test_tmpfs.sh``'s
-    own shell-entry guard deliberately stays a flat 1 GiB for the
-    DIFFERENT case it covers — a bare interactive ``nix-shell`` entry,
-    skipped entirely once ``CRATEDIGGER_SUITE_OWNS_HEADROOM`` is set,
-    where no worker count is even known yet.
+    _HEADROOM_PER_WORKER_BYTES * worker_count)`` — see
+    ``recommended_worker_count``'s docstring for the measured evidence this
+    per-worker term is sized against: the deterministic suite's own
+    ephemeral-PostgreSQL worker footprint.
+
+    Issue #1156 item 3: this function takes a plain, explicit
+    ``worker_count`` rather than reading a suite-specific global, so every
+    coordinator that admits its own pool of processes onto the shared
+    tmpfs can call it. The deterministic suite passes its own predicted
+    worker count (``_expected_worker_count``, via
+    ``_default_min_headroom_bytes`` below) because issue #1131 measured
+    that specific per-worker footprint. The fuzz burst
+    (``scripts/run_fuzz_tests.py``) and the world-model burst
+    (``scripts/run_world_model_burst.py``) instead call this with
+    ``worker_count=1`` — i.e. the flat ``DEFAULT_MIN_HEADROOM_BYTES``,
+    still override-respecting — because there is no equivalent MEASURED
+    per-worker footprint for either burst's own, differently-shaped worker
+    pool (up to several dozen short-lived fuzz targets, vs. the suite's
+    handful of ephemeral-PostgreSQL-backed workers), and issue #1214 is
+    concurrently changing what that footprint even is. Extending the
+    suite's own multiplier to them would be an unjustified guess dressed
+    up as a measurement — confirmed live: sizing the fuzz burst's floor by
+    its own default worker count (up to 60 on a 30-core host) demanded
+    EXACTLY 4 GiB (256 MiB base + 64 MiB/worker * 60 workers = 4096 MiB,
+    independent review B7 item 2 — "over 4 GiB" overstated it), more than
+    this repository's own 3.1 GiB interactive dev tmpfs actually has free. Reusing the SAME flat floor
+    ``scripts/test_tmpfs.sh``'s shell-entry guard already enforces for
+    them today just moves the check from "one-shot at shell entry" to "a
+    real coordinator precondition, with a mid-run recheck," without
+    inventing a number nothing measures.
     """
+    if worker_count < 1:
+        raise ValueError("worker_count must be at least 1")
     raw = os.environ.get("CRATEDIGGER_TEST_RAM_MIN_BYTES")
     if raw is not None:
         try:
@@ -1097,16 +1117,51 @@ def _default_min_headroom_bytes() -> int:
         return value
     return max(
         DEFAULT_MIN_HEADROOM_BYTES,
-        _HEADROOM_BASE_BYTES + _HEADROOM_PER_WORKER_BYTES * _expected_worker_count(),
+        _HEADROOM_BASE_BYTES + _HEADROOM_PER_WORKER_BYTES * worker_count,
     )
 
 
+def _default_min_headroom_bytes() -> int:
+    """The deterministic suite's own floor: ``headroom_floor_bytes`` sized by
+    the Python phase's own expected worker count (``_expected_worker_count``).
+
+    Issue #1131 review N1: raising the default worker count means more
+    concurrent ephemeral PostgreSQL clusters, so a flat 1 GiB floor no
+    longer bounds a run's OWN peak tmpfs on a tight host — doc1 (30
+    cores, 3.2 GB root) measured a 1178 MB peak at 22 workers, above the
+    flat 1 GiB (1073.7 MB) floor a run could previously have been
+    admitted under. ``scripts/test_tmpfs.sh``'s own shell-entry guard
+    deliberately stays a flat 1 GiB for the DIFFERENT case it covers — a
+    bare interactive ``nix-shell`` entry, skipped entirely once
+    ``CRATEDIGGER_SUITE_OWNS_HEADROOM`` is set, where no worker count is
+    even known yet.
+    """
+    return headroom_floor_bytes(_expected_worker_count())
+
+
 def _check_suite_headroom(runtime: Path, *, minimum_bytes: int) -> None:
-    """Fail the whole suite once, immediately — never mid-run (issue #1111).
+    """One measured headroom check against the shared tmpfs root, raising
+    ``RamRootExhaustedError`` on insufficient free bytes.
 
     Measures the same root scripts/test_tmpfs.sh's shell-entry guard does:
     ``CRATEDIGGER_TEST_RAM_ROOT`` when an operator has overridden it, else
     the validated ``runtime`` this suite was actually admitted under.
+
+    The deterministic suite (``run_suite`` below) calls this exactly once,
+    immediately, before any phase runs (issue #1111) — for that caller
+    ONLY, a trip fails the whole suite once and never mid-run. Issue #1156
+    item 3: the fuzz burst (``scripts/run_fuzz_tests.py``) and the
+    world-model burst (``scripts/run_world_model_burst.py``) also call
+    this SAME function, but NOT exactly twice per coordinator run
+    (independent review B7 item 1 — corrected): each makes exactly one
+    preflight call, plus one call per outer admission-loop iteration for
+    as long as ``pending`` remains non-empty — as few as one such mid-run
+    call when the whole pool is admitted in a single cycle (two calls
+    total), or several more when admission is staggered across multiple
+    cycles because the worker pool or the separate PostgreSQL ceiling is
+    already full. What stays true regardless of the exact count: "never
+    mid-run" is a property of ``run_suite``'s own call site, not of this
+    function itself.
     """
     target = Path(os.environ.get("CRATEDIGGER_TEST_RAM_ROOT") or runtime)
     available = shutil.disk_usage(target).free

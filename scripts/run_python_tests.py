@@ -17,6 +17,7 @@ import unittest
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import TracebackType
@@ -62,6 +63,20 @@ _SCHEMA_READY_ENV = "CRATEDIGGER_TEST_SCHEMA_READY"
 #: the phase — and the whole suite — out of an ordinary "failed" state,
 #: without touching that generic logic.
 TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE = 4
+
+#: Issue #1156 item 2: a worker killed by the OOM killer raises the SAME
+#: BrokenProcessPool shape this module already catches for every
+#: outstanding future in a broken ProcessPoolExecutor, but the disk-full
+#: classifier above measures the wrong resource for it (tmpfs, not system
+#: memory) — so it always fell through as disk_full=False and reported as
+#: N ordinary worker failures, each named after a different innocent test
+#: (the same N-disguises shape issue #1111 fixed for disk-full). This is a
+#: DIFFERENT resource than the tmpfs RAM root, so it gets its OWN identity
+#: and exit code rather than being folded into TEST_RAM_ROOT_EXHAUSTED —
+#: conflating the two would undo the honesty this classification exists
+#: for.
+TEST_HOST_MEMORY_EXHAUSTED = "test host memory exhausted"
+TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE = 5
 WORLD_MODEL_MODULE = "tests.world_model.state_machine"
 # Method profiling showed the dominant Nix evaluation was otherwise admitted
 # late enough to become the deterministic suite's tail.
@@ -173,6 +188,7 @@ class TargetInfrastructureFailure:
     target: TestTarget
     detail: str
     disk_full: bool = False
+    memory_exhausted: bool = False
 
 
 class HypothesisPropertyStats(msgspec.Struct, frozen=True):
@@ -324,6 +340,70 @@ def _measure_tempdir_available_bytes() -> int | None:
         return shutil.disk_usage(tempfile.gettempdir()).free
     except OSError:
         return None
+
+
+#: Deliberately conservative floor for the OOM classifier below (issue
+#: #1156 item 2) — unlike the tmpfs floor, which run_suite's own
+#: precondition already pins to a specific, worker-aware value, there is
+#: no equivalent configured "expected system memory headroom" anywhere in
+#: this repository; 256 MiB is chosen to sit comfortably below what any
+#: live, unstressed host is expected to have free, minimizing the chance
+#: an ordinary transient dip gets misclassified as exhaustion. See
+#: ``_classify_target_infrastructure_failure``'s docstring for the
+#: measurement-timing residual this floor cannot close.
+_MIN_VALID_MEMORY_HEADROOM_BYTES = 256 * 1024 * 1024
+
+
+def _measure_available_memory_bytes(
+    meminfo_path: Path = Path("/proc/meminfo"),
+) -> int | None:
+    """Best-effort system memory availability right now, via /proc/meminfo.
+
+    ``MemAvailable`` (not ``MemFree``) is the kernel's own estimate of what
+    a new allocation could get without swapping — closer to what actually
+    drives OOM-kill decisions than raw free pages, which undercounts
+    reclaimable page cache. Linux-only, matching every other resource
+    guard in this module; returns ``None`` when unreadable (missing file,
+    unexpected format) so the caller degrades to "cannot classify" rather
+    than guessing.
+
+    ``meminfo_path`` defaults to the real file so every production caller
+    is unaffected; it exists so a test can pin the ``MemAvailable`` line
+    and its ``* 1024`` (kB -> bytes) conversion against a KNOWN fixture
+    (issue #1156 review F4) — /proc/meminfo cannot otherwise be forced to
+    a controlled value.
+    """
+    try:
+        with meminfo_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _default_min_memory_headroom_bytes() -> int:
+    """The OOM classifier's floor: env-overridable, mirroring
+    ``CRATEDIGGER_TEST_RAM_MIN_BYTES``'s own override pattern for the
+    tmpfs floor. This is also the seam that makes the classifier's
+    positive case testable end-to-end: a test can set this to a value no
+    real host's ``MemAvailable`` can exceed — the identical trick
+    ``TestRunTargetsWorkerExceptionWiring``'s own docstring already
+    documents for the disk-full floor.
+    """
+    raw = os.environ.get("CRATEDIGGER_TEST_MEMORY_MIN_BYTES")
+    if raw is not None:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = -1
+        if value < 0:
+            raise ValueError(
+                "CRATEDIGGER_TEST_MEMORY_MIN_BYTES must be a non-negative integer"
+            )
+        return value
+    return _MIN_VALID_MEMORY_HEADROOM_BYTES
 
 
 def _classify_test_infrastructure_error(
@@ -1226,6 +1306,8 @@ def _classify_target_infrastructure_failure(
     *,
     available_bytes: Callable[[], int | None] = _measure_tempdir_available_bytes,
     minimum_bytes: int | None = None,
+    available_memory_bytes: Callable[[], int | None] = _measure_available_memory_bytes,
+    minimum_memory_bytes: int | None = None,
 ) -> TargetInfrastructureFailure:
     """Classify a worker's own crash by measuring free bytes right now.
 
@@ -1253,14 +1335,82 @@ def _classify_target_infrastructure_failure(
     It can never fold a genuine code defect INTO this bucket and hide it:
     nothing here suppresses a failure, only relabels ones it can prove are
     environmental.
+
+    Issue #1156 item 2: an OOM-killed worker raises ``BrokenProcessPool``,
+    not an ENOSPC-shaped exception, and the disk-full check above measures
+    the wrong resource for it — so it always fell through as an ordinary,
+    unclassified worker failure, one ``CheckFailureMarker`` per target,
+    each named after a different innocent test (the same N-disguises shape
+    issue #1111 fixed for disk-full). Classified the same "measured state"
+    way, narrowed by exception SHAPE rather than left as a bare threshold
+    check: ``isinstance(exc, BrokenProcessPool)`` is the specific signal
+    every outstanding future in a ``ProcessPoolExecutor`` receives when one
+    of its workers vanishes unexpectedly, and
+    ``available_memory_bytes() < minimum_memory_bytes`` is the
+    corroborating measured state — never a scan of ``exc``'s text. Only
+    evaluated when the disk check already came back negative — a DELIBERATE
+    ORDERING CHOICE, not a claim that the two are physically distinct
+    (independent review B2, issue #1156): on a host where the shared tmpfs
+    RAM root is itself what "memory" mostly consists of (issue #1214's own
+    measurement — cgroup v2 ``memory.peak`` counts tmpfs pages, 69% of the
+    fuzz phase's peak was scratch tmpfs), genuine system-wide memory
+    pressure usually manifests as tmpfs exhaustion FIRST, so the disk-full
+    branch wins and this memory branch is largely inert under exactly the
+    pressure it exists to name. ``scripts/run_python_tests.py``'s own
+    `main` wiring below (issue #1156 review F10) already states the
+    correct, weaker fact: nothing stops a disk-full marker and a
+    memory-exhausted marker from BOTH occurring in the same run (on
+    different targets); this docstring must not contradict it.
+
+    Residual, stated honestly (worse than the tmpfs case): an OOM kill
+    FREES the killed worker's memory immediately, so by the time this
+    classifier runs — after ``ProcessPoolExecutor`` has already detected
+    the broken pool and raised — available memory may have already
+    recovered above the floor. That reads as an ordinary worker failure,
+    the same miss the disk-full branch already accepts for its own
+    measurement-timing window, just more likely to occur here.
+
+    This one is NOT one-directional the way the disk-full branch's own
+    claim is (independent review F5(e), issue #1156): a genuine code
+    defect whose crash happens to raise a real ``BrokenProcessPool``
+    (e.g. a segfault in a C extension the pool worker was running) WHILE
+    measured memory genuinely reads below the floor at that exact moment
+    WOULD be folded into "memory exhausted" and reported as
+    environmental rather than a real bug. What is still true: a
+    ``BrokenProcessPool`` with healthy measured memory stays an ordinary
+    infrastructure failure, and any exception OTHER than
+    ``BrokenProcessPool`` is never reclassified as memory exhaustion no
+    matter how little memory is measured — the exception-shape gate
+    narrows the false-positive window to "the pool broke AND memory is
+    genuinely low right now," not "any bug at all."
     """
     available = available_bytes()
     floor = minimum_bytes if minimum_bytes is not None else _default_min_headroom_bytes()
     disk_full = available is not None and available < floor
+    memory_exhausted = False
+    available_memory: int | None = None
+    if not disk_full and isinstance(exc, BrokenProcessPool):
+        memory_floor = (
+            minimum_memory_bytes
+            if minimum_memory_bytes is not None
+            else _default_min_memory_headroom_bytes()
+        )
+        available_memory = available_memory_bytes()
+        memory_exhausted = (
+            available_memory is not None
+            and available_memory < memory_floor
+        )
     detail = f"{type(exc).__name__}: {exc}"
     if disk_full:
         detail = f"temporary filesystem has {available} bytes free; {detail}"
-    return TargetInfrastructureFailure(target=target, detail=detail, disk_full=disk_full)
+    elif memory_exhausted:
+        detail = f"system memory has {available_memory} bytes available; {detail}"
+    return TargetInfrastructureFailure(
+        target=target,
+        detail=detail,
+        disk_full=disk_full,
+        memory_exhausted=memory_exhausted,
+    )
 
 
 def _run_targets(
@@ -1380,6 +1530,46 @@ def _collapse_disk_full_failures(
     return tuple(remaining_results), tuple(remaining_infrastructure), marker
 
 
+def _collapse_memory_exhausted_failures(
+    infrastructure_failures: Sequence[TargetInfrastructureFailure],
+) -> tuple[tuple[TargetInfrastructureFailure, ...], CheckFailureMarker | None]:
+    """Fold every OOM-classified worker death into one named marker.
+
+    Mirrors ``_collapse_disk_full_failures`` for a DIFFERENT resource
+    (issue #1156 item 2), not a copy of its decision: memory exhaustion is
+    detectable only at the WORKER-death level
+    (``TargetInfrastructureFailure.memory_exhausted`` —
+    ``BrokenProcessPool`` means the whole pool broke, not that a
+    still-alive worker's specific test raised), so unlike the disk-full
+    fold there is no ``failed_results`` half to fold here; a target that
+    finished, however it finished, never carries this kind of failure.
+    """
+    remaining: list[TargetInfrastructureFailure] = []
+    combined_ids: list[str] = []
+    combined_details: list[str] = []
+    for failure in infrastructure_failures:
+        if failure.memory_exhausted:
+            combined_ids.append(failure.target.test_name)
+            combined_details.append(failure.detail)
+        else:
+            remaining.append(failure)
+
+    if not combined_ids:
+        return tuple(remaining), None
+
+    marker = CheckFailureMarker(
+        identity=TEST_HOST_MEMORY_EXHAUSTED,
+        owner="",
+        detail=(
+            f"{len(combined_ids)} target(s) failed while the host's "
+            "available system memory was exhausted; sample: "
+            f"{combined_details[0] if combined_details else 'no detail'}"
+        ),
+        test_ids=tuple(combined_ids),
+    )
+    return tuple(remaining), marker
+
+
 def _failure_diagnostics(output: str) -> str:
     marker_index = output.find(_FAILURE_MARKER)
     if marker_index >= 0:
@@ -1432,7 +1622,31 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    run_targets_fn: Callable[
+        ...,
+        tuple[tuple[TargetRunResult, ...], tuple[TargetInfrastructureFailure, ...]],
+    ] = _run_targets,
+) -> int:
+    """Run the deterministic Python suite phase's CLI entry point.
+
+    ``run_targets_fn`` mirrors the ``check_headroom`` DI seam on the fuzz
+    and world-model bursts' own ``main`` functions (issue #1156 item 3):
+    ``_run_targets`` (the production default) is the ONE real boundary that
+    talks to a genuine ``ProcessPoolExecutor`` and its subprocess-level
+    worker-death semantics -- a worker dying poisons the WHOLE pool for
+    every still-tracked future, so two independently-classified real
+    deaths (one disk_full, one memory_exhausted) cannot be produced
+    deterministically in a single real run. Independent review B-3 (third
+    round): the two-clause promotion guard below needs exactly that
+    heterogeneous-marker scenario to prove its own `is None` clauses are
+    load-bearing; the test seeds it by replacing this ONE real boundary
+    with pre-built results, while every other line of `main` -- CLI
+    parsing, discovery, scheduling, the collapse helpers, printing, exit
+    code selection -- runs for real, unmocked.
+    """
     args = _parser().parse_args(argv)
     top = args.top_level_directory.resolve()
     start = args.start_directory
@@ -1482,7 +1696,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"({sharded_target_count} audited hotspot targets)"
     )
     started_at = time.monotonic()
-    results, infrastructure_failures = _run_targets(
+    results, infrastructure_failures = run_targets_fn(
         schedule,
         worker_count=worker_count,
         top_level_directory=top,
@@ -1510,6 +1724,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             remaining_infrastructure_failures,
             ram_root_marker,
         ) = _collapse_disk_full_failures(failed_results, infrastructure_failures)
+        (
+            remaining_infrastructure_failures,
+            memory_marker,
+        ) = _collapse_memory_exhausted_failures(remaining_infrastructure_failures)
         for result in sorted(
             remaining_failed_results,
             key=lambda item: item.target.test_name,
@@ -1567,11 +1785,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"({len(ram_root_marker.test_ids)} target(s)/test(s)) ---"
             )
             print(ram_root_marker.detail)
+        if memory_marker is not None:
+            # Issue #1156 item 2: every OOM-classified worker death is ONE
+            # named entry here, never N separately-indexed disguises.
+            print(FAILURE_MARKER_PREFIX + msgspec.json.encode(memory_marker).decode())
+            print(
+                "\n--- FAIL: "
+                f"{TEST_HOST_MEMORY_EXHAUSTED} "
+                f"({len(memory_marker.test_ids)} target(s)) ---"
+            )
+            print(memory_marker.detail)
         known_count = sum(result.tests_run for result in results)
         failed_targets = (
             len(remaining_failed_results)
             + len(remaining_infrastructure_failures)
             + (1 if ram_root_marker is not None else 0)
+            + (1 if memory_marker is not None else 0)
         )
         print(
             METRICS_MARKER_PREFIX
@@ -1587,12 +1816,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"\nFAILED: {failed_targets} of {len(schedule)} targets; "
             f"Ran {known_count} reported tests in {wall_seconds:.1f}s"
         )
+        # Promotion requires a HOMOGENEOUS failure set: exactly one
+        # environmental cause and nothing else unexplained. If BOTH
+        # ram_root_marker and memory_marker are present (two DIFFERENT
+        # targets independently classified disk_full and memory_exhausted
+        # in the same run -- a per-target classification is mutually
+        # exclusive between the two, but nothing stops different targets
+        # in the same run from landing on different sides), neither
+        # condition below matches and this falls through to the ordinary
+        # `return 1`. Both markers are still printed above with their
+        # correct identities; only the infrastructure-failure PROMOTION is
+        # skipped. Stated honestly (independent review F10, issue #1156):
+        # this is a known, accepted residual, not a claim that the two
+        # causes can never co-occur in one run.
         if (
             not remaining_failed_results
             and not remaining_infrastructure_failures
             and ram_root_marker is not None
+            and memory_marker is None
         ):
             return TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
+        if (
+            not remaining_failed_results
+            and not remaining_infrastructure_failures
+            and memory_marker is not None
+            and ram_root_marker is None
+        ):
+            return TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE
         return 1
 
     total_tests = sum(result.tests_run for result in results)

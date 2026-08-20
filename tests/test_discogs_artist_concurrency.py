@@ -131,6 +131,22 @@ class TestDiscogsArtistGlobalConcurrency(unittest.TestCase):
         self.assertEqual(attempts, ["discogs", "discogs"])
 
     def test_three_top_level_artist_reads_share_one_two_request_budget(self) -> None:
+        # Issue #1156 item 6: a prior round of this fix added
+        # handler_exit_delay=0.02 here on the theory that this test shared
+        # test_slow_handler_teardown_does_not_inflate_the_measured_window's
+        # #1175 counted-window symptom. Independent review (third round)
+        # traced _DiscogsMirror.do_GET and found that theory unsupported:
+        # leave() closes the counted window BEFORE send_response and is
+        # idempotent, so handler_exit_delay's sleep in the `finally` block
+        # only delays handler-thread TEARDOWN (which ThreadingHTTPServer
+        # does not serialize against) -- it cannot move mirror.max_active
+        # either way. An A/B load probe on a 30-core host was inconclusive
+        # (0/25 failures with the delay, 0/25 without), which is consistent
+        # with the delay being a no-op here, not evidence either way of the
+        # underlying flake reported in issue #1156 item 6. Left unchanged
+        # rather than keeping an unsubstantiated fix; the demonstrated,
+        # reproduced half of item 6 is the Node worker startup timeout in
+        # tests/test_node_jsonl_worker.py.
         mirror = self._run_calls(3)
         # Saturation AND the cap in one assertion: with the budget honoured the
         # only value three concurrent readers can produce is the budget itself.

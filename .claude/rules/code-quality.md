@@ -545,9 +545,70 @@ A target whose failures are ENTIRELY disk-full returns
 `TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE` so the phase (and the suite) reports
 `infrastructure-failure`, not an ordinary `failed`, without touching
 `scripts/run_test_suite.py`'s generic phase-state derivation.
-`scripts/fuzz_burst.sh` and `scripts/run_world_model_burst.py` remain
-entirely outside this gate — a known, stated residual, part of #1111's own
-incident set, not a hidden gap.
+`scripts/fuzz_burst.sh` (`scripts/run_fuzz_tests.py`) and
+`scripts/run_world_model_burst.py` each now run their own analogous
+headroom precondition (issue #1156 item 3) — `headroom_floor_bytes`/
+`_check_suite_headroom`, called once before any work and again once per
+admission CYCLE inside their own admission loop (a cycle can admit up to
+`worker_count` targets at once, so this is not a per-target check).
+Honestly stated (independent review F6/F7): in the daily gate specifically
+this preflight is a near-duplicate of a check that already ran seconds
+earlier — `scripts/daily_flake_update.sh` scopes
+`CRATEDIGGER_SUITE_OWNS_HEADROOM=1` to its `deterministic_suite` stage
+only, so the `world_model`/`generated_fuzz`/`mirror_harness` stages still
+hit `scripts/test_tmpfs.sh`'s shell-entry guard on the SAME root with the
+SAME env var and the SAME flat 1 GiB default before either coordinator's
+own `main` ever runs. The coordinator-level preflight's real added value
+is for a SECOND invocation inside an already-entered shell (interactive
+dev use, or any caller that skips the wrapper `.sh` and its shellHook),
+where nothing else re-checks headroom between shell entry and that call.
+Neither burst takes `acquire_suite_admission`'s exclusive lock or
+`reap_stale_check_bundles`'s scratch reaping. Independent review B-4 (third
+round, issue #1156): these are two SEPARATE decisions, and only the lock one
+is where this paragraph previously claimed both were -- each `main`'s own
+docstring records the lock reasoning (both are long-running, variable-
+duration bursts that would starve or force raising the timeout on the
+bounded queue an ordinary `scripts/test.sh` dev-loop run waits on); neither
+docstring mentions `reap_stale_check_bundles` at all. The reaping decision
+is simpler and stated here instead: `reap_stale_check_bundles` only reaps
+`cratedigger-checks.*`/fixture-prefixed scratch under the ADMISSION LOCK
+(`scripts/run_test_suite.py::run_suite`, called for neither burst), so a
+burst that never takes that lock has no reap call to make in the first
+place -- there is no burst-specific tradeoff to document. Both pass
+`worker_count=1` to `headroom_floor_bytes`
+(the flat, override-respecting `DEFAULT_MIN_HEADROOM_BYTES` floor), not a
+worker-scaled one: neither burst has a MEASURED per-worker tmpfs footprint
+the way the deterministic suite's #1131 model does — a worker-scaled
+attempt sized by the fuzz burst's own default worker count (up to 60 on a
+30-core host) demanded EXACTLY 4 GiB (256 MiB base + 64 MiB/worker * 60
+workers = 4096 MiB, independent review B7 item 2 — "over 4 GiB" overstated
+it), more than a normal interactive dev
+tmpfs actually has free (see `headroom_floor_bytes`'s docstring). Tripping
+either guard stops ADMISSION only — already-running targets keep
+consuming the reserve regardless, so this is a correct label and exit code
+on the way out, not prevention, and the abort is one-way with no
+hysteresis. `recommended_fuzz_jobs` separately gained a ceiling
+(`MAX_FUZZ_JOBS` = 64, issue #1214 "Contributing gaps" item 1, NOT #1156
+item 1): it is inert on hosts measured to date (doc1 at 30 cores computes
+60, well under 64) and would not by itself have prevented the 2026-08-20
+incident (60 was already the number that overflowed) — it is fail-closed
+legislation for a future, larger host. Separately,
+`run_python_tests.py`'s worker-death classifier
+(`_classify_target_infrastructure_failure`) now also folds a worker killed
+by the OOM killer — exception shape `BrokenProcessPool`, corroborated by
+measured `/proc/meminfo` `MemAvailable` below the env-overridable
+`CRATEDIGGER_TEST_MEMORY_MIN_BYTES` (mirroring `CRATEDIGGER_TEST_RAM_MIN_BYTES`'s
+own override pattern) — into ONE named `test host memory exhausted` marker
+(`TEST_HOST_MEMORY_EXHAUSTED` / `_collapse_memory_exhausted_failures`), the
+same N-disguises fix `TEST_RAM_ROOT_EXHAUSTED` above already gave
+disk-full. A DIFFERENT resource (system memory, not the tmpfs RAM root)
+gets a DIFFERENT identity and exit code
+(`TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE`), never folded into the disk-full
+bucket. If BOTH a disk-full marker and a memory-exhausted marker occur in
+the same run (different targets), the phase reports an ordinary failed
+rather than promoting to infrastructure-failure — a known, accepted
+residual (independent review F10), not a claim that the two never
+co-occur.
 
 **Generated (property-based) production tests**
 (`tests/test_*_generated.py`, Hypothesis)

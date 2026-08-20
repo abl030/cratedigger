@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -12,6 +14,7 @@ from pathlib import Path
 from scripts.run_fuzz_tests import (
     DEPTH_REPORT_LIMIT,
     EPHEMERAL_POSTGRES_TARGET_LIMIT,
+    MAX_FUZZ_JOBS,
     FuzzModuleManifest,
     FuzzPropertyManifest,
     FuzzTarget,
@@ -24,16 +27,20 @@ from scripts.run_fuzz_tests import (
     discover_fuzz_manifests,
     format_depth_report,
     is_structurally_shallow,
+    main,
     property_profile_max_examples,
     recommended_fuzz_jobs,
     recommended_postgres_jobs,
     recommended_property_shards,
+    run_fuzz_targets,
     select_fuzz_admissions,
 )
 from scripts.run_python_tests import (
     STRATEGY_SPACE_EXHAUSTED,
+    TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
     HypothesisPropertyStats,
 )
+from scripts.run_test_suite import TEST_RAM_ROOT_EXHAUSTED, RamRootExhaustedError
 from tests._source_pins import pinned_source
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -486,6 +493,16 @@ class TestFuzzTargetPlanning(unittest.TestCase):
         self.assertEqual(workers, 60)
         self.assertEqual(recommended_postgres_jobs(30, workers), 24)
 
+    def test_worker_formula_is_capped_regardless_of_host_size(self) -> None:
+        """Issue #1214 "Contributing gaps" item 1 (independent review F5(b):
+        NOT #1156 item 1, a different, unrelated finding): recommended_
+        fuzz_jobs had no ceiling; MAX_FUZZ_JOBS bounds it on an arbitrarily
+        large host without moving today's measured 30-core number (60,
+        well under the 64 ceiling)."""
+        self.assertEqual(recommended_fuzz_jobs(40), MAX_FUZZ_JOBS)
+        self.assertLess(recommended_fuzz_jobs(40), 40 * 2)
+        self.assertEqual(recommended_fuzz_jobs(1000), MAX_FUZZ_JOBS)
+
     def test_discovered_profile_budget_ignores_explicit_properties(self) -> None:
         manifest = FuzzModuleManifest(
             module_name="tests.test_generated_world",
@@ -566,6 +583,295 @@ class TestFuzzTargetPlanning(unittest.TestCase):
 
         self.assertTrue(manifest.uses_ephemeral_postgres)
         self.assertNotIn("TEST_DB_DSN", environment)
+
+
+class TestFuzzTargetsMidRunHeadroom(unittest.TestCase):
+    """``run_fuzz_targets``'s own admission-loop headroom check (issue
+    #1156 item 3) -- distinct from the preflight check ``main`` also runs
+    (covered end-to-end in ``TestFuzzRunnerProcess`` below). Both call
+    sites use the identical real ``_check_suite_headroom`` measurement
+    against the same shared tmpfs, so a static real-disk threshold cannot
+    tell them apart; a controlled ``check_headroom`` fake proves the loop
+    consults it a SECOND time, mid-run, not just once at the top.
+    """
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+        package = self.root / "midrun_fixture"
+        package.mkdir()
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "test_pins.py").write_text(
+            "import unittest\n\n"
+            "class PinWorld(unittest.TestCase):\n"
+            "    def test_a(self):\n"
+            "        self.assertTrue(True)\n\n"
+            "    def test_b(self):\n"
+            "        self.assertTrue(True)\n\n"
+            "    def test_c(self):\n"
+            "        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        self.module = "midrun_fixture.test_pins"
+        self.log_directory = self.root / "logs"
+        self.log_directory.mkdir()
+        self.environment = {
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                (str(self.root), str(REPO_ROOT), os.environ.get("PYTHONPATH", ""))
+            ),
+        }
+
+    def _target(self, letter: str) -> FuzzTarget:
+        return FuzzTarget(
+            label=letter,
+            module_name=self.module,
+            load_names=(self.module,),
+            expected_test_ids=(f"{self.module}.PinWorld.test_{letter}",),
+        )
+
+    def test_trip_aborts_admission_without_starting_the_rest(self) -> None:
+        calls = {"count": 0}
+
+        def flaky_check_headroom() -> None:
+            calls["count"] += 1
+            if calls["count"] >= 2:
+                raise RamRootExhaustedError(
+                    f"{TEST_RAM_ROOT_EXHAUSTED}: synthetic mid-run trip"
+                )
+
+        targets = (self._target("a"), self._target("b"), self._target("c"))
+
+        batch = run_fuzz_targets(
+            targets,
+            worker_count=1,
+            postgres_worker_count=1,
+            environment=self.environment,
+            log_directory=self.log_directory,
+            check_headroom=flaky_check_headroom,
+        )
+
+        self.assertTrue(batch.headroom_exhausted)
+        self.assertEqual(batch.infrastructure_failures, ())
+        self.assertEqual(len(batch.results), 1)
+        self.assertTrue(batch.results[0].successful)
+        self.assertEqual(len(batch.not_started), 2)
+        self.assertGreaterEqual(calls["count"], 2)
+
+    def test_never_tripping_runs_every_target_normally(self) -> None:
+        targets = (self._target("a"), self._target("b"), self._target("c"))
+
+        batch = run_fuzz_targets(
+            targets,
+            worker_count=2,
+            postgres_worker_count=2,
+            environment=self.environment,
+            log_directory=self.log_directory,
+            check_headroom=lambda: None,
+        )
+
+        self.assertFalse(batch.headroom_exhausted)
+        self.assertEqual(batch.infrastructure_failures, ())
+        self.assertEqual(len(batch.results), 3)
+        self.assertTrue(all(result.successful for result in batch.results))
+        self.assertEqual(batch.not_started, ())
+
+    def test_drain_phase_never_calls_check_headroom_once_pending_is_empty(
+        self,
+    ) -> None:
+        """Independent review F1 (BLOCKING): the mid-run check used to sit
+        inside ``if not infrastructure_aborted:`` with no ``pending`` gate,
+        so it kept firing on every drain iteration after the LAST target
+        was already admitted -- when there is nothing left to admit. A
+        free-space dip at that exact moment reported a fully green burst
+        ("2 completed of 2, 0 not started") as an infrastructure failure.
+        worker_count >= len(targets) admits everything in the first
+        iteration; the poison pill below (a RamRootExhaustedError on every
+        call after the first) proves check_headroom is never consulted
+        again during the drain that follows.
+        """
+        calls = {"count": 0}
+
+        def check_headroom() -> None:
+            calls["count"] += 1
+            if calls["count"] > 1:
+                raise RamRootExhaustedError(
+                    f"{TEST_RAM_ROOT_EXHAUSTED}: must never fire once "
+                    "pending is empty"
+                )
+
+        targets = (self._target("a"), self._target("b"), self._target("c"))
+
+        batch = run_fuzz_targets(
+            targets,
+            worker_count=3,
+            postgres_worker_count=3,
+            environment=self.environment,
+            log_directory=self.log_directory,
+            check_headroom=check_headroom,
+        )
+
+        self.assertFalse(batch.headroom_exhausted)
+        self.assertEqual(batch.infrastructure_failures, ())
+        self.assertEqual(len(batch.results), 3)
+        self.assertTrue(all(result.successful for result in batch.results))
+        self.assertEqual(batch.not_started, ())
+
+
+class TestFuzzMainMidRunHeadroom(unittest.TestCase):
+    """``main``'s own POST-run reporting of a mid-run trip (issue #1156
+    item 3) -- distinct from TestFuzzTargetsMidRunHeadroom above, which
+    only proves ``run_fuzz_targets``'s admission loop stops correctly.
+    This drives the real CLI entry point in-process (the ``check_headroom``
+    DI seam mirrors ``run_world_model_burst.py::main``'s own) so the
+    unified failed_results/infrastructure_failures/headroom_exhausted
+    reporting block -- the code that used to silently drop other targets'
+    detail when it early-returned before printing them -- is exercised
+    end-to-end, not just unit-tested in isolation.
+    """
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+        package = self.root / "main_midrun_fixture"
+        package.mkdir()
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "test_alpha.py").write_text(
+            "import unittest\n\n"
+            "class Alpha(unittest.TestCase):\n"
+            "    def test_pin(self):\n"
+            "        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        (package / "test_beta.py").write_text(
+            "import unittest\n\n"
+            "class Beta(unittest.TestCase):\n"
+            "    def test_pin(self):\n"
+            "        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        self.module_a = "main_midrun_fixture.test_alpha"
+        self.module_b = "main_midrun_fixture.test_beta"
+        self.database = self.root / "database"
+        self.database.mkdir()
+        original_pythonpath = os.environ.get("PYTHONPATH")
+        os.environ["PYTHONPATH"] = os.pathsep.join(
+            (str(self.root), original_pythonpath or "")
+        )
+        original_hsd = os.environ.pop("HYPOTHESIS_STORAGE_DIRECTORY", None)
+        os.environ["HYPOTHESIS_STORAGE_DIRECTORY"] = str(self.database)
+        original_output_dir = os.environ.pop("CRATEDIGGER_FUZZ_OUTPUT_DIR", None)
+
+        def _restore() -> None:
+            if original_pythonpath is None:
+                os.environ.pop("PYTHONPATH", None)
+            else:
+                os.environ["PYTHONPATH"] = original_pythonpath
+            if original_hsd is None:
+                os.environ.pop("HYPOTHESIS_STORAGE_DIRECTORY", None)
+            else:
+                os.environ["HYPOTHESIS_STORAGE_DIRECTORY"] = original_hsd
+            if original_output_dir is not None:
+                os.environ["CRATEDIGGER_FUZZ_OUTPUT_DIR"] = original_output_dir
+
+        self.addCleanup(_restore)
+
+    def test_main_reports_a_mid_run_trip_through_the_ordinary_failure_path(
+        self,
+    ) -> None:
+        """Independent review B4 (HIGH): the fake used to raise
+        ``f"{TEST_RAM_ROOT_EXHAUSTED}: synthetic mid-run trip"`` -- an
+        identity string ALREADY embedded in the exception's own message --
+        so a loose ``assertIn`` matched ``run_fuzz_targets``'s OWN separate
+        admission-loop print (`scripts/run_fuzz_tests.py` line ~959,
+        ``print(f"RAM ROOT EXHAUSTED mid-run: {exc}")``) regardless of
+        whether ``main()``'s OWN reporting block (lines ~1473-1499) ever
+        ran at all. The fake below deliberately carries NEITHER
+        ``TEST_RAM_ROOT_EXHAUSTED`` NOR the word "mid-run", so the
+        assertions can only pass via strings ``main()`` itself composes."""
+        calls = {"count": 0}
+
+        def flaky_check_headroom() -> None:
+            calls["count"] += 1
+            if calls["count"] >= 3:
+                raise RamRootExhaustedError("xyzzy-unrelated-probe-marker")
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            status = main(
+                (self.module_a, self.module_b, "--jobs", "1", "--profile", "suite"),
+                check_headroom=flaky_check_headroom,
+            )
+        output = stdout.getvalue()
+
+        self.assertEqual(status, TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE, output)
+        # main()'s own header line (scripts/run_fuzz_tests.py:1474) -- no
+        # other print site in the module emits this exact banner.
+        self.assertIn(f"--- {TEST_RAM_ROOT_EXHAUSTED} (mid-run) ---", output)
+        # main()'s own unique explanatory sentence (line ~1476-1478) --
+        # not duplicated by run_fuzz_targets's admission-loop print.
+        self.assertIn(
+            "already-running targets were drained and no new target "
+            "was started",
+            output,
+        )
+        # main()'s own terminal summary line (line ~1494-1499).
+        self.assertIn("property verdict invalid", output)
+        # Independent review B-2 (third round): the OTHER identity token in
+        # main()'s own terminal summary (line ~1500-1501) was previously
+        # unconstrained -- replacing TEST_RAM_ROOT_EXHAUSTED with a generic
+        # literal there survived every existing assertion above.
+        self.assertIn(
+            f"fuzz burst: {TEST_RAM_ROOT_EXHAUSTED} mid-run after", output
+        )
+        self.assertGreaterEqual(calls["count"], 3)
+
+    def test_unavailable_runtime_dir_aborts_cleanly_not_as_a_raw_traceback(
+        self,
+    ) -> None:
+        """Independent review F3 (MEDIUM): private_runtime_dir() used to be
+        called ONE LINE ABOVE the try/except that exists to catch its own
+        RuntimeError, so it escaped as an unhandled traceback instead of
+        the intended "infrastructure precondition failed" exit 2. Drives
+        the REAL production private_runtime_dir() (check_headroom=None,
+        the default -- no injected fake), pointed at a real, non-tmpfs
+        directory via XDG_RUNTIME_DIR, matching test-fidelity Rule B: the
+        fake in test_preflight_non_ram_root_error_returns_two only proves
+        the except clause's own handling, never the real raise site.
+        """
+        # dir="/var/tmp" deliberately: TMPDIR is itself tmpfs inside this
+        # nix-shell (scripts/test_tmpfs.sh's own shell-entry scratch), so a
+        # bare tempfile.TemporaryDirectory() would land ON tmpfs and never
+        # trip the check this test exists to prove. /var/tmp is real
+        # disk-backed storage (ext4 on doc1 and in this worktree),
+        # guaranteed non-tmpfs -- AND, unlike an earlier version of this
+        # test that used dir=REPO_ROOT, it is NOT inside the git-tracked
+        # checkout (independent review B9): a hard kill mid-test (the
+        # TemporaryDirectory context manager's own cleanup never runs on
+        # SIGKILL) used to risk leaving a stray directory inside the repo
+        # worktree; /var/tmp is real disk but outside anything git tracks.
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as fake_runtime_dir:
+            original = os.environ.get("XDG_RUNTIME_DIR")
+            os.environ["XDG_RUNTIME_DIR"] = fake_runtime_dir
+            try:
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(
+                    stderr
+                ):
+                    status = main((self.module_a, "--jobs", "1", "--profile", "suite"))
+            finally:
+                if original is None:
+                    os.environ.pop("XDG_RUNTIME_DIR", None)
+                else:
+                    os.environ["XDG_RUNTIME_DIR"] = original
+            output = stdout.getvalue() + stderr.getvalue()
+
+        self.assertEqual(status, 2, output)
+        self.assertIn("infrastructure precondition failed", output)
+        self.assertIn("not tmpfs", output)
 
 
 class TestFuzzProfileBudget(unittest.TestCase):
@@ -811,6 +1117,24 @@ class TestBurstDepthReport(unittest.TestCase):
 
 class TestFuzzRunnerProcess(unittest.TestCase):
     def setUp(self) -> None:
+        # Independent review B1 (BLOCKING): main()'s production default
+        # (check_headroom=None) now calls the REAL private_runtime_dir()/
+        # _check_suite_headroom() with a flat 1 GiB floor. Every subprocess
+        # test in this class that does not deliberately test headroom
+        # inherited a live ambient-free-space precondition, coupling them
+        # to whatever the shared tmpfs root happens to have free at test
+        # time -- reproduced live (4/460 targets failed on doc1 with
+        # 1002692608 bytes free, needs 1073741824). Pin the floor to "0"
+        # (always satisfied, real code path, no DI) for the whole class;
+        # the one test that is actually ABOUT headroom
+        # (test_preflight_headroom_exhaustion_aborts_before_any_discovery)
+        # overrides it back to an impossible value in its OWN env dict,
+        # which wins over this class-level default.
+        self._original_ram_min_bytes = os.environ.get(
+            "CRATEDIGGER_TEST_RAM_MIN_BYTES"
+        )
+        os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = "0"
+        self.addCleanup(self._restore_ram_min_bytes)
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
@@ -955,6 +1279,12 @@ class TestFuzzRunnerProcess(unittest.TestCase):
         self.database = self.root / "persistent-database"
         self.database.mkdir()
         (self.database / "seed-marker").write_text("seed", encoding="utf-8")
+
+    def _restore_ram_min_bytes(self) -> None:
+        if self._original_ram_min_bytes is None:
+            os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+        else:
+            os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = self._original_ram_min_bytes
 
     def run_burst(self, *, failing: bool) -> subprocess.CompletedProcess[str]:
         env = {
@@ -1267,6 +1597,55 @@ class TestFuzzRunnerProcess(unittest.TestCase):
             "supported only by the fuzz profile",
             completed.stderr,
         )
+
+    def test_preflight_headroom_exhaustion_aborts_before_any_discovery(
+        self,
+    ) -> None:
+        """Issue #1156 item 3: the fail-fast, before-any-work precondition.
+
+        CRATEDIGGER_TEST_RAM_MIN_BYTES set to a value no real host's free
+        bytes can exceed is the same deterministic trick
+        TestRunTargetsWorkerExceptionWiring already documents for the
+        suite's own classifier -- real headroom_floor_bytes/
+        _check_suite_headroom, genuinely tripped, no fake disk.
+        """
+        env = {
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                (str(self.root), str(REPO_ROOT), os.environ.get("PYTHONPATH", ""))
+            ),
+            "HYPOTHESIS_STORAGE_DIRECTORY": str(self.database),
+            "CRATEDIGGER_FUZZ_OUTPUT_DIR": str(self.output_dir),
+            "CRATEDIGGER_TEST_RAM_MIN_BYTES": str(10**18),
+        }
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(RUNNER),
+                "--jobs",
+                "1",
+                "--profile",
+                "suite",
+                self.module,
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(
+            completed.returncode,
+            TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
+            completed.stdout + completed.stderr,
+        )
+        self.assertIn(
+            TEST_RAM_ROOT_EXHAUSTED, completed.stdout + completed.stderr
+        )
+        self.assertFalse(self.output_dir.exists())
+        self.assertNotIn("targets (", completed.stdout)
 
     def test_wrapper_delegates_to_the_exact_coverage_runner(self) -> None:
         source = pinned_source(WRAPPER)

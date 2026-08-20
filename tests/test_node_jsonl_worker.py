@@ -130,12 +130,27 @@ async function handle() {
         self.assertFalse(worker.is_running)
 
     def test_timeout_terminates_child_and_fails_closed(self) -> None:
+        """Issue #1156 item 6: the original 0.1s timeout_seconds governs
+        BOTH the deliberate hang below AND this worker's own Node startup
+        handshake (NodeJsonlWorker.__init__ reuses the same budget for the
+        "ready" response) -- at 20-24 workers on a 16-thread host, Node
+        interpreter startup alone can exceed 0.1s under real CPU
+        contention, raising NodeJsonlWorkerError OUT OF THE CONSTRUCTOR,
+        before the `with self.assertRaisesRegex(...)` block below is even
+        entered (it only wraps `worker.request`, not construction) --
+        reproducing exactly the "fails reproducibly past the worker knee"
+        symptom the issue names, as a raw ERROR rather than a clean
+        assertion failure. 2.0s (matching this file's own
+        test_stderr_flood_is_drained_without_deadlocking_response) gives
+        real startup headroom under load while the deliberate hang
+        (`await new Promise(() => {})`, which never resolves) still makes
+        the timeout the only possible outcome."""
         source = """
 async function handle() {
   await new Promise(() => {});
 }
 """
-        worker = NodeJsonlWorker(source, cwd=ROOT, timeout_seconds=0.1)
+        worker = NodeJsonlWorker(source, cwd=ROOT, timeout_seconds=2.0)
         self.addCleanup(worker.close)
 
         with self.assertRaisesRegex(NodeJsonlWorkerError, "timed out"):
@@ -144,6 +159,16 @@ async function handle() {
         self.assertFalse(worker.is_running)
 
     def test_blocked_request_write_consumes_the_transaction_deadline(self) -> None:
+        """Independent review B-1 (third round): `command=` overrides the
+        default Node spawn with a bare Python fake, so this test doesn't
+        carry the Node-startup fragility the sibling fixes above address --
+        it did not reproduce live -- but it shares the SAME shape (a tight
+        timeout_seconds plus an upper-bound wall-clock assertion on
+        termination promptness) and the reviewer's own note says use
+        judgement here. Widened proportionally so a slow SIGKILL-and-reap
+        under host CPU pressure has real headroom without weakening what
+        this test proves: that the deadline path returns control promptly,
+        nowhere near the child's deliberate 60s sleep."""
         command = self._fake_command(
             "import signal, time\n"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
@@ -153,7 +178,7 @@ async function handle() {
         worker = NodeJsonlWorker(
             "",
             cwd=ROOT,
-            timeout_seconds=0.1,
+            timeout_seconds=0.5,
             command=command,
         )
         self.addCleanup(worker.close)
@@ -161,7 +186,7 @@ async function handle() {
         started = time.monotonic()
         with self.assertRaisesRegex(NodeJsonlWorkerError, "timed out") as caught:
             worker.request("blocked", {"text": "x" * (512 * 1024)})
-        self.assertLess(time.monotonic() - started, 0.75)
+        self.assertLess(time.monotonic() - started, 3.0)
         self.assertFalse(worker.is_running)
         with self.assertRaises(NodeJsonlWorkerError) as repeated:
             worker.request("blocked", {})
@@ -186,13 +211,24 @@ async function handle() {
         self.assertEqual(str(repeated.exception), str(caught.exception))
 
     def test_partial_line_times_out_instead_of_blocking_readline(self) -> None:
+        """Independent review B-1 (HIGH, third round): this test constructs
+        a real Node worker (no `command=` override) with the SAME
+        timeout_seconds=0.1 that test_timeout_terminates_child_and_fails_
+        closed above was widened for, and for the identical reason --
+        NodeJsonlWorker.__init__ reuses this budget for Node's own startup
+        handshake, not just the deliberate hang under test. Reproduced live
+        on doc1 at load ~19-89 (1/8, then 8/20 module/class runs failing
+        with "request 0 timed out after 0.1s" -- a construction-time
+        ERROR, not a clean assertion failure, since it happens before the
+        assertRaisesRegex block below is even entered). 2.0s matches the
+        sibling fix."""
         source = r"""
 async function handle(_operation, _payload) {
   process.stdout.write('{"id":');
   return await new Promise(() => {});
 }
 """
-        worker = NodeJsonlWorker(source, cwd=ROOT, timeout_seconds=0.1)
+        worker = NodeJsonlWorker(source, cwd=ROOT, timeout_seconds=2.0)
         self.addCleanup(worker.close)
 
         with self.assertRaisesRegex(NodeJsonlWorkerError, "timed out"):

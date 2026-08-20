@@ -399,7 +399,23 @@ coordinator-owned ephemeral PostgreSQL cluster is migrated once, then every
 active target gets a distinct cloned database. Each target also runs in a fresh
 interpreter with private Beets and Hypothesis paths. Ambient `TEST_DB_DSN` is
 replaced with an owned clone DSN and children cannot stop the shared cluster.
-The mirror-harness engine remains separately capped at two jobs.
+The mirror-harness engine remains separately capped at two jobs. A shared
+tmpfs-headroom precondition (`headroom_floor_bytes`/`_check_suite_headroom`,
+the same primitives `scripts/run_test_suite.py::run_suite` and the fuzz burst
+use) runs once before any work and again once per admission CYCLE inside the
+admission loop (a cycle can admit up to `jobs` targets at once, so this is
+not a per-target check); either trip aborts the run under the `test RAM root
+exhausted` identity rather than surfacing as an opaque coordinator crash
+(issue #1156 item 3). Like the fuzz burst, it uses the flat, override-
+respecting default floor (`CRATEDIGGER_TEST_RAM_MIN_BYTES`), not one scaled
+by its own job count: no MEASURED per-worker tmpfs footprint exists for this
+coordinator's own worker pool. Same daily-gate redundancy caveat as the fuzz
+burst below: `scripts/daily_flake_update.sh` only sets
+`CRATEDIGGER_SUITE_OWNS_HEADROOM=1` for its deterministic-suite stage, so
+this coordinator's `world_model`/`mirror_harness` stages still hit
+`scripts/test_tmpfs.sh`'s own shell-entry guard on the same root moments
+earlier — the mid-run half, not the preflight half, is this change's
+genuinely new protection.
 
 Every run prints a random 64-bit root seed before storage starts; `--seed`
 recreates that schedule. Target seeds derive only from the root seed, logical
@@ -563,13 +579,50 @@ the module's other properties or pins. An exact-budget check rejects any
 schedule that omits a test, repeats a pin, changes a property's combined example
 count, exceeds a resource shard limit, or invents an ID.
 
-The queue defaults to twice the host's core count because these targets mix
+The queue defaults to twice the host's core count, capped at `MAX_FUZZ_JOBS`
+(64) regardless of host size (issue #1214 "Contributing gaps" item 1 — NOT
+#1156 item 1, a different, unrelated finding), because these targets mix
 Python with subprocess and filesystem waits. PostgreSQL-backed targets have a
 separate bounded lane (24 targets on doc1's 30-core host); admission fills that
 lane before ordinary capacity so PostgreSQL work cannot accumulate into a
 low-utilization tail. Any `ENOSPC`, PostgreSQL `DiskFull`, or unexpected loss of
 an ephemeral database aborts further admission and reports that the property
-verdict is invalid. Set `CRATEDIGGER_FUZZ_JOBS` to cap all concurrent processes,
+verdict is invalid. A shared tmpfs-headroom precondition
+(`headroom_floor_bytes`/`_check_suite_headroom`, the same primitives
+`scripts/run_test_suite.py::run_suite` uses) runs once before any work and
+again once per admission CYCLE inside the admission loop (a cycle can admit
+up to `worker_count` targets at once, so this is not a per-target check);
+either trip aborts the same way, under the `test RAM root exhausted`
+identity, before the burst can silently ENOSPC deep into a run (issue #1156
+item 3). The MID-RUN half is the genuinely new protection; the PREFLIGHT
+half is a near-duplicate in the daily gate specifically, where
+`scripts/daily_flake_update.sh` only sets `CRATEDIGGER_SUITE_OWNS_HEADROOM=1`
+for its deterministic-suite stage, so `scripts/test_tmpfs.sh`'s own
+shell-entry guard already checked the SAME root with the SAME flat 1 GiB
+default moments earlier — the preflight's real added value is a SECOND
+invocation inside an already-entered shell. Unlike the deterministic suite's
+own worker-scaled floor, the fuzz
+burst uses the flat, override-respecting default
+(`CRATEDIGGER_TEST_RAM_MIN_BYTES`): there is no equivalent measured
+per-worker tmpfs footprint for its own, much larger and differently-shaped
+worker pool. Tripping the guard stops ADMISSION only -- already-running
+targets keep consuming the reserve regardless, so this is a correct label
+and exit code on the way out, not prevention, and the abort is one-way with
+no hysteresis (a single transient dip abandons every not-yet-started
+target). Separately (and NOT part of this headroom precondition): when the
+deterministic suite's own Python-phase worker pool runs a generated-test
+module deterministically (`run_python_tests.py`'s own `ProcessPoolExecutor`
+scheduling, not this randomized nightly burst -- the burst spawns each
+target's own subprocess directly via `subprocess.run` and so can never
+raise `BrokenProcessPool`), a worker killed by the OOM killer is classified
+honestly rather than reported as an ordinary per-target failure:
+`_classify_target_infrastructure_failure` recognizes the `BrokenProcessPool`
+shape, corroborated by measured `/proc/meminfo` `MemAvailable` below the
+env-overridable `CRATEDIGGER_TEST_MEMORY_MIN_BYTES` (mirroring
+`CRATEDIGGER_TEST_RAM_MIN_BYTES`'s own override pattern), and folds every
+such worker death into one `test host memory exhausted` marker instead of
+N separately-indexed disguises (issue #1156 item 2). Set
+`CRATEDIGGER_FUZZ_JOBS` to cap all concurrent processes,
 `CRATEDIGGER_FUZZ_POSTGRES_JOBS` to cap the PostgreSQL lane, or
 `CRATEDIGGER_FUZZ_PROPERTY_SHARDS` to override automatic entropy fan-out. On
 doc1's 30-core VM on 2026-07-23, the complete 71-module,
