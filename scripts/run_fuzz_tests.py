@@ -950,7 +950,7 @@ def run_fuzz_targets(
             tuple[int, FuzzTarget],
         ] = {}
         while futures or (pending and not infrastructure_aborted):
-            if not infrastructure_aborted:
+            if pending and not infrastructure_aborted:
                 try:
                     check_headroom()
                 except RamRootExhaustedError as exc:
@@ -1134,8 +1134,10 @@ def _parse_positive_int(value: str) -> int:
     return parsed
 
 
-#: Hard ceiling stacked on top of the doubling formula below (issue #1156
-#: item 1). Mixed subprocess/I/O fuzz targets tolerate CPU oversubscription
+#: Hard ceiling stacked on top of the doubling formula below (issue #1214,
+#: "Contributing gaps" item 1 -- NOT #1156 item 1, which is a different,
+#: unrelated finding about test_nix_module world-level sharding). Mixed
+#: subprocess/I/O fuzz targets tolerate CPU oversubscription
 #: far better than the deterministic suite's in-process workers, so
 #: ``recommended_worker_count``'s audited three-quarters-of-cores contract
 #: does not apply here — but nothing bounded the DOUBLING itself, so an
@@ -1277,6 +1279,19 @@ def main(
     SAME callable threaded into ``run_fuzz_targets`` for the mid-run
     admission-loop check can be driven deterministically end-to-end,
     including through this function's own post-run reporting.
+
+    Design note (issue #1156, task scoping explicitly left this call): this
+    coordinator does NOT take ``scripts/run_test_suite.py::
+    acquire_suite_admission``'s exclusive lock. It is long-running and
+    variable-duration (minutes interactively, up to the full overnight
+    ``CRATEDIGGER_FUZZ_MAX_EXAMPLES`` budget in the daily gate); folding it
+    into the SAME exclusive queue an ordinary, quick ``scripts/test.sh``
+    dev-loop run waits on (bounded at ``DEFAULT_ADMISSION_TIMEOUT_SECONDS``)
+    would either starve that bounded wait or force raising the timeout for
+    everyone. It gets its own independent headroom precondition instead —
+    real, but narrower in scope than full admission: it does not serialize
+    against a concurrently-running deterministic suite the way the lock
+    would.
     """
     args = _parser().parse_args(argv)
     module_names = tuple(args.modules) or _default_modules()
@@ -1285,17 +1300,27 @@ def main(
         return 2
     worker_count = min(args.jobs, max(1, len(module_names)))
 
-    if check_headroom is None:
-        runtime = private_runtime_dir()
-        # worker_count=1 deliberately, not args.jobs: see
-        # headroom_floor_bytes's docstring (issue #1156 item 3) for why
-        # the fuzz burst does not extend the suite's per-worker multiplier
-        # to itself.
-        headroom_minimum = headroom_floor_bytes(1)
-        check_headroom = lambda: _check_suite_headroom(
-            runtime, minimum_bytes=headroom_minimum
-        )
+    # issue #1156 review F3: private_runtime_dir() must be called INSIDE
+    # the try below, not before it -- it is the one production call site
+    # that can raise the plain RuntimeError this except tuple exists to
+    # catch (e.g. XDG_RUNTIME_DIR unset/non-tmpfs/wrong-owner), and a
+    # RuntimeError raised one line above a try is never caught by it.
+    # An unavailable runtime dir aborts loudly here (exit 2) rather than
+    # silently degrading and running without the guard -- matching
+    # run_test_suite.py::main's own top-level precondition for the exact
+    # same failure shape; silently skipping the guard when its own
+    # prerequisite is broken would defeat the guard's purpose.
     try:
+        if check_headroom is None:
+            runtime = private_runtime_dir()
+            # worker_count=1 deliberately, not args.jobs: see
+            # headroom_floor_bytes's docstring (issue #1156 item 3) for why
+            # the fuzz burst does not extend the suite's per-worker
+            # multiplier to itself.
+            headroom_minimum = headroom_floor_bytes(1)
+            check_headroom = lambda: _check_suite_headroom(
+                runtime, minimum_bytes=headroom_minimum
+            )
         check_headroom()
     except RamRootExhaustedError as exc:
         print(f"fuzz burst: {exc}", file=sys.stderr)

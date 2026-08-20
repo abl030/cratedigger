@@ -18,7 +18,11 @@ from unittest import mock
 
 import msgspec
 
-from scripts.run_python_tests import TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
+from scripts.run_python_tests import (
+    TEST_HOST_MEMORY_EXHAUSTED,
+    TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE,
+    TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
+)
 from scripts.run_targeted_tests import targeted_phases
 from scripts.run_test_suite import (
     _HEADROOM_BASE_BYTES,
@@ -746,6 +750,88 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         self.assertEqual(summary.phases[0].state, "infrastructure-failure")
         self.assertEqual(
             summary.phases[0].failures[0].identity, TEST_RAM_ROOT_EXHAUSTED
+        )
+
+    def test_memory_exhausted_exit_code_is_not_an_ordinary_python_failure_code(
+        self,
+    ) -> None:
+        """Independent review F2 (BLOCKING): mirrors
+        test_ram_root_exhausted_exit_code_is_not_an_ordinary_python_
+        failure_code above for the SIBLING constant -- issue #1111 shipped
+        TWO guard tests for TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE and this PR
+        mirrored neither for TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE.
+        Mutating 5 -> 1 (or -> 4, TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE's own
+        value) used to leave 121 tests across this module and
+        test_parallel_test_runner green, because nothing asserted this
+        constant's VALUE against anything other than itself
+        (assertEqual(result.returncode, TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE)
+        is tautological — the exact anti-pattern code-quality.md records
+        from #1088/#1090). This test instead asserts the constant's value
+        stays OUTSIDE the "python" phase's declared failure_exit_codes in
+        BOTH _default_phases() and targeted_phases(), and stays DISTINCT
+        from its sibling constant.
+        """
+        self.assertNotEqual(
+            TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE, TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
+        )
+        canonical_python = next(
+            phase for phase in _default_phases() if phase.name == "python"
+        )
+        targeted_python = next(
+            phase
+            for phase in targeted_phases(("tests.test_typing_ratchet",))
+            if phase.name == "python"
+        )
+        for desc, phase in (
+            ("canonical _default_phases", canonical_python),
+            ("targeted targeted_phases", targeted_python),
+        ):
+            with self.subTest(desc=desc):
+                self.assertNotIn(
+                    TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE, phase.failure_exit_codes
+                )
+
+    def test_pure_memory_exhaustion_promotes_the_suite_to_infrastructure_failure(
+        self,
+    ) -> None:
+        """Independent review F2 (BLOCKING): mirrors
+        test_pure_ram_root_exhaustion_promotes_the_suite_to_infrastructure_
+        failure above -- a "python" phase that emits the collapsed
+        memory-exhaustion marker and exits
+        TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE must promote the whole suite
+        to infrastructure-failure (exit 2), not an ordinary failed
+        (exit 1)."""
+        marker = msgspec.json.encode(
+            CheckFailureMarker(
+                identity=TEST_HOST_MEMORY_EXHAUSTED,
+                owner="",
+                detail=(
+                    "1 target(s) failed while the host's available system "
+                    "memory was exhausted"
+                ),
+                test_ids=("tests.test_alpha",),
+            )
+        ).decode()
+        phases = (
+            PhaseSpec(
+                "python",
+                _python_command(
+                    f"{FAILURE_MARKER_PREFIX}{marker}",
+                    TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE,
+                ),
+                "python3 scripts/run_python_tests.py",
+                "python",
+            ),
+        )
+
+        result, _terminal = self._run(phases)
+        summary = decode_summary(result.bundle / "summary.json")
+
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(summary.state, "infrastructure-failure")
+        self.assertEqual(summary.phases[0].state, "infrastructure-failure")
+        self.assertEqual(
+            summary.phases[0].failures[0].identity, TEST_HOST_MEMORY_EXHAUSTED
         )
 
 

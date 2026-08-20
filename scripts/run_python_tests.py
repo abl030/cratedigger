@@ -354,7 +354,9 @@ def _measure_tempdir_available_bytes() -> int | None:
 _MIN_VALID_MEMORY_HEADROOM_BYTES = 256 * 1024 * 1024
 
 
-def _measure_available_memory_bytes() -> int | None:
+def _measure_available_memory_bytes(
+    meminfo_path: Path = Path("/proc/meminfo"),
+) -> int | None:
     """Best-effort system memory availability right now, via /proc/meminfo.
 
     ``MemAvailable`` (not ``MemFree``) is the kernel's own estimate of what
@@ -364,9 +366,15 @@ def _measure_available_memory_bytes() -> int | None:
     guard in this module; returns ``None`` when unreadable (missing file,
     unexpected format) so the caller degrades to "cannot classify" rather
     than guessing.
+
+    ``meminfo_path`` defaults to the real file so every production caller
+    is unaffected; it exists so a test can pin the ``MemAvailable`` line
+    and its ``* 1024`` (kB -> bytes) conversion against a KNOWN fixture
+    (issue #1156 review F4) — /proc/meminfo cannot otherwise be forced to
+    a controlled value.
     """
     try:
-        with open("/proc/meminfo", encoding="utf-8") as handle:
+        with meminfo_path.open(encoding="utf-8") as handle:
             for line in handle:
                 if line.startswith("MemAvailable:"):
                     return int(line.split()[1]) * 1024
@@ -1349,12 +1357,21 @@ def _classify_target_infrastructure_failure(
     the broken pool and raised — available memory may have already
     recovered above the floor. That reads as an ordinary worker failure,
     the same miss the disk-full branch already accepts for its own
-    measurement-timing window, just more likely to occur here. It can
-    never fold a genuine code defect into this bucket: a
+    measurement-timing window, just more likely to occur here.
+
+    This one is NOT one-directional the way the disk-full branch's own
+    claim is (independent review F5(e), issue #1156): a genuine code
+    defect whose crash happens to raise a real ``BrokenProcessPool``
+    (e.g. a segfault in a C extension the pool worker was running) WHILE
+    measured memory genuinely reads below the floor at that exact moment
+    WOULD be folded into "memory exhausted" and reported as
+    environmental rather than a real bug. What is still true: a
     ``BrokenProcessPool`` with healthy measured memory stays an ordinary
     infrastructure failure, and any exception OTHER than
     ``BrokenProcessPool`` is never reclassified as memory exhaustion no
-    matter how little memory is measured.
+    matter how little memory is measured — the exception-shape gate
+    narrows the false-positive window to "the pool broke AND memory is
+    genuinely low right now," not "any bug at all."
     """
     available = available_bytes()
     floor = minimum_bytes if minimum_bytes is not None else _default_min_headroom_bytes()
@@ -1764,6 +1781,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"\nFAILED: {failed_targets} of {len(schedule)} targets; "
             f"Ran {known_count} reported tests in {wall_seconds:.1f}s"
         )
+        # Promotion requires a HOMOGENEOUS failure set: exactly one
+        # environmental cause and nothing else unexplained. If BOTH
+        # ram_root_marker and memory_marker are present (two DIFFERENT
+        # targets independently classified disk_full and memory_exhausted
+        # in the same run -- a per-target classification is mutually
+        # exclusive between the two, but nothing stops different targets
+        # in the same run from landing on different sides), neither
+        # condition below matches and this falls through to the ordinary
+        # `return 1`. Both markers are still printed above with their
+        # correct identities; only the infrastructure-failure PROMOTION is
+        # skipped. Stated honestly (independent review F10, issue #1156):
+        # this is a known, accepted residual, not a claim that the two
+        # causes can never co-occur in one run.
         if (
             not remaining_failed_results
             and not remaining_infrastructure_failures

@@ -653,9 +653,12 @@ class TestWorldModelReplayDatabase(unittest.TestCase):
         """
 
         def always_fail() -> None:
-            raise RamRootExhaustedError(
-                f"{TEST_RAM_ROOT_EXHAUSTED}: synthetic preflight trip"
-            )
+            # Independent review F9: the message deliberately does NOT
+            # embed TEST_RAM_ROOT_EXHAUSTED -- the identity in the assembled
+            # coordinator_error must come from main's own handler labeling
+            # (f"{TEST_RAM_ROOT_EXHAUSTED}: {error}"), never leak through
+            # from this fake's own text (agree-by-construction).
+            raise RamRootExhaustedError("synthetic preflight trip")
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -699,6 +702,47 @@ class TestWorldModelReplayDatabase(unittest.TestCase):
 
             self.assertEqual(status, 2)
 
+    def test_unavailable_runtime_dir_aborts_cleanly_not_as_a_raw_traceback(
+        self,
+    ) -> None:
+        """Independent review F3 (MEDIUM): private_runtime_dir() used to be
+        called ONE LINE ABOVE the try/except that exists to catch its own
+        RuntimeError, so it escaped as an unhandled traceback instead of
+        the intended exit 2. Drives the REAL production private_runtime_dir()
+        (check_headroom=None, the default -- no injected fake), pointed at
+        a real, non-tmpfs directory via XDG_RUNTIME_DIR: test-fidelity
+        Rule B, since test_preflight_non_ram_root_error_returns_two's fake
+        only proves the except clause's own handling, never the real raise
+        site. dir=repo_root deliberately: TMPDIR is itself tmpfs inside
+        this nix-shell, so a bare tempfile.TemporaryDirectory() would land
+        ON tmpfs and never trip the check this test exists to prove; the
+        repo checkout itself is real disk-backed storage.
+        """
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=str(repo_root)) as fake_runtime_dir:
+            original = os.environ.get("XDG_RUNTIME_DIR")
+            os.environ["XDG_RUNTIME_DIR"] = fake_runtime_dir
+            try:
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    status = main(
+                        (
+                            "--database", str(root / "canonical"),
+                            "--output-dir", str(root / "output"),
+                            "--examples", "1",
+                            "--steps", "1",
+                            "--jobs", "1",
+                            "--seed", "13",
+                        ),
+                    )
+            finally:
+                if original is None:
+                    os.environ.pop("XDG_RUNTIME_DIR", None)
+                else:
+                    os.environ["XDG_RUNTIME_DIR"] = original
+
+        self.assertEqual(status, 2)
+
     def test_mid_run_headroom_exhaustion_aborts_and_labels_the_receipt(
         self,
     ) -> None:
@@ -711,9 +755,15 @@ class TestWorldModelReplayDatabase(unittest.TestCase):
         def flaky_check_headroom() -> None:
             calls["count"] += 1
             if calls["count"] >= 2:
-                raise RamRootExhaustedError(
-                    f"{TEST_RAM_ROOT_EXHAUSTED}: synthetic mid-run trip"
-                )
+                # Independent review F9: the message deliberately does NOT
+                # embed TEST_RAM_ROOT_EXHAUSTED -- assertIn(TEST_RAM_ROOT_
+                # EXHAUSTED, receipt.coordinator_error) below must be
+                # satisfied by main's own handler labeling
+                # (f"{TEST_RAM_ROOT_EXHAUSTED}: {error}"), not by this
+                # fake's own message text (agree-by-construction: with the
+                # identity embedded here, the assertion passed even when
+                # the handler's own f-string prefix was mutated away).
+                raise RamRootExhaustedError("synthetic mid-run trip")
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

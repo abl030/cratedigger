@@ -1139,11 +1139,22 @@ def _default_min_headroom_bytes() -> int:
 
 
 def _check_suite_headroom(runtime: Path, *, minimum_bytes: int) -> None:
-    """Fail the whole suite once, immediately — never mid-run (issue #1111).
+    """One measured headroom check against the shared tmpfs root, raising
+    ``RamRootExhaustedError`` on insufficient free bytes.
 
     Measures the same root scripts/test_tmpfs.sh's shell-entry guard does:
     ``CRATEDIGGER_TEST_RAM_ROOT`` when an operator has overridden it, else
     the validated ``runtime`` this suite was actually admitted under.
+
+    The deterministic suite (``run_suite`` below) calls this exactly once,
+    immediately, before any phase runs (issue #1111) — for that caller
+    ONLY, a trip fails the whole suite once and never mid-run. Issue #1156
+    item 3: the fuzz burst (``scripts/run_fuzz_tests.py``) and the
+    world-model burst (``scripts/run_world_model_burst.py``) also call
+    this SAME function, but each one calls it TWICE per coordinator run —
+    once as their own preflight, and again inside their own admission
+    loop, genuinely mid-run — so "never mid-run" is a property of
+    ``run_suite``'s own call site, not of this function itself.
     """
     target = Path(os.environ.get("CRATEDIGGER_TEST_RAM_ROOT") or runtime)
     available = shutil.disk_usage(target).free

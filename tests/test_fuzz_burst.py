@@ -494,10 +494,11 @@ class TestFuzzTargetPlanning(unittest.TestCase):
         self.assertEqual(recommended_postgres_jobs(30, workers), 24)
 
     def test_worker_formula_is_capped_regardless_of_host_size(self) -> None:
-        """Issue #1156 item 1: recommended_fuzz_jobs was the only worker
-        formula in the repo with no ceiling; MAX_FUZZ_JOBS bounds it on an
-        arbitrarily large host without moving today's measured 30-core
-        number (60, well under the 64 ceiling)."""
+        """Issue #1214 "Contributing gaps" item 1 (independent review F5(b):
+        NOT #1156 item 1, a different, unrelated finding): recommended_
+        fuzz_jobs had no ceiling; MAX_FUZZ_JOBS bounds it on an arbitrarily
+        large host without moving today's measured 30-core number (60,
+        well under the 64 ceiling)."""
         self.assertEqual(recommended_fuzz_jobs(40), MAX_FUZZ_JOBS)
         self.assertLess(recommended_fuzz_jobs(40), 40 * 2)
         self.assertEqual(recommended_fuzz_jobs(1000), MAX_FUZZ_JOBS)
@@ -676,6 +677,47 @@ class TestFuzzTargetsMidRunHeadroom(unittest.TestCase):
         self.assertTrue(all(result.successful for result in batch.results))
         self.assertEqual(batch.not_started, ())
 
+    def test_drain_phase_never_calls_check_headroom_once_pending_is_empty(
+        self,
+    ) -> None:
+        """Independent review F1 (BLOCKING): the mid-run check used to sit
+        inside ``if not infrastructure_aborted:`` with no ``pending`` gate,
+        so it kept firing on every drain iteration after the LAST target
+        was already admitted -- when there is nothing left to admit. A
+        free-space dip at that exact moment reported a fully green burst
+        ("2 completed of 2, 0 not started") as an infrastructure failure.
+        worker_count >= len(targets) admits everything in the first
+        iteration; the poison pill below (a RamRootExhaustedError on every
+        call after the first) proves check_headroom is never consulted
+        again during the drain that follows.
+        """
+        calls = {"count": 0}
+
+        def check_headroom() -> None:
+            calls["count"] += 1
+            if calls["count"] > 1:
+                raise RamRootExhaustedError(
+                    f"{TEST_RAM_ROOT_EXHAUSTED}: must never fire once "
+                    "pending is empty"
+                )
+
+        targets = (self._target("a"), self._target("b"), self._target("c"))
+
+        batch = run_fuzz_targets(
+            targets,
+            worker_count=3,
+            postgres_worker_count=3,
+            environment=self.environment,
+            log_directory=self.log_directory,
+            check_headroom=check_headroom,
+        )
+
+        self.assertFalse(batch.headroom_exhausted)
+        self.assertEqual(batch.infrastructure_failures, ())
+        self.assertEqual(len(batch.results), 3)
+        self.assertTrue(all(result.successful for result in batch.results))
+        self.assertEqual(batch.not_started, ())
+
 
 class TestFuzzMainMidRunHeadroom(unittest.TestCase):
     """``main``'s own POST-run reporting of a mid-run trip (issue #1156
@@ -760,6 +802,46 @@ class TestFuzzMainMidRunHeadroom(unittest.TestCase):
         self.assertIn(TEST_RAM_ROOT_EXHAUSTED, output)
         self.assertIn("mid-run", output)
         self.assertGreaterEqual(calls["count"], 3)
+
+    def test_unavailable_runtime_dir_aborts_cleanly_not_as_a_raw_traceback(
+        self,
+    ) -> None:
+        """Independent review F3 (MEDIUM): private_runtime_dir() used to be
+        called ONE LINE ABOVE the try/except that exists to catch its own
+        RuntimeError, so it escaped as an unhandled traceback instead of
+        the intended "infrastructure precondition failed" exit 2. Drives
+        the REAL production private_runtime_dir() (check_headroom=None,
+        the default -- no injected fake), pointed at a real, non-tmpfs
+        directory via XDG_RUNTIME_DIR, matching test-fidelity Rule B: the
+        fake in test_preflight_non_ram_root_error_returns_two only proves
+        the except clause's own handling, never the real raise site.
+        """
+        # dir=REPO_ROOT deliberately: TMPDIR is itself tmpfs inside this
+        # nix-shell (scripts/test_tmpfs.sh's own shell-entry scratch), so a
+        # bare tempfile.TemporaryDirectory() would land ON tmpfs and never
+        # trip the check this test exists to prove. The repo checkout
+        # itself is real disk-backed storage (ext4 on doc1 and in this
+        # worktree), guaranteed non-tmpfs.
+        with tempfile.TemporaryDirectory(dir=str(REPO_ROOT)) as fake_runtime_dir:
+            original = os.environ.get("XDG_RUNTIME_DIR")
+            os.environ["XDG_RUNTIME_DIR"] = fake_runtime_dir
+            try:
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(
+                    stderr
+                ):
+                    status = main((self.module_a, "--jobs", "1", "--profile", "suite"))
+            finally:
+                if original is None:
+                    os.environ.pop("XDG_RUNTIME_DIR", None)
+                else:
+                    os.environ["XDG_RUNTIME_DIR"] = original
+            output = stdout.getvalue() + stderr.getvalue()
+
+        self.assertEqual(status, 2, output)
+        self.assertIn("infrastructure precondition failed", output)
+        self.assertIn("not tmpfs", output)
 
 
 class TestFuzzProfileBudget(unittest.TestCase):

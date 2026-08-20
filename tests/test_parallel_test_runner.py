@@ -50,6 +50,7 @@ from scripts.run_python_tests import (
     _collapse_disk_full_failures,
     _collapse_memory_exhausted_failures,
     _iter_test_cases,
+    _measure_available_memory_bytes,
     _measure_tempdir_available_bytes,
     _run_targets,
     assert_exact_schedule,
@@ -309,6 +310,107 @@ class TestWorkerMemoryExhaustionClassification(unittest.TestCase):
 
         self.assertFalse(failure.memory_exhausted)
 
+    def test_default_floor_uses_the_real_256mib_constant_not_env(self) -> None:
+        """Independent review F4 (MEDIUM): every other "low memory" test in
+        this class uses available_memory_bytes=lambda: 1 -- degenerate,
+        since 1 is below ANY plausible floor including a mutant of
+        _MIN_VALID_MEMORY_HEADROOM_BYTES collapsed to 2 (1 < 2 is still
+        True, so that mutant survives every other test here). A reading
+        comfortably under the real 256 MiB constant but far above a
+        near-zero mutant proves the CONSTANT itself, not just the env
+        override path (test_default_memory_floor_reads_the_configured_
+        env_var above), gates real classification."""
+        original = os.environ.pop("CRATEDIGGER_TEST_MEMORY_MIN_BYTES", None)
+        try:
+            failure = _classify_target_infrastructure_failure(
+                _target("tests.test_alpha"),
+                BrokenProcessPool("a worker was terminated abruptly"),
+                available_bytes=lambda: 10 * 1024 * 1024 * 1024,
+                available_memory_bytes=lambda: 200 * 1024 * 1024,
+            )
+        finally:
+            if original is not None:
+                os.environ["CRATEDIGGER_TEST_MEMORY_MIN_BYTES"] = original
+
+        self.assertTrue(failure.memory_exhausted)
+
+    def test_memory_exactly_at_the_floor_is_not_exhausted(self) -> None:
+        """Independent review F8: boundary. The classifier uses a strict
+        `<` comparison against the floor, matching the disk-full
+        classifier's own convention -- `<=` would misclassify a host
+        sitting exactly at the configured floor."""
+        failure = _classify_target_infrastructure_failure(
+            _target("tests.test_alpha"),
+            BrokenProcessPool("a worker was terminated abruptly"),
+            available_bytes=lambda: 10 * 1024 * 1024 * 1024,
+            available_memory_bytes=lambda: 10 * 1024 * 1024,
+            minimum_memory_bytes=10 * 1024 * 1024,
+        )
+
+        self.assertFalse(failure.memory_exhausted)
+
+    def test_zero_available_memory_is_still_exhausted(self) -> None:
+        """Independent review F8: boundary. 0 is a legitimate (falsy)
+        MemAvailable reading -- a genuinely exhausted host -- not the
+        unmeasurable (None) case; the classifier's `is not None` check
+        must not be weakened to a truthiness check that would silently
+        treat 0 the same as "cannot classify"."""
+        failure = _classify_target_infrastructure_failure(
+            _target("tests.test_alpha"),
+            BrokenProcessPool("a worker was terminated abruptly"),
+            available_bytes=lambda: 10 * 1024 * 1024 * 1024,
+            available_memory_bytes=lambda: 0,
+        )
+
+        self.assertTrue(failure.memory_exhausted)
+
+    def test_measure_available_memory_converts_kib_to_bytes(self) -> None:
+        """Independent review F4 (MEDIUM): MemAvailable in /proc/meminfo is
+        reported in KiB. Dropping the `* 1024` conversion would silently
+        read kB as bytes, misclassifying every real BrokenProcessPool as
+        memory-exhausted on a healthy multi-GB host -- worse than the
+        disguise this whole change exists to remove. A fake fixture file
+        proves the conversion since /proc/meminfo cannot be forced to a
+        known value."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            fake_meminfo = Path(tempdir) / "meminfo"
+            fake_meminfo.write_text(
+                "MemTotal:       32865536 kB\n"
+                "MemFree:        10000000 kB\n"
+                "MemAvailable:   20000000 kB\n",
+                encoding="utf-8",
+            )
+            result = _measure_available_memory_bytes(fake_meminfo)
+
+        self.assertEqual(result, 20000000 * 1024)
+
+    def test_measure_available_memory_reads_memavailable_not_memfree(
+        self,
+    ) -> None:
+        """Independent review F4 (MEDIUM): must read MemAvailable, not
+        MemFree -- MemFree undercounts reclaimable page cache and would
+        report a healthy host as critically low."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            fake_meminfo = Path(tempdir) / "meminfo"
+            fake_meminfo.write_text(
+                "MemTotal:       32865536 kB\n"
+                "MemFree:            1000 kB\n"
+                "MemAvailable:   20000000 kB\n",
+                encoding="utf-8",
+            )
+            result = _measure_available_memory_bytes(fake_meminfo)
+
+        self.assertEqual(result, 20000000 * 1024)
+
+    def test_measure_available_memory_reads_the_real_proc_meminfo(self) -> None:
+        """The default parameter value is wired to the REAL file on this
+        Linux host, not just the fixture-driven tests above."""
+        result = _measure_available_memory_bytes()
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertGreater(result, 0)
+
 
 class TestCollapseDiskFullFailures(unittest.TestCase):
     """Issue #1111 item 2: N disk-full-classified failures fold into ONE
@@ -508,6 +610,41 @@ class TestCollapseMemoryExhaustedFailures(unittest.TestCase):
 
         self.assertEqual(remaining, (disk_full_failure,))
         self.assertIsNone(marker)
+
+    def test_disk_full_and_memory_exhausted_are_each_folded_exactly_once(
+        self,
+    ) -> None:
+        """Independent review F9: main()'s wiring MUST feed
+        _collapse_memory_exhausted_failures the DISK-FULL-FILTERED
+        remainder from _collapse_disk_full_failures, never the raw
+        infrastructure_failures list. Feeding the raw list would leave a
+        disk_full failure in BOTH ram_root_marker's folded set AND the
+        "remaining" list this composition proves must be empty --
+        double-reporting the same failure under two different markers
+        while ALSO printing it a third time as an ordinary per-target
+        detail."""
+        disk_full_failure = TargetInfrastructureFailure(
+            target=_target("tests.test_disk"), detail="disk", disk_full=True
+        )
+        memory_failure = TargetInfrastructureFailure(
+            target=_target("tests.test_memory"),
+            detail="BrokenProcessPool: a worker was terminated abruptly",
+            memory_exhausted=True,
+        )
+
+        _remaining_results, remaining_infra, ram_root_marker = (
+            _collapse_disk_full_failures([], [disk_full_failure, memory_failure])
+        )
+        remaining_infra, memory_marker = _collapse_memory_exhausted_failures(
+            remaining_infra
+        )
+
+        self.assertEqual(remaining_infra, ())
+        self.assertIsNotNone(ram_root_marker)
+        self.assertIsNotNone(memory_marker)
+        assert ram_root_marker is not None and memory_marker is not None
+        self.assertEqual(ram_root_marker.test_ids, ("tests.test_disk",))
+        self.assertEqual(memory_marker.test_ids, ("tests.test_memory",))
 
 
 class TestRunTargetsWorkerExceptionWiring(unittest.TestCase):
@@ -1316,29 +1453,36 @@ class TestRunnerProcessContract(unittest.TestCase):
             ("fixture_tests.test_alpha.Alpha.test_real_bug",),
         )
 
-    def _run_worker_death_fixture(self) -> subprocess.CompletedProcess[str]:
-        """Kill the ProcessPoolExecutor's OWN worker process (not the
-        nested per-target subprocess `_run_test_target` spawns) so the
-        parent's `future.result()` genuinely raises `BrokenProcessPool` --
-        the SAME exception shape an OOM kill produces. `os.getppid()`
-        inside the nested `--_run-target` child is the pool worker's PID:
-        killing IT (not the child's own PID) reproduces the real
-        production shape, confirmed live (issue #1156 item 2).
+    def _run_worker_death_fixture(
+        self, *, count: int = 2
+    ) -> subprocess.CompletedProcess[str]:
+        """Kill `count` INDEPENDENT ProcessPoolExecutor worker processes
+        (not the nested per-target subprocess `_run_test_target` spawns)
+        so the parent's `future.result()` genuinely raises
+        `BrokenProcessPool` for EACH ONE -- the SAME exception shape an
+        OOM kill produces. `os.getppid()` inside the nested `--_run-target`
+        child is the pool worker's PID: killing IT (not the child's own
+        PID) reproduces the real production shape, confirmed live (issue
+        #1156 item 2). Independent review F10: count=1 cannot distinguish
+        "folded into one marker" from "there was only ever one failure to
+        report" -- count>1 real, independent deaths is required to prove
+        the fold actually collapses N>1 into ONE.
         """
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             tests_dir = root / "fixture_tests"
             tests_dir.mkdir()
             (tests_dir / "__init__.py").write_text("", encoding="utf-8")
-            (tests_dir / "test_alpha.py").write_text(
-                "import os\n"
-                "import signal\n"
-                "import unittest\n\n"
-                "class Alpha(unittest.TestCase):\n"
-                "    def test_worker_dies(self):\n"
-                "        os.kill(os.getppid(), signal.SIGKILL)\n",
-                encoding="utf-8",
-            )
+            for index in range(count):
+                (tests_dir / f"test_alpha{index}.py").write_text(
+                    "import os\n"
+                    "import signal\n"
+                    "import unittest\n\n"
+                    "class Alpha(unittest.TestCase):\n"
+                    "    def test_worker_dies(self):\n"
+                    "        os.kill(os.getppid(), signal.SIGKILL)\n",
+                    encoding="utf-8",
+                )
             env = {
                 **os.environ,
                 "CRATEDIGGER_TEST_MEMORY_MIN_BYTES": str(10**18),
@@ -1352,7 +1496,7 @@ class TestRunnerProcessContract(unittest.TestCase):
                     "--top-level-directory",
                     str(root),
                     "--jobs",
-                    "1",
+                    str(count),
                 ],
                 cwd=REPO_ROOT,
                 env=env,
@@ -1365,12 +1509,15 @@ class TestRunnerProcessContract(unittest.TestCase):
     def test_worker_death_under_exhausted_memory_floor_collapses_to_one_named_failure(
         self,
     ) -> None:
-        """End-to-end (issue #1156 item 2): a REAL BrokenProcessPool, not a
-        fake, folded into ONE marker instead of an ordinary per-target
-        disguise -- the CRATEDIGGER_TEST_MEMORY_MIN_BYTES override is the
-        same deterministic trick TestRunTargetsWorkerExceptionWiring
-        documents for the disk-full floor, applied to the memory one."""
-        result = self._run_worker_death_fixture()
+        """End-to-end (issue #1156 item 2): TWO REAL, INDEPENDENT
+        BrokenProcessPool deaths, not fakes, folded into ONE marker
+        instead of an ordinary per-target disguise -- the
+        CRATEDIGGER_TEST_MEMORY_MIN_BYTES override is the same
+        deterministic trick TestRunTargetsWorkerExceptionWiring documents
+        for the disk-full floor, applied to the memory one. Independent
+        review F10: N=2 (not 1) so "exactly one marker" actually proves
+        folding, not just that there was one failure to report."""
+        result = self._run_worker_death_fixture(count=2)
 
         self.assertEqual(
             result.returncode,
@@ -1384,7 +1531,19 @@ class TestRunnerProcessContract(unittest.TestCase):
         )
         self.assertIn(TEST_HOST_MEMORY_EXHAUSTED, result.stdout)
         self.assertIn("BrokenProcessPool", result.stdout)
-        self.assertIn("fixture_tests.test_alpha", result.stdout)
+        marker_line = next(
+            line
+            for line in result.stdout.splitlines()
+            if line.startswith(FAILURE_MARKER_PREFIX)
+        )
+        marker = msgspec.json.decode(
+            marker_line.removeprefix(FAILURE_MARKER_PREFIX),
+            type=CheckFailureMarker,
+        )
+        self.assertEqual(
+            set(marker.test_ids),
+            {"fixture_tests.test_alpha0", "fixture_tests.test_alpha1"},
+        )
 
     def test_each_module_gets_a_fresh_python_interpreter(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
