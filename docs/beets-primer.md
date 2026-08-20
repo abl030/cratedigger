@@ -873,6 +873,46 @@ maintenance. Review one exact album, ensure notifier/rescan consequences are
 understood, and keep it outside a Cratedigger deployment or cutover. Concurrent
 plain-`beet` mutation is not locked against the importer.
 
+### One-shot config overlays — how an operator run overrides the deployment
+
+A one-shot does NOT have to wait on a deployed config change to get different
+behaviour. `beet` layers `-c/--config` **above** the deployment-owned immutable
+`BEETSDIR`, and `-P/--disable-plugins` drops a plugin for that run only. Keys
+the overlay omits are inherited from the deployed config, so an overlay states
+only what it changes:
+
+```bash
+# Overlay wins for the keys it names; everything else stays deployment-owned.
+printf 'fetchart:\n  minwidth: 0\n  sources: [cover_art_url]\n' > /tmp/art.yaml
+beet -c /tmp/art.yaml config | sed -n '/^fetchart:/,/^[a-z]/p'   # confirm first
+TMPDIR=~/beet-oneshot beet -c /tmp/art.yaml -P embedart fetchart 'id:14345'
+```
+
+Three facts that each cost a wasted batch if learned the hard way:
+
+- **`beet fetchart` exposes only `-f/--force` and `-q/--quiet`.** There is no
+  source-selection flag. The overlay above is how a one-shot pins its own
+  `fetchart.sources` order, which is what keeps an art run pressing-exact
+  (`cover_art_url` keys on the exact Discogs release id; `itunes` matches on
+  album-title string equality and collides sibling pressings — cratedigger#1200).
+- **The embed floor and the folder-art floor cannot be decoupled by config.**
+  `minwidth` is a `fetchart` option that rejects *candidates* before they become
+  art at all, so a below-floor image yields no folder art and no embedded art.
+  `embedart` has no `minwidth` of its own, and it auto-embeds off the `art_set`
+  event that `beet fetchart` itself fires — so simply lowering `minwidth` embeds
+  the small image into every track. `-P embedart` is how a one-shot writes a
+  small folder `cover.jpg` while leaving the tracks untouched. That result is
+  self-protecting: on any later re-import the deployed `minwidth` rejects the
+  same file as a `filesystem` candidate, `art_set` never fires, and it is still
+  never embedded.
+- **Set a private `TMPDIR`.** beets caches downloads under
+  `$TMPDIR/beets/<plugin>`, and the service already owns `/tmp/beets` as
+  `cratedigger:users` mode 0755. An operator running as another account gets
+  `Permission denied`, reported as the misleading `no art found`.
+
+Queries do not OR by default: `beet fetchart 'id:1' 'id:2'` is an AND and
+matches nothing. Loop one album per invocation.
+
 ### Dangerous Commands — NEVER Use Without Approval
 
 ```bash
