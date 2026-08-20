@@ -34,6 +34,7 @@ from pathlib import Path
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from tests.fakes.beets_contract import BeetsContractWorld
 
 #: >= 20 per the task brief; the real "resident worlds" production number

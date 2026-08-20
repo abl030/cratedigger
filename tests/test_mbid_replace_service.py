@@ -11,6 +11,8 @@ import os
 import sys
 import tempfile
 import unittest
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
@@ -290,16 +292,19 @@ class _ServiceCase(unittest.TestCase):
             preserved_paths=(),
         )
 
-    def _patch_externals(self):
-        """Patch wrong-match cleanup and the two rescan notifiers.
-
-        Beets deletion is injected through the service constructor; missing
-        current authority is the ordinary no-op default for unrelated tests.
-        Register cleanup via
-        ``self.addCleanup``. Returns the patched mocks as a list so tests
-        can assert on them. Scoped per-test — unlike ``patch.stopall``
-        which would stop EVERY active patch in the process."""
-        patches = [
+    @staticmethod
+    def _external_patches():
+        """The three service-boundary patches every _replace() run needs:
+        wrong-match cleanup and the two rescan notifiers. The ONLY source
+        location that spells these three patch() calls -- both
+        _patch_externals (addCleanup-scoped, per test METHOD) and
+        _patch_externals_scoped (context-manager-scoped, per Hypothesis
+        EXAMPLE, issue #1214) start this SAME list rather than each writing
+        their own patch() calls, so tests/_mock_audit_scanner.py's
+        MULTILINE_PATCH_BASELINE ratchet for
+        lib.mbid_replace_service.delete_wrong_match_group sees exactly one
+        occurrence here, not two."""
+        return [
             patch(
                 "lib.mbid_replace_service.delete_wrong_match_group",
                 MagicMock(side_effect=_empty_wrong_match_summary),
@@ -310,11 +315,33 @@ class _ServiceCase(unittest.TestCase):
                 MagicMock(),
             ),
         ]
+
+    def _patch_externals(self):
+        """Patch wrong-match cleanup and the two rescan notifiers.
+
+        Beets deletion is injected through the service constructor; missing
+        current authority is the ordinary no-op default for unrelated tests.
+        Register cleanup via
+        ``self.addCleanup``. Returns the patched mocks as a list so tests
+        can assert on them. Scoped per-test — unlike ``patch.stopall``
+        which would stop EVERY active patch in the process."""
         mocks = []
-        for p in patches:
+        for p in self._external_patches():
             mocks.append(p.start())
             self.addCleanup(p.stop)
         return mocks
+
+    @contextmanager
+    def _patch_externals_scoped(self) -> Iterator[list[MagicMock]]:
+        """Same three patches as _patch_externals, scoped to a with-block
+        instead of self.addCleanup. addCleanup fires once per test METHOD;
+        Hypothesis re-executes an @given method body once per EXAMPLE, so a
+        helper using addCleanup from inside such a body leaves every
+        earlier example's patches stacked until the whole method returns
+        (issue #1214 defect class). Use this from an @given body instead."""
+        with ExitStack() as stack:
+            mocks = [stack.enter_context(p) for p in self._external_patches()]
+            yield mocks
 
     def _assert_slskd_untouched(self, slskd: object) -> None:
         """Assert FakeSlskdAPI recorded zero calls across every surface.
@@ -1373,18 +1400,11 @@ class TestReplaceHappyPath(_ServiceCase):
         fresh identity snapshot."""
         # Scoped locally (not via self._patch_externals()/addCleanup) --
         # Hypothesis re-executes this method body once per example, and
-        # addCleanup only fires once per method (issue #1214 defect class).
-        with (
-            patch(
-                "lib.mbid_replace_service.delete_wrong_match_group",
-                MagicMock(side_effect=_empty_wrong_match_summary),
-            ),
-            patch("lib.mbid_replace_service.trigger_plex_scan", MagicMock()),
-            patch(
-                "lib.mbid_replace_service.trigger_jellyfin_scan",
-                MagicMock(),
-            ),
-        ):
+        # addCleanup only fires once per method (issue #1214 defect class):
+        # _patch_externals_scoped() shares its patch() calls with
+        # _patch_externals() (see _external_patches) but stops them at the
+        # end of this with-block instead.
+        with self._patch_externals_scoped():
             beets = self._installed_beets()
             exact_delete = MagicMock(side_effect=self._completed_delete)
             _db, _, svc = self._replace(
