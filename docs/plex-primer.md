@@ -180,16 +180,17 @@ release id BOTH before Beets launch and again here, and diffs the two
 `lib.dispatch.core._vanished_album_directories`) — this before/after diff is
 the PRIMARY, authoritative source of vanished pre-upgrade paths.
 `postflight.replaced_albums` (the harness's mid-import serialization) is only
-a SECONDARY source unioned in: it can already show the album's NEW path by
-the time it's captured — verified live for the Bowie row above
-(`download_log` 40213, request 8964: `replaced_albums` records
-`album_path = .../David Bowie/1969 - David Bowie [SBL 7912]` for removed
-beets album 19881, which is exactly the path beets album 19882 now occupies)
-and fingerprinted three more times by `jellyfin_date_created_pins`, whose
-`album_item_id IS NULL` floor-pin rows (3 of 262 live) are the signature of
-a path-changing upgrade whose old path could not be found — so it cannot be
-trusted alone. For each distinct vanished
-path from either source, Cratedigger calls
+a SECONDARY source unioned in: it reports only an album the import's dup-guard
+answered "remove" for — it structurally cannot report a directory that left
+the library for any OTHER reason. Verified live: the
+`…1969 - David Bowie [1969]` directory (the incident above) left the Beets
+library with NO `download_log` row anywhere in the corpus naming that path,
+so whatever removed it was not a dup-guard removal this pipeline ever
+recorded — `replaced_albums` had nothing to say about it. A before/after
+Beets directory snapshot observes what Beets actually held, so it catches a
+directory leaving the release regardless of the reason — exactly the
+property `replaced_albums` cannot have. For each distinct vanished path from
+either source, Cratedigger calls
 `lib.library_delete_notifiers.notify_library_delete` — the SAME function
 "Library deletion refresh" above uses: walk up to the nearest existing
 ancestor within the configured root and submit a partial scan there. It is
@@ -211,10 +212,12 @@ vanished item and instead deletes its child rows — this Plex mechanism
 genuinely self-heals: the nearest-existing-ancestor partial scan is exactly
 what Plex needs to notice the vanished child and reconcile it. Every outcome
 (both providers, one line each) is logged
-(`lib/dispatch/core.py::_reconcile_vanished_replaced_album_paths`):
+(`lib/dispatch/core.py::_reconcile_vanished_replaced_album_paths`). This call
+runs inside `dispatch_import_core`, drained by `cratedigger-importer.service`,
+NOT the `cratedigger.service` timer unit:
 
 ```bash
-journalctl -u cratedigger | grep 'MEDIA SERVER RECONCILE:'
+journalctl -u cratedigger-importer | grep 'MEDIA SERVER RECONCILE:'
 ```
 
 ### Useful endpoints
