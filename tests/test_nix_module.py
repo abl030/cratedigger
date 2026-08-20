@@ -282,42 +282,69 @@ def _cached_nix_eval_json(expression: str) -> dict[str, object]:
     return value
 
 
-def _shared_module_worlds_web_auth_matrix() -> dict[str, object]:
-    """The ``webAuthMatrix`` nix eval — this module's single heaviest world.
+def _shared_module_worlds_web_auth_matrix_part1() -> dict[str, object]:
+    """The first of two bounded ``webAuthMatrix`` nix evals (issue #1156 item 1).
 
-    Issue #1131 review round 2: measured per-world costs are wildly uneven
-    (``headlessComposition`` 0.80s, ``beetsReadiness`` 3.46s,
-    ``mergedGateway`` 18.67s, ``beetsCapability`` 38.28s, ``webAuthMatrix``
-    65.44s — the pole). Running the whole module unsharded (this issue's
-    own round 1) serializes every merged world onto ONE target and pushes
-    the module's critical-path contribution from main's own 61.6s (its
-    worst `method_batch` bin-packing) to 118.3s — a regression, not a fix.
+    Splits the 39 independent, equal-cost worlds this module's single
+    heaviest target used to force in one ``nix eval`` subprocess (measured
+    57.2-61.0s solo across three quiet-host runs, mean ~58.5s; the prior
+    #1131 docstring's 65.44s was this same target measured on an earlier
+    host state) into two roughly-balanced halves so the target's own solo
+    floor drops without changing what is evaluated or asserted. This half
+    carries the first 20 worlds in declaration order (``missing`` through
+    ``rootAccessGroup``); :func:`_shared_module_worlds_web_auth_matrix_part2`
+    carries the remaining 19.
 
-    The CPU saved by merging evaluations is modest, NOT the headline
-    reason for this split: the shared preamble (``getFlake`` + ``import
-    nixpkgs`` + ``import ./nix/beets.nix``) measured at well under 1s
-    forced standalone, so eliminating N-1 redundant preambles is bounded
-    above by roughly N-1 seconds, not by the sum of each eval's SOLO wall
-    time (which double-counts nixpkgs-import work every eval pays whether
-    merged or not). The real reason to split by cost rather than merge
-    everything or run one unsharded target: main's own `method_batch`
-    sharding can (and, this module's own shard simulation shows, does)
-    land more than one of these multi-GB nix-eval methods in the same
-    12-way batch, and a worker-count sweep on main shows this module's
-    pole inflating hard with concurrency (88.0s at 8 workers, 122.7s at
-    12, 147.7s at 16, 152.3s at 20). Isolating this one world caps this
-    module at AT MOST TWO concurrent
-    heavy nix-eval subprocesses (this function's, plus
-    ``_shared_module_worlds_rest``'s), down from up to five under main's
-    own scheme — which is what would make raising the suite's worker
-    count affordable, the next lever on this issue. Floor: level with
-    main's own 61.6s (~61-65s measured), not better.
+    Measured solo (quiet host): this half alone 31.9s, the other half alone
+    28.3s (59.0s summed vs the original single target's ~58.5s mean -- the
+    ~1s preamble each half now pays independently is exactly the modest,
+    bounded cost #1131's own docstring already priced in). Measured
+    concurrently (both halves launched together, no other suite load):
+    33.2s wall -- close to the per-half floor, confirming the two
+    subprocesses barely interfere with each other in isolation.
+
+    That isolation number was NOT what decided this split -- three
+    interleaved (baseline, candidate) pairs of full ``run_tests.sh``
+    invocations were, run back to back on an otherwise-shared 30-core host
+    (ambient contention from concurrent sibling work acknowledged and
+    visible in the spread below). The ORIGINAL unsplit target -- frontloaded
+    (``AUDITED_FRONTLOAD_MODULES``) and so starting alongside roughly twenty
+    other concurrent workers, several of them CPU-heavy generated-test
+    targets, not merely its own ``_rest`` sibling -- ran 100.1s / 114.3s /
+    103.3s across the three baseline runs (mean 105.9s, 1.7-2.0x its solo
+    floor). Splitting it into two raised this module's own
+    concurrently-schedulable heavy-nix-eval target count from two
+    (``webAuthMatrix`` + ``_rest``) to three (this half + the other half +
+    ``_rest``) -- exactly the axis #1131's own worker-count sweep (88.0s at
+    8 workers, 122.7s at 12, 147.7s at 16, 152.3s at 20) warned against
+    raising carelessly. Measured anyway: the worst single target this
+    module contributes to a run dropped to 95.0s / 96.4s / 85.7s (mean
+    92.4s, -13% average, and every one of the three pairs improved,
+    individually) with NO runaway blowup -- this half and the other half
+    each stayed in the 46-62s range even competing against two heavy
+    siblings instead of one. The suite-level python-phase wall time moved
+    from a mean of 118.6s to 113.8s (-4%, and noisier than the per-target
+    number: baseline's own three runs alone spanned 107.5-137.0s from
+    ambient contention, before this change touches anything) -- a real,
+    if modest, net win with no evidence of the feared regression, not the
+    dramatic headline number the solo floor alone would suggest.
+
+    Two of the original test method's assertion groups spanned this 20/21
+    world boundary (a 3-tuple checking "must be dedicated" across
+    ``serviceGroupOverlap``, ``nginxGroupOverlap``, ``secretGroupOverlap``,
+    and a 2-tuple checking "forbidden authority group" across
+    ``rootAccessGroup``, ``wheelAccessGroup``). Each was split into its own
+    half's assertions on the same message substrings against the same
+    worlds -- a partitioning change, not a coverage change: every world
+    this module ever evaluated is still evaluated, by exactly one half, and
+    asserted with the identical check it always got.
 
     See ``HOTSPOT_ISOLATED_METHODS`` in ``scripts/run_python_tests.py`` for
-    the scheduler half of this split: the whole point is defeated if this
-    function's sole consumer ever runs in a different worker process than
-    intended, so it is carved into its OWN singleton target rather than
-    left to generic count-balanced batching.
+    the scheduler half of this split: both this function's sole consumer
+    and its sibling's must each keep their own singleton target for the
+    same reason the original single-target carve-out did -- the whole
+    point is defeated if either ever shares a worker process with a
+    neighbour it was not measured against.
     """
     expression = r'''
       let
@@ -328,7 +355,7 @@ def _shared_module_worlds_web_auth_matrix() -> dict[str, object]:
         };
         beetsPackage = import ./nix/beets.nix { pkgs = modulePkgs; };
       in {
-        webAuthMatrix =
+        webAuthMatrixPart1 =
           let
             evaluate = extra:
               let
@@ -519,6 +546,67 @@ def _shared_module_worlds_web_auth_matrix() -> dict[str, object]:
                 };
               };
             };
+          };
+      }
+    '''
+    return _cached_nix_eval_json(expression)
+
+
+def _shared_module_worlds_web_auth_matrix_part2() -> dict[str, object]:
+    """The second of two bounded ``webAuthMatrix`` nix evals (issue #1156
+    item 1). See :func:`_shared_module_worlds_web_auth_matrix_part1` for the
+    full rationale, the measured solo/concurrent/under-load numbers, and why
+    this split is a measured boundary decision, not merely half the file.
+    This half carries the remaining 19 worlds in declaration order
+    (``wheelAccessGroup`` through ``nginxRestartDisabled``). Measured solo
+    (quiet host): 28.3s. Under full-suite load across the same three
+    interleaved pairs, this half itself measured 46.3s / 48.3s / 53.0s.
+    """
+    expression = r'''
+      let
+        f = builtins.getFlake (toString ./.);
+        lib = f.inputs.nixpkgs.lib;
+        modulePkgs = import f.inputs.nixpkgs {
+          system = builtins.currentSystem;
+        };
+        beetsPackage = import ./nix/beets.nix { pkgs = modulePkgs; };
+      in {
+        webAuthMatrixPart2 =
+          let
+            evaluate = extra:
+              let
+                system = lib.nixosSystem {
+                  system = builtins.currentSystem;
+                  modules = [
+                    f.nixosModules.default
+                    ({ ... }: {
+                      services.cratedigger = {
+                        enable = true;
+                        src = ./.;
+                        slskd.apiKeyFile = "/run/secrets/slskd-key";
+                        slskd.downloadDir = "/srv/slskd";
+                        pipelineDb.createLocally = true;
+                        web.enable = true;
+                        beets.runtime = {
+                          package = beetsPackage;
+                          configDir = "/etc/beets";
+                          expectedLibrary = "/srv/beets/beets-library.db";
+                          expectedDirectory = "/srv/music";
+                          expectedStateFile = "/var/lib/beets/state.pickle";
+                          expectedSecretInclude = "/run/secrets/beets.yaml";
+                        };
+                      };
+                    })
+                    extra
+                  ];
+                };
+              in map (assertion: assertion.message)
+                (builtins.filter
+                  (assertion:
+                    !assertion.assertion
+                    && lib.hasPrefix "services.cratedigger.web" assertion.message)
+                  system.config.assertions);
+          in {
             wheelAccessGroup = evaluate {
               services.cratedigger = {
                 user = "cratedigger";
@@ -716,11 +804,18 @@ def _shared_module_worlds_rest() -> dict[str, object]:
 
     Issue #1131 review round 2: ``headlessComposition`` (0.80s),
     ``mergedGateway`` (18.67s), ``beetsCapability`` (38.28s), and
-    ``beetsReadiness`` (3.46s) sum to ~61s solo — close enough to
-    ``webAuthMatrix``'s own 65.44s (see
-    ``_shared_module_worlds_web_auth_matrix``) that bundling them into one
-    target keeps the module's two-target floor level with main's own
-    worst-case bin-packed batch (~61.6s), not better. Merging these four
+    ``beetsReadiness`` (3.46s) sum to ~61s solo — close enough to the
+    original single ``webAuthMatrix`` target's 65.44s (see the historical
+    #1131 measurement recorded in
+    :func:`_shared_module_worlds_web_auth_matrix_part1`) that bundling them
+    into one target kept the module's original two-target floor level with
+    main's own worst-case bin-packed batch (~61.6s), not better. Issue
+    #1156 item 1 later split that single ``webAuthMatrix`` target into
+    ``_part1``/``_part2``, so this function is now one of THREE heavy
+    targets the module contributes rather than two — see
+    :func:`_shared_module_worlds_web_auth_matrix_part1` for the measured
+    effect of that split on this target's own under-load time and on the
+    module's total contribution. Merging these four
     also eliminates 3 of the 4 redundant ``getFlake`` + ``import nixpkgs``
     + ``import ./nix/beets.nix`` preambles they used to pay independently
     — each measured at well under 1s standalone, so the CPU this merge
@@ -734,9 +829,10 @@ def _shared_module_worlds_rest() -> dict[str, object]:
     with no ``web``/``beets.validation`` composition — the cheapest shape
     in this file). Measured this whole target's wall time before and
     after: ~34.9s solo before, ~41.8s solo after (+20%) — still well under
-    ``webAuthMatrix``'s own ~65s, so the two-target floor this function's
-    own docstring argues for is unchanged; no existing world here was
-    weakened to fit it in.
+    the original single ``webAuthMatrix`` target's ~65s, so the
+    (now-superseded, see above) two-target floor this function's own
+    docstring argued for was unchanged at the time; no existing world here
+    was weakened to fit it in.
 
     Every world here only ever reads ``.config.assertions`` or plain
     option/service values, never forces ``.system.build.toplevel``, so
@@ -1243,8 +1339,20 @@ class TestDefaultHeadlessComposition(unittest.TestCase):
 class TestWebAuthenticationModuleContract(unittest.TestCase):
     """The enabled web surface has one fail-closed module-owned perimeter."""
 
-    def test_basic_and_insecure_mode_matrix_is_evaluated(self) -> None:
-        worlds = _shared_module_worlds_web_auth_matrix()["webAuthMatrix"]
+    def test_basic_and_insecure_mode_matrix_is_evaluated_part1(self) -> None:
+        """Worlds 1-20 of the 39-world matrix (issue #1156 item 1).
+
+        See :func:`_shared_module_worlds_web_auth_matrix_part1` for why this
+        is now two methods/targets instead of one, and
+        ``test_basic_and_insecure_mode_matrix_is_evaluated_part2`` for the
+        rest. The ``serviceGroupOverlap``/``nginxGroupOverlap``/
+        ``secretGroupOverlap`` and ``rootAccessGroup``/``wheelAccessGroup``
+        checks straddled the 20/21 world boundary in the original single
+        method; each is now asserted once, in whichever half holds the
+        world it names, on the identical message substring it always
+        checked.
+        """
+        worlds = _shared_module_worlds_web_auth_matrix_part1()["webAuthMatrixPart1"]
         assert isinstance(worlds, dict)
         self.assertTrue(
             any("exactly one" in message for message in worlds["missing"])
@@ -1300,23 +1408,42 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 for message in worlds["disabledExternal"]
             )
         )
-        for world in (
-            "serviceGroupOverlap",
-            "nginxGroupOverlap",
-            "secretGroupOverlap",
-        ):
+        for world in ("serviceGroupOverlap", "nginxGroupOverlap"):
             self.assertTrue(
                 any("must be dedicated" in message for message in worlds[world]),
                 (world, worlds[world]),
             )
-        for world in ("rootAccessGroup", "wheelAccessGroup"):
-            self.assertTrue(
-                any(
-                    "forbidden authority group" in message
-                    for message in worlds[world]
-                ),
-                (world, worlds[world]),
-            )
+        self.assertTrue(
+            any(
+                "forbidden authority group" in message
+                for message in worlds["rootAccessGroup"]
+            ),
+            worlds["rootAccessGroup"],
+        )
+
+    def test_basic_and_insecure_mode_matrix_is_evaluated_part2(self) -> None:
+        """Worlds 21-39 of the 39-world matrix (issue #1156 item 1).
+
+        See ``test_basic_and_insecure_mode_matrix_is_evaluated_part1`` for
+        the split rationale and the two straddling checks this method
+        carries its half of.
+        """
+        worlds = _shared_module_worlds_web_auth_matrix_part2()["webAuthMatrixPart2"]
+        assert isinstance(worlds, dict)
+        self.assertTrue(
+            any(
+                "must be dedicated" in message
+                for message in worlds["secretGroupOverlap"]
+            ),
+            worlds["secretGroupOverlap"],
+        )
+        self.assertTrue(
+            any(
+                "forbidden authority group" in message
+                for message in worlds["wheelAccessGroup"]
+            ),
+            worlds["wheelAccessGroup"],
+        )
         self.assertEqual(worlds["explicitOperatorGroup"], [])
         self.assertTrue(
             any(
