@@ -181,9 +181,14 @@ release id BOTH before Beets launch and again here, and diffs the two
 the PRIMARY, authoritative source of vanished pre-upgrade paths.
 `postflight.replaced_albums` (the harness's mid-import serialization) is only
 a SECONDARY source unioned in: it can already show the album's NEW path by
-the time it's captured (measured live: 182 of 232 historical
-`replaced_albums` records show `album_path == imported_path`, including the
-Bowie row above), so it cannot be trusted alone. For each distinct vanished
+the time it's captured — verified live for the Bowie row above
+(`download_log` 40213, request 8964: `replaced_albums` records
+`album_path = .../David Bowie/1969 - David Bowie [SBL 7912]` for removed
+beets album 19881, which is exactly the path beets album 19882 now occupies)
+and fingerprinted three more times by `jellyfin_date_created_pins`, whose
+`album_item_id IS NULL` floor-pin rows (3 of 262 live) are the signature of
+a path-changing upgrade whose old path could not be found — so it cannot be
+trusted alone. For each distinct vanished
 path from either source, Cratedigger calls
 `lib.library_delete_notifiers.notify_library_delete` — the SAME function
 "Library deletion refresh" above uses: walk up to the nearest existing
@@ -204,7 +209,13 @@ which deliberately only finds the item and reports it — never refreshes,
 since a source-level finding proved a targeted Jellyfin refresh cannot reap a
 vanished item and instead deletes its child rows — this Plex mechanism
 genuinely self-heals: the nearest-existing-ancestor partial scan is exactly
-what Plex needs to notice the vanished child and reconcile it.
+what Plex needs to notice the vanished child and reconcile it. Every outcome
+(both providers, one line each) is logged
+(`lib/dispatch/core.py::_reconcile_vanished_replaced_album_paths`):
+
+```bash
+journalctl -u cratedigger | grep 'MEDIA SERVER RECONCILE:'
+```
 
 ### Useful endpoints
 
