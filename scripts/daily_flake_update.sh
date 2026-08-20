@@ -34,21 +34,18 @@ finalize() {
     # absorbed into whatever exit code the candidate gates already produced,
     # so the one run that most needed its telemetry called out was
     # indistinguishable from an ordinary gate failure. daily_resource_
-    # monitor_finish returns non-zero for BOTH status=invalid (no phase
-    # breakdown at all) and status=degraded (a real but partial loss --
-    # issue #1214 review C5: a single failed sample write used to flip
-    # this exit code before that status even existed, and going quiet
-    # about it now would be a regression on exactly the run where it
-    # matters most), so this stderr call-out and exit-code promotion cover
-    # both without needing to tell them apart here; the receipt's own
-    # `status=` field on stdout already does that. It always fires when
-    # the receipt is non-clean, including on the INT/TERM signal exits.
-    # Only PROMOTING it into the process's own exit code is unchanged from
-    # before: that still happens only when the gates were otherwise green
+    # monitor_finish returns non-zero exactly when status=invalid --
+    # binary, not a quantified "degraded" (that status was cut in the
+    # issue #1214 round-6 strip-back: any failed write now makes the
+    # whole receipt invalid, never a partial pass) -- so this stderr
+    # call-out and exit-code promotion fire whenever the receipt is
+    # non-clean, including on the INT/TERM signal exits. Only PROMOTING
+    # it into the process's own exit code is unchanged from before: that
+    # still happens only when the gates were otherwise green
     # (command_status == 0), so a signal exit's exact code (130/143
     # below), which is contractual, is never overwritten.
     if ((resource_status != 0)); then
-        echo "daily unstable gate: resource receipt degraded or invalid" \
+        echo "daily unstable gate: resource receipt invalid" \
             "(command exit $command_status)" >&2
         if ((command_status == 0)); then
             command_status=$resource_status

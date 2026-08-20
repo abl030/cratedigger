@@ -70,8 +70,7 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
             "CRATEDIGGER_DAILY_RESOURCE_RECEIPT schema=1 status=valid",
             proc.stdout,
         )
-        self.assertIn("dropped_samples=0", proc.stdout)
-        self.assertNotIn("resource receipt degraded or invalid", proc.stderr)
+        self.assertNotIn("resource receipt invalid", proc.stderr)
         for phase in (
             "deterministic_suite",
             "stable_nix",
@@ -141,12 +140,11 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
             "CRATEDIGGER_DAILY_RESOURCE_RECEIPT schema=1 status=valid",
             proc.stdout,
         )
-        self.assertIn("dropped_samples=0", proc.stdout)
-        # A healthy (zero-drop, valid) monitor on an ordinary gate failure
-        # gets no degraded/invalid-receipt diagnostic -- issue #1214 gap 4
-        # is about a NON-CLEAN receipt surfacing, not every failing run
-        # growing new output.
-        self.assertNotIn("resource receipt degraded or invalid", proc.stderr)
+        # A healthy, valid monitor on an ordinary gate failure gets no
+        # invalid-receipt diagnostic -- issue #1214 gap 4 is about a
+        # NON-CLEAN receipt surfacing, not every failing run growing new
+        # output.
+        self.assertNotIn("resource receipt invalid", proc.stderr)
 
     def test_unchanged_lock_still_runs_gates_without_commit(self) -> None:
         self.fake.update_state(lock_changed=False)
@@ -303,30 +301,37 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
 
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("status=invalid reason=scratch_not_tmpfs", proc.stdout)
-        self.assertIn("resource receipt degraded or invalid", proc.stderr)
+        self.assertIn("resource receipt invalid", proc.stderr)
 
-    def test_degraded_receipt_surfaces_and_flips_an_otherwise_green_exit(
+    def test_invalid_receipt_from_a_write_failure_surfaces_and_flips_an_otherwise_green_exit(
         self,
     ) -> None:
-        """Regression pin for issue #1214 review C5: before status=degraded
-        existed, a single failed sample write produced status=invalid and
-        flipped the gate's exit code even on an otherwise-green run; after
-        the original fix shipped, the same event exited 0 with nothing on
-        stderr, because daily_resource_summarize_samples returned 0 for a
-        degraded receipt just like a clean one. The gate's own rationale
-        for gap 4 ("that is exactly when the telemetry matters most")
-        applies to a real partial loss at least as strongly. This test
-        forces a REAL boundary sample to fail (chmod 400, real EACCES)
-        during an otherwise-green candidate run, and asserts the exit code
-        and stderr call-out both fire exactly as they do for a fully
-        invalid receipt.
+        """Regression pin for the gap-4 invariant applied to a REAL,
+        mid-run write failure rather than a startup refusal: a failed
+        sample write during an otherwise-green candidate run must still
+        flip the gate's own exit code and print a stderr call-out, not
+        just an invalid receipt nobody's exit code reflects. issue #1214's
+        round-6 strip-back removed the quantified `status=degraded`
+        status this test used to pin (a single failed write no longer
+        gets a separate "partial" outcome -- it is invalid, the same as
+        any other lost write, per the round-6 design). This test forces a
+        REAL boundary sample write to fail (chmod 400, real EACCES)
+        during an otherwise-green run and asserts status=invalid, without
+        pinning the exact reason token: depending on timing, the
+        real (unstubbed) periodic loop may ALSO hit the same chmod'd
+        file and die first (`monitor_process_died`), or the in-flight
+        set_phase boundary write may lose the race
+        (`sample_write_failed`) -- both are legitimate, and this
+        integration-level test cannot control that race the way the
+        unit-level pins in tests/test_daily_resource_monitor.py do.
 
-        Mutant proof (both directions; empirically run during review, not
-        committed): reverting daily_resource_summarize_samples's trailing
-        `if ((degraded)); then return 1; fi` (so it always returns 0)
-        makes this test fail -- the receipt still prints
-        status=degraded on stdout, but the process exits 0 and stderr has
-        no diagnostic at all, exactly the regression C5 named."""
+        Mutant proof (empirically run during review, not committed):
+        reverting daily_resource_monitor_finish so a failure reason never
+        forces an invalid summarize call (i.e. always passing an empty
+        reason to daily_resource_summarize_samples) makes this test fail
+        -- the receipt still shows the surviving phase breakdown, but
+        prints status=valid and the process exits 0 with no stderr
+        diagnostic at all."""
         # issue #1214 review C2: globbing shared /tmp for the monitor's
         # state directory is unsound -- another test's timed-out/SIGKILLed
         # monitor run leaks its mktemp'd directory there permanently (it is
@@ -344,7 +349,7 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         # root to exactly this directory -- never the shared fallback -- and
         # glob only inside it.
         with tempfile.TemporaryDirectory(
-            dir="/tmp", prefix="cratedigger-c5-isolated-tmpdir-"
+            dir="/tmp", prefix="cratedigger-isolated-tmpdir-"
         ) as isolated_tmpdir:
             env = self.fake_environment()
             env["TMPDIR"] = isolated_tmpdir
@@ -386,8 +391,8 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertEqual(state["commit_count"], 1)
         self.assertEqual(state["push_count"], 1)
         self.assertNotEqual(process.returncode, 0)
-        self.assertIn("status=degraded reason=partial_sample_loss", stdout)
-        self.assertIn("resource receipt degraded or invalid", stderr)
+        self.assertIn("status=invalid", stdout)
+        self.assertIn("resource receipt invalid", stderr)
 
     def test_process_group_term_emits_one_terminal_receipt_without_deadlock(
         self,
@@ -417,9 +422,10 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
             stdout.count("CRATEDIGGER_DAILY_RESOURCE_RECEIPT "), 1,
             stdout,
         )
-        # A signal can race a boundary sample write; issue #1214 gap 2 means
-        # that can now legitimately degrade rather than invalidate.
-        self.assertRegex(stdout, r"status=(?:valid|degraded|invalid) ")
+        # A signal can race a boundary sample write, which can legitimately
+        # make the receipt invalid rather than valid (issue #1214 gap 2 /
+        # round-6 strip-back: no separate "degraded" status any more).
+        self.assertRegex(stdout, r"status=(?:valid|invalid) ")
 
     def test_red_tip_canary_cannot_block_green_nixpkgs_candidate(self) -> None:
         # The fault must name the canary's CURRENT stage, or this test

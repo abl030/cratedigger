@@ -695,91 +695,62 @@ an unreachable scratch or state root, and a violated cross-sample invariant
 (a scratch/inode limit of zero or one that changes mid-run, usage above the
 limit, a cgroup peak below its own current value, an impossible memory
 breakdown, or a regressing memory/swap peak) still produce one terminal
-`status=invalid` receipt with no phase breakdown at all, rather than zeros; so
-does a structural failure of the monitor's own coordination state (the phase
-pointer/history write itself, never a mere sample). The runner's EXIT path
-emits the terminal receipt after its owned checkout cleanup even when a test
-stage fails or the later live-world post-step makes the systemd unit red. A
-receipt that is not clean (`status=invalid` OR `status=degraded`, see below)
-also prints an explicit `resource receipt degraded or invalid` line to stderr
-regardless of whether the candidate gates themselves passed or failed (issue
-#1214 gap 4, extended to `degraded` by review C5) — an invalid receipt used to
-be silently absorbed into an already-nonzero exit code on a failing run, and a
-degraded one used to exit 0 with no stderr at all, in both cases exactly the
-run where the telemetry matters most.
+`status=invalid` receipt with no phase breakdown at all, rather than zeros. A
+receipt that is not clean (`status=invalid`) also prints an explicit
+`resource receipt invalid` line to stderr regardless of whether the
+candidate gates themselves passed or failed (issue #1214 gap 4) — an
+invalid receipt used to be silently absorbed into an already-nonzero exit
+code on a failing run, exactly the run where the telemetry matters most.
 
-The monitor's own bookkeeping (samples, the phase pointer and its durable
-history, its lock, the loop's report channel) lives under a state root tried
-in order — the caller's own `TMPDIR`, then `/tmp` — verified by filesystem
-identity to be distinct from the private scratch tmpfs it measures
-(`$XDG_RUNTIME_DIR`), never inside it: a full scratch tmpfs on 2026-08-20 took
-the monitor's own state down with it and erased the one night's telemetry
-that would have diagnosed the overflow (issue #1214). A CLEANLY-REJECTED
-write (nothing lands at all) is REPORTED by the writer that experienced it,
-never inferred from a gap in the surviving samples (review C1: a gap in a
-writer's own sequence numbers is only observable when a LATER row from
-that writer survives, so a permanent, never-recovered failure —
-EACCES/EROFS, a persistent lock or cgroup-read failure, anything from
-partway through the run to the very end — left no hole to see and a false
-`status=valid`). The caller's own bootstrap/boundary/final samples run in
-the same process that prints the receipt, so their failures are counted
-in-process directly; the periodic background loop -- already a child
-`daily_resource_monitor_finish` `wait`s on -- counts its own failed
-attempts in-process and reports the final total to the parent through a
-kernel pipe (a fifo opened once at start, while the state store is
-known-healthy), never through a file write that could fail with the exact
-store it would be reporting on. `daily_resource_monitor_set_phase`'s own
-bookkeeping failures (an invalid phase name, a stuck lock, a failed
-phase-pointer/history write, a failed unlock) travel the same way but even
-more directly, as a plain in-process variable rather than a marker file:
-`set_phase` and `finish` always run in the ONE parent process, so nothing
-here is ever forked, and a bash variable assignment cannot itself fail the
-way a filesystem write can (review C-F1 found the file-based marker this
-mechanism used through round 4 reachably unwritable — four sites could
-each independently fail in a world where creating new files in the state
-dir is denied but already-open files can still be appended to, previously
-producing a false `status=valid` over a run that lost an entire phase
-transition).
+**The invariant is binary, not quantified: a receipt must never say
+`status=valid` if anything failed to record.** The monitor's own
+bookkeeping (samples, the phase pointer, its lock) lives under a state
+root tried in order — the caller's own `TMPDIR`, then `/tmp` — verified by
+filesystem identity to be distinct from the private scratch tmpfs it
+measures (`$XDG_RUNTIME_DIR`), never inside it: a full scratch tmpfs on
+2026-08-20 took the monitor's own state down with it and erased the one
+night's telemetry that would have diagnosed the overflow (issue #1214).
+That is the whole fix. Issue #1214's rounds 2-4 (reviews F1-F9, C1-C9,
+C-F1-C-F5) layered an increasingly elaborate loss-accounting system on top
+of it — writer identity, per-sample sequence numbers, a fifo report
+channel from the periodic loop, parent/loop drop counters, a
+`dropped_samples`/`missing_phases`/`corrupted_history_lines` receipt
+triple, a `degraded` status, a phase-history file — and each round's fix
+for that layer re-introduced the same class of bug one call site over
+(review C-F1 found the fourth such site: four bare marker-file writes
+inside `daily_resource_monitor_set_phase` with no fallback of their own).
+That was a design smell, not a testing gap, and the whole layer was
+removed in a round-6 strip-back: once the state root is verified off the
+measured filesystem, a write failure there is a rare, genuinely
+exceptional event, not routine disk pressure, so it is handled the plain
+way this monitor used before issue #1214's accounting rounds — a writer
+that fails just says so, and the run is `invalid`. No counting.
 
-A write that lands but PARTIALLY is a different case again: a real full
-filesystem does not reject a write atomically — a partial page can land
-and the next append then concatenates onto its unterminated tail (review
-F2, measured) — but the writer's own attempt still returns nonzero for
-that call, so it IS observed and IS reported once through the ordinary
-per-writer drop counting above (review C-F2 corrected an earlier claim
-that "nothing observed it fail"). The partial bytes already written are
-never rolled back, though, so the next append that lands concatenates
-onto that unterminated tail, producing a further malformed row that
-summarization DETECTS from the surviving data itself rather than any
-writer reporting it (review C4) — the one place the `dropped_samples`
-TOTAL counts something inferred rather than reported. One lost sample
-this way therefore counts TWICE (the reported attempt, the detected
-corruption): inflation, never a hole. A row with the wrong shape or a
-non-numeric field is skipped and counted as corruption rather than
-discarding every other row's evidence for one corrupt line. Sequence
-numbers and a writer identity ride on every row as a further
-corruption/reordering signal but are never themselves the source of a
-reported drop. `missing_phases` and `corrupted_history_lines` below are
-their own, independently `degraded`-triggering after-the-fact inferences
-(review C-F3): the corrupted-row term of `dropped_samples` is the one
-place THAT field infers rather than reports, not a claim that the whole
-mechanism never infers anything. A phase whose
-every sample was lost this way still cannot vanish silently (review F4):
-every phase transition is independently durable via the phase-history file
-(a second write, not a free extension of the phase-pointer write — review
-C9b), and a phase present there with zero surviving samples is reported by
-name in a `CRATEDIGGER_DAILY_RESOURCE_PHASE_MISSING` line, counted in the
-terminal receipt's `missing_phases` field. A malformed phase-history LINE is
-its own kind of loss (phase-tracking integrity, not a sample) and gets its
-own `corrupted_history_lines` field rather than being folded into
-`dropped_samples`, which counts exactly one thing — sample attempts that
-produced no usable data point (review C4). Any of the three — a
-writer-reported drop, a skipped corrupt sample row, or a corrupt/missing
-phase — marks the terminal receipt `status=degraded reason=partial_sample_loss
-dropped_samples=<N> missing_phases=<N> corrupted_history_lines=<N>` while
-keeping every other field (the full per-phase breakdown for every phase that
-has one) exactly as a clean run has; `status=valid` requires all three to be
-zero.
+`daily_resource_monitor_set_phase`'s own structural failures (an invalid
+phase name, a stuck lock, a failed phase-pointer write, a failed unlock)
+are reported through a plain in-process bash variable
+(`_CRATEDIGGER_RESOURCE_FAILURE_REASON`), never a marker file: `set_phase`
+and `daily_resource_monitor_finish` always run in the ONE parent process
+(nothing here is forked except the periodic loop itself), so a bash
+variable assignment — which cannot itself fail the way a filesystem write
+can — is sufficient. The periodic loop is a genuinely separate, forked
+process with no report channel of any kind: on its first failed sample
+write it simply stops (matching this file's own pre-accounting shape),
+and `daily_resource_monitor_finish`'s ordinary `wait` on its PID observes
+that exit status directly — no inter-process signaling required. Either
+path forces the terminal receipt to `status=invalid`, but — this is the
+part rounds 2-4 existed to protect and the strip-back keeps — the
+per-phase breakdown for whatever DID survive is still printed above it,
+because losing that breakdown for the one run that needed it is the
+entire reason this file exists.
+
+A row that lands but is malformed (a real full filesystem does not reject
+a write atomically — review F2, measured; a partial page can land and the
+next append then concatenates onto its unterminated tail) is skipped and
+the summary keeps going, rather than discarding every other row's
+evidence for one corrupt line — this is what makes the receipt useful
+under real ENOSPC pressure on the state store itself, the difference
+between "we have the phase breakdown" and "we have nothing."
 
 It is pure and safe: no prod DB, no slskd, no beets, no network. Green runs
 write disposable state only to the measured scratch tmpfs; the monitor's

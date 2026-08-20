@@ -1,71 +1,62 @@
 #!/usr/bin/env bash
 # Phase-correlated cgroup and private-scratch receipts for the daily gate.
 #
-# The monitor's OWN bookkeeping (samples, the phase pointer/history, its
-# lock, the loop's report channel) must never live on the filesystem it is
-# measuring (issue #1214): on 2026-08-20 the measured scratch tmpfs filled,
-# the monitor's own state directory was mktemp'd inside that same tmpfs,
-# its writes hit ENOSPC alongside the workload's, and the run's entire
-# per-phase breakdown was lost for exactly the one night it was needed.
-# State now lives under a separately-verified root (see
-# daily_resource_monitor_start), proven distinct from the measured scratch
-# by filesystem identity, with a fallback candidate list rather than a
-# single hardcoded path.
+# The monitor's OWN bookkeeping (samples, the phase pointer, its lock) must
+# never live on the filesystem it is measuring (issue #1214): on 2026-08-20
+# the measured scratch tmpfs filled, the monitor's own state directory was
+# mktemp'd inside that same tmpfs, its writes hit ENOSPC alongside the
+# workload's, and the run's entire per-phase breakdown was lost for exactly
+# the one night it was needed. State now lives under a separately-verified
+# root (see daily_resource_monitor_start), proven distinct from the
+# measured scratch by filesystem identity, with a fallback candidate list
+# rather than a single hardcoded path.
 #
-# A CLEANLY-REJECTED write (nothing lands at all) is REPORTED by the writer
-# that experienced it, never inferred from a gap in the surviving samples
-# (issue #1214 review C1: gap-inference from sequence numbers cannot see
-# loss that persists to the end of a writer's own stream -- there is no
-# later surviving row to reveal the hole, so a permanent EACCES/EROFS/lock
-# failure that never recovers produced a false status=valid). The caller's
-# own bootstrap/boundary/final samples run in the SAME process that prints
-# the receipt, so their failures are counted in-process directly. The
-# periodic loop is a background child that daily_resource_monitor_finish
-# already `wait`s on; it counts its own failed attempts in-process and
-# reports the final total to the parent through a kernel pipe (a fifo
-# opened once at start, while the state store is known-healthy) -- never
-# through a file write that could fail with the exact store it would be
-# reporting on.
+# This is the whole fix. Rounds 2-4 (issue #1214 reviews F1-F9, C1-C9,
+# C-F1-C-F5) layered an increasingly elaborate loss-accounting system on
+# top of it -- writer identity, per-sample sequence numbers, a fifo report
+# channel from the periodic loop, parent/loop drop counters, a
+# `dropped_samples`/`missing_phases`/`corrupted_history_lines` receipt
+# triple, a `degraded` status, a phase-history file -- and each round's fix
+# for that layer re-introduced the same class of bug one call site over
+# (review C-F1 found the fourth such site). That was a design smell, not a
+# testing gap: the entire accounting layer existed to work around a
+# failing state store. Once the state root is verified off the measured
+# filesystem (above), a write failure there is a rare, genuinely
+# exceptional event, not routine disk pressure -- so it is handled the
+# plain way, matching what this monitor did before issue #1214's
+# accounting rounds: a writer that fails just says so, in-process, and the
+# run is `invalid`. No counting.
 #
-# daily_resource_monitor_set_phase's own bookkeeping failures (an invalid
-# phase name, a stuck lock, a failed phase-pointer/history write, a failed
-# unlock) are reported the SAME way finish's own loop-report-unavailable
-# case is, and for the same reason, but even more directly: set_phase and
-# daily_resource_monitor_finish always run in the ONE parent process
-# (nothing here is forked), so the reason travels as a plain in-process
-# variable (_CRATEDIGGER_RESOURCE_FAILURE_REASON), never a marker FILE.
-# issue #1214 review C-F1 found the previous file-based marker itself
-# reachably unwritable: four bare
-# `printf ... > $_CRATEDIGGER_RESOURCE_FAILURE` sites could each
-# independently fail in a world where creating new files in the state dir
-# is denied but already-open files (samples.tsv) can still be appended to
-# -- reproduced live, and it produced a false status=valid over a run that
-# lost an entire phase transition, because neither dropped_samples nor
-# missing_phases moved in that world. A bash variable assignment cannot
-# fail the way a filesystem write can, so this class of compound failure
-# is no longer constructible, not merely patched at the four sites it was
-# found at.
+# **The invariant: a receipt must never say `status=valid` if anything
+# failed to record.** Any failed sample write (boundary, final, or the
+# periodic loop's), any failed phase-pointer write, or the loop dying
+# outright all make the terminal status `invalid` -- binary, not
+# quantified -- while the per-phase breakdown for whatever DID survive is
+# still printed above it, because losing that breakdown for the one run
+# that needed it is the entire reason this file exists (issue #1214,
+# 2026-08-20). Structural failures inside `daily_resource_monitor_set_phase`
+# (an invalid phase name, a stuck lock, a failed phase-pointer write, a
+# failed unlock) travel as a plain in-process bash variable
+# (`_CRATEDIGGER_RESOURCE_FAILURE_REASON`) rather than a marker file:
+# `set_phase` and `daily_resource_monitor_finish` always run in the ONE
+# parent process (nothing here is forked except the periodic loop itself),
+# so a bash variable assignment -- which cannot itself fail the way a
+# filesystem write can -- is sufficient and simpler than any file-based
+# signal. The periodic loop is a genuinely separate, forked process; it
+# has no report channel of any kind (issue #1214 review round 5's fifo was
+# cut in the round-6 strip-back) -- on its first failed sample write it
+# simply stops (matching this file's own pre-accounting shape), and
+# `daily_resource_monitor_finish`'s ordinary `wait` on its PID observes
+# that exit status directly, no inter-process signaling required.
 #
-# A write that lands but PARTIALLY (a real full filesystem does not reject
-# a write atomically -- review F2, measured) is a different case again:
-# the writer's own attempt still returns nonzero for that call (issue
-# #1214 review C-F2: the failure IS observed, and IS reported through the
-# ordinary per-writer dropped-sample counting above -- "nothing observed
-# it fail" overstated the mechanism), so it counts once as a REPORTED
-# drop. But the partial bytes already written are never rolled back, and
-# the next append -- whichever attempt eventually lands -- concatenates
-# onto that unterminated tail, producing a further malformed row that
-# summarization DETECTS from the surviving data itself (review C4), the
-# one place the dropped_samples TOTAL counts something inferred rather
-# than reported. One lost sample this way therefore counts TWICE (the
-# reported attempt, the detected corruption) -- inflation, never a hole.
-# Sequence numbers and writer identity remain on every row as a further
-# corruption/reordering signal. `missing_phases` and
-# `corrupted_history_lines` are their own, independently
-# `degraded`-triggering after-the-fact inferences (review C-F3): the
-# corrupted-row term of dropped_samples is the one place THAT FIELD infers
-# rather than reports, not a claim that the whole mechanism never infers
-# anything.
+# A row that lands but is malformed (a real full filesystem does not
+# reject a write atomically -- issue #1214 review F2, measured; a partial
+# page can land and the next append then concatenates onto its
+# unterminated tail) is skipped and the summary keeps going, rather than
+# discarding every other row's evidence for one corrupt line -- this is
+# what makes the receipt useful under real ENOSPC pressure on the state
+# store itself, the difference between "we have the phase breakdown" and
+# "we have nothing."
 
 _daily_resource_invalid() {
     local reason="$1"
@@ -78,19 +69,15 @@ _daily_resource_invalid() {
 
 daily_resource_summarize_samples() {
     local samples_file="$1"
-    local phase_history_file="$2"
-    local parent_dropped="${3:-0}"
-    local loop_dropped="${4:-0}"
+    local external_reason="${2:-}"
     local timestamp_ns phase memory_current memory_peak swap_current swap_peak
     local anon file_bytes shmem kernel scratch_bytes scratch_byte_limit
     local scratch_inodes scratch_inode_limit extra value field
-    local writer seq
     local sample_count=0 global_memory_peak=-1 global_swap_peak=-1
     local global_scratch_byte_peak=0 global_scratch_inode_peak=0
     local global_scratch_byte_limit=-1 global_scratch_inode_limit=-1
     local memory_peak_owner=""
     local previous_memory_peak=-1 previous_swap_peak=-1
-    local corrupted_rows=0 corrupted_history_lines=0
     local -a phase_order=()
     local -A phase_seen=()
     local -A phase_samples=()
@@ -109,36 +96,15 @@ daily_resource_summarize_samples() {
     local -A phase_memory_peak_timestamp=()
     local -A phase_scratch_byte_peak=()
     local -A phase_scratch_inode_peak=()
-    local -a history_phase_order=()
-    local -A history_phase_seen=()
-    local history_line malformed_row
+    local malformed_row
 
-    if [[ ! "$parent_dropped" =~ ^[0-9]+$ || ! "$loop_dropped" =~ ^[0-9]+$ ]]; then
-        _daily_resource_invalid summarize_arguments_invalid
-        return
-    fi
     if [[ ! -r "$samples_file" ]]; then
         _daily_resource_invalid samples_unreadable
         return
     fi
-    if [[ ! -r "$phase_history_file" ]]; then
-        _daily_resource_invalid phase_history_unreadable
-        return
-    fi
-
-    while IFS= read -r history_line; do
-        if [[ ! "$history_line" =~ ^[a-z][a-z0-9_]*$ ]]; then
-            corrupted_history_lines=$((corrupted_history_lines + 1))
-            continue
-        fi
-        if [[ -z "${history_phase_seen[$history_line]:-}" ]]; then
-            history_phase_seen[$history_line]=1
-            history_phase_order+=("$history_line")
-        fi
-    done < "$phase_history_file"
 
     while IFS=$'\t' read -r \
-        writer seq timestamp_ns phase memory_current memory_peak \
+        timestamp_ns phase memory_current memory_peak \
         swap_current swap_peak anon file_bytes shmem kernel scratch_bytes \
         scratch_byte_limit scratch_inodes scratch_inode_limit extra
     do
@@ -146,17 +112,14 @@ daily_resource_summarize_samples() {
         # partial page can land, and the NEXT successful append then
         # concatenates onto its unterminated tail (issue #1214 review F2,
         # measured). That produces a row with the wrong shape or
-        # non-numeric values, not a missing row. Skip and count it rather
-        # than discarding every other row's evidence for one corrupt line.
+        # non-numeric values, not a missing row. Skip it rather than
+        # discarding every other row's evidence for one corrupt line.
         malformed_row=0
-        if [[ -n "${extra:-}" \
-            || ! "$writer" =~ ^(loop|parent)$ \
-            || ! "$phase" =~ ^[a-z][a-z0-9_]*$ ]]
-        then
+        if [[ -n "${extra:-}" || ! "$phase" =~ ^[a-z][a-z0-9_]*$ ]]; then
             malformed_row=1
         else
             for field in \
-                seq timestamp_ns memory_current memory_peak swap_current \
+                timestamp_ns memory_current memory_peak swap_current \
                 swap_peak anon file_bytes shmem kernel scratch_bytes \
                 scratch_byte_limit scratch_inodes scratch_inode_limit
             do
@@ -168,7 +131,6 @@ daily_resource_summarize_samples() {
             done
         fi
         if ((malformed_row)); then
-            corrupted_rows=$((corrupted_rows + 1))
             continue
         fi
 
@@ -265,20 +227,12 @@ daily_resource_summarize_samples() {
             global_scratch_inode_peak=$scratch_inodes
         fi
         sample_count=$((sample_count + 1))
-    done < <(sort -n -k3,3 -- "$samples_file")
+    done < <(sort -n -k1,1 -- "$samples_file")
 
     if ((sample_count == 0)); then
         _daily_resource_invalid samples_empty
         return
     fi
-
-    local -a missing_phases=()
-    local hphase
-    for hphase in "${history_phase_order[@]}"; do
-        if [[ -z "${phase_seen[$hphase]:-}" ]]; then
-            missing_phases+=("$hphase")
-        fi
-    done
 
     for phase in "${phase_order[@]}"; do
         printf '%s' 'CRATEDIGGER_DAILY_RESOURCE_PHASE schema=1'
@@ -304,32 +258,19 @@ daily_resource_summarize_samples() {
         printf ' scratch_inode_limit=%d' "$global_scratch_inode_limit"
         printf ' memory_current_peak_timestamp_ns=%d\n' "${phase_memory_peak_timestamp[$phase]}"
     done
-    for hphase in "${missing_phases[@]}"; do
-        printf 'CRATEDIGGER_DAILY_RESOURCE_PHASE_MISSING schema=1 phase=%s\n' "$hphase"
-    done
 
-    # dropped_samples counts one thing: sample attempts that produced no
-    # usable data point -- reported losses from each writer (issue #1214
-    # review C1) plus rows that landed but are unparseable (review F2).
-    # A malformed row is counted once, here, never also inferred as a
-    # sequence gap (review C4). A corrupt phase-history LINE is a
-    # different kind of loss (phase-tracking integrity, not a sample) and
-    # gets its own field.
-    local -i dropped_samples=$((parent_dropped + loop_dropped + corrupted_rows))
-    local -i missing_phase_count=${#missing_phases[@]}
-    local -i degraded=0
-    ((dropped_samples > 0)) && degraded=1
-    ((missing_phase_count > 0)) && degraded=1
-    ((corrupted_history_lines > 0)) && degraded=1
-
-    printf '%s' 'CRATEDIGGER_DAILY_RESOURCE_RECEIPT schema=1'
-    if ((degraded)); then
-        printf ' status=degraded reason=partial_sample_loss'
-    else
-        printf ' status=valid'
+    # The per-phase breakdown above is printed REGARDLESS of
+    # external_reason -- that is the whole point (issue #1214, the
+    # 2026-08-20 incident lost exactly this breakdown). Only the terminal
+    # status differs: any external failure (a failed sample write outside
+    # this function, a failed phase write, the loop dying) makes it
+    # invalid, binary, no partial credit for the data that did survive.
+    if [[ -n "$external_reason" ]]; then
+        _daily_resource_invalid "$external_reason"
+        return
     fi
-    printf ' dropped_samples=%d missing_phases=%d corrupted_history_lines=%d' \
-        "$dropped_samples" "$missing_phase_count" "$corrupted_history_lines"
+
+    printf '%s' 'CRATEDIGGER_DAILY_RESOURCE_RECEIPT schema=1 status=valid'
     printf ' samples=%d phases=%d' "$sample_count" "${#phase_order[@]}"
     printf ' memory_peak_bytes=%d memory_peak_owner=%s' \
         "$global_memory_peak" "$memory_peak_owner"
@@ -338,19 +279,10 @@ daily_resource_summarize_samples() {
         "$global_scratch_byte_peak" "$global_scratch_byte_limit"
     printf ' scratch_inode_peak=%d scratch_inode_limit=%d\n' \
         "$global_scratch_inode_peak" "$global_scratch_inode_limit"
-
-    # A degraded receipt is still a signal something needs attention
-    # (issue #1214 review C5): treat it the same as invalid for the
-    # caller's own pass/fail purposes, so daily_flake_update.sh's existing
-    # "an unclean resource receipt surfaces regardless of gate status"
-    # logic covers it without duplicating that decision here.
-    if ((degraded)); then
-        return 1
-    fi
 }
 
 _daily_resource_record_sample_once() {
-    local phase="$1" writer="$2" seq="$3"
+    local phase="$1"
     local memory_current memory_peak swap_current swap_peak
     local anon="" file_bytes="" shmem="" kernel="" key value
     local blocks free_blocks block_size total_inodes free_inodes
@@ -387,8 +319,8 @@ _daily_resource_record_sample_once() {
     ) || return 1
     scratch_bytes=$(((blocks - free_blocks) * block_size))
     scratch_inodes=$((total_inodes - free_inodes))
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$writer" "$seq" "$timestamp_ns" "$phase" "$memory_current" "$memory_peak" \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$timestamp_ns" "$phase" "$memory_current" "$memory_peak" \
         "$swap_current" "$swap_peak" "$anon" "$file_bytes" "$shmem" \
         "$kernel" "$scratch_bytes" "$((blocks * block_size))" \
         "$scratch_inodes" "$total_inodes" \
@@ -396,9 +328,9 @@ _daily_resource_record_sample_once() {
 }
 
 _daily_resource_record_sample_unlocked() {
-    local phase="$1" writer="$2" seq="$3" attempts=3
+    local phase="$1" attempts=3
     while ((attempts > 0)); do
-        if _daily_resource_record_sample_once "$phase" "$writer" "$seq"; then
+        if _daily_resource_record_sample_once "$phase"; then
             return 0
         fi
         attempts=$((attempts - 1))
@@ -430,16 +362,15 @@ _daily_resource_unlock() {
 }
 
 _daily_resource_record_sample_locked() {
-    local phase="$1" writer="$2" seq="$3"
+    local phase="$1"
     local status=0
     _daily_resource_lock || return 1
-    _daily_resource_record_sample_unlocked "$phase" "$writer" "$seq" || status=1
+    _daily_resource_record_sample_unlocked "$phase" || status=1
     _daily_resource_unlock || status=1
     return "$status"
 }
 
 _daily_resource_record_current_phase_locked() {
-    local writer="$1" seq="$2"
     local phase=""
     local status=0
     _daily_resource_lock || return 1
@@ -447,7 +378,7 @@ _daily_resource_record_current_phase_locked() {
     if [[ -z "$phase" ]]; then
         status=1
     elif ((status == 0)); then
-        _daily_resource_record_sample_unlocked "$phase" "$writer" "$seq" || status=1
+        _daily_resource_record_sample_unlocked "$phase" || status=1
     fi
     _daily_resource_unlock || status=1
     return "$status"
@@ -457,35 +388,22 @@ _daily_resource_write_phase() {
     local phase="$1"
     local temporary="$_CRATEDIGGER_RESOURCE_PHASE.next"
     printf '%s\n' "$phase" > "$temporary" || return 1
-    mv -f -- "$temporary" "$_CRATEDIGGER_RESOURCE_PHASE" || return 1
-    # A second, independently durable write (issue #1214 review F4): a
-    # phase whose every metric sample fails would otherwise vanish from
-    # the receipt with no trace at all. This CAN fail on its own, after
-    # the pointer above has already swapped (review C9b) -- that is folded
-    # into the SAME fatal outcome as the pointer write via this function's
-    # own trailing exit status, exactly like the pointer write already
-    # was; it does not introduce a silent divergence, but it is a second
-    # failure point, not a free one.
-    printf '%s\n' "$phase" >> "$_CRATEDIGGER_RESOURCE_PHASE_HISTORY"
+    mv -f -- "$temporary" "$_CRATEDIGGER_RESOURCE_PHASE"
 }
 
 _daily_resource_monitor_loop() {
-    # A single failed sample (cgroup churn, a transient state-store write
-    # failure, or a permanent one) is simply not written -- the loop never
-    # dies on one, it only ever stops on the parent's own stop signal. Its
-    # own count of failed attempts (whatever the cause -- issue #1214
-    # review C6) is reported to the parent when it exits, through the
-    # report fd set up in daily_resource_monitor_start: a kernel pipe, not
-    # a file, so this report cannot fail with the store it describes
-    # (review C1).
-    local -i seq=0 dropped=0
+    # A single failed sample write (cgroup churn, or a genuine state-store
+    # failure) stops the loop outright -- this is deliberately fatal, not
+    # tolerated (issue #1214 round-6 strip-back): with the state root
+    # verified off the measured filesystem, a write failure here is a
+    # rare, exceptional event, not routine disk pressure, so there is
+    # nothing useful left to quantify. daily_resource_monitor_finish's own
+    # `wait` on this process's PID observes the resulting nonzero exit
+    # directly; no report channel back to the parent is needed.
     while [[ ! -e "$_CRATEDIGGER_RESOURCE_STOP" ]]; do
-        seq=$((seq + 1))
-        _daily_resource_record_current_phase_locked loop "$seq" \
-            || dropped=$((dropped + 1))
+        _daily_resource_record_current_phase_locked || return 1
         sleep 0.25
     done
-    printf '%d\n' "$dropped" >&"${_CRATEDIGGER_RESOURCE_LOOP_REPORT_FD}"
 }
 
 daily_resource_monitor_start() {
@@ -496,7 +414,6 @@ daily_resource_monitor_start() {
 
     _CRATEDIGGER_RESOURCE_STARTED=starting
     _CRATEDIGGER_RESOURCE_TERMINAL_EMITTED=0
-    _CRATEDIGGER_RESOURCE_PARENT_DROPPED=0
     _CRATEDIGGER_RESOURCE_FAILURE_REASON=""
     _CRATEDIGGER_RESOURCE_SCRATCH="${XDG_RUNTIME_DIR:-}"
     if [[ -z "$_CRATEDIGGER_RESOURCE_SCRATCH" \
@@ -596,43 +513,15 @@ daily_resource_monitor_start() {
     }
     _CRATEDIGGER_RESOURCE_SAMPLES="$_CRATEDIGGER_RESOURCE_DIR/samples.tsv"
     _CRATEDIGGER_RESOURCE_PHASE="$_CRATEDIGGER_RESOURCE_DIR/phase"
-    _CRATEDIGGER_RESOURCE_PHASE_HISTORY="$_CRATEDIGGER_RESOURCE_DIR/phase-history"
     _CRATEDIGGER_RESOURCE_STOP="$_CRATEDIGGER_RESOURCE_DIR/stop"
     _CRATEDIGGER_RESOURCE_LOCK="$_CRATEDIGGER_RESOURCE_DIR/sample.lock"
-    _CRATEDIGGER_RESOURCE_LOOP_REPORT="$_CRATEDIGGER_RESOURCE_DIR/loop-report"
     : > "$_CRATEDIGGER_RESOURCE_SAMPLES"
-    : > "$_CRATEDIGGER_RESOURCE_PHASE_HISTORY"
     : > "$_CRATEDIGGER_RESOURCE_LOCK"
-    if ! mkfifo -m 600 "$_CRATEDIGGER_RESOURCE_LOOP_REPORT" 2>/dev/null; then
-        rm -rf -- "$_CRATEDIGGER_RESOURCE_DIR"
-        _daily_resource_invalid state_store_bootstrap_failed
-        return
-    fi
-    # Opened read-write (not read-only) so this open call itself does not
-    # block waiting for the loop's own writer end to connect; the SAME fd
-    # then serves as the parent's read end once the loop exits. This is
-    # the only place the report channel ever touches a filesystem path --
-    # every later transfer through it is a pure kernel pipe (review C1).
-    if ! exec {_CRATEDIGGER_RESOURCE_LOOP_REPORT_FD}<> \
-        "$_CRATEDIGGER_RESOURCE_LOOP_REPORT"; then
-        rm -rf -- "$_CRATEDIGGER_RESOURCE_DIR"
-        _daily_resource_invalid state_store_bootstrap_failed
-        return
-    fi
     _CRATEDIGGER_RESOURCE_CURRENT_PHASE=bootstrap
-    _CRATEDIGGER_RESOURCE_PARENT_SEQ=1
     if ! _daily_resource_write_phase "$_CRATEDIGGER_RESOURCE_CURRENT_PHASE" \
         || ! _daily_resource_record_sample_unlocked \
-            "$_CRATEDIGGER_RESOURCE_CURRENT_PHASE" parent \
-            "$_CRATEDIGGER_RESOURCE_PARENT_SEQ";
+            "$_CRATEDIGGER_RESOURCE_CURRENT_PHASE";
     then
-        # { ...; } wraps the redirection -- a BARE `exec {fd}<&- 2>/dev/null`
-        # (no command after exec) applies 2>/dev/null to the CURRENT SHELL
-        # permanently, silently killing every later `>&2` write for the
-        # rest of the process's life (caught live: it silenced
-        # daily_flake_update.sh's own gap-4/C5 stderr diagnostic). Do not
-        # "simplify" this back to the bare form.
-        { exec {_CRATEDIGGER_RESOURCE_LOOP_REPORT_FD}<&-; } 2>/dev/null || true
         rm -rf -- "$_CRATEDIGGER_RESOURCE_DIR"
         _daily_resource_invalid state_store_bootstrap_failed
         return
@@ -655,25 +544,21 @@ daily_resource_monitor_set_phase() {
         _CRATEDIGGER_RESOURCE_FAILURE_REASON=phase_lock_failed
         return 1
     fi
-    # A boundary sample is a droppable single sample, same as the periodic
-    # loop's: its loss is counted directly (issue #1214 review C1), never
-    # a reason to abandon the phase transition itself -- that would leave
-    # the shared phase pointer stuck on the old phase and mis-attribute
-    # every later sample.
-    _CRATEDIGGER_RESOURCE_PARENT_SEQ=$((_CRATEDIGGER_RESOURCE_PARENT_SEQ + 1))
+    # A boundary sample write failing is a real, reportable failure (issue
+    # #1214 round-6 strip-back: binary, not counted), but never a reason
+    # to abandon the phase transition itself -- that would leave the
+    # shared phase pointer stuck on the old phase and mis-attribute every
+    # later sample on top of the one already lost.
     _daily_resource_record_sample_unlocked "$_CRATEDIGGER_RESOURCE_CURRENT_PHASE" \
-        parent "$_CRATEDIGGER_RESOURCE_PARENT_SEQ" \
-        || _CRATEDIGGER_RESOURCE_PARENT_DROPPED=$((_CRATEDIGGER_RESOURCE_PARENT_DROPPED + 1))
+        || _CRATEDIGGER_RESOURCE_FAILURE_REASON=sample_write_failed
     if ! _daily_resource_write_phase "$phase"; then
         _daily_resource_unlock
         _CRATEDIGGER_RESOURCE_FAILURE_REASON=phase_state_write_failed
         return 1
     fi
     _CRATEDIGGER_RESOURCE_CURRENT_PHASE="$phase"
-    _CRATEDIGGER_RESOURCE_PARENT_SEQ=$((_CRATEDIGGER_RESOURCE_PARENT_SEQ + 1))
     _daily_resource_record_sample_unlocked "$_CRATEDIGGER_RESOURCE_CURRENT_PHASE" \
-        parent "$_CRATEDIGGER_RESOURCE_PARENT_SEQ" \
-        || _CRATEDIGGER_RESOURCE_PARENT_DROPPED=$((_CRATEDIGGER_RESOURCE_PARENT_DROPPED + 1))
+        || _CRATEDIGGER_RESOURCE_FAILURE_REASON=sample_write_failed
     if ! _daily_resource_unlock; then
         _CRATEDIGGER_RESOURCE_FAILURE_REASON=phase_unlock_failed
         return 1
@@ -681,17 +566,12 @@ daily_resource_monitor_set_phase() {
 }
 
 daily_resource_monitor_finish() {
-    local monitor_status=0 summary_status=0 reason="" loop_dropped=0
+    local monitor_status=0 summary_status=0
     if [[ "${_CRATEDIGGER_RESOURCE_STARTED:-0}" != 1 ]]; then
         if [[ -n "${_CRATEDIGGER_RESOURCE_PID:-}" ]]; then
             [[ -n "${_CRATEDIGGER_RESOURCE_STOP:-}" ]] \
                 && : > "$_CRATEDIGGER_RESOURCE_STOP"
             wait "$_CRATEDIGGER_RESOURCE_PID" 2>/dev/null || true
-        fi
-        if [[ -n "${_CRATEDIGGER_RESOURCE_LOOP_REPORT_FD:-}" ]]; then
-            # Grouped, not bare -- see the comment at the first occurrence
-            # of this pattern in daily_resource_monitor_start.
-            { exec {_CRATEDIGGER_RESOURCE_LOOP_REPORT_FD}<&-; } 2>/dev/null || true
         fi
         if [[ -n "${_CRATEDIGGER_RESOURCE_DIR:-}" \
             && -d "$_CRATEDIGGER_RESOURCE_DIR" ]]; then
@@ -702,43 +582,21 @@ daily_resource_monitor_finish() {
         fi
         return 1
     fi
-    _CRATEDIGGER_RESOURCE_PARENT_SEQ=$((_CRATEDIGGER_RESOURCE_PARENT_SEQ + 1))
-    _daily_resource_record_sample_locked \
-        "$_CRATEDIGGER_RESOURCE_CURRENT_PHASE" parent \
-        "$_CRATEDIGGER_RESOURCE_PARENT_SEQ" \
-        || _CRATEDIGGER_RESOURCE_PARENT_DROPPED=$((_CRATEDIGGER_RESOURCE_PARENT_DROPPED + 1))
+    _daily_resource_record_sample_locked "$_CRATEDIGGER_RESOURCE_CURRENT_PHASE" \
+        || _CRATEDIGGER_RESOURCE_FAILURE_REASON=sample_write_failed
     : > "$_CRATEDIGGER_RESOURCE_STOP"
     if ! wait "$_CRATEDIGGER_RESOURCE_PID"; then
         monitor_status=1
     fi
-    if ((monitor_status == 0)); then
-        if ! IFS= read -r -t 5 -u "$_CRATEDIGGER_RESOURCE_LOOP_REPORT_FD" loop_dropped \
-            || [[ ! "$loop_dropped" =~ ^[0-9]+$ ]]
-        then
-            # Plain in-process assignment (issue #1214 review
-            # C-F1/C-F4): this cannot itself fail the way the old
-            # file-based marker could, so daily_resource_summarize_samples's
-            # `${4:-0}` default (review C5) never gets a chance to launder
-            # a loop report that was never actually read, and the
-            # monitor_process_died fallback below is reachable ONLY when
-            # the loop's own `wait` genuinely reports a crash -- never as
-            # an imprecise stand-in for a doubly-failed marker write.
-            _CRATEDIGGER_RESOURCE_FAILURE_REASON=loop_report_unavailable
-        fi
+    if ((monitor_status != 0)) && [[ -z "$_CRATEDIGGER_RESOURCE_FAILURE_REASON" ]]; then
+        _CRATEDIGGER_RESOURCE_FAILURE_REASON=monitor_process_died
     fi
-    # Grouped, not bare -- see the comment at the first occurrence of this
-    # pattern in daily_resource_monitor_start.
-    { exec {_CRATEDIGGER_RESOURCE_LOOP_REPORT_FD}<&-; } 2>/dev/null || true
-    if [[ -n "$_CRATEDIGGER_RESOURCE_FAILURE_REASON" ]]; then
-        reason="$_CRATEDIGGER_RESOURCE_FAILURE_REASON"
-        _daily_resource_invalid "$reason"
-        summary_status=1
-    elif ((monitor_status != 0)); then
-        _daily_resource_invalid monitor_process_died
-        summary_status=1
-    elif ! daily_resource_summarize_samples \
-        "$_CRATEDIGGER_RESOURCE_SAMPLES" "$_CRATEDIGGER_RESOURCE_PHASE_HISTORY" \
-        "$_CRATEDIGGER_RESOURCE_PARENT_DROPPED" "$loop_dropped";
+    # Always summarize -- even when a failure is already known -- so the
+    # per-phase breakdown for whatever survived is still printed above the
+    # terminal receipt line (issue #1214's own invariant: losing that
+    # breakdown is the entire reason this file exists).
+    if ! daily_resource_summarize_samples \
+        "$_CRATEDIGGER_RESOURCE_SAMPLES" "$_CRATEDIGGER_RESOURCE_FAILURE_REASON";
     then
         summary_status=1
     fi
@@ -751,11 +609,11 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     set -euo pipefail
     case "${1:-}" in
         summarize)
-            if [[ "$#" -ne 5 ]]; then
+            if [[ "$#" -lt 2 || "$#" -gt 3 ]]; then
                 _daily_resource_invalid summarize_arguments_invalid
                 exit 1
             fi
-            daily_resource_summarize_samples "$2" "$3" "$4" "$5"
+            daily_resource_summarize_samples "$2" "${3:-}"
             ;;
         *)
             _daily_resource_invalid command_invalid
