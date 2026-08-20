@@ -545,9 +545,37 @@ A target whose failures are ENTIRELY disk-full returns
 `TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE` so the phase (and the suite) reports
 `infrastructure-failure`, not an ordinary `failed`, without touching
 `scripts/run_test_suite.py`'s generic phase-state derivation.
-`scripts/fuzz_burst.sh` and `scripts/run_world_model_burst.py` remain
-entirely outside this gate — a known, stated residual, part of #1111's own
-incident set, not a hidden gap.
+`scripts/fuzz_burst.sh` (`scripts/run_fuzz_tests.py`) and
+`scripts/run_world_model_burst.py` deliberately do NOT take
+`acquire_suite_admission`'s exclusive lock or `reap_stale_check_bundles`'s
+scratch reaping (issue #1156 items 1-3): both are long-running,
+variable-duration bursts (minutes interactively, up to the full overnight
+`CRATEDIGGER_FUZZ_MAX_EXAMPLES` budget in the daily gate), and folding them
+into the SAME exclusive queue an ordinary, quick `scripts/test.sh` dev-loop
+run waits on would starve that bounded wait, or force raising its timeout
+for everyone. They DO each now run their own analogous headroom
+precondition — `headroom_floor_bytes`/`_check_suite_headroom`, called once
+before any work and again inside their own admission loop before every new
+target — closing the #1111-era residual for the fail-fast half. Both pass
+`worker_count=1` (the flat, override-respecting `DEFAULT_MIN_HEADROOM_BYTES`
+floor), not a worker-scaled one: neither burst has a MEASURED per-worker
+tmpfs footprint the way the deterministic suite's #1131 model does — a
+worker-scaled attempt sized by the fuzz burst's own default worker count
+(up to 60 on a 30-core host) demanded over 4 GiB, more than a normal
+interactive dev tmpfs actually has free (see `headroom_floor_bytes`'s
+docstring). `recommended_fuzz_jobs` also gained a ceiling
+(`MAX_FUZZ_JOBS`), the only worker formula in the repo that previously had
+none. Separately, `run_python_tests.py`'s worker-death classifier
+(`_classify_target_infrastructure_failure`) now also folds a worker killed
+by the OOM killer — exception shape `BrokenProcessPool`, corroborated by
+measured `/proc/meminfo` `MemAvailable` below
+`CRATEDIGGER_TEST_MEMORY_MIN_BYTES` — into ONE named
+`test host memory exhausted` marker (`TEST_HOST_MEMORY_EXHAUSTED` /
+`_collapse_memory_exhausted_failures`), the same N-disguises fix
+`TEST_RAM_ROOT_EXHAUSTED` above already gave disk-full. A DIFFERENT
+resource (system memory, not the tmpfs RAM root) gets a DIFFERENT identity
+and exit code (`TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE`), never folded into
+the disk-full bucket.
 
 **Generated (property-based) production tests**
 (`tests/test_*_generated.py`, Hypothesis)
