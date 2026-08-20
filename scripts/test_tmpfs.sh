@@ -129,10 +129,13 @@ setup_cratedigger_test_tmpfs() {
     # Ownership marker (issue #1208 item 1): a "<pid> <ticks>\n" pair naming
     # THIS shell process, written immediately after mktemp so the window
     # during which the directory exists with no marker at all is as small
-    # as possible. Same content shape as scripts/run_test_suite.py's
-    # admission-lock holder identity and scripts/run_final_gate.sh's own
-    # helper/gate identity. scripts/run_test_suite.py::_scratch_tree_owner_dead
-    # reads it on the reaping side and verifies liveness with the same
+    # as possible. Same content shape as scripts/run_test_suite.py's own
+    # admission-lock holder identity (issue #1208 review D8: NOT the same
+    # shape as scripts/run_final_gate.sh's helper/gate identity, which
+    # stores pid and start-ticks in two SEPARATE files rather than one
+    # "<pid> <ticks>" line — an earlier version of this comment claimed
+    # otherwise). scripts/run_test_suite.py::_scratch_tree_owner_dead reads
+    # it on the reaping side and verifies liveness with the same
     # pid-reuse-safe start-ticks comparison those two already use — never
     # on readability alone. A missing or unparseable marker (this write
     # failing, or a reap racing the tiny window before it lands) is read
@@ -143,8 +146,17 @@ setup_cratedigger_test_tmpfs() {
         _cratedigger_test_tmpfs_proc_start_ticks "$$" 2>/dev/null
     )" || _cratedigger_test_tmpfs_owner_ticks=""
     if [[ -n "$_cratedigger_test_tmpfs_owner_ticks" ]]; then
+        # Issue #1208 review D5: redirections apply LEFT TO RIGHT, so a
+        # `>file 2>/dev/null` order does NOT suppress a failed open of
+        # `file` — bash reports that diagnostic on the still-live original
+        # stderr before the `2>/dev/null` redirection is even installed.
+        # Reproduced on a full/permission-denied tmpfs: every dev-shell
+        # entry printed an unexplained "Permission denied" naming this
+        # hidden dotfile. `2>/dev/null` FIRST makes stderr point at
+        # /dev/null before the `>` open is attempted, so its failure
+        # diagnostic (like everything else here) is genuinely silent.
         printf '%s %s\n' "$$" "$_cratedigger_test_tmpfs_owner_ticks" \
-            >"$_CRATEDIGGER_TEST_TMPDIR/.owner" 2>/dev/null || true
+            2>/dev/null >"$_CRATEDIGGER_TEST_TMPDIR/.owner" || true
     fi
 
     trap _exit_cratedigger_test_tmpfs EXIT

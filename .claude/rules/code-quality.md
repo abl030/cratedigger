@@ -460,6 +460,13 @@ admission-lock holder identity below) immediately after `mktemp`, and
 `_proc_start_ticks` comparison. A live owner is never touched regardless of
 age; a missing or malformed marker fails closed (treated as "unknown,
 never reap", not "abandoned") rather than falling back to age alone.
+Known residual (issue #1208 review D7): the reaper resolves its runtime
+root from `XDG_RUNTIME_DIR` only (`private_runtime_dir`), while
+`_check_suite_headroom` below and `scripts/test_tmpfs.sh`'s own scratch-
+tree parent both honor a `CRATEDIGGER_TEST_RAM_ROOT` override — set that
+override and the reaper looks in a different directory than the scratch
+trees it exists to reap. Latent: nothing in this repository sets that
+override outside tests and one doc recipe.
 
 The 4-hour floor protects the bundle's detailed EVIDENCE (per-phase logs,
 summary.md), not receipt reuse itself: `run_final_gate.sh status` checks a

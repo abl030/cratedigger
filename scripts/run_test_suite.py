@@ -236,7 +236,19 @@ def dirty_state_fingerprint(repo_root: Path) -> tuple[bool, str]:
 
 
 def private_runtime_dir(candidate: Path | None = None) -> Path:
-    """Resolve and validate the caller-owned runtime tmpfs."""
+    """Resolve and validate the caller-owned runtime tmpfs.
+
+    Issue #1208 review D7 (documented, not changed here to avoid a merge
+    collision with concurrent headroom-logic work in this same file): this
+    reads ``XDG_RUNTIME_DIR`` only, with no ``CRATEDIGGER_TEST_RAM_ROOT``
+    override — unlike ``_check_suite_headroom`` below and
+    ``scripts/test_tmpfs.sh``'s own scratch-tree parent, both of which DO
+    honor that override. With ``CRATEDIGGER_TEST_RAM_ROOT`` set, the
+    reaper (this module) and the scratch trees it exists to reap
+    (``scripts/test_tmpfs.sh``) would resolve to DIFFERENT directories,
+    so item 1's fix would not apply at all. Latent today: nothing in this
+    repository sets that override outside tests and one doc recipe.
+    """
     runtime = candidate or Path(
         os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
     )
@@ -312,19 +324,69 @@ def admission_lock_path(runtime: Path) -> Path:
     return runtime / ".cratedigger-test-admission.lock"
 
 
-def _proc_start_ticks(pid: int) -> str | None:
-    """Field 22 of /proc/<pid>/stat — mirrors run_final_gate.sh's proc_start_ticks."""
+def _read_proc_stat(pid: int) -> str:
+    """Real ``/proc/<pid>/stat`` reader — the sole production default for
+    ``_proc_stat_start_ticks`` below."""
+    return Path(f"/proc/{pid}/stat").read_text()
+
+
+def _proc_stat_start_ticks(
+    pid: int, *, read_stat: Callable[[int], str] = _read_proc_stat
+) -> tuple[bool, str | None]:
+    """(confirmed_absent, start_ticks) for /proc/<pid>/stat — field 22.
+
+    Three real outcomes, not two: the pid is CONFIRMED gone (``ENOENT`` —
+    the kernel's own proof no such process exists); the pid exists and its
+    start ticks were read and parsed; or the read failed for some OTHER
+    reason (a permission boundary, e.g. a restrictive ``hidepid`` mount, or
+    a malformed stat line) and liveness could not be determined AT ALL.
+    Only the first case returns ``confirmed_absent=True`` — every other
+    failure mode, including a failed read, returns ``False`` there, because
+    "cannot verify" is never the same fact as "confirmed gone" (issue
+    #1208 review D4).
+
+    ``_proc_start_ticks`` below collapses the second and third outcomes
+    into one ``None`` — the right posture for its own callers (the
+    admission-lock holder identity, receipt liveness): "unverified"
+    already degrades to "not live" there, and the worst consequence is a
+    wrong display name or an unretired receipt. ``_scratch_tree_owner_dead``
+    needs the finer distinction, because ITS decision is deletion: treating
+    "cannot verify" as "provably dead" there is exactly the conflation
+    issue #1208 review D4 named, so it calls this function directly
+    instead of going through the collapsed wrapper.
+
+    ``read_stat`` is a kwarg-DI seam (code-quality.md "Picking a
+    strategy" #2): production always uses the real default
+    (``_read_proc_stat``); tests inject a fake to exercise the
+    non-``FileNotFoundError`` OSError branch and the malformed-content
+    branch, neither of which is constructible against a real ``/proc``
+    entry without root or a user-namespace remap.
+    """
     try:
-        raw = Path(f"/proc/{pid}/stat").read_text()
+        raw = read_stat(pid)
+    except FileNotFoundError:
+        return True, None
     except OSError:
-        return None
+        return False, None
     close = raw.rfind(")")
     if close == -1:
-        return None
+        return False, None
     fields = raw[close + 2 :].split()
     if len(fields) < 20:
-        return None
-    return fields[19]
+        return False, None
+    return False, fields[19]
+
+
+def _proc_start_ticks(pid: int) -> str | None:
+    """Field 22 of /proc/<pid>/stat — mirrors run_final_gate.sh's proc_start_ticks.
+
+    A thin wrapper over ``_proc_stat_start_ticks`` that collapses "confirmed
+    gone" and "cannot verify" into the same ``None`` — see that function's
+    docstring for why that collapse is correct for THIS function's callers
+    but not for ``_scratch_tree_owner_dead``.
+    """
+    _confirmed_absent, ticks = _proc_stat_start_ticks(pid)
+    return ticks
 
 
 def _write_lock_holder_identity(descriptor: int) -> None:
@@ -481,6 +543,52 @@ def _bundle_last_activity(bundle: Path) -> float:
         return 0.0
 
 
+def _scratch_tree_last_activity(tree: Path) -> float:
+    """Most recent mtime anywhere WITHIN ``tree``, not just its own top-level dir.
+
+    ``_bundle_last_activity`` (above) is right for a ``run_suite`` check
+    bundle: ``run_suite`` is the bundle's only writer, and it writes
+    ``summary.json`` at the top level as its very last act, so the bundle's
+    own dirent set is exactly what changes as work happens.
+
+    A dev-shell scratch tree (``SCRATCH_TREE_PREFIX``) has no such shape
+    (issue #1208 review D3). Its own top-level directory mtime is bumped
+    only by a DIRECT child dirent change (create/delete/rename of an
+    immediate child) — a process writing INTO an existing nested
+    subdirectory never touches it. The owning shell's own children, or an
+    orphaned descendant that outlives the shell itself (e.g. issue #1214's
+    fuzz burst, which takes neither the admission lock nor a headroom
+    guard), can write deep inside the tree for the whole run without the
+    top-level dir's own mtime ever moving — so an age gate keyed on that
+    one timestamp can silently stop tracking real activity long before
+    writing actually stops, exactly the "mtime cannot distinguish
+    abandoned from just idle" argument the ownership-marker design itself
+    makes, just one level deeper. Walks the whole tree and returns the
+    maximum mtime observed on any entry (falling back to the tree's own
+    mtime on an empty tree or any walk error), so ongoing nested activity
+    is never mistaken for staleness. Deliberately does NOT check
+    ``summary.json`` — nothing writes one inside a scratch tree today, and
+    checking it here would silently key the age gate on a file that
+    happens to share a name with an unrelated concept.
+    """
+    latest = 0.0
+    try:
+        latest = tree.stat().st_mtime
+    except OSError:
+        pass
+    try:
+        for root, dirs, files in os.walk(tree, onerror=lambda _exc: None):
+            for name in (*dirs, *files):
+                try:
+                    entry_mtime = os.lstat(os.path.join(root, name)).st_mtime
+                except OSError:
+                    continue
+                latest = max(latest, entry_mtime)
+    except OSError:
+        pass
+    return latest
+
+
 #: Directory-name prefixes the reaper protects the shared runtime tmpfs from
 #: leaking forever: ``run_suite``'s own check bundles, plus this test-infra
 #: change's own per-test scratch directories (``tests/test_suite_coordinator.py``)
@@ -530,19 +638,30 @@ _REAPABLE_PREFIXES = (
 SCRATCH_TREE_OWNER_MARKER_NAME = ".owner"
 
 
-def _scratch_tree_owner_dead(tree: Path) -> bool:
+def _scratch_tree_owner_dead(
+    tree: Path,
+    *,
+    proc_stat: Callable[[int], tuple[bool, str | None]] = _proc_stat_start_ticks,
+) -> bool:
     """True only when ``tree``'s recorded pid+start-ticks owner is PROVABLY gone.
 
     Returns ``False`` — never eligible for reaping by this signal — for
     every case that is not a proven death: a missing marker file (the
     shell died before ``mktemp`` returned, or in the brief window before
-    the marker write in ``scripts/test_tmpfs.sh``), unreadable content, or
-    a malformed pid/ticks pair. ``False`` here means "unknown", not
-    "alive"; the caller must treat unknown exactly like alive. Only a
-    syntactically well-formed marker whose ``_proc_start_ticks(pid) !=
-    ticks`` (the process is gone, or — since start ticks make pid reuse
-    detectable, the same precedent ``_read_lock_holder_identity`` already
-    relies on — a different, unrelated process now holds that pid)
+    the marker write in ``scripts/test_tmpfs.sh``), unreadable content, a
+    malformed pid/ticks pair, or a ``/proc`` read that failed for a reason
+    OTHER than the pid being confirmed gone (issue #1208 review D4 — a
+    permission boundary such as a restrictive ``hidepid`` mount, or a
+    malformed stat line, is "cannot verify", never "provably dead"; this
+    calls ``_proc_stat_start_ticks`` directly, not the collapsed
+    ``_proc_start_ticks`` wrapper, specifically to keep that distinction —
+    see its docstring). ``False`` here means "unknown", not "alive"; the
+    caller must treat unknown exactly like alive. Only a syntactically
+    well-formed marker naming a pid the kernel CONFIRMS is gone, or one
+    whose current start ticks were read successfully and differ from the
+    recorded value (the process is gone, or — since start ticks make pid
+    reuse detectable, the same precedent ``_read_lock_holder_identity``
+    already relies on — a different, unrelated process now holds that pid)
     returns ``True``.
 
     This is the fail-closed half of issue #1208 item 1's ownership-marker
@@ -558,7 +677,12 @@ def _scratch_tree_owner_dead(tree: Path) -> bool:
     if len(parts) != 2 or not all(part.isdigit() for part in parts):
         return False
     pid_str, ticks = parts
-    return _proc_start_ticks(int(pid_str)) != ticks
+    confirmed_absent, current_ticks = proc_stat(int(pid_str))
+    if confirmed_absent:
+        return True
+    if current_ticks is None:
+        return False
+    return current_ticks != ticks
 
 
 def _receipt_protected_bundles(runtime: Path) -> frozenset[Path]:
@@ -613,7 +737,14 @@ def _receipt_last_activity(receipt: Path) -> float:
     finished and the tree-match check has passed — so its mtime is the true
     "this receipt became final" timestamp for a completed run. A receipt
     that never reached that point (crashed, interrupted) falls back to the
-    receipt directory's own mtime, which only ever gets older.
+    receipt directory's own mtime — issue #1208 review D8: that is NOT a
+    timestamp that "only ever gets older". ``run_gate`` writes roughly ten
+    files into the receipt over the run (``repo_root``, ``head``, ``clean``,
+    ``command``, ``helper_pid``, ``helper_start_ticks``, ``output.log``,
+    ``gate_pid``, ``gate_start_ticks``, ...), and each new dirent bumps the
+    directory's own mtime — the true claim is only that it stops moving
+    once nothing more is written into it, which for a crashed or
+    interrupted run is exactly when the crash happened.
     """
     try:
         return (receipt / "terminal").stat().st_mtime
@@ -745,7 +876,13 @@ def reap_stale_check_bundles(
     treated as unknown liveness, never as abandoned. Every other prefix
     keeps the pure age gate described above; only this one has a
     provable-death precondition, because only this one has an owning
-    process capable of writing it one.
+    process capable of writing it one. Its age itself is also computed
+    differently (``_scratch_tree_last_activity``, not
+    ``_bundle_last_activity``): a scratch tree's own top-level directory
+    mtime does not move when something writes into an existing nested
+    subdirectory, so an owner-dead-but-still-being-written-by-a-descendant
+    tree (issue #1208 review D3) is protected by walking the whole tree
+    for its true most recent activity, not just its top-level dirent.
     """
     reference = reference_time if reference_time is not None else time.time()
     protected = _receipt_protected_bundles(runtime)
@@ -768,11 +905,15 @@ def reap_stale_check_bundles(
             continue
         if info.st_uid != os.getuid():
             continue
-        if candidate.name.startswith(
-            SCRATCH_TREE_PREFIX
-        ) and not _scratch_tree_owner_dead(candidate):
+        is_scratch_tree = candidate.name.startswith(SCRATCH_TREE_PREFIX)
+        if is_scratch_tree and not _scratch_tree_owner_dead(candidate):
             continue
-        age = reference - _bundle_last_activity(candidate)
+        last_activity = (
+            _scratch_tree_last_activity(candidate)
+            if is_scratch_tree
+            else _bundle_last_activity(candidate)
+        )
+        age = reference - last_activity
         if age < max_age_seconds:
             continue
         try:

@@ -39,6 +39,7 @@ from scripts.run_test_suite import (
     _default_min_headroom_bytes,
     _default_phases,
     _proc_start_ticks,
+    _proc_stat_start_ticks,
     _read_lock_holder_identity,
     _scratch_tree_owner_dead,
     acquire_suite_admission,
@@ -1129,11 +1130,25 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
     def test_scratch_tree_prefix_matches_test_tmpfs_shs_own_mktemp_template(
         self,
     ) -> None:
-        """scripts/test_tmpfs.sh's setup_cratedigger_test_tmpfs creates its
-        scratch tree with `mktemp -d "$parent/cratedigger-tests.XXXXXX"` —
-        a hand-typed literal there, not a value either side imports. This
-        pin is the only thing that would catch the constant here drifting
-        away from that literal."""
+        """Issue #1208 review D2: an earlier version of this docstring
+        falsely claimed this pin "is the only thing that would catch the
+        constant here drifting" and, implicitly, that it binds this
+        constant to the producer. Neither is true — both sides of this
+        equality are hand-typed literals (this one, and
+        scripts/test_tmpfs.sh's own `mktemp -d
+        "$parent/cratedigger-tests.XXXXXX"` template), so this is a
+        same-repo consistency check between two independently-written
+        strings, not a producer binding. Real producer-side drift is
+        caught elsewhere, against the REAL shell function:
+        `tests.test_test_tmpfs.TestTmpfsSetup.test_allocates_isolated_
+        tmpfs_directory_and_cleans_it_on_exit` (asserts the real created
+        directory's name against its own hand-typed "cratedigger-tests."
+        literal) and
+        `tests.test_test_tmpfs.ScratchTreeOwnershipMarkerTestCase`'s real
+        SIGKILL round trip (drives the real setup function end to end).
+        This pin is kept anyway because it fails fast and names the exact
+        drifted value if the two literals here and in run_test_suite.py
+        ever disagree with each other — it does not replace those."""
         self.assertEqual(SCRATCH_TREE_PREFIX, "cratedigger-tests.")
 
     def _scratch_tree(self, name: str, *, age_seconds: float, now: float) -> Path:
@@ -1200,6 +1215,78 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
 
         self.assertTrue(_scratch_tree_owner_dead(tree))
 
+    # --- Issue #1208 review D4: "cannot verify" must never collapse into
+    # "provably dead". A permission boundary (e.g. a restrictive `hidepid`
+    # mount) or a malformed /proc/<pid>/stat line is not constructible
+    # against a REAL /proc entry without root or a user-namespace remap,
+    # so these use the kwarg-DI seam _proc_stat_start_ticks and
+    # _scratch_tree_owner_dead both accept (`read_stat=` / `proc_stat=`) —
+    # production always uses the real default; only tests inject.
+
+    def test_proc_stat_start_ticks_confirms_absence_only_on_file_not_found(
+        self,
+    ) -> None:
+        def _raise(exc: BaseException) -> str:
+            raise exc
+
+        CASES = (
+            (
+                "process confirmed gone (ENOENT)",
+                lambda pid: _raise(FileNotFoundError()),
+                (True, None),
+            ),
+            (
+                "permission boundary (a real, non-ENOENT OSError)",
+                lambda pid: _raise(PermissionError()),
+                (False, None),
+            ),
+            (
+                "malformed content: no comm-field close paren",
+                lambda pid: "not a real stat line",
+                (False, None),
+            ),
+            (
+                "malformed content: too few fields after comm",
+                lambda pid: "12345 (bash) R 1 2 3",
+                (False, None),
+            ),
+        )
+        for desc, read_stat, expected in CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    _proc_stat_start_ticks(12345, read_stat=read_stat),
+                    expected,
+                )
+
+    def test_proc_stat_start_ticks_reads_real_ticks_on_success(self) -> None:
+        """The happy path, still through the real default reader — proves
+        the DI seam's default is wired to the real function, not just
+        that the seam itself can be overridden."""
+        confirmed_absent, ticks = _proc_stat_start_ticks(os.getpid())
+
+        self.assertFalse(confirmed_absent)
+        self.assertEqual(ticks, _proc_start_ticks(os.getpid()))
+
+    def test_scratch_tree_owner_dead_is_false_when_liveness_cannot_be_verified(
+        self,
+    ) -> None:
+        """THE outermost real adapter for this decision: a marker naming
+        a pid whose /proc read fails for a reason OTHER than confirmed
+        absence must never be treated as dead — "unknown" degrades to
+        "alive", the fail-closed half of the ownership-marker design, now
+        proven for the /proc-read failure mode specifically (not just the
+        marker-file failure modes the earlier tests in this class cover)."""
+        tree = self._scratch_tree(
+            "cratedigger-tests.unverifiable", age_seconds=1, now=time.time()
+        )
+        self._write_owner_marker(tree, 999999999, "123456")
+
+        self.assertFalse(
+            _scratch_tree_owner_dead(
+                tree, proc_stat=lambda pid: (False, None)
+            )
+        )
+
     @staticmethod
     def _observed_start_ticks(pid: int) -> str:
         ticks = _proc_start_ticks(pid)
@@ -1226,10 +1313,13 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
             )
             self._write_owner_marker(tree, proc.pid, ticks)
             # Writing the marker just now bumped the directory's own mtime
-            # to "now" (a new dirent updates the parent dir's mtime) —
-            # restore the staleness so the age gate alone could NOT be
-            # what is protecting this tree; only the live-owner check may.
-            os.utime(tree, (stamp, stamp))
+            # AND gave the .owner file itself a fresh mtime —
+            # _scratch_tree_last_activity (issue #1208 review D3) walks
+            # the WHOLE tree, so restamping only the top-level dir is not
+            # enough: without restamping the marker file too, the age
+            # gate alone (not the live-owner check) would be what keeps
+            # this test green, defeating the point of the test.
+            self._restamp_recursive(tree, stamp)
 
             reaped = reap_stale_check_bundles(
                 self.runtime, max_age_seconds=100, reference_time=now
@@ -1256,10 +1346,11 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
             "cratedigger-tests.deadchild", age_seconds=999, now=now
         )
         self._write_owner_marker(tree, pid, ticks)
-        # Writing the marker just now bumped the directory's own mtime to
-        # "now" (a new dirent updates the parent dir's mtime) — restore
-        # the staleness _bundle_last_activity's fallback will read.
-        os.utime(tree, (stamp, stamp))
+        # Writing the marker just now bumped the directory's own mtime AND
+        # gave the .owner file itself a fresh mtime — _scratch_tree_last_
+        # activity (issue #1208 review D3) walks the WHOLE tree, so both
+        # need restoring to genuine staleness, not just the top-level dir.
+        self._restamp_recursive(tree, stamp)
 
         reaped = reap_stale_check_bundles(
             self.runtime, max_age_seconds=100, reference_time=now
@@ -1303,6 +1394,69 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
 
         self.assertEqual(reaped, ())
         self.assertTrue(tree.exists())
+
+    # --- Issue #1208 review D3: the age gate must walk the WHOLE tree,
+    # not just its top-level directory mtime. A write into an EXISTING
+    # nested subdirectory never bumps the top-level dir's own mtime, so
+    # an orphaned descendant of the (now dead) owning shell — e.g. issue
+    # #1214's fuzz burst, which takes neither the admission lock nor a
+    # headroom guard — could keep a tree genuinely in use while its
+    # top-level dirent looked stale for hours.
+
+    @staticmethod
+    def _restamp_recursive(path: Path, stamp: float) -> None:
+        for root, dirs, files in os.walk(path):
+            for name in (*dirs, *files):
+                os.utime(os.path.join(root, name), (stamp, stamp))
+        os.utime(path, (stamp, stamp))
+
+    def test_reap_keeps_a_dead_owned_tree_with_recent_nested_activity(
+        self,
+    ) -> None:
+        now = time.time()
+        old = now - 999
+        tree = self._scratch_tree(
+            "cratedigger-tests.orphanwriting", age_seconds=999, now=now
+        )
+        self._write_owner_marker(tree, 999999999, "123456")
+        nested = tree / "nested"
+        nested.mkdir()
+        self._restamp_recursive(tree, old)
+        # Created AFTER the restamp above, so its mtime (and its parent
+        # nested/'s) is genuinely recent — an orphaned descendant still
+        # writing, exactly the scenario the top-level-only check misses.
+        (nested / "still-writing.tmp").write_text("x")
+
+        reaped = reap_stale_check_bundles(
+            self.runtime, max_age_seconds=100, reference_time=now
+        )
+
+        self.assertEqual(reaped, ())
+        self.assertTrue(tree.exists())
+
+    def test_reap_removes_a_dead_owned_tree_once_all_nested_activity_is_stale(
+        self,
+    ) -> None:
+        """Converse of the above: once every entry in the tree — not just
+        the top-level dir — is genuinely stale, the dead-owned tree is
+        reaped."""
+        now = time.time()
+        old = now - 999
+        tree = self._scratch_tree(
+            "cratedigger-tests.trulystale", age_seconds=999, now=now
+        )
+        self._write_owner_marker(tree, 999999999, "123456")
+        nested = tree / "nested"
+        nested.mkdir()
+        (nested / "old.tmp").write_text("x")
+        self._restamp_recursive(tree, old)
+
+        reaped = reap_stale_check_bundles(
+            self.runtime, max_age_seconds=100, reference_time=now
+        )
+
+        self.assertEqual(reaped, (tree,))
+        self.assertFalse(tree.exists())
 
 
 class FinalGateReceiptRetirementTestCase(unittest.TestCase):
@@ -1529,6 +1683,63 @@ class FinalGateReceiptRetirementTestCase(unittest.TestCase):
 
         self.assertEqual(reaped, (bundle,))
         self.assertFalse(bundle.exists())
+
+    # --- Issue #1208 review D6: per-clause coverage for
+    # reap_stale_final_gate_receipts's non-dir/symlink and foreign-uid
+    # guards — untested gaps review found by planting mutants that
+    # survived. Recorded honestly: for THESE two clauses specifically,
+    # shutil.rmtree already refuses to operate on a symlink or a
+    # non-directory (raises OSError, caught by this function's own
+    # `except OSError: continue`), so removing either guard clause does
+    # NOT change the observable `retired` return value or which entities
+    # survive on disk — the tests below pin that real end-to-end safety
+    # property (proven empirically: shutil.rmtree(symlink) raises
+    # "Cannot call rmtree on a symbolic link", shutil.rmtree(regular_file)
+    # raises NotADirectoryError), not the specific guard-clause mutant,
+    # which this composition genuinely cannot distinguish from "no guard
+    # at all". They still matter as regression coverage: if a future
+    # change ever replaced shutil.rmtree with something that lacks its
+    # built-in refusal, these would be the tests that catch it.
+
+    def test_never_retires_a_symlink_named_like_a_receipt(self) -> None:
+        now = time.time()
+        real_target = self.runtime / "not-actually-a-receipt"
+        real_target.mkdir(mode=0o700)
+        (real_target / "terminal").write_text("pass 0\n")
+        stamp = now - 999
+        os.utime(real_target / "terminal", (stamp, stamp))
+        link = self.runtime / "cratedigger-final-gate.symlink"
+        link.symlink_to(real_target)
+
+        retired = reap_stale_final_gate_receipts(
+            self.runtime, max_age_seconds=100, reference_time=now
+        )
+
+        self.assertEqual(retired, ())
+        self.assertTrue(link.exists())
+        self.assertTrue(real_target.exists())
+
+    def test_never_retires_a_non_directory_named_like_a_receipt(self) -> None:
+        now = time.time()
+        stray_file = self.runtime / "cratedigger-final-gate.strayfile"
+        stray_file.write_text("not a receipt directory\n")
+        stamp = now - 999
+        os.utime(stray_file, (stamp, stamp))
+
+        retired = reap_stale_final_gate_receipts(
+            self.runtime, max_age_seconds=100, reference_time=now
+        )
+
+        self.assertEqual(retired, ())
+        self.assertTrue(stray_file.exists())
+
+    # The third guard clause (`info.st_uid != os.getuid()`) has no test
+    # here: constructing a receipt-shaped directory genuinely owned by a
+    # DIFFERENT real uid requires root or a user-namespace remap, neither
+    # available to this test user. Recorded as an honest, stated residual
+    # (issue #1208 review D6) rather than a fabricated or skipped test —
+    # `reap_stale_check_bundles` carries the identical, equally untested
+    # clause already, so this is not a new gap.
 
     def test_default_retirement_floor_is_seven_days(self) -> None:
         """Pins the documented constant directly — a change here is a
