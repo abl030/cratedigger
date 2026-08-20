@@ -66,19 +66,25 @@ and emits a warning when the item was never observable or remains present.
 Failures are surfaced as warnings on the already completed delete rather than
 rolling library state back.
 
-**This lane's refresh does not converge, by the same source-level finding the
-post-import reconciler below exists to route around.** A targeted
-`/Items/{id}/Refresh` cannot reap the item it targets — Jellyfin computes
-deletion one level up, from the PARENT folder's own disk-vs-DB child-set
-diff — so after an exact-album library delete the album's `MusicAlbum` item
-is expected to remain a childless orphan (its `Audio` children are the ones
-actually removed, and only as an incidental side effect of the very refresh
-this lane submits) until a scan reaches the parent by some other route (a
-later sibling import's own notifier, or an operator-triggered library scan).
-The `"exact album item … remains observable after refresh submission"`
-`warning` this lane emits is therefore the EXPECTED steady state for this
-lane too, not a transient condition awaiting convergence — this code path is
-unchanged by issue #1203 item 2; only its documentation is corrected here.
+**When the item IS found by its former path, this lane's TARGETED refresh
+does not converge, by the same source-level finding the post-import
+reconciler below exists to route around.** A targeted `/Items/{id}/Refresh`
+cannot reap the item it targets — Jellyfin computes deletion one level up,
+from the PARENT folder's own disk-vs-DB child-set diff, never from the item
+refreshing itself — so after an exact-album library delete the album's
+`MusicAlbum` item is expected to remain a childless orphan (its `Audio`
+children are the ones actually removed, and only as an incidental side
+effect of the very refresh this lane submits) until a scan reaches the
+parent by some other route (a later sibling import's own notifier, or an
+operator-triggered library scan). The
+`"exact album item … remains observable after refresh submission"` `warning`
+this lane emits for that case is therefore an EXPECTED outcome, not a
+transient condition awaiting convergence. This is narrower than it may look:
+when NO item is found by the former path, this lane instead refreshes
+`cfg.jellyfin_library_id` — a library-SCOPE refresh, which recursively
+re-validates the whole tree and does reach the orphan's parent, so that path
+genuinely can converge. This code path is unchanged by issue #1203 item 2;
+only its documentation is corrected here.
 
 ### Post-import vanished-path reconciliation (issue #1203 item 2)
 
@@ -100,16 +106,17 @@ BOTH before Beets launch and again here, and diffs the two
 `lib.dispatch.core._vanished_album_directories`) — this before/after diff is
 the PRIMARY, authoritative source of vanished pre-upgrade paths.
 `postflight.replaced_albums` (the harness's mid-import serialization) is only
-a SECONDARY source unioned in: it can already show the album's NEW path by
-the time it's captured — verified live for the Bowie row above
-(`download_log` 40213, request 8964: `replaced_albums` records
-`album_path = .../David Bowie/1969 - David Bowie [SBL 7912]` for removed
-beets album 19881, which is exactly the path beets album 19882 now
-occupies) and fingerprinted three more times by
-`jellyfin_date_created_pins`, whose `album_item_id IS NULL` floor-pin rows
-(3 of 262 live) are the signature of a path-changing upgrade whose old path
-could not be found — so it cannot be trusted alone. For each distinct vanished
-path from either source, Cratedigger calls
+a SECONDARY source unioned in: it reports only an album the import's dup-guard
+answered "remove" for — it structurally cannot report a directory that left
+the library for any OTHER reason. Verified live: the
+`…1969 - David Bowie [1969]` directory (request 8964, the incident above)
+left the Beets library with NO `download_log` row anywhere in the corpus
+naming that path, so whatever removed it was not a dup-guard removal this
+pipeline ever recorded — `replaced_albums` had nothing to say about it. A
+before/after Beets directory snapshot observes what Beets actually held, so
+it catches a directory leaving the release regardless of the reason —
+exactly the property `replaced_albums` cannot have. For each distinct
+vanished path from either source, Cratedigger calls
 `lib.library_delete_notifiers.notify_library_delete` with
 `allow_escalation=False`.
 
@@ -144,10 +151,12 @@ final — neither is a "try again later":
 
 Both shapes are logged, one line per outcome (`lib/dispatch/core.py::_reconcile_vanished_replaced_album_paths`,
 one line per provider — always Plex and Jellyfin both, even when only one
-is configured). To find these in the journal:
+is configured). This call runs inside `dispatch_import_core`, drained by
+`cratedigger-importer.service`, NOT the `cratedigger.service` timer unit — to
+find these in the journal:
 
 ```bash
-journalctl -u cratedigger | grep 'MEDIA SERVER RECONCILE:'
+journalctl -u cratedigger-importer | grep 'MEDIA SERVER RECONCILE:'
 ```
 
 Whether Cratedigger should ever be authorized to delete a Jellyfin item

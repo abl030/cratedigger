@@ -740,12 +740,23 @@ def _trigger_post_import_notifiers(
 
     ``pre_import_album_directories`` is the snapshot ``dispatch_import_core``
     captured before Beets launch; this function takes the matching
-    POST-import snapshot here (issue #1203 item 2) and diffs the two —
-    the authoritative primary source for vanished directories, ahead of the
-    secondary ``postflight.replaced_albums`` source. That diff happens AFTER
-    both pin captures below on purpose: it is only used at the reconciler
-    call, which MUST stay last (see ``_reconcile_vanished_replaced_album_paths``
-    docstring for why).
+    POST-import snapshot and diffs the two (issue #1203 item 2) —
+    ``_vanished_album_directories``'s output is the authoritative primary
+    source for vanished directories, ahead of the secondary
+    ``postflight.replaced_albums`` source.
+
+    Beets state is already final by the time this function runs — the
+    import subprocess that could mutate it already completed before
+    ``dispatch_import_core`` ever calls this — so the snapshot diff itself
+    is taken up front, not at the reconciler call. This is deliberate: it
+    lets the SAME vanished-directory set reach BOTH the Jellyfin pin
+    capture below and the reconciler at the end, instead of the pin capture
+    seeing every album the release still holds (see the pin capture call
+    site for why that would be wrong). Only the media-server NOTIFY call
+    itself carries the ordering constraint — it MUST stay last, after both
+    pin captures and both new-path notifiers (see
+    ``_reconcile_vanished_replaced_album_paths`` docstring for why);
+    reading Beets earlier does not.
     """
     from lib.util import trigger_jellyfin_scan as trigger_jellyfin
     from lib.util import trigger_plex_scan as trigger_plex
@@ -757,6 +768,18 @@ def _trigger_post_import_notifiers(
         cancellation_token=cancellation_token,
         owner_session_identity=owner_session_identity,
     )
+
+    post_import_album_directories = _capture_album_directory_snapshot(
+        album_directory_snapshot_fn,
+        beets_library_db_path=beets_library_db_path,
+        beets_library_root=beets_library_root,
+        mb_release_id=mb_release_id,
+        when="post-import",
+    )
+    vanished_directories = _vanished_album_directories(
+        pre_import_album_directories, post_import_album_directories,
+    )
+
     imported_path = import_result.postflight.imported_path
     plex_original_added_at: int | None = None
     try:
@@ -784,14 +807,19 @@ def _trigger_post_import_notifiers(
             historical_added_at=plex_original_added_at,
             # Union the PRIMARY snapshot source (issue #1203 item 2) ahead of
             # the secondary postflight.replaced_albums source, same ordering
-            # convention as the reconciler itself. pre_import_album_directories
-            # is already computed and in scope; the POST-import snapshot is
-            # deliberately NOT used here -- it isn't needed to find the
-            # pre-upgrade item (this capture runs before any post-import
-            # snapshot exists) and using it would violate the ordering
-            # constraint _reconcile_vanished_replaced_album_paths documents.
+            # convention as the reconciler itself. ``vanished_directories``
+            # (computed above) is the GENUINELY-vanished set only -- never
+            # the raw pre_import_album_directories.values(). That distinction
+            # matters: pre_import_album_directories holds EVERY album the
+            # release still holds, not just ones that left. A release held
+            # by several albums (a surviving sibling under the same
+            # identity) would otherwise leak the sibling's own directory in
+            # here, and capture_jellyfin_date_created_pin would then pin a
+            # genuinely-new import against the SIBLING's Jellyfin item and
+            # date, clamping the new album's DateCreated backwards and
+            # hiding it from Recently Added.
             replaced_album_paths=[
-                *pre_import_album_directories.values(),
+                *vanished_directories,
                 *(
                     candidate.album_path
                     for candidate in import_result.postflight.replaced_albums
@@ -804,21 +832,14 @@ def _trigger_post_import_notifiers(
     trigger_jellyfin(cfg, imported_path)
 
     # MUST run last — see _reconcile_vanished_replaced_album_paths docstring
-    # for why this cannot move before the Jellyfin pin capture above.
-    post_import_album_directories = _capture_album_directory_snapshot(
-        album_directory_snapshot_fn,
-        beets_library_db_path=beets_library_db_path,
-        beets_library_root=beets_library_root,
-        mb_release_id=mb_release_id,
-        when="post-import",
-    )
+    # for why this cannot move before the Jellyfin pin capture above. The
+    # snapshot diff itself (vanished_directories) was already computed at
+    # the top of this function; only the notify call is ordering-sensitive.
     _reconcile_vanished_replaced_album_paths(
         cfg,
         imported_path=imported_path,
         replaced_albums=import_result.postflight.replaced_albums,
-        vanished_snapshot_paths=_vanished_album_directories(
-            pre_import_album_directories, post_import_album_directories,
-        ),
+        vanished_snapshot_paths=vanished_directories,
         notify_fn=media_server_notify_fn,
     )
 
