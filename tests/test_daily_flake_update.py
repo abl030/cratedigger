@@ -479,16 +479,6 @@ class TestDailyFlakeUpdateFakeShimCaching(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.fake = FakeDailyFlakeUpdateCommands(Path(self.tempdir.name))
 
-    def fake_environment(self) -> dict[str, str]:
-        env = os.environ.copy()
-        env.update(
-            {
-                "PATH": f"{self.fake.fake_bin}:{env['PATH']}",
-                "DAILY_UPDATE_FAKE_STATE": str(self.fake.state_path),
-            }
-        )
-        return env
-
     def test_command_stub_is_tiny_and_shares_one_cached_shim_module(self) -> None:
         shim_path = self.fake.fake_bin / "_shim.py"
         self.assertTrue(shim_path.exists())
@@ -507,21 +497,33 @@ class TestDailyFlakeUpdateFakeShimCaching(unittest.TestCase):
         pycache = self.fake.fake_bin / "__pycache__"
         self.assertFalse(pycache.exists())
 
-        self.fake.update_state(lock_changed=False)
+        # Default seed state is lock_changed=True (`_write_state` above), so
+        # this world exits 1 -- an exit-0 world here would be indistinguishable
+        # from a stub that never calls main() at all (P2-F1 review finding on
+        # #1156 items 4/5). The `events` assertion below is the direct kill:
+        # `main()` appends to `state["events"]` before any branch dispatch, so
+        # a stub that imports `_shim` but never calls `main()` leaves it empty
+        # regardless of exit code.
         proc = subprocess.run(
             [str(self.fake.fake_bin / "git"), "diff", "--quiet", "--", "flake.lock"],
-            env=self.fake_environment(),
+            env=self.fake.environment(),
             capture_output=True,
             text=True,
             check=False,
         )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn(
+            ["git", "diff", "--quiet", "--", "flake.lock"],
+            self.fake.state["events"],
+        )
 
         cached = list(pycache.glob("_shim.*.pyc"))
         self.assertEqual(
             len(cached), 1,
             "expected the shim's bytecode to be cached in __pycache__ "
-            f"after one call, found {cached}",
+            f"after one call, found {cached} -- check for an ambient "
+            "PYTHONDONTWRITEBYTECODE or PYTHONPYCACHEPREFIX in your "
+            "environment, either of which silently defeats this caching",
         )
 
     def test_command_stub_fails_loudly_without_the_shared_shim_module(self) -> None:
@@ -529,7 +531,7 @@ class TestDailyFlakeUpdateFakeShimCaching(unittest.TestCase):
 
         proc = subprocess.run(
             [str(self.fake.fake_bin / "git"), "diff", "--quiet", "--", "flake.lock"],
-            env=self.fake_environment(),
+            env=self.fake.environment(),
             capture_output=True,
             text=True,
             check=False,

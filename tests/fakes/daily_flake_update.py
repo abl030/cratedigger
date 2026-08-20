@@ -176,19 +176,16 @@ def main():
 # it instead lets CPython write `__pycache__/_shim.cpython-*.pyc` once and
 # reuse it for the rest (issue #1156 item 5, same fix as item 4's
 # tests/fakes/deploy_pin.py). `-S` skips `site` for faster startup (issue
-# #1156 item 5 also brings this sibling onto the #1152 startup fix). `-S`
-# does not remove the interpreter's own insertion of the running script's
-# directory as sys.path[0] -- that happens regardless of `site` -- but the
-# mechanism is made explicit here (via `__file__`) rather than relied on
-# implicitly. `git`/`nix`/`nix-shell` remain symlinks to this one file, same
-# as before; a symlink's own path (not its target) is what `__file__`
-# resolves to for a directly-run script, so this still finds `_shim.py`
-# alongside the symlink itself.
+# #1156 item 5 also brings this sibling onto the #1152 startup fix). No
+# explicit sys.path manipulation: the interpreter inserts the running
+# script's own directory as sys.path[0] before user code executes, `-S`
+# does not change that, and `_shim.py` always sits beside this stub in the
+# same fixture directory -- so a bare `import _shim` already resolves.
+# `git`/`nix`/`nix-shell` remain symlinks to this one file, same as before;
+# a symlink's own path (not its target) is what the interpreter uses for
+# sys.path[0], and both the symlink and `_shim.py` live in the same
+# directory, so this still finds it.
 _STUB_COMMAND = r'''#!/usr/bin/env -S python3 -S
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _shim
 
 _shim.main()
@@ -283,12 +280,9 @@ class FakeDailyFlakeUpdateCommands:
         state.update(changes)
         self._write_state(state)
 
-    def run(
-        self,
-        script: Path,
-        *,
-        extra_env: dict[str, str] | None = None,
-    ) -> subprocess.CompletedProcess[str]:
+    def environment(
+        self, *, extra_env: dict[str, str] | None = None
+    ) -> dict[str, str]:
         env = os.environ.copy()
         env.update(
             {
@@ -306,10 +300,18 @@ class FakeDailyFlakeUpdateCommands:
         )
         if extra_env:
             env.update(extra_env)
+        return env
+
+    def run(
+        self,
+        script: Path,
+        *,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(script)],
             cwd=self.root,
-            env=env,
+            env=self.environment(extra_env=extra_env),
             capture_output=True,
             text=True,
             check=False,

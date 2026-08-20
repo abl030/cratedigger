@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import tempfile
 import unittest
@@ -608,16 +607,6 @@ class TestDeployCycleFakeShimCaching(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.fake = FakeDeployCycleCommands(Path(self.tempdir.name))
 
-    def fake_environment(self) -> dict[str, str]:
-        env = os.environ.copy()
-        env.update(
-            {
-                "PATH": f"{self.fake.fake_bin}:{env['PATH']}",
-                "DEPLOY_CYCLE_FAKE_STATE": str(self.fake.state_path),
-            }
-        )
-        return env
-
     def test_ssh_stub_is_tiny_and_shares_one_cached_shim_module(self) -> None:
         shim_path = self.fake.fake_bin / "_shim.py"
         self.assertTrue(shim_path.exists())
@@ -638,7 +627,7 @@ class TestDeployCycleFakeShimCaching(unittest.TestCase):
                 str(self.fake.fake_bin / "ssh"), "doc2", "systemctl", "show",
                 "cratedigger-db-migrate.service", "--property=ActiveState",
             ],
-            env=self.fake_environment(),
+            env=self.fake.environment(),
             capture_output=True,
             text=True,
             check=False,
@@ -650,7 +639,9 @@ class TestDeployCycleFakeShimCaching(unittest.TestCase):
         self.assertEqual(
             len(cached), 1,
             "expected the shim's bytecode to be cached in __pycache__ "
-            f"after one call, found {cached}",
+            f"after one call, found {cached} -- check for an ambient "
+            "PYTHONDONTWRITEBYTECODE or PYTHONPYCACHEPREFIX in your "
+            "environment, either of which silently defeats this caching",
         )
 
     def test_ssh_stub_fails_loudly_without_the_shared_shim_module(self) -> None:
@@ -661,7 +652,7 @@ class TestDeployCycleFakeShimCaching(unittest.TestCase):
                 str(self.fake.fake_bin / "ssh"), "doc2", "systemctl", "show",
                 "cratedigger-db-migrate.service", "--property=ActiveState",
             ],
-            env=self.fake_environment(),
+            env=self.fake.environment(),
             capture_output=True,
             text=True,
             check=False,

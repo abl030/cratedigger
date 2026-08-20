@@ -122,17 +122,12 @@ def main():
 # instead lets CPython write `__pycache__/_shim.cpython-*.pyc` once and
 # reuse it for the rest (issue #1156 item 5, same fix as item 4's
 # tests/fakes/deploy_pin.py). `-S` skips `site` for faster startup (issue
-# #1156 item 5 also brings this sibling onto the #1152 startup fix). `-S`
-# does not remove the interpreter's own insertion of the running script's
-# directory as sys.path[0] -- that happens regardless of `site` -- but the
-# mechanism is made explicit here (via `__file__`) rather than relied on
-# implicitly, and it is independent of the process's current working
-# directory.
+# #1156 item 5 also brings this sibling onto the #1152 startup fix). No
+# explicit sys.path manipulation: the interpreter inserts the running
+# script's own directory as sys.path[0] before user code executes, `-S`
+# does not change that, and `_shim.py` always sits beside this stub in the
+# same fixture directory -- so a bare `import _shim` already resolves.
 _STUB_SSH = r'''#!/usr/bin/env -S python3 -S
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _shim
 
 _shim.main()
@@ -292,12 +287,7 @@ class FakeDeployCycleCommands:
             encoding="utf-8",
         )
 
-    def run(
-        self,
-        script: Path,
-        *args: str,
-        max_polls: int = 4,
-    ) -> subprocess.CompletedProcess[str]:
+    def environment(self, *, max_polls: int = 4) -> dict[str, str]:
         env = os.environ.copy()
         env.update(
             {
@@ -308,11 +298,19 @@ class FakeDeployCycleCommands:
                 "CRATEDIGGER_CYCLE_VERIFY_TIMEOUT_SECONDS": "60",
             }
         )
+        return env
+
+    def run(
+        self,
+        script: Path,
+        *args: str,
+        max_polls: int = 4,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [str(script), *args],
             text=True,
             capture_output=True,
-            env=env,
+            env=self.environment(max_polls=max_polls),
             check=False,
         )
 

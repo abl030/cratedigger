@@ -879,7 +879,9 @@ class TestDeployPinFakeShimCaching(unittest.TestCase):
             self.assertEqual(
                 len(cached), 1,
                 "expected the shim's bytecode to be cached in __pycache__ "
-                f"after one call, found {cached}",
+                f"after one call, found {cached} -- check for an ambient "
+                "PYTHONDONTWRITEBYTECODE or PYTHONPYCACHEPREFIX in your "
+                "environment, either of which silently defeats this caching",
             )
 
     def test_stub_fails_loudly_without_the_shared_shim_module(self) -> None:
