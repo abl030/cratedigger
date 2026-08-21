@@ -565,8 +565,10 @@ class TestGroupedCompositePhysicalCheck(unittest.TestCase):
         recording -- a mislabeled rip, a bonus track, an accidentally-
         copied file), not an unreadable one; ``AudioTagReadError`` is far
         less likely live. Same composite-naming contract as the
-        unreadable-extra pin above, through the OTHER ``unknown_extra``
-        producer ("uncatalogued audio lacks exact source identity").
+        unreadable-extra pin above, through another ``unknown_extra``
+        producer ("uncatalogued audio lacks exact source identity" --
+        one of three; see also the conflicting-identity producer covered
+        by ``tests/test_library_completeness_generated.py``'s property).
         """
         release = "461206"
         composite_path = "/album/composite.opus"
@@ -630,6 +632,80 @@ class TestGroupedCompositePhysicalCheck(unittest.TestCase):
             detect_composite_gap=_unreachable,
         )
         self.assertEqual(kinds, {"catalog_drift"})
+
+    def test_uncatalogued_remaining_subposition_satisfies_via_recording_tag(self) -> None:
+        """Issue #1237 review G5: the E3 recording loop reads BOTH
+        ``release_track`` and ``recording`` from ``tag_reader`` -- a
+        mutant narrowing it to ``release_track`` alone survived every
+        existing test, because none of them satisfied a remaining sub-
+        position through the SECOND (``mb_trackid``/recording) tag only.
+        Here the uncatalogued file's ``release_track`` tag is blank and
+        only its ``recording`` tag names the remaining sub-position.
+        """
+        release = "461206"
+        first_path = "/album/16.1.opus"
+        second_path = "/album/16.2.opus"
+        tags = {
+            first_path: (f"{release}-16.1", ""),
+            second_path: ("", f"{release}-16.2"),
+        }
+        album = LibraryAlbum(
+            1, "Artist", "Album", ReleaseIdentity("discogs", release), "/album",
+            (CatalogItem(first_path, tags[first_path][0], ""),),
+        )
+
+        def _unreachable(path: str) -> bool:
+            raise AssertionError(f"unexpected composite audio decode for {path!r}")
+
+        kinds = self._classify(
+            album, _discogs_raw(["16.1", "16.2"], release), tags=tags,
+            detect_composite_gap=_unreachable,
+        )
+        self.assertEqual(kinds, {"catalog_drift"})
+
+    def test_unidentifiable_extra_with_silence_filler_names_only_real_parts(self) -> None:
+        """Issue #1237 review G1: the E1 ``unknown_extra`` message is a
+        THIRD ``real_label`` consumer (alongside the unreadable-composite
+        ``unknown`` and ``missing_source_audio``), and it was the only one
+        with no test proving it -- a mutant swapping ``real_label`` for
+        the unfiltered ``component.title`` at the E1 site survives every
+        other test in this module, which would let a "(silence)" filler
+        marker be named to the operator as possibly-missing audio.
+        """
+        release = "888888"
+        raw = {"id": release, "tracks": [
+            {"position": "10.1", "title": "Island Lost At Sea"},
+            {"position": "10.2", "title": "(silence)"},
+            {"position": "10.3", "title": "Untitled"},
+        ]}
+        composite_path = "/album/composite.opus"
+        stray_path = "/album/stray.opus"
+        composite_key = f"{release}-10.1"
+        album = LibraryAlbum(
+            1, "Artist", "Album", ReleaseIdentity("discogs", release), "/album",
+            (CatalogItem(composite_path, composite_key, ""),),
+        )
+        manifest = discogs_manifest(release, raw)
+        self.assertIn("(silence)", manifest.components[0].title)
+
+        def _tag_reader(path: str) -> tuple[str, str]:
+            if path == stray_path:
+                return ("", "")
+            return (composite_key, "")
+
+        result = classify_album(
+            album, manifest,
+            enumerate_files=lambda _directory: (composite_path, stray_path),
+            tag_reader=_tag_reader,
+            detect_composite_gap=lambda _path: False,
+        )
+        unknown_details = [f.detail for f in result.findings if f.kind == "unknown"]
+        self.assertTrue(
+            any("Island Lost At Sea" in detail and "Untitled" in detail for detail in unknown_details),
+            f"expected one unknown finding to name the composite, got {unknown_details!r}",
+        )
+        for detail in unknown_details:
+            self.assertNotIn("(silence)", detail)
 
 
 class TestSourceRawContracts(unittest.TestCase):

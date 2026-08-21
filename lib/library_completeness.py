@@ -552,20 +552,20 @@ def classify_album(
             unmatched_mb_witnesses += 1
 
     unknown_extra = False
-    # Issue #1237 review E3: a physically-present, correctly-tagged
+    # Issue #1237 review E3/G3/G6: a physically-present, correctly-tagged
     # uncatalogued file can name a SUB-position of a coalesced Discogs
-    # group (e.g. "1-16.2") -- a real identity that is never a top-level
-    # ``components_by_key`` entry, so ``matching_keys`` below never
-    # recognises it and it is otherwise invisible to every branch in this
-    # loop. Recorded separately (identity -> path) so the grouped-
-    # composite subtraction further down can treat it as satisfied too,
-    # symmetrically with the FIRST position's own ``component_key_paths``
-    # route (``test_uncatalogued_present_first_position_still_reaches_
+    # group (e.g. "1-16.2") that is NOT a top-level ``components_by_key``
+    # entry -- true of every sub-position except the group's own FIRST
+    # one (which IS the group's top-level key, so ``matching_keys`` below
+    # already recognises it). Recorded as a set of identities -- the
+    # matching physical path is never consumed here, only membership --
+    # so the grouped-composite subtraction further down can treat a
+    # REMAINING sub-position as satisfied too, symmetrically with the
+    # FIRST position's own ``component_key_paths`` route
+    # (``test_uncatalogued_present_first_position_still_reaches_
     # decode``). Deliberately does not change ``known_component_keys`` or
-    # ``unknown_extra`` semantics above -- last-write-wins on a shared
-    # identity between two uncatalogued files is an accepted residual
-    # (issue #1237 review E-round "recorded, do NOT chase").
-    uncatalogued_sub_identity_paths: dict[str, str] = {}
+    # ``unknown_extra`` semantics above.
+    uncatalogued_sub_identities: set[str] = set()
     for path in physical_paths - catalog_paths:
         try:
             release_track, recording = tag_reader(path)
@@ -594,7 +594,7 @@ def classify_album(
                 ))
             for identity in (release_track, recording):
                 if identity:
-                    uncatalogued_sub_identity_paths.setdefault(identity, path)
+                    uncatalogued_sub_identities.add(identity)
         elif manifest.source == "musicbrainz":
             key = current_component_key(release_track, recording)
             if key:
@@ -649,22 +649,23 @@ def classify_album(
                 (key, title) for key, title in real_subcomponents
                 if key != component.key
                 and key not in existing_source_keys
-                and key not in uncatalogued_sub_identity_paths
+                and key not in uncatalogued_sub_identities
             ]
             if not remaining:
                 continue
             path = component_key_paths.get(component.key)
             if path is None:
                 continue
-            # C9/D7: both messages below name only the REAL sub-components
-            # -- a silence marker was never real audio, and the label must
-            # be consistent whether the composite turns out unreadable or
-            # genuinely short (previously only the missing_source_audio
-            # branch filtered it, so an "unknown" finding for the same
-            # group still spelled out "(silence)"). Only the
-            # missing_source_audio message below also COUNTS them
-            # (``len(real_titles)``); the unreadable-composite message
-            # names but does not count.
+            # C9/D7/G1: all THREE messages built from ``real_label``/
+            # ``real_titles`` below -- the composite-unreadable ``unknown``,
+            # the unknown_extra-suppressed ``unknown``, and
+            # ``missing_source_audio`` -- name only the REAL sub-components;
+            # a silence marker was never real audio, and the label must be
+            # consistent across every branch (previously only the
+            # missing_source_audio branch filtered it, so an "unknown"
+            # finding for the same group still spelled out "(silence)").
+            # Only the missing_source_audio message also COUNTS them
+            # (``len(real_titles)``); the other two name but do not count.
             real_titles = tuple(title for _, title in real_subcomponents)
             real_label = " / ".join(real_titles) or component.key
             try:
@@ -693,7 +694,7 @@ def classify_album(
                 findings.append(CompletenessFinding(
                     "unknown",
                     f"{real_label}: uncatalogued extra audio could satisfy "
-                    "the apparent gap; installed composite shows no "
+                    "the missing part -- installed composite shows no "
                     "internal silence gap",
                 ))
             else:

@@ -799,7 +799,7 @@ def _make_album_data(**overrides):
 class TestApplyCandidateScenarioIdempotence(unittest.TestCase):
     """``apply_candidate_scenario`` must leave no stale field behind when
     called a second time on the SAME ``ValidationResult`` (issue #1237
-    review C8/D4/E4). ``lib/download_validation.py``'s merge-redirect
+    review C8/D4/E4/G4). ``lib/download_validation.py``'s merge-redirect
     seam is exactly one such caller, and its OWN call is always the first
     on a given object (D4): it is reached only when ``result.scenario ==
     "mbid_not_found"``, a value this function itself never produces. That
@@ -808,19 +808,27 @@ class TestApplyCandidateScenarioIdempotence(unittest.TestCase):
     message the harness sends within one session, with last-wins field
     overwrites on the SAME shared ``result``, calling
     ``apply_candidate_scenario`` once per message whose candidate matches
-    the target MBID. Beets' own import session discovers one task per
-    album-shaped subdirectory it finds under the given path
-    (``harness/beets_harness.py``'s ``HarnessImportSession`` adds no
-    override that limits this to one), so a directory holding more than
-    one such subdirectory yields more than one ``choose_match`` before
-    ``session_end`` -- a DIFFERENT concept from the later, separate
-    ``nested_layout`` quality-decision fact (``lib/measurement.py``),
-    which is computed downstream of validation and names a different
-    failure. A second ``apply_candidate_scenario`` call on the same
-    object is therefore reachable inside ``beets_validate`` itself
-    whenever more than one task's candidates match the requested MBID --
-    exactly the case this test guards, independent of whether a specific
-    live album is known to exercise it today.
+    the target MBID; beets can emit more than one ``choose_match`` in one
+    session (``HarnessImportSession.choose_match`` in
+    ``harness/beets_harness.py`` numbers each with an incrementing
+    ``task_id``, evidence the underlying protocol supports more than one
+    per session). Beets' own ``albums_in_dir`` (``beets/importer/tasks.py``)
+    is NOT one task per subdirectory as a rule, though: it deliberately
+    COLLAPSES a multi-disc layout (``CD1``/``CD2``, ``Disc 1``/``Disc 2``,
+    and similar numbered-marker siblings) into a single task -- the most
+    common shape a directory with more than one subdirectory takes in this
+    pipeline. The mechanism above is real for two genuinely UNRELATED
+    album subdirectories under one target path (not a recognised multi-
+    disc pattern), which is what a second ``apply_candidate_scenario``
+    call actually requires -- a DIFFERENT concept from the later, separate
+    ``nested_layout`` quality-decision fact (spelled in
+    ``lib/quality/pipeline.py`` and ``lib/import_preview.py``), which is
+    computed downstream of validation and names a different failure. A
+    second ``apply_candidate_scenario`` call on the same object is
+    therefore reachable inside ``beets_validate`` itself whenever more
+    than one task's candidates match the requested MBID -- exactly the
+    case this test guards, independent of whether a specific live album
+    is known to exercise it today.
     """
 
     def _composite_candidate(self, *, local_length: float, indexed_length: float) -> CandidateSummary:

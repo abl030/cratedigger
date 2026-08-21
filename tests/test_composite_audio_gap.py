@@ -354,6 +354,20 @@ class TestDetectCompositeSilenceGap(unittest.TestCase):
         with self.assertRaises(CompositeAudioReadError):
             detect_composite_silence_gap(path)
 
+    def test_just_over_one_second_file_measures_normally(self) -> None:
+        """Issue #1237 review G5: brackets the D6 guard from the OTHER
+        side -- a mutant widening it (``< _DECODE_SAMPLE_RATE`` to
+        ``< 2 * _DECODE_SAMPLE_RATE``) survived every existing test,
+        since none proved a file just over one second still measures
+        rather than raising. 1.5s of continuous tone has no qualifying
+        gap, so this also pins the expected non-raising result.
+        """
+        handle, path = tempfile.mkstemp(suffix=".wav")
+        os.close(handle)
+        self.addCleanup(os.remove, path)
+        _write_synthetic_wav(path, [("tone", 1.5)])
+        self.assertFalse(detect_composite_silence_gap(path))
+
 
 if __name__ == "__main__":
     unittest.main()
