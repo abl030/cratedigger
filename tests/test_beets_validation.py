@@ -799,10 +799,14 @@ def _make_album_data(**overrides):
 class TestApplyCandidateScenarioIdempotence(unittest.TestCase):
     """``apply_candidate_scenario`` must leave no stale field behind when
     called a second time on the SAME ``ValidationResult`` (issue #1237
-    review C8) -- e.g. ``lib/download_validation.py``'s merge-redirect seam
-    calling it again for the survivor's own candidate after an earlier
-    call already populated ``incomplete_composite_paths`` for a DIFFERENT
-    candidate.
+    review C8/D4). No current production caller actually does this --
+    ``lib/download_validation.py``'s merge-redirect seam calls it exactly
+    once per object, always the FIRST call, since it is reached only when
+    ``result.scenario == "mbid_not_found"``, a value this function itself
+    never produces. This test protects the function's OWN stated "total
+    and idempotent by construction" contract (already promised for
+    ``valid``/``scenario``/``detail``) directly, independent of whether
+    any caller currently exercises it.
     """
 
     def _composite_candidate(self, *, local_length: float, indexed_length: float) -> CandidateSummary:

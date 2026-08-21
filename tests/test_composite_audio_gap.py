@@ -108,18 +108,25 @@ class TestGapDecisionFromSilenceFlags(unittest.TestCase):
     def test_all_silence_is_false(self) -> None:
         self.assertFalse(gap_decision_from_silence_flags([True] * 20))
 
+    # Issue #1237 review D2: every fixture below is a LITERAL 5/10, never
+    # ``MIN_SILENCE_SECONDS``/``MIN_TRAILING_AUDIO_SECONDS``. Building a
+    # boundary fixture FROM the same mutable symbol production reads makes
+    # it agree by construction -- a mutated constant reconstructs the exact
+    # same (now-wrong) boundary and the pin can never catch it. The literal
+    # values below match the constants' current values (5, 10); if either
+    # constant's intended value ever legitimately changes, these literals
+    # must be updated by hand, which is the point.
+
     def test_gap_too_short_is_false(self) -> None:
-        flags = [False] * 3 + [True] * (MIN_SILENCE_SECONDS - 1) + [False] * 20
+        flags = [False] * 3 + [True] * 4 + [False] * 20
         self.assertFalse(gap_decision_from_silence_flags(flags))
 
     def test_trailing_audio_too_short_is_false(self) -> None:
-        flags = [False] * 3 + [True] * MIN_SILENCE_SECONDS + [False] * (
-            MIN_TRAILING_AUDIO_SECONDS - 1
-        )
+        flags = [False] * 3 + [True] * 5 + [False] * 9
         self.assertFalse(gap_decision_from_silence_flags(flags))
 
     def test_exact_boundary_lengths_are_true(self) -> None:
-        flags = [False] * 3 + [True] * MIN_SILENCE_SECONDS + [False] * MIN_TRAILING_AUDIO_SECONDS
+        flags = [False] * 3 + [True] * 5 + [False] * 10
         self.assertTrue(gap_decision_from_silence_flags(flags))
 
     def test_second_gap_qualifies_even_when_first_does_not(self) -> None:
@@ -127,10 +134,10 @@ class TestGapDecisionFromSilenceFlags(unittest.TestCase):
         # SEPARATE qualifying gap later in the file.
         flags = (
             [False] * 2
-            + [True] * (MIN_SILENCE_SECONDS - 1)
+            + [True] * 4
             + [False] * 2
-            + [True] * MIN_SILENCE_SECONDS
-            + [False] * MIN_TRAILING_AUDIO_SECONDS
+            + [True] * 5
+            + [False] * 10
         )
         self.assertTrue(gap_decision_from_silence_flags(flags))
 
@@ -143,7 +150,16 @@ def _reference_gap_decision(flags: list[bool]) -> bool:
     production (index-scan over explicit run boundaries here; production
     groups with :func:`itertools.groupby` then scans forward), so a
     Hypothesis-found divergence is a genuine, not tautological, defect.
+
+    Issue #1237 review D2: the two thresholds below are LITERAL 5/10, not
+    ``MIN_SILENCE_SECONDS``/``MIN_TRAILING_AUDIO_SECONDS``. An oracle that
+    reads the same mutable symbol production reads agrees with a mutated
+    constant by construction -- it would recompute its own boundary from
+    the identical mutated value and never diverge. A genuinely independent
+    oracle must hardcode the constants' current, correct values.
     """
+    min_silence_seconds = 5
+    min_trailing_audio_seconds = 10
     n = len(flags)
     i = 0
     while i < n:
@@ -153,7 +169,7 @@ def _reference_gap_decision(flags: list[bool]) -> bool:
         start = i
         while i < n and flags[i]:
             i += 1
-        if i - start < MIN_SILENCE_SECONDS:
+        if i - start < min_silence_seconds:
             continue
         j = i
         while j < n:
@@ -163,18 +179,30 @@ def _reference_gap_decision(flags: list[bool]) -> bool:
             audio_start = j
             while j < n and not flags[j]:
                 j += 1
-            if j - audio_start >= MIN_TRAILING_AUDIO_SECONDS:
+            if j - audio_start >= min_trailing_audio_seconds:
                 return True
     return False
 
 
 @given(st.lists(st.booleans(), max_size=60))
 @example(
-    # The exact >= boundary: a silent run of exactly MIN_SILENCE_SECONDS.
-    # A random burst does not reliably land on this single point --
-    # pinned per the "pin the decisive world as an @example" rule after a
-    # planted off-by-one mutant (`< ` -> `<=`) survived an un-pinned run.
-    [False] * 3 + [True] * MIN_SILENCE_SECONDS + [False] * MIN_TRAILING_AUDIO_SECONDS,
+    # The exact >= boundary: a silent run of exactly 5 (MIN_SILENCE_SECONDS'
+    # current value, hardcoded per issue #1237 review D2 -- see
+    # ``_reference_gap_decision``'s own docstring for why).
+    [False] * 3 + [True] * 5 + [False] * 10,
+)
+@example(
+    # Issue #1237 review D2: just BELOW the silence threshold (4, not 5) --
+    # a mutated ``MIN_SILENCE_SECONDS`` <= 4 would make production accept
+    # this gap while the hardcoded-literal reference still refuses it.
+    [False] * 3 + [True] * 4 + [False] * 20,
+)
+@example(
+    # Issue #1237 review D2: just BELOW the trailing-audio threshold (9,
+    # not 10) -- a mutated ``MIN_TRAILING_AUDIO_SECONDS`` <= 9 would make
+    # production accept this trailing run while the hardcoded-literal
+    # reference still refuses it.
+    [False] * 3 + [True] * 5 + [False] * 9,
 )
 def _property_gap_decision_matches_independent_reference(flags: list[bool]) -> None:
     assert gap_decision_from_silence_flags(flags) == _reference_gap_decision(flags)
@@ -292,6 +320,39 @@ class TestDetectCompositeSilenceGap(unittest.TestCase):
             (-3.0, 3.0), (-40.0, 6.0), (-3.0, 12.0),
         ], seed=2)
         self.assertFalse(detect_composite_silence_gap(path))
+
+    def test_zero_frame_file_raises_never_silently_accuses(self) -> None:
+        """Issue #1237 review D6: a VALID zero-duration WAV decodes with
+        ffmpeg exit 0 and zero stdout bytes -- a genuinely different path
+        from the corrupt-file case above (which fails ffmpeg's own exit
+        code). Without the ``samples.size < _DECODE_SAMPLE_RATE`` guard,
+        this degrades to an empty flags list and
+        ``gap_decision_from_silence_flags([])`` is False, silently
+        accusing a file that was never readable at all.
+        """
+        handle, path = tempfile.mkstemp(suffix=".wav")
+        os.close(handle)
+        self.addCleanup(os.remove, path)
+        with wave.open(path, "wb") as h:
+            h.setnchannels(1)
+            h.setsampwidth(2)
+            h.setframerate(_FIXTURE_SAMPLE_RATE)
+            h.writeframesraw(b"")
+        with self.assertRaises(CompositeAudioReadError):
+            detect_composite_silence_gap(path)
+
+    def test_sub_second_file_raises_never_silently_accuses(self) -> None:
+        """Issue #1237 review D6: a genuinely SHORT (0.5s) but otherwise
+        valid, decodable file must also raise -- not silently decide
+        "no gap" (an accusation) from a degenerate less-than-one-second
+        RMS pass.
+        """
+        handle, path = tempfile.mkstemp(suffix=".wav")
+        os.close(handle)
+        self.addCleanup(os.remove, path)
+        _write_synthetic_wav(path, [("tone", 0.5)])
+        with self.assertRaises(CompositeAudioReadError):
+            detect_composite_silence_gap(path)
 
 
 if __name__ == "__main__":

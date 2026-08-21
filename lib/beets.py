@@ -167,13 +167,17 @@ def apply_candidate_scenario(
 
     Total and idempotent by construction: every branch assigns ``valid``,
     ``scenario``, ``detail``, and ``incomplete_composite_paths`` (the last
-    unconditionally, even to empty -- issue #1237 review C8: a conditional
-    assignment would leave a stale composite observation behind from an
-    EARLIER call on the same ``result`` object, e.g. the merge-redirect
-    seam in ``lib/download_validation.py`` calling this a second time for
-    the survivor's own candidate), so calling it on a result that already
-    named ``mbid_not_found`` -- or already carries a first candidate's own
-    composite evidence -- leaves no stale field behind.
+    unconditionally, even to empty), so calling it on a result that already
+    names ``mbid_not_found`` -- as the merge-redirect seam in
+    ``lib/download_validation.py`` does -- leaves no stale field behind.
+    That seam is this function's FIRST and ONLY call on that object, not a
+    second one: it is reached only when ``result.scenario ==
+    "mbid_not_found"`` (``lib/download_validation.py::
+    validate_release_with_merge_redirect``'s own gate), a scenario this
+    function itself never produces, so a result already carrying it has
+    never been through here before (issue #1237 review D4 corrects an
+    earlier revision of this docstring, which wrongly cited that seam as a
+    second call).
     """
     candidate.is_target = True
     result.mbid_found = True

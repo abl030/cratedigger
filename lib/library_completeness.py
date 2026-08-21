@@ -255,6 +255,16 @@ def _try_coalesce_nested_index(
     subtrack index, so the caller falls back to Beets' OTHER real branch:
     literal per-child expansion (this module's pre-existing, unchanged
     ``sub_tracks`` flattening).
+
+    Issue #1237 review D5, measured: across all 410 live library releases
+    (3,965 track entries) plus 300 further sampled mirror releases, the
+    deployed Discogs mirror never emits ``sub_tracks`` at all -- it
+    returns a fixed ``{artists, duration, position, title}`` schema. This
+    branch therefore has NO current live producer; it corrects a real
+    divergence from the real Beets plugin in a code path that already
+    existed before this issue (the pre-existing literal-per-child
+    flattening below), not a defect this issue's own live evidence
+    surfaced.
     """
     if not sub_list:
         return None
@@ -298,7 +308,9 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
     group because consecutive keys differ (issue #1237).
 
     A ``sub_tracks``-nested header (Discogs' distinct index/heading
-    container) reproduces Beets' OWN nested branch instead
+    container -- measured absent from the deployed mirror as of issue
+    #1237 review D5; see ``_try_coalesce_nested_index``) reproduces
+    Beets' OWN nested branch instead
     (``_try_coalesce_nested_index`` / ``_coalesce_index_track``, issue
     #1237 review C6) -- subindexed children merge into one track keyed at
     the stripped first-child position with the header's own title;
@@ -615,20 +627,28 @@ def classify_album(
             path = component_key_paths.get(component.key)
             if path is None:
                 continue
-            label = component.title or component.key
+            # C9/D7: both messages below name and count only the REAL
+            # sub-components -- a silence marker was never real audio, and
+            # the label must be consistent whether the composite turns out
+            # unreadable or genuinely short (previously only the
+            # missing_source_audio branch filtered it, so an "unknown"
+            # finding for the same group still spelled out "(silence)").
+            real_titles = tuple(title for _, title in real_subcomponents)
+            real_label = " / ".join(real_titles) or component.key
             try:
                 gap_present = detect_composite_gap(path)
             except CompositeAudioReadError as exc:
                 findings.append(CompletenessFinding(
-                    "unknown", f"{label}: composite audio unreadable: {exc}",
+                    "unknown", f"{real_label}: composite audio unreadable: {exc}",
                 ))
                 continue
-            if not gap_present:
-                # C9: the missing-audio message names and counts only the
-                # REAL sub-components -- a silence marker was never real
-                # audio, so it is excluded here too, not only above.
-                real_titles = tuple(title for _, title in real_subcomponents)
-                real_label = " / ".join(real_titles) or component.key
+            # Issue #1237 review D1: mirror the identity-driven verdict's own
+            # ``not unknown_extra`` guard below. An unreadable uncatalogued
+            # extra file is exactly the kind of uncertainty that could BE the
+            # missing piece -- accusing the grouped composite of a definite
+            # gap while that uncertainty stands unresolved is the same class
+            # of premature "missing" this file elsewhere refuses to make.
+            if not gap_present and not unknown_extra:
                 findings.append(CompletenessFinding(
                     "missing_source_audio",
                     f"{real_label}: installed composite is one continuous "

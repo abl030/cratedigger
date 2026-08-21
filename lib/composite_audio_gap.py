@@ -26,6 +26,22 @@ Do not "fix" this by counting segments or title-sniffing Discogs'
 ``(silence)`` markers -- under-detection here is preferred to a false
 alarm.
 
+Accepted residual, the OTHER direction (issue #1237 review D8, previously
+undocumented here, in the docstring, and in the issue): a genuinely
+COMPLETE composite can also be falsely accused. A segued/medley
+recording -- every declared part physically present, crossfaded or
+joined with no real silence between them -- has no qualifying gap by
+construction, so ``gap_present`` is ``False`` and the census reports
+``missing_source_audio`` even though nothing is missing. This is a real
+false alarm, not merely the mirror image of the under-detection residual
+above: under-detection silently judges an incomplete file "complete" (no
+finding at all), while this direction actively names a complete file
+incomplete. Both residuals are accepted for the same reason -- the
+instrument answers a strictly boolean question from raw audio, not a
+segment-aware one -- and the census's own operator-facing surfacing
+(never an automatic reject/re-acquire) is what keeps a false alarm here
+cheap to dismiss rather than destructive.
+
 Never a decision by itself: the census (``lib/library_completeness.py``)
 surfaces this as evidence on an operator-facing finding; nothing here
 mutates Beets, deletes a file, or triggers a re-acquire.
@@ -123,8 +139,17 @@ def _decode_mono_pcm16(path: str) -> np.ndarray:
             f"ffmpeg failed decoding {path} (rc={proc.returncode}): {' / '.join(tail)}"
         )
     samples = np.frombuffer(proc.stdout, dtype="<i2")
-    if samples.size == 0:
-        raise CompositeAudioReadError(f"composite audio decoded to zero samples: {path}")
+    # Issue #1237 review D6: fewer than one full second of decoded audio
+    # (including exactly zero) cannot be evaluated at all -- the per-second
+    # RMS pass would silently produce an empty flags list, and
+    # ``gap_decision_from_silence_flags([])`` is False, which would
+    # accuse a genuinely unreadable/degenerate file of missing audio
+    # instead of reporting it unknown. Treat both as unreadable.
+    if samples.size < _DECODE_SAMPLE_RATE:
+        raise CompositeAudioReadError(
+            "composite audio decoded to less than one second "
+            f"({samples.size} samples at {_DECODE_SAMPLE_RATE}Hz): {path}"
+        )
     return samples
 
 
@@ -133,8 +158,9 @@ def detect_composite_silence_gap(path: str) -> bool:
     RMS against :func:`gap_decision_from_silence_flags`.
 
     Raises :class:`CompositeAudioReadError` on any decode failure (missing
-    ffmpeg, nonzero exit, an empty/zero-sample decode, or a timeout) --
-    callers must treat that as ``unknown``, never as a silent guess.
+    ffmpeg, nonzero exit, a sub-one-second decode including zero samples,
+    or a timeout) -- callers must treat that as ``unknown``, never as a
+    silent guess.
     """
     samples = _decode_mono_pcm16(path)
     levels = _per_second_dbfs(samples, _DECODE_SAMPLE_RATE)

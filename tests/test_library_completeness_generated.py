@@ -9,7 +9,7 @@ import unittest
 
 from beetsplug.discogs import DiscogsPlugin
 from beetsplug.discogs.types import AudioTrack, Track
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
@@ -113,9 +113,37 @@ def _property_video_never_means_missing_audio(token: str) -> None:
     assert not completeness_invariant_violations({f.kind for f in result.findings}, expect_drift=False, expect_missing=False, expect_video_ignored=True, expect_unknown=False)
 
 
-@given(st.lists(st.text(alphabet="ABC123", min_size=1, max_size=4), min_size=1, max_size=6, unique=True))
-def _property_unreadable_extra_is_unknown_not_missing(positions: list[str]) -> None:
-    result = _discogs_world(tuple(positions), catalog_positions=(), physical_positions=("extra",), unreadable_extra=True)
+@given(
+    positions=st.lists(st.text(alphabet="ABC123", min_size=1, max_size=4), min_size=1, max_size=6, unique=True),
+    grouped=st.booleans(),
+    prefix=st.integers(min_value=1, max_value=20),
+    group_size=st.integers(min_value=2, max_value=4),
+)
+def _property_unreadable_extra_is_unknown_not_missing(
+    positions: list[str], grouped: bool, prefix: int, group_size: int,
+) -> None:
+    """Issue #1237 review D1: an unreadable uncatalogued extra file must
+    fail closed to ``unknown``, never ``missing_source_audio`` -- both for
+    the identity-driven verdict's pre-existing ``not unknown_extra`` guard
+    (``grouped=False``, the original scenario) AND for the
+    grouped-composite physical check's OWN matching guard (``grouped=
+    True``, issue #1237 review D1's live regression: the original
+    scenario's ``catalog_positions=()`` left every component unknown, so
+    it could never reach the grouped branch at all -- a mutant deleting
+    the grouped block's own guard survived every run before this branch
+    was added).
+    """
+    if grouped:
+        group_positions = tuple(f"{prefix}.{index}" for index in range(1, group_size + 1))
+        result = _discogs_world(
+            group_positions, catalog_positions=(group_positions[0],),
+            physical_positions=(group_positions[0], "extra"), unreadable_extra=True,
+        )
+    else:
+        result = _discogs_world(
+            tuple(positions), catalog_positions=(), physical_positions=("extra",),
+            unreadable_extra=True,
+        )
     assert not completeness_invariant_violations({f.kind for f in result.findings}, expect_drift=True, expect_missing=False, expect_video_ignored=False, expect_unknown=True)
 
 
@@ -183,9 +211,27 @@ def _discogs_raw_entries(draw: st.DrawFn) -> list[dict[str, object]]:
     * plain positions that never carry a subtrack index (``A5``);
     * digit-then-letter positions that DO (``3B`` -- issue #1237 review C7,
       previously ungenerated);
-    * dotted subtrack families (``16.1``/``16.2``/...);
+    * bare numeric positions with no subtrack index at all (``16`` --
+      issue #1237 review D3, previously ungenerated: distinct from
+      ``plain``/``digit_letter``, which always mix a letter in, so neither
+      could stand in for the coordinator's ``["16", "16.1", "16.2"]``
+      counter-example);
+    * dotted subtrack families, optionally letter-prefixed (``16.1``/
+      ``16.2``/... or ``A2.1``/``A2.2``/... -- issue #1237 review D3);
     * nested ``sub_tracks`` headers, both subindexed (Beets' merge branch,
       issue #1237 review C6) and not (Beets' expand branch).
+
+    A family atom may also lead with a BARE entry sharing its exact
+    prefix (``lead_with_bare``, issue #1237 review D3) -- deterministically
+    reproducing the adjacency shape that exposes
+    ``_discogs_subtrack_group_key``'s ``subindex`` guard: without a bare,
+    non-subindexed position immediately preceding a same-prefix dotted
+    family, mutating that guard away is invisible, because
+    ``discogs_manifest``'s own ``flush_pending`` collapses a length-1
+    pending group back into an ordinary singleton component identical to
+    what a direct append would have produced. Independent random draws of
+    ``bare_numeric``/``family`` atoms sharing a prefix by chance are not
+    relied on for this coverage.
 
     Deliberately does NOT force every family's prefix to be globally
     unique (issue #1237 review C7): two atoms can legitimately compute the
@@ -208,7 +254,9 @@ def _discogs_raw_entries(draw: st.DrawFn) -> list[dict[str, object]]:
         return True
 
     for _ in range(atom_count):
-        kind = draw(st.sampled_from(["plain", "digit_letter", "family", "nested"]))
+        kind = draw(st.sampled_from(
+            ["plain", "digit_letter", "bare_numeric", "family", "nested"]
+        ))
         if kind == "plain":
             letter = draw(st.sampled_from("ABCDEFGH"))
             number = draw(st.integers(min_value=1, max_value=99))
@@ -223,13 +271,25 @@ def _discogs_raw_entries(draw: st.DrawFn) -> list[dict[str, object]]:
             if not reserve(position):
                 continue
             entries.append({"position": position, "title": position})
-        elif kind == "family":
-            prefix = draw(st.integers(min_value=1, max_value=20))
-            size = draw(st.integers(min_value=2, max_value=4))
-            family_positions = [f"{prefix}.{index}" for index in range(1, size + 1)]
-            if any(p in used_positions for p in family_positions):
+        elif kind == "bare_numeric":
+            number = draw(st.integers(min_value=1, max_value=20))
+            position = str(number)
+            if not reserve(position):
                 continue
-            used_positions.update(family_positions)
+            entries.append({"position": position, "title": position})
+        elif kind == "family":
+            letter = draw(st.sampled_from(["", *"ABCDEFGH"]))
+            prefix = draw(st.integers(min_value=1, max_value=20))
+            label = f"{letter}{prefix}"
+            size = draw(st.integers(min_value=2, max_value=4))
+            family_positions = [f"{label}.{index}" for index in range(1, size + 1)]
+            lead_with_bare = draw(st.booleans())
+            candidate_positions = ([label] if lead_with_bare else []) + family_positions
+            if any(p in used_positions for p in candidate_positions):
+                continue
+            used_positions.update(candidate_positions)
+            if lead_with_bare:
+                entries.append({"position": label, "title": label})
             entries.extend({"position": p, "title": p} for p in family_positions)
         else:  # nested
             prefix = draw(st.integers(min_value=1, max_value=20))
@@ -237,11 +297,29 @@ def _discogs_raw_entries(draw: st.DrawFn) -> list[dict[str, object]]:
             size = draw(st.integers(min_value=1, max_value=3))
             if subindexed:
                 child_positions = [f"{prefix}.{index}" for index in range(1, size + 1)]
+                # Issue #1237 review D3: a subindexed header collapses to
+                # ONE physical track keyed by the stripped medium+index of
+                # its FIRST child (``_try_coalesce_nested_index`` mirrors
+                # ``DiscogsPlugin._coalesce_index_track`` exactly), not by
+                # any of the children's own literal positions. That derived
+                # key can coincide with an unrelated atom's bare literal
+                # position (e.g. a "bare_numeric" ``"1"`` next to a nested
+                # header whose first child is ``"1.1"``) -- reserve it too,
+                # or ``discogs_manifest`` legitimately raises
+                # ``SourceManifestError("duplicate identity")`` on a world
+                # no real Discogs release could produce (real releases
+                # never repeat a physical track identity).
+                first_medium, first_index, _ = DiscogsPlugin.get_track_index(
+                    child_positions[0]
+                )
+                derived_key = f"{first_medium or ''}{first_index or ''}"
+                reservation_targets = [derived_key, *child_positions]
             else:
                 child_positions = [f"{chr(65 + index)}{prefix}" for index in range(size)]
-            if any(p in used_positions for p in child_positions):
+                reservation_targets = child_positions
+            if any(p in used_positions for p in reservation_targets):
                 continue
-            used_positions.update(child_positions)
+            used_positions.update(reservation_targets)
             entries.append({
                 "position": "", "title": f"Header{prefix}", "duration": "",
                 "sub_tracks": [{"position": p, "title": f"C{p}"} for p in child_positions],
@@ -250,12 +328,30 @@ def _discogs_raw_entries(draw: st.DrawFn) -> list[dict[str, object]]:
 
 
 @given(_discogs_raw_entries())
+@example(
+    # Independent review D3: the coordinator's own counter-example. A bare
+    # numeric position with no subtrack index ("16"), immediately followed
+    # by a dotted family sharing that exact prefix ("16.1"/"16.2"). Beets
+    # keeps "16" a standalone track and merges only "16.1"+"16.2"; the
+    # strategy's earlier "plain"/"digit_letter"/"family" atom kinds could
+    # never generate a bare, letterless, dotless leading position, so this
+    # exact adjacency was unreachable and a mutant removing
+    # ``_discogs_subtrack_group_key``'s ``subindex`` guard survived all 63
+    # tests. Pinned rather than left to chance, per the "widen the
+    # strategy, not delete the clause" / "pin the decisive world" rules.
+    [
+        {"position": "16", "title": "16"},
+        {"position": "16.1", "title": "16.1"},
+        {"position": "16.2", "title": "16.2"},
+    ],
+)
 def _property_discogs_manifest_agrees_with_beets_oracle(entries: list[dict[str, object]]) -> None:
     """Issue #1237: ``discogs_manifest``'s component set must match what
     Beets itself would catalogue -- the real adapter (``beetsplug.discogs
     .DiscogsPlugin``) is the oracle, not a second hand-written
     reimplementation of the same regex, over flat siblings AND nested
-    ``sub_tracks`` containers (issue #1237 review C6/C7).
+    ``sub_tracks`` containers (issue #1237 review C6/C7), plus the bare-
+    numeric-then-family adjacency (issue #1237 review D3).
     """
     release = "1"
     manifest = discogs_manifest(release, {"id": release, "tracks": entries})
