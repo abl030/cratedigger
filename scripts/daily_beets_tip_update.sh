@@ -39,6 +39,14 @@ nix flake update beets-tip mutagen-tip mediafile-tip
 # entry-time free-bytes refusal defers to it (issue #1111). Every automated
 # launcher of the canonical suite sets this.
 export CRATEDIGGER_SUITE_OWNS_HEADROOM=1
+# No scripts/memory_scope.sh containment here, deliberately: this runner is
+# launched by the nixosconfig `cratedigger-beets-tip-canary` SYSTEM unit
+# (Type=oneshot, User=abl030), which has no reliable user D-Bus session, so
+# `systemd-run --user` would fail-open to no containment on exactly the
+# unattended path that most needs it. The nightly units carry a declarative
+# `MemoryMax=` on the unit itself instead -- enforced by the system manager,
+# no bus required. The helper is for the interactive/agent launchers
+# (scripts/test.sh, scripts/run_final_gate.sh) that do have a user session.
 nix develop .#tip --command bash scripts/run_tests.sh
 
 # Deliberately no lock commit or push. The canary's product is the signal,

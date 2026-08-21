@@ -24,5 +24,15 @@ cd "$(dirname "$0")/.."
 # untracked file does not participate in the flake source at all (490ms).
 # There is deliberately no nix-shell fallback: this repo already requires
 # `nix develop` for scripts/daily_beets_tip_update.sh's `.#tip` canary.
+#
+# The targeted runner calls the same run_suite() as the canonical suite, so it
+# carries the same runaway risk and gets the same cgroup containment
+# (scripts/memory_scope.sh). The prefix is empty when containment is
+# unavailable, so this stays a plain exec on such a host.
+# shellcheck source=scripts/memory_scope.sh
+source "$(dirname "${BASH_SOURCE[0]}")/memory_scope.sh"
+cratedigger_memory_scope_prefix || exit 2
+
 printf -v command '%q ' python3 scripts/run_targeted_tests.py "$@"
-exec env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 nix develop --command bash -c "$command"
+exec "${CRATEDIGGER_MEMORY_SCOPE_ARGV[@]}" \
+    env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 nix develop --command bash -c "$command"

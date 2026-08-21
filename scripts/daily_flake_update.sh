@@ -129,6 +129,15 @@ run_stage() {
     daily_resource_monitor_set_phase runner_overhead
 }
 
+# No scripts/memory_scope.sh containment in this runner, deliberately. It is
+# launched by the nixosconfig `cratedigger-daily-checks` SYSTEM unit
+# (Type=oneshot, User=abl030), which has no reliable user D-Bus session, so
+# `systemd-run --user` would fail open to no containment on exactly the
+# unattended path that suffered the 2026-08-19 global OOM. These stages are
+# bounded by a declarative `MemoryMax=` on the unit itself, enforced by the
+# system manager with no bus involved. `stable_nix` would be unbounded either
+# way: `nix build` delegates the work to the nix-daemon, which runs in the
+# system slice under its own cgroup, outside anything this script controls.
 daily_resource_monitor_set_phase runner_overhead
 run_stage deterministic_suite "deterministic full suite" \
     env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 \

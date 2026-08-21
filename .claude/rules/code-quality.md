@@ -617,6 +617,30 @@ rather than promoting to infrastructure-failure — a known, accepted
 residual (independent review F10), not a claim that the two never
 co-occur.
 
+Every guard above CLASSIFIES an exhaustion that already happened; none
+BOUNDS it. Until #1238 nothing limited a suite run to its own share of the
+host, so the 2026-08-19 leak produced a `CONSTRAINT_NONE ... global_oom` —
+the kernel choosing victims across the whole machine by `oom_score`, killing
+six unrelated processes rather than the offender. `scripts/memory_scope.sh`
+closes that: `scripts/test.sh` and `scripts/run_final_gate.sh` launch the
+suite inside a transient `systemd-run --user --scope` carrying
+`MemoryMax` (70% of the host's own MemTotal — derived, never a constant, so
+other installations scale) plus `MemorySwapMax=0`. The swap cap is
+load-bearing, not belt-and-braces: `MemoryMax` alone bounds only RESIDENT
+memory, so on a host with swap a runaway spills over and thrashes instead
+of dying (measured: 200 MiB under a 64 MiB cap exits 0 without it, 137
+with it). `MemoryHigh` is deliberately absent — it stalls a runaway in the
+reclaim loop for minutes rather than killing it, turning an unattended gate
+into a hang. `CRATEDIGGER_TEST_MEMORY_MAX_BYTES` overrides the limit; `0`
+disables containment. Missing infrastructure (no `systemd-run`, no delegated
+memory controller) warns and runs UNCONTAINED — containment is a safety net,
+not a correctness gate — but an invalid explicit override fails closed, the
+same asymmetry `headroom_floor_bytes` already uses. The two nightly runners
+deliberately opt out and are bounded by a declarative `MemoryMax=` on their
+nixosconfig system units instead: `systemd-run --user` needs a user D-Bus
+session those units do not reliably have, so wiring the helper there would
+fail open on precisely the unattended path that failed in the first place.
+
 **Generated (property-based) production tests**
 (`tests/test_*_generated.py`, Hypothesis)
 run deterministically in the suite. After changing quality policy, run the

@@ -2,6 +2,9 @@
 # Run the canonical full suite with a runtime-tmpfs receipt, or inspect one.
 set -uo pipefail
 
+# shellcheck source=scripts/memory_scope.sh
+source "$(dirname "${BASH_SOURCE[0]}")/memory_scope.sh"
+
 die() {
     printf '%s\n' "$*" >&2
     exit 2
@@ -167,7 +170,22 @@ run_gate() {
     # `canonical_command` is unchanged, so the receipt still records the
     # same canonical `bash scripts/run_tests.sh` and `status` still
     # compares it the same way; only the launcher around it moved.
-    gate_argv=(env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 nix develop --command bash -c "$command")
+    # Bound the suite to its own cgroup so a runaway kills only itself
+    # instead of triggering the host-wide OOM that took out six unrelated
+    # processes on 2026-08-19 (see scripts/memory_scope.sh). An invalid
+    # explicit override fails the gate closed rather than silently running
+    # with a limit the operator did not choose.
+    cratedigger_memory_scope_prefix \
+        || die "invalid CRATEDIGGER_TEST_MEMORY_MAX_BYTES"
+    # `$!` below becomes the systemd-run process rather than the suite's own.
+    # That is the correct thing to record: `--scope` runs the command
+    # synchronously under one long-lived process which propagates the exit
+    # status verbatim (measured: `exit 7` -> 7, an OOM kill -> 137), so it
+    # remains an exact liveness proxy for `status`'s exact-active check.
+    gate_argv=(
+        "${CRATEDIGGER_MEMORY_SCOPE_ARGV[@]}"
+        env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 nix develop --command bash -c "$command"
+    )
     receipt=$(mktemp -d "$runtime/cratedigger-final-gate.XXXXXXXX") \
         || die "cannot create final-gate receipt beneath $runtime"
     chmod 700 "$receipt" || die "cannot secure receipt directory: $receipt"

@@ -94,6 +94,15 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "pyrightconfig.production.json": (
         "tests.test_pyright_checks",
     ),
+    "scripts/memory_scope.sh": (
+        "tests.test_memory_scope",
+    ),
+    "scripts/run_final_gate.sh": (
+        # The gate's own receipt contract, plus the containment prefix it
+        # now applies: a solo edit to either seam must select both.
+        "tests.test_final_gate_receipt",
+        "tests.test_memory_scope",
+    ),
     "scripts/run_pyright_checks.py": (
         "tests.test_pyright_checks",
     ),
@@ -111,6 +120,7 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     ),
     "scripts/test.sh": (
         "tests.test_targeted_test_selection",
+        "tests.test_memory_scope",
     ),
     "scripts/test_tmpfs.sh": (
         # Issue #1208 review D1: this file had NO entry at all — a solo
