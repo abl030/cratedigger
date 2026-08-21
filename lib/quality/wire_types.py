@@ -242,6 +242,15 @@ class ValidationResult(msgspec.Struct):
     # ``bad_audio_hashes.id`` and the candidate track that hashed to it.
     matched_bad_hash_id: int | None = None
     matched_bad_track_path: str | None = None
+    # Composite-duration observation (issue #1237): populated whenever
+    # ``candidate_audio_coverage`` finds a coalesced Discogs indexed
+    # component whose declared sub-durations disagree with the local
+    # file's length. Never fails validation on its own (see
+    # ``lib.beets_candidate_coverage.CandidateAudioCoverage.complete``) --
+    # this is evidence only, persisted so it stays visible through
+    # existing ``validation_result`` audit surfaces even on a
+    # ``strong_match``.
+    incomplete_composite_paths: list[str] = []
 
     def to_json(self) -> str:
         """Serialize to JSON string via msgspec.json.encode."""

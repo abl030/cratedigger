@@ -14,7 +14,10 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from lib.beets_candidate_coverage import candidate_audio_coverage
+from lib.beets_candidate_coverage import (
+    CandidateAudioCoverage,
+    candidate_audio_coverage,
+)
 from lib.quality import (
     CandidateSummary,
     HarnessItem,
@@ -40,6 +43,7 @@ def _candidate(
     composite_length: float = 0.0,
     component_count: int = 1,
     duration_complete: bool = True,
+    indexed_program_length: float = 408.0,
 ) -> CandidateSummary:
     return CandidateSummary(
         mbid="2823685",
@@ -55,7 +59,7 @@ def _candidate(
                 track=HarnessTrackInfo(
                     title=f"track-{idx}",
                     length=(
-                        408.0 if path == composite_path else 0.0
+                        indexed_program_length if path == composite_path else 0.0
                     ),
                     discogs_indexed_component_count=(
                         component_count if path == composite_path else 1
@@ -127,7 +131,19 @@ class TestCandidateAudioCoverage(unittest.TestCase):
         self.assertFalse(coverage.complete)
         self.assertEqual(coverage.unmatched_track_count, 1)
 
-    def test_force_cannot_treat_first_component_as_complete_composite(self) -> None:
+    def test_short_local_composite_duration_disagreement_no_longer_fails_coverage(self) -> None:
+        """Issue #1237: a composite duration disagreement is EVIDENCE, never
+        a coverage failure -- it cannot distinguish a genuinely short
+        composite from Discogs' overlapping-duration convention (the file's
+        FIRST sub-position duration already covering the whole physical
+        track; see ``test_overlapping_duration_convention_never_fails_
+        coverage`` for that exact live shape). Renamed from
+        ``test_force_cannot_treat_first_component_as_complete_composite``,
+        which pinned the pre-fix reject-on-duration-alone bug this issue
+        replaces. The observation itself is preserved (still populates
+        ``incomplete_composite_paths`` and ``detail()``) -- only the
+        ``complete`` gate moved.
+        """
         path = "02 Unwashed And Somewhat Slightly Dazed.flac"
         coverage = candidate_audio_coverage(
             [_item(path, length=369.0)],
@@ -139,12 +155,38 @@ class TestCandidateAudioCoverage(unittest.TestCase):
             ),
         )
 
-        self.assertFalse(coverage.complete)
+        self.assertTrue(coverage.complete)
         self.assertEqual(
             coverage.incomplete_composite_paths,
             (f"{path} (local=369.0s, indexed_program=408.0s)",),
         )
         self.assertIn("incomplete indexed composite audio", coverage.detail())
+
+    def test_overlapping_duration_convention_never_fails_coverage(self) -> None:
+        """Issue #1237's founding live shape: Bouncing Souls -- Anchors
+        Aweigh (Discogs 461206). Declared sub-durations 9:37 + 3:24 = 781s
+        SUM over the installed 579.7s file because Discogs' overlapping
+        convention makes the FIRST sub-position's own declared duration
+        already cover the whole physical track. The mapping itself drops
+        nothing -- must not be rejected for the duration disagreement.
+        """
+        path = "16 Untitled.flac"
+        coverage = candidate_audio_coverage(
+            [_item(path, length=579.7)],
+            _candidate(
+                mapped_paths=[path],
+                composite_path=path,
+                composite_length=579.7,
+                component_count=2,
+                indexed_program_length=781.0,
+            ),
+        )
+
+        self.assertTrue(coverage.complete)
+        self.assertEqual(
+            coverage.incomplete_composite_paths,
+            (f"{path} (local=579.7s, indexed_program=781.0s)",),
+        )
 
     def test_complete_composite_program_is_covered(self) -> None:
         path = "02 Unwashed And Somewhat Slightly Dazed + Don't Sit Down.flac"
@@ -160,7 +202,11 @@ class TestCandidateAudioCoverage(unittest.TestCase):
 
         self.assertTrue(coverage.complete)
 
-    def test_short_indexed_component_cannot_hide_inside_tolerance(self) -> None:
+    def test_short_indexed_component_no_longer_fails_but_remains_evidenced(self) -> None:
+        """Renamed from ``test_short_indexed_component_cannot_hide_inside_
+        tolerance`` -- issue #1237 removes the duration gate; the
+        observation is unchanged.
+        """
         path = "A2 incomplete composite.flac"
         coverage = candidate_audio_coverage(
             [_item(path, length=399.0)],
@@ -172,13 +218,17 @@ class TestCandidateAudioCoverage(unittest.TestCase):
             ),
         )
 
-        self.assertFalse(coverage.complete)
+        self.assertTrue(coverage.complete)
         self.assertEqual(
             coverage.incomplete_composite_paths,
             (f"{path} (local=399.0s, indexed_program=408.0s)",),
         )
 
-    def test_unknown_component_duration_fails_closed(self) -> None:
+    def test_unknown_component_duration_no_longer_fails_but_remains_evidenced(self) -> None:
+        """Renamed from ``test_unknown_component_duration_fails_closed`` --
+        issue #1237 removes the duration gate (including the unprovable-
+        duration case); the observation is unchanged.
+        """
         path = "A2 unprovable composite.flac"
         coverage = candidate_audio_coverage(
             [_item(path, length=500.0)],
@@ -191,7 +241,7 @@ class TestCandidateAudioCoverage(unittest.TestCase):
             ),
         )
 
-        self.assertFalse(coverage.complete)
+        self.assertTrue(coverage.complete)
         self.assertEqual(
             coverage.incomplete_composite_paths,
             (f"{path} (indexed component duration evidence incomplete)",),
@@ -235,6 +285,64 @@ def test_generated_candidate_coverage_oracle(
         and extra_track_count == 0
     )
     assert coverage.complete is expected
+
+
+@given(
+    local_length=st.floats(min_value=0.0, max_value=2000.0, allow_nan=False, allow_infinity=False),
+    indexed_length=st.floats(min_value=0.0, max_value=2000.0, allow_nan=False, allow_infinity=False),
+    component_count=st.integers(min_value=1, max_value=5),
+    duration_complete=st.booleans(),
+)
+def test_generated_complete_mapping_never_rejected_for_duration_disagreement(
+    local_length: float,
+    indexed_length: float,
+    component_count: int,
+    duration_complete: bool,
+) -> None:
+    """Issue #1237: a candidate whose mapping drops no admitted file is
+    never rejected for a composite duration disagreement -- regardless of
+    how short, long, or unprovable the declared indexed program looks.
+    """
+    path = "composite.flac"
+    coverage = candidate_audio_coverage(
+        [_item(path, length=local_length)],
+        _candidate(
+            mapped_paths=[path],
+            composite_path=path,
+            composite_length=local_length,
+            component_count=component_count,
+            duration_complete=duration_complete,
+            indexed_program_length=indexed_length,
+        ),
+    )
+    assert coverage.complete
+
+
+@given(unmapped=st.booleans(), extra=st.booleans(), composite_evidence=st.booleans())
+def test_generated_provable_audio_loss_requires_a_lost_file_and_composite_evidence(
+    unmapped: bool, extra: bool, composite_evidence: bool,
+) -> None:
+    """Issue #1237: the shared retry trigger fires iff Beets' own mapping
+    proves lost audio (unmapped and/or reported-extra) AND there is
+    composite evidence a coalesced track could plausibly explain it --
+    see :attr:`CandidateAudioCoverage.provable_audio_loss`'s docstring for
+    why the composite-evidence half is required (an unmapped/extra file
+    beside an ALREADY-COMPLETE composite is a genuine duplicate; retrying
+    there can turn a correct reject into a false accept).
+    """
+    coverage = CandidateAudioCoverage(
+        admitted_count=2,
+        mapped_count=1,
+        unmapped_paths=("a.flac",) if unmapped else (),
+        unexpected_mapped_paths=(),
+        duplicate_admitted_paths=(),
+        duplicate_mapped_paths=(),
+        reported_extra_paths=("b.flac",) if extra else (),
+        unmatched_track_count=0,
+        incomplete_composite_paths=("c.flac (evidence)",) if composite_evidence else (),
+    )
+    expected = (unmapped or extra) and composite_evidence
+    assert coverage.provable_audio_loss is expected
 
 
 def test_generated_oracle_kills_count_only_mutant() -> None:

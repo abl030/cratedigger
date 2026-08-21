@@ -20,6 +20,10 @@ from typing import Literal, Protocol
 import msgspec
 
 from lib.beets_db import beets_authority_availability_category
+from lib.composite_audio_gap import (
+    CompositeAudioReadError,
+    detect_composite_silence_gap,
+)
 from lib.mb_canonical import CanonicalReleaseRedirected, TaggedCanonicalReleaseFn
 from lib.quality import AUDIO_EXTENSIONS_DOTTED
 from lib.release_identity import ReleaseIdentity
@@ -37,11 +41,19 @@ class AudioTagReadError(RuntimeError):
 
 
 class SourceComponent(msgspec.Struct, frozen=True):
-    """One source-declared release component; ``key`` is source-native."""
+    """One source-declared release component; ``key`` is source-native.
+
+    ``sub_component_titles`` is populated (len >= 2) only when this
+    component is a coalesced Discogs group -- consecutive flat indexed
+    sub-positions (e.g. ``16.1``/``16.2``) that Beets catalogues as ONE
+    physical track (issue #1237). Empty for every ordinary component,
+    including MusicBrainz's.
+    """
     key: str
     title: str
     kind: SourceKind
     recording_id: str | None = None
+    sub_component_titles: tuple[str, ...] = ()
 
 
 class SourceManifest(msgspec.Struct, frozen=True):
@@ -177,8 +189,67 @@ def musicbrainz_manifest(
     return _valid_manifest("musicbrainz", release_id, components)
 
 
+def _discogs_get_track_index(position: str) -> tuple[str | None, str | None, str | None]:
+    """Beets' own Discogs position parser, resolved dynamically.
+
+    Calls ``beetsplug.discogs.DiscogsPlugin.get_track_index`` -- the exact
+    static parser ``_subtrack_position`` itself delegates to -- via
+    ``importlib``/``getattr`` rather than a static import. This is the
+    same seam ``harness/beets_compat.py`` already uses to reach into this
+    package: it avoids requiring third-party type stubs for
+    ``beetsplug.discogs`` under production-strict Pyright, and fails
+    closed (``SourceManifestError``) rather than silently trusting an
+    unexpected return shape.
+    """
+    module = importlib.import_module("beetsplug.discogs")
+    plugin_class = getattr(module, "DiscogsPlugin", None)
+    get_track_index = getattr(plugin_class, "get_track_index", None)
+    if not callable(get_track_index):
+        raise SourceManifestError("Beets Discogs plugin lacks callable get_track_index")
+    raw: object = get_track_index(position)
+    try:
+        return msgspec.convert(raw, type=tuple[str | None, str | None, str | None])
+    except msgspec.ValidationError as exc:
+        raise SourceManifestError(
+            "Beets Discogs get_track_index returned an unsupported shape"
+        ) from exc
+
+
+def _discogs_subtrack_group_key(position: str) -> str | None:
+    """Physical-track key for a literal Discogs position, or ``None``.
+
+    Mirrors ``beetsplug.discogs.DiscogsPlugin._subtrack_position`` exactly
+    by calling its own ``get_track_index`` static parser -- no local regex
+    copy to drift from the real Beets Discogs plugin. ``None`` means the
+    position carries no subtrack index (e.g. vinyl sides ``A1``/``B2``);
+    non-``None`` is the ``(medium, medium_index)`` prefix consecutive
+    entries must share to be the SAME physical track (e.g. ``16.1`` and
+    ``16.2`` both key to ``"16"``).
+    """
+    medium, index, subindex = _discogs_get_track_index(position)
+    if not subindex:
+        return None
+    return f"{medium or ''}{index or ''}"
+
+
 def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManifest:
-    """Normalize raw Discogs tracks using literal positions (incl. A2.1)."""
+    """Normalize raw Discogs tracks, reproducing Beets' own coalescing.
+
+    Beets (2.13.1, deployed) groups CONSECUTIVE flat indexed sub-positions
+    sharing the same ``_discogs_subtrack_group_key`` into one physical
+    component keyed by the FIRST sub-position, titled by joining every
+    sub-component's title with ``" / "`` (``DiscogsPlugin._merge_subtracks``).
+    A2/B-side positions (``A1``, ``B2``) never carry a subtrack index and
+    so never group; ``1A``/``4A``/``1B`` each form their own singleton
+    group because consecutive keys differ (issue #1237).
+
+    This reproduces ONLY that top-level consecutive-sibling rule. A
+    ``sub_tracks``-nested header (Discogs' distinct index/heading
+    container) keeps this module's pre-existing literal-per-child
+    flattening unchanged -- that is a different Beets code path
+    (``_coalesce_index_track``), out of this issue's scope -- and, like a
+    real Beets non-"track" entry, breaks any pending top-level group.
+    """
     raw_release_id = raw.get("id")
     if (isinstance(raw_release_id, bool)
             or not isinstance(raw_release_id, (int, str))
@@ -186,16 +257,40 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
         raise SourceManifestError("Discogs raw release identity is unavailable or mismatched")
     tracks = _raw_list(raw.get("tracks"), "Discogs raw release has no tracks list")
     components: list[SourceComponent] = []
+    pending: list[tuple[str, str]] = []
+    pending_key: str | None = None
 
-    def visit(entries: Iterable[object]) -> None:
+    def flush_pending() -> None:
+        nonlocal pending, pending_key
+        if not pending:
+            return
+        first_position, _ = pending[0]
+        titles = tuple(title for _, title in pending)
+        components.append(SourceComponent(
+            key=f"{release_id}-{first_position}",
+            title=" / ".join(titles),
+            kind="audio",
+            sub_component_titles=titles if len(pending) > 1 else (),
+        ))
+        pending = []
+        pending_key = None
+
+    def visit(entries: Iterable[object], *, groupable: bool) -> None:
+        nonlocal pending, pending_key
         for raw_entry in entries:
             entry = _raw_mapping(raw_entry, "Discogs track is not an object")
             subtracks = entry.get("sub_tracks")
             if subtracks is not None:
                 # A parent with subtracks is an index/header, not another
                 # playable component. Counting both invents an extra source
-                # track; preserve each child literal position instead.
-                visit(_raw_list(subtracks, "Discogs sub_tracks is not a list"))
+                # track; preserve each child literal position instead
+                # (unchanged pre-#1237 behaviour -- not grouped by this pass).
+                if groupable:
+                    flush_pending()
+                visit(
+                    _raw_list(subtracks, "Discogs sub_tracks is not a list"),
+                    groupable=False,
+                )
                 continue
             position = entry.get("position")
             duration = entry.get("duration")
@@ -204,15 +299,32 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
             # that non-playable header shape; an absent/nonempty duration is
             # ambiguous and must not be silently discarded.
             if position == "" and duration == "":
+                if groupable:
+                    flush_pending()
                 continue
             if not isinstance(position, str) or not position:
                 raise SourceManifestError("Discogs track lacks literal position")
             title = entry.get("title")
-            components.append(SourceComponent(
-                key=f"{release_id}-{position}",
-                title=title if isinstance(title, str) else "", kind="audio",
-            ))
-    visit(tracks)
+            title_str = title if isinstance(title, str) else ""
+            if not groupable:
+                components.append(SourceComponent(
+                    key=f"{release_id}-{position}", title=title_str, kind="audio",
+                ))
+                continue
+            group_key = _discogs_subtrack_group_key(position)
+            if group_key is not None and group_key == pending_key:
+                pending.append((position, title_str))
+                continue
+            flush_pending()
+            if group_key is not None:
+                pending = [(position, title_str)]
+                pending_key = group_key
+            else:
+                components.append(SourceComponent(
+                    key=f"{release_id}-{position}", title=title_str, kind="audio",
+                ))
+    visit(tracks, groupable=True)
+    flush_pending()
     return _valid_manifest("discogs", release_id, components)
 
 
@@ -293,12 +405,20 @@ def classify_album(
     album: LibraryAlbum, manifest: SourceManifest,
     *, enumerate_files: Callable[[str], tuple[str, ...]] = enumerate_audio_files,
     tag_reader: Callable[[str], tuple[str, str]] = read_audio_tag_identities,
+    detect_composite_gap: Callable[[str], bool] = detect_composite_silence_gap,
 ) -> CompletenessAlbum:
     """Classify one album with independent source/catalog/filesystem evidence.
 
     The finding list is intentionally nonexclusive.  Any malformed source,
     containment refusal, directory error, or unreadable noncatalogued audio
     turns the answer into ``unknown`` rather than guessing missingness.
+
+    ``detect_composite_gap`` is issue #1237's physical instrument: for a
+    coalesced Discogs component (``sub_component_titles`` len >= 2) whose
+    installed item IS present by identity, it decides from the audio
+    itself whether the file plausibly covers the whole declared program.
+    Only ever called for such a component -- an ordinary or genuinely
+    absent component never reaches it.
     """
     findings: list[CompletenessFinding] = []
     if album.identity is None or album.identity.release_id != manifest.release_id:
@@ -340,11 +460,16 @@ def classify_album(
 
     existing_catalog = [item for item in album.catalog_items if item.path in physical_paths]
     known_component_keys: set[str] = set()
+    # Tracks, for a component matched by exact identity, the ONE physical
+    # path that satisfied it -- issue #1237's grouped-composite physical
+    # check below reads the installed audio from here, never a guess.
+    component_key_paths: dict[str, str] = {}
     unmatched_mb_witnesses = 0
     for item in existing_catalog:
         key = current_component_key(item.source_key, item.recording_id)
         if key:
             known_component_keys.add(key)
+            component_key_paths[key] = item.path
         elif manifest.source == "musicbrainz":
             # A physically present Beets item with historical MB entities can
             # still be the current missing source component. It is not proof
@@ -366,6 +491,8 @@ def classify_album(
             }
             if len(matching_keys) == 1:
                 known_component_keys.update(matching_keys)
+                (matched_key,) = matching_keys
+                component_key_paths[matched_key] = path
             elif len(matching_keys) > 1:
                 unknown_extra = True
                 findings.append(CompletenessFinding(
@@ -390,6 +517,39 @@ def classify_album(
                 findings.append(CompletenessFinding(
                     "unknown", "uncatalogued audio lacks exact source identity",
                 ))
+
+    # Issue #1237, design item 5: for a coalesced Discogs group (>= 2
+    # declared sub-components) whose installed item IS present by identity,
+    # identity alone cannot say whether the file covers the WHOLE program --
+    # decide from the audio. Never runs for an ordinary or absent component,
+    # never overrides identity, and never touches ``known_component_keys``:
+    # it only ever ADDS evidence alongside the identity-driven verdict below.
+    if manifest.source == "discogs":
+        for component in audio:
+            if len(component.sub_component_titles) < 2:
+                continue
+            if component.key not in known_component_keys:
+                continue
+            path = component_key_paths.get(component.key)
+            if path is None:
+                continue
+            label = component.title or component.key
+            try:
+                gap_present = detect_composite_gap(path)
+            except CompositeAudioReadError as exc:
+                findings.append(CompletenessFinding(
+                    "unknown", f"{label}: composite audio unreadable: {exc}",
+                ))
+                continue
+            if not gap_present:
+                findings.append(CompletenessFinding(
+                    "missing_source_audio",
+                    f"{label}: installed composite is one continuous audio "
+                    "segment; no internal silence gap found across "
+                    f"{len(component.sub_component_titles)} declared "
+                    f"components ({' / '.join(component.sub_component_titles)})",
+                ))
+
     # A catalogued missing path is already catalog drift.  It cannot satisfy
     # source audio, but is not unreadable physical evidence either.
     missing: set[str] = audio_keys - known_component_keys
@@ -469,6 +629,7 @@ def scan_library_completeness(
     fetch_discogs_raw: Callable[[str], dict[str, object]],
     enumerate_files: Callable[[str], tuple[str, ...]] = enumerate_audio_files,
     tag_reader: Callable[[str], tuple[str, str]] = read_audio_tag_identities,
+    detect_composite_gap: Callable[[str], bool] = detect_composite_silence_gap,
     resolve_musicbrainz_redirect: TaggedCanonicalReleaseFn | None = None,
     max_workers: int = 4,
 ) -> CompletenessReport:
@@ -496,7 +657,10 @@ def scan_library_completeness(
                         )
                         if album.identity.source == "musicbrainz"
                         else discogs_manifest(album.identity.release_id, raw))
-            return classify_album(album, manifest, enumerate_files=enumerate_files, tag_reader=tag_reader)
+            return classify_album(
+                album, manifest, enumerate_files=enumerate_files, tag_reader=tag_reader,
+                detect_composite_gap=detect_composite_gap,
+            )
         except (urllib.error.HTTPError, urllib.error.URLError, OSError,
                 json.JSONDecodeError, UnicodeDecodeError, SourceManifestError,
                 msgspec.ValidationError) as exc:

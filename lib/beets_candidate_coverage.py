@@ -34,6 +34,14 @@ class CandidateAudioCoverage:
 
     @property
     def complete(self) -> bool:
+        # ``incomplete_composite_paths`` deliberately does NOT gate
+        # completeness (issue #1237): a summed declared sub-track duration
+        # exceeding the local file's length cannot distinguish a genuinely
+        # short composite from Discogs' overlapping-duration convention,
+        # where the FIRST sub-position's own declared duration already
+        # covers the whole physical track. It remains computed as evidence
+        # (see ``detail()`` and ``ValidationResult.incomplete_composite_paths``)
+        # but never fails an otherwise-complete mapping.
         return not any((
             self.unmapped_paths,
             self.unexpected_mapped_paths,
@@ -41,8 +49,37 @@ class CandidateAudioCoverage:
             self.duplicate_mapped_paths,
             self.reported_extra_paths,
             self.unmatched_track_count,
-            self.incomplete_composite_paths,
         ))
+
+    @property
+    def provable_audio_loss(self) -> bool:
+        """Whether the flat-subtrack retry is worth attempting (issue #1237).
+
+        Unmapped admitted audio and/or Beets-reported extra items are the
+        provable facts Beets' own mapping asserts -- a composite duration
+        disagreement alone is NOT provable loss (see :attr:`complete`) and
+        must never trigger the retry by itself, since it cannot tell a
+        short composite from Discogs' overlapping-duration convention.
+
+        The retry is still gated on ALSO having :attr:`incomplete_composite_
+        paths` -- i.e. Beets already coalesced SOME mapped composite whose
+        local duration disagrees with its declared program. That is the
+        only situation flattening indexed subtracks could plausibly fix.
+        Confirmed empirically (``tests/test_discogs_subtracks_e2e.py::
+        test_complete_composite_plus_extra_cannot_be_flattened_under_
+        force``): an unmapped/extra file coexisting with an ALREADY-COMPLETE
+        composite match is a genuine duplicate, and retrying there does not
+        merely waste a harness pass -- Beets' real flat-subtrack matcher can
+        pair the duplicate against the freed-up second sub-position by
+        title/length alone, turning a correct reject into a FALSE
+        ``strong_match``. Requiring composite evidence closes that hole
+        while still covering the Bowie (extra item) and UNKLE (unmapped
+        item) shapes, both of which coalesce a genuinely split composite.
+        """
+        return bool(
+            (self.unmapped_paths or self.reported_extra_paths)
+            and self.incomplete_composite_paths
+        )
 
     def detail(self) -> str:
         parts: list[str] = []

@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import unittest
 
-from hypothesis import given
+from beetsplug.discogs import DiscogsPlugin
+from beetsplug.discogs.types import Track
+from hypothesis import assume, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
@@ -55,7 +57,18 @@ def _discogs_world(positions: tuple[str, ...], *, catalog_positions: tuple[str, 
     return classify_album(album, manifest, enumerate_files=lambda _: physical, tag_reader=tags)
 
 
-@given(st.lists(st.text(alphabet="ABC123", min_size=1, max_size=4), min_size=2, max_size=8, unique=True))
+#: Letters only, deliberately -- Discogs' own ``get_track_index`` parser
+#: only assigns a subtrack index (and so groups) a position that contains a
+#: DIGIT (either "16.1"-style or "1A"-style). A digit-bearing alphabet can
+#: generate two ADJACENT distinct strings ("1A","1B") that Beets' own
+#: coalescing would still merge into one physical component, breaking these
+#: properties' 1:1 position<->component assumption. Coalescing has its own
+#: dedicated pin + property (``tests/test_library_completeness.py``); these
+#: four exercise identity-matching, independent of grouping.
+_UNGROUPABLE_POSITION_ALPHABET = "ABC"
+
+
+@given(st.lists(st.text(alphabet=_UNGROUPABLE_POSITION_ALPHABET, min_size=1, max_size=4), min_size=2, max_size=8, unique=True))
 def _property_catalog_disk_symmetry(positions: list[str]) -> None:
     all_positions = tuple(positions)
     complete = _discogs_world(all_positions, catalog_positions=all_positions, physical_positions=all_positions)
@@ -66,7 +79,7 @@ def _property_catalog_disk_symmetry(positions: list[str]) -> None:
     assert not completeness_invariant_violations({f.kind for f in extra.findings}, expect_drift=True, expect_missing=False, expect_video_ignored=False, expect_unknown=False)
 
 
-@given(st.lists(st.text(alphabet="ABC123", min_size=1, max_size=4), min_size=2, max_size=7, unique=True))
+@given(st.lists(st.text(alphabet=_UNGROUPABLE_POSITION_ALPHABET, min_size=1, max_size=4), min_size=2, max_size=7, unique=True))
 def _property_nonexclusive_missing_and_drift(positions: list[str]) -> None:
     all_positions = tuple(positions)
     # First is physically present but deliberately untracked; second is absent.
@@ -87,10 +100,82 @@ def _property_video_never_means_missing_audio(token: str) -> None:
     assert not completeness_invariant_violations({f.kind for f in result.findings}, expect_drift=False, expect_missing=False, expect_video_ignored=True, expect_unknown=False)
 
 
-@given(st.lists(st.text(alphabet="ABC123", min_size=1, max_size=4), min_size=1, max_size=6, unique=True))
+@given(st.lists(st.text(alphabet=_UNGROUPABLE_POSITION_ALPHABET, min_size=1, max_size=4), min_size=1, max_size=6, unique=True))
 def _property_unreadable_extra_is_unknown_not_missing(positions: list[str]) -> None:
     result = _discogs_world(tuple(positions), catalog_positions=(), physical_positions=("extra",), unreadable_extra=True)
     assert not completeness_invariant_violations({f.kind for f in result.findings}, expect_drift=True, expect_missing=False, expect_video_ignored=False, expect_unknown=True)
+
+
+def _beets_oracle_groups(raw_positions: list[str]) -> list[tuple[str, str]]:
+    """Ground truth for issue #1237's coalescing: run the REAL Beets
+    Discogs plugin's own ``_coalesce_tracks`` (the same "modern" cohort
+    ``harness/beets_compat.py`` targets) and read off ``(position, title)``
+    for each resulting physical track. ``object.__new__`` bypasses
+    ``DiscogsPlugin.__init__`` (network/config setup this call never
+    needs) -- the same construction ``tests/test_discogs_subtracks_e2e.py``
+    already uses as its own candidate-shim oracle.
+    """
+    plugin = object.__new__(DiscogsPlugin)
+    raw: list[Track] = [
+        {"type_": "track", "position": position, "title": position, "duration": "0:01"}
+        for position in raw_positions
+    ]
+    coalesced = plugin._coalesce_tracks(raw)
+    return [(track["position"], track["title"]) for track in coalesced]
+
+
+@st.composite
+def _discogs_position_sequence(draw: st.DrawFn) -> list[str]:
+    """A realistic raw Discogs position sequence: a mix of plain (never-
+    group) positions and dotted subtrack FAMILIES (2-4 consecutive
+    sub-positions sharing one physical prefix), each family's own prefix
+    kept distinct so cross-family adjacency never accidentally merges.
+    """
+    group_count = draw(st.integers(min_value=1, max_value=6))
+    used_prefixes: set[str] = set()
+    used_plain: set[str] = set()
+    positions: list[str] = []
+    for _ in range(group_count):
+        if draw(st.booleans()):
+            letter = draw(st.sampled_from("ABCDEFGH"))
+            number = draw(st.integers(min_value=1, max_value=99))
+            plain = f"{letter}{number}"
+            assume(plain not in used_plain)
+            used_plain.add(plain)
+            positions.append(plain)
+        else:
+            prefix = draw(st.integers(min_value=1, max_value=99))
+            assume(str(prefix) not in used_prefixes)
+            used_prefixes.add(str(prefix))
+            size = draw(st.integers(min_value=2, max_value=4))
+            positions.extend(f"{prefix}.{index}" for index in range(1, size + 1))
+    return positions
+
+
+@given(_discogs_position_sequence())
+def _property_discogs_manifest_agrees_with_beets_oracle(raw_positions: list[str]) -> None:
+    """Issue #1237: ``discogs_manifest``'s component set must match what
+    Beets itself would catalogue -- the real adapter (``beetsplug.discogs
+    .DiscogsPlugin``) is the oracle, not a second hand-written
+    reimplementation of the same regex.
+    """
+    release = "1"
+    manifest = discogs_manifest(release, {
+        "id": release,
+        "tracks": [{"position": p, "title": p} for p in raw_positions],
+    })
+    oracle = _beets_oracle_groups(raw_positions)
+    assert [component.key for component in manifest.components] == [
+        f"{release}-{position}" for position, _ in oracle
+    ]
+    assert [component.title for component in manifest.components] == [
+        title for _, title in oracle
+    ]
+
+
+class TestDiscogsGroupingOracleGenerated(unittest.TestCase):
+    def test_discogs_manifest_agrees_with_beets_oracle(self) -> None:
+        _property_discogs_manifest_agrees_with_beets_oracle()
 
 
 class TestLibraryCompletenessGenerated(unittest.TestCase):

@@ -73,12 +73,14 @@ def make_coverage_choose_match_msg(
     composite_local_length: float = 0.0,
     composite_program_length: float = 0.0,
     composite_duration_complete: bool = True,
+    item_paths: list[str] | None = None,
 ) -> str:
-    item_paths = [
-        "01 Space Oddity.flac",
-        "02 Unwashed And Somewhat Slightly Dazed.flac",
-        "03 Don't Sit Down.flac",
-    ]
+    if item_paths is None:
+        item_paths = [
+            "01 Space Oddity.flac",
+            "02 Unwashed And Somewhat Slightly Dazed.flac",
+            "03 Don't Sit Down.flac",
+        ]
     items = [
         {
             "path": path,
@@ -192,6 +194,82 @@ class TestBeetsValidate(unittest.TestCase):
         self.assertEqual(mock_popen.call_count, 2)
         second_cmd = mock_popen.call_args_list[1].args[0]
         self.assertIn("--preserve-discogs-flat-subtracks", second_cmd)
+
+    @patch("lib.beets.sp.Popen")
+    def test_unkle_style_unmapped_file_with_no_reported_extra_retries_flat(
+        self,
+        mock_popen,
+    ):
+        """Issue #1237's second confirmation shape: 13 admitted files, one
+        genuinely UNMAPPED with zero ``extra_items`` reported (unlike Bowie's
+        shape, which Beets reports as an extra item) -- the retry trigger
+        must fire on ``unmapped_paths`` alone, not only on
+        ``reported_extra_paths``.
+        """
+        release_id = "2823685"
+        item_paths = [f"{n:02d} Track {n}.flac" for n in range(1, 14)]
+        composite_path = item_paths[1]
+        default = make_validation_proc(make_coverage_choose_match_msg(
+            release_id,
+            item_paths=item_paths,
+            mapped_paths=item_paths[:12],
+            extra_paths=[],
+            composite_path=composite_path,
+            composite_local_length=100.0,
+            composite_program_length=220.0,
+        ))
+        expanded = make_validation_proc(make_coverage_choose_match_msg(
+            release_id,
+            item_paths=item_paths,
+            mapped_paths=item_paths,
+            extra_paths=[],
+        ))
+        mock_popen.side_effect = [default, expanded]
+
+        result = beets_validate(self.HARNESS, "/test/album", release_id, 0.15)
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.scenario, "strong_match")
+        self.assertEqual(len(result.candidates[0].mapping), 13)
+        self.assertEqual(mock_popen.call_count, 2)
+        second_cmd = mock_popen.call_args_list[1].args[0]
+        self.assertIn("--preserve-discogs-flat-subtracks", second_cmd)
+
+    @patch("lib.beets.sp.Popen")
+    def test_overlapping_composite_validates_without_retry_and_carries_evidence(
+        self,
+        mock_popen,
+    ):
+        """Issue #1237: a composite duration disagreement with an otherwise
+        COMPLETE mapping (no unmapped/extra audio) must validate on the
+        FIRST pass -- no retry needed, no rejection -- while still
+        persisting the observation on the result.
+        """
+        release_id = "2823685"
+        composite_path = "02 Unwashed And Somewhat Slightly Dazed.flac"
+        proc = make_validation_proc(make_coverage_choose_match_msg(
+            release_id,
+            mapped_paths=[
+                "01 Space Oddity.flac",
+                composite_path,
+                "03 Don't Sit Down.flac",
+            ],
+            extra_paths=[],
+            composite_path=composite_path,
+            composite_local_length=579.7,
+            composite_program_length=781.0,
+        ))
+        mock_popen.return_value = proc
+
+        result = beets_validate(self.HARNESS, "/test/album", release_id, 0.15)
+
+        self.assertTrue(result.valid, result.to_json())
+        self.assertEqual(result.scenario, "strong_match")
+        self.assertEqual(mock_popen.call_count, 1)
+        self.assertEqual(
+            result.incomplete_composite_paths,
+            [f"{composite_path} (local=579.7s, indexed_program=781.0s)"],
+        )
 
     @patch("lib.beets.sp.Popen")
     def test_force_distance_override_cannot_bypass_incomplete_mapping(
