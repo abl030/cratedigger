@@ -86,7 +86,7 @@ class TestWorldAuditDebtDecisions(unittest.TestCase):
     def test_initialized_state_contains_member_digests_not_raw_identity(self) -> None:
         state = initialize_world_audit_debt_state(_report(
             _violation(11),
-            _violation(12, code="evidence_fingerprint_mismatch"),
+            _violation(12, code="current_beets_missing"),
         ))
 
         encoded = msgspec.json.encode(state)
@@ -151,13 +151,13 @@ class TestWorldAuditDebtDecisions(unittest.TestCase):
     def test_changed_cause_for_known_identity_is_red(self) -> None:
         original = _violation(
             11,
-            code="evidence_fingerprint_mismatch",
-            detail="request 11 fingerprint old does not match disk first",
+            code="current_beets_missing",
+            detail="imported request 11 is missing from current Beets",
         )
         changed = _violation(
             11,
-            code="evidence_fingerprint_mismatch",
-            detail="request 11 fingerprint old does not match disk second",
+            code="current_beets_missing",
+            detail="imported request 11 vanished from current Beets",
         )
         state = initialize_world_audit_debt_state(_report(original))
 
@@ -220,6 +220,162 @@ class TestWorldAuditDebtDecisions(unittest.TestCase):
         ])
         self.assertTrue(evaluation.passed)
         self.assertEqual(evaluation.report.strict_violations, 1)
+
+
+class TestNonGatingViolationCodes(unittest.TestCase):
+    """``evidence_fingerprint_mismatch`` is reported but never gates (#1233).
+
+    A stale evidence fingerprint is a stale cache, not a world defect: the
+    action-time resolver rebuilds and relinks instead of refusing. The
+    exemption is ONE named code, not bucket B — ``current_beets_missing``
+    shares that bucket and means an imported album vanished from Beets.
+    """
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+
+    def test_new_non_gating_member_does_not_fail_the_gate(self) -> None:
+        state = initialize_world_audit_debt_state(_report(_violation(11)))
+        current = _report(
+            _violation(11),
+            _violation(12, code="evidence_fingerprint_mismatch"),
+        )
+
+        evaluation = assess_world_audit_debt(state, current)
+
+        self.assertTrue(evaluation.passed)
+        self.assertEqual(evaluation.report.new_members, 0)
+        self.assertIsNotNone(evaluation.next_state)
+
+    def test_new_gating_member_in_the_same_bucket_still_fails(self) -> None:
+        # Must-still-work guard: the exemption is one code, not bucket B.
+        state = initialize_world_audit_debt_state(_report(_violation(11)))
+        current = _report(
+            _violation(11),
+            _violation(12, code="current_beets_missing"),
+        )
+
+        evaluation = assess_world_audit_debt(state, current)
+
+        self.assertFalse(evaluation.passed)
+        self.assertEqual(evaluation.report.new_members, 1)
+
+    def test_a_non_gating_member_cannot_mask_a_gating_one(self) -> None:
+        state = initialize_world_audit_debt_state(_report(_violation(11)))
+        current = _report(
+            _violation(11),
+            _violation(12, code="evidence_fingerprint_mismatch"),
+            _violation(13, code="current_beets_missing"),
+        )
+
+        evaluation = assess_world_audit_debt(state, current)
+
+        self.assertFalse(evaluation.passed)
+        self.assertEqual(evaluation.report.new_members, 1)
+
+    def test_changed_non_gating_cause_does_not_fail_the_gate(self) -> None:
+        # The exact live #1233 shape: 74 new + 1 changed fingerprint mismatch
+        # against an otherwise stable cohort.
+        state = initialize_world_audit_debt_state(_report(
+            _violation(11),
+            _violation(
+                12,
+                code="evidence_fingerprint_mismatch",
+                detail="request 12 evidence 'a' does not match disk 'b'",
+            ),
+        ))
+        current = _report(
+            _violation(11),
+            _violation(
+                12,
+                code="evidence_fingerprint_mismatch",
+                detail="request 12 evidence 'a' does not match disk 'c'",
+            ),
+            _violation(13, code="evidence_fingerprint_mismatch"),
+        )
+
+        evaluation = assess_world_audit_debt(state, current)
+
+        self.assertTrue(evaluation.passed)
+        self.assertEqual(evaluation.report.new_members, 0)
+        self.assertEqual(evaluation.report.changed_members, 0)
+
+    def test_strict_violations_stays_truthful_and_the_gap_is_named(self) -> None:
+        state = initialize_world_audit_debt_state(_report(_violation(11)))
+        current = _report(
+            _violation(11),
+            _violation(12, code="evidence_fingerprint_mismatch"),
+            _violation(13, code="evidence_fingerprint_mismatch"),
+        )
+
+        evaluation = assess_world_audit_debt(state, current)
+
+        # The strict audit really did report three violations. Never shrink
+        # this number to hide the untracked ones.
+        self.assertEqual(evaluation.report.strict_violations, 3)
+        self.assertEqual(evaluation.report.non_gating_violations, 2)
+        self.assertEqual(
+            [(item.code, item.count)
+             for item in evaluation.report.non_gating_by_code],
+            [("evidence_fingerprint_mismatch", 2)],
+        )
+        self.assertEqual(evaluation.report.known_remaining, 1)
+
+    def test_initialize_never_records_a_non_gating_member(self) -> None:
+        state = initialize_world_audit_debt_state(_report(
+            _violation(11),
+            _violation(12, code="evidence_fingerprint_mismatch"),
+        ))
+
+        self.assertEqual(state.approved_total, 1)
+        self.assertEqual(
+            [item.code for item in state.approved_by_code],
+            ["current_evidence_missing"],
+        )
+        self.assertEqual(len(state.remaining), 1)
+
+    def test_loading_a_legacy_state_drops_non_gating_members(self) -> None:
+        # Self-migration: the live known-debt.json carries 238 approved
+        # evidence_fingerprint_mismatch members from before the exemption.
+        # Loading rebaselines it, so no operator one-shot is needed.
+        from lib.world_audit_debt import (
+            WorldAuditDebtCodeCount,
+            WorldAuditDebtState,
+            _member,
+        )
+
+        gating = _member(_violation(11))
+        exempt = _member(_violation(12, code="evidence_fingerprint_mismatch"))
+        legacy = WorldAuditDebtState(
+            schema_version=WORLD_AUDIT_DEBT_SCHEMA_VERSION,
+            approved_total=2,
+            approved_by_code=(
+                WorldAuditDebtCodeCount(
+                    code="current_evidence_missing", count=1),
+                WorldAuditDebtCodeCount(
+                    code="evidence_fingerprint_mismatch", count=1),
+            ),
+            remaining=tuple(sorted(
+                (gating, exempt),
+                key=lambda item: (
+                    item.violation_digest,
+                    item.identity_digest,
+                    item.code,
+                ),
+            )),
+        )
+        path = Path(self.tempdir.name) / "legacy-debt.json"
+        path.write_bytes(msgspec.json.encode(legacy))
+
+        loaded = load_world_audit_debt_state(path)
+
+        self.assertEqual(loaded.approved_total, 1)
+        self.assertEqual(
+            [item.code for item in loaded.approved_by_code],
+            ["current_evidence_missing"],
+        )
+        self.assertEqual(loaded.remaining, (gating,))
 
 
 class TestWorldAuditDebtGateProcess(unittest.TestCase):

@@ -468,10 +468,34 @@ pipeline-cli audit world --json |
 The state contains schema-versioned member digests and aggregate code counts,
 not request IDs, release IDs, paths, or violation text. An exact stable cohort
 passes as `tracked_debt`; an exact subset passes and atomically removes the
-converged members. A new member, a changed violation for a known identity,
-growth, duplicate input, or unavailable/invalid state fails closed without
-changing the authority state. Initialization is deliberately separate and
-exclusive:
+converged members. For every **gated** code, a new member, a changed violation
+for a known identity, growth, duplicate input, or unavailable/invalid state
+fails closed without changing the authority state.
+
+`lib/world_audit_debt.py::NON_GATING_VIOLATION_CODES` names the codes this gate
+reports but never gates on and never tracks as debt — currently just
+`evidence_fingerprint_mismatch`. Its members are excluded from the known
+cohort, from convergence accounting, and from the pass/fail decision, and a
+state written before a code joined that set is rebaselined on load, so no
+operator one-shot is needed. `strict_violations` still counts them, and
+`non_gating_violations` / `non_gating_by_code` name the resulting gap. This
+is a per-code list, not a bucket rule: `current_beets_missing` shares bucket B
+and still fails the gate. The daily wrapper's `jq` protocol filter projects a
+fixed key set and therefore does not yet surface the two `non_gating_*` fields;
+`pipeline-cli audit world --json` lists every such violation in full.
+
+A stale evidence fingerprint means a persisted evidence row describes an older
+byte state of an album directory. Every decision consumer reauthorizes the
+installed snapshot at action time and rebuilds rather than failing closed, so
+it cannot produce a wrong import decision — see `docs/quality-verification.md`
+§ "Evidence addressing, propagation, and ownership" and CLAUDE.md invariant 12.
+
+Authority: "stale evidence will -always- auto heal at import time. so it sinoyk
+does not matter. its not something we need tit rsck and we shoukd just teach
+the workd audit thing ti ignire it." (operator, 2026-08-21) —
+<https://github.com/abl030/cratedigger/issues/1233#issuecomment-5363639933>
+
+Initialization is deliberately separate and exclusive:
 
 ```bash
 pipeline-cli audit world --json |
