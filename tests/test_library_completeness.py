@@ -517,14 +517,16 @@ class TestGroupedCompositePhysicalCheck(unittest.TestCase):
         self.assertIn("Untitled", unknown_findings[0].detail)
 
     def test_unreadable_uncatalogued_extra_suppresses_missing_accusation(self) -> None:
-        """Issue #1237 review D1 (live regression): the identity-driven
-        verdict below already refuses to turn ``missing`` into a definite
-        ``missing_source_audio`` while an uncatalogued extra file's
-        identity is unresolved (its own ``not unknown_extra`` guard). The
-        grouped-composite physical check must refuse the same way instead
-        of accusing a genuine no-gap composite while that same uncertainty
-        stands unresolved -- an unreadable extra file could, in principle,
-        BE the "missing" part.
+        """Issue #1237 review D1/E1 (live regression, then fail-open
+        correction): the identity-driven verdict below already refuses to
+        turn ``missing`` into a definite ``missing_source_audio`` while an
+        uncatalogued extra file's identity is unresolved (its own ``not
+        unknown_extra`` guard), substituting an explanatory ``unknown``
+        instead of silently dropping the finding. The grouped-composite
+        physical check must do the same: refuse the accusation AND emit
+        its OWN ``unknown`` naming the composite -- D1's original fix
+        suppressed the accusation but emitted NOTHING for the composite
+        (E1's review: "the finding vanishes").
         """
         release = "461206"
         composite_path = "/album/composite.opus"
@@ -550,6 +552,84 @@ class TestGroupedCompositePhysicalCheck(unittest.TestCase):
         kinds = {finding.kind for finding in result.findings}
         self.assertEqual(kinds, {"catalog_drift", "unknown"})
         self.assertNotIn("missing_source_audio", kinds)
+        unknown_details = [f.detail for f in result.findings if f.kind == "unknown"]
+        self.assertEqual(len(unknown_details), 2)
+        self.assertTrue(
+            any("16.1" in detail and "16.2" in detail for detail in unknown_details),
+            f"expected one unknown finding to name the composite, got {unknown_details!r}",
+        )
+
+    def test_untagged_uncatalogued_extra_suppresses_missing_accusation(self) -> None:
+        """Issue #1237 review E1: the REALISTIC trigger for this
+        suppression is a stray UNTAGGED audio file (blank release_track/
+        recording -- a mislabeled rip, a bonus track, an accidentally-
+        copied file), not an unreadable one; ``AudioTagReadError`` is far
+        less likely live. Same composite-naming contract as the
+        unreadable-extra pin above, through the OTHER ``unknown_extra``
+        producer ("uncatalogued audio lacks exact source identity").
+        """
+        release = "461206"
+        composite_path = "/album/composite.opus"
+        extra_path = "/album/stray.opus"
+        composite_key = f"{release}-16.1"
+        album = LibraryAlbum(
+            1, "Artist", "Album", ReleaseIdentity("discogs", release), "/album",
+            (CatalogItem(composite_path, composite_key, ""),),
+        )
+        manifest = discogs_manifest(release, _discogs_raw(["16.1", "16.2"], release))
+
+        def _tag_reader(path: str) -> tuple[str, str]:
+            if path == extra_path:
+                return ("", "")
+            return (composite_key, "")
+
+        result = classify_album(
+            album, manifest,
+            enumerate_files=lambda _directory: (composite_path, extra_path),
+            tag_reader=_tag_reader,
+            detect_composite_gap=lambda _path: False,
+        )
+        kinds = {finding.kind for finding in result.findings}
+        self.assertEqual(kinds, {"catalog_drift", "unknown"})
+        self.assertNotIn("missing_source_audio", kinds)
+        unknown_details = [f.detail for f in result.findings if f.kind == "unknown"]
+        self.assertEqual(len(unknown_details), 2)
+        self.assertTrue(
+            any("16.1" in detail and "16.2" in detail for detail in unknown_details),
+            f"expected one unknown finding to name the composite, got {unknown_details!r}",
+        )
+
+    def test_uncatalogued_remaining_subposition_satisfies_by_identity(self) -> None:
+        """Issue #1237 review E3: the C1 subtraction only checked
+        CATALOGUED items for a satisfied sub-position, but an
+        uncatalogued-but-correctly-identified physical file satisfies it
+        just as well -- the group's FIRST position can already reach this
+        route via ``component_key_paths``
+        (``test_uncatalogued_present_first_position_still_reaches_
+        decode``); the REMAINING sub-positions must reach it too, or a
+        genuinely complete composite (one part catalogued, the other
+        merely uncatalogued) is falsely accused of missing audio.
+        """
+        release = "461206"
+        first_path = "/album/16.1.opus"
+        second_path = "/album/16.2.opus"
+        tags = {
+            first_path: (f"{release}-16.1", ""),
+            second_path: (f"{release}-16.2", ""),
+        }
+        album = LibraryAlbum(
+            1, "Artist", "Album", ReleaseIdentity("discogs", release), "/album",
+            (CatalogItem(first_path, tags[first_path][0], ""),),
+        )
+
+        def _unreachable(path: str) -> bool:
+            raise AssertionError(f"unexpected composite audio decode for {path!r}")
+
+        kinds = self._classify(
+            album, _discogs_raw(["16.1", "16.2"], release), tags=tags,
+            detect_composite_gap=_unreachable,
+        )
+        self.assertEqual(kinds, {"catalog_drift"})
 
 
 class TestSourceRawContracts(unittest.TestCase):

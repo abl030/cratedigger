@@ -139,12 +139,24 @@ def _decode_mono_pcm16(path: str) -> np.ndarray:
             f"ffmpeg failed decoding {path} (rc={proc.returncode}): {' / '.join(tail)}"
         )
     samples = np.frombuffer(proc.stdout, dtype="<i2")
-    # Issue #1237 review D6: fewer than one full second of decoded audio
-    # (including exactly zero) cannot be evaluated at all -- the per-second
-    # RMS pass would silently produce an empty flags list, and
-    # ``gap_decision_from_silence_flags([])`` is False, which would
-    # accuse a genuinely unreadable/degenerate file of missing audio
-    # instead of reporting it unknown. Treat both as unreadable.
+    # Issue #1237 review D6: decoded audio under one full second (including
+    # exactly zero) cannot produce even ONE per-second RMS sample --
+    # ``_per_second_dbfs`` would silently return an empty list, and
+    # ``gap_decision_from_silence_flags([])`` returns False without error,
+    # which reads as "measured: no gap" rather than "could not measure at
+    # all." This guard closes exactly that degenerate, could-not-measure
+    # case.
+    #
+    # Issue #1237 review E4: it does NOT, and by construction cannot,
+    # protect the much wider band directly above it. ANY decode shorter
+    # than MIN_SILENCE_SECONDS + MIN_TRAILING_AUDIO_SECONDS whole seconds
+    # can never contain a qualifying gap regardless of its actual content
+    # -- so a genuinely short, fully-measurable composite in that band
+    # still reaches a deterministic "no gap" verdict here, exactly like a
+    # longer file with no gap does. 1.0s is the minimum needed to produce
+    # a single RMS sample, not a boundary chosen to guard against false
+    # alarms on short files in general; the caller (``classify_album``)
+    # is what decides what a "no gap" verdict means for the composite.
     if samples.size < _DECODE_SAMPLE_RATE:
         raise CompositeAudioReadError(
             "composite audio decoded to less than one second "

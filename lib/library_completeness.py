@@ -256,15 +256,18 @@ def _try_coalesce_nested_index(
     literal per-child expansion (this module's pre-existing, unchanged
     ``sub_tracks`` flattening).
 
-    Issue #1237 review D5, measured: across all 410 live library releases
-    (3,965 track entries) plus 300 further sampled mirror releases, the
-    deployed Discogs mirror never emits ``sub_tracks`` at all -- it
-    returns a fixed ``{artists, duration, position, title}`` schema. This
-    branch therefore has NO current live producer; it corrects a real
+    Issue #1237 review D5/E4: observed at review time, not a structural
+    guarantee this repository can verify on its own (the mirror is an
+    external service, not vendored code) -- a manual sample of all 410
+    live library releases (3,965 track entries) plus 300 further sampled
+    mirror releases found the deployed Discogs mirror never emitting
+    ``sub_tracks``; every sampled entry returned a fixed ``{artists,
+    duration, position, title}`` schema instead. At the time of that
+    sample this branch had no live producer; it corrects a real
     divergence from the real Beets plugin in a code path that already
     existed before this issue (the pre-existing literal-per-child
-    flattening below), not a defect this issue's own live evidence
-    surfaced.
+    flattening below), independent of whether the mirror's shape has
+    since changed.
     """
     if not sub_list:
         return None
@@ -549,6 +552,20 @@ def classify_album(
             unmatched_mb_witnesses += 1
 
     unknown_extra = False
+    # Issue #1237 review E3: a physically-present, correctly-tagged
+    # uncatalogued file can name a SUB-position of a coalesced Discogs
+    # group (e.g. "1-16.2") -- a real identity that is never a top-level
+    # ``components_by_key`` entry, so ``matching_keys`` below never
+    # recognises it and it is otherwise invisible to every branch in this
+    # loop. Recorded separately (identity -> path) so the grouped-
+    # composite subtraction further down can treat it as satisfied too,
+    # symmetrically with the FIRST position's own ``component_key_paths``
+    # route (``test_uncatalogued_present_first_position_still_reaches_
+    # decode``). Deliberately does not change ``known_component_keys`` or
+    # ``unknown_extra`` semantics above -- last-write-wins on a shared
+    # identity between two uncatalogued files is an accepted residual
+    # (issue #1237 review E-round "recorded, do NOT chase").
+    uncatalogued_sub_identity_paths: dict[str, str] = {}
     for path in physical_paths - catalog_paths:
         try:
             release_track, recording = tag_reader(path)
@@ -575,6 +592,9 @@ def classify_album(
                 findings.append(CompletenessFinding(
                     "unknown", "uncatalogued audio lacks exact source identity",
                 ))
+            for identity in (release_track, recording):
+                if identity:
+                    uncatalogued_sub_identity_paths.setdefault(identity, path)
         elif manifest.source == "musicbrainz":
             key = current_component_key(release_track, recording)
             if key:
@@ -618,21 +638,33 @@ def classify_album(
             # catalogued items -- one per literal sub-position (e.g.
             # 2823685-A2.1 AND 2823685-A2.2 both present) is a COMPLETE
             # import, not missing, and needs no audio decode at all.
+            # Issue #1237 review E3: the same subtraction applies when a
+            # sub-position is satisfied by an uncatalogued-but-correctly-
+            # identified physical file, not only a catalogued one -- the
+            # group's FIRST position could already reach ``component_key_
+            # paths`` this way; the REMAINING positions must too, or a
+            # genuinely complete composite (one part catalogued, the other
+            # merely uncatalogued) is falsely accused.
             remaining = [
                 (key, title) for key, title in real_subcomponents
-                if key != component.key and key not in existing_source_keys
+                if key != component.key
+                and key not in existing_source_keys
+                and key not in uncatalogued_sub_identity_paths
             ]
             if not remaining:
                 continue
             path = component_key_paths.get(component.key)
             if path is None:
                 continue
-            # C9/D7: both messages below name and count only the REAL
-            # sub-components -- a silence marker was never real audio, and
-            # the label must be consistent whether the composite turns out
-            # unreadable or genuinely short (previously only the
-            # missing_source_audio branch filtered it, so an "unknown"
-            # finding for the same group still spelled out "(silence)").
+            # C9/D7: both messages below name only the REAL sub-components
+            # -- a silence marker was never real audio, and the label must
+            # be consistent whether the composite turns out unreadable or
+            # genuinely short (previously only the missing_source_audio
+            # branch filtered it, so an "unknown" finding for the same
+            # group still spelled out "(silence)"). Only the
+            # missing_source_audio message below also COUNTS them
+            # (``len(real_titles)``); the unreadable-composite message
+            # names but does not count.
             real_titles = tuple(title for _, title in real_subcomponents)
             real_label = " / ".join(real_titles) or component.key
             try:
@@ -642,13 +674,29 @@ def classify_album(
                     "unknown", f"{real_label}: composite audio unreadable: {exc}",
                 ))
                 continue
-            # Issue #1237 review D1: mirror the identity-driven verdict's own
-            # ``not unknown_extra`` guard below. An unreadable uncatalogued
-            # extra file is exactly the kind of uncertainty that could BE the
-            # missing piece -- accusing the grouped composite of a definite
-            # gap while that uncertainty stands unresolved is the same class
-            # of premature "missing" this file elsewhere refuses to make.
-            if not gap_present and not unknown_extra:
+            if gap_present:
+                continue
+            # Issue #1237 review D1/E1: mirror the identity-driven verdict's
+            # own ``not unknown_extra`` behaviour below, not only its
+            # CONDITION. In this subsystem a gap PROVES completeness, so
+            # ``not gap_present`` here is a definite ABSENCE of a gap, not a
+            # "definite gap" (D1's own docstring had that inverted) -- and
+            # while an unreadable/unidentified uncatalogued extra file's
+            # identity is unresolved, that absence must not become a
+            # SILENT drop of the composite's own evidence (D1 shipped that
+            # gap: unknown_extra suppressed the accusation but emitted
+            # nothing naming the composite at all). Emit the SAME kind of
+            # explanatory ``unknown`` the identity-driven verdict emits for
+            # its own ``missing and unknown_extra`` case, naming this
+            # composite specifically.
+            if unknown_extra:
+                findings.append(CompletenessFinding(
+                    "unknown",
+                    f"{real_label}: uncatalogued extra audio could satisfy "
+                    "the apparent gap; installed composite shows no "
+                    "internal silence gap",
+                ))
+            else:
                 findings.append(CompletenessFinding(
                     "missing_source_audio",
                     f"{real_label}: installed composite is one continuous "

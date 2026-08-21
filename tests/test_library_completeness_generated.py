@@ -62,7 +62,23 @@ def _identity_only_gap_detector(_path: str) -> bool:
     return False
 
 
-def _discogs_world(positions: tuple[str, ...], *, catalog_positions: tuple[str, ...], physical_positions: tuple[str, ...], unreadable_extra: bool = False):
+def _discogs_world(
+    positions: tuple[str, ...], *, catalog_positions: tuple[str, ...],
+    physical_positions: tuple[str, ...], unreadable_extra: bool = False,
+    untagged_extra: bool = False, conflicting_extra: bool = False,
+):
+    """Issue #1237 review E2: ``unreadable_extra``/``untagged_extra``/
+    ``conflicting_extra`` select which of the THREE real ``unknown_extra``
+    producers in ``classify_album``'s Discogs uncatalogued-extra loop the
+    "extra" physical file exercises -- an ``AudioTagReadError``, blank
+    tags, or a tag pair matching two DIFFERENT top-level components at
+    once. Mutually exclusive; all default ``False`` reproduces the
+    pre-existing shape every other caller in this module relies on: a
+    non-blank tag ("1-extra") that matches nothing, which none of the
+    three producer branches recognise (contributes only to catalog
+    drift). ``conflicting_extra`` requires >= 2 top-level components in
+    ``positions`` -- a single coalesced group has only one.
+    """
     release = "1"
     manifest = discogs_manifest(release, {
         "id": release,
@@ -71,9 +87,16 @@ def _discogs_world(positions: tuple[str, ...], *, catalog_positions: tuple[str, 
     catalog = tuple(CatalogItem(f"/album/{p}.flac", f"{release}-{p}", "") for p in catalog_positions)
     album = LibraryAlbum(1, "a", "b", ReleaseIdentity("discogs", release), "/album", catalog)
     physical = tuple(f"/album/{p}.flac" for p in physical_positions)
+    manifest_keys = [component.key for component in manifest.components]
     def tags(path: str) -> tuple[str, str]:
-        if unreadable_extra and path.endswith("extra.flac"):
-            raise AudioTagReadError("unreadable")
+        if path.endswith("extra.flac"):
+            if unreadable_extra:
+                raise AudioTagReadError("unreadable")
+            if untagged_extra:
+                return ("", "")
+            if conflicting_extra:
+                assert len(manifest_keys) >= 2, "conflicting_extra needs >= 2 top-level components"
+                return (manifest_keys[0], manifest_keys[1])
         return (f"{release}-{path.rsplit('/', 1)[-1].removesuffix('.flac')}", "")
     return classify_album(
         album, manifest, enumerate_files=lambda _: physical, tag_reader=tags,
@@ -118,33 +141,72 @@ def _property_video_never_means_missing_audio(token: str) -> None:
     grouped=st.booleans(),
     prefix=st.integers(min_value=1, max_value=20),
     group_size=st.integers(min_value=2, max_value=4),
+    extra_producer=st.sampled_from(["unreadable", "untagged", "conflicting"]),
 )
+@example(positions=["A"], grouped=True, prefix=1, group_size=2, extra_producer="untagged")
+@example(positions=["A"], grouped=True, prefix=1, group_size=2, extra_producer="conflicting")
 def _property_unreadable_extra_is_unknown_not_missing(
     positions: list[str], grouped: bool, prefix: int, group_size: int,
+    extra_producer: str,
 ) -> None:
-    """Issue #1237 review D1: an unreadable uncatalogued extra file must
-    fail closed to ``unknown``, never ``missing_source_audio`` -- both for
-    the identity-driven verdict's pre-existing ``not unknown_extra`` guard
-    (``grouped=False``, the original scenario) AND for the
+    """Issue #1237 review D1/E1/E2: an uncatalogued extra file with
+    unresolved identity must fail closed to ``unknown``, never
+    ``missing_source_audio`` -- both for the identity-driven verdict's
+    pre-existing ``not unknown_extra`` guard (``grouped=False``, the
+    original scenario, always the ``unreadable`` producer) AND for the
     grouped-composite physical check's OWN matching guard (``grouped=
     True``, issue #1237 review D1's live regression: the original
     scenario's ``catalog_positions=()`` left every component unknown, so
     it could never reach the grouped branch at all -- a mutant deleting
     the grouped block's own guard survived every run before this branch
-    was added).
+    was added). ``extra_producer`` draws all THREE real ``unknown_extra``
+    producers for the grouped branch (issue #1237 review E2: only
+    ``unreadable`` was patrolled there before -- ``untagged`` and
+    ``conflicting`` were not).
     """
     if grouped:
         group_positions = tuple(f"{prefix}.{index}" for index in range(1, group_size + 1))
+        if extra_producer == "conflicting":
+            # A conflicting-identity extra needs a SECOND, unrelated
+            # top-level component to conflict against -- a single
+            # coalesced group has only one (issue #1237 review E2). The
+            # letter prefix keeps it structurally distinct from the
+            # group's own bare-numeric dotted family; it is never
+            # catalogued or physically present, so it becomes the
+            # identity-driven verdict's own ``missing`` -- exercising
+            # that verdict's ``unknown_extra`` downgrade too, not only
+            # the grouped-composite block's.
+            all_positions = group_positions + (f"Z{prefix}",)
+        else:
+            all_positions = group_positions
         result = _discogs_world(
-            group_positions, catalog_positions=(group_positions[0],),
-            physical_positions=(group_positions[0], "extra"), unreadable_extra=True,
+            all_positions, catalog_positions=(group_positions[0],),
+            physical_positions=(group_positions[0], "extra"),
+            unreadable_extra=extra_producer == "unreadable",
+            untagged_extra=extra_producer == "untagged",
+            conflicting_extra=extra_producer == "conflicting",
+        )
+        assert not completeness_invariant_violations({f.kind for f in result.findings}, expect_drift=True, expect_missing=False, expect_video_ignored=False, expect_unknown=True)
+        # Issue #1237 review E1: ``completeness_invariant_violations`` only
+        # checks KIND-SET membership, so it cannot distinguish the grouped
+        # composite emitting its OWN "unknown" evidence from it silently
+        # contributing nothing while merely inheriting "unknown" from the
+        # unrelated extra file's own finding (D1's original defect --
+        # "the finding vanishes"). Assert directly that the composite's own
+        # finding exists: its first sub-position's title (== its own
+        # literal position, per ``_discogs_world``'s manifest construction)
+        # must appear in some ``unknown`` finding's detail.
+        unknown_details = [f.detail for f in result.findings if f.kind == "unknown"]
+        assert any(group_positions[0] in detail for detail in unknown_details), (
+            f"grouped composite {group_positions[0]!r} produced no unknown "
+            f"finding naming itself: {unknown_details!r}"
         )
     else:
         result = _discogs_world(
             tuple(positions), catalog_positions=(), physical_positions=("extra",),
             unreadable_extra=True,
         )
-    assert not completeness_invariant_violations({f.kind for f in result.findings}, expect_drift=True, expect_missing=False, expect_video_ignored=False, expect_unknown=True)
+        assert not completeness_invariant_violations({f.kind for f in result.findings}, expect_drift=True, expect_missing=False, expect_video_ignored=False, expect_unknown=True)
 
 
 def _to_beets_audio_track(item: object) -> AudioTrack:
@@ -336,9 +398,11 @@ def _discogs_raw_entries(draw: st.DrawFn) -> list[dict[str, object]]:
     # strategy's earlier "plain"/"digit_letter"/"family" atom kinds could
     # never generate a bare, letterless, dotless leading position, so this
     # exact adjacency was unreachable and a mutant removing
-    # ``_discogs_subtrack_group_key``'s ``subindex`` guard survived all 63
-    # tests. Pinned rather than left to chance, per the "widen the
-    # strategy, not delete the clause" / "pin the decisive world" rules.
+    # ``_discogs_subtrack_group_key``'s ``subindex`` guard survived all 61
+    # tests then in both this file and ``tests/test_library_completeness.py``
+    # (52 + 9, measured at review time). Pinned rather than left to chance,
+    # per the "widen the strategy, not delete the clause" / "pin the
+    # decisive world" rules.
     [
         {"position": "16", "title": "16"},
         {"position": "16.1", "title": "16.1"},

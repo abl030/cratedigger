@@ -799,14 +799,28 @@ def _make_album_data(**overrides):
 class TestApplyCandidateScenarioIdempotence(unittest.TestCase):
     """``apply_candidate_scenario`` must leave no stale field behind when
     called a second time on the SAME ``ValidationResult`` (issue #1237
-    review C8/D4). No current production caller actually does this --
-    ``lib/download_validation.py``'s merge-redirect seam calls it exactly
-    once per object, always the FIRST call, since it is reached only when
-    ``result.scenario == "mbid_not_found"``, a value this function itself
-    never produces. This test protects the function's OWN stated "total
-    and idempotent by construction" contract (already promised for
-    ``valid``/``scenario``/``detail``) directly, independent of whether
-    any caller currently exercises it.
+    review C8/D4/E4). ``lib/download_validation.py``'s merge-redirect
+    seam is exactly one such caller, and its OWN call is always the first
+    on a given object (D4): it is reached only when ``result.scenario ==
+    "mbid_not_found"``, a value this function itself never produces. That
+    is not the same as "no caller ever reaches a SECOND call" --
+    ``lib/beets.py::_beets_validate_once`` processes every ``choose_match``
+    message the harness sends within one session, with last-wins field
+    overwrites on the SAME shared ``result``, calling
+    ``apply_candidate_scenario`` once per message whose candidate matches
+    the target MBID. Beets' own import session discovers one task per
+    album-shaped subdirectory it finds under the given path
+    (``harness/beets_harness.py``'s ``HarnessImportSession`` adds no
+    override that limits this to one), so a directory holding more than
+    one such subdirectory yields more than one ``choose_match`` before
+    ``session_end`` -- a DIFFERENT concept from the later, separate
+    ``nested_layout`` quality-decision fact (``lib/measurement.py``),
+    which is computed downstream of validation and names a different
+    failure. A second ``apply_candidate_scenario`` call on the same
+    object is therefore reachable inside ``beets_validate`` itself
+    whenever more than one task's candidates match the requested MBID --
+    exactly the case this test guards, independent of whether a specific
+    live album is known to exercise it today.
     """
 
     def _composite_candidate(self, *, local_length: float, indexed_length: float) -> CandidateSummary:
