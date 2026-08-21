@@ -19,6 +19,43 @@ _DIGEST_LENGTH = 64
 _IDENTITY_DOMAIN = b"cratedigger-world-audit-debt:identity:v1\0"
 _VIOLATION_DOMAIN = b"cratedigger-world-audit-debt:violation:v1\0"
 
+#: Strict-audit codes this gate reports but never gates on, and never tracks
+#: as debt.
+#:
+#: ``evidence_fingerprint_mismatch`` says one thing: a persisted evidence row
+#: describes an older byte state of an album directory. That is a stale cache,
+#: not a world defect. The action-time current-evidence resolver in
+#: ``lib/import_evidence.py`` treats a stale snapshot by falling through to
+#: ``backfill_current_evidence_from_album_info`` and relinking, rather than
+#: refusing — which is CLAUDE.md invariant 12, evidence is observational, not
+#: atomic. So a stale fingerprint does not by itself decide anything; gating on
+#: it only reports that some album's bytes changed since capture.
+#:
+#: One carve-out, deliberately not hidden here: that same resolver DOES return
+#: ``fail_closed=True`` before reaching the backfill when the linked row
+#: requires a lossless-source V0 metric and lacks one. The rebuild is the
+#: ordinary path, not a universal law.
+#:
+#: Measured on the live world 2026-08-21: all 311 mismatches were historical
+#: drift with zero actionable defects — 229 rows whose evidence still lists a
+#: pre-conversion ``.mp3`` inventory for albums now installed as ``.opus``,
+#: 81 byte churn with an identical file set (the #1200 cover-art embed), and
+#: one album whose duplicate-file contamination had since been cleaned up. The
+#: class also barely converges: 238 members approved at initialization, 237
+#: still tracked.
+#:
+#: This is deliberately a NAMED CODE, not bucket B. ``current_beets_missing``
+#: shares that bucket and means an imported album vanished from Beets, which
+#: must keep failing the gate.
+#:
+#: Authority: "stale evidence will -always- auto heal at import time. so it
+#: sinoyk does not matter. its not something we need tit rsck and we shoukd
+#: just teach the workd audit thing ti ignire it." (operator, 2026-08-21) —
+#: https://github.com/abl030/cratedigger/issues/1233#issuecomment-5363639933
+NON_GATING_VIOLATION_CODES: frozenset[str] = frozenset({
+    "evidence_fingerprint_mismatch",
+})
+
 
 class WorldAuditDebtError(ValueError):
     """The report or persisted authority state is invalid."""
@@ -55,6 +92,9 @@ class WorldAuditDebtCodeReport(msgspec.Struct, frozen=True):
 class WorldAuditDebtReport(msgspec.Struct, frozen=True):
     status: str
     strict_status: str
+    #: Every violation the strict audit reported, gating or not. Deliberately
+    #: NOT narrowed to the gated subset: shrinking it would hide the
+    #: untracked cohort from the one line the daily gate prints.
     strict_violations: int
     approved_total: int
     known_remaining: int
@@ -65,6 +105,11 @@ class WorldAuditDebtReport(msgspec.Struct, frozen=True):
     growth: int
     state_updated: bool
     by_code: tuple[WorldAuditDebtCodeReport, ...]
+    #: The `NON_GATING_VIOLATION_CODES` share of `strict_violations`. Named so
+    #: the gap between `strict_violations` and the tracked counts is explained
+    #: rather than cryptic.
+    non_gating_violations: int = 0
+    non_gating_by_code: tuple[WorldAuditDebtCodeCount, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -95,6 +140,22 @@ def _member(violation: WorldViolation) -> WorldAuditDebtMember:
         identity_digest=_digest(_IDENTITY_DOMAIN, identity),
         violation_digest=_digest(_VIOLATION_DOMAIN, violation),
     )
+
+
+def _partition_violations(
+    violations: tuple[WorldViolation, ...],
+) -> tuple[tuple[WorldViolation, ...], tuple[WorldViolation, ...]]:
+    """Split a strict report into (gated, reported-only) violations."""
+
+    gated = tuple(
+        item for item in violations
+        if item.code not in NON_GATING_VIOLATION_CODES
+    )
+    reported_only = tuple(
+        item for item in violations
+        if item.code in NON_GATING_VIOLATION_CODES
+    )
+    return gated, reported_only
 
 
 def _sorted_members(
@@ -211,7 +272,8 @@ def initialize_world_audit_debt_state(
     report: WorldAuditReport,
 ) -> WorldAuditDebtState:
     validate_world_audit_report(report)
-    members = _sorted_members(report.violations)
+    gated, _reported_only = _partition_violations(report.violations)
+    members = _sorted_members(gated)
     state = WorldAuditDebtState(
         schema_version=WORLD_AUDIT_DEBT_SCHEMA_VERSION,
         approved_total=len(members),
@@ -264,7 +326,8 @@ def assess_world_audit_debt(
 ) -> WorldAuditDebtEvaluation:
     validate_world_audit_debt_state(state)
     validate_world_audit_report(report)
-    current = _sorted_members(report.violations)
+    gated, reported_only = _partition_violations(report.violations)
+    current = _sorted_members(gated)
     remaining_by_violation = {
         item.violation_digest: item for item in state.remaining
     }
@@ -325,7 +388,11 @@ def assess_world_audit_debt(
     gate_report = WorldAuditDebtReport(
         status=status,
         strict_status=report.status,
-        strict_violations=len(current),
+        strict_violations=len(report.violations),
+        non_gating_violations=len(reported_only),
+        non_gating_by_code=_code_counts(
+            [item.code for item in reported_only],
+        ),
         approved_total=state.approved_total,
         known_remaining=len(known),
         newly_converged=len(converged),
@@ -381,6 +448,42 @@ def decode_world_audit_report(payload: bytes) -> WorldAuditReport:
     return report
 
 
+def _without_non_gating_members(
+    state: WorldAuditDebtState,
+) -> WorldAuditDebtState:
+    """Rebaseline a state written before a code became non-gating.
+
+    Forward-only self-migration, so no operator one-shot is needed: the live
+    ``known-debt.json`` carries approved members for codes that are now
+    reported-only. Both the approval baseline and the remaining set drop
+    them together, which keeps ``approved_total``, ``approved_by_code`` and
+    ``remaining`` mutually consistent — validation rejects a state whose
+    remaining members outnumber or outrank their approvals.
+    """
+
+    if not any(
+        item.code in NON_GATING_VIOLATION_CODES
+        for item in state.approved_by_code
+    ) and not any(
+        item.code in NON_GATING_VIOLATION_CODES
+        for item in state.remaining
+    ):
+        return state
+    approved_by_code = tuple(
+        item for item in state.approved_by_code
+        if item.code not in NON_GATING_VIOLATION_CODES
+    )
+    return WorldAuditDebtState(
+        schema_version=state.schema_version,
+        approved_total=sum(item.count for item in approved_by_code),
+        approved_by_code=approved_by_code,
+        remaining=tuple(
+            item for item in state.remaining
+            if item.code not in NON_GATING_VIOLATION_CODES
+        ),
+    )
+
+
 def load_world_audit_debt_state(path: Path) -> WorldAuditDebtState:
     try:
         payload = path.read_bytes()
@@ -392,8 +495,14 @@ def load_world_audit_debt_state(path: Path) -> WorldAuditDebtState:
         state = msgspec.json.decode(payload, type=WorldAuditDebtState)
     except (msgspec.DecodeError, msgspec.ValidationError) as exc:
         raise WorldAuditDebtError(f"invalid debt state: {exc}") from exc
+    # Validate what is actually on disk first, so a corrupt legacy state
+    # still fails closed rather than being quietly rebaselined into a valid
+    # one.
     validate_world_audit_debt_state(state)
-    return state
+    migrated = _without_non_gating_members(state)
+    if migrated is not state:
+        validate_world_audit_debt_state(migrated)
+    return migrated
 
 
 def _fsync_directory(path: Path) -> None:
@@ -460,6 +569,7 @@ def write_world_audit_debt_state(
 
 
 __all__ = [
+    "NON_GATING_VIOLATION_CODES",
     "WORLD_AUDIT_DEBT_SCHEMA_VERSION",
     "WorldAuditDebtCodeCount",
     "WorldAuditDebtCodeReport",
