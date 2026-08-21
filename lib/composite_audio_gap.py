@@ -14,11 +14,17 @@ An "internal silence gap" is a contiguous run of >=5s below -45 dBFS
 followed anywhere afterward by >=10s of non-silence before end of file.
 A gap proves the file holds at least two distinct audio parts.
 
-Accepted residual (stated in issue #1237, deliberate -- do not "fix" by
-counting or title-sniffing): a composite with THREE declared parts,
-genuinely missing only the third, still shows one qualifying gap (part 1
-| silence | part 2) and is judged complete. Under-detection here is
-preferred to a false alarm.
+Accepted residual, deliberate: this module answers a strictly BOOLEAN
+question (does at least one qualifying gap exist), not the segment COUNT
+issue #1237's own item 5 literally asks for (compare the segment count
+against the declared NON-SILENCE sub-component count). The boolean
+simplification is an implementation choice, not something the issue text
+itself specifies -- and it under-detects by construction: a composite
+with THREE declared parts, genuinely missing only the third, still shows
+one qualifying gap (part 1 | silence | part 2) and is judged complete.
+Do not "fix" this by counting segments or title-sniffing Discogs'
+``(silence)`` markers -- under-detection here is preferred to a false
+alarm.
 
 Never a decision by itself: the census (``lib/library_completeness.py``)
 surfaces this as evidence on an operator-facing finding; nothing here
@@ -33,7 +39,10 @@ from typing import Final
 
 import numpy as np
 
-#: Silence threshold in dBFS -- issue #1237's stated bound.
+#: Silence threshold in dBFS for this instrument (issue #1237). Not a
+#: bound the issue text itself specifies -- pinned by
+#: ``tests/test_composite_audio_gap.py``'s realistic-noise-floor fixtures,
+#: which bracket it from both sides.
 SILENCE_DBFS: Final[float] = -45.0
 #: Minimum contiguous silent run, in whole seconds, to count as a gap.
 MIN_SILENCE_SECONDS: Final[int] = 5

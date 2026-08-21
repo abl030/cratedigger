@@ -63,18 +63,37 @@ class CandidateAudioCoverage:
 
         The retry is still gated on ALSO having :attr:`incomplete_composite_
         paths` -- i.e. Beets already coalesced SOME mapped composite whose
-        local duration disagrees with its declared program. That is the
-        only situation flattening indexed subtracks could plausibly fix.
-        Confirmed empirically (``tests/test_discogs_subtracks_e2e.py::
+        local duration disagrees with its declared program. Confirmed
+        empirically (``tests/test_discogs_subtracks_e2e.py::
         test_complete_composite_plus_extra_cannot_be_flattened_under_
-        force``): an unmapped/extra file coexisting with an ALREADY-COMPLETE
+        force``): an unmapped/extra file coexisting with an EXACT-duration
         composite match is a genuine duplicate, and retrying there does not
         merely waste a harness pass -- Beets' real flat-subtrack matcher can
         pair the duplicate against the freed-up second sub-position by
         title/length alone, turning a correct reject into a FALSE
-        ``strong_match``. Requiring composite evidence closes that hole
+        ``strong_match``. Requiring composite evidence closes THAT specific
+        hole (an exact-duration match, so no composite ambiguity at all)
         while still covering the Bowie (extra item) and UNKLE (unmapped
         item) shapes, both of which coalesce a genuinely split composite.
+
+        Stated plainly, this clause does NOT close every such hole. For
+        the overlapping-duration convention this issue is centrally about
+        (a Discogs release whose first sub-position's OWN declared
+        duration already covers the whole physical track), the naive
+        declared-duration SUM this module compares against always
+        overshoots the true single-file length -- so
+        ``incomplete_composite_paths`` is non-empty BY CONSTRUCTION for
+        that entire album family, regardless of whether anything is
+        actually wrong. An overlapping-duration album that ALSO happens to
+        carry some unrelated genuine unmapped/extra file therefore still
+        retries and can still hit the same title/length duplicate-pairing
+        risk described above. This is a PRE-EXISTING characteristic, not
+        one this fix introduces: the pre-#1237 trigger
+        (``bool(incomplete_composite_paths)`` alone, with no unmapped/extra
+        check at all) retried unconditionally whenever composite evidence
+        existed, so an overlapping-duration album plus an unrelated extra
+        file behaved identically before this change. Closing it is out of
+        scope for issue #1237 (review C8) and remains an open residual.
         """
         return bool(
             (self.unmapped_paths or self.reported_extra_paths)

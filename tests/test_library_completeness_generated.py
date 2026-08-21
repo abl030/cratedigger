@@ -8,8 +8,8 @@ from __future__ import annotations
 import unittest
 
 from beetsplug.discogs import DiscogsPlugin
-from beetsplug.discogs.types import Track
-from hypothesis import assume, given
+from beetsplug.discogs.types import AudioTrack, Track
+from hypothesis import given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
@@ -41,6 +41,27 @@ def completeness_invariant_violations(
     return violations
 
 
+def _identity_only_gap_detector(_path: str) -> bool:
+    """Fake ``detect_composite_gap`` for the identity-focused properties
+    below (issue #1237 review C3).
+
+    ``_discogs_world`` catalogues/physically-places ONE item per literal
+    RAW position (matching what Beets' #1183 flat retry actually installs
+    for a genuinely split composite -- issue #1237 review C1's subtraction
+    then recognises a group as complete purely by identity, with NO audio
+    decode, whenever every sub-position is separately present). The decode
+    branch is reached ONLY when some sub-position of a coalesced group
+    remains genuinely unaccounted for after that subtraction -- in every
+    such world here, the correct answer is "no gap" (still missing),
+    agreeing with what identity already knows. A real ffmpeg decode
+    against these synthetic (nonexistent) paths would either spawn a real
+    subprocess per Hypothesis example or fail closed to ``unknown``;
+    returning ``False`` directly is what keeps these properties fast and
+    correct without either.
+    """
+    return False
+
+
 def _discogs_world(positions: tuple[str, ...], *, catalog_positions: tuple[str, ...], physical_positions: tuple[str, ...], unreadable_extra: bool = False):
     release = "1"
     manifest = discogs_manifest(release, {
@@ -54,21 +75,13 @@ def _discogs_world(positions: tuple[str, ...], *, catalog_positions: tuple[str, 
         if unreadable_extra and path.endswith("extra.flac"):
             raise AudioTagReadError("unreadable")
         return (f"{release}-{path.rsplit('/', 1)[-1].removesuffix('.flac')}", "")
-    return classify_album(album, manifest, enumerate_files=lambda _: physical, tag_reader=tags)
+    return classify_album(
+        album, manifest, enumerate_files=lambda _: physical, tag_reader=tags,
+        detect_composite_gap=_identity_only_gap_detector,
+    )
 
 
-#: Letters only, deliberately -- Discogs' own ``get_track_index`` parser
-#: only assigns a subtrack index (and so groups) a position that contains a
-#: DIGIT (either "16.1"-style or "1A"-style). A digit-bearing alphabet can
-#: generate two ADJACENT distinct strings ("1A","1B") that Beets' own
-#: coalescing would still merge into one physical component, breaking these
-#: properties' 1:1 position<->component assumption. Coalescing has its own
-#: dedicated pin + property (``tests/test_library_completeness.py``); these
-#: four exercise identity-matching, independent of grouping.
-_UNGROUPABLE_POSITION_ALPHABET = "ABC"
-
-
-@given(st.lists(st.text(alphabet=_UNGROUPABLE_POSITION_ALPHABET, min_size=1, max_size=4), min_size=2, max_size=8, unique=True))
+@given(st.lists(st.text(alphabet="ABC123", min_size=1, max_size=4), min_size=2, max_size=8, unique=True))
 def _property_catalog_disk_symmetry(positions: list[str]) -> None:
     all_positions = tuple(positions)
     complete = _discogs_world(all_positions, catalog_positions=all_positions, physical_positions=all_positions)
@@ -79,7 +92,7 @@ def _property_catalog_disk_symmetry(positions: list[str]) -> None:
     assert not completeness_invariant_violations({f.kind for f in extra.findings}, expect_drift=True, expect_missing=False, expect_video_ignored=False, expect_unknown=False)
 
 
-@given(st.lists(st.text(alphabet=_UNGROUPABLE_POSITION_ALPHABET, min_size=1, max_size=4), min_size=2, max_size=7, unique=True))
+@given(st.lists(st.text(alphabet="ABC123", min_size=1, max_size=4), min_size=2, max_size=7, unique=True))
 def _property_nonexclusive_missing_and_drift(positions: list[str]) -> None:
     all_positions = tuple(positions)
     # First is physically present but deliberately untracked; second is absent.
@@ -100,71 +113,153 @@ def _property_video_never_means_missing_audio(token: str) -> None:
     assert not completeness_invariant_violations({f.kind for f in result.findings}, expect_drift=False, expect_missing=False, expect_video_ignored=True, expect_unknown=False)
 
 
-@given(st.lists(st.text(alphabet=_UNGROUPABLE_POSITION_ALPHABET, min_size=1, max_size=4), min_size=1, max_size=6, unique=True))
+@given(st.lists(st.text(alphabet="ABC123", min_size=1, max_size=4), min_size=1, max_size=6, unique=True))
 def _property_unreadable_extra_is_unknown_not_missing(positions: list[str]) -> None:
     result = _discogs_world(tuple(positions), catalog_positions=(), physical_positions=("extra",), unreadable_extra=True)
     assert not completeness_invariant_violations({f.kind for f in result.findings}, expect_drift=True, expect_missing=False, expect_video_ignored=False, expect_unknown=True)
 
 
-def _beets_oracle_groups(raw_positions: list[str]) -> list[tuple[str, str]]:
+def _to_beets_audio_track(item: object) -> AudioTrack:
+    """Beets' leaf ``AudioTrack`` shape for one flat entry. ``item`` comes
+    from our own untyped generated ``dict[str, object]`` entries (or the
+    untyped children of a ``sub_tracks`` list), never itself nested.
+    """
+    assert isinstance(item, dict)
+    return {
+        "type_": "track",
+        "position": str(item["position"]),
+        "title": str(item.get("title", "")),
+        "duration": "0:01",
+    }
+
+
+def _to_beets_shape(entries: list[dict[str, object]]) -> list[Track]:
+    """Inject the ``type_`` key Beets' own ``Track`` TypedDict requires
+    (absent from Cratedigger's own wire shape). ``IndexTrack.sub_tracks``
+    is declared ``list[AudioTrack]`` (never a further-nested index) --
+    matching both Beets' own real shape and this module's generator, which
+    never nests a header inside a header (issue #1237 review C6/C7).
+    """
+    shaped: list[Track] = []
+    for item in entries:
+        sub_tracks = item.get("sub_tracks")
+        if sub_tracks is not None:
+            assert isinstance(sub_tracks, list)
+            shaped.append({
+                "type_": "index",
+                "position": "",
+                "title": str(item.get("title", "")),
+                "duration": str(item.get("duration", "")),
+                "sub_tracks": [_to_beets_audio_track(child) for child in sub_tracks],
+            })
+        else:
+            shaped.append(_to_beets_audio_track(item))
+    return shaped
+
+
+def _beets_oracle_groups(entries: list[dict[str, object]]) -> list[tuple[str, str]]:
     """Ground truth for issue #1237's coalescing: run the REAL Beets
     Discogs plugin's own ``_coalesce_tracks`` (the same "modern" cohort
-    ``harness/beets_compat.py`` targets) and read off ``(position, title)``
-    for each resulting physical track. ``object.__new__`` bypasses
-    ``DiscogsPlugin.__init__`` (network/config setup this call never
-    needs) -- the same construction ``tests/test_discogs_subtracks_e2e.py``
-    already uses as its own candidate-shim oracle.
+    ``harness/beets_compat.py`` targets) over Cratedigger's raw entries
+    and read off ``(position, title)`` for each resulting physical track.
+    ``object.__new__`` bypasses ``DiscogsPlugin.__init__`` (network/config
+    setup this call never needs) -- the same construction
+    ``tests/test_discogs_subtracks_e2e.py`` already uses as its own
+    candidate-shim oracle. ``config["index_tracks"]`` is read by the real
+    plugin's non-subindexed nested branch, so a minimal stand-in is
+    supplied (default ``False``, matching the deployed plugin default).
     """
     plugin = object.__new__(DiscogsPlugin)
-    raw: list[Track] = [
-        {"type_": "track", "position": position, "title": position, "duration": "0:01"}
-        for position in raw_positions
-    ]
-    coalesced = plugin._coalesce_tracks(raw)
+    setattr(plugin, "config", {"index_tracks": False})  # noqa: B010 - real config type is untyped confuse Subview
+    coalesced = plugin._coalesce_tracks(_to_beets_shape(entries))
     return [(track["position"], track["title"]) for track in coalesced]
 
 
 @st.composite
-def _discogs_position_sequence(draw: st.DrawFn) -> list[str]:
-    """A realistic raw Discogs position sequence: a mix of plain (never-
-    group) positions and dotted subtrack FAMILIES (2-4 consecutive
-    sub-positions sharing one physical prefix), each family's own prefix
-    kept distinct so cross-family adjacency never accidentally merges.
+def _discogs_raw_entries(draw: st.DrawFn) -> list[dict[str, object]]:
+    """A realistic raw Discogs track list in Cratedigger's OWN wire shape
+    (no ``type_`` key -- ``discogs_manifest`` doesn't need it), covering:
+
+    * plain positions that never carry a subtrack index (``A5``);
+    * digit-then-letter positions that DO (``3B`` -- issue #1237 review C7,
+      previously ungenerated);
+    * dotted subtrack families (``16.1``/``16.2``/...);
+    * nested ``sub_tracks`` headers, both subindexed (Beets' merge branch,
+      issue #1237 review C6) and not (Beets' expand branch).
+
+    Deliberately does NOT force every family's prefix to be globally
+    unique (issue #1237 review C7): two atoms can legitimately compute the
+    SAME Beets group key (e.g. a ``5.1``/``5.2`` family followed by a
+    ``5A`` plain-looking-but-groupable position) without colliding on
+    LITERAL position text, which is exactly the "adjacent families sharing
+    a prefix" shape most likely to diverge from Beets if grouping were
+    reimplemented incorrectly. Duplicate LITERAL positions are rejected
+    inline (a real Discogs release never repeats one), not via a
+    whole-draw ``assume`` that would only lower yield.
     """
-    group_count = draw(st.integers(min_value=1, max_value=6))
-    used_prefixes: set[str] = set()
-    used_plain: set[str] = set()
-    positions: list[str] = []
-    for _ in range(group_count):
-        if draw(st.booleans()):
+    atom_count = draw(st.integers(min_value=1, max_value=5))
+    entries: list[dict[str, object]] = []
+    used_positions: set[str] = set()
+
+    def reserve(position: str) -> bool:
+        if position in used_positions:
+            return False
+        used_positions.add(position)
+        return True
+
+    for _ in range(atom_count):
+        kind = draw(st.sampled_from(["plain", "digit_letter", "family", "nested"]))
+        if kind == "plain":
             letter = draw(st.sampled_from("ABCDEFGH"))
             number = draw(st.integers(min_value=1, max_value=99))
-            plain = f"{letter}{number}"
-            assume(plain not in used_plain)
-            used_plain.add(plain)
-            positions.append(plain)
-        else:
-            prefix = draw(st.integers(min_value=1, max_value=99))
-            assume(str(prefix) not in used_prefixes)
-            used_prefixes.add(str(prefix))
+            position = f"{letter}{number}"
+            if not reserve(position):
+                continue
+            entries.append({"position": position, "title": position})
+        elif kind == "digit_letter":
+            number = draw(st.integers(min_value=1, max_value=99))
+            letter = draw(st.sampled_from("ABCDEFGH"))
+            position = f"{number}{letter}"
+            if not reserve(position):
+                continue
+            entries.append({"position": position, "title": position})
+        elif kind == "family":
+            prefix = draw(st.integers(min_value=1, max_value=20))
             size = draw(st.integers(min_value=2, max_value=4))
-            positions.extend(f"{prefix}.{index}" for index in range(1, size + 1))
-    return positions
+            family_positions = [f"{prefix}.{index}" for index in range(1, size + 1)]
+            if any(p in used_positions for p in family_positions):
+                continue
+            used_positions.update(family_positions)
+            entries.extend({"position": p, "title": p} for p in family_positions)
+        else:  # nested
+            prefix = draw(st.integers(min_value=1, max_value=20))
+            subindexed = draw(st.booleans())
+            size = draw(st.integers(min_value=1, max_value=3))
+            if subindexed:
+                child_positions = [f"{prefix}.{index}" for index in range(1, size + 1)]
+            else:
+                child_positions = [f"{chr(65 + index)}{prefix}" for index in range(size)]
+            if any(p in used_positions for p in child_positions):
+                continue
+            used_positions.update(child_positions)
+            entries.append({
+                "position": "", "title": f"Header{prefix}", "duration": "",
+                "sub_tracks": [{"position": p, "title": f"C{p}"} for p in child_positions],
+            })
+    return entries
 
 
-@given(_discogs_position_sequence())
-def _property_discogs_manifest_agrees_with_beets_oracle(raw_positions: list[str]) -> None:
+@given(_discogs_raw_entries())
+def _property_discogs_manifest_agrees_with_beets_oracle(entries: list[dict[str, object]]) -> None:
     """Issue #1237: ``discogs_manifest``'s component set must match what
     Beets itself would catalogue -- the real adapter (``beetsplug.discogs
     .DiscogsPlugin``) is the oracle, not a second hand-written
-    reimplementation of the same regex.
+    reimplementation of the same regex, over flat siblings AND nested
+    ``sub_tracks`` containers (issue #1237 review C6/C7).
     """
     release = "1"
-    manifest = discogs_manifest(release, {
-        "id": release,
-        "tracks": [{"position": p, "title": p} for p in raw_positions],
-    })
-    oracle = _beets_oracle_groups(raw_positions)
+    manifest = discogs_manifest(release, {"id": release, "tracks": entries})
+    oracle = _beets_oracle_groups(entries)
     assert [component.key for component in manifest.components] == [
         f"{release}-{position}" for position, _ in oracle
     ]

@@ -21,10 +21,16 @@ from unittest.mock import MagicMock, patch
 # (e.g. ``lib.youtube_album_service``) that uses real
 # ``requests.Timeout`` / ``ConnectionError`` exception classes.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from lib.beets import beets_validate
+from lib.beets import apply_candidate_scenario, beets_validate
 from lib.grab_list import GrabListEntry
 from lib.processing_paths import stage_to_ai_path
-from lib.quality import ValidationResult
+from lib.quality import (
+    CandidateSummary,
+    HarnessItem,
+    HarnessTrackInfo,
+    TrackMapping,
+    ValidationResult,
+)
 from lib.staged_album import StagedAlbum
 from lib.util import log_validation_result
 
@@ -788,6 +794,44 @@ def _make_album_data(**overrides):
     }
     defaults.update(overrides)
     return GrabListEntry(**defaults)
+
+
+class TestApplyCandidateScenarioIdempotence(unittest.TestCase):
+    """``apply_candidate_scenario`` must leave no stale field behind when
+    called a second time on the SAME ``ValidationResult`` (issue #1237
+    review C8) -- e.g. ``lib/download_validation.py``'s merge-redirect seam
+    calling it again for the survivor's own candidate after an earlier
+    call already populated ``incomplete_composite_paths`` for a DIFFERENT
+    candidate.
+    """
+
+    def _composite_candidate(self, *, local_length: float, indexed_length: float) -> CandidateSummary:
+        path = "composite.flac"
+        return CandidateSummary(
+            mbid="release",
+            data_source="Discogs",
+            mapping=[TrackMapping(
+                item=HarnessItem(path=path, length=local_length),
+                track=HarnessTrackInfo(
+                    title="composite", length=indexed_length,
+                    discogs_indexed_component_count=2,
+                    discogs_indexed_duration_complete=True,
+                ),
+            )],
+        )
+
+    def test_second_call_clears_first_calls_composite_evidence(self) -> None:
+        result = ValidationResult(items=[{"path": "composite.flac", "length": 100.0}])
+        first = self._composite_candidate(local_length=100.0, indexed_length=200.0)
+        apply_candidate_scenario(result, first, 0.15)
+        self.assertEqual(
+            result.incomplete_composite_paths,
+            ["composite.flac (local=100.0s, indexed_program=200.0s)"],
+        )
+
+        second = self._composite_candidate(local_length=200.0, indexed_length=200.0)
+        apply_candidate_scenario(result, second, 0.15)
+        self.assertEqual(result.incomplete_composite_paths, [])
 
 
 class TestStagedAlbumMoveTo(unittest.TestCase):

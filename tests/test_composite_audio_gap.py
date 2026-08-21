@@ -22,6 +22,7 @@ import unittest
 import wave
 from itertools import groupby
 
+import numpy as np
 from hypothesis import example, given
 from hypothesis import strategies as st
 
@@ -29,6 +30,7 @@ import tests._hypothesis_profiles  # noqa: F401
 from lib.composite_audio_gap import (
     MIN_SILENCE_SECONDS,
     MIN_TRAILING_AUDIO_SECONDS,
+    SILENCE_DBFS,
     CompositeAudioReadError,
     detect_composite_silence_gap,
     gap_decision_from_silence_flags,
@@ -37,6 +39,34 @@ from lib.composite_audio_gap import (
 _FIXTURE_SAMPLE_RATE = 8000
 _TONE_FREQUENCY_HZ = 440.0
 _TONE_AMPLITUDE = 16000
+_FULL_SCALE_16_BIT = 32767.0
+
+
+def _write_level_controlled_wav(
+    path: str, segments: list[tuple[float, float]], *, seed: int = 0,
+) -> None:
+    """Write mono 16-bit PCM alternating segments of GAUSSIAN NOISE at
+    explicit dBFS levels: each segment is ``(level_dbfs, seconds)``.
+
+    Issue #1237 review C4: digital-zero silence and near-full-scale tones
+    (``_write_synthetic_wav`` below) are silent/non-silent at ANY plausible
+    ``SILENCE_DBFS`` threshold, so they cannot prove the constant's exact
+    value is load-bearing. This generator produces a REALISTIC noise floor
+    at a level chosen relative to the real ``-45.0`` threshold, so a
+    mutated threshold and the real one classify it differently.
+    """
+    rng = np.random.default_rng(seed)
+    with wave.open(path, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(_FIXTURE_SAMPLE_RATE)
+        for level_dbfs, seconds in segments:
+            frame_count = int(seconds * _FIXTURE_SAMPLE_RATE)
+            rms = _FULL_SCALE_16_BIT * (10.0 ** (level_dbfs / 20.0))
+            samples = np.clip(
+                rng.normal(0.0, rms, frame_count), -32768, 32767,
+            ).astype("<i2")
+            handle.writeframesraw(samples.tobytes())
 
 
 def _write_synthetic_wav(path: str, segments: list[tuple[str, float]]) -> None:
@@ -221,6 +251,47 @@ class TestDetectCompositeSilenceGap(unittest.TestCase):
     def test_missing_file_raises_never_guesses(self) -> None:
         with self.assertRaises(CompositeAudioReadError):
             detect_composite_silence_gap("/nonexistent/composite.flac")
+
+    def test_silence_threshold_constant_is_pinned(self) -> None:
+        """Direct value pin -- a first, cheap line of defense alongside the
+        two behavioral fixtures below (issue #1237 review C4).
+        """
+        self.assertEqual(SILENCE_DBFS, -45.0)
+
+    def test_realistic_noise_floor_below_threshold_is_a_detected_gap(self) -> None:
+        """Issue #1237 review C4: a REALISTIC near-silent noise floor at
+        -50dBFS (fixed literal, NOT derived from ``SILENCE_DBFS`` -- a
+        derived value would shift with any mutation to the constant and
+        prove nothing) sits strictly BETWEEN the real -45dBFS threshold
+        and a -65dBFS regression. Digital-zero silence cannot discriminate
+        this: it is silent under any plausible threshold, and a stricter
+        (more negative) mutant would silently reintroduce the founding
+        Bouncing Souls false positive by failing to recognise real analog
+        noise floors as silence.
+        """
+        handle, path = tempfile.mkstemp(suffix=".wav")
+        os.close(handle)
+        self.addCleanup(os.remove, path)
+        _write_level_controlled_wav(path, [
+            (-3.0, 3.0), (-50.0, 6.0), (-3.0, 12.0),
+        ], seed=1)
+        self.assertTrue(detect_composite_silence_gap(path))
+
+    def test_realistic_noise_floor_above_threshold_is_not_silent(self) -> None:
+        """Brackets the threshold from the OTHER side: -40dBFS (fixed
+        literal) is louder than the real -45dBFS threshold and must NOT
+        register as silence, even though it is still quiet relative to
+        full-scale audio. Together with the -50dBFS fixture above, this
+        pair kills both a stricter (-65dBFS) and a looser (e.g. -25dBFS)
+        threshold mutation.
+        """
+        handle, path = tempfile.mkstemp(suffix=".wav")
+        os.close(handle)
+        self.addCleanup(os.remove, path)
+        _write_level_controlled_wav(path, [
+            (-3.0, 3.0), (-40.0, 6.0), (-3.0, 12.0),
+        ], seed=2)
+        self.assertFalse(detect_composite_silence_gap(path))
 
 
 if __name__ == "__main__":

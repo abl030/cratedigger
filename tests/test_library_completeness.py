@@ -56,10 +56,12 @@ def _mb_raw(
 def _unexpected_gap_detector(path: str) -> bool:
     """Fails any test that reaches issue #1237's audio decode by surprise.
 
-    Every existing pin in this class classifies either an ungrouped Discogs
-    component or a MusicBrainz manifest, neither of which is ever eligible
-    for the grouped-composite physical check -- so the default proves that
-    stays true. Tests that DO need the check pass their own fake.
+    Every existing pin in this class classifies an ungrouped Discogs
+    component, a MusicBrainz manifest, or a grouped Discogs component whose
+    every sub-position is already separately catalogued (issue #1237
+    review C1's identity-only subtraction) -- none of which ever reaches
+    the grouped-composite physical check. Tests that DO need the check
+    pass their own fake.
     """
     raise AssertionError(f"unexpected composite audio decode for {path!r}")
 
@@ -82,24 +84,32 @@ class TestLiveIncidentPins(unittest.TestCase):
         )
         return {finding.kind for finding in result.findings}
 
-    def test_bowie_discogs_subtrack_coalesces_and_space_oddity_is_drift(self) -> None:
-        """Issue #1237: A2.1/A2.2 are ONE physical track once identity is
-        matched via its first sub-position, so nothing is missing -- only
-        the genuinely uncatalogued Space Oddity file is drift. Renamed from
-        ``test_bowie_discogs_subtrack_is_missing_and_space_oddity_is_drift``,
-        which pinned the pre-fix bug this issue exists to correct (root
-        cause: ``discogs_manifest`` enumerated every literal sub-position,
-        so the second could never be matched by any installed item).
+    def test_bowie_both_parts_installed_and_space_oddity_is_drift(self) -> None:
+        """Issue #1237 review C1's live regression (Bowie 2823685): Beets'
+        own #1183 flat retry installs a genuinely split composite as TWO
+        separate catalogued items, one per literal sub-position
+        (``2823685-A2.1`` + ``2823685-A2.2``) -- that is a COMPLETE
+        import, not missing. ``classify_album`` must recognise this via
+        identity/subtraction alone; the default raising fake detector
+        proves NO audio decode is even attempted once every sub-position
+        is separately accounted for (issue #1237 review C5 -- deriving the
+        detector's answer from a real producer would otherwise require
+        real audio this synthetic fixture doesn't have; subtraction makes
+        that unnecessary). Renamed from
+        ``test_bowie_discogs_subtrack_coalesces_and_space_oddity_is_drift``,
+        which modelled ONE merged item (a genuinely different, single-file
+        composite shape, now covered by ``TestGroupedCompositePhysicalCheck``)
+        and fed the detector an invented ``True`` the real producer for
+        that shape does not return -- test-fidelity Rule C.
         """
         release = "2823685"
         paths = {f"/album/{position}.opus": (f"{release}-{position}", "")
-                 for position in ("A2.1", "A3", "A4", "B1", "B2", "B3", "B4", "B5")}
+                 for position in ("A2.1", "A2.2", "A3", "A4", "B1", "B2", "B3", "B4", "B5")}
         paths["/album/Space Oddity.opus"] = (f"{release}-A1", "")
         album = LibraryAlbum(11782, "David Bowie", "David Bowie", ReleaseIdentity("discogs", release), "/album",
                              tuple(CatalogItem(path, tag[0], "") for path, tag in paths.items() if "Space" not in path))
         kinds = self._classify(
             album, _discogs_raw(["A1", "A2.1", "A2.2", "A3", "A4", "B1", "B2", "B3", "B4", "B5"]), tags=paths,
-            detect_composite_gap=lambda _path: True,
         )
         self.assertEqual(kinds, {"catalog_drift"})
 
@@ -387,6 +397,68 @@ class TestGroupedCompositePhysicalCheck(unittest.TestCase):
         )
         self.assertEqual(kinds, {"unknown"})
 
+    def test_both_parts_separately_installed_needs_no_decode(self) -> None:
+        """Issue #1237 review C1: the generic composite-check version of
+        ``test_bowie_both_parts_installed_and_space_oddity_is_drift`` --
+        when EVERY sub-position of a coalesced group is separately
+        catalogued (Beets' #1183 flat retry), the group is complete by
+        identity alone. A raising fake proves decode is never reached.
+        """
+        release = "461206"
+        first_path = "/album/16.1.opus"
+        second_path = "/album/16.2.opus"
+        tags = {
+            first_path: (f"{release}-16.1", ""),
+            second_path: (f"{release}-16.2", ""),
+        }
+        album = LibraryAlbum(
+            1, "Artist", "Album", ReleaseIdentity("discogs", release), "/album",
+            (CatalogItem(first_path, tags[first_path][0], ""),
+             CatalogItem(second_path, tags[second_path][0], "")),
+        )
+
+        def _unreachable(path: str) -> bool:
+            raise AssertionError(f"unexpected composite audio decode for {path!r}")
+
+        kinds = self._classify(
+            album, _discogs_raw(["16.1", "16.2"], release), tags=tags,
+            detect_composite_gap=_unreachable,
+        )
+        self.assertEqual(kinds, set())
+
+    def test_silence_subcomponent_excluded_from_missing_audio_naming(self) -> None:
+        """Issue #1237 review C9: a Discogs "(silence)" sub-position is a
+        literal filler/gap marker, not real audio. The no-gap message must
+        name and count only the REAL sub-components -- never assert a
+        silence entry as missing audio.
+        """
+        release = "888888"
+        raw = {"id": release, "tracks": [
+            {"position": "10.1", "title": "Island Lost At Sea"},
+            {"position": "10.2", "title": "(silence)"},
+            {"position": "10.3", "title": "Untitled"},
+        ]}
+        album, tags = self._grouped_album(release, ["10.1", "10.2", "10.3"], catalog_key_position="10.1")
+        manifest = discogs_manifest(release, raw)
+        self.assertEqual(
+            manifest.components[0].sub_component_titles,
+            ("Island Lost At Sea", "(silence)", "Untitled"),
+        )
+        result = classify_album(
+            album, manifest,
+            enumerate_files=lambda _directory: tuple(sorted(tags)),
+            tag_reader=lambda path: tags[path],
+            detect_composite_gap=lambda _path: False,
+        )
+        findings = [f for f in result.findings if f.kind == "missing_source_audio"]
+        self.assertEqual(len(findings), 1)
+        detail = findings[0].detail
+        self.assertIn("2 declared components", detail)
+        self.assertIn("Island Lost At Sea", detail)
+        self.assertIn("Untitled", detail)
+        self.assertNotIn("(silence)", detail)
+        self.assertNotIn("3 declared components", detail)
+
 
 class TestSourceRawContracts(unittest.TestCase):
     def test_direct_empty_manifest_is_unknown_not_complete(self) -> None:
@@ -441,14 +513,81 @@ class TestSourceRawContracts(unittest.TestCase):
         with self.assertRaisesRegex(SourceManifestError, "no playable components"):
             discogs_manifest("1", {"id": "1", "tracks": []})
 
-    def test_discogs_index_parent_is_not_double_counted_with_subtracks(self) -> None:
+    def test_discogs_subindexed_nested_header_coalesces_like_beets(self) -> None:
+        """Issue #1237 review C6: verified against the real Beets plugin --
+        a subindexed ``sub_tracks`` header ("A2.1" carries a subtrack
+        index) is BEETS' OWN "merge into one track" branch
+        (``_coalesce_index_track``), not its "expand into N" branch. The
+        resulting key is the STRIPPED first-child position ("A2", not
+        "A2.1"), titled by the header's OWN title ("Suite"), never the
+        children's joined titles. Renamed from
+        ``test_discogs_index_parent_is_not_double_counted_with_subtracks``,
+        which pinned the un-coalesced two-component shape this review
+        replaces -- strictly worse than the flat-sibling case #1237
+        already fixed, since neither literal child key could ever match
+        an installed item.
+        """
         manifest = discogs_manifest("1", {"id": "1", "tracks": [{
             "position": "A2", "title": "Suite", "sub_tracks": [
                 {"position": "A2.1", "title": "Part one"},
                 {"position": "A2.2", "title": "Part two"},
             ],
         }]})
-        self.assertEqual([component.key for component in manifest.components], ["1-A2.1", "1-A2.2"])
+        self.assertEqual([component.key for component in manifest.components], ["1-A2"])
+        self.assertEqual(manifest.components[0].title, "Suite")
+        self.assertEqual(manifest.components[0].sub_component_titles, ("Part one", "Part two"))
+        self.assertEqual(manifest.components[0].sub_component_keys, ("1-A2.1", "1-A2.2"))
+
+    def test_discogs_non_subindexed_nested_header_expands_literally(self) -> None:
+        """The OTHER real Beets branch, unchanged by #1237: when the first
+        nested child carries no subtrack index, the header's children are
+        independent physical tracks -- expanded literally, not merged."""
+        manifest = discogs_manifest("1", {"id": "1", "tracks": [{
+            "position": "", "title": "Symphony", "sub_tracks": [
+                {"position": "A2", "title": "Mvt 1"},
+                {"position": "A3", "title": "Mvt 2"},
+            ],
+        }]})
+        self.assertEqual([component.key for component in manifest.components], ["1-A2", "1-A3"])
+        self.assertEqual([c.title for c in manifest.components], ["Mvt 1", "Mvt 2"])
+        self.assertEqual([c.sub_component_titles for c in manifest.components], [(), ()])
+
+    def test_sub_tracks_header_breaks_pending_top_level_group(self) -> None:
+        """Issue #1237 review C7: a nested ``sub_tracks`` header in between
+        two would-be-adjacent subtrack positions must NOT let them merge
+        across it -- mirrors a real Beets non-"track" entry breaking
+        ``groupby``'s adjacency. Kills the mutant removing the
+        ``flush_pending()`` call guarding this branch: without it, "16.1"
+        and "16.2" would wrongly merge across the header.
+        """
+        manifest = discogs_manifest("1", {"id": "1", "tracks": [
+            {"position": "16.1", "title": "Part A"},
+            {"position": "A9", "title": "Interlude", "sub_tracks": [
+                {"position": "A9.1", "title": "Interlude i"},
+            ]},
+            {"position": "16.2", "title": "Part B"},
+        ]})
+        self.assertEqual(
+            [component.key for component in manifest.components],
+            ["1-16.1", "1-A9", "1-16.2"],
+        )
+
+    def test_empty_header_between_subtrack_siblings_breaks_pending_group(self) -> None:
+        """Issue #1237 review C7: the OTHER ``flush_pending()`` call (the
+        empty-position/empty-duration header skip) must also break
+        adjacency, not just the ``sub_tracks`` one.
+        """
+        manifest = discogs_manifest("1", {"id": "1", "tracks": [
+            {"position": "16.1", "title": "Part A"},
+            {"position": "", "duration": "", "title": "Side Two"},
+            {"position": "16.2", "title": "Part B"},
+        ]})
+        self.assertEqual(
+            [component.key for component in manifest.components],
+            ["1-16.1", "1-16.2"],
+        )
+        self.assertEqual(manifest.components[0].sub_component_titles, ())
+        self.assertEqual(manifest.components[1].sub_component_titles, ())
 
     def test_discogs_flattened_empty_position_empty_duration_header_is_skipped(self) -> None:
         manifest = discogs_manifest("1", {"id": "1", "tracks": [

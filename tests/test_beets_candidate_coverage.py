@@ -14,10 +14,7 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from lib.beets_candidate_coverage import (
-    CandidateAudioCoverage,
-    candidate_audio_coverage,
-)
+from lib.beets_candidate_coverage import candidate_audio_coverage
 from lib.quality import (
     CandidateSummary,
     HarnessItem,
@@ -263,7 +260,7 @@ _PATHS = tuple(f"track-{idx}.flac" for idx in range(6))
     reported_extra=set(),
     extra_track_count=0,
 )
-def test_generated_candidate_coverage_oracle(
+def _property_candidate_coverage_oracle(
     admitted: set[str],
     mapped: list[str],
     reported_extra: set[str],
@@ -293,7 +290,7 @@ def test_generated_candidate_coverage_oracle(
     component_count=st.integers(min_value=1, max_value=5),
     duration_complete=st.booleans(),
 )
-def test_generated_complete_mapping_never_rejected_for_duration_disagreement(
+def _property_complete_mapping_never_rejected_for_duration_disagreement(
     local_length: float,
     indexed_length: float,
     component_count: int,
@@ -318,44 +315,94 @@ def test_generated_complete_mapping_never_rejected_for_duration_disagreement(
     assert coverage.complete
 
 
-@given(unmapped=st.booleans(), extra=st.booleans(), composite_evidence=st.booleans())
-def test_generated_provable_audio_loss_requires_a_lost_file_and_composite_evidence(
-    unmapped: bool, extra: bool, composite_evidence: bool,
+@given(
+    include_extra_file=st.booleans(),
+    local_length=st.floats(min_value=0.0, max_value=2000.0, allow_nan=False, allow_infinity=False),
+    indexed_length=st.floats(min_value=0.0, max_value=2000.0, allow_nan=False, allow_infinity=False),
+    component_count=st.integers(min_value=1, max_value=5),
+)
+@example(include_extra_file=True, local_length=369.0, indexed_length=408.0, component_count=1)
+def _property_provable_audio_loss_needs_a_lost_file_and_composite_evidence(
+    include_extra_file: bool,
+    local_length: float,
+    indexed_length: float,
+    component_count: int,
 ) -> None:
-    """Issue #1237: the shared retry trigger fires iff Beets' own mapping
-    proves lost audio (unmapped and/or reported-extra) AND there is
-    composite evidence a coalesced track could plausibly explain it --
-    see :attr:`CandidateAudioCoverage.provable_audio_loss`'s docstring for
-    why the composite-evidence half is required (an unmapped/extra file
-    beside an ALREADY-COMPLETE composite is a genuine duplicate; retrying
-    there can turn a correct reject into a false accept).
+    """Issue #1237: two NECESSARY-CONDITION invariants for the shared
+    retry trigger, driven through the REAL ``candidate_audio_coverage()``
+    pipeline (not a hand-built ``CandidateAudioCoverage``, and NOT a
+    mirror of ``provable_audio_loss``'s own ``(unmapped or extra) and
+    incomplete_composite_paths`` expression -- issue #1237 review C2: a
+    property that restates the implementation verbatim cannot catch a
+    defect IN that expression):
+
+    1. If Beets' own mapping drops no admitted file, the retry is never
+       worth attempting -- regardless of any composite evidence.
+    2. If there is no composite evidence a coalesced track could explain
+       the loss, the retry is never worth attempting -- regardless of any
+       unmapped/extra file.
+
+    The pinned ``@example`` (component_count=1, so no composite evidence
+    is even possible) is the exact world that kills the mutant dropping
+    the ``and incomplete_composite_paths`` clause: with it removed,
+    ``provable_audio_loss`` would wrongly become ``True`` from the extra
+    file alone, violating invariant 2.
     """
-    coverage = CandidateAudioCoverage(
-        admitted_count=2,
-        mapped_count=1,
-        unmapped_paths=("a.flac",) if unmapped else (),
-        unexpected_mapped_paths=(),
-        duplicate_admitted_paths=(),
-        duplicate_mapped_paths=(),
-        reported_extra_paths=("b.flac",) if extra else (),
-        unmatched_track_count=0,
-        incomplete_composite_paths=("c.flac (evidence)",) if composite_evidence else (),
-    )
-    expected = (unmapped or extra) and composite_evidence
-    assert coverage.provable_audio_loss is expected
-
-
-def test_generated_oracle_kills_count_only_mutant() -> None:
-    """Known-bad self-test: equal counts are not set coverage."""
-    admitted = {"track-0.flac", "track-1.flac"}
-    mapped = ["track-0.flac", "track-0.flac"]
-    count_only_mutant = len(mapped) == len(admitted)
-    assert count_only_mutant
+    composite_path = "composite.flac"
+    mapped_paths = [composite_path]
+    extra_items: list[str] = []
+    admitted_paths = [composite_path]
+    if include_extra_file:
+        extra_items = ["extra.flac"]
+        admitted_paths = [composite_path, "extra.flac"]
     coverage = candidate_audio_coverage(
-        [_item(path) for path in sorted(admitted)],
-        _candidate(mapped_paths=mapped),
+        [_item(path) for path in admitted_paths],
+        _candidate(
+            mapped_paths=mapped_paths,
+            extra_items=extra_items,
+            composite_path=composite_path,
+            composite_length=local_length,
+            component_count=component_count,
+            indexed_program_length=indexed_length,
+        ),
     )
-    assert not coverage.complete
+    if not (coverage.unmapped_paths or coverage.reported_extra_paths):
+        assert not coverage.provable_audio_loss
+    if not coverage.incomplete_composite_paths:
+        assert not coverage.provable_audio_loss
+
+
+class TestBeetsCandidateCoverageGenerated(unittest.TestCase):
+    """Wraps the module-level Hypothesis properties above as real
+    ``unittest`` test methods (issue #1237 review C2): every automated
+    runner in this repo (targeted selection, the full suite, the fuzz
+    burst) discovers tests via ``unittest.defaultTestLoader``, which never
+    finds a bare ``def test_*`` function outside a ``TestCase`` -- proven
+    by replanting the ``provable_audio_loss`` mutant (dropping the
+    composite-evidence clause) and confirming it now dies through THIS
+    class, where it previously survived the whole module.
+    """
+
+    def test_candidate_coverage_oracle(self) -> None:
+        _property_candidate_coverage_oracle()
+
+    def test_complete_mapping_never_rejected_for_duration_disagreement(self) -> None:
+        _property_complete_mapping_never_rejected_for_duration_disagreement()
+
+    def test_provable_audio_loss_needs_a_lost_file_and_composite_evidence(self) -> None:
+        _property_provable_audio_loss_needs_a_lost_file_and_composite_evidence()
+
+    def test_oracle_kills_count_only_mutant(self) -> None:
+        """Known-bad self-test: equal counts are not set coverage."""
+        admitted = {"track-0.flac", "track-1.flac"}
+        mapped = ["track-0.flac", "track-0.flac"]
+        count_only_mutant = len(mapped) == len(admitted)
+        self.assertTrue(count_only_mutant)
+        coverage = candidate_audio_coverage(
+            [_item(path) for path in sorted(admitted)],
+            _candidate(mapped_paths=mapped),
+        )
+        self.assertFalse(coverage.complete)
 
 
 if __name__ == "__main__":

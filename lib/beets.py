@@ -165,9 +165,15 @@ def apply_candidate_scenario(
     album retagged, and the request rekeyed. Re-deriving those four fields at
     a second site is the parallel-code-path trap (issue #1059).
 
-    Total and idempotent by construction: every branch assigns ``valid``, so
-    calling it on a result that already named ``mbid_not_found`` leaves no
-    stale field behind.
+    Total and idempotent by construction: every branch assigns ``valid``,
+    ``scenario``, ``detail``, and ``incomplete_composite_paths`` (the last
+    unconditionally, even to empty -- issue #1237 review C8: a conditional
+    assignment would leave a stale composite observation behind from an
+    EARLIER call on the same ``result`` object, e.g. the merge-redirect
+    seam in ``lib/download_validation.py`` calling this a second time for
+    the survivor's own candidate), so calling it on a result that already
+    named ``mbid_not_found`` -- or already carries a first candidate's own
+    composite evidence -- leaves no stale field behind.
     """
     candidate.is_target = True
     result.mbid_found = True
@@ -180,10 +186,9 @@ def apply_candidate_scenario(
     # so the composite-duration observation is captured on every outcome,
     # including a ``strong_match`` -- issue #1237's overlapping-duration
     # albums are exactly the case that now VALIDATES while still carrying
-    # this evidence.
+    # this evidence. Assigned unconditionally too (see docstring above).
     coverage = candidate_audio_coverage(admitted_items, candidate)
-    if coverage.incomplete_composite_paths:
-        result.incomplete_composite_paths = list(coverage.incomplete_composite_paths)
+    result.incomplete_composite_paths = list(coverage.incomplete_composite_paths)
     if n_extra > 0:
         result.valid = False
         result.scenario = "extra_tracks"

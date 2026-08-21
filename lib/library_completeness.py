@@ -43,17 +43,22 @@ class AudioTagReadError(RuntimeError):
 class SourceComponent(msgspec.Struct, frozen=True):
     """One source-declared release component; ``key`` is source-native.
 
-    ``sub_component_titles`` is populated (len >= 2) only when this
-    component is a coalesced Discogs group -- consecutive flat indexed
-    sub-positions (e.g. ``16.1``/``16.2``) that Beets catalogues as ONE
-    physical track (issue #1237). Empty for every ordinary component,
-    including MusicBrainz's.
+    ``sub_component_titles``/``sub_component_keys`` (aligned, same order)
+    are populated (len >= 2) only when this component is a coalesced
+    Discogs group -- consecutive flat indexed sub-positions (e.g.
+    ``16.1``/``16.2``) or a subindexed ``sub_tracks`` header that Beets
+    catalogues as ONE physical track (issue #1237). Empty for every
+    ordinary component, including MusicBrainz's. ``sub_component_keys``
+    lets ``classify_album`` recognise when Beets' #1183 flat retry
+    installed each sub-position as its OWN separate catalogued item
+    (issue #1237 review C1) -- that is a complete import, not missing.
     """
     key: str
     title: str
     kind: SourceKind
     recording_id: str | None = None
     sub_component_titles: tuple[str, ...] = ()
+    sub_component_keys: tuple[str, ...] = ()
 
 
 class SourceManifest(msgspec.Struct, frozen=True):
@@ -232,6 +237,55 @@ def _discogs_subtrack_group_key(position: str) -> str | None:
     return f"{medium or ''}{index or ''}"
 
 
+def _try_coalesce_nested_index(
+    release_id: str, header: Mapping[str, object], sub_list: list[object],
+) -> SourceComponent | None:
+    """Mirror ``DiscogsPlugin._coalesce_index_track``'s subindexed branch.
+
+    Issue #1237 review C6: verified empirically against the real plugin
+    (``object.__new__(DiscogsPlugin)._coalesce_tracks(...)``) -- when the
+    FIRST nested ``sub_tracks`` child carries a subtrack index, Beets
+    catalogues the WHOLE header as ONE physical track keyed at that
+    child's STRIPPED ``medium+medium_index`` position (NOT the child's own
+    literal position -- e.g. first child ``"A2.1"`` yields key ``"A2"``,
+    even though the flat-sibling case would key it ``"A2.1"``), titled by
+    the INDEX's OWN title, never the children's. Even a single subindexed
+    child triggers this (empirically confirmed), so there is no size
+    threshold here. Returns ``None`` when the first child has no
+    subtrack index, so the caller falls back to Beets' OTHER real branch:
+    literal per-child expansion (this module's pre-existing, unchanged
+    ``sub_tracks`` flattening).
+    """
+    if not sub_list:
+        return None
+    first = _raw_mapping(sub_list[0], "Discogs track is not an object")
+    first_position = first.get("position")
+    if not isinstance(first_position, str) or not first_position:
+        return None
+    medium, index, subindex = _discogs_get_track_index(first_position)
+    if not subindex:
+        return None
+    child_keys: list[str] = []
+    child_titles: list[str] = []
+    for raw_child in sub_list:
+        child = _raw_mapping(raw_child, "Discogs track is not an object")
+        position = child.get("position")
+        if not isinstance(position, str) or not position:
+            raise SourceManifestError("Discogs track lacks literal position")
+        title = child.get("title")
+        child_keys.append(f"{release_id}-{position}")
+        child_titles.append(title if isinstance(title, str) else "")
+    header_title = header.get("title")
+    stripped_position = f"{medium or ''}{index or ''}"
+    return SourceComponent(
+        key=f"{release_id}-{stripped_position}",
+        title=header_title if isinstance(header_title, str) else "",
+        kind="audio",
+        sub_component_titles=tuple(child_titles) if len(child_titles) > 1 else (),
+        sub_component_keys=tuple(child_keys) if len(child_keys) > 1 else (),
+    )
+
+
 def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManifest:
     """Normalize raw Discogs tracks, reproducing Beets' own coalescing.
 
@@ -243,12 +297,14 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
     so never group; ``1A``/``4A``/``1B`` each form their own singleton
     group because consecutive keys differ (issue #1237).
 
-    This reproduces ONLY that top-level consecutive-sibling rule. A
-    ``sub_tracks``-nested header (Discogs' distinct index/heading
-    container) keeps this module's pre-existing literal-per-child
-    flattening unchanged -- that is a different Beets code path
-    (``_coalesce_index_track``), out of this issue's scope -- and, like a
-    real Beets non-"track" entry, breaks any pending top-level group.
+    A ``sub_tracks``-nested header (Discogs' distinct index/heading
+    container) reproduces Beets' OWN nested branch instead
+    (``_try_coalesce_nested_index`` / ``_coalesce_index_track``, issue
+    #1237 review C6) -- subindexed children merge into one track keyed at
+    the stripped first-child position with the header's own title;
+    non-subindexed children flatten literally, unchanged. Either way, a
+    nested header breaks any pending TOP-LEVEL group, like a real Beets
+    non-"track" entry breaks ``groupby``'s adjacency.
     """
     raw_release_id = raw.get("id")
     if (isinstance(raw_release_id, bool)
@@ -266,11 +322,13 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
             return
         first_position, _ = pending[0]
         titles = tuple(title for _, title in pending)
+        keys = tuple(f"{release_id}-{position}" for position, _ in pending)
         components.append(SourceComponent(
             key=f"{release_id}-{first_position}",
             title=" / ".join(titles),
             kind="audio",
             sub_component_titles=titles if len(pending) > 1 else (),
+            sub_component_keys=keys if len(pending) > 1 else (),
         ))
         pending = []
         pending_key = None
@@ -281,16 +339,18 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
             entry = _raw_mapping(raw_entry, "Discogs track is not an object")
             subtracks = entry.get("sub_tracks")
             if subtracks is not None:
-                # A parent with subtracks is an index/header, not another
-                # playable component. Counting both invents an extra source
-                # track; preserve each child literal position instead
-                # (unchanged pre-#1237 behaviour -- not grouped by this pass).
                 if groupable:
                     flush_pending()
-                visit(
-                    _raw_list(subtracks, "Discogs sub_tracks is not a list"),
-                    groupable=False,
-                )
+                sub_list = _raw_list(subtracks, "Discogs sub_tracks is not a list")
+                merged = _try_coalesce_nested_index(release_id, entry, sub_list)
+                if merged is not None:
+                    components.append(merged)
+                else:
+                    # Beets' non-subindexed branch: independent physical
+                    # tracks grouped under a heading -- preserve each
+                    # child literal position (unchanged pre-#1237
+                    # behaviour, not grouped by the top-level pass).
+                    visit(sub_list, groupable=False)
                 continue
             position = entry.get("position")
             duration = entry.get("duration")
@@ -525,10 +585,32 @@ def classify_album(
     # never overrides identity, and never touches ``known_component_keys``:
     # it only ever ADDS evidence alongside the identity-driven verdict below.
     if manifest.source == "discogs":
+        existing_source_keys = {item.source_key for item in existing_catalog}
         for component in audio:
             if len(component.sub_component_titles) < 2:
                 continue
             if component.key not in known_component_keys:
+                continue
+            # Issue #1237 review C9: a Discogs "(silence)" sub-position is
+            # a literal filler/gap marker, not real audio -- never expected
+            # to have its own installed item, never named as missing.
+            real_subcomponents = [
+                (key, title) for key, title in zip(
+                    component.sub_component_keys, component.sub_component_titles,
+                    strict=True,
+                )
+                if title.strip().casefold() != "(silence)"
+            ]
+            # Issue #1237 review C1 (live regression): subtract sub-positions
+            # Beets' own #1183 flat retry already installed as SEPARATE
+            # catalogued items -- one per literal sub-position (e.g.
+            # 2823685-A2.1 AND 2823685-A2.2 both present) is a COMPLETE
+            # import, not missing, and needs no audio decode at all.
+            remaining = [
+                (key, title) for key, title in real_subcomponents
+                if key != component.key and key not in existing_source_keys
+            ]
+            if not remaining:
                 continue
             path = component_key_paths.get(component.key)
             if path is None:
@@ -542,12 +624,17 @@ def classify_album(
                 ))
                 continue
             if not gap_present:
+                # C9: the missing-audio message names and counts only the
+                # REAL sub-components -- a silence marker was never real
+                # audio, so it is excluded here too, not only above.
+                real_titles = tuple(title for _, title in real_subcomponents)
+                real_label = " / ".join(real_titles) or component.key
                 findings.append(CompletenessFinding(
                     "missing_source_audio",
-                    f"{label}: installed composite is one continuous audio "
-                    "segment; no internal silence gap found across "
-                    f"{len(component.sub_component_titles)} declared "
-                    f"components ({' / '.join(component.sub_component_titles)})",
+                    f"{real_label}: installed composite is one continuous "
+                    "audio segment; no internal silence gap found across "
+                    f"{len(real_titles)} declared components "
+                    f"({' / '.join(real_titles)})",
                 ))
 
     # A catalogued missing path is already catalog drift.  It cannot satisfy
