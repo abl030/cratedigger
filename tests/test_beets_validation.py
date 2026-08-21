@@ -21,10 +21,16 @@ from unittest.mock import MagicMock, patch
 # (e.g. ``lib.youtube_album_service``) that uses real
 # ``requests.Timeout`` / ``ConnectionError`` exception classes.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from lib.beets import beets_validate
+from lib.beets import apply_candidate_scenario, beets_validate
 from lib.grab_list import GrabListEntry
 from lib.processing_paths import stage_to_ai_path
-from lib.quality import ValidationResult
+from lib.quality import (
+    CandidateSummary,
+    HarnessItem,
+    HarnessTrackInfo,
+    TrackMapping,
+    ValidationResult,
+)
 from lib.staged_album import StagedAlbum
 from lib.util import log_validation_result
 
@@ -73,12 +79,14 @@ def make_coverage_choose_match_msg(
     composite_local_length: float = 0.0,
     composite_program_length: float = 0.0,
     composite_duration_complete: bool = True,
+    item_paths: list[str] | None = None,
 ) -> str:
-    item_paths = [
-        "01 Space Oddity.flac",
-        "02 Unwashed And Somewhat Slightly Dazed.flac",
-        "03 Don't Sit Down.flac",
-    ]
+    if item_paths is None:
+        item_paths = [
+            "01 Space Oddity.flac",
+            "02 Unwashed And Somewhat Slightly Dazed.flac",
+            "03 Don't Sit Down.flac",
+        ]
     items = [
         {
             "path": path,
@@ -192,6 +200,82 @@ class TestBeetsValidate(unittest.TestCase):
         self.assertEqual(mock_popen.call_count, 2)
         second_cmd = mock_popen.call_args_list[1].args[0]
         self.assertIn("--preserve-discogs-flat-subtracks", second_cmd)
+
+    @patch("lib.beets.sp.Popen")
+    def test_unkle_style_unmapped_file_with_no_reported_extra_retries_flat(
+        self,
+        mock_popen,
+    ):
+        """Issue #1237's second confirmation shape: 13 admitted files, one
+        genuinely UNMAPPED with zero ``extra_items`` reported (unlike Bowie's
+        shape, which Beets reports as an extra item) -- the retry trigger
+        must fire on ``unmapped_paths`` alone, not only on
+        ``reported_extra_paths``.
+        """
+        release_id = "2823685"
+        item_paths = [f"{n:02d} Track {n}.flac" for n in range(1, 14)]
+        composite_path = item_paths[1]
+        default = make_validation_proc(make_coverage_choose_match_msg(
+            release_id,
+            item_paths=item_paths,
+            mapped_paths=item_paths[:12],
+            extra_paths=[],
+            composite_path=composite_path,
+            composite_local_length=100.0,
+            composite_program_length=220.0,
+        ))
+        expanded = make_validation_proc(make_coverage_choose_match_msg(
+            release_id,
+            item_paths=item_paths,
+            mapped_paths=item_paths,
+            extra_paths=[],
+        ))
+        mock_popen.side_effect = [default, expanded]
+
+        result = beets_validate(self.HARNESS, "/test/album", release_id, 0.15)
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.scenario, "strong_match")
+        self.assertEqual(len(result.candidates[0].mapping), 13)
+        self.assertEqual(mock_popen.call_count, 2)
+        second_cmd = mock_popen.call_args_list[1].args[0]
+        self.assertIn("--preserve-discogs-flat-subtracks", second_cmd)
+
+    @patch("lib.beets.sp.Popen")
+    def test_overlapping_composite_validates_without_retry_and_carries_evidence(
+        self,
+        mock_popen,
+    ):
+        """Issue #1237: a composite duration disagreement with an otherwise
+        COMPLETE mapping (no unmapped/extra audio) must validate on the
+        FIRST pass -- no retry needed, no rejection -- while still
+        persisting the observation on the result.
+        """
+        release_id = "2823685"
+        composite_path = "02 Unwashed And Somewhat Slightly Dazed.flac"
+        proc = make_validation_proc(make_coverage_choose_match_msg(
+            release_id,
+            mapped_paths=[
+                "01 Space Oddity.flac",
+                composite_path,
+                "03 Don't Sit Down.flac",
+            ],
+            extra_paths=[],
+            composite_path=composite_path,
+            composite_local_length=579.7,
+            composite_program_length=781.0,
+        ))
+        mock_popen.return_value = proc
+
+        result = beets_validate(self.HARNESS, "/test/album", release_id, 0.15)
+
+        self.assertTrue(result.valid, result.to_json())
+        self.assertEqual(result.scenario, "strong_match")
+        self.assertEqual(mock_popen.call_count, 1)
+        self.assertEqual(
+            result.incomplete_composite_paths,
+            [f"{composite_path} (local=579.7s, indexed_program=781.0s)"],
+        )
 
     @patch("lib.beets.sp.Popen")
     def test_force_distance_override_cannot_bypass_incomplete_mapping(
@@ -710,6 +794,70 @@ def _make_album_data(**overrides):
     }
     defaults.update(overrides)
     return GrabListEntry(**defaults)
+
+
+class TestApplyCandidateScenarioIdempotence(unittest.TestCase):
+    """``apply_candidate_scenario`` must leave no stale field behind when
+    called a second time on the SAME ``ValidationResult`` (issue #1237
+    review C8/D4/E4/G4). ``lib/download_validation.py``'s merge-redirect
+    seam is exactly one such caller, and its OWN call is always the first
+    on a given object (D4): it is reached only when ``result.scenario ==
+    "mbid_not_found"``, a value this function itself never produces. That
+    is not the same as "no caller ever reaches a SECOND call" --
+    ``lib/beets.py::_beets_validate_once`` processes every ``choose_match``
+    message the harness sends within one session, with last-wins field
+    overwrites on the SAME shared ``result``, calling
+    ``apply_candidate_scenario`` once per message whose candidate matches
+    the target MBID; beets can emit more than one ``choose_match`` in one
+    session (``HarnessImportSession.choose_match`` in
+    ``harness/beets_harness.py`` numbers each with an incrementing
+    ``task_id``, evidence the underlying protocol supports more than one
+    per session). Beets' own ``albums_in_dir`` (``beets/importer/tasks.py``)
+    is NOT one task per subdirectory as a rule, though: it deliberately
+    COLLAPSES a multi-disc layout (``CD1``/``CD2``, ``Disc 1``/``Disc 2``,
+    and similar numbered-marker siblings) into a single task -- the most
+    common shape a directory with more than one subdirectory takes in this
+    pipeline. The mechanism above is real for two genuinely UNRELATED
+    album subdirectories under one target path (not a recognised multi-
+    disc pattern), which is what a second ``apply_candidate_scenario``
+    call actually requires -- a DIFFERENT concept from the later, separate
+    ``nested_layout`` quality-decision fact (spelled in
+    ``lib/quality/pipeline.py`` and ``lib/import_preview.py``), which is
+    computed downstream of validation and names a different failure. A
+    second ``apply_candidate_scenario`` call on the same object is
+    therefore reachable inside ``beets_validate`` itself whenever more
+    than one task's candidates match the requested MBID -- exactly the
+    case this test guards, independent of whether a specific live album
+    is known to exercise it today.
+    """
+
+    def _composite_candidate(self, *, local_length: float, indexed_length: float) -> CandidateSummary:
+        path = "composite.flac"
+        return CandidateSummary(
+            mbid="release",
+            data_source="Discogs",
+            mapping=[TrackMapping(
+                item=HarnessItem(path=path, length=local_length),
+                track=HarnessTrackInfo(
+                    title="composite", length=indexed_length,
+                    discogs_indexed_component_count=2,
+                    discogs_indexed_duration_complete=True,
+                ),
+            )],
+        )
+
+    def test_second_call_clears_first_calls_composite_evidence(self) -> None:
+        result = ValidationResult(items=[{"path": "composite.flac", "length": 100.0}])
+        first = self._composite_candidate(local_length=100.0, indexed_length=200.0)
+        apply_candidate_scenario(result, first, 0.15)
+        self.assertEqual(
+            result.incomplete_composite_paths,
+            ["composite.flac (local=100.0s, indexed_program=200.0s)"],
+        )
+
+        second = self._composite_candidate(local_length=200.0, indexed_length=200.0)
+        apply_candidate_scenario(result, second, 0.15)
+        self.assertEqual(result.incomplete_composite_paths, [])
 
 
 class TestStagedAlbumMoveTo(unittest.TestCase):

@@ -21,7 +21,7 @@ from unittest.mock import patch
 from harness import import_one
 from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD, beets_validate
 from lib.beets_db import BeetsDB
-from lib.quality import AUDIO_EXTENSIONS_DOTTED, QualityRankConfig
+from lib.quality import AUDIO_EXTENSIONS_DOTTED, QualityRankConfig, ValidationResult
 
 _RELEASE_ID = "2823685"
 _TRACKS = (
@@ -325,12 +325,13 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
             unknown_component_duration=True,
         )
 
-    def _exercise_force_rejection(
+    def _exercise_force_world(
         self,
         *,
         composite_duration: int,
         duplicate_component: bool,
-    ) -> None:
+        expect_valid: bool,
+    ) -> ValidationResult:
         with tempfile.TemporaryDirectory(
             prefix="cratedigger-discogs-subtracks-force-e2e-",
         ) as raw_root:
@@ -412,7 +413,7 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
                     _RELEASE_ID,
                     FORCE_IMPORT_DISTANCE_THRESHOLD,
                 )
-                self.assertFalse(validation.valid, validation.to_json())
+                self.assertEqual(validation.valid, expect_valid, validation.to_json())
                 outcome = import_one.run_import(
                     str(source),
                     _RELEASE_ID,
@@ -422,28 +423,50 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
                     beets_library_root=str(library),
                 )
 
+            admitted_count = 10 if duplicate_component else 9
+            if expect_valid:
+                self.assertEqual(outcome.exit_code, 0, outcome.failure_reason)
+                self.assertEqual(_audio_files(source), [])
+                self.assertEqual(len(_audio_files(library)), admitted_count)
+                return validation
             self.assertEqual(outcome.exit_code, 2)
             self.assertIn("candidate mapping would discard", outcome.failure_reason or "")
-            self.assertEqual(
-                len(_audio_files(source)),
-                10 if duplicate_component else 9,
-            )
+            self.assertEqual(len(_audio_files(source)), admitted_count)
             self.assertEqual(_audio_files(library), [])
+            return validation
 
-    def test_incomplete_composite_fails_closed_even_with_force_distance(
+    def test_overlapping_short_local_composite_validates_and_carries_evidence(
         self,
     ) -> None:
-        self._exercise_force_rejection(
+        """Issue #1237: a composite duration disagreement alone must never
+        reject an otherwise-complete mapping -- it cannot distinguish a
+        genuinely short composite from Discogs' overlapping-duration
+        convention. Renamed from ``test_incomplete_composite_fails_closed_
+        even_with_force_distance``, which pinned the pre-fix reject-on-
+        duration-alone bug this issue exists to correct; that world now
+        imports successfully and the observation is preserved as evidence
+        on the persisted ``ValidationResult``.
+        """
+        validation = self._exercise_force_world(
             composite_duration=6,
             duplicate_component=False,
+            expect_valid=True,
+        )
+        self.assertEqual(
+            validation.incomplete_composite_paths,
+            [(
+                "02 - Unwashed And Somewhat Slightly Dazed.flac "
+                "(local=6.0s, indexed_program=18.0s)"
+            )],
         )
 
     def test_complete_composite_plus_extra_cannot_be_flattened_under_force(
         self,
     ) -> None:
-        self._exercise_force_rejection(
+        self._exercise_force_world(
             composite_duration=18,
             duplicate_component=True,
+            expect_valid=False,
         )
 
 

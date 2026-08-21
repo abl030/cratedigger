@@ -165,9 +165,19 @@ def apply_candidate_scenario(
     album retagged, and the request rekeyed. Re-deriving those four fields at
     a second site is the parallel-code-path trap (issue #1059).
 
-    Total and idempotent by construction: every branch assigns ``valid``, so
-    calling it on a result that already named ``mbid_not_found`` leaves no
-    stale field behind.
+    Total and idempotent by construction: every branch assigns ``valid``,
+    ``scenario``, ``detail``, and ``incomplete_composite_paths`` (the last
+    unconditionally, even to empty), so calling it on a result that already
+    names ``mbid_not_found`` -- as the merge-redirect seam in
+    ``lib/download_validation.py`` does -- leaves no stale field behind.
+    That seam is this function's FIRST and ONLY call on that object, not a
+    second one: it is reached only when ``result.scenario ==
+    "mbid_not_found"`` (``lib/download_validation.py::
+    validate_release_with_merge_redirect``'s own gate), a scenario this
+    function itself never produces, so a result already carrying it has
+    never been through here before (issue #1237 review D4 corrects an
+    earlier revision of this docstring, which wrongly cited that seam as a
+    second call).
     """
     candidate.is_target = True
     result.mbid_found = True
@@ -176,13 +186,18 @@ def apply_candidate_scenario(
     if admitted_items is None:
         admitted_items = msgspec.convert(result.items, type=list[HarnessItem])
     n_extra = len(candidate.extra_tracks)
+    # Computed unconditionally (not lazily inside the coverage branch below)
+    # so the composite-duration observation is captured on every outcome,
+    # including a ``strong_match`` -- issue #1237's overlapping-duration
+    # albums are exactly the case that now VALIDATES while still carrying
+    # this evidence. Assigned unconditionally too (see docstring above).
+    coverage = candidate_audio_coverage(admitted_items, candidate)
+    result.incomplete_composite_paths = list(coverage.incomplete_composite_paths)
     if n_extra > 0:
         result.valid = False
         result.scenario = "extra_tracks"
         result.detail = f"MB has {n_extra} more tracks than local files"
-    elif not (
-        coverage := candidate_audio_coverage(admitted_items, candidate)
-    ).complete:
+    elif not coverage.complete:
         result.valid = False
         result.scenario = "unmapped_audio"
         result.detail = (
@@ -431,7 +446,7 @@ def beets_validate(
         return result
     admitted_items = msgspec.convert(result.items, type=list[HarnessItem])
     coverage = candidate_audio_coverage(admitted_items, target)
-    if not coverage.incomplete_composite_paths:
+    if not coverage.provable_audio_loss:
         return result
     logger.info(
         "BEETS_VALIDATE: retrying Discogs target %s with flat indexed "

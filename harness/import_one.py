@@ -1474,7 +1474,7 @@ def _run_import_once(
                         retry_flat = (
                             not preserve_discogs_flat_subtracks
                             and typed_candidate.data_source.casefold() == "discogs"
-                            and bool(coverage.incomplete_composite_paths)
+                            and coverage.provable_audio_loss
                         )
                         return RunImportOutcome(
                             2,

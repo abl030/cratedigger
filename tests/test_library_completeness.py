@@ -6,10 +6,12 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from collections.abc import Callable
 
 from mediafile.exceptions import UnreadableFileError
 
 from lib.beets_db import BeetsDB
+from lib.composite_audio_gap import CompositeAudioReadError
 from lib.library_completeness import (
     AudioTagReadError,
     CatalogItem,
@@ -51,8 +53,24 @@ def _mb_raw(
     ]}]}
 
 
+def _unexpected_gap_detector(path: str) -> bool:
+    """Fails any test that reaches issue #1237's audio decode by surprise.
+
+    Every existing pin in this class classifies an ungrouped Discogs
+    component, a MusicBrainz manifest, or a grouped Discogs component whose
+    every sub-position is already separately catalogued (issue #1237
+    review C1's identity-only subtraction) -- none of which ever reaches
+    the grouped-composite physical check. Tests that DO need the check
+    pass their own fake.
+    """
+    raise AssertionError(f"unexpected composite audio decode for {path!r}")
+
+
 class TestLiveIncidentPins(unittest.TestCase):
-    def _classify(self, album: LibraryAlbum, raw: dict[str, object], *, tags: dict[str, tuple[str, str]]) -> set[str]:
+    def _classify(
+        self, album: LibraryAlbum, raw: dict[str, object], *, tags: dict[str, tuple[str, str]],
+        detect_composite_gap: Callable[[str], bool] = _unexpected_gap_detector,
+    ) -> set[str]:
         assert album.identity is not None
         raw = {**raw, "id": album.identity.release_id}
         manifest = (discogs_manifest(album.identity.release_id, raw)
@@ -62,18 +80,38 @@ class TestLiveIncidentPins(unittest.TestCase):
             album, manifest,
             enumerate_files=lambda _directory: tuple(sorted(tags)),
             tag_reader=lambda path: tags[path],
+            detect_composite_gap=detect_composite_gap,
         )
         return {finding.kind for finding in result.findings}
 
-    def test_bowie_discogs_subtrack_is_missing_and_space_oddity_is_drift(self) -> None:
+    def test_bowie_both_parts_installed_and_space_oddity_is_drift(self) -> None:
+        """Issue #1237 review C1's live regression (Bowie 2823685): Beets'
+        own #1183 flat retry installs a genuinely split composite as TWO
+        separate catalogued items, one per literal sub-position
+        (``2823685-A2.1`` + ``2823685-A2.2``) -- that is a COMPLETE
+        import, not missing. ``classify_album`` must recognise this via
+        identity/subtraction alone; the default raising fake detector
+        proves NO audio decode is even attempted once every sub-position
+        is separately accounted for (issue #1237 review C5 -- deriving the
+        detector's answer from a real producer would otherwise require
+        real audio this synthetic fixture doesn't have; subtraction makes
+        that unnecessary). Renamed from
+        ``test_bowie_discogs_subtrack_coalesces_and_space_oddity_is_drift``,
+        which modelled ONE merged item (a genuinely different, single-file
+        composite shape, now covered by ``TestGroupedCompositePhysicalCheck``)
+        and fed the detector an invented ``True`` the real producer for
+        that shape does not return -- test-fidelity Rule C.
+        """
         release = "2823685"
         paths = {f"/album/{position}.opus": (f"{release}-{position}", "")
-                 for position in ("A2.1", "A3", "A4", "B1", "B2", "B3", "B4", "B5")}
+                 for position in ("A2.1", "A2.2", "A3", "A4", "B1", "B2", "B3", "B4", "B5")}
         paths["/album/Space Oddity.opus"] = (f"{release}-A1", "")
         album = LibraryAlbum(11782, "David Bowie", "David Bowie", ReleaseIdentity("discogs", release), "/album",
                              tuple(CatalogItem(path, tag[0], "") for path, tag in paths.items() if "Space" not in path))
-        kinds = self._classify(album, _discogs_raw(["A1", "A2.1", "A2.2", "A3", "A4", "B1", "B2", "B3", "B4", "B5"]), tags=paths)
-        self.assertEqual(kinds, {"missing_source_audio", "catalog_drift"})
+        kinds = self._classify(
+            album, _discogs_raw(["A1", "A2.1", "A2.2", "A3", "A4", "B1", "B2", "B3", "B4", "B5"]), tags=paths,
+        )
+        self.assertEqual(kinds, {"catalog_drift"})
 
     def test_dirt_discogs_1b_is_missing_without_drift(self) -> None:
         release = "4738671"
@@ -232,6 +270,444 @@ class TestLiveIncidentPins(unittest.TestCase):
         self.assertEqual(result.findings[0].kind, "unknown")
 
 
+class TestGroupedCompositePhysicalCheck(unittest.TestCase):
+    """Issue #1237 design items 4-5: the census's ONE new instrument.
+
+    Census pins for the five live shapes from the issue's own evidence
+    table (Bouncing Souls 461206 overlapping, Marie Wilson 18213658
+    disjoint, Stellastarr* 521474 disjoint-short) plus the two structural
+    edges the issue names explicitly: an unknown declared duration must
+    not change the audio-only verdict, and a per-position (never grouped)
+    shape must be resolved at identity level with NO audio decode at all.
+    """
+
+    def _classify(
+        self, album: LibraryAlbum, raw: dict[str, object], *, tags: dict[str, tuple[str, str]],
+        detect_composite_gap: Callable[[str], bool],
+    ) -> set[str]:
+        assert album.identity is not None
+        manifest = discogs_manifest(album.identity.release_id, raw)
+        result = classify_album(
+            album, manifest,
+            enumerate_files=lambda _directory: tuple(sorted(tags)),
+            tag_reader=lambda path: tags[path],
+            detect_composite_gap=detect_composite_gap,
+        )
+        return {finding.kind for finding in result.findings}
+
+    def _grouped_album(
+        self, release: str, positions: list[str], *, catalog_key_position: str,
+    ) -> tuple[LibraryAlbum, dict[str, tuple[str, str]]]:
+        """One installed composite item, keyed by the group's FIRST
+        sub-position -- exactly what Beets itself stamps on import."""
+        path = "/album/composite.opus"
+        tags = {path: (f"{release}-{catalog_key_position}", "")}
+        album = LibraryAlbum(
+            1, "Artist", "Album", ReleaseIdentity("discogs", release), "/album",
+            (CatalogItem(path, tags[path][0], ""),),
+        )
+        return album, tags
+
+    def test_overlapping_complete_gap_present_is_fully_complete(self) -> None:
+        """Bouncing Souls 461206 shape: two sub-positions, physical gap
+        proves the composite covers both -- no finding at all."""
+        release = "461206"
+        album, tags = self._grouped_album(release, ["16.1", "16.2"], catalog_key_position="16.1")
+        kinds = self._classify(
+            album, _discogs_raw(["16.1", "16.2"], release), tags=tags,
+            detect_composite_gap=lambda _path: True,
+        )
+        self.assertEqual(kinds, set())
+
+    def test_disjoint_complete_gap_present_is_fully_complete(self) -> None:
+        """Marie Wilson 18213658 shape: three sub-positions, physical gaps
+        prove all three parts are present -- no finding at all."""
+        release = "18213658"
+        album, tags = self._grouped_album(release, ["10.1", "10.2", "10.3"], catalog_key_position="10.1")
+        kinds = self._classify(
+            album, _discogs_raw(["10.1", "10.2", "10.3"], release), tags=tags,
+            detect_composite_gap=lambda _path: True,
+        )
+        self.assertEqual(kinds, set())
+
+    def test_disjoint_short_no_gap_states_what_was_observed(self) -> None:
+        """Stellastarr* 521474 shape: three sub-positions, NO internal gap
+        -- the file is one continuous segment, genuinely short."""
+        release = "521474"
+        album, tags = self._grouped_album(release, ["7.1", "7.2", "7.3"], catalog_key_position="7.1")
+        kinds = self._classify(
+            album, _discogs_raw(["7.1", "7.2", "7.3"], release), tags=tags,
+            detect_composite_gap=lambda _path: False,
+        )
+        self.assertEqual(kinds, {"missing_source_audio"})
+
+    def test_unknown_duration_short_still_decides_from_audio_alone(self) -> None:
+        """A declared component duration of "" (Discogs' own unknown-
+        duration shape, ``harness/beets_compat.py``'s ``duration_complete``
+        analog) must not change anything: the census never models declared
+        duration at the manifest level -- grouping is identity-only, and
+        design 5's verdict is audio-only.
+        """
+        release = "999999"
+        raw = {"id": release, "tracks": [
+            {"position": "16.1", "title": "Part One", "duration": ""},
+            {"position": "16.2", "title": "Part Two", "duration": "3:24"},
+        ]}
+        album, tags = self._grouped_album(release, ["16.1", "16.2"], catalog_key_position="16.1")
+        manifest = discogs_manifest(release, raw)
+        self.assertEqual(len(manifest.components), 1)
+        self.assertEqual(manifest.components[0].sub_component_titles, ("Part One", "Part Two"))
+        kinds = self._classify(
+            album, raw, tags=tags, detect_composite_gap=lambda _path: False,
+        )
+        self.assertEqual(kinds, {"missing_source_audio"})
+
+    def test_per_position_never_grouped_shape_needs_no_audio_decode(self) -> None:
+        """Dirt Dress 4738671 shape (1A/2A/3A/4A/1B): consecutive keys
+        differ, so nothing ever groups -- resolved at identity level alone.
+        Mirrors ``test_dirt_discogs_1b_is_missing_without_drift`` and
+        proves, with a raising fake, that the audio decode is NEVER
+        reached for an ungrouped component.
+        """
+        release = "4738671"
+        paths = {f"/album/{position}.opus": (f"{release}-{position}", "")
+                 for position in ("1A", "2A", "3A", "4A")}
+        album = LibraryAlbum(1255, "Dirt Dress", "Theme Songs", ReleaseIdentity("discogs", release), "/album",
+                             tuple(CatalogItem(path, tag[0], "") for path, tag in paths.items()))
+
+        def _unreachable(path: str) -> bool:
+            raise AssertionError(f"unexpected composite audio decode for {path!r}")
+
+        kinds = self._classify(
+            album, _discogs_raw(["1A", "2A", "3A", "4A", "1B"], release), tags=paths,
+            detect_composite_gap=_unreachable,
+        )
+        self.assertEqual(kinds, {"missing_source_audio"})
+
+    def test_undecodable_composite_is_unknown_never_guessed(self) -> None:
+        release = "461206"
+        album, tags = self._grouped_album(release, ["16.1", "16.2"], catalog_key_position="16.1")
+
+        def _raises(_path: str) -> bool:
+            raise CompositeAudioReadError("simulated ffmpeg failure")
+
+        kinds = self._classify(
+            album, _discogs_raw(["16.1", "16.2"], release), tags=tags,
+            detect_composite_gap=_raises,
+        )
+        self.assertEqual(kinds, {"unknown"})
+
+    def test_both_parts_separately_installed_needs_no_decode(self) -> None:
+        """Issue #1237 review C1: the generic composite-check version of
+        ``test_bowie_both_parts_installed_and_space_oddity_is_drift`` --
+        when EVERY sub-position of a coalesced group is separately
+        catalogued (Beets' #1183 flat retry), the group is complete by
+        identity alone. A raising fake proves decode is never reached.
+        """
+        release = "461206"
+        first_path = "/album/16.1.opus"
+        second_path = "/album/16.2.opus"
+        tags = {
+            first_path: (f"{release}-16.1", ""),
+            second_path: (f"{release}-16.2", ""),
+        }
+        album = LibraryAlbum(
+            1, "Artist", "Album", ReleaseIdentity("discogs", release), "/album",
+            (CatalogItem(first_path, tags[first_path][0], ""),
+             CatalogItem(second_path, tags[second_path][0], "")),
+        )
+
+        def _unreachable(path: str) -> bool:
+            raise AssertionError(f"unexpected composite audio decode for {path!r}")
+
+        kinds = self._classify(
+            album, _discogs_raw(["16.1", "16.2"], release), tags=tags,
+            detect_composite_gap=_unreachable,
+        )
+        self.assertEqual(kinds, set())
+
+    def test_silence_subcomponent_excluded_from_missing_audio_naming(self) -> None:
+        """Issue #1237 review C9: a Discogs "(silence)" sub-position is a
+        literal filler/gap marker, not real audio. The no-gap message must
+        name and count only the REAL sub-components -- never assert a
+        silence entry as missing audio.
+        """
+        release = "888888"
+        raw = {"id": release, "tracks": [
+            {"position": "10.1", "title": "Island Lost At Sea"},
+            {"position": "10.2", "title": "(silence)"},
+            {"position": "10.3", "title": "Untitled"},
+        ]}
+        album, tags = self._grouped_album(release, ["10.1", "10.2", "10.3"], catalog_key_position="10.1")
+        manifest = discogs_manifest(release, raw)
+        self.assertEqual(
+            manifest.components[0].sub_component_titles,
+            ("Island Lost At Sea", "(silence)", "Untitled"),
+        )
+        result = classify_album(
+            album, manifest,
+            enumerate_files=lambda _directory: tuple(sorted(tags)),
+            tag_reader=lambda path: tags[path],
+            detect_composite_gap=lambda _path: False,
+        )
+        findings = [f for f in result.findings if f.kind == "missing_source_audio"]
+        self.assertEqual(len(findings), 1)
+        detail = findings[0].detail
+        self.assertIn("2 declared components", detail)
+        self.assertIn("Island Lost At Sea", detail)
+        self.assertIn("Untitled", detail)
+        self.assertNotIn("(silence)", detail)
+        self.assertNotIn("3 declared components", detail)
+
+    def test_uncatalogued_present_first_position_still_reaches_decode(self) -> None:
+        """Issue #1237 review D6: ``component_key_paths[matched_key] = path``
+        in the uncatalogued-extra loop is the ONLY route by which a
+        composite whose first sub-position is identified via an
+        uncatalogued (never catalogued at all) but physically present
+        file reaches the audio-decode check. A recording fake proves the
+        exact path that flows through.
+        """
+        release = "461206"
+        first_path = "/album/composite-first.opus"
+        tags = {first_path: (f"{release}-16.1", "")}
+        album = LibraryAlbum(
+            1, "Artist", "Album", ReleaseIdentity("discogs", release), "/album", (),
+        )
+        seen_paths: list[str] = []
+
+        def _recording_detector(path: str) -> bool:
+            seen_paths.append(path)
+            return True
+
+        self._classify(
+            album, _discogs_raw(["16.1", "16.2"], release), tags=tags,
+            detect_composite_gap=_recording_detector,
+        )
+        self.assertEqual(seen_paths, [first_path])
+
+    def test_unreadable_composite_names_only_real_subcomponents(self) -> None:
+        """Issue #1237 review D7: the "unknown: composite audio
+        unreadable" message must filter "(silence)" the same way the
+        missing_source_audio message already does -- previously it used
+        the unfiltered ``component.title``, naming a silence marker as
+        part of an unreadable composite.
+        """
+        release = "888888"
+        raw = {"id": release, "tracks": [
+            {"position": "10.1", "title": "Island Lost At Sea"},
+            {"position": "10.2", "title": "(silence)"},
+            {"position": "10.3", "title": "Untitled"},
+        ]}
+        album, tags = self._grouped_album(release, ["10.1", "10.2", "10.3"], catalog_key_position="10.1")
+        manifest = discogs_manifest(release, raw)
+
+        def _raises(_path: str) -> bool:
+            raise CompositeAudioReadError("simulated ffmpeg failure")
+
+        result = classify_album(
+            album, manifest,
+            enumerate_files=lambda _directory: tuple(sorted(tags)),
+            tag_reader=lambda path: tags[path],
+            detect_composite_gap=_raises,
+        )
+        unknown_findings = [f for f in result.findings if f.kind == "unknown"]
+        self.assertEqual(len(unknown_findings), 1)
+        self.assertNotIn("(silence)", unknown_findings[0].detail)
+        self.assertIn("Island Lost At Sea", unknown_findings[0].detail)
+        self.assertIn("Untitled", unknown_findings[0].detail)
+
+    def test_unreadable_uncatalogued_extra_suppresses_missing_accusation(self) -> None:
+        """Issue #1237 review D1/E1 (live regression, then fail-open
+        correction): the identity-driven verdict below already refuses to
+        turn ``missing`` into a definite ``missing_source_audio`` while an
+        uncatalogued extra file's identity is unresolved (its own ``not
+        unknown_extra`` guard), substituting an explanatory ``unknown``
+        instead of silently dropping the finding. The grouped-composite
+        physical check must do the same: refuse the accusation AND emit
+        its OWN ``unknown`` naming the composite -- D1's original fix
+        suppressed the accusation but emitted NOTHING for the composite
+        (E1's review: "the finding vanishes").
+        """
+        release = "461206"
+        composite_path = "/album/composite.opus"
+        extra_path = "/album/extra.opus"
+        composite_key = f"{release}-16.1"
+        album = LibraryAlbum(
+            1, "Artist", "Album", ReleaseIdentity("discogs", release), "/album",
+            (CatalogItem(composite_path, composite_key, ""),),
+        )
+        manifest = discogs_manifest(release, _discogs_raw(["16.1", "16.2"], release))
+
+        def _tag_reader(path: str) -> tuple[str, str]:
+            if path == extra_path:
+                raise AudioTagReadError("simulated unreadable extra")
+            return (composite_key, "")
+
+        result = classify_album(
+            album, manifest,
+            enumerate_files=lambda _directory: (composite_path, extra_path),
+            tag_reader=_tag_reader,
+            detect_composite_gap=lambda _path: False,
+        )
+        kinds = {finding.kind for finding in result.findings}
+        self.assertEqual(kinds, {"catalog_drift", "unknown"})
+        self.assertNotIn("missing_source_audio", kinds)
+        unknown_details = [f.detail for f in result.findings if f.kind == "unknown"]
+        self.assertEqual(len(unknown_details), 2)
+        self.assertTrue(
+            any("16.1" in detail and "16.2" in detail for detail in unknown_details),
+            f"expected one unknown finding to name the composite, got {unknown_details!r}",
+        )
+
+    def test_untagged_uncatalogued_extra_suppresses_missing_accusation(self) -> None:
+        """Issue #1237 review E1: the REALISTIC trigger for this
+        suppression is a stray UNTAGGED audio file (blank release_track/
+        recording -- a mislabeled rip, a bonus track, an accidentally-
+        copied file), not an unreadable one; ``AudioTagReadError`` is far
+        less likely live. Same composite-naming contract as the
+        unreadable-extra pin above, through another ``unknown_extra``
+        producer ("uncatalogued audio lacks exact source identity" --
+        one of three; see also the conflicting-identity producer covered
+        by ``tests/test_library_completeness_generated.py``'s property).
+        """
+        release = "461206"
+        composite_path = "/album/composite.opus"
+        extra_path = "/album/stray.opus"
+        composite_key = f"{release}-16.1"
+        album = LibraryAlbum(
+            1, "Artist", "Album", ReleaseIdentity("discogs", release), "/album",
+            (CatalogItem(composite_path, composite_key, ""),),
+        )
+        manifest = discogs_manifest(release, _discogs_raw(["16.1", "16.2"], release))
+
+        def _tag_reader(path: str) -> tuple[str, str]:
+            if path == extra_path:
+                return ("", "")
+            return (composite_key, "")
+
+        result = classify_album(
+            album, manifest,
+            enumerate_files=lambda _directory: (composite_path, extra_path),
+            tag_reader=_tag_reader,
+            detect_composite_gap=lambda _path: False,
+        )
+        kinds = {finding.kind for finding in result.findings}
+        self.assertEqual(kinds, {"catalog_drift", "unknown"})
+        self.assertNotIn("missing_source_audio", kinds)
+        unknown_details = [f.detail for f in result.findings if f.kind == "unknown"]
+        self.assertEqual(len(unknown_details), 2)
+        self.assertTrue(
+            any("16.1" in detail and "16.2" in detail for detail in unknown_details),
+            f"expected one unknown finding to name the composite, got {unknown_details!r}",
+        )
+
+    def test_uncatalogued_remaining_subposition_satisfies_by_identity(self) -> None:
+        """Issue #1237 review E3: the C1 subtraction only checked
+        CATALOGUED items for a satisfied sub-position, but an
+        uncatalogued-but-correctly-identified physical file satisfies it
+        just as well -- the group's FIRST position can already reach this
+        route via ``component_key_paths``
+        (``test_uncatalogued_present_first_position_still_reaches_
+        decode``); the REMAINING sub-positions must reach it too, or a
+        genuinely complete composite (one part catalogued, the other
+        merely uncatalogued) is falsely accused of missing audio.
+        """
+        release = "461206"
+        first_path = "/album/16.1.opus"
+        second_path = "/album/16.2.opus"
+        tags = {
+            first_path: (f"{release}-16.1", ""),
+            second_path: (f"{release}-16.2", ""),
+        }
+        album = LibraryAlbum(
+            1, "Artist", "Album", ReleaseIdentity("discogs", release), "/album",
+            (CatalogItem(first_path, tags[first_path][0], ""),),
+        )
+
+        def _unreachable(path: str) -> bool:
+            raise AssertionError(f"unexpected composite audio decode for {path!r}")
+
+        kinds = self._classify(
+            album, _discogs_raw(["16.1", "16.2"], release), tags=tags,
+            detect_composite_gap=_unreachable,
+        )
+        self.assertEqual(kinds, {"catalog_drift"})
+
+    def test_uncatalogued_remaining_subposition_satisfies_via_recording_tag(self) -> None:
+        """Issue #1237 review G5: the E3 recording loop reads BOTH
+        ``release_track`` and ``recording`` from ``tag_reader`` -- a
+        mutant narrowing it to ``release_track`` alone survived every
+        existing test, because none of them satisfied a remaining sub-
+        position through the SECOND (``mb_trackid``/recording) tag only.
+        Here the uncatalogued file's ``release_track`` tag is blank and
+        only its ``recording`` tag names the remaining sub-position.
+        """
+        release = "461206"
+        first_path = "/album/16.1.opus"
+        second_path = "/album/16.2.opus"
+        tags = {
+            first_path: (f"{release}-16.1", ""),
+            second_path: ("", f"{release}-16.2"),
+        }
+        album = LibraryAlbum(
+            1, "Artist", "Album", ReleaseIdentity("discogs", release), "/album",
+            (CatalogItem(first_path, tags[first_path][0], ""),),
+        )
+
+        def _unreachable(path: str) -> bool:
+            raise AssertionError(f"unexpected composite audio decode for {path!r}")
+
+        kinds = self._classify(
+            album, _discogs_raw(["16.1", "16.2"], release), tags=tags,
+            detect_composite_gap=_unreachable,
+        )
+        self.assertEqual(kinds, {"catalog_drift"})
+
+    def test_unidentifiable_extra_with_silence_filler_names_only_real_parts(self) -> None:
+        """Issue #1237 review G1: the E1 ``unknown_extra`` message is a
+        THIRD ``real_label`` consumer (alongside the unreadable-composite
+        ``unknown`` and ``missing_source_audio``), and it was the only one
+        with no test proving it -- a mutant swapping ``real_label`` for
+        the unfiltered ``component.title`` at the E1 site survives every
+        other test in this module, which would let a "(silence)" filler
+        marker be named to the operator as possibly-missing audio.
+        """
+        release = "888888"
+        raw = {"id": release, "tracks": [
+            {"position": "10.1", "title": "Island Lost At Sea"},
+            {"position": "10.2", "title": "(silence)"},
+            {"position": "10.3", "title": "Untitled"},
+        ]}
+        composite_path = "/album/composite.opus"
+        stray_path = "/album/stray.opus"
+        composite_key = f"{release}-10.1"
+        album = LibraryAlbum(
+            1, "Artist", "Album", ReleaseIdentity("discogs", release), "/album",
+            (CatalogItem(composite_path, composite_key, ""),),
+        )
+        manifest = discogs_manifest(release, raw)
+        self.assertIn("(silence)", manifest.components[0].title)
+
+        def _tag_reader(path: str) -> tuple[str, str]:
+            if path == stray_path:
+                return ("", "")
+            return (composite_key, "")
+
+        result = classify_album(
+            album, manifest,
+            enumerate_files=lambda _directory: (composite_path, stray_path),
+            tag_reader=_tag_reader,
+            detect_composite_gap=lambda _path: False,
+        )
+        unknown_details = [f.detail for f in result.findings if f.kind == "unknown"]
+        self.assertTrue(
+            any("Island Lost At Sea" in detail and "Untitled" in detail for detail in unknown_details),
+            f"expected one unknown finding to name the composite, got {unknown_details!r}",
+        )
+        for detail in unknown_details:
+            self.assertNotIn("(silence)", detail)
+
+
 class TestSourceRawContracts(unittest.TestCase):
     def test_direct_empty_manifest_is_unknown_not_complete(self) -> None:
         album = LibraryAlbum(1, "a", "b", ReleaseIdentity("discogs", "1"), "/album", ())
@@ -269,21 +745,97 @@ class TestSourceRawContracts(unittest.TestCase):
                 with self.assertRaisesRegex(SourceManifestError, "release identity"):
                     discogs_manifest("4738671", raw)
 
-    def test_discogs_literal_subtrack_position_is_preserved(self) -> None:
-        self.assertEqual(discogs_manifest("2823685", _discogs_raw(["A2.1", "A2.2"], "2823685")).components[1].key, "2823685-A2.2")
+    def test_discogs_consecutive_subtrack_positions_coalesce_into_one_component(self) -> None:
+        """Issue #1237: consecutive A2.1/A2.2 are ONE physical track, keyed
+        by the first sub-position, title joined with " / " -- exactly what
+        ``beetsplug.discogs.DiscogsPlugin._merge_subtracks`` does. Renamed
+        from ``test_discogs_literal_subtrack_position_is_preserved``, which
+        pinned the un-coalesced shape #1237 replaces.
+        """
+        manifest = discogs_manifest("2823685", _discogs_raw(["A2.1", "A2.2"], "2823685"))
+        self.assertEqual([c.key for c in manifest.components], ["2823685-A2.1"])
+        self.assertEqual(manifest.components[0].title, "A2.1 / A2.2")
+        self.assertEqual(manifest.components[0].sub_component_titles, ("A2.1", "A2.2"))
 
     def test_empty_source_program_is_rejected_not_complete(self) -> None:
         with self.assertRaisesRegex(SourceManifestError, "no playable components"):
             discogs_manifest("1", {"id": "1", "tracks": []})
 
-    def test_discogs_index_parent_is_not_double_counted_with_subtracks(self) -> None:
+    def test_discogs_subindexed_nested_header_coalesces_like_beets(self) -> None:
+        """Issue #1237 review C6: verified against the real Beets plugin --
+        a subindexed ``sub_tracks`` header ("A2.1" carries a subtrack
+        index) is BEETS' OWN "merge into one track" branch
+        (``_coalesce_index_track``), not its "expand into N" branch. The
+        resulting key is the STRIPPED first-child position ("A2", not
+        "A2.1"), titled by the header's OWN title ("Suite"), never the
+        children's joined titles. Renamed from
+        ``test_discogs_index_parent_is_not_double_counted_with_subtracks``,
+        which pinned the un-coalesced two-component shape this review
+        replaces -- strictly worse than the flat-sibling case #1237
+        already fixed, since neither literal child key could ever match
+        an installed item.
+        """
         manifest = discogs_manifest("1", {"id": "1", "tracks": [{
             "position": "A2", "title": "Suite", "sub_tracks": [
                 {"position": "A2.1", "title": "Part one"},
                 {"position": "A2.2", "title": "Part two"},
             ],
         }]})
-        self.assertEqual([component.key for component in manifest.components], ["1-A2.1", "1-A2.2"])
+        self.assertEqual([component.key for component in manifest.components], ["1-A2"])
+        self.assertEqual(manifest.components[0].title, "Suite")
+        self.assertEqual(manifest.components[0].sub_component_titles, ("Part one", "Part two"))
+        self.assertEqual(manifest.components[0].sub_component_keys, ("1-A2.1", "1-A2.2"))
+
+    def test_discogs_non_subindexed_nested_header_expands_literally(self) -> None:
+        """The OTHER real Beets branch, unchanged by #1237: when the first
+        nested child carries no subtrack index, the header's children are
+        independent physical tracks -- expanded literally, not merged."""
+        manifest = discogs_manifest("1", {"id": "1", "tracks": [{
+            "position": "", "title": "Symphony", "sub_tracks": [
+                {"position": "A2", "title": "Mvt 1"},
+                {"position": "A3", "title": "Mvt 2"},
+            ],
+        }]})
+        self.assertEqual([component.key for component in manifest.components], ["1-A2", "1-A3"])
+        self.assertEqual([c.title for c in manifest.components], ["Mvt 1", "Mvt 2"])
+        self.assertEqual([c.sub_component_titles for c in manifest.components], [(), ()])
+
+    def test_sub_tracks_header_breaks_pending_top_level_group(self) -> None:
+        """Issue #1237 review C7: a nested ``sub_tracks`` header in between
+        two would-be-adjacent subtrack positions must NOT let them merge
+        across it -- mirrors a real Beets non-"track" entry breaking
+        ``groupby``'s adjacency. Kills the mutant removing the
+        ``flush_pending()`` call guarding this branch: without it, "16.1"
+        and "16.2" would wrongly merge across the header.
+        """
+        manifest = discogs_manifest("1", {"id": "1", "tracks": [
+            {"position": "16.1", "title": "Part A"},
+            {"position": "A9", "title": "Interlude", "sub_tracks": [
+                {"position": "A9.1", "title": "Interlude i"},
+            ]},
+            {"position": "16.2", "title": "Part B"},
+        ]})
+        self.assertEqual(
+            [component.key for component in manifest.components],
+            ["1-16.1", "1-A9", "1-16.2"],
+        )
+
+    def test_empty_header_between_subtrack_siblings_breaks_pending_group(self) -> None:
+        """Issue #1237 review C7: the OTHER ``flush_pending()`` call (the
+        empty-position/empty-duration header skip) must also break
+        adjacency, not just the ``sub_tracks`` one.
+        """
+        manifest = discogs_manifest("1", {"id": "1", "tracks": [
+            {"position": "16.1", "title": "Part A"},
+            {"position": "", "duration": "", "title": "Side Two"},
+            {"position": "16.2", "title": "Part B"},
+        ]})
+        self.assertEqual(
+            [component.key for component in manifest.components],
+            ["1-16.1", "1-16.2"],
+        )
+        self.assertEqual(manifest.components[0].sub_component_titles, ())
+        self.assertEqual(manifest.components[1].sub_component_titles, ())
 
     def test_discogs_flattened_empty_position_empty_duration_header_is_skipped(self) -> None:
         manifest = discogs_manifest("1", {"id": "1", "tracks": [
