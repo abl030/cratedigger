@@ -374,6 +374,33 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # and tests.world_model.state_machine (indirectly, via
     # tests/world_model/support.py's LifecycleWorld.force_import_request,
     # real-PostgreSQL + real Beets, ~33s).
+    #
+    # Two more additions, issue #1246 item 1: PR #1245 added
+    # tests.test_dispatch_outcomes_generated's
+    # ``TestGeneratedLaneDistanceAudit`` specifically to patrol the
+    # ``distance_threshold is not None`` lane discriminator this file's
+    # ``_dispatch_import_from_db_locked`` uses to decide whether the
+    # accept-path terminal audit records a measured distance or NULL
+    # (issue #1211) — and tests.test_local_import_lane, which pins the
+    # caller-side (``scripts/importer.py``) contract that discriminator
+    # depends on as an invariant (which lane passes which threshold).
+    # Measured on 2026-08-22 (this issue's own repro): before this entry,
+    # editing only this file selected neither. Qualified by fault
+    # injection, flipping the discriminator's ``is not None`` to
+    # ``is None``: tests.test_dispatch_outcomes_generated's
+    # ``TestGeneratedLaneDistanceAudit`` DOES kill it (real dynamic
+    # execution through the real ``dispatch_import_from_db`` — confirmed
+    # RED, ``0.42 != None`` on the force/present cell). tests.test_local_
+    # import_lane does NOT kill it (confirmed: exit 0, all 9 tests pass
+    # with the mutant live) — every one of its ``execute_import_job``
+    # calls injects ``force_dispatch_fn=<recorder>``, so it never runs
+    # this file's real code at all. Kept anyway, for the same reason as
+    # tests.test_issue_573_boundaries above: it is real, valuable coverage
+    # of a different regression class — the caller-side pairing this
+    # discriminator's own correctness assumes as a precondition (only
+    # local-import's caller ever passes a non-None threshold, and only
+    # after its own strict-validation guard already passed) — not a
+    # substitute for the dynamic-execution coverage above.
     "lib/dispatch/entry_points.py": (
         "tests.test_dispatch_from_db",
         "tests.test_force_import_merge_redirect",
@@ -381,6 +408,8 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_import_manifest",
         "tests.test_import_queue",
         "tests.test_issue_573_boundaries",
+        "tests.test_dispatch_outcomes_generated",
+        "tests.test_local_import_lane",
     ),
 }
 

@@ -132,13 +132,24 @@ class TestTargetedTestSelection(unittest.TestCase):
         under-selection either. A diff touching only this file previously
         selected zero of its real behavior coverage.
 
-        The six-module set is qualified by fault injection (a ``raise
-        RuntimeError`` planted as the first statement of
+        The original six-module set is qualified by fault injection (a
+        ``raise RuntimeError`` planted as the first statement of
         ``dispatch_import_from_db``, run against each module — see the
         registry's own comment). ``tests.test_force_import_gates`` is
         deliberately absent: an #1196 review round found it kills nothing
         (its only references to this module are docstring lines saying
         coverage MOVED OUT after the U4 importer-never-measures refactor).
+
+        Issue #1246 item 1 added two more: PR #1245's own
+        ``tests.test_dispatch_outcomes_generated::TestGeneratedLaneDistanceAudit``
+        was written specifically to patrol this file's lane discriminator
+        but was never selected by a solo edit to it, and
+        ``tests.test_local_import_lane`` pins the caller-side contract that
+        discriminator depends on. Qualified the same way: flipping the
+        discriminator's ``is not None`` to ``is None`` kills
+        ``TestGeneratedLaneDistanceAudit`` (real dynamic execution); it does
+        NOT kill ``test_local_import_lane``, which is kept anyway as a
+        different, real regression class (see the registry's own comment).
         """
         selected = expand_test_selection(
             (),
@@ -154,6 +165,8 @@ class TestTargetedTestSelection(unittest.TestCase):
                 "tests.test_import_manifest",
                 "tests.test_import_queue",
                 "tests.test_issue_573_boundaries",
+                "tests.test_dispatch_outcomes_generated",
+                "tests.test_local_import_lane",
             }.issubset(selected)
         )
         self.assertNotIn("tests.test_force_import_gates", selected)
