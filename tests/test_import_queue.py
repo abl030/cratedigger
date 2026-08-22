@@ -3720,8 +3720,8 @@ class TestCleanupTerminalForceActionFailsClosed(unittest.TestCase):
     (``automation_import``, ``youtube_import``), the small minority of live
     doc2 rows of either type that carry an ``action_path`` key at all carry
     it as JSON ``null`` -- most rows have no such key, and none observed to
-    date has a non-null one (issue #1246 F5) -- so ``_force_action_path``
-    already returns ``None`` first. This test bypasses both guards by
+    date has a non-null one -- so ``_force_action_path`` already returns
+    ``None`` first. This test bypasses both guards by
     constructing the ``ImportJob`` directly (not through ``from_row``) with
     a real, unmapped job type and a synthetic non-null ``action_path``, to
     pin the guard itself independent of today's live reachability.
@@ -3771,8 +3771,7 @@ class TestCleanupTerminalForceActionFailsClosed(unittest.TestCase):
         # Derive exhaustiveness rather than asserting it in prose: a
         # future fifth IMPORT_JOB_TYPES member would silently escape both
         # this loop and the mapped test below unless this equality is
-        # checked against the real enum and the real table (issue #1246
-        # F4).
+        # checked against the real enum and the real table.
         self.assertEqual(
             {job_type for _, job_type, _ in self.UNMAPPED_CASES},
             IMPORT_JOB_TYPES - set(ACTION_COPY_PREFIX_BY_JOB_TYPE),
@@ -3811,10 +3810,10 @@ class TestCleanupTerminalForceActionFailsClosed(unittest.TestCase):
         from lib.import_queue import IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL
 
         # Derive, not assert in prose: the mapped half is EXACTLY these
-        # two -- no more, no fewer (issue #1246 F4). Paired with the
-        # unmapped test's own derived equality above, this proves the two
-        # halves partition the full IMPORT_JOB_TYPES domain rather than
-        # merely covering four hand-picked members of it.
+        # two -- no more, no fewer. Paired with the unmapped test's own
+        # derived equality above, this proves the two halves partition
+        # the full IMPORT_JOB_TYPES domain rather than merely covering
+        # four hand-picked members of it.
         self.assertEqual(
             set(ACTION_COPY_PREFIX_BY_JOB_TYPE), {IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL},
         )

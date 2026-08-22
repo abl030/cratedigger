@@ -289,13 +289,17 @@ before/after shape.
 
 What actually licensed skipping live-corpus evidence for PR #1245 is the
 vacuous-case argument above, not the writer/renderer distinction on its
-own: `source='local'` has exactly one row in the entire live
-`download_log`, and it is a rejection that already carries a real distance
+own, and it is keyed on the EXISTING-row population exactly as the
+vacuous-case paragraph is — never on an unmeasurable future one:
+`source='local'` has exactly one row in the entire live `download_log`
 (measured 2026-08-22: id 40287, outcome `rejected`, scenario
-`high_distance`, `beets_distance=0.5401`) — the forward population of
-future accepted local imports the writer change affects was itself zero
-at ship time. A future writer change whose forward population is
-NOT empty does not get to cite this distinction to skip a live-corpus
+`high_distance`, `beets_distance=0.5401`), and it is a rejection, not an
+acceptance — so the accept-path write this PR changed had never fired in
+production as of that measurement. There is no existing row whose
+accept-path write behavior the change could be judged against, which is
+the vacuous case applied to a writer instead of a renderer. A future
+writer change where existing rows already show nonzero accept-path
+volume does not get to cite this distinction to skip a live-corpus
 tally.
 
 ## Executable coverage and its boundary

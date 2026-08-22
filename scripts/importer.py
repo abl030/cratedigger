@@ -492,11 +492,12 @@ def _cleanup_terminal_force_action(job: ImportJob) -> dict[str, object] | None:
         # string) -- most rows of both types have no such key, and none
         # observed to date has a non-null one -- so ``_force_action_path``
         # above already returns ``None`` and this function never reaches
-        # here for either. See issue #1246 F5 for the live query and its
-        # exact counts as of the review round that found this; that count
-        # is not reproduced here since a frozen number inside a permanent
-        # comment only drifts (it moved between two measurements taken
-        # hours apart in that same review round).
+        # here for either. A live doc2 count is deliberately not
+        # reproduced here: the table grows continuously (rows accrued
+        # between successive measurements already differed), so a
+        # frozen number inside a permanent comment would only go stale.
+        # Re-query ``import_jobs`` for the current counts if this needs
+        # re-verifying.
         prefix = ACTION_COPY_PREFIX_BY_JOB_TYPE.get(job.job_type)
         if prefix is None:
             return None
