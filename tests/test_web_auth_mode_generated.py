@@ -114,6 +114,30 @@ def _evaluate_mode_worlds() -> dict[str, dict[str, object]]:
     in a real phase run. See
     ``tests/test_nix_module.py::_shared_module_worlds_web_auth_matrix_part1``
     for the mechanism and the byte-identical-output evidence.
+
+    Issue #1248: ``builtins.getFlake`` unconditionally walks and NAR-hashes
+    its ENTIRE source directory the moment it is called -- before any
+    output is even referenced -- so pointing it at a bare ``./.`` names
+    this live, possibly-dirty worktree and races any concurrent test
+    worker's Python bytecode cache writes/removals under ``**/__pycache__``
+    (gitignored, never part of the module's real input; a suite run
+    observed this as ``path '.../tests/__pycache__/test_quality_generated.
+    cpython-314.pyc.<n>' does not exist``, a directory-walk read of a file
+    a sibling worker had already renamed away). ``repoSource`` filters that
+    subtree out with a plain ``builtins.path`` -- a Nix builtin, not a
+    nixpkgs helper, so it needs no ``lib`` and has no circular dependency
+    on the very flake it is about to fetch. Filtering a DIRECTORY out of a
+    ``builtins.path``/``filterSource`` walk means Nix never recurses into
+    it at all, so this is not "less likely to race", it is structurally
+    unable to: the walk never calls ``readdir``/``stat`` on anything under
+    ``__pycache__/`` in the first place. Both raw-path references below
+    (the old ``getFlake (toString ./.)`` and the module config's own
+    ``src = ./.;``, which named the same live directory independently) now
+    read the SAME filtered copy, so no live-tree read in this expression
+    is left unfiltered. Nothing about which worlds are evaluated, what the
+    module asserts, or the module's own source (every non-``__pycache__``
+    file is still present, unchanged) is affected -- this only removes a
+    subtree the module never references anyway.
     """
     worlds = "\n            ".join(
         f"{world.key} = evaluate {{ {_nix_web_attrs(world)} }};"
@@ -121,7 +145,18 @@ def _evaluate_mode_worlds() -> dict[str, dict[str, object]]:
     )
     expression = f'''
       let
-        f = builtins.getFlake (toString ./.);
+        repoSource = builtins.path {{
+          path = toString ./.;
+          filter = path: type: baseNameOf path != "__pycache__";
+          name = "cratedigger-nix-eval-source";
+        }};
+        # builtins.path's result carries a store-path context (it tracks
+        # that the string provenance is a store path), and getFlake
+        # refuses a context-carrying argument ("... is not allowed to
+        # refer to a store path"). The directory is already realized on
+        # disk synchronously by builtins.path above, so there is no build
+        # step being skipped -- discarding the context is safe here.
+        f = builtins.getFlake (builtins.unsafeDiscardStringContext (toString repoSource));
         lib = f.inputs.nixpkgs.lib;
         modulePkgs = import f.inputs.nixpkgs {{
           system = builtins.currentSystem;
@@ -137,7 +172,7 @@ def _evaluate_mode_worlds() -> dict[str, dict[str, object]]:
                 ({{ ... }}: {{
                   services.cratedigger = {{
                     enable = true;
-                    src = ./.;
+                    src = repoSource;
                     user = "cratedigger";
                     group = "cratedigger";
                     slskd.apiKeyFile = "/run/secrets/slskd-key";
