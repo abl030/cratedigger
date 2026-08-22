@@ -1052,6 +1052,23 @@ rationale; never allowlist a pure decision.
   new false claim can hide. Earned four times in one batch (#1101,
   #1102, #1107, #1110); in each, the false claim was caught only by the
   next independent read, never by the round that wrote it.
+- **Briefs are an unreviewed claim surface.** Every other artifact in this
+  pipeline gets an independent read — a commit, a PR, a test. The brief an
+  orchestrator hands an implementer does not; the implementer treats it as
+  settled fact and builds on it. Two things fix it: a brief separates what
+  its author MEASURED (ran it, read the actual output) from what they
+  INFERRED (a plausible causal claim resting on a measurement); and the
+  implementer verifies a brief's load-bearing claims before building on
+  them, rather than taking them as given. Three false claims shipped this
+  way in the #1211 series, all caught only by an independent reviewer
+  (issue #1246, `.claude/memory/feedback_orchestrator_briefs_become_defects.md`):
+  a real count (71 `db=… # type: ignore[arg-type]` sites) with a false
+  causal claim attached (that two `tests/helpers.py` bridges "exist to
+  replace" them — zero of the 71 sit at either bridge's target); a
+  citation naming an identifier (`BASELINE`) that exists nowhere, at a
+  line that was not the mechanism being described; and an instruction to
+  write "the other seven sites reference it by name" when the true count
+  was five.
 - Independent review plants at least two mutants PER new or changed test,
   aimed at that test's named subject, not only at sites the author's Fault
   injection sentence already covers (issue #1143 / #1155).
