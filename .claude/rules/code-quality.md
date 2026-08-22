@@ -1059,16 +1059,19 @@ rationale; never allowlist a pure decision.
   its author MEASURED (ran it, read the actual output) from what they
   INFERRED (a plausible causal claim resting on a measurement); and the
   implementer verifies a brief's load-bearing claims before building on
-  them, rather than taking them as given. Three false claims shipped this
-  way in the #1211 series, all caught only by an independent reviewer
-  (issue #1246, `.claude/memory/feedback_orchestrator_briefs_become_defects.md`):
-  a real count (71 `db=… # type: ignore[arg-type]` sites) with a false
-  causal claim attached (that two `tests/helpers.py` bridges "exist to
-  replace" them — zero of the 71 sit at either bridge's target); a
-  citation naming an identifier (`BASELINE`) that exists nowhere, at a
-  line that was not the mechanism being described; and an instruction to
-  write "the other seven sites reference it by name" when the true count
-  was five.
+  them, rather than taking them as given. Three false claims originated in
+  briefs during the #1211 series (issue #1246,
+  `.claude/memory/feedback_orchestrator_briefs_become_defects.md`). Two
+  shipped and were caught only by an independent reviewer: a real count
+  (71 `db=… # type: ignore[arg-type]` sites) with a false causal claim
+  attached (that two `tests/helpers.py` bridges "exist to replace" them —
+  zero of the 71 sit at either bridge's target); and a citation naming an
+  identifier (`BASELINE`) that exists nowhere, at a line that was not the
+  mechanism being described. The third — an instruction to write "the
+  other seven sites reference it by name" when the true count was five —
+  never shipped: the implementer verified the count before writing it and
+  caught the error. That third instance is the rule working as intended,
+  not another failure of it.
 - Independent review plants at least two mutants PER new or changed test,
   aimed at that test's named subject, not only at sites the author's Fault
   injection sentence already covers (issue #1143 / #1155).
