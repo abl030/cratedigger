@@ -91,6 +91,32 @@ def _inputs(
 
 
 # ---------------------------------------------------------------------------
+# 0. Tunable constant literal pins (issue #1211 PR3).
+# ---------------------------------------------------------------------------
+
+
+class TestTunableConstantValues(unittest.TestCase):
+    """These four constants (see their docstrings in
+    lib/unfindable_detection_service.py) govern detection sensitivity and
+    cadence; every other test here exercises them only at a +/-1 boundary,
+    never pins the value itself, so a changed constant is a deliberate edit
+    to be reviewed here, not a silent drift no test would catch.
+    """
+
+    def test_artist_match_threshold(self) -> None:
+        self.assertEqual(ARTIST_MATCH_THRESHOLD, 5)
+
+    def test_required_zero_find_cycles(self) -> None:
+        self.assertEqual(REQUIRED_ZERO_FIND_CYCLES, 3)
+
+    def test_wrong_pressing_min_hits(self) -> None:
+        self.assertEqual(WRONG_PRESSING_MIN_HITS, 3)
+
+    def test_probe_interval_days(self) -> None:
+        self.assertEqual(PROBE_INTERVAL_DAYS, 7)
+
+
+# ---------------------------------------------------------------------------
 # 1. Pure classifier — subTest table.
 # ---------------------------------------------------------------------------
 

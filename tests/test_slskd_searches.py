@@ -67,6 +67,20 @@ _PAST_GRACE = SEARCH_LEDGER_SWEEP_GRACE_S + 60.0
 _INSIDE_GRACE = SEARCH_LEDGER_SWEEP_GRACE_S / 2.0
 
 
+class TestSearchLedgerTunableConstants(unittest.TestCase):
+    """Every other test here exercises these constants only relative to
+    themselves (``+ 60.0``, ``/ 2.0``, ``+ 1`` days), never pins either
+    value — a changed constant moves the sweep's grace window or the
+    ledger's retention window and must be a deliberate edit.
+    """
+
+    def test_sweep_grace_seconds(self) -> None:
+        self.assertEqual(SEARCH_LEDGER_SWEEP_GRACE_S, 3600.0)
+
+    def test_prune_retention_days(self) -> None:
+        self.assertEqual(SEARCH_LEDGER_PRUNE_RETENTION_DAYS, 7)
+
+
 class TestConvergeSlskdSearchesI1Pin(unittest.TestCase):
     """I1 (kill-proof): a ledgered search whose creating process died
     right after the POST is still reaped once past GRACE."""

@@ -21,11 +21,14 @@ exposure, the strict distance threshold, its own attempt scenario).
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import unittest
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
+from lib.config import CratediggerConfig
 from lib.dispatch.manifest_guard import _guard_force_import_audio_manifest
 from lib.dispatch.types import DispatchOutcome, ImportAttemptResult
 from lib.import_execution import CancellationToken, OwnerSessionIdentity
@@ -34,6 +37,7 @@ from lib.import_queue import (
     IMPORT_JOB_FORCE,
     IMPORT_JOB_LOCAL,
     IMPORT_JOB_YOUTUBE,
+    ImportJob,
     force_import_dedupe_key,
     force_import_payload,
     local_import_dedupe_key,
@@ -405,6 +409,111 @@ class TestProcessClaimedJobForwardsPinnedSessionToLocal(unittest.TestCase):
 
         self.assertIs(captured.get("cancellation_token"), token)
         self.assertIs(captured.get("owner_session_identity"), identity)
+
+
+class TestRunOnceClaimsLocalImportCandidate(unittest.TestCase):
+    """Issue #1211 PR3 — no test anywhere drove ``importer.run_once`` all
+    the way through the ``IMPORT_JOB_LOCAL`` claim branch (the
+    ``elif candidate.job_type == IMPORT_JOB_LOCAL:`` arm at ~importer.py:2318,
+    which calls ``_process_force_claim(..., claim_fn=_claim_local_import)``
+    -> ``process_claimed_job``). #1210 covered ``process_claimed_job`` in
+    isolation once already claimed; this proves the claim-loop wiring one
+    level up actually reaches and claims a queued local-import candidate.
+    """
+
+    def setUp(self) -> None:
+        # Mirrors tests/test_import_queue.py::TestImporterWorker.setUp — the
+        # terminal cleanup this test exercises (_record_terminal_force_
+        # action_cleanup -> cleanup_force_action_copy_for_job) asserts the
+        # private processing root is mode 0700 (lib/fs_authority.py), so
+        # plain os.makedirs (as TestExecuteImportJobLocalBranchSeam uses,
+        # which never reaches terminal cleanup) is not enough here.
+        self._root = tempfile.mkdtemp(prefix="cratedigger-local-import-run-once-")
+        self.addCleanup(lambda: shutil.rmtree(self._root, ignore_errors=True))
+        downloads = os.path.join(self._root, "downloads")
+        processing = os.path.join(self._root, "processing")
+        os.mkdir(downloads, 0o700)
+        os.mkdir(processing, 0o700)
+        os.mkdir(os.path.join(processing, "albums"), 0o700)
+        os.mkdir(os.path.join(processing, "preview"), 0o700)
+        self._cfg = CratediggerConfig(
+            slskd_download_dir=downloads,
+            processing_dir=processing,
+            audio_check_mode="off",
+        )
+        patcher = patch(
+            "lib.config.read_runtime_config", return_value=self._cfg,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_run_once_claims_and_completes_a_local_import_candidate(self) -> None:
+        db = FakePipelineDB()
+        job = _local_job(db, request_id=90, source_path="/operator/real/Album")
+        action_path = force_action_copy_path(
+            self._cfg, job.id, prefix=LOCAL_IMPORT_ACTION_PREFIX,
+        )
+        os.mkdir(action_path, 0o700)
+        marked = db.mark_import_job_preview_importable(
+            job.id, preview_result={"action_path": action_path}, message="ready",
+        )
+        assert marked is not None
+
+        dispatch_calls: list[dict[str, object]] = []
+
+        def _recording_dispatch(_db: object, **kwargs: object) -> DispatchOutcome:
+            dispatch_calls.append(kwargs)
+            return DispatchOutcome(success=True, message="imported")
+
+        def _execute_fn(
+            db_arg: object,
+            job_arg: ImportJob,
+            *,
+            ctx: object = None,
+            cancellation_token: CancellationToken | None = None,
+            owner_session_identity: OwnerSessionIdentity | None = None,
+        ) -> DispatchOutcome:
+            # The REAL execute_import_job, driven through ITS OWN
+            # force_dispatch_fn/force_runtime_config kwarg-DI seam
+            # (code-quality.md's preferred strategy over patching
+            # lib.dispatch.dispatch_import_from_db, which is not leaf-seam
+            # allowlisted) -- process_claimed_job's own execute_fn(...) call
+            # never forwards those two kwargs, so this wrapper (injected via
+            # run_once's own execute_fn= seam) supplies them instead.
+            return importer.execute_import_job(
+                db_arg,  # pyright: ignore[reportArgumentType]
+                job_arg,
+                ctx=ctx,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+                force_dispatch_fn=_recording_dispatch,
+                force_runtime_config=self._cfg,
+            )
+
+        result = importer.run_once(
+            db,  # pyright: ignore[reportArgumentType]
+            worker_id="worker",
+            stage_db_factory=lambda _dsn: db,
+            execute_fn=_execute_fn,
+        )
+
+        assert result is not None
+        self.assertEqual(result.id, job.id)
+        self.assertEqual(result.job_type, IMPORT_JOB_LOCAL)
+        # Domain-state assertion (Test Taxonomy #3): the job outcome
+        # persisted by the claim-loop, not merely "it ran without raising".
+        self.assertEqual(result.status, "completed")
+        stored = db.get_import_job(job.id)
+        assert stored is not None
+        self.assertEqual(stored.status, "completed")
+
+        self.assertEqual(len(dispatch_calls), 1)
+        dispatch_kwargs = dispatch_calls[0]
+        self.assertEqual(dispatch_kwargs["failed_path"], action_path)
+        # Decision 2 (#1176 PR3): local-import never audits the operator's
+        # real path.
+        self.assertIsNone(dispatch_kwargs["source_reference_path"])
+        self.assertEqual(dispatch_kwargs["scenario"], "local_import")
 
 
 if __name__ == "__main__":
