@@ -264,6 +264,34 @@ screenshots of changed cases and must-still-work controls. Use the existing
 recipe in `docs/solutions/ui-dev-server-screenshot-loop.md`; it is the visual
 evidence leg of Rule D, not a second differential runbook.
 
+**The vacuous case: an empty affected population.** When the live rows a
+change could possibly affect number zero, the differential is zero by
+construction — there is nothing to render twice and compare. That is not
+missing evidence; the honest evidence IS the population query itself (the
+`WHERE` clause that scopes the change, and its live row count), put in the
+PR body in place of a differential. Running the differential machinery
+anyway would only reproduce the same zero the population query already
+proved, for no additional confidence.
+
+**Writer changes and renderer changes answer different questions.** Rule D
+is written for a RENDERER change — the same stored rows, displayed
+differently — where the differential is the only instrument that settles
+"what does this change on the rows that exist?" A change to what gets
+WRITTEN going forward is a different claim: it moves no existing row's
+appearance at all, so a differential over already-written rows would
+correctly report zero regardless of whether the writer change is even
+correct. The right evidence for a writer change is that the new rows it
+produces carry the intended values (an ordinary behavior test), not a
+render differential.
+
+PR #1245 is the worked example, and had to argue this from first
+principles: `source='local'` has exactly one row in the entire live
+`download_log`, and it is a rejection that already carries a real
+distance (measured 2026-08-22: id 40287, outcome `rejected`, scenario
+`high_distance`, `beets_distance=0.5401`) — zero accepted local imports
+exist in production. The change there was to what gets written on a
+future accepted local import, not to how any existing row renders.
+
 ## Executable coverage and its boundary
 
 Rule A coverage is enforced by `tests/test_pipeline_db_write_audit.py` plus
