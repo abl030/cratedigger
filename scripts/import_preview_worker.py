@@ -49,6 +49,7 @@ from lib.import_execution import (
 )
 from lib.import_preview import (
     ACTION_COPY_PREFIX_BY_JOB_TYPE,
+    FORCE_ACTION_PREFIX,
     LOCAL_IMPORT_ACTION_PREFIX,
     PREVIEW_VERDICT_EVIDENCE_READY,
     PREVIEW_VERDICT_MEASUREMENT_FAILED,
@@ -664,7 +665,7 @@ class _JobActionAuthority:
 #: Default authority: today's force-import quarantine resolution, unchanged.
 _FORCE_ACTION_AUTHORITY = _JobActionAuthority(
     snapshot_fn=snapshot_configured_quarantine_directory,
-    action_prefix="force-action-",
+    action_prefix=FORCE_ACTION_PREFIX,
 )
 
 #: The local-import lane's authority (issue #1176 PR3): resolves through
