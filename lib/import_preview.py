@@ -550,7 +550,7 @@ def retain_preview_snapshot_for_force_action(
     cfg: CratediggerConfig,
     *,
     import_job_id: int,
-    prefix: str = FORCE_ACTION_PREFIX,
+    prefix: str,
     cancellation_token: CancellationToken | None = None,
 ) -> str:
     """Promote one verified private snapshot to a job-scoped action copy.
@@ -561,12 +561,17 @@ def retain_preview_snapshot_for_force_action(
     preview so the importer consumes the exact normalized bytes evidence
     describes.
 
-    ``prefix`` (issue #1176 PR3) defaults to today's ``FORCE_ACTION_PREFIX``
-    (``"force-action-"``) so the force lane stays byte-identical; the
-    local-import lane passes its own ``LOCAL_IMPORT_ACTION_PREFIX``
-    (``"local-import-action-"``) so a force copy and a local-import copy can
-    never collide on name even though ``import_job_id`` is drawn from the
-    same ``import_jobs`` sequence across every job type.
+    ``prefix`` (issue #1176 PR3) is REQUIRED, not defaulted (issue #1211
+    PR1 follow-up): the sole caller already always passes its lane's own
+    prefix explicitly — ``FORCE_ACTION_PREFIX`` (``"force-action-"``) for
+    force, ``LOCAL_IMPORT_ACTION_PREFIX`` (``"local-import-action-"``) for
+    local-import — so a force copy and a local-import copy can never
+    collide on name even though ``import_job_id`` is drawn from the same
+    ``import_jobs`` sequence across every job type. An unreachable default
+    that silently supplied force's prefix was exactly the implicit-
+    inheritance hazard this module exists to remove: a caller that forgot
+    ``prefix=`` would have silently retained every job type's action copy
+    under FORCE's deterministic name instead of failing loudly.
     """
     name = os.path.basename(path)
     if name == path or not name.startswith("preview-"):
@@ -597,7 +602,7 @@ def remove_force_action_copy(
     path: str,
     cfg: CratediggerConfig,
     *,
-    prefix: str = FORCE_ACTION_PREFIX,
+    prefix: str,
     cancellation_token: CancellationToken | None = None,
 ) -> None:
     """Remove one unneeded retained job-scoped action copy after a terminal
@@ -631,7 +636,7 @@ def cleanup_force_action_copy_for_job(
     cfg: CratediggerConfig,
     *,
     import_job_id: int,
-    prefix: str = FORCE_ACTION_PREFIX,
+    prefix: str,
     cancellation_token: CancellationToken | None = None,
 ) -> None:
     """Remove only the deterministic action copy owned by this job.
