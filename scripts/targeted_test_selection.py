@@ -374,6 +374,33 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # and tests.world_model.state_machine (indirectly, via
     # tests/world_model/support.py's LifecycleWorld.force_import_request,
     # real-PostgreSQL + real Beets, ~33s).
+    #
+    # Two more additions, issue #1246 item 1: PR #1245 added
+    # tests.test_dispatch_outcomes_generated's
+    # ``TestGeneratedLaneDistanceAudit`` specifically to patrol the
+    # ``distance_threshold is not None`` lane discriminator this file's
+    # ``_dispatch_import_from_db_locked`` uses to decide whether the
+    # accept-path terminal audit records a measured distance or NULL
+    # (issue #1211) — and tests.test_local_import_lane, which pins the
+    # caller-side (``scripts/importer.py``) contract that discriminator
+    # depends on as an invariant (which lane passes which threshold).
+    # Measured on 2026-08-22 (this issue's own repro): before this entry,
+    # editing only this file selected neither. Qualified by fault
+    # injection, flipping the discriminator's ``is not None`` to
+    # ``is None``: tests.test_dispatch_outcomes_generated's
+    # ``TestGeneratedLaneDistanceAudit`` DOES kill it (real dynamic
+    # execution through the real ``dispatch_import_from_db`` — confirmed
+    # RED, ``0.42 != None`` on the force/present cell). tests.test_local_
+    # import_lane does NOT kill it (confirmed: exit 0, all 9 tests pass
+    # with the mutant live) — every one of its ``execute_import_job``
+    # calls injects ``force_dispatch_fn=<recorder>``, so it never runs
+    # this file's real code at all. Kept anyway, for the same reason as
+    # tests.test_issue_573_boundaries above: it is real, valuable coverage
+    # of a different regression class — the caller-side pairing this
+    # discriminator's own correctness assumes as a precondition (only
+    # local-import's caller ever passes a non-None threshold, and only
+    # after its own strict-validation guard already passed) — not a
+    # substitute for the dynamic-execution coverage above.
     "lib/dispatch/entry_points.py": (
         "tests.test_dispatch_from_db",
         "tests.test_force_import_merge_redirect",
@@ -381,6 +408,99 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_import_manifest",
         "tests.test_import_queue",
         "tests.test_issue_573_boundaries",
+        "tests.test_dispatch_outcomes_generated",
+        "tests.test_local_import_lane",
+    ),
+    # scripts/importer.py and scripts/import_preview_worker.py live under
+    # scripts/, so _direct_test_candidates probes tests.test_importer and
+    # tests.test_import_preview_worker respectively -- neither exists, so
+    # both resolved ZERO real neighbours. Unlike the lib/ case above,
+    # scripts/ is not covered by _changed_path_neighbours's fail-closed
+    # check either (it only fires for path.parts[:1] == ("lib",)), so
+    # this was SILENT under-selection, not an admitted gap -- and it
+    # meant tests.test_import_queue's TestCleanupTerminalForceAction
+    # FailsClosed did not run when its subject, scripts/importer.py,
+    # changed.
+    #
+    # Method: a ``raise RuntimeError`` planted as the first executable
+    # statement of each file's own central, every-job-type entry point
+    # (``process_claimed_job`` for importer.py -- "the single
+    # queue-outcome mapper all four job types route through", per its
+    # own docstring; ``process_claimed_preview_job`` for import_preview_
+    # worker.py, its direct analogue), run against every module found by
+    # grepping for real imports of the module under test, PLUS every
+    # module that reaches the entry point indirectly through tests/
+    # helpers.py's finalize_claimed_dispatch bridge (a search grep alone
+    # cannot find, since those modules never spell the module's own
+    # name). This list is a QUALIFIED SUBSET chosen for coverage value,
+    # NOT a complete kill set -- an import-name grep is structurally
+    # incomplete for the bridge-reached case, and other real consumers
+    # likely exist beyond what either search turned up. Preference order
+    # among confirmed killers: a generated property whose own subject is
+    # behavior these two files own outranks a deterministic slice that
+    # merely passes through them on the way to exercising something else.
+    #
+    # importer.py -- confirmed killed and included: tests.test_import_
+    # dispatch, tests.test_import_operation_fence, tests.test_import_
+    # queue (this file's own pin lives here), tests.test_integration_
+    # slices, tests.test_local_import_lane, tests.test_terminal_outcomes,
+    # tests.test_dispatch_outcomes_generated (patrols this file's own
+    # lane discriminator -- see the entry_points.py entry above),
+    # tests.test_force_import_service_generated, tests.test_import_job_
+    # lifecycle_generated, tests.test_processing_lifecycle_generated,
+    # tests.test_spectral_attempt_audit_generated, tests.test_wrong_
+    # match_post_commit_generated. Confirmed killed but deliberately
+    # excluded for selection cost or relevance, mirroring the entry_
+    # points.py entry's own precedent: tests.test_pipeline_db
+    # (real-PostgreSQL, 574 tests, ~23s -- the two failures it produces
+    # under the mutant are indirect, a real child process failing to
+    # reach an expected barrier, not a direct assertion on the mutant,
+    # confirmed genuine by reverting the mutant and observing both pass
+    # cleanly at baseline); tests.test_dispatch_core (a deterministic
+    # slice whose own subject is lib/dispatch/core.py's orchestration,
+    # reached via the finalize_claimed_dispatch bridge -- it touches this
+    # file rather than patrolling behavior this file owns). Confirmed NOT
+    # killed (real imports exist but exercise other surfaces of the
+    # module, or bypass this entry point via their own DI seams):
+    # tests.test_importer_graceful_shutdown, tests.test_merge_rekey,
+    # tests.test_importer_runtime_context, tests.test_automation_
+    # startup_recovery, tests.test_beets_config_startup.
+    #
+    # import_preview_worker.py -- confirmed killed and included:
+    # tests.test_import_queue, tests.test_integration_slices (both
+    # already listed above for importer.py -- real, independent coverage
+    # of the preview worker's own module, not double-counted),
+    # tests.test_issue_1030_postgres_slice, tests.test_terminal_outcome_
+    # callers, tests.test_evidence_generated, tests.test_path_authority_
+    # generated, tests.test_preview_failure_evidence_generated,
+    # tests.test_spectral_attempt_audit_generated (kills both this
+    # file's mutant and importer.py's -- real, independent coverage of
+    # each). Confirmed NOT killed: tests.test_import_preview,
+    # tests.test_import_result, tests.test_beets_config_startup_
+    # entrypoints.
+    "scripts/importer.py": (
+        "tests.test_import_dispatch",
+        "tests.test_import_operation_fence",
+        "tests.test_import_queue",
+        "tests.test_integration_slices",
+        "tests.test_local_import_lane",
+        "tests.test_terminal_outcomes",
+        "tests.test_dispatch_outcomes_generated",
+        "tests.test_force_import_service_generated",
+        "tests.test_import_job_lifecycle_generated",
+        "tests.test_processing_lifecycle_generated",
+        "tests.test_spectral_attempt_audit_generated",
+        "tests.test_wrong_match_post_commit_generated",
+    ),
+    "scripts/import_preview_worker.py": (
+        "tests.test_import_queue",
+        "tests.test_integration_slices",
+        "tests.test_issue_1030_postgres_slice",
+        "tests.test_terminal_outcome_callers",
+        "tests.test_evidence_generated",
+        "tests.test_path_authority_generated",
+        "tests.test_preview_failure_evidence_generated",
+        "tests.test_spectral_attempt_audit_generated",
     ),
 }
 

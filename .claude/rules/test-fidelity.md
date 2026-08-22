@@ -264,6 +264,44 @@ screenshots of changed cases and must-still-work controls. Use the existing
 recipe in `docs/solutions/ui-dev-server-screenshot-loop.md`; it is the visual
 evidence leg of Rule D, not a second differential runbook.
 
+**The vacuous case: an empty affected population.** When the live rows a
+change could possibly affect number zero, the differential is zero by
+construction — there is nothing to render twice and compare. That is not
+missing evidence; the honest evidence IS the population query itself (the
+`WHERE` clause that scopes the change, and its live row count), put in the
+PR body in place of a differential. Running the differential machinery
+anyway would only reproduce the same zero the population query already
+proved, for no additional confidence.
+
+**A writer change's differential reports zero for a mechanical reason, not
+a licensing one.** `beets_distance` IS rendered on the Recents card, so
+Rule D's own scope ("presentation **or output**") applies to changing what
+gets written into it, exactly as it applies to a renderer change. The
+render-differential mechanism compares old-renderer-output to
+new-renderer-output over the SAME already-written rows; a change to what
+gets WRITTEN going forward touches none of those rows, so the differential
+correctly reports zero regardless of whether the writer change is even
+correct. That mechanical zero is not, by itself, evidence — a writer
+change with a nonempty forward population still owes Rule D's live-corpus
+tally, just answered by a different instrument (the new rows it produces
+carry the intended values) rather than the render-differential's specific
+before/after shape.
+
+What actually licensed skipping live-corpus evidence for PR #1245 is the
+vacuous-case argument above, not the writer/renderer distinction on its
+own, and it is keyed on the EXISTING-row population exactly as the
+vacuous-case paragraph is — never on an unmeasurable future one:
+`source='local'` has exactly one row in the entire live `download_log`
+(measured 2026-08-22: id 40287, outcome `rejected`, scenario
+`high_distance`, `beets_distance=0.5401`), and it is a rejection, not an
+acceptance — so the accept-path write this PR changed had never fired in
+production as of that measurement. There is no existing row whose
+accept-path write behavior the change could be judged against, which is
+the vacuous case applied to a writer instead of a renderer. A future
+writer change where existing rows already show nonzero accept-path
+volume does not get to cite this distinction to skip a live-corpus
+tally.
+
 ## Executable coverage and its boundary
 
 Rule A coverage is enforced by `tests/test_pipeline_db_write_audit.py` plus

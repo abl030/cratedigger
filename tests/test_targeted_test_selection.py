@@ -132,13 +132,24 @@ class TestTargetedTestSelection(unittest.TestCase):
         under-selection either. A diff touching only this file previously
         selected zero of its real behavior coverage.
 
-        The six-module set is qualified by fault injection (a ``raise
-        RuntimeError`` planted as the first statement of
+        The original six-module set is qualified by fault injection (a
+        ``raise RuntimeError`` planted as the first statement of
         ``dispatch_import_from_db``, run against each module — see the
         registry's own comment). ``tests.test_force_import_gates`` is
         deliberately absent: an #1196 review round found it kills nothing
         (its only references to this module are docstring lines saying
         coverage MOVED OUT after the U4 importer-never-measures refactor).
+
+        Issue #1246 item 1 added two more: PR #1245's own
+        ``tests.test_dispatch_outcomes_generated::TestGeneratedLaneDistanceAudit``
+        was written specifically to patrol this file's lane discriminator
+        but was never selected by a solo edit to it, and
+        ``tests.test_local_import_lane`` pins the caller-side contract that
+        discriminator depends on. Qualified the same way: flipping the
+        discriminator's ``is not None`` to ``is None`` kills
+        ``TestGeneratedLaneDistanceAudit`` (real dynamic execution); it does
+        NOT kill ``test_local_import_lane``, which is kept anyway as a
+        different, real regression class (see the registry's own comment).
         """
         selected = expand_test_selection(
             (),
@@ -154,9 +165,78 @@ class TestTargetedTestSelection(unittest.TestCase):
                 "tests.test_import_manifest",
                 "tests.test_import_queue",
                 "tests.test_issue_573_boundaries",
+                "tests.test_dispatch_outcomes_generated",
+                "tests.test_local_import_lane",
             }.issubset(selected)
         )
         self.assertNotIn("tests.test_force_import_gates", selected)
+
+    def test_importer_and_preview_worker_changes_add_their_real_consumers(
+        self,
+    ) -> None:
+        """``scripts/importer.py`` and ``scripts/import_preview_worker.py``
+        had no ``EXACT_PATH_NEIGHBOURS`` entry. Both live under ``scripts/``,
+        not ``lib/``, so ``_changed_path_neighbours``'s lib-only fail-closed
+        check never caught the resulting under-selection either -- silent,
+        not admitted. A diff touching only ``scripts/importer.py``
+        previously selected zero of its real behavior coverage, including
+        ``TestCleanupTerminalForceActionFailsClosed`` in
+        ``tests.test_import_queue`` -- and, sharper still, never selected
+        ``tests.test_dispatch_outcomes_generated``, the generated property
+        specifically written to patrol the lane discriminator this file's
+        caller (``lib/dispatch/entry_points.py``) relies on -- the exact
+        module whose non-selection is the reason this registry exists.
+
+        Both sets are qualified by fault injection (a ``raise RuntimeError``
+        planted as the first statement of each file's own central,
+        every-job-type entry point -- ``process_claimed_job`` for
+        importer.py, ``process_claimed_preview_job`` for import_preview_
+        worker.py) run against every module found by grepping for real
+        imports PLUS every module reaching the entry point indirectly
+        through ``tests/helpers.py::finalize_claimed_dispatch`` -- a
+        QUALIFIED SUBSET of confirmed killers, not a claimed-complete kill
+        set; see the registry's own comment for the full killed/not-killed/
+        excluded-for-cost breakdown.
+        """
+        importer_selected = expand_test_selection(
+            (),
+            changed_paths=("scripts/importer.py",),
+            repo_root=REPO_ROOT,
+        )
+        self.assertTrue(
+            {
+                "tests.test_import_dispatch",
+                "tests.test_import_operation_fence",
+                "tests.test_import_queue",
+                "tests.test_integration_slices",
+                "tests.test_local_import_lane",
+                "tests.test_terminal_outcomes",
+                "tests.test_dispatch_outcomes_generated",
+                "tests.test_force_import_service_generated",
+                "tests.test_import_job_lifecycle_generated",
+                "tests.test_processing_lifecycle_generated",
+                "tests.test_spectral_attempt_audit_generated",
+                "tests.test_wrong_match_post_commit_generated",
+            }.issubset(importer_selected)
+        )
+
+        preview_selected = expand_test_selection(
+            (),
+            changed_paths=("scripts/import_preview_worker.py",),
+            repo_root=REPO_ROOT,
+        )
+        self.assertTrue(
+            {
+                "tests.test_import_queue",
+                "tests.test_integration_slices",
+                "tests.test_issue_1030_postgres_slice",
+                "tests.test_terminal_outcome_callers",
+                "tests.test_evidence_generated",
+                "tests.test_path_authority_generated",
+                "tests.test_preview_failure_evidence_generated",
+                "tests.test_spectral_attempt_audit_generated",
+            }.issubset(preview_selected)
+        )
 
     def test_unknown_explicit_selector_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown test selector"):
