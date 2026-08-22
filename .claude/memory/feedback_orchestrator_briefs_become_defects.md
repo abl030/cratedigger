@@ -27,9 +27,31 @@ instances in one run:
   numbers in one comment, in a repo whose recent commit `16c5e7ad` was literally
   "stop the docstrings over-claiming".
 
+Recurred 2026-08-22 in the #1211 series (PRs #1242/#1243/#1244/#1245), three
+more instances in one run, all caught only by independent review:
+
+- Claimed the 71 `db=... # type: ignore[arg-type]` findings are the shape
+  `finalize_claimed_dispatch`/`make_ctx_with_fake_db` "exist to replace".
+  Zero of them sit at either bridge's target. The implementer wrote it into
+  an always-loaded rule file, and the reviewer reproduced the dead end live.
+  Root cause: I conflated "matches the `db=` ignore shape" (a count I did
+  verify) with "absorbable by those bridges" (a causal claim I did not).
+- Cited `bc = BASELINE.get(rel, {})` as the ratchet's equality check. No
+  identifier `BASELINE` exists, and that line is not the check -- a paraphrase
+  typed from memory rather than read from the file.
+- Told an implementer to write "the other seven sites reference it by name".
+  The real count was five. The implementer grepped, caught it, and said so.
+
+The generalisation worth keeping: **a brief is an unreviewed claim surface.**
+Every other artifact in the pipeline gets an independent read; the brief never
+does, and the implementer treats it as settled fact. Filed as item 3 of #1246.
+
 **How to apply:**
 - Verify a fact before putting it in a brief, or mark it explicitly as "check
   this" rather than stating it.
+- Separate what you measured from what you inferred. The #1211 failures were
+  all inference wearing a measurement's clothes -- a real count with a false
+  causal claim attached, a real mechanism with an invented symbol name.
 - Never relay a number, line count, or measurement you did not verify. Say
   "the reviewer measured X — confirm it yourself" or omit it.
 - When a review finding and your own brief disagree, suspect the brief.
