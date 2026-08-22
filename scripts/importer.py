@@ -464,6 +464,7 @@ def _cleanup_terminal_force_action(job: ImportJob) -> dict[str, object] | None:
         from lib.config import read_runtime_config
         from lib.import_preview import (
             ACTION_COPY_PREFIX_BY_JOB_TYPE,
+            FORCE_ACTION_PREFIX,
             cleanup_force_action_copy_for_job,
         )
 
@@ -475,7 +476,16 @@ def _cleanup_terminal_force_action(job: ImportJob) -> dict[str, object] | None:
         # re-raised on every subsequent importer startup recovery sweep.
         # ``ACTION_COPY_PREFIX_BY_JOB_TYPE`` is the same table
         # scripts/import_preview_worker.py's sibling cleanup already uses.
-        prefix = ACTION_COPY_PREFIX_BY_JOB_TYPE.get(job.job_type, "force-action-")
+        # The fallback stays ``FORCE_ACTION_PREFIX`` (issue #1211 PR1): the
+        # table deliberately omits ``automation_import``/``youtube_import``,
+        # neither of which ever retains a private action copy, so
+        # ``_force_action_path`` above already returns ``None`` and short-
+        # circuits before this line for both — this default is provably dead
+        # for every current job type. Whether ``.get(...)`` should instead
+        # fail closed on an unrecognized job type is an open question left
+        # for a follow-up; this PR only collapses the eight literal spellings
+        # onto one constant and preserves every existing fallback behavior.
+        prefix = ACTION_COPY_PREFIX_BY_JOB_TYPE.get(job.job_type, FORCE_ACTION_PREFIX)
         cleanup_force_action_copy_for_job(
             action_path, cfg, import_job_id=job.id, prefix=prefix,
         )
@@ -835,11 +845,13 @@ def execute_import_job(
             [source_dir for source_dir in payload.source_dirs if source_dir]
             or None
         )
+        from lib.import_preview import FORCE_ACTION_PREFIX
+
         return _execute_action_copy_dispatch(
             db,
             job,
             request_id=job.request_id,
-            action_prefix="force-action-",
+            action_prefix=FORCE_ACTION_PREFIX,
             source_reference_path=payload.failed_path,
             source_username=payload.source_username,
             source_dirs=source_dirs,

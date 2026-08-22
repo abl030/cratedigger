@@ -505,6 +505,20 @@ def remove_preview_snapshot(
     )
 
 
+#: The force-import lane's action-copy prefix (issue #1211) — the single
+#: named source for a string that used to be spelled independently as a
+#: literal at eight functional sites across this module,
+#: ``scripts/importer.py``, and ``scripts/import_preview_worker.py``. All
+#: eight were byte-identical, so nothing was broken, but editing any one
+#: alone would have silently drifted the importer's terminal cleanup
+#: comparison in ``cleanup_force_action_copy_for_job`` — which raises
+#: ``FilesystemAuthorityError`` BEFORE ever touching the filesystem on a
+#: mismatch, leaking the retained action copy permanently and re-raising on
+#: every subsequent importer startup recovery sweep. That exact defect
+#: already happened once for the local-import lane (see the comment at
+#: ``scripts/importer.py``'s ``_cleanup_terminal_force_action``).
+FORCE_ACTION_PREFIX = "force-action-"
+
 #: The local-import lane's action-copy prefix (issue #1176 PR3) — passed as
 #: ``prefix=`` to every action-copy helper below so a local-import job's
 #: retained private copy can never collide on name with a force job's, even
@@ -526,7 +540,7 @@ LOCAL_IMPORT_ACTION_PREFIX = "local-import-action-"
 #: on purpose — neither retains a private action copy under
 #: ``processing/albums/`` the way force/local-import do.
 ACTION_COPY_PREFIX_BY_JOB_TYPE: dict[str, str] = {
-    IMPORT_JOB_FORCE: "force-action-",
+    IMPORT_JOB_FORCE: FORCE_ACTION_PREFIX,
     IMPORT_JOB_LOCAL: LOCAL_IMPORT_ACTION_PREFIX,
 }
 
@@ -536,7 +550,7 @@ def retain_preview_snapshot_for_force_action(
     cfg: CratediggerConfig,
     *,
     import_job_id: int,
-    prefix: str = "force-action-",
+    prefix: str = FORCE_ACTION_PREFIX,
     cancellation_token: CancellationToken | None = None,
 ) -> str:
     """Promote one verified private snapshot to a job-scoped action copy.
@@ -547,11 +561,12 @@ def retain_preview_snapshot_for_force_action(
     preview so the importer consumes the exact normalized bytes evidence
     describes.
 
-    ``prefix`` (issue #1176 PR3) defaults to today's ``"force-action-"`` so
-    the force lane stays byte-identical; the local-import lane passes its
-    own ``"local-import-action-"`` prefix so a force copy and a local-import
-    copy can never collide on name even though ``import_job_id`` is drawn
-    from the same ``import_jobs`` sequence across every job type.
+    ``prefix`` (issue #1176 PR3) defaults to today's ``FORCE_ACTION_PREFIX``
+    (``"force-action-"``) so the force lane stays byte-identical; the
+    local-import lane passes its own ``LOCAL_IMPORT_ACTION_PREFIX``
+    (``"local-import-action-"``) so a force copy and a local-import copy can
+    never collide on name even though ``import_job_id`` is drawn from the
+    same ``import_jobs`` sequence across every job type.
     """
     name = os.path.basename(path)
     if name == path or not name.startswith("preview-"):
@@ -582,7 +597,7 @@ def remove_force_action_copy(
     path: str,
     cfg: CratediggerConfig,
     *,
-    prefix: str = "force-action-",
+    prefix: str = FORCE_ACTION_PREFIX,
     cancellation_token: CancellationToken | None = None,
 ) -> None:
     """Remove one unneeded retained job-scoped action copy after a terminal
@@ -616,7 +631,7 @@ def cleanup_force_action_copy_for_job(
     cfg: CratediggerConfig,
     *,
     import_job_id: int,
-    prefix: str = "force-action-",
+    prefix: str = FORCE_ACTION_PREFIX,
     cancellation_token: CancellationToken | None = None,
 ) -> None:
     """Remove only the deterministic action copy owned by this job.
@@ -638,7 +653,7 @@ def cleanup_force_action_copy_for_job(
 
 
 def force_action_copy_path(
-    cfg: CratediggerConfig, import_job_id: int, *, prefix: str = "force-action-",
+    cfg: CratediggerConfig, import_job_id: int, *, prefix: str = FORCE_ACTION_PREFIX,
 ) -> str:
     """The one reclaimable private action directory for a job.
     ``prefix`` — see :func:`retain_preview_snapshot_for_force_action`.

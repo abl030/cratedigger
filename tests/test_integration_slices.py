@@ -2452,6 +2452,140 @@ class TestForceImportSlice(unittest.TestCase):
         row = db.request(833)
         self.assertNotIn("imported_path", row)
 
+    def test_force_action_copy_retain_cleanup_round_trip(self):
+        """Issue #1211: ``FORCE_ACTION_PREFIX`` is spelled independently at
+        eight functional sites across ``lib/import_preview.py``,
+        ``scripts/importer.py``, and ``scripts/import_preview_worker.py``.
+        All eight are byte-identical today, so nothing is currently broken —
+        this is a latent-defect regression guard, mirroring the local-import
+        mandatory slice
+        (``test_local_import_terminal_acceptance_drives_real_process_
+        claimed_job``) but for the force lane, and composing the REAL
+        producer with the REAL consumer instead of hand-building the
+        retained directory:
+
+        * **Real producer** — ``scripts.import_preview_worker.
+          _prepare_force_action_path`` (via its default
+          ``_FORCE_ACTION_AUTHORITY``) publishes the job-scoped action copy
+          under the real ``processing_dir/albums/`` exactly as the preview
+          worker does in production.
+        * **Real consumer** — ``scripts.importer._cleanup_terminal_force_
+          action`` (reached through ``process_claimed_job`` via
+          ``finalize_claimed_dispatch``) reaps it on a successful terminal
+          acceptance.
+
+        If any ONE of the eight sites drifts from the others,
+        ``cleanup_force_action_copy_for_job``'s deterministic-name
+        comparison raises ``FilesystemAuthorityError`` BEFORE ever touching
+        the filesystem: the retained copy leaks permanently and
+        ``force_action_cleanup.removed`` is always ``False`` — the exact
+        defect already recorded for the local-import lane at
+        ``scripts/importer.py``'s ``_cleanup_terminal_force_action``
+        (issue #1176 PR3 F5).
+        """
+        from lib.dispatch.types import DispatchOutcome
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_dedupe_key,
+            force_import_payload,
+        )
+        from lib.terminal_outcomes import (
+            PendingImportTerminalOutcome,
+            TerminalDownloadAudit,
+        )
+        from lib.transitions import RequestTransition
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1211, status="wanted"))
+        with tempfile.TemporaryDirectory() as root:
+            staging_dir = os.path.join(root, "Incoming")
+            source = os.path.join(staging_dir, "failed_imports", "candidate")
+            os.makedirs(source)
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            slskd_dir = os.path.join(root, "slskd")
+            os.mkdir(slskd_dir)
+            processing_dir = os.path.join(root, "processing")
+            os.makedirs(os.path.join(processing_dir, "albums"), mode=0o700)
+            os.makedirs(os.path.join(processing_dir, "preview"), mode=0o700)
+            os.chmod(processing_dir, 0o700)
+
+            download_log_id = db.log_download(
+                1211,
+                outcome="rejected",
+                validation_result={"failed_path": source},
+            )
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=1211,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            preview_claim = claim_next_import_preview_job(
+                db, worker_id="preview-1211",
+            )
+            assert preview_claim is not None and preview_claim.id == job.id
+
+            cfg = CratediggerConfig(
+                beets_staging_dir=staging_dir,
+                slskd_download_dir=slskd_dir,
+                processing_dir=processing_dir,
+            )
+
+            # Real producer: publishes the job-scoped action copy for real,
+            # under the deterministic name every one of the eight sites
+            # must agree on.
+            action_path = import_preview_worker._prepare_force_action_path(
+                db, preview_claim, cfg, raw_path=source,
+            )
+            self.assertTrue(os.path.isdir(action_path))
+            self.assertEqual(
+                os.path.basename(action_path), f"force-action-{job.id}",
+            )
+
+            db.mark_import_job_preview_importable(
+                job.id, preview_result={"action_path": action_path},
+            )
+            claimed = claim_next_import_job(db, worker_id="force-cleanup-1211")
+            assert claimed is not None and claimed.id == job.id
+
+            pending = PendingImportTerminalOutcome(
+                request_id=1211,
+                import_job_id=job.id,
+                initial_transition=RequestTransition.to_imported(
+                    from_status="wanted",
+                ),
+                audit=TerminalDownloadAudit(outcome="force_import"),
+            ).mark_successful_terminal_acceptance()
+            outcome = DispatchOutcome(
+                success=True, message="Imported", terminal_outcome=pending,
+            )
+
+            with patch("lib.config.read_runtime_config", return_value=cfg):
+                updated = finalize_claimed_dispatch(db, claimed, outcome)
+
+            # Real consumer: proven gone WHILE the tempdir is still alive,
+            # so this is the cleanup code's own doing, not teardown.
+            self.assertFalse(os.path.exists(action_path))
+
+        assert updated is not None
+        self.assertEqual(updated.status, "completed")
+        row = db.request(1211)
+        self.assertEqual(row["status"], "imported")
+        db.assert_log(self, 0, outcome="rejected")
+        assert updated.result is not None
+        cleanup = updated.result.get("force_action_cleanup")
+        assert isinstance(cleanup, dict)
+        self.assertTrue(
+            cleanup.get("removed"),
+            f"force action copy cleanup did not succeed: {cleanup!r}",
+        )
+
 
 class TestLocalImportSlice(unittest.TestCase):
     """Integration slice: dispatch_import_from_db through the local-import
