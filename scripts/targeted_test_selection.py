@@ -524,19 +524,20 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # ...])`) and separately imports its CheckerResult wire type.
         # tests.test_beets_config_startup_generated does the same real
         # subprocess launch to assert redacted-secret behaviour on a load
-        # failure. Neither is the unrelated lib.beets_config_contract.
-        # check_beets_config function this script imports and wraps --
-        # that shared function's own ~90 call sites across
-        # test_beets_config_contract*.py and test_harness_beets2_contract.py
-        # exercise lib/beets_config_contract.py, not this file.
+        # failure. Neither is the unrelated
+        # lib.beets_config_contract.check_beets_config function this
+        # script imports and wraps -- that shared function's own ~90 call
+        # sites across test_beets_config_contract*.py and
+        # test_harness_beets2_contract.py exercise
+        # lib/beets_config_contract.py, not this file.
         "tests.test_beets_config_contract_integration",
         "tests.test_beets_config_startup_generated",
     ),
     "scripts/cratedigger_deploy_hold.py": (
         # tests.test_deploy_hold: "import scripts.cratedigger_deploy_hold
         # as deploy_hold_module" + a real-module import block.
-        # tests.test_deploy_hold_generated: "from scripts.cratedigger_
-        # deploy_hold import (...)".
+        # tests.test_deploy_hold_generated:
+        # "from scripts.cratedigger_deploy_hold import (...)".
         "tests.test_deploy_hold",
         "tests.test_deploy_hold_generated",
     ),
@@ -544,7 +545,7 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # tests.test_plex_dupes_scripts: "from scripts import
         # plex_dupes_audit, plex_dupes_merge" plus real calls
         # (plex_dupes_audit.fetch_children, ._parse_children_xml,
-        # ._load_albums) -- the one test module covering BOTH plex_dupes_
+        # ._load_albums) -- the one test module covering both plex_dupes
         # scripts, contrary to this issue's own opening measurement, which
         # assumed the plex_dupes_* pair was a genuine gap without reading
         # this file first.
@@ -559,9 +560,9 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # Both test modules load this file via
         # importlib.util.spec_from_file_location (not a dotted import --
         # presumably because the module needs loading under two distinct
-        # synthetic names, "beets_compat_releases" and "beets_compat_
-        # releases_generated", for the deterministic/generated split) and
-        # execute it for real.
+        # synthetic names, "beets_compat_releases" and
+        # "beets_compat_releases_generated", for the deterministic/
+        # generated split) and execute it for real.
         "tests.test_beets_compat_releases",
         "tests.test_beets_compat_releases_generated",
     ),
@@ -569,10 +570,11 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # tests.test_fuzz_burst: "from scripts.run_fuzz_tests import
         # (...)" plus RUNNER = .../run_fuzz_tests.py driving real
         # subprocess bursts. tests.test_parallel_test_runner: "from
-        # scripts.run_fuzz_tests import (...)". tests.test_unused_import_
-        # audit.py and tests.test_hypothesis_profile_audit.py also mention
-        # this filename but only as a string/comment (a TID251 ruff-rule
-        # entry keyed by path, and prose citing where a real bug lived) --
+        # scripts.run_fuzz_tests import (...)".
+        # tests.test_unused_import_audit.py and
+        # tests.test_hypothesis_profile_audit.py also mention this
+        # filename but only as a string/comment (a TID251 ruff-rule entry
+        # keyed by path, and prose citing where a real bug lived) --
         # neither imports or executes the module, so neither is listed.
         "tests.test_fuzz_burst",
         "tests.test_parallel_test_runner",
@@ -588,36 +590,37 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # subprocess exec, "subprocess.run([sys.executable,
         # 'scripts/run_library_completeness_census.py', ...])", but
         # against a deliberately invalid config -- it proves the module's
-        # main()/config-load path fails closed before publish_library_
-        # completeness_census ever runs, so the SAME mutant above does
-        # NOT reach it (confirmed: 6/6 pass with the mutant live). Kept
-        # as a real, independent neighbour for the startup/config-load
-        # code this module owns, not because it kills every mutant in
-        # the census body.
+        # main()/config-load path fails closed before
+        # publish_library_completeness_census ever runs, so the SAME
+        # mutant above does NOT reach it (confirmed: 6/6 pass with the
+        # mutant live). Kept as a real, independent neighbour for the
+        # startup/config-load code this module owns, not because it
+        # kills every mutant in the census body.
         "tests.test_library_completeness_snapshot",
         "tests.test_beets_config_startup_entrypoints",
     ),
     "scripts/run_world_model_burst.py": (
-        # tests.test_world_model_coordinator: "from scripts.run_world_
-        # model_burst import (...)" including build_targets, called
-        # directly at 5 sites -- fault-injection confirmed (a runtime
-        # raise planted as the first statement of build_targets fails
-        # this module with 3 failures/5 errors). tests.test_ephemeral_pg
-        # only imports the IN_PROCESS_JOB_CAP constant, never a function
-        # -- confirmed it does NOT kill the same mutant (14/14 pass with
-        # the mutant live). Kept anyway: it is real, independent module-
-        # level-import coverage (an import-time break in this file would
-        # still fail it), just not of build_targets specifically.
-        # tests.test_world_model_burst.py, tests.test_negative_coverage_
-        # audit.py, and tests.test_fuzz_burst.py also mention this
-        # filename but only in a string literal/comment/docstring, never
-        # a real import, so none of the three is listed.
+        # tests.test_world_model_coordinator:
+        # "from scripts.run_world_model_burst import (...)" including
+        # build_targets, called directly at 5 sites -- fault-injection
+        # confirmed (a runtime raise planted as the first statement of
+        # build_targets fails this module with 3 failures/5 errors).
+        # tests.test_ephemeral_pg only imports the IN_PROCESS_JOB_CAP
+        # constant, never a function -- confirmed it does NOT kill the
+        # same mutant (14/14 pass with the mutant live). Kept anyway: it
+        # is real, independent module-level-import coverage (an
+        # import-time break in this file would still fail it), just not
+        # of build_targets specifically. tests.test_world_model_burst.py,
+        # tests.test_negative_coverage_audit.py, and
+        # tests.test_fuzz_burst.py also mention this filename but only in
+        # a string literal/comment/docstring, never a real import, so
+        # none of the three is listed.
         "tests.test_world_model_coordinator",
         "tests.test_ephemeral_pg",
     ),
     "scripts/world_audit_debt_gate.py": (
-        # tests.test_world_audit_debt: "from scripts.world_audit_debt_
-        # gate import run".
+        # tests.test_world_audit_debt:
+        # "from scripts.world_audit_debt_gate import run".
         "tests.test_world_audit_debt",
     ),
     # scripts/pipeline_cli/*.py: 19 of the 20 files in this package
@@ -645,6 +648,20 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # quality, search_plan, triage, replace, beets_distance, and long_tail,
     # every one of which IS called directly above, so _format.py's code
     # runs for real whenever any of those command tests run.
+    #
+    # TWO CARVE-OUTS from the "direct cmd_* call" claim above, both owning
+    # no cmd_* of the shape just described:
+    # - api_mutations.py: its own six cmd_* handlers are NEVER called by
+    #   tests.test_pipeline_cli (fault-injection confirmed: a mutant in
+    #   all six survives at exit 0). What IS real there is
+    #   api_mutations._post, a shared helper OTHER modules' handlers call
+    #   through -- see its own entry below for the exact evidence and
+    #   where the six handlers themselves ARE covered.
+    # - __init__.py: it owns no cmd_* of its own at all (only re-exports).
+    #   Its coverage is import-level -- "from scripts import pipeline_cli"
+    #   runs this file's top-level code (the imports + __all__ list)
+    #   merely by being imported, which every test in
+    #   tests.test_pipeline_cli.py does at module load.
     "scripts/pipeline_cli/__init__.py": (
         "tests.test_pipeline_cli",
     ),
@@ -655,11 +672,28 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_pipeline_cli",
     ),
     "scripts/pipeline_cli/api_mutations.py": (
-        # api_mutations.py additionally has its own dedicated test
-        # modules: tests.test_pipeline_cli_api_mutations ("from
-        # scripts.pipeline_cli import api_mutations" + real
-        # cmd_merge_rekey/cmd_wrong_match_delete_group/... calls) and its
-        # generated sibling.
+        # NOT covered by tests.test_pipeline_cli the way the general block
+        # comment above describes for its siblings: this module's own six
+        # cmd_* handlers (cmd_merge_rekey, cmd_pipeline_delete,
+        # cmd_resolve_rg, cmd_set_quality, cmd_upgrade,
+        # cmd_wrong_match_converge) are NEVER called there -- confirmed by
+        # fault injection, a mutant raising in all six survives
+        # tests.test_pipeline_cli at exit 0. What tests.test_pipeline_cli
+        # DOES exercise for real is api_mutations._post, the shared HTTP
+        # POST helper OTHER family modules' handlers call through -- e.g.
+        # wrong_match.py's cmd_wrong_match_triage /
+        # cmd_wrong_match_triage_cancel, tested at
+        # tests/test_pipeline_cli.py:1409-1454 and :1741-1757 via
+        # "real_post = api_mutations._post" then
+        # patch.object(api_mutations, "_post", <wrapper calling real_post>)
+        # -- fault-injection confirmed (a mutant in _post fails
+        # tests.test_pipeline_cli). The six handlers themselves are
+        # covered by tests.test_pipeline_cli_api_mutations: its _run()
+        # helper dict-dispatches all six by name (TestApiMutationCli._run,
+        # exercised by
+        # test_each_command_preserves_canonical_method_path_and_body's
+        # six-case loop plus several other tests) and its generated
+        # sibling.
         "tests.test_pipeline_cli",
         "tests.test_pipeline_cli_api_mutations",
         "tests.test_pipeline_cli_api_mutations_generated",
@@ -955,9 +989,10 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
 #: Changed `scripts/**/*.py` files whose full neighbour resolution
 #: (EXACT_PATH_NEIGHBOURS + prefix rules + direct candidates that actually
 #: exist) yields ZERO test modules -- the scripts/ twin of
-#: LIB_MODULES_WITHOUT_SELECTION_COVERAGE (issue #1248). `_direct_test_
-#: candidates` probes only `tests.test_<basename>` for a scripts/ path (no
-#: `_generated` sibling probe, unlike lib/), so a script whose real coverage
+#: LIB_MODULES_WITHOUT_SELECTION_COVERAGE (issue #1248).
+#: `_direct_test_candidates` probes only `tests.test_<basename>` for a
+#: scripts/ path (no `_generated` sibling probe, unlike lib/), so a
+#: script whose real coverage
 #: lives under a differently-named test module, or whose basename collides
 #: with a sibling file in a subdirectory `_direct_test_candidates` cannot
 #: see (it ignores every path component except the basename), resolves zero
@@ -966,8 +1001,8 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
 #: for a path listed here -- the full resolution already ran, so a script
 #: that later gains a real EXACT_PATH_NEIGHBOURS entry, prefix rule, or
 #: `tests.test_<stem>` module selects it immediately with no code change
-#: here, and the stale registration is what `tests/test_scripts_selection_
-#: coverage_audit.py` then demands be deleted.
+#: here, and the stale registration is what
+#: `tests/test_scripts_selection_coverage_audit.py` then demands be deleted.
 #:
 #: Population is a fresh measurement (driving the real resolution function
 #: plus a grep-and-read pass over every candidate test file to confirm REAL
@@ -995,8 +1030,9 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
 #: bootstrap works around), so no dotted-import test module can drive it.
 SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
     "scripts/bench_parallel_search.py": (
-        "measured 2026-08-22: zero neighbours -- tests.test_bench_parallel_"
-        "search does not exist; the only reference anywhere under tests/ is "
+        "measured 2026-08-22: zero neighbours -- "
+        "tests.test_bench_parallel_search does not exist; the only "
+        "reference anywhere under tests/ is "
         "a comment in tests/conftest.py naming it as the dev benchmarking "
         "script an optional fallback exists for, not an import or exec "
         "(issue #1248)"

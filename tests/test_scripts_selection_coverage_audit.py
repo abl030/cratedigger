@@ -1,13 +1,13 @@
 """Audit: `SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE` stays exact (issue #1248).
 
-`scripts/targeted_test_selection.py::SCRIPTS_MODULES_WITHOUT_SELECTION_
-COVERAGE` is the scripts/ twin of `LIB_MODULES_WITHOUT_SELECTION_COVERAGE` —
-a changed `scripts/**/*.py` file whose full neighbour resolution
+`scripts/targeted_test_selection.py::SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE`
+is the scripts/ twin of `LIB_MODULES_WITHOUT_SELECTION_COVERAGE` — a changed
+`scripts/**/*.py` file whose full neighbour resolution
 (`EXACT_PATH_NEIGHBOURS` + prefix rules + direct candidates that actually
-exist) yields zero test modules now fails closed in `_changed_path_
-neighbours` (an exit-code-2 refusal through `scripts/test.sh`, the same
-shape the lib/-side unmapped-module check already had) unless the path is
-admitted here.
+exist) yields zero test modules now fails closed in
+`_changed_path_neighbours` (an exit-code-2 refusal through
+`scripts/test.sh`, the same shape the lib/-side unmapped-module check
+already had) unless the path is admitted here.
 
 Same non-early-return shape as the lib/ registry: `_changed_path_neighbours`
 does NOT return early for a path registered here — the full resolution still
@@ -78,8 +78,8 @@ class TestScriptsSelectionCoverageRegistryIsExact(unittest.TestCase):
         self.assertEqual(
             violations,
             [],
-            "A path registered in SCRIPTS_MODULES_WITHOUT_SELECTION_"
-            "COVERAGE as a zero-neighbour gap now resolves real "
+            "A path registered in SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE "
+            "as a zero-neighbour gap now resolves real "
             "coverage — remove the stale registration:\n  "
             + "\n  ".join(violations),
         )
@@ -126,9 +126,19 @@ class TestScriptsSelectionCoverageRegistryIsExact(unittest.TestCase):
 
 
 class TestScriptsSelectionCoverageCheckerTripsOnViolations(unittest.TestCase):
-    """Known-bad self-tests, driven through synthetic registries/paths —
-    never the real registry — so the checker's own correctness is proven
-    independently of today's registrations happening to be clean."""
+    """Known-bad self-tests proving the checker's own correctness, split
+    two ways. The two "fails closed" tests (unmapped top-level / nested
+    scripts/ paths) and the stale-registration trip test drive entirely
+    synthetic paths/registries never present in the real module-level
+    data. The remaining three ("admitted gap log names itself",
+    "registered zero-neighbour gap does not raise", "stale checker is
+    quiet on a genuine gap") deliberately drive the REAL registry's first
+    entry via `next(iter(SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE))` —
+    they are must-still-work controls proving a real admitted gap behaves
+    correctly, not proof the checker fires on a violation; they depend on
+    today's registry actually holding a genuine, non-stale gap, which
+    `TestScriptsSelectionCoverageRegistryIsExact` above independently
+    proves."""
 
     def test_unmapped_zero_neighbour_scripts_file_fails_closed_with_its_name(
         self,

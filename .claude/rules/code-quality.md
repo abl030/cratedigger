@@ -397,10 +397,11 @@ through to the SAME return every other path takes — never a silent cap, and
 a registration that later gains real coverage is selected immediately with
 no code change here (only the now-stale registry entry needs deleting,
 which the audit demands). A changed `scripts/**/*.py` file gets the SAME
-non-early-return, admitted-gap treatment (issue #1248) via `SCRIPTS_
-MODULES_WITHOUT_SELECTION_COVERAGE` and `tests/test_scripts_selection_
-coverage_audit.py` — the scripts/ mirror of the lib/ case above, including
-the same nested-subdirectory basename-only miss (`scripts/pipeline_cli/
+non-early-return, admitted-gap treatment (issue #1248) via
+`SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE` and
+`tests/test_scripts_selection_coverage_audit.py` — the scripts/ mirror of
+the lib/ case above, including the same nested-subdirectory basename-only
+miss (`scripts/pipeline_cli/
 cli.py` probes only `tests.test_cli`, ignoring the `pipeline_cli/`
 component). This is development feedback; the full suite
 remains the exhaustive pre-review boundary.
