@@ -97,7 +97,8 @@ protocol-conformance checks conflict with production strict rules.
 `Any`, `cast(...)`, `# type: ignore`, and bare `# pyright: ignore` for every
 file to match the checked-in baseline (`tests/_typing_ratchet_baseline.py`,
 `tests/_tests_typing_ratchet_baseline.py`) EXACTLY — a straight dict-equality
-check (`bc = BASELINE.get(rel, {})`), not a monotonic comparison. Say plainly
+check (`if live == TESTS_TYPING_RATCHET_BASELINE:` at
+`tests/test_typing_ratchet.py:178`), not a monotonic comparison. Say plainly
 what that does and does not enforce: any escape hatch added WITHOUT
 regenerating the baseline fails the test immediately, because the live count
 no longer equals the committed one. What no code enforces:
@@ -114,16 +115,26 @@ path and retain a direct zero-tolerance check; delete the scanner only when a
 configured tool enforces the same syntax.
 
 Before adding a new escape hatch in tests, or before widening the tests
-baseline to admit one, check the file's existing typed bridges first:
+baseline to admit one, check the file's existing typed bridges first. The
+largest single cluster of frozen tests-side `type_ignore` debt is the
+`db=<FakePipelineDB>` kwarg gap: 71 of the tests baseline's 198
+`type_ignore` findings share that shape, clustered mostly at three call
+sites — `dispatch_import_core` (34), `measure_preimport_state` (14), and
+`_check_quality_gate_core` (11) — with the rest spread across five other
+functions. `tests/helpers.py` already provides typed bridges for two
+DIFFERENT call shapes in the same family —
 `tests/helpers.py::finalize_claimed_dispatch` (an `Any`-typed bridge from a
 `FakePipelineDB` fixture into the `PipelineDB`-typed `process_claimed_job`)
 and `make_ctx_with_fake_db` (wraps a fake in `FakePipelineDBSource` so
-production code hits a typed surface instead of a raw fixture). Extending one
-of these is the first remedy, ahead of a fresh `# type: ignore` and ahead of
-a baseline sweep — 71 of the tests baseline's 198 `type_ignore` findings are
-the single `db=…  # type: ignore[arg-type]` shape these bridges exist to
-replace. The aim for a NEW test file is zero escape hatches reached via those
-bridges, not a fresh baseline entry.
+production code hits a typed `CratediggerContext`, not a `PipelineDB`) —
+but NEITHER covers the three call sites above: zero of the 71 findings sit
+at `process_claimed_job`, and `make_ctx_with_fake_db` doesn't return a
+`PipelineDB` at all. The first remedy for a new hatch of this shape is
+still to check `tests/helpers.py` first: reuse an existing bridge where
+the call site actually matches one, or EXTEND the bridge set with a new
+one for the call site you need — never a bare `# type: ignore`, and never
+a baseline sweep. The aim for a NEW test file is zero escape hatches
+reached via a bridge, not a fresh baseline entry.
 
 When either typing ratchet trips, do not stop at making it green. For every
 affected file and finding kind, finish with the committed count at least ten
@@ -271,8 +282,9 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   `@example` and re-measure. **Standing scope:** a PR adding or changing a
   checker clause audits that checker's clauses as part of the change, and
   records the result — the named world and the killed mutant, per clause —
-  in the PR's Fault injection sentence
-  (`.github/pull_request_template.md`). The audit examines test
+  in the PR's Fault injection section (`.github/pull_request_template.md`);
+  one clause fits in a sentence, a checker with many clauses is a short
+  list, one line per clause. The audit examines test
   machinery, so its artifacts are deterministic-only, and its evidence is a
   named world plus a killed mutant — never a scanner inferring reachability
   from source (issue #1094). Procedure: `docs/generated-testing.md`
@@ -285,11 +297,13 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   surviving mutant is either a missing invariant (add it) or an entropy
   budget miss (pin the decisive world as an `@example`). The driver is an
   operator/agent one-shot — never committed (`scope.md`). Report what you
-  tried and what happened in one sentence, in the PR's Fault injection
-  section (`.github/pull_request_template.md`) — name the mutant and the
+  tried and what happened in one sentence (a short list, one line per
+  clause, when the change is per-clause proof against a many-clause
+  checker), in the PR's Fault injection section
+  (`.github/pull_request_template.md`) — name the mutant and the
   test, not just "planted a mutant, confirmed RED". This used to be a
-  mandatory per-diff-site table; it is a sentence now because the table is
-  where confabulation happened: PR #1209's matrix claimed "RED at the
+  mandatory per-diff-site table; it is a short account now because the
+  table is where confabulation happened: PR #1209's matrix claimed "RED at the
   property, not just a pin" for the exact property later proved
   agree-by-construction, while the regression-pin and adapter mutant rules
   above — which stay unconditional — caught real defects. A mutant that
@@ -1031,4 +1045,4 @@ rationale; never allowlist a pure decision.
 - Non-trivial work goes on a feature branch with a PR (e.g. `feat/cooldowns`, `fix/spectral-race`)
 - PRs are merged via GitHub **Create a merge commit** (not Rebase-and-merge, not Squash-and-merge). This keeps the PR attached to mainline history while preserving the individual commits, so write them well.
 - Deploy and verify live after merging
-- PR body follows `.github/pull_request_template.md`. The Fault injection section is one sentence naming what you tried and what happened, not an exhaustive table — but the regression-pin and adapter mutant rules in § "Testing — Red/Green TDD" stay unconditional, and the reviewer's two-mutants-per-changed-test obligation is separate and always applies.
+- PR body follows `.github/pull_request_template.md`. The Fault injection section is a short account (one sentence, or a short list for per-clause proof against a many-clause checker) naming what you tried and what happened, not an exhaustive table; whether to run fault injection at all is the "when in doubt" judgment call in § "Testing — Red/Green TDD", not something every PR owes — but the regression-pin and adapter mutant rules in that same section stay unconditional, and the reviewer's two-mutants-per-changed-test obligation is separate and always applies.

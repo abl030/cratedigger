@@ -1,8 +1,11 @@
 """GENERATED tests escape-hatch freeze baseline (#784).
 
-Frozen at campaign end; may only DECREASE. Tests are never
-strict-annotated, but their Any/cast/type-ignore debt must not grow.
-Regenerate after REMOVING hatches from tests with:
+Frozen at campaign end; live counts must match this baseline
+EXACTLY (tests/test_typing_ratchet.py). Tests are never
+strict-annotated. Growing this baseline without an explicit
+reason is a regression a reviewer must catch in the diff, not
+something this file itself enforces. Regenerate ONLY after
+REMOVING hatches from tests, with:
 
     nix-shell --run "python3 -m tests._typing_ratchet_scanner tests" \
         > tests/_tests_typing_ratchet_baseline.py

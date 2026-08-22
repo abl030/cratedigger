@@ -564,14 +564,17 @@ burst) collects tests via `unittest.defaultTestLoader`, which finds only
 never executed, with no error and no skip notice. The operator declined
 building an audit for this shape specifically (unlike the profile-loading
 hazard just above, which the two gates enforce mechanically), so treat a
-bare module-level `@given` function as a review flag. Both known instances
-of this shape shipped in the same commit (`12e38e3c`) and are both fixed
-today: `tests/test_composite_audio_gap.py` wraps its module-level properties
-in `test_*` methods that call them (the correct pattern from the start);
-`tests/test_beets_candidate_coverage.py` originally shipped bare
-module-level `def test_generated_...` functions — invisible to
+bare module-level `@given` function as a review flag. The instructive
+detail: the SAME commit (`12e38e3c`) shipped both the correct pattern and
+the broken one, in two different new files, on the same day.
+`tests/test_composite_audio_gap.py` was never an instance of the hazard —
+it wraps its module-level properties in `test_*` methods that call them,
+the correct pattern from the start. `tests/test_beets_candidate_coverage.py`
+was the broken instance: it originally shipped bare module-level
+`def test_generated_...` functions — invisible to
 `unittest.defaultTestLoader` despite the `test_` name — and was wrapped the
-same way in a later review round. Nothing is known to be unreachable today.
+same way as the other file in a later review round. Nothing is known to be
+unreachable today.
 
 **Gated correctly is not the same as fuzz-patrolled — name the two tiers
 explicitly.** `scripts/run_fuzz_tests.py`'s own module discovery
@@ -581,18 +584,26 @@ module in a subdirectory never matches regardless of its name. A module can
 pass both gates above — profile imported correctly, deadline disabled,
 every property genuinely discoverable by `unittest` — and still never be
 selected for a randomized burst, because its filename doesn't match the
-pattern. As of this writing, 12 files outside the glob hold 33 such
-properties (real, discoverable, production-facing — not the test-machinery
-self-tests the "Never property-test the test machinery" rule in
-`.claude/rules/code-quality.md` already excludes, such as
-`tests/test_parallel_test_runner.py`'s own Hypothesis-integration fixtures),
-running only at the deterministic suite's bounded budget (150 examples,
-`derandomize=True`) and never at daily fuzz depth:
-`tests/test_convergence_service.py`,
-`tests/test_import_queue.py`, `tests/web/test_server_endpoints.py`, and
-`tests/test_composite_audio_gap.py` are four of them. A property that passes
-both gates above is wired correctly, not fuzz-patrolled — the two are
-independent facts and neither implies the other.
+pattern. As of this writing, 15 files outside the glob carry 39 `@given`
+decorators (counted directly from each file's AST, not by grepping text —
+the count includes every `@given` regardless of whether the decorated
+function is a production-facing property or a deliberate Hypothesis-
+integration self-test under the "Never property-test the test machinery"
+rule in `.claude/rules/code-quality.md`, because BOTH shapes are equally
+invisible to this specific glob and both are equally stuck at suite depth
+by it):
+`tests/test_convergence_service.py`, `tests/test_import_queue.py`,
+`tests/web/test_server_endpoints.py`, and `tests/test_composite_audio_gap.py`
+are four of them, running only at the deterministic suite's bounded budget
+(150 examples, `derandomize=True`) and never at `scripts/fuzz_burst.sh`'s
+daily depth. One exception worth naming: `tests/world_model/state_machine.py`
+is one of the 15, but its `RuleBasedStateMachine` properties DO get separate
+randomized coverage through `scripts/run_world_model_burst.py`, an entirely
+different burst mechanism keyed on `tests.world_model.state_machine`
+specifically — so unlike the other 14, it is not actually starved of
+randomized depth, only of THIS burst. A property that passes both gates
+above is wired correctly, not fuzz-patrolled — the two are independent
+facts and neither implies the other.
 
 `scripts/fuzz_burst.sh` discovers the exact unittest IDs and effective
 Hypothesis settings in every generated module. Ordinary deterministic pins run
@@ -927,7 +938,8 @@ operator/agent one-shot — never committed (`.claude/rules/scope.md`); record
 what you tried and what happened in the PR's Fault injection section
 (`.github/pull_request_template.md`) — name the mutant and the test, not just
 "planted a mutant, confirmed RED". That section used to be a mandatory
-per-diff-site table; it is a one-sentence account now
+per-diff-site table; it is a short account now — one sentence, or a short
+list for per-clause proof against a many-clause checker
 (`.claude/rules/code-quality.md` § "Testing — Red/Green TDD" has the
 reasoning), while the regression-pin and adapter mutant rules in that same
 section stay unconditional.
@@ -1098,8 +1110,9 @@ artifacts are deterministic-only — never schedule a generated audit of the
 audit. Do not build a scanner that infers clause reachability from source
 (`.claude/rules/code-quality.md` § "Semantic source scanners are
 prohibited"); the evidence is the named world and the killed mutant,
-recorded in the PR's Fault injection sentence exactly as the fault-injection
-account above is.
+recorded in the PR's Fault injection section exactly as the fault-injection
+account above is — one clause fits in a sentence, several clauses are a
+short list, one line per clause.
 
 ## Every property must use every input it draws
 
