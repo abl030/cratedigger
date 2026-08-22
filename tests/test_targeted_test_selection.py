@@ -171,6 +171,57 @@ class TestTargetedTestSelection(unittest.TestCase):
         )
         self.assertNotIn("tests.test_force_import_gates", selected)
 
+    def test_importer_and_preview_worker_changes_add_their_real_consumers(
+        self,
+    ) -> None:
+        """Issue #1246 F3: ``scripts/importer.py`` and
+        ``scripts/import_preview_worker.py`` had no ``EXACT_PATH_NEIGHBOURS``
+        entry. Both live under ``scripts/``, not ``lib/``, so
+        ``_changed_path_neighbours``'s lib-only fail-closed check never
+        caught the resulting under-selection either -- silent, not admitted.
+        A diff touching only ``scripts/importer.py`` previously selected
+        zero of its real behavior coverage, including this issue's own item-2
+        pin (``TestCleanupTerminalForceActionFailsClosed`` in
+        ``tests.test_import_queue``).
+
+        Both sets are qualified by fault injection (a ``raise RuntimeError``
+        planted as the first statement of each file's own central,
+        every-job-type entry point -- ``process_claimed_job`` for
+        importer.py, ``process_claimed_preview_job`` for
+        import_preview_worker.py -- run against every plausible candidate;
+        see the registry's own comment for the full killed/not-killed
+        breakdown).
+        """
+        importer_selected = expand_test_selection(
+            (),
+            changed_paths=("scripts/importer.py",),
+            repo_root=REPO_ROOT,
+        )
+        self.assertTrue(
+            {
+                "tests.test_import_dispatch",
+                "tests.test_import_operation_fence",
+                "tests.test_import_queue",
+                "tests.test_integration_slices",
+                "tests.test_local_import_lane",
+                "tests.test_terminal_outcomes",
+            }.issubset(importer_selected)
+        )
+
+        preview_selected = expand_test_selection(
+            (),
+            changed_paths=("scripts/import_preview_worker.py",),
+            repo_root=REPO_ROOT,
+        )
+        self.assertTrue(
+            {
+                "tests.test_import_queue",
+                "tests.test_integration_slices",
+                "tests.test_issue_1030_postgres_slice",
+                "tests.test_terminal_outcome_callers",
+            }.issubset(preview_selected)
+        )
+
     def test_unknown_explicit_selector_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown test selector"):
             expand_test_selection(

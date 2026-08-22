@@ -411,6 +411,60 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_dispatch_outcomes_generated",
         "tests.test_local_import_lane",
     ),
+    # scripts/importer.py and scripts/import_preview_worker.py live under
+    # scripts/, so _direct_test_candidates probes tests.test_importer and
+    # tests.test_import_preview_worker respectively -- neither exists, so
+    # both resolved ZERO real neighbours (issue #1246 F3, found reviewing
+    # item 1/2 of this same issue). Unlike the lib/ case above, scripts/
+    # is not covered by _changed_path_neighbours's fail-closed check
+    # either (it only fires for path.parts[:1] == ("lib",)), so this was
+    # SILENT under-selection, not an admitted gap -- and it meant this
+    # issue's OWN item-2 pin (TestCleanupTerminalForceActionFailsClosed
+    # in tests.test_import_queue) did not run when its subject,
+    # scripts/importer.py, changed.
+    #
+    # Both entries qualified by fault injection, the same way as
+    # entry_points.py above: a ``raise RuntimeError`` planted as the
+    # first executable statement of each file's own central,
+    # every-job-type entry point (``process_claimed_job`` for importer.py
+    # -- "the single queue-outcome mapper all four job types route
+    # through", per its own docstring; ``process_claimed_preview_job``
+    # for import_preview_worker.py, its direct analogue), run against
+    # every plausible candidate found by grepping for real imports of the
+    # module under test.
+    #
+    # importer.py -- killed: tests.test_import_dispatch,
+    # tests.test_import_operation_fence,
+    # tests.test_import_queue (this issue's own new pin lives here),
+    # tests.test_integration_slices, tests.test_local_import_lane,
+    # tests.test_terminal_outcomes. Confirmed NOT killed (real imports
+    # exist but exercise other surfaces of the module, or bypass this
+    # entry point via their own DI seams): tests.test_importer_graceful_
+    # shutdown, tests.test_merge_rekey, tests.test_importer_runtime_
+    # context, tests.test_automation_startup_recovery, tests.test_beets_
+    # config_startup.
+    #
+    # import_preview_worker.py -- killed: tests.test_import_queue,
+    # tests.test_integration_slices (both already listed above for
+    # importer.py -- real, independent coverage of the preview worker's
+    # own module, not double-counted), tests.test_issue_1030_postgres_
+    # slice, tests.test_terminal_outcome_callers. Confirmed NOT killed:
+    # tests.test_import_preview, tests.test_import_result,
+    # tests.test_beets_config_startup_entrypoints.
+    "scripts/importer.py": (
+        "tests.test_import_dispatch",
+        "tests.test_import_operation_fence",
+        "tests.test_import_queue",
+        "tests.test_integration_slices",
+        "tests.test_local_import_lane",
+        "tests.test_terminal_outcomes",
+    ),
+    "scripts/import_preview_worker.py": (
+        "tests.test_import_queue",
+        "tests.test_integration_slices",
+        "tests.test_issue_1030_postgres_slice",
+        "tests.test_terminal_outcome_callers",
+    ),
 }
 
 #: Shared tests/ modules with NO real consuming test today — an admitted,
