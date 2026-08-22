@@ -564,20 +564,28 @@ burst) collects tests via `unittest.defaultTestLoader`, which finds only
 never executed, with no error and no skip notice. The operator declined
 building an audit for this shape specifically (unlike the profile-loading
 hazard just above, which the two gates enforce mechanically), so treat a
-bare module-level `@given` function as a review flag. The instructive
-history: `tests/test_beets_candidate_coverage.py` shipped the broken shape
-at its creation (`b1d5f7b5`, 2026-08-18) — a bare module-level
-`def test_generated_candidate_coverage_oracle` invisible to
-`unittest.defaultTestLoader` despite the `test_` name — and kept it through
-two later commits that touched the same file without noticing
-(`2f887859`, `c33c6557`, same day). Three days after that, `12e38e3c`
-(2026-08-21) added TWO MORE bare module-level `@given` functions to the
-same file, growing the invisible cohort to three, and in that SAME commit
-also added a brand-new `tests/test_composite_audio_gap.py` that used the
-correct wrapper pattern from the start — wrapping its module-level
-properties in `test_*` methods that call them. The broken file was finally
-wrapped the same way in a later review round (`75e3a3b7`, "#1237 review
-C1-C9"). Nothing is known to be unreachable today.
+bare module-level `@given` function as a review flag — and more generally,
+any bare module-level `test_*` function outside a `TestCase`, `@given` or
+not, since `unittest.defaultTestLoader` is blind to the shape itself, not
+specifically to Hypothesis. The instructive history:
+`tests/test_beets_candidate_coverage.py` shipped the broken shape at its
+creation (`b1d5f7b5`, 2026-08-18) with TWO invisible module-level
+functions — `test_generated_candidate_coverage_oracle` (`@given`) and
+`test_generated_oracle_kills_count_only_mutant` (a plain known-bad
+self-test, no Hypothesis at all) — and kept both through two later commits
+that touched the same file without noticing (`2f887859`, `c33c6557`, same
+day). Three days after that, `12e38e3c` (2026-08-21) added TWO MORE bare
+module-level `@given` functions to the same file, growing the invisible
+set to FOUR, and in that SAME commit also added a brand-new
+`tests/test_composite_audio_gap.py` that used the correct wrapper pattern
+from the start — wrapping its module-level properties in `test_*` methods
+that call them. All four were finally wrapped the same way in the
+`#1237` review-correction commit (`75e3a3b7`). The most damning of the
+four: the known-bad self-test is exactly the artifact
+`.claude/rules/code-quality.md`'s "Every invariant checker owes a
+known-bad self-test" rule makes mandatory — the ONE test meant to prove a
+checker clause actually trips never ran at all, invisibly, the whole time.
+Nothing is known to be unreachable today.
 
 **Gated correctly is not the same as fuzz-patrolled — name the two tiers
 explicitly.** `scripts/run_fuzz_tests.py`'s own module discovery
@@ -956,8 +964,9 @@ what you tried and what happened in the PR's Fault injection section
 per-diff-site table; it is a short account now — one sentence, or a short
 list for per-clause proof against a many-clause checker
 (`.claude/rules/code-quality.md` § "Testing — Red/Green TDD" has the
-reasoning), while the regression-pin and adapter mutant rules in that same
-section stay unconditional.
+reasoning), while the regression-pin rule, the adapter mutant rule, and the
+Standing scope per-clause obligation in that same section all stay
+unconditional.
 
 Canonical run (issue #548, 2026-07-08): 13 mutants — including reverting
 fix `6cf26a4`, which the generated lifecycle property killed independently

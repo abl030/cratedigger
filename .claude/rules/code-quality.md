@@ -98,7 +98,7 @@ protocol-conformance checks conflict with production strict rules.
 file to match the checked-in baseline (`tests/_typing_ratchet_baseline.py`,
 `tests/_tests_typing_ratchet_baseline.py`) EXACTLY — a straight dict-equality
 check (`if live == TESTS_TYPING_RATCHET_BASELINE:` at
-`tests/test_typing_ratchet.py:178`), not a monotonic comparison. What that
+`tests/test_typing_ratchet.py:181`), not a monotonic comparison. What that
 enforces: any escape hatch added WITHOUT regenerating the baseline fails
 the test immediately, because the live count no longer equals the
 committed one. What no code enforces:
@@ -141,17 +141,25 @@ affected file and finding kind, finish with the committed count at least ten
 below the baseline at the start of the change, or at zero if fewer than ten
 remain, then regenerate the baseline. This is deliberately a convergence rule,
 not another checker: do not add stable-site, diff-aware, or history-aware
-machinery to catch delete-and-add laundering (deleting one escape hatch and
-adding a different one elsewhere in the same file, netting an equal or lower
-per-file count that sails through the exact-match check unnoticed) — a real
-guard against THAT would need per-SITE identity (a stable fingerprint for
-each occurrence, tracked across commits), not just the aggregate count the
-baseline already holds; laundering leaves the count itself equal or lower,
-so the count reveals nothing. That per-site tracking is exactly the
-stable-site/diff-aware/history-aware machinery this rule forbids building.
-This is a distinct escape from the upward-regeneration one above — that one
-is caught by noticing the baseline's count go UP in the diff; laundering
-never moves the count at all.
+machinery to catch delete-and-add laundering (deleting one escape hatch of a
+kind and adding a DIFFERENT one of the same kind elsewhere in the same file).
+Both ratchet tests return early, silently, ONLY on exact dict equality
+between the live scan and the baseline; any other outcome builds
+`regressions`/`improvements` lists and calls `self.fail(...)` unconditionally.
+That means only the EQUAL-count case of laundering is genuinely invisible to
+the check — it hits the same early-return the unchanged case does, because
+the (file, key) count is identical to the baseline either way. A laundering
+edit that nets a DECREASE is not silent: it fails, with the "escape hatches
+removed — tighten the baseline" message, exactly like a real improvement
+would — the residual risk there is a reviewer who reads the celebratory
+framing and regenerates the smaller number without checking WHICH specific
+occurrence changed. Catching either shape for real would need per-SITE
+identity (a stable fingerprint for each occurrence, tracked across commits),
+not just the aggregate count the baseline already holds — that per-site
+tracking is exactly the stable-site/diff-aware/history-aware machinery this
+rule forbids building. This is a distinct escape from the upward-regeneration
+one above — that one is caught by noticing the baseline's count go UP in the
+diff; the equal-count laundering case never shows a diff at all.
 
 ## HTTP request bodies — use `pydantic.BaseModel`
 
@@ -314,7 +322,8 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   table is where confabulation happened: PR #1209's matrix claimed "RED at the
   property, not just a pin" for the exact property later proved
   agree-by-construction, while the regression-pin and adapter mutant rules
-  above — which stay unconditional — caught real defects. A mutant that
+  above — which caught real defects — stay unconditional, alongside the
+  Standing scope per-clause obligation just above them. A mutant that
   kills test A does not qualify test B. Canonical run: issue #548,
   2026-07-08 — 13 mutants, incl. reverting fix `6cf26a4`, led to PR #555.
   Lesson (#1110): the implementer reported reverting each fix and
