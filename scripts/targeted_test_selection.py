@@ -502,6 +502,215 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_preview_failure_evidence_generated",
         "tests.test_spectral_attempt_audit_generated",
     ),
+    # Issue #1248: 10 of the 11 scripts/*.py files that resolve zero
+    # neighbours have real coverage -- `_direct_test_candidates` only ever
+    # probes `tests.test_<basename>`, which misses coverage filed under a
+    # differently-named test module or reached only via subprocess/dynamic
+    # load. Each entry below was verified by reading the referencing test
+    # file, not just grepping the filename (a plain grep for several of
+    # these names alone would have produced false positives from comment/
+    # docstring mentions or from the string, unrelated
+    # lib.beets_config_contract.check_beets_config function that
+    # scripts/check_beets_config.py itself imports and wraps).
+    "scripts/audit_issue_references.py": (
+        # tests.test_issue_reference_contract:10 --
+        # "from scripts.audit_issue_references import find_closing_issue_references"
+        "tests.test_issue_reference_contract",
+    ),
+    "scripts/check_beets_config.py": (
+        # tests.test_beets_config_contract_integration launches this file
+        # as a real subprocess (TestStandaloneBeetsConfigChecker._run,
+        # `subprocess.run([sys.executable, "scripts/check_beets_config.py",
+        # ...])`) and separately imports its CheckerResult wire type.
+        # tests.test_beets_config_startup_generated does the same real
+        # subprocess launch to assert redacted-secret behaviour on a load
+        # failure. Neither is the unrelated lib.beets_config_contract.
+        # check_beets_config function this script imports and wraps --
+        # that shared function's own ~90 call sites across
+        # test_beets_config_contract*.py and test_harness_beets2_contract.py
+        # exercise lib/beets_config_contract.py, not this file.
+        "tests.test_beets_config_contract_integration",
+        "tests.test_beets_config_startup_generated",
+    ),
+    "scripts/cratedigger_deploy_hold.py": (
+        # tests.test_deploy_hold: "import scripts.cratedigger_deploy_hold
+        # as deploy_hold_module" + a real-module import block.
+        # tests.test_deploy_hold_generated: "from scripts.cratedigger_
+        # deploy_hold import (...)".
+        "tests.test_deploy_hold",
+        "tests.test_deploy_hold_generated",
+    ),
+    "scripts/plex_dupes_audit.py": (
+        # tests.test_plex_dupes_scripts: "from scripts import
+        # plex_dupes_audit, plex_dupes_merge" plus real calls
+        # (plex_dupes_audit.fetch_children, ._parse_children_xml,
+        # ._load_albums) -- the one test module covering BOTH plex_dupes_
+        # scripts, contrary to this issue's own opening measurement, which
+        # assumed the plex_dupes_* pair was a genuine gap without reading
+        # this file first.
+        "tests.test_plex_dupes_scripts",
+    ),
+    "scripts/plex_dupes_merge.py": (
+        # Same tests.test_plex_dupes_scripts module -- real call:
+        # plex_dupes_merge.merge("1", ["2"], "merge-token").
+        "tests.test_plex_dupes_scripts",
+    ),
+    "scripts/refresh_beets_compat_releases.py": (
+        # Both test modules load this file via
+        # importlib.util.spec_from_file_location (not a dotted import --
+        # presumably because the module needs loading under two distinct
+        # synthetic names, "beets_compat_releases" and "beets_compat_
+        # releases_generated", for the deterministic/generated split) and
+        # execute it for real.
+        "tests.test_beets_compat_releases",
+        "tests.test_beets_compat_releases_generated",
+    ),
+    "scripts/run_fuzz_tests.py": (
+        # tests.test_fuzz_burst: "from scripts.run_fuzz_tests import
+        # (...)" plus RUNNER = .../run_fuzz_tests.py driving real
+        # subprocess bursts. tests.test_parallel_test_runner: "from
+        # scripts.run_fuzz_tests import (...)". tests.test_unused_import_
+        # audit.py and tests.test_hypothesis_profile_audit.py also mention
+        # this filename but only as a string/comment (a TID251 ruff-rule
+        # entry keyed by path, and prose citing where a real bug lived) --
+        # neither imports or executes the module, so neither is listed.
+        "tests.test_fuzz_burst",
+        "tests.test_parallel_test_runner",
+    ),
+    "scripts/run_library_completeness_census.py": (
+        # tests.test_library_completeness_snapshot: "from scripts import
+        # run_library_completeness_census as census" +
+        # "from scripts.run_library_completeness_census import
+        # publish_library_completeness_census" -- fault-injection
+        # confirmed (a runtime raise planted as the first statement of
+        # publish_library_completeness_census fails this module with 2
+        # errors). tests.test_beets_config_startup_entrypoints: real
+        # subprocess exec, "subprocess.run([sys.executable,
+        # 'scripts/run_library_completeness_census.py', ...])", but
+        # against a deliberately invalid config -- it proves the module's
+        # main()/config-load path fails closed before publish_library_
+        # completeness_census ever runs, so the SAME mutant above does
+        # NOT reach it (confirmed: 6/6 pass with the mutant live). Kept
+        # as a real, independent neighbour for the startup/config-load
+        # code this module owns, not because it kills every mutant in
+        # the census body.
+        "tests.test_library_completeness_snapshot",
+        "tests.test_beets_config_startup_entrypoints",
+    ),
+    "scripts/run_world_model_burst.py": (
+        # tests.test_world_model_coordinator: "from scripts.run_world_
+        # model_burst import (...)" including build_targets, called
+        # directly at 5 sites -- fault-injection confirmed (a runtime
+        # raise planted as the first statement of build_targets fails
+        # this module with 3 failures/5 errors). tests.test_ephemeral_pg
+        # only imports the IN_PROCESS_JOB_CAP constant, never a function
+        # -- confirmed it does NOT kill the same mutant (14/14 pass with
+        # the mutant live). Kept anyway: it is real, independent module-
+        # level-import coverage (an import-time break in this file would
+        # still fail it), just not of build_targets specifically.
+        # tests.test_world_model_burst.py, tests.test_negative_coverage_
+        # audit.py, and tests.test_fuzz_burst.py also mention this
+        # filename but only in a string literal/comment/docstring, never
+        # a real import, so none of the three is listed.
+        "tests.test_world_model_coordinator",
+        "tests.test_ephemeral_pg",
+    ),
+    "scripts/world_audit_debt_gate.py": (
+        # tests.test_world_audit_debt: "from scripts.world_audit_debt_
+        # gate import run".
+        "tests.test_world_audit_debt",
+    ),
+    # scripts/pipeline_cli/*.py: 19 of the 20 files in this package
+    # (everything except beets_distance.py, whose basename-derived
+    # candidate tests.test_beets_distance already exists) resolve zero
+    # neighbours -- _direct_test_candidates derives tests.test_<basename>
+    # from ONLY the basename, ignoring the pipeline_cli/ subdirectory
+    # component entirely, the same nested-lib/ shape lib/dispatch/core.py
+    # had under #1199. Of those 19, __main__.py is the one genuine gap
+    # (its own SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE entry, defined
+    # further down this file, has the rationale); the other 18 get real
+    # EXACT_PATH_NEIGHBOURS entries below.
+    # tests.test_pipeline_cli.py (8k+ lines) is this
+    # package's real, dedicated coverage: scripts/pipeline_cli/__init__.py
+    # re-exports every cmd_* handler, and tests.test_pipeline_cli.py does
+    # "from scripts import pipeline_cli" then calls
+    # pipeline_cli.cmd_<name>(db, args) directly -- the SAME function
+    # object the owning family module defines (Python re-export is a name
+    # binding, not a copy), so the call is real execution of that module's
+    # code. Verified by grep for a direct call to at least one cmd_*
+    # (or, for cli.py, pipeline_cli.main(...); for routes_meta.py,
+    # _build_parser()) owned by each module below, confirmed present in
+    # tests.test_pipeline_cli.py. _format.py has no direct call of its own
+    # -- its own docstring names it as shared helpers used by query, show,
+    # quality, search_plan, triage, replace, beets_distance, and long_tail,
+    # every one of which IS called directly above, so _format.py's code
+    # runs for real whenever any of those command tests run.
+    "scripts/pipeline_cli/__init__.py": (
+        "tests.test_pipeline_cli",
+    ),
+    "scripts/pipeline_cli/_format.py": (
+        "tests.test_pipeline_cli",
+    ),
+    "scripts/pipeline_cli/album_requests.py": (
+        "tests.test_pipeline_cli",
+    ),
+    "scripts/pipeline_cli/api_mutations.py": (
+        # api_mutations.py additionally has its own dedicated test
+        # modules: tests.test_pipeline_cli_api_mutations ("from
+        # scripts.pipeline_cli import api_mutations" + real
+        # cmd_merge_rekey/cmd_wrong_match_delete_group/... calls) and its
+        # generated sibling.
+        "tests.test_pipeline_cli",
+        "tests.test_pipeline_cli_api_mutations",
+        "tests.test_pipeline_cli_api_mutations_generated",
+    ),
+    "scripts/pipeline_cli/audit.py": (
+        "tests.test_pipeline_cli",
+    ),
+    "scripts/pipeline_cli/cli.py": (
+        "tests.test_pipeline_cli",
+        "tests.test_pipeline_cli_api_mutations",
+    ),
+    "scripts/pipeline_cli/destructive.py": (
+        "tests.test_pipeline_cli",
+    ),
+    "scripts/pipeline_cli/imports.py": (
+        "tests.test_pipeline_cli",
+        "tests.test_pipeline_cli_api_mutations",
+    ),
+    "scripts/pipeline_cli/long_tail.py": (
+        "tests.test_pipeline_cli",
+    ),
+    "scripts/pipeline_cli/quality.py": (
+        "tests.test_pipeline_cli",
+    ),
+    "scripts/pipeline_cli/query.py": (
+        "tests.test_pipeline_cli",
+    ),
+    "scripts/pipeline_cli/replace.py": (
+        "tests.test_pipeline_cli",
+    ),
+    "scripts/pipeline_cli/routes_meta.py": (
+        "tests.test_pipeline_cli",
+        "tests.test_pipeline_cli_api_mutations",
+    ),
+    "scripts/pipeline_cli/search_plan.py": (
+        "tests.test_pipeline_cli",
+    ),
+    "scripts/pipeline_cli/show.py": (
+        "tests.test_pipeline_cli",
+    ),
+    "scripts/pipeline_cli/triage.py": (
+        "tests.test_pipeline_cli",
+    ),
+    "scripts/pipeline_cli/wrong_match.py": (
+        "tests.test_pipeline_cli",
+        "tests.test_pipeline_cli_api_mutations",
+    ),
+    "scripts/pipeline_cli/youtube.py": (
+        "tests.test_pipeline_cli",
+        "tests.test_pipeline_cli_api_mutations",
+    ),
 }
 
 #: Shared tests/ modules with NO real consuming test today — an admitted,
@@ -743,6 +952,66 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
 }
 
 
+#: Changed `scripts/**/*.py` files whose full neighbour resolution
+#: (EXACT_PATH_NEIGHBOURS + prefix rules + direct candidates that actually
+#: exist) yields ZERO test modules -- the scripts/ twin of
+#: LIB_MODULES_WITHOUT_SELECTION_COVERAGE (issue #1248). `_direct_test_
+#: candidates` probes only `tests.test_<basename>` for a scripts/ path (no
+#: `_generated` sibling probe, unlike lib/), so a script whose real coverage
+#: lives under a differently-named test module, or whose basename collides
+#: with a sibling file in a subdirectory `_direct_test_candidates` cannot
+#: see (it ignores every path component except the basename), resolves zero
+#: neighbours from that mechanism alone. Mirrors the lib/ registry's
+#: non-early-return shape: `_changed_path_neighbours` does NOT return early
+#: for a path listed here -- the full resolution already ran, so a script
+#: that later gains a real EXACT_PATH_NEIGHBOURS entry, prefix rule, or
+#: `tests.test_<stem>` module selects it immediately with no code change
+#: here, and the stale registration is what `tests/test_scripts_selection_
+#: coverage_audit.py` then demands be deleted.
+#:
+#: Population is a fresh measurement (driving the real resolution function
+#: plus a grep-and-read pass over every candidate test file to confirm REAL
+#: import/exec, not a docstring or comment mention -- see that same file's
+#: audit test for the mechanical proof), never hand-curated. Of the 11
+#: top-level `scripts/*.py` files issue #1248 found resolving zero
+#: neighbours, measurement showed 10 have real test coverage reachable only
+#: through a missing EXACT_PATH_NEIGHBOURS entry (added below) -- only
+#: `bench_parallel_search.py` is a genuine gap. The same sweep found a
+#: second, undercounted cohort: 19 of 20 `scripts/pipeline_cli/*.py` files
+#: also resolve zero neighbours (`_direct_test_candidates` derives
+#: `tests.test_<basename>` from ONLY the basename, ignoring the
+#: `pipeline_cli/` subdirectory, exactly the nested-lib/ shape
+#: `lib/dispatch/core.py` had under #1199) despite the package having
+#: extensive real coverage in `tests/test_pipeline_cli.py` -- every command-
+#: family module is re-exported by `scripts/pipeline_cli/__init__.py` and
+#: called there as `pipeline_cli.cmd_<name>(...)`, the SAME function object
+#: the family module defines, so the call is real execution of that
+#: module's code, not a lookalike. `scripts/pipeline_cli/beets_distance.py`
+#: is the one file in that package whose basename-derived candidate
+#: (`tests.test_beets_distance`) already exists, so it needs no entry.
+#: `scripts/pipeline_cli/__main__.py` is a genuine gap: its own docstring
+#: states nothing does `import scripts.pipeline_cli.__main__` (running it
+#: as a script sets `sys.path[0]` to its own directory, the #445 hazard its
+#: bootstrap works around), so no dotted-import test module can drive it.
+SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
+    "scripts/bench_parallel_search.py": (
+        "measured 2026-08-22: zero neighbours -- tests.test_bench_parallel_"
+        "search does not exist; the only reference anywhere under tests/ is "
+        "a comment in tests/conftest.py naming it as the dev benchmarking "
+        "script an optional fallback exists for, not an import or exec "
+        "(issue #1248)"
+    ),
+    "scripts/pipeline_cli/__main__.py": (
+        "measured 2026-08-22: zero neighbours -- tests.test___main__ does "
+        "not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it; the "
+        "module's own docstring states nothing imports it under a dotted "
+        "name (script-mode-only entry shim, the #445 sys.path[0] hazard), "
+        "so no dotted-import test module can drive its bootstrap or its "
+        "delegation into scripts.pipeline_cli.cli.main (issue #1248)"
+    ),
+}
+
+
 def _assert_no_double_registration(
     exact_path_neighbours: Mapping[str, tuple[str, ...]],
     admitted_gap_registry: Mapping[str, str],
@@ -780,6 +1049,11 @@ _assert_no_double_registration(
     EXACT_PATH_NEIGHBOURS,
     LIB_MODULES_WITHOUT_SELECTION_COVERAGE,
     gap_registry_name="LIB_MODULES_WITHOUT_SELECTION_COVERAGE",
+)
+_assert_no_double_registration(
+    EXACT_PATH_NEIGHBOURS,
+    SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE,
+    gap_registry_name="SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE",
 )
 
 
@@ -970,6 +1244,26 @@ def _changed_path_neighbours(
             raise ValueError(
                 f"unmapped lib module: {relative_path} resolves zero test "
                 "neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
+                "prefix rule for it in scripts/targeted_test_selection.py"
+            )
+    if path.suffix == ".py" and path.parts[:1] == ("scripts",) and not neighbours:
+        # The scripts/ twin of the lib/ check above (issue #1248): a changed
+        # scripts/**/*.py file that resolves zero test neighbours
+        # under-selects silently unless it is an admitted, reviewed gap.
+        # Same non-early-return shape as the lib/ branch: selection proceeds
+        # (ambient gates still run) either way, only the stderr/raise
+        # differs.
+        if relative_path in SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE:
+            print(
+                "admitted selection gap: "
+                f"{relative_path} resolves zero test neighbours "
+                f"({SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE[relative_path]})",
+                file=sys.stderr,
+            )
+        else:
+            raise ValueError(
+                f"unmapped scripts module: {relative_path} resolves zero "
+                "test neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
                 "prefix rule for it in scripts/targeted_test_selection.py"
             )
     return tuple(neighbours)
