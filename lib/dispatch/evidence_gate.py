@@ -366,6 +366,7 @@ def _refresh_current_evidence_after_import(
     import_result: ImportResult | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
+    candidate_program_complete: bool | None = None,
 ) -> EvidenceBuildResult:
     """Persist current evidence for the just-imported Beets album.
 
@@ -388,6 +389,14 @@ def _refresh_current_evidence_after_import(
     ``beets_library_db_path`` selects an isolated real Beets database for
     world-model runs. Normal production callers omit it and retain the
     module-configured read-only library path.
+
+    ``candidate_program_complete`` is the caller's proof that this import's
+    candidate covered every declared release track (issue #1241). ``False``
+    — the force-import lane, which imports despite an invalid beets verdict
+    and can therefore install an ``extra_tracks`` folder — withholds the
+    verified-lossless proof from the new current row so an album that is
+    missing a declared component never enters the locked state. ``None``
+    (unknown) and ``True`` carry the proof exactly as before.
     """
 
     from lib.beets_db import (
@@ -453,6 +462,7 @@ def _refresh_current_evidence_after_import(
             request_id=request_id,
             candidate_evidence=source_candidate,
             album_info=album_info,
+            candidate_program_complete=candidate_program_complete,
         )
         return _exact_linked_refresh_result(
             db,

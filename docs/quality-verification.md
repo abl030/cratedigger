@@ -505,6 +505,93 @@ errors, dispatch records `have_analysis_error`. Both are environment failures,
 not quality verdicts: the request returns to ordinary wanted searching with no
 denylist or narrowing consequence. A later attempt measures again from scratch.
 
+## Installed completeness (issue #1241)
+
+`AlbumQualityEvidence.installed_completeness` records whether the INSTALLED
+copy holds every audio component its exact source release declares. It is
+measured at preview time by
+`lib/library_completeness.py::classify_installed_release` — the same
+classifier the daily census runs, with the boolean composite-silence-gap
+instrument deliberately NOT consulted, because `lib/composite_audio_gap.py`
+is never a decision by itself. `"unknown"` is the fail-safe value for every
+unreadable source, ambiguous identity or unavailable mirror; it behaves
+exactly as a never-measured row.
+
+It has two consumers, both of which read only a POSITIVE `"incomplete"`
+verdict:
+
+1. **The measured comparison.** `import_quality_decision` returns the
+   `installed_incomplete_hold` decision instead of `downgrade` /
+   `transcode_downgrade` when the comparison said `equivalent`, the installed
+   copy is positively incomplete, AND this attempt PROVED its candidate
+   covers the whole declared program
+   (`AlbumQualityEvidenceDecisionFacts.candidate_covers_declared_program`,
+   from beets' own `extra_tracks` check). Both conjuncts are required — one
+   incomplete copy must never "upgrade" another. `worse` stays blocked
+   regardless, exactly as it is under the verified-lossless bypass (issue
+   #60). The comparison basis keeps its honest `verdict` / `branch` and
+   records `installed_incomplete_hold=True` only when the hold CHANGED the
+   outcome.
+
+   **The "folder is kept" outcome is the CLEANUP REDUCER lane only.** In the
+   importer lane the hold's routing is byte-identical to the `downgrade` it
+   replaced — rejection recorded, peer denylisted, disposable staged source
+   cleaned, installed album kept, searching continues — so an auto-import
+   candidate that trips the hold is still deleted, exactly as before. That is
+   deliberate (`lib/quality/dispatch_actions.py` carries the reasoning:
+   preserving an importer-lane source would need a new
+   quality-reject-writes-`failed_path` quarantine lane that
+   `docs/rejection-routing.md` rules out), and it is the residual to widen
+   first if this cohort turns out to matter — the distinct decision string is
+   what makes it countable.
+
+2. **Granting the proof lock.** Completeness is a precondition on GRANTING a
+   current row the verified-lossless proof, at the two writers of that field
+   (`propagate_candidate_evidence_to_current` and
+   `backfill_current_evidence_from_album_info`). The lock's semantics are
+   unchanged and nothing is ever revoked. The candidate-side proof in
+   `evidence_from_import_result` is untouched: it describes the candidate's
+   own bytes, which beets already proved whole.
+
+### Named residuals — where a locked album can still be incomplete
+
+The precondition is a WRITE-time gate and #1241 writes no revocation, so it
+cannot make "no locked album is incomplete" true as a standing invariant.
+Three reachable cohorts keep exactly their pre-#1241 behaviour, and they are
+recorded here rather than papered over:
+
+- **Granted before the verdict existed.** `propagate_candidate_evidence_to_
+  current` mints the current row's proof at import time, when that brand-new
+  snapshot has no completeness verdict yet (the preview enrichment lane
+  measures it later). If the later measurement says `incomplete`, the proof
+  stays. Narrow in practice — the installed files ARE the candidate beets
+  just proved whole — but real when the source manifest later gains a
+  component.
+- **Carried across a snapshot change from a complete predecessor.**
+  `backfill_current_evidence_from_album_info` can only consult the PREVIOUS
+  snapshot's verdict. In the case it exists for — files removed or damaged —
+  the predecessor was `complete`, so the proof carries onto the damaged
+  snapshot and the new row is measured `incomplete` afterwards.
+- **Rows locked before this deploy.** Nothing walks them.
+
+For all three, `full_pipeline_decision_from_evidence`'s verified-lossless
+early return and `lib/wrong_match_cleanup_service.py`'s disk-loaded
+verified-lossless-parent short circuit both run BEFORE `installed_completeness`
+is consulted, so a complete candidate against such an album is still rejected
+(`verified_lossless_locked`) and, in the reducer, still deleted. Closing that
+would mean making the lock's READ side conditional on completeness, which is
+a separate deliberate decision about the archival ceiling and is out of scope
+here. The operator/agent escape hatch is unchanged: clear the stale proof on
+the one row, then let the next cycle re-decide.
+
+Live incident: request 1852, Dirt Dress *Theme Songs* (Discogs 4738671,
+download_log 40355). An installed AAC ~128 copy missing 700 s of declared
+program deleted the complete MP3 ~196 candidate that held it, on a truthful
+`equivalent` verdict. Pinned in
+`tests/test_quality_classification.py` (both twins),
+`tests/test_wrong_match_cleanup_service.py` and
+`tests/test_quality_generated.py`.
+
 ## Proof gate v3 — the ultrasonic deficit leg (issue #829 Phase 5 PR3)
 
 ### What `verified_lossless` claims

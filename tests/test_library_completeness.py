@@ -1,12 +1,17 @@
 """Pins for the independent source/catalog/files completeness classifier."""
 from __future__ import annotations
 
+import email.message
+import io
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import unittest
+import urllib.error
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 from mediafile.exceptions import UnreadableFileError
 
@@ -15,10 +20,14 @@ from lib.composite_audio_gap import CompositeAudioReadError
 from lib.library_completeness import (
     AudioTagReadError,
     CatalogItem,
+    CompletenessAlbum,
+    CompletenessFinding,
     LibraryAlbum,
     SourceManifest,
     SourceManifestError,
+    album_completeness_verdict,
     classify_album,
+    classify_installed_release,
     discogs_manifest,
     enumerate_audio_files,
     musicbrainz_manifest,
@@ -31,6 +40,7 @@ from lib.mb_canonical import (
     CanonicalReleaseRedirected,
     CanonicalReleaseUnavailable,
 )
+from lib.quality import InstalledCompleteness
 from lib.release_identity import ReleaseIdentity
 
 
@@ -1066,6 +1076,367 @@ class TestMusicBrainzRedirectProof(unittest.TestCase):
                 report = self._scan(proof)
                 self.assertEqual(report.counts.unknown, 1)
                 self.assertEqual(report.albums[0].findings[0].kind, "unknown")
+
+
+class TestAlbumCompletenessVerdict(unittest.TestCase):
+    """Issue #1241: one reduction, shared by the census and the decision."""
+
+    def _album(self, *kinds: str) -> CompletenessAlbum:
+        return CompletenessAlbum(
+            album_id=1, artist="Artist", title="Album", release_id="1",
+            findings=tuple(
+                CompletenessFinding(kind, f"{kind} detail")  # pyright: ignore[reportArgumentType]
+                for kind in kinds
+            ),
+            source_audio_components=1, physical_audio_files=1, catalog_items=1,
+        )
+
+    def test_no_findings_is_complete(self) -> None:
+        self.assertEqual(album_completeness_verdict(self._album()), "complete")
+
+    def test_catalog_drift_alone_is_still_complete(self) -> None:
+        """Drift is a bookkeeping mismatch, not a missing component: a
+        catalogued-but-absent path is already excluded from the satisfied
+        set, so a genuinely unsatisfied component lands in ``missing``."""
+        self.assertEqual(
+            album_completeness_verdict(self._album("catalog_drift")), "complete",
+        )
+
+    def test_missing_source_audio_is_incomplete(self) -> None:
+        self.assertEqual(
+            album_completeness_verdict(
+                self._album("missing_source_audio", "catalog_drift"),
+            ),
+            "incomplete",
+        )
+
+    def test_unknown_outranks_a_missing_accusation(self) -> None:
+        self.assertEqual(
+            album_completeness_verdict(
+                self._album("missing_source_audio", "unknown"),
+            ),
+            "unknown",
+        )
+
+
+class TestCompositeGapIsUnreachableOnTheDecisionPath(unittest.TestCase):
+    """Issue #1241: ``lib/composite_audio_gap.py`` is never a decision by
+    itself, so the gating caller cannot reach it in EITHER direction."""
+
+    def _grouped(self, release: str) -> tuple[LibraryAlbum, dict[str, tuple[str, str]]]:
+        path = "/album/composite.opus"
+        tags = {path: (f"{release}-7.1", "")}
+        album = LibraryAlbum(
+            1, "Artist", "Album", ReleaseIdentity("discogs", release), "/album",
+            (CatalogItem(path, tags[path][0], ""),),
+        )
+        return album, tags
+
+    def _classify(self, album, raw, tags, *, consult: bool, detector):
+        assert album.identity is not None
+        return {
+            finding.kind
+            for finding in classify_album(
+                album, discogs_manifest(album.identity.release_id, raw),
+                enumerate_files=lambda _directory: tuple(sorted(tags)),
+                tag_reader=lambda path: tags[path],
+                detect_composite_gap=detector,
+                consult_composite_audio_gap=consult,
+            ).findings
+        }
+
+    def test_an_accusing_instrument_is_silenced_and_never_called(self) -> None:
+        """Stellastarr* 521474 shape: with the instrument the census emits
+        ``missing_source_audio``; the decision path must emit nothing and
+        must not even decode the audio."""
+        release = "521474"
+        album, tags = self._grouped(release)
+        raw = _discogs_raw(["7.1", "7.2", "7.3"], release)
+        self.assertEqual(
+            self._classify(
+                album, raw, tags, consult=True, detector=lambda _path: False,
+            ),
+            {"missing_source_audio"},
+        )
+        self.assertEqual(
+            self._classify(
+                album, raw, tags,
+                consult=False, detector=_unexpected_gap_detector,
+            ),
+            set(),
+        )
+
+    def test_an_unreadable_instrument_cannot_publish_unknown_either(self) -> None:
+        release = "461206"
+        album, tags = self._grouped(release)
+        raw = _discogs_raw(["7.1", "7.2"], release)
+
+        def _raises(_path: str) -> bool:
+            raise CompositeAudioReadError("simulated ffmpeg failure")
+
+        self.assertEqual(
+            self._classify(album, raw, tags, consult=True, detector=_raises),
+            {"unknown"},
+        )
+        self.assertEqual(
+            self._classify(
+                album, raw, tags,
+                consult=False, detector=_unexpected_gap_detector,
+            ),
+            set(),
+        )
+
+    def test_the_dirt_dress_incident_is_unchanged_either_way(self) -> None:
+        """Request 1852 / Discogs 4738671 resolves at identity level, so the
+        flag costs the live incident nothing: 1B is missing with or without
+        the instrument."""
+        release = "4738671"
+        paths = {f"/album/{position}.opus": (f"{release}-{position}", "")
+                 for position in ("1A", "2A", "3A", "4A")}
+        album = LibraryAlbum(
+            1255, "Dirt Dress", "Theme Songs",
+            ReleaseIdentity("discogs", release), "/album",
+            tuple(CatalogItem(path, tag[0], "") for path, tag in paths.items()),
+        )
+        raw = _discogs_raw(["1A", "2A", "3A", "4A", "1B"], release)
+        for consult in (True, False):
+            with self.subTest(consult_composite_audio_gap=consult):
+                self.assertEqual(
+                    self._classify(
+                        album, raw, paths,
+                        consult=consult, detector=_unexpected_gap_detector,
+                    ),
+                    {"missing_source_audio"},
+                )
+
+
+class TestClassifyInstalledRelease(unittest.TestCase):
+    """Issue #1241: the single-album, decision-time measurement.
+
+    Every expected boundary failure resolves to ``unknown``, which is the
+    fail-safe value: it never holds a decision and never withholds a proof.
+    """
+
+    RELEASE = "4738671"
+
+    def _album(self) -> LibraryAlbum:
+        paths = {f"/album/{position}.opus": (f"{self.RELEASE}-{position}", "")
+                 for position in ("1A", "2A", "3A", "4A")}
+        return LibraryAlbum(
+            1255, "Dirt Dress", "Theme Songs",
+            ReleaseIdentity("discogs", self.RELEASE), "/album",
+            tuple(CatalogItem(path, tag[0], "") for path, tag in paths.items()),
+        )
+
+    def _beets(self, album: LibraryAlbum | None):
+        class OneAlbumBeets:
+            def library_completeness_album(
+                self, identity: ReleaseIdentity,
+            ) -> LibraryAlbum | None:
+                del identity
+                return album
+
+        return OneAlbumBeets()
+
+    def _classify(
+        self,
+        *,
+        fetch_discogs_raw: Callable[[str], dict[str, object]] | None = None,
+    ) -> InstalledCompleteness:
+        album = self._album()
+        paths = tuple(sorted(item.path for item in album.catalog_items))
+
+        def default_fetch(_release_id: str) -> dict[str, object]:
+            return _discogs_raw(["1A", "2A", "3A", "4A", "1B"], self.RELEASE)
+
+        return classify_installed_release(
+            ReleaseIdentity("discogs", self.RELEASE),
+            beets=self._beets(album),
+            fetch_musicbrainz_raw=lambda _release_id: {},
+            fetch_discogs_raw=fetch_discogs_raw or default_fetch,
+            enumerate_files=lambda _directory: paths,
+            tag_reader=lambda path: (path, ""),
+            now_fn=lambda: datetime(2026, 8, 22, tzinfo=UTC),
+        )
+
+    def test_the_live_incident_measures_incomplete_with_its_counts(self) -> None:
+        """Request 1852: 5 declared components, 4 installed audio files, the
+        missing one being ``4738671-1B`` (Peter and the Wolf)."""
+        result = self._classify()
+        self.assertEqual(result.verdict, "incomplete")
+        self.assertEqual(result.source, "discogs")
+        self.assertEqual(result.declared_audio_components, 5)
+        self.assertEqual(result.physical_audio_files, 4)
+        assert result.detail is not None
+        self.assertIn("missing_source_audio", result.detail)
+        self.assertEqual(result.validation_errors(), [])
+
+    def test_a_fully_installed_release_measures_complete(self) -> None:
+        result = self._classify(
+            fetch_discogs_raw=lambda _release_id: _discogs_raw(
+                ["1A", "2A", "3A", "4A"], self.RELEASE,
+            ),
+        )
+        self.assertEqual(result.verdict, "complete")
+        self.assertEqual(result.declared_audio_components, 4)
+        self.assertIsNone(result.detail)
+        self.assertEqual(result.validation_errors(), [])
+
+    def test_real_catalog_drift_measures_complete_and_never_holds(self) -> None:
+        """``catalog_drift`` is bookkeeping, not a missing component.
+
+        The drift world produced by the real classifier, not a hand-built
+        finding: the file on disk carries the declared component's identity
+        in ``mb_trackid`` while Beets has it catalogued nowhere. Every
+        declared component IS satisfied by real audio, so the album is
+        ``complete`` — treating drift as ``incomplete`` would hold and
+        un-lock a large, blameless slice of the library (the census counts
+        drift far more often than missing audio).
+
+        The finding is still reported in ``detail``, so an operator reading
+        the row sees the drift without the verdict accusing anything.
+        """
+        release = "4738671"
+        path = "/album/01.opus"
+        album = LibraryAlbum(
+            1255, "Dirt Dress", "Theme Songs",
+            ReleaseIdentity("discogs", release), "/album", (),
+        )
+
+        result = classify_installed_release(
+            ReleaseIdentity("discogs", release),
+            beets=self._beets(album),
+            fetch_musicbrainz_raw=lambda _release_id: {},
+            fetch_discogs_raw=lambda _release_id: _discogs_raw(
+                ["1A"], release),
+            enumerate_files=lambda _directory: (path,),
+            tag_reader=lambda _path: ("", f"{release}-1A"),
+            now_fn=lambda: datetime(2026, 8, 22, tzinfo=UTC),
+        )
+
+        self.assertEqual(result.verdict, "complete")
+        self.assertEqual(result.declared_audio_components, 1)
+        self.assertEqual(result.physical_audio_files, 1)
+        self.assertIn("catalog_drift", result.detail or "")
+        self.assertEqual(result.validation_errors(), [])
+
+    def test_absent_or_ambiguous_beets_identity_is_unknown(self) -> None:
+        result = classify_installed_release(
+            ReleaseIdentity("discogs", self.RELEASE),
+            beets=self._beets(None),
+            fetch_musicbrainz_raw=lambda _release_id: {},
+            fetch_discogs_raw=lambda _release_id: {},
+        )
+        self.assertEqual(result.verdict, "unknown")
+        self.assertIsNone(result.source)
+        self.assertIn("absent from Beets", result.detail or "")
+
+    def test_every_expected_source_failure_is_unknown(self) -> None:
+        for error in (
+            urllib.error.HTTPError(
+                "https://mirror.invalid/releases/1", 503, "down",
+                email.message.Message(), io.BytesIO(b""),
+            ),
+            urllib.error.URLError("no route"),
+            OSError("connection reset"),
+            json.JSONDecodeError("bad JSON", "not json", 0),
+            SourceManifestError("Discogs raw release identity is unavailable"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                def fetch(
+                    _release_id: str, exc: Exception = error,
+                ) -> dict[str, object]:
+                    raise exc
+
+                result = self._classify(fetch_discogs_raw=fetch)
+                self.assertEqual(result.verdict, "unknown")
+                self.assertIn("source unreadable", result.detail or "")
+                self.assertEqual(result.validation_errors(), [])
+
+    def test_an_unconfigured_discogs_mirror_is_unknown_not_a_crash(self) -> None:
+        """``web.discogs`` raises a bare RuntimeError subclass at URL
+        construction, which no expected-failure tuple would otherwise catch."""
+        from web.discogs import DiscogsMirrorNotConfigured
+
+        def fetch(_release_id: str) -> dict[str, object]:
+            raise DiscogsMirrorNotConfigured("no mirror")
+
+        result = self._classify(fetch_discogs_raw=fetch)
+        self.assertEqual(result.verdict, "unknown")
+        self.assertIn("mirror is not configured", result.detail or "")
+
+    def test_a_programmer_defect_still_propagates(self) -> None:
+        """Matching the census: only EXPECTED boundary failures become
+        ``unknown``; a real bug stays loud instead of being laundered into a
+        verdict that silently changes nothing."""
+        def fetch(_release_id: str) -> dict[str, object]:
+            raise ValueError("programmer defect")
+
+        with self.assertRaisesRegex(ValueError, "programmer defect"):
+            self._classify(fetch_discogs_raw=fetch)
+
+
+class TestScopedBeetsCompletenessAlbum(unittest.TestCase):
+    """Issue #1241: the scoped read shares the census's one decoder."""
+
+    def _library(
+        self, rows: list[tuple[int, str, object, int]],
+    ) -> tuple[str, str]:
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        root = os.path.join(tmpdir, "library")
+        os.mkdir(root)
+        db_path = os.path.join(tmpdir, "library.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+          CREATE TABLE albums (id INTEGER PRIMARY KEY, albumartist TEXT, album TEXT,
+            mb_albumid TEXT, discogs_albumid INTEGER);
+          CREATE TABLE items (id INTEGER PRIMARY KEY, album_id INTEGER, path BLOB,
+            mb_releasetrackid TEXT, mb_trackid TEXT, title TEXT, track INTEGER);
+        """)
+        for album_id, name, mb_albumid, discogs_albumid in rows:
+            album_dir = os.path.join(root, name)
+            os.mkdir(album_dir)
+            path = os.path.join(album_dir, "01.flac")
+            open(path, "wb").close()
+            conn.execute(
+                "INSERT INTO albums VALUES (?, 'Dirt Dress', ?, ?, ?)",
+                (album_id, name, mb_albumid, discogs_albumid),
+            )
+            conn.execute(
+                "INSERT INTO items VALUES (?, ?, ?, '', ?, '1A', 1)",
+                (album_id, album_id, path.encode(), f"{discogs_albumid}-1A"),
+            )
+        conn.commit()
+        conn.close()
+        return db_path, root
+
+    def test_scoped_read_matches_the_census_projection_exactly(self) -> None:
+        db_path, root = self._library([(1, "Theme Songs", None, 4738671)])
+        with BeetsDB(db_path, library_root=root) as beets:
+            scoped = beets.library_completeness_album(
+                ReleaseIdentity("discogs", "4738671"),
+            )
+            listed = beets.list_library_completeness_albums()
+        self.assertEqual(scoped, listed[0])
+
+    def test_absent_identity_is_none(self) -> None:
+        db_path, root = self._library([(1, "Theme Songs", None, 4738671)])
+        with BeetsDB(db_path, library_root=root) as beets:
+            self.assertIsNone(beets.library_completeness_album(
+                ReleaseIdentity("discogs", "999999"),
+            ))
+
+    def test_ambiguous_identity_is_none_never_a_guess(self) -> None:
+        db_path, root = self._library([
+            (1, "Theme Songs", None, 4738671),
+            (2, "Theme Songs (again)", None, 4738671),
+        ])
+        with BeetsDB(db_path, library_root=root) as beets:
+            self.assertEqual(len(beets.list_library_completeness_albums()), 2)
+            self.assertIsNone(beets.library_completeness_album(
+                ReleaseIdentity("discogs", "4738671"),
+            ))
 
 
 if __name__ == "__main__":

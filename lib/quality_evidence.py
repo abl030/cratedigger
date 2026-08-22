@@ -902,6 +902,15 @@ def evidence_from_import_result(
     cd_rip_verification = (
         measurement.cd_rip_verification if measurement is not None else None
     )
+    # Issue #1241 deliberately does NOT gate this proof on installed
+    # completeness. This is the CANDIDATE row: the proof describes the
+    # candidate's own bytes, and beets already proved a reviewed candidate
+    # covers the declared program (``extra_tracks`` hard-rejects otherwise).
+    # The installed-side precondition belongs at the two writers of a CURRENT
+    # row's proof — ``propagate_candidate_evidence_to_current`` and
+    # ``backfill_current_evidence_from_album_info`` — because
+    # ``full_pipeline_decision_from_evidence``'s lock reads
+    # ``current.verified_lossless_proof``, never this one.
     proof = (
         cd_rip_verification.verified_lossless_proof()
         if cd_rip_verification is not None
@@ -1477,6 +1486,7 @@ def propagate_candidate_evidence_to_current(
     candidate_evidence: AlbumQualityEvidence,
     album_info: AlbumInfo,
     measured_at: datetime | None = None,
+    candidate_program_complete: bool | None = None,
 ) -> EvidenceBuildResult:
     """Build new library-side evidence by propagating candidate measurement payload.
 
@@ -1498,7 +1508,16 @@ def propagate_candidate_evidence_to_current(
     * Source-subject spectral and V0 facts carry with provenance ``carried``.
     * Installed-subject facts are dropped and measured again on the installed
       snapshot by the ordinary enrichment path.
-    * Verified-lossless proof carries with provenance ``carried``.
+    * Verified-lossless proof carries with provenance ``carried``, EXCEPT
+      when ``candidate_program_complete is False`` (issue #1241). That is the
+      force-import hole: force imports despite an invalid beets verdict, so
+      an ``extra_tracks`` folder — one beets rejected precisely because it is
+      missing a declared track — can become the installed album. Minting a
+      permanent verified-lossless lock on a demonstrably incomplete album
+      would close the release at the archival ceiling forever. ``None``
+      (unknown) and ``True`` both carry, as before: the fail-safe direction
+      is that only a POSITIVE incompleteness withholds the proof. This is
+      forward-only — no existing row is ever rewritten or revoked.
     * The AAC frame lattice does NOT carry (issue #829 PR-A). It is a fact
       about the exact candidate bytes, and the library row is a different
       snapshot — usually the transcoded output, which carries the target
@@ -1582,7 +1601,12 @@ def propagate_candidate_evidence_to_current(
             candidate_evidence.verified_lossless_proof,
             provenance=EVIDENCE_PROVENANCE_CARRIED,
         )
-        if candidate_evidence.verified_lossless_proof is not None
+        if (
+            candidate_evidence.verified_lossless_proof is not None
+            # issue #1241 — completeness is a PRECONDITION on granting the
+            # lock. Only a positive False withholds; None (unknown) carries.
+            and candidate_program_complete is not False
+        )
         else None
     )
     carried_cd_rip = (
@@ -1590,7 +1614,14 @@ def propagate_candidate_evidence_to_current(
             candidate_evidence.cd_rip_verification,
             provenance=EVIDENCE_PROVENANCE_CARRIED,
         )
-        if candidate_evidence.cd_rip_verification is not None
+        if (
+            candidate_evidence.cd_rip_verification is not None
+            # The structured CD fact and its scalar proof are ONE pair
+            # (``cd_rip_proof_pair_validation_errors``): carrying the CD
+            # verification while withholding its proof is not a storable row.
+            # Withhold both together (issue #1241).
+            and candidate_program_complete is not False
+        )
         else None
     )
     measurement = AudioQualityMeasurement(
@@ -1710,6 +1741,7 @@ def backfill_current_evidence_from_album_info(
         # byte fingerprint happens to equal the requested album's snapshot.
         existing = None
     carried_cd_rip: CdRipBitVerification | None = None
+    carried_from_existing = False
     if (
         verified_lossless_proof is None
         and preserve_existing_verified_lossless_proof
@@ -1718,6 +1750,7 @@ def backfill_current_evidence_from_album_info(
         and existing.verified_lossless_proof.source
         and existing.verified_lossless_proof.classifier
     ):
+        carried_from_existing = True
         verified_lossless_proof = msgspec.structs.replace(
             existing.verified_lossless_proof,
             provenance=EVIDENCE_PROVENANCE_CARRIED,
@@ -1733,6 +1766,41 @@ def backfill_current_evidence_from_album_info(
         verified_lossless_proof=verified_lossless_proof,
         cd_rip_verification=carried_cd_rip,
     )
+    if (
+        # Issue #1241. This branch CARRIES a proof across an installed-
+        # snapshot change — files removed or damaged. An album the census
+        # classifier positively measured as missing a declared audio
+        # component must not carry its lock onto the NEW snapshot; the lock's
+        # semantics are unchanged, such an album simply never enters the
+        # locked state at the new address. ``unknown`` and never-measured
+        # both carry, as before — only a POSITIVE incomplete verdict
+        # withholds.
+        #
+        # Scoped to a CHANGED fingerprint on purpose. A rebuild at the SAME
+        # content address (``current_evidence_rebuild_reasons`` fires on an
+        # unchanged snapshot too) re-upserts the very row the proof already
+        # lives on, and the upsert's ``verified_lossless`` merge only
+        # preserves a stored proof that carries a ``cd_rip_verification`` —
+        # so withholding there would REVOKE a FLAC-source proof retroactively.
+        # #1241 is forward-only: nothing already granted is ever taken away.
+        carried_from_existing
+        and existing is not None
+        and existing.installed_completeness is not None
+        and existing.installed_completeness.verdict == "incomplete"
+        and result.evidence is not None
+        and result.evidence.snapshot_fingerprint != existing.snapshot_fingerprint
+    ):
+        withheld = msgspec.structs.replace(
+            result.evidence,
+            verified_lossless_proof=None,
+            # The structured CD fact and its scalar proof are ONE pair
+            # (``cd_rip_proof_pair_validation_errors``); withhold both.
+            cd_rip_verification=None,
+        )
+        errors = withheld.storage_validation_errors()
+        if errors:
+            return EvidenceBuildResult(None, "incomplete", "; ".join(errors))
+        result = EvidenceBuildResult(withheld, result.status, result.reason)
     if result.evidence is not None and existing is not None:
         existing_measurement = existing.measurement
         same_snapshot = (

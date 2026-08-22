@@ -40,6 +40,7 @@ from lib.util import observe_failed_path
 from lib.validation_envelope import (
     WrongMatchTriageAudit,
     decode_validation_envelope,
+    scenario_covers_declared_program,
 )
 from lib.wrong_matches import (
     WrongMatchSourceDB,
@@ -365,9 +366,8 @@ def _cleanup_wrong_match(
             reason="failed_path_missing_on_disk",
         )
     candidates = _path_candidates(*candidates, resolved_path)
-    source_dirs = tuple(
-        decode_validation_envelope(entry.get("validation_result")).source_dirs
-    )
+    envelope = decode_validation_envelope(entry.get("validation_result"))
+    source_dirs = tuple(envelope.source_dirs)
 
     active_jobs = _matching_active_jobs(
         db,
@@ -483,6 +483,19 @@ def _cleanup_wrong_match(
                 None,
             ),
             target_format=request.get("target_format"),
+            # Issue #1241. Of the four delete-eligible rejection scenarios
+            # (``lib/wrong_match_policy.py``), only ``high_distance`` reached
+            # ``apply_candidate_scenario``'s post-``extra_tracks`` branches,
+            # so only it PROVES this candidate covers the declared program.
+            # ``extra_tracks`` proves the opposite; ``mbid_not_found`` and
+            # ``no_choose_match`` never produced a checked candidate summary
+            # at all. Without this conjunct an incomplete candidate could
+            # "upgrade" an incomplete installed copy. Derived through the
+            # shared envelope predicate so a later force import of this very
+            # row reads the SAME bit off the SAME persisted scenario.
+            candidate_covers_declared_program=(
+                scenario_covers_declared_program(envelope.scenario)
+            ),
         ),
         cfg=getattr(runtime_cfg, "quality_ranks", None),
     )

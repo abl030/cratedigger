@@ -104,6 +104,32 @@ DISTANCE_KEY = "distance"
 SCENARIO_KEY = "scenario"
 WRONG_MATCH_TRIAGE_KEY = "wrong_match_triage"
 
+#: Beets scenarios that PROVE the attempt's candidate covered every declared
+#: release track (issue #1241). ``lib/beets.py::apply_candidate_scenario``
+#: assigns each of these only AFTER its ``len(candidate.extra_tracks) > 0``
+#: branch fell through, so reaching one of them IS beets' own coverage proof.
+#: ``extra_tracks`` proves the opposite; ``mbid_not_found`` /
+#: ``no_choose_match`` never produced a checked candidate summary at all.
+CANDIDATE_PROGRAM_COVERED_SCENARIOS: frozenset[str] = frozenset({
+    "strong_match",
+    "high_distance",
+    "unmapped_audio",
+})
+
+
+def scenario_covers_declared_program(scenario: str | None) -> bool:
+    """Whether a persisted beets scenario proves declared-program coverage.
+
+    The ONE derivation of
+    ``AlbumQualityEvidenceDecisionFacts.candidate_covers_declared_program``
+    from a stored envelope (issue #1241). Both lanes that judge the same
+    ``download_log`` row -- the Wrong Matches cleanup reducer and a force
+    import of that very row -- call this, so they cannot disagree about
+    whether beets proved the candidate whole. Unknown is ``False``: unproven
+    means the installed-incomplete hold never fires.
+    """
+    return scenario in CANDIDATE_PROGRAM_COVERED_SCENARIOS
+
 _TRIAGE_NESTED_STRUCT_FIELDS = {
     "candidate_measurement": AudioQualityMeasurement.__struct_fields__,
     "current_measurement": AudioQualityMeasurement.__struct_fields__,

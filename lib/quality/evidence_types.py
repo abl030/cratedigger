@@ -496,6 +496,65 @@ class VerifiedLosslessProof(
         return errors
 
 
+InstalledCompletenessVerdict = Literal["complete", "incomplete", "unknown"]
+"""Whether an installed copy holds every audio component its source declares.
+
+Defined here rather than in ``lib/library_completeness.py`` because the
+census classifier imports ``lib.quality`` (not the other way round), and
+one Literal must serve the measurement, the persisted row, and the
+decision (issue #1241).
+"""
+
+
+class InstalledCompleteness(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
+    """Whether the INSTALLED copy holds every audio component its exact
+    source release declares (issue #1241).
+
+    Measured by ``lib/library_completeness.py::classify_installed_release``,
+    which is the same classifier the daily census runs -- with the boolean
+    composite-silence-gap instrument deliberately NOT consulted
+    (``lib/composite_audio_gap.py`` is never a decision by itself, and its
+    known false-alarm direction accuses a segued recording that is
+    physically complete).
+
+    ``"unknown"`` is the fail-safe value for every unreadable source,
+    ambiguous identity, or unavailable mirror. It never holds a decision
+    and never withholds a proof; it behaves exactly as an unmeasured row.
+
+    Only ever written for a CURRENT (installed) evidence row. Candidate
+    rows leave it ``None``: beets' own ``extra_tracks`` reject
+    (``lib/beets.py::apply_candidate_scenario``) is the candidate side's
+    completeness authority, and it runs long before evidence exists.
+    """
+
+    verdict: InstalledCompletenessVerdict
+    source: Literal["musicbrainz", "discogs"] | None = None
+    declared_audio_components: int = 0
+    physical_audio_files: int = 0
+    detail: str | None = None
+    measured_at: datetime | None = None
+
+    def validation_errors(self) -> list[str]:
+        errors: list[str] = []
+        detail = (self.detail or "").strip()
+        if self.verdict in ("incomplete", "unknown") and not detail:
+            # A verdict that withholds or accuses must always name why; the
+            # operator reading the audit trail has nothing else to go on.
+            errors.append(
+                f"installed_completeness {self.verdict} requires a detail"
+            )
+        if self.verdict != "unknown" and self.source is None:
+            errors.append(
+                "installed_completeness complete/incomplete requires a "
+                "measured source"
+            )
+        if self.declared_audio_components < 0 or self.physical_audio_files < 0:
+            errors.append("installed_completeness counts must be >= 0")
+        return errors
+
+
 class CdTocIdentity(msgspec.Struct, frozen=True):
     """The exact CD-shaped source identity submitted to both providers."""
 
@@ -827,6 +886,12 @@ class AlbumQualityEvidence(
     # ``scored_tracks == 0`` means measured and nothing scored. No decision
     # reads it in PR-A.
     aac_lattice: AacLatticeCapture | None = None
+    # issue #1241. A CURRENT-row fact only: whether the installed copy holds
+    # every audio component its exact source release declares. Candidate rows
+    # leave it None -- beets' extra_tracks reject already proved a reviewed
+    # candidate covers the declared program. NULL/None means never measured,
+    # which reads as "unknown" and changes nothing.
+    installed_completeness: InstalledCompleteness | None = None
 
     def sorted_for_storage(self) -> "AlbumQualityEvidence":
         return AlbumQualityEvidence(
@@ -859,6 +924,7 @@ class AlbumQualityEvidence(
             matched_bad_audio_hash_id=self.matched_bad_audio_hash_id,
             matched_bad_audio_hash_path=self.matched_bad_audio_hash_path,
             aac_lattice=self.aac_lattice,
+            installed_completeness=self.installed_completeness,
         )
 
     def storage_validation_errors(self) -> list[str]:
@@ -967,6 +1033,8 @@ class AlbumQualityEvidence(
             errors.extend(self.verified_lossless_proof.validation_errors())
         if self.aac_lattice is not None:
             errors.extend(self.aac_lattice.validation_errors())
+        if self.installed_completeness is not None:
+            errors.extend(self.installed_completeness.validation_errors())
         return errors
 
     def policy_incomplete_reasons(self) -> list[str]:
@@ -1066,6 +1134,14 @@ class QualityComparisonBasis(
     spectral_clamped: bool = False
     tolerance_kbps: int | None = None
     verified_lossless_bypass: bool = False
+    #: True only when the installed-incomplete hold CHANGED the outcome: the
+    #: comparison genuinely said "equivalent" and the reject was withheld
+    #: because the installed copy is positively incomplete and this candidate
+    #: provably covers the declared program. Never merely because the
+    #: installed copy is incomplete. ``verdict``/``branch`` above stay the
+    #: honest record of what ``compare_quality()`` actually found, exactly as
+    #: they do for ``verified_lossless_bypass`` (issue #1241).
+    installed_incomplete_hold: bool = False
 
 
 COMPARISON_BASIS_BRANCHES: frozenset[str] = frozenset({

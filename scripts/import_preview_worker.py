@@ -2340,6 +2340,17 @@ def main() -> int:
     except StartupProbeError:
         return 1
 
+    # Issue #1241: this unit reads raw MusicBrainz/Discogs releases to measure
+    # installed completeness. Without the admitted runtime bases,
+    # ``web.discogs`` raises DiscogsMirrorNotConfigured at URL construction
+    # and MB fetches would fall back to public musicbrainz.org at 1 req/s.
+    # The census script and the web server already do exactly this.
+    from lib.mb_canonical import configure_canonical_release_lookup
+    from web.api_bases import configure_api_bases_from_runtime_config
+
+    configure_api_bases_from_runtime_config()
+    configure_canonical_release_lookup(admitted_config)
+
     worker_id = args.worker_id or f"{socket.gethostname()}:{os.getpid()}"
     db = PipelineDB(args.dsn)
     try:

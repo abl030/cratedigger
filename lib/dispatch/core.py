@@ -16,7 +16,7 @@ import subprocess as sp
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from lib import transitions
 from lib.dispatch.evidence_gate import (
@@ -75,6 +75,7 @@ from lib.processing_paths import (
     protected_staging_roots,
 )
 from lib.quality import (
+    DECISION_INSTALLED_INCOMPLETE_HOLD,
     AlbumQualityEvidence,
     AlbumQualityEvidenceDecisionFacts,
     DownloadInfo,
@@ -93,6 +94,10 @@ from lib.quality import (
 )
 from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
 from lib.terminal_outcomes import PendingImportTerminalOutcome
+from lib.validation_envelope import (
+    decode_validation_envelope,
+    scenario_covers_declared_program,
+)
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -102,6 +107,7 @@ if TYPE_CHECKING:
     )
     from lib.library_delete_notifiers import DeleteNotification
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
+    from lib.pipeline_db.rows import DownloadLogWithEvidenceRow
     from lib.quality import DuplicateRemoveCandidate, SpectralDetail
 
 logger = logging.getLogger("cratedigger")
@@ -282,7 +288,13 @@ def _resolve_rejection_override(
     """Resolve a post-rejection search override without failing dispatch."""
     current_override: str | None = None
     narrowed_override: str | None = None
-    if decision in {"downgrade", "transcode_downgrade"}:
+    # ``installed_incomplete_hold`` (issue #1241) narrows exactly like the
+    # ``downgrade`` it replaced — see ``resolve_rejection_search_override``.
+    if decision in {
+        "downgrade",
+        "transcode_downgrade",
+        DECISION_INSTALLED_INCOMPLETE_HOLD,
+    }:
         try:
             request = db.get_request(request_id)
             current_override = (
@@ -555,6 +567,79 @@ def _snapshot_current_album_directories(
         beets_library_db_path, library_root=beets_library_root,
     ) as beets_db:
         return beets_db.get_current_album_directories(mb_release_id)
+
+
+class _DownloadLogEntryReader(Protocol):
+    """The one read ``_attempt_beets_scenario`` needs.
+
+    Narrowed to a single method rather than the whole ``PipelineDB`` so the
+    precondition is directly testable and cannot reach anything else.
+    """
+
+    def get_download_log_entry(
+        self, log_id: int,
+    ) -> DownloadLogWithEvidenceRow | None: ...
+
+
+def _attempt_beets_scenario(
+    db: _DownloadLogEntryReader,
+    *,
+    scenario: str,
+    download_log_id: int | None,
+) -> str | None:
+    """The beets validation scenario THIS import attempt is acting on.
+
+    Issue #1241. Auto-import and local-import reach dispatch only through a
+    valid beets ``strong_match`` — that is what admitted them. A force import
+    acts on a row beets REJECTED (force ignores an invalid verdict,
+    ``docs/rejection-routing.md`` § force import), so its scenario has to be
+    read back off the linked ``download_log`` row. ``None`` means the
+    scenario is unknown: no linked row, or the row is gone.
+
+    Reading it back is what keeps the two lanes that judge the SAME row —
+    the Wrong Matches cleanup reducer and a later force import of that very
+    row — from deriving contradictory facts from it.
+    """
+    if scenario not in FORCE_IMPORT_SCENARIOS:
+        return "strong_match"
+    if download_log_id is None:
+        return None
+    entry = db.get_download_log_entry(download_log_id)
+    if entry is None:
+        return None
+    return decode_validation_envelope(entry.get("validation_result")).scenario
+
+
+def _candidate_program_complete(attempt_scenario: str | None) -> bool | None:
+    """Whether this attempt's candidate covers every declared release track.
+
+    Issue #1241: the precondition on GRANTING a current row the
+    verified-lossless proof lock. Tri-state, and the tri-state is the point —
+    only a POSITIVE ``False`` withholds a proof, exactly as only a positive
+    ``incomplete`` completeness verdict holds a decision:
+
+    * ``True``  — beets positively proved coverage
+      (``scenario_covers_declared_program``): every auto/local import, plus a
+      force import of a ``high_distance`` / ``unmapped_audio`` row.
+    * ``False`` — a force import of a row beets rejected as ``extra_tracks``,
+      i.e. beets positively proved the candidate is MISSING a declared
+      track. That folder really can become the installed album, and minting
+      a permanent archival-ceiling lock on it would close the release
+      forever.
+    * ``None``  — unproven either way (``mbid_not_found``,
+      ``no_choose_match``, no linked row). The proof carries exactly as it
+      did before #1241, so the "proof lock is absolute for every import
+      mode" invariant (issue #711) is untouched.
+
+    Note this is NOT the same bit as
+    ``AlbumQualityEvidenceDecisionFacts.candidate_covers_declared_program``,
+    which needs proof of COMPLETENESS to fire the hold. Here the burden runs
+    the other way: proof of INcompleteness to withhold a lock. Both are
+    derived from the one ``attempt_scenario`` above.
+    """
+    if attempt_scenario == "extra_tracks":
+        return False
+    return True if scenario_covers_declared_program(attempt_scenario) else None
 
 
 def _capture_album_directory_snapshot(
@@ -1251,6 +1336,14 @@ def dispatch_import_core(
                     reason=reason or "missing",
                     expected_execution_lease=active_execution_lease,
                 )
+            # Issue #1241: read ONCE, feed both #1241 facts. The decision
+            # conjunct needs positive proof of COVERAGE; the proof-lock
+            # precondition needs positive proof of INcompleteness.
+            attempt_beets_scenario = _attempt_beets_scenario(
+                db,
+                scenario=scenario,
+                download_log_id=candidate_download_log_id,
+            )
             if evidence_gate.candidate is not None:
                 # U11: ``full_pipeline_decision_from_evidence`` is the single
                 # decision function. Folder/audio-integrity facts
@@ -1263,6 +1356,19 @@ def dispatch_import_core(
                 facts = AlbumQualityEvidenceDecisionFacts(
                     verified_lossless_target=verified_lossless_target or None,
                     target_format=target_format,
+                    # Issue #1241. Derived from the attempt's own beets
+                    # scenario through the shared envelope predicate, so a
+                    # force import of a Wrong Matches row reads the SAME bit
+                    # the cleanup reducer read off that row. Auto/local
+                    # import is ``strong_match`` by admission; a force import
+                    # of an ``extra_tracks`` / ``mbid_not_found`` /
+                    # ``no_choose_match`` row is unproven and never fires the
+                    # hold.
+                    candidate_covers_declared_program=(
+                        scenario_covers_declared_program(
+                            attempt_beets_scenario
+                        )
+                    ),
                 )
                 evidence_decision = full_pipeline_decision_from_evidence(
                     evidence_gate.candidate,
@@ -1530,6 +1636,14 @@ def dispatch_import_core(
                             import_result=ir,
                             beets_library_db_path=effective_beets_library_db_path,
                             beets_library_root=effective_beets_library_root,
+                            # Issue #1241 — see ``_candidate_program_complete``
+                            # for why this is tri-state and NOT the same bit
+                            # as the decision facts' conjunct above.
+                            candidate_program_complete=(
+                                _candidate_program_complete(
+                                    attempt_beets_scenario
+                                )
+                            ),
                         )
                     except ExecutionCancelled:
                         raise

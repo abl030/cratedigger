@@ -522,6 +522,14 @@ def decide_row(
         _evidence_from_corpus_row(current) if current is not None else None
     )
     fields: dict[str, object] = {}
+    # Issue #1241. ``candidate_covers_declared_program`` is DELIBERATELY left
+    # at its default False, and deliberately not spelled: this script is
+    # copied verbatim into historical checkouts by
+    # ``tests/test_decision_corpus_export.py`` and must stay runnable against
+    # a ``lib/`` that has never heard of the field. The default is also the
+    # right value — an exported corpus row does not carry the attempt's beets
+    # scenario, so this what-if replay cannot PROVE the candidate covered the
+    # declared program, and unproven means the hold never fires.
     facts = AlbumQualityEvidenceDecisionFacts(
         verified_lossless_target=verified_lossless_target,
     )
@@ -684,6 +692,19 @@ class DecisionCorpusAacLatticeTrackWire(
     error: str | None
 
 
+class DecisionCorpusInstalledCompletenessWire(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
+    """Exact JSON shape of the persisted installed-completeness verdict."""
+
+    verdict: Literal["complete", "incomplete", "unknown"]
+    source: Literal["musicbrainz", "discogs"] | None
+    declared_audio_components: int
+    physical_audio_files: int
+    detail: str | None
+    measured_at: str | None
+
+
 class DecisionCorpusCdTocWire(
     msgspec.Struct, frozen=True, forbid_unknown_fields=True
 ):
@@ -800,6 +821,7 @@ class DecisionCorpusEvidenceWire(
     aac_lattice_modal_count: int | None
     aac_lattice_scored_tracks: int | None
     aac_lattice_max_z: float | None
+    installed_completeness: DecisionCorpusInstalledCompletenessWire | None
     files: list[DecisionCorpusEvidenceFileWire]
 
 
@@ -1298,7 +1320,8 @@ _DECISION_CORPUS_EVIDENCE_SQL = (
     "e.audio_file_count, e.filetype_band, e.matched_bad_audio_hash_id, "
     "e.matched_bad_audio_hash_path, e.aac_lattice_tracks, "
     "e.aac_lattice_modal_offset, e.aac_lattice_modal_count, "
-    "e.aac_lattice_scored_tracks, e.aac_lattice_max_z"
+    "e.aac_lattice_scored_tracks, e.aac_lattice_max_z, "
+    "e.installed_completeness"
 )
 
 
@@ -1492,6 +1515,7 @@ _EVIDENCE_SCHEMA_TYPES: dict[str, tuple[str, bool]] = {
     "aac_lattice_modal_count": ("integer", True),
     "aac_lattice_scored_tracks": ("integer", True),
     "aac_lattice_max_z": ("double precision", True),
+    "installed_completeness": ("jsonb", True),
 }
 _FILE_SCHEMA_TYPES: dict[str, tuple[str, bool]] = {
     # Join/filter/order dependencies are part of the authoritative export

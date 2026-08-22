@@ -15,6 +15,7 @@ import urllib.error
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal, Protocol
 
 import msgspec
@@ -25,7 +26,11 @@ from lib.composite_audio_gap import (
     detect_composite_silence_gap,
 )
 from lib.mb_canonical import CanonicalReleaseRedirected, TaggedCanonicalReleaseFn
-from lib.quality import AUDIO_EXTENSIONS_DOTTED
+from lib.quality import (
+    AUDIO_EXTENSIONS_DOTTED,
+    InstalledCompleteness,
+    InstalledCompletenessVerdict,
+)
 from lib.release_identity import ReleaseIdentity
 
 SourceKind = Literal["audio", "non_audio"]
@@ -38,6 +43,16 @@ class SourceManifestError(ValueError):
 
 class AudioTagReadError(RuntimeError):
     """Expected corrupt/unreadable audio-tag boundary failure."""
+
+
+# The expected boundary failures of reading one exact raw source release.
+# Anything else is a programmer defect and stays loud (the census's
+# ``test_unexpected_source_value_error_propagates`` pins that).
+SOURCE_READ_FAILURES: tuple[type[BaseException], ...] = (
+    urllib.error.HTTPError, urllib.error.URLError, OSError,
+    json.JSONDecodeError, UnicodeDecodeError, SourceManifestError,
+    msgspec.ValidationError,
+)
 
 
 class SourceComponent(msgspec.Struct, frozen=True):
@@ -119,6 +134,19 @@ class LibraryAlbum:
 
 class CompletenessBeets(Protocol):
     def list_library_completeness_albums(self) -> list[LibraryAlbum]: ...
+
+
+class SingleAlbumCompletenessBeets(Protocol):
+    """The scoped Beets read one decision-time measurement needs (#1241).
+
+    ``None`` covers BOTH absent and ambiguous (more than one album row
+    matching the exact identity) -- neither may be guessed at, and both
+    resolve to an ``unknown`` verdict that changes nothing.
+    """
+
+    def library_completeness_album(
+        self, identity: ReleaseIdentity,
+    ) -> LibraryAlbum | None: ...
 
 
 def _raw_list(value: object, detail: str) -> list[object]:
@@ -481,6 +509,7 @@ def classify_album(
     *, enumerate_files: Callable[[str], tuple[str, ...]] = enumerate_audio_files,
     tag_reader: Callable[[str], tuple[str, str]] = read_audio_tag_identities,
     detect_composite_gap: Callable[[str], bool] = detect_composite_silence_gap,
+    consult_composite_audio_gap: bool = True,
 ) -> CompletenessAlbum:
     """Classify one album with independent source/catalog/filesystem evidence.
 
@@ -494,6 +523,15 @@ def classify_album(
     itself whether the file plausibly covers the whole declared program.
     Only ever called for such a component -- an ordinary or genuinely
     absent component never reaches it.
+
+    ``consult_composite_audio_gap=False`` removes that instrument from the
+    run entirely, so a coalesced group is judged on identity alone (issue
+    #1241). ``lib/composite_audio_gap.py`` is documented "never a decision
+    by itself" and has a known false-alarm direction -- a segued/medley
+    recording holding everything reads as missing -- so the decision-time
+    caller must not be able to reach it, in EITHER direction: it can
+    neither accuse nor emit its own ``unknown``. The census keeps the
+    default ``True``.
     """
     findings: list[CompletenessFinding] = []
     if album.identity is None or album.identity.release_id != manifest.release_id:
@@ -620,6 +658,12 @@ def classify_album(
         existing_source_keys = {item.source_key for item in existing_catalog}
         for component in audio:
             if len(component.sub_component_titles) < 2:
+                continue
+            if not consult_composite_audio_gap:
+                # Issue #1241: the gating caller judges a coalesced group on
+                # identity alone. Skipping here (rather than injecting a
+                # constant answer) means the boolean silence instrument
+                # neither accuses nor emits its own "unknown" on that path.
                 continue
             if component.key not in known_component_keys:
                 continue
@@ -779,6 +823,117 @@ def _unknown(album: LibraryAlbum, manifest: SourceManifest, detail: str) -> Comp
                              len(album.catalog_items))
 
 
+def album_completeness_verdict(
+    album: CompletenessAlbum,
+) -> InstalledCompletenessVerdict:
+    """Reduce one album's nonexclusive findings to a single verdict.
+
+    Priority is ``unknown`` > missing > complete: any uncertainty outranks an
+    accusation, and an accusation outranks silence. ``catalog_drift`` is
+    deliberately NOT an incomplete signal -- ``classify_album`` already
+    excludes a catalogued-but-absent path from ``existing_catalog``, so a
+    genuinely unsatisfied component falls into ``missing`` on its own.
+
+    Extracted from ``scan_library_completeness``'s aggregation so the census
+    and the decision path (issue #1241) cannot drift apart on what
+    "complete" means.
+    """
+    kinds = {finding.kind for finding in album.findings}
+    if "unknown" in kinds:
+        return "unknown"
+    if "missing_source_audio" in kinds:
+        return "incomplete"
+    return "complete"
+
+
+def classify_installed_release(
+    identity: ReleaseIdentity,
+    *,
+    beets: SingleAlbumCompletenessBeets,
+    fetch_musicbrainz_raw: Callable[[str], dict[str, object]],
+    fetch_discogs_raw: Callable[[str], dict[str, object]],
+    enumerate_files: Callable[[str], tuple[str, ...]] = enumerate_audio_files,
+    tag_reader: Callable[[str], tuple[str, str]] = read_audio_tag_identities,
+    resolve_musicbrainz_redirect: TaggedCanonicalReleaseFn | None = None,
+    now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> InstalledCompleteness:
+    """Measure ONE installed release's completeness for a live decision (#1241).
+
+    The single-album counterpart of :func:`scan_library_completeness`, sharing
+    its exact classifier, manifest builders and verdict reduction -- there is
+    no second definition of "complete" anywhere. Two deliberate differences:
+
+    * the boolean composite-silence-gap instrument is never consulted
+      (``consult_composite_audio_gap=False``), because it is "never a
+      decision by itself"; and
+    * every expected boundary failure resolves to ``verdict="unknown"``
+      with the reason in ``detail`` instead of being aggregated away.
+
+    ``unknown`` is the fail-safe: it never holds a decision and never
+    withholds a proof, so an unreachable mirror or an ambiguous library row
+    leaves behaviour exactly as it is today. Programmer defects still
+    propagate, matching the census.
+
+    This never consults the daily census snapshot; it measures the one album
+    under decision, now.
+    """
+    from web.discogs import DiscogsMirrorNotConfigured
+
+    measured_at = now_fn()
+
+    def unknown(detail: str) -> InstalledCompleteness:
+        return InstalledCompleteness(
+            verdict="unknown", detail=detail, measured_at=measured_at,
+        )
+
+    try:
+        album = beets.library_completeness_album(identity)
+    except Exception as exc:
+        category = beets_authority_availability_category(exc)
+        if category is None:
+            raise
+        return unknown(f"Beets library unavailable: {category}")
+    if album is None:
+        return unknown(
+            "installed release is absent from Beets or names more than one "
+            "album row"
+        )
+    try:
+        if identity.source == "musicbrainz":
+            manifest = musicbrainz_manifest(
+                identity.release_id,
+                fetch_musicbrainz_raw(identity.release_id),
+                resolve_redirect=resolve_musicbrainz_redirect,
+            )
+        else:
+            manifest = discogs_manifest(
+                identity.release_id, fetch_discogs_raw(identity.release_id),
+            )
+        classified = classify_album(
+            album, manifest,
+            enumerate_files=enumerate_files, tag_reader=tag_reader,
+            consult_composite_audio_gap=False,
+        )
+    except DiscogsMirrorNotConfigured as exc:
+        # web.discogs raises a bare RuntimeError subclass at URL-construction
+        # time, which no expected-failure tuple below would catch.
+        return unknown(f"Discogs mirror is not configured: {exc}")
+    except SOURCE_READ_FAILURES as exc:
+        return unknown(f"source unreadable: {exc}")
+    return InstalledCompleteness(
+        verdict=album_completeness_verdict(classified),
+        source=identity.source,
+        declared_audio_components=classified.source_audio_components,
+        physical_audio_files=classified.physical_audio_files,
+        detail="; ".join(
+            f"{finding.kind}: {finding.detail}" if finding.detail
+            else finding.kind
+            for finding in classified.findings
+        ) or None,
+        measured_at=measured_at,
+    )
+
+
 def scan_library_completeness(
     beets: CompletenessBeets,
     *, fetch_musicbrainz_raw: Callable[[str], dict[str, object]],
@@ -817,9 +972,7 @@ def scan_library_completeness(
                 album, manifest, enumerate_files=enumerate_files, tag_reader=tag_reader,
                 detect_composite_gap=detect_composite_gap,
             )
-        except (urllib.error.HTTPError, urllib.error.URLError, OSError,
-                json.JSONDecodeError, UnicodeDecodeError, SourceManifestError,
-                msgspec.ValidationError) as exc:
+        except SOURCE_READ_FAILURES as exc:
             return _unknown(album, SourceManifest(album.identity.source, album.identity.release_id, ()), f"source unreadable: {exc}")
 
     # ``map`` yields input order despite concurrent fetching. Web clients
@@ -831,11 +984,13 @@ def scan_library_completeness(
     complete = missing = drift = unknown = 0
     for result in results:
         kinds = {finding.kind for finding in result.findings}
+        # The three flag counters are deliberately NONEXCLUSIVE (an album can
+        # be both unknown and drifted); only the "clean" arm is the single
+        # priority reduction, which is shared with the decision path.
         missing += "missing_source_audio" in kinds
         drift += "catalog_drift" in kinds
         unknown += "unknown" in kinds
-        if not {"missing_source_audio", "unknown"} & kinds:
-            complete += 1
+        complete += album_completeness_verdict(result) == "complete"
         if result.findings:
             listed.append(result)
     status: CompletenessStatus = "unknown" if unknown else "incomplete" if missing else "complete"

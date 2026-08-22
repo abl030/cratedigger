@@ -40,6 +40,7 @@ from lib.quality import (
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     ImportResult,
+    InstalledCompleteness,
     MeasuredImportDecisionInput,
     QualityRankConfig,
     SpectralAnalysisDetail,
@@ -210,6 +211,12 @@ def assert_enrichment_plan_never_remeasures(evidence, plan) -> None:
         raise AssertionError(
             "enrichment plan re-researches V0 evidence that already exists"
         )
+    if plan.completeness and evidence.installed_completeness is not None:
+        # Issue #1241: a stored verdict of ANY value -- ``unknown``
+        # included -- means the measurement already ran on these exact bytes.
+        raise AssertionError(
+            "enrichment plan re-measures completeness that already exists"
+        )
 
 
 def assert_failure_enrichment_matches_library_membership(
@@ -336,14 +343,27 @@ class TestQualityLineagePins(unittest.TestCase):
         graded = make_album_quality_evidence()  # default: genuine spectral
         with self.assertRaisesRegex(AssertionError, "spectral"):
             assert_enrichment_plan_never_remeasures(
-                graded, EnrichmentPlan(spectral=True, v0=False),
+                graded,
+                EnrichmentPlan(spectral=True, v0=False, completeness=False),
             )
         attempted = make_album_quality_evidence(
             on_disk_v0_research_attempted=True,
         )
         with self.assertRaisesRegex(AssertionError, "V0"):
             assert_enrichment_plan_never_remeasures(
-                attempted, EnrichmentPlan(spectral=False, v0=True),
+                attempted,
+                EnrichmentPlan(spectral=False, v0=True, completeness=False),
+            )
+        measured = make_album_quality_evidence(
+            installed_completeness=InstalledCompleteness(
+                verdict="unknown",
+                detail="Discogs mirror is not configured",
+            ),
+        )
+        with self.assertRaisesRegex(AssertionError, "completeness"):
+            assert_enrichment_plan_never_remeasures(
+                measured,
+                EnrichmentPlan(spectral=False, v0=False, completeness=True),
             )
 
     def test_failure_enrichment_checker_rejects_unlinked_installed_release(self):
@@ -411,15 +431,46 @@ class TestQualityLineagePins(unittest.TestCase):
         ),
         v0_present=st.booleans(),
         v0_attempted=st.booleans(),
+        # Issue #1241. Without this axis the completeness clause of
+        # ``assert_enrichment_plan_never_remeasures`` is unfalsifiable: every
+        # generated world left ``installed_completeness`` at None, so the
+        # clause's condition could never be true (code-quality.md Q2).
+        completeness_verdict=st.one_of(
+            st.none(),
+            st.sampled_from(("complete", "incomplete", "unknown")),
+        ),
     )
     @example(grade=None, spectral_bitrate=None,
-             v0_present=False, v0_attempted=False)
+             v0_present=False, v0_attempted=False,
+             completeness_verdict=None)
     @example(grade="genuine", spectral_bitrate=None,
-             v0_present=False, v0_attempted=True)
+             v0_present=False, v0_attempted=True,
+             completeness_verdict=None)
+    @example(grade="genuine", spectral_bitrate=None,
+             v0_present=True, v0_attempted=True,
+             completeness_verdict="unknown")
+    @example(grade="genuine", spectral_bitrate=None,
+             v0_present=True, v0_attempted=True,
+             completeness_verdict="incomplete")
     def test_generated_enrichment_plan_measures_exactly_the_missing_pieces(
         self, grade, spectral_bitrate, v0_present, v0_attempted,
+        completeness_verdict,
     ):
         evidence = make_album_quality_evidence(
+            installed_completeness=(
+                None
+                if completeness_verdict is None
+                else InstalledCompleteness(
+                    verdict=completeness_verdict,
+                    # Both accusing verdicts must name a reason
+                    # (``InstalledCompleteness.validation_errors``).
+                    detail=(
+                        None
+                        if completeness_verdict == "complete"
+                        else f"generated {completeness_verdict} world"
+                    ),
+                )
+            ),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=320,
                 avg_bitrate_kbps=320,
@@ -447,6 +498,8 @@ class TestQualityLineagePins(unittest.TestCase):
             grade is None,
         )
         self.assertEqual(plan.v0, not v0_present and not v0_attempted)
+        # Issue #1241: once per content snapshot, whatever the verdict said.
+        self.assertEqual(plan.completeness, completeness_verdict is None)
 
     @given(
         album_present=st.booleans(),

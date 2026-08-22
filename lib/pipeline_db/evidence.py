@@ -25,6 +25,7 @@ from lib.quality import (
     CodecFamily,
     EvidenceProvenance,
     EvidenceSubject,
+    InstalledCompleteness,
     VerifiedLosslessProof,
     cd_rip_proof_pair_validation_errors,
 )
@@ -113,6 +114,7 @@ class PersistedAlbumQualityEvidenceRow(
     aac_lattice_modal_count: int | None
     aac_lattice_scored_tracks: int | None
     aac_lattice_max_z: float | None
+    installed_completeness: InstalledCompleteness | None
 
 
 EVIDENCE_PROJECTION_COLUMNS: tuple[str, ...] = (
@@ -141,7 +143,7 @@ _EVIDENCE_PROJECTION_SQL = (
     "folder_layout, audio_file_count, filetype_band, "
     "matched_bad_audio_hash_id, matched_bad_audio_hash_path, "
     "aac_lattice_tracks, aac_lattice_modal_offset, aac_lattice_modal_count, "
-    "aac_lattice_scored_tracks, aac_lattice_max_z"
+    "aac_lattice_scored_tracks, aac_lattice_max_z, installed_completeness"
 )
 
 
@@ -227,6 +229,10 @@ class _EvidenceMixin(_PipelineDBBase):
         cd_rip_verification_json = (
             msgspec.json.encode(evidence.cd_rip_verification).decode()
             if evidence.cd_rip_verification is not None else None
+        )
+        installed_completeness_json = (
+            msgspec.json.encode(evidence.installed_completeness).decode()
+            if evidence.installed_completeness is not None else None
         )
         preserve_existing_audio_validation = evidence.audio_validation.outcome in {
             "legacy_unrecorded",
@@ -355,6 +361,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     aac_lattice_tracks, aac_lattice_modal_offset,
                     aac_lattice_modal_count, aac_lattice_scored_tracks,
                     aac_lattice_max_z,
+                    installed_completeness,
                     updated_at
                 )
                 VALUES (
@@ -371,6 +378,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     %s, -- positive CD rip bit verification
                     %s, %s, %s, %s, %s, %s, %s, %s, -- preview facts
                     %s, %s, %s, %s, %s, -- AAC lattice capture (issue #829 PR-A)
+                    %s, -- installed completeness (issue #1241)
                     NOW()
                 )
                 ON CONFLICT (mb_release_id, snapshot_fingerprint)
@@ -779,6 +787,16 @@ class _EvidenceMixin(_PipelineDBBase):
                         WHEN EXCLUDED.aac_lattice_tracks IS NOT NULL
                         THEN EXCLUDED.aac_lattice_max_z
                         ELSE album_quality_evidence.aac_lattice_max_z END,
+                    -- issue #1241: an ordinary evidence rebuild at the same
+                    -- content address carries no completeness verdict (only
+                    -- the preview enrichment lane measures one), so a NULL
+                    -- writer must never erase what was already measured on
+                    -- these exact bytes. A writer that DOES carry a verdict
+                    -- has just measured it and wins.
+                    installed_completeness = COALESCE(
+                        EXCLUDED.installed_completeness,
+                        album_quality_evidence.installed_completeness
+                    ),
                     updated_at = NOW()
                 RETURNING id, %s::boolean AS preserve_existing_audio_validation
             ),
@@ -889,6 +907,7 @@ class _EvidenceMixin(_PipelineDBBase):
                 lattice.modal_count if lattice is not None else None,
                 lattice.scored_tracks if lattice is not None else None,
                 lattice.max_z if lattice is not None else None,
+                installed_completeness_json,
                 incoming_preserves_source_spectral,
                 incoming_preserves_source_spectral,
                 incoming_preserves_source_spectral,
@@ -1071,6 +1090,58 @@ class _EvidenceMixin(_PipelineDBBase):
                 codec_family,
                 ultrasonic_deficit_db,
                 spectral_measurement_version,
+                int(request_id),
+                int(expected_evidence_id),
+                expected_snapshot_fingerprint,
+            ),
+        )
+        persisted = cur.fetchone() is not None
+        self.conn.commit()
+        return persisted
+
+    def persist_current_installed_completeness(
+        self,
+        *,
+        request_id: int,
+        expected_evidence_id: int,
+        expected_snapshot_fingerprint: str,
+        completeness: InstalledCompleteness,
+    ) -> bool:
+        """Persist a fresh installed-completeness verdict on one exact snapshot.
+
+        Issue #1241. Fresh-measurement-wins, exactly like
+        :meth:`persist_current_spectral_measurement`: the caller only reaches
+        here having just classified the exact matched-fingerprint installed
+        copy, so it re-persists over any disagreeing stored verdict on the
+        still-current row. The request FK and the evidence content address are
+        checked in the same UPDATE that writes the verdict, so a stale
+        producer is a zero-write result rather than a cross-snapshot lie.
+
+        The verdict is a function of BOTH the file snapshot and the source
+        manifest, and the content address only covers the files. A source
+        correction can therefore leave a stale verdict behind; that is
+        accepted because staleness is fail-safe in both directions (a stale
+        ``complete`` is today's behaviour, a stale ``incomplete`` merely
+        stages one album for the operator). The persisted counts and detail
+        are what make a stale verdict recognisable.
+        """
+        errors = completeness.validation_errors()
+        if errors:
+            raise ValueError("; ".join(errors))
+        cur = self._execute(
+            """
+            UPDATE album_quality_evidence AS evidence
+            SET installed_completeness = %s,
+                updated_at = NOW()
+            FROM album_requests AS request
+            WHERE request.id = %s
+              AND request.current_evidence_id = evidence.id
+              AND evidence.id = %s
+              AND evidence.snapshot_fingerprint = %s
+            RETURNING evidence.id
+            """,
+            (
+                msgspec.json.encode(completeness).decode(),
                 int(request_id),
                 int(expected_evidence_id),
                 expected_snapshot_fingerprint,
@@ -1474,4 +1545,5 @@ class _EvidenceMixin(_PipelineDBBase):
             matched_bad_audio_hash_id=persisted.matched_bad_audio_hash_id,
             matched_bad_audio_hash_path=persisted.matched_bad_audio_hash_path,
             aac_lattice=aac_lattice,
+            installed_completeness=persisted.installed_completeness,
         )

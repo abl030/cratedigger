@@ -65,6 +65,7 @@ from lib.quality import (
     AudioQualityMeasurement,
     AudioToolDiagnostic,
     AudioValidationReport,
+    InstalledCompleteness,
     VerifiedLosslessProof,
     legacy_unrecorded_audio_validation_report,
 )
@@ -8539,6 +8540,134 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertEqual(loaded.measurement.spectral_bitrate_kbps, 160)
         self.assertEqual(loaded.measurement.spectral_subject, "installed")
         self.assertEqual(loaded.measurement.spectral_provenance, "measured")
+
+    def test_installed_completeness_round_trips_and_survives_a_rebuild(self):
+        """Issue #1241 (real-PG round-trip). The verdict is guarded by the
+        request FK plus the exact content address, a fresh measurement wins,
+        and an ordinary evidence rebuild at the same address -- which carries
+        no verdict at all -- must never erase what was measured on these
+        exact bytes."""
+        evidence = self._seed(mb_release_id="evidence-uuid")
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(
+            self.req_id, stored.id))
+
+        incomplete = InstalledCompleteness(
+            verdict="incomplete",
+            source="discogs",
+            declared_audio_components=5,
+            physical_audio_files=4,
+            detail="missing_source_audio: Peter and the Wolf",
+            measured_at=datetime(2026, 8, 22, tzinfo=UTC),
+        )
+        # A wrong content address is refused.
+        self.assertFalse(self.db.persist_current_installed_completeness(
+            request_id=self.req_id,
+            expected_evidence_id=stored.id,
+            expected_snapshot_fingerprint="wrong",
+            completeness=incomplete,
+        ))
+        self.assertTrue(self.db.persist_current_installed_completeness(
+            request_id=self.req_id,
+            expected_evidence_id=stored.id,
+            expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+            completeness=incomplete,
+        ))
+        loaded = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert loaded is not None
+        self.assertEqual(loaded.installed_completeness, incomplete)
+
+        # An ordinary rebuild of the same content address carries no verdict.
+        self.db.upsert_album_quality_evidence(evidence)
+        rebuilt = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert rebuilt is not None
+        self.assertEqual(rebuilt.installed_completeness, incomplete)
+
+        # A fresh measurement of the same bytes wins.
+        complete = InstalledCompleteness(
+            verdict="complete",
+            source="discogs",
+            declared_audio_components=5,
+            physical_audio_files=5,
+        )
+        self.assertTrue(self.db.persist_current_installed_completeness(
+            request_id=self.req_id,
+            expected_evidence_id=stored.id,
+            expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+            completeness=complete,
+        ))
+        refreshed = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert refreshed is not None
+        self.assertEqual(refreshed.installed_completeness, complete)
+
+    def test_upsert_round_trips_an_installed_completeness_it_carries(self):
+        """Rule A for the upsert's INSERT arm (issue #1241 review).
+
+        The test above only ever upserts rows with NO verdict and then writes
+        through the dedicated exact-snapshot writer, so it exercises the
+        ``COALESCE`` preserve arm alone. ``FakePipelineDB`` stores the struct
+        verbatim, which is precisely the ``album_title`` shape Rule A exists
+        for: a field the fake preserves and the SQL column list could drop.
+        """
+        carried = InstalledCompleteness(
+            verdict="incomplete",
+            source="musicbrainz",
+            declared_audio_components=12,
+            physical_audio_files=11,
+            detail="missing_source_audio: side B",
+            measured_at=datetime(2026, 8, 22, 1, 2, 3, tzinfo=UTC),
+        )
+        evidence = self._seed(
+            mb_release_id="evidence-completeness-insert",
+            installed_completeness=carried,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None
+        self.assertEqual(stored.installed_completeness, carried)
+
+    def test_installed_completeness_rejects_a_verdict_that_names_no_reason(self):
+        """The struct validator runs before SQL, and migration 082's CHECK is
+        its independent twin: an accusing or withholding verdict must always
+        name why."""
+        with self.assertRaisesRegex(ValueError, "requires a detail"):
+            self.db.persist_current_installed_completeness(
+                request_id=self.req_id,
+                expected_evidence_id=1,
+                expected_snapshot_fingerprint="anything",
+                completeness=InstalledCompleteness(
+                    verdict="incomplete", source="discogs",
+                ),
+            )
+        evidence = self._seed(mb_release_id="evidence-uuid")
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self.db._execute(
+                "UPDATE album_quality_evidence "
+                "SET installed_completeness = %s WHERE id = %s",
+                (
+                    # The real producer's own encoding of the same invalid
+                    # value, so the SQL twin is checked against the struct's
+                    # actual wire shape rather than a hand-typed literal.
+                    msgspec.json.encode(InstalledCompleteness(
+                        verdict="incomplete", source="discogs",
+                    )).decode(),
+                    stored.id,
+                ),
+            )
 
     def test_current_spectral_write_carries_capture_facts_real_pg(self):
         """Issue #829 Phase 5 finding A (round 3 review): every writer of

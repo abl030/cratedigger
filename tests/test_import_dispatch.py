@@ -1597,6 +1597,91 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
         )
         self.assertIsNone(row["target_format"])
 
+    def test_installed_incomplete_hold_narrows_the_search_override(
+        self,
+    ) -> None:
+        """Issue #1241 — the importer lane's routing for the hold is
+        byte-identical to the ``downgrade`` it replaced, INCLUDING the
+        rejected-tier narrowing.
+
+        This drives the real caller. Teaching only
+        ``resolve_rejection_search_override`` about the decision leaves the
+        new branch unreachable from production (review round 1's surviving
+        mutant), so the assertion is on the request row the caller wrote,
+        not on the pure resolver's return value.
+        """
+        from lib.dispatch import _reject_import_from_evidence_decision
+        from lib.dispatch.types import ImportAttemptResult
+        from lib.quality import (
+            DECISION_INSTALLED_INCOMPLETE_HOLD,
+            AudioQualityMeasurement,
+            ImportResult,
+            QualityRankConfig,
+        )
+
+        overrides: dict[str, object] = {}
+        for decision in ("downgrade", DECISION_INSTALLED_INCOMPLETE_HOLD):
+            with self.subTest(decision=decision):
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(
+                    id=44,
+                    status="downloading",
+                    search_filetype_override=QUALITY_UPGRADE_TIERS,
+                    target_format=None,
+                ))
+                attempt_result = ImportAttemptResult(None)
+                attempt_result.merge(ImportResult(
+                    decision=decision,
+                    source_measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=226,
+                        avg_bitrate_kbps=226,
+                        format="MP3",
+                    ),
+                    current_measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=320,
+                        avg_bitrate_kbps=320,
+                        median_bitrate_kbps=320,
+                        format="MP3",
+                        is_cbr=True,
+                    ),
+                ))
+                with patch_dispatch_externals():
+                    _reject_import_from_evidence_decision(
+                        db=db,  # type: ignore[arg-type]
+                        request_id=44,
+                        dl_info=DownloadInfo(
+                            filetype="mp3", username="qreature", is_vbr=True,
+                        ),
+                        attempt_result=attempt_result,
+                        distance=0.0,
+                        decision=decision,
+                        detail="import-time persisted evidence rejected",
+                        requeue_on_failure=True,
+                        validation_result=None,
+                        staged_path="/tmp/installed-incomplete-hold",
+                        scenario="quality_downgrade",
+                        files=None,
+                        source_path_cleanup_scenario="quality_downgrade",
+                        cooled_down_users=None,
+                        quality_ranks=QualityRankConfig.defaults(),
+                    )
+                row = db.request(44)
+                self.assertEqual(row["status"], "wanted")
+                self.assertEqual(
+                    row["search_filetype_override"],
+                    "lossless,mp3 320,aac,opus,ogg",
+                )
+                # The peer is banned in this lane, exactly as for downgrade.
+                self.assertEqual(
+                    [e["username"] for e in db.get_denylisted_users(44)],
+                    ["qreature"],
+                )
+                overrides[decision] = row["search_filetype_override"]
+        self.assertEqual(
+            overrides[DECISION_INSTALLED_INCOMPLETE_HOLD],
+            overrides["downgrade"],
+        )
+
 
 class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
     """Every rejection honors the lifecycle authority chosen by its caller.

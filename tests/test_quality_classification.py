@@ -14,12 +14,17 @@ import unittest
 # Add project root to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 from lib.json_narrow import json_dict
 from lib.quality import (
+    DECISION_INSTALLED_INCOMPLETE_HOLD,
     STAGE2_COUNTERFACTUAL_UNAVAILABLE,
+    AlbumQualityEvidenceDecisionFacts,
     CodecFamily,
+    InstalledCompleteness,
+    classify_full_pipeline_decision,
+    dispatch_action,
     full_pipeline_decision,
 )
 from tests.helpers import (
@@ -795,6 +800,149 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertEqual(basis["new_value_kbps"], 128)
         self.assertEqual(basis["existing_metric"], "avg")
         self.assertEqual(basis["existing_value_kbps"], 256)
+
+    def test_dirt_dress_theme_songs_incomplete_installed_holds_downgrade(self):
+        """Request 1852, Dirt Dress — *Theme Songs*, Discogs 4738671.
+
+        The live incident (download_log 40355, peer iosononessuno). Measured
+        world:
+
+        * Installed: 4 files, 719.4 s, AAC ~128 kbps. Track 04 is 181.4 s
+          where two declared components total 881 s — 700 s of declared
+          program ("Peter and the Wolf", Discogs position 1B) is simply not
+          on disk. 49% of the runtime is missing.
+        * Candidate: 5 files, 1419.9 s, MP3 ~196 kbps, including
+          "05 peter and the wolf.mp3" @ 700.4 s. COMPLETE.
+        * beets: distance=0.1667, scenario=high_distance -> wrong_matches.
+
+        The cleanup reducer then asked the quality question, got
+        ``cross_family_same_rank`` / verdict ``equivalent`` (aac good 128 vs
+        mp3 good 196), decided ``downgrade``, and DELETED the only copy of
+        the missing 700 s.
+
+        The comparison itself was not wrong — those two encodes really are
+        equivalent. What was wrong is treating "not better" as a licence to
+        destroy, when the two sides are not the same program. With the
+        installed copy positively measured incomplete and this candidate
+        proven to cover the whole declared program, the reject is withheld
+        (issue #1241).
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=196,
+            avg_bitrate=196,
+            is_cbr=False,
+            new_format="MP3",
+            existing_format="AAC",
+            existing_min_bitrate=128,
+            existing_avg_bitrate=128,
+            installed_incomplete=True,
+            candidate_covers_declared_program=True,
+        )
+
+        self.assertEqual(
+            r["stage2_import"], DECISION_INSTALLED_INCOMPLETE_HOLD)
+        self.assertFalse(r["imported"])
+        # The literal policy, not the expression that produced it: the peer
+        # IS banned in the importer lane, which is what stops the next cycle
+        # re-downloading the identical bytes and is what
+        # docs/rejection-routing.md's "kept + banned + visible" records.
+        # Comparing r["denylisted"] to dispatch_action(...).denylist would be
+        # comparing a value to its own source and would pass either way.
+        self.assertTrue(r["denylisted"])
+        self.assertTrue(
+            dispatch_action(DECISION_INSTALLED_INCOMPLETE_HOLD).denylist)
+        # The audit trail stays HONEST: compare_quality really did find an
+        # equivalent cross-family pair. Only the CONSEQUENCE changed, and
+        # the new flag is what records that.
+        basis = json_dict(r["comparison_basis"])
+        self.assertEqual(basis["verdict"], "equivalent")
+        self.assertEqual(basis["branch"], "cross_family_same_rank")
+        self.assertTrue(basis["installed_incomplete_hold"])
+        # Never cleanup-eligible: this is exactly what stops the Wrong
+        # Matches reducer deleting the folder.
+        self.assertEqual(
+            classify_full_pipeline_decision(r),
+            ("uncertain", False, DECISION_INSTALLED_INCOMPLETE_HOLD),
+        )
+
+    def test_dirt_dress_world_without_a_covered_candidate_still_downgrades(
+        self,
+    ):
+        """Negative twin: an UNPROVEN candidate never rescues itself.
+
+        The same measured world, but the attempt carries no proof that the
+        candidate covers the declared program — the shape the Wrong Matches
+        reducer sees for an ``extra_tracks`` / ``mbid_not_found`` /
+        ``no_choose_match`` row, none of which ever produced a checked
+        candidate summary (``extra_tracks`` proves the OPPOSITE).
+
+        One incomplete copy must never "upgrade" another, so the hold's
+        candidate conjunct is load-bearing, not decorative: today's
+        destructive ``downgrade`` is the correct outcome here.
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=196,
+            avg_bitrate=196,
+            is_cbr=False,
+            new_format="MP3",
+            existing_format="AAC",
+            existing_min_bitrate=128,
+            existing_avg_bitrate=128,
+            installed_incomplete=True,
+            candidate_covers_declared_program=False,
+        )
+
+        self.assertEqual(r["stage2_import"], "downgrade")
+        self.assertFalse(r["imported"])
+        self.assertFalse(
+            json_dict(r["comparison_basis"])["installed_incomplete_hold"])
+        self.assertEqual(
+            classify_full_pipeline_decision(r),
+            ("confident_reject", True, "downgrade"),
+        )
+
+    def test_a_worse_candidate_against_an_incomplete_install_still_rejects(
+        self,
+    ):
+        """The hold's deliberate ceiling: ``equivalent`` only, never ``worse``.
+
+        MP3 96 CBR against an installed MP3 320 is a ``rank`` verdict of
+        ``worse``, and "worse is blocked regardless" is issue #60's
+        acceptance criterion — the same rule that already stops a
+        deliberately low verified-lossless target replacing a good album.
+        Widening the hold to cover it would let a 96 kbps rip stage itself
+        against any incomplete album.
+
+        Accepted residual, recorded here so it is a decision and not an
+        oversight: a genuinely worse but complete candidate that holds the
+        missing component is still rejected. Widening is one conjunct away
+        and the hold's own decision string makes that cohort countable
+        first (issue #1241).
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=96,
+            avg_bitrate=96,
+            is_cbr=True,
+            new_format="MP3",
+            existing_format="MP3",
+            existing_min_bitrate=320,
+            existing_avg_bitrate=320,
+            installed_incomplete=True,
+            candidate_covers_declared_program=True,
+        )
+
+        basis = json_dict(r["comparison_basis"])
+        self.assertEqual(basis["verdict"], "worse")
+        self.assertFalse(basis["installed_incomplete_hold"])
+        self.assertEqual(r["stage2_import"], "downgrade")
+        self.assertFalse(r["imported"])
+        self.assertEqual(
+            classify_full_pipeline_decision(r),
+            ("confident_reject", True, "downgrade"),
+        )
 
 
 class TestWavvesAacCodecBlindSpectral(unittest.TestCase):
@@ -1994,6 +2142,195 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         self.assertEqual(basis["new_value_kbps"], 128)
         self.assertEqual(basis["existing_metric"], "avg")
         self.assertEqual(basis["existing_value_kbps"], 256)
+
+    def test_dirt_dress_theme_songs_incomplete_installed_holds_downgrade_via_evidence(
+        self,
+    ):
+        """Parity twin of the request-1852 reproduction.
+
+        Same measured world (Dirt Dress — *Theme Songs*, Discogs 4738671,
+        download_log 40355), expressed as the rows the production decider
+        actually reads: an installed AAC ~128 row carrying a positive
+        ``incomplete`` completeness verdict, and an MP3 ~196 candidate whose
+        attempt proved it covers the declared program.
+        """
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=196, avg_bitrate=196, is_cbr=False,
+        )
+        current = self._build_current(
+            min_bitrate=128, avg_bitrate=128, format="AAC", is_cbr=False,
+            mb_release_id=candidate.mb_release_id,
+            installed_completeness=InstalledCompleteness(
+                verdict="incomplete",
+                source="discogs",
+                declared_audio_components=5,
+                physical_audio_files=4,
+                detail="missing_source_audio: 4738671-1B",
+                measured_at=datetime.now(UTC),
+            ),
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate,
+            current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                candidate_covers_declared_program=True,
+            ),
+        )
+
+        self.assertEqual(
+            r["stage2_import"], DECISION_INSTALLED_INCOMPLETE_HOLD)
+        self.assertFalse(r["imported"])
+        # The literal policy, not the expression that produced it: the peer
+        # IS banned in the importer lane, which is what stops the next cycle
+        # re-downloading the identical bytes and is what
+        # docs/rejection-routing.md's "kept + banned + visible" records.
+        # Comparing r["denylisted"] to dispatch_action(...).denylist would be
+        # comparing a value to its own source and would pass either way.
+        self.assertTrue(r["denylisted"])
+        self.assertTrue(
+            dispatch_action(DECISION_INSTALLED_INCOMPLETE_HOLD).denylist)
+        basis = json_dict(r["comparison_basis"])
+        self.assertEqual(basis["verdict"], "equivalent")
+        self.assertEqual(basis["branch"], "cross_family_same_rank")
+        self.assertTrue(basis["installed_incomplete_hold"])
+        self.assertEqual(
+            classify_full_pipeline_decision(r),
+            ("uncertain", False, DECISION_INSTALLED_INCOMPLETE_HOLD),
+        )
+
+    def test_dirt_dress_world_without_a_covered_candidate_still_downgrades_via_evidence(
+        self,
+    ):
+        """Parity twin of the negative pin — the reducer's ``extra_tracks``
+        shape, where nothing ever proved the candidate whole."""
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=196, avg_bitrate=196, is_cbr=False,
+        )
+        current = self._build_current(
+            min_bitrate=128, avg_bitrate=128, format="AAC", is_cbr=False,
+            mb_release_id=candidate.mb_release_id,
+            installed_completeness=InstalledCompleteness(
+                verdict="incomplete",
+                source="discogs",
+                declared_audio_components=5,
+                physical_audio_files=4,
+                detail="missing_source_audio: 4738671-1B",
+                measured_at=datetime.now(UTC),
+            ),
+        )
+
+        r = full_pipeline_decision_from_evidence(candidate, current)
+
+        self.assertEqual(r["stage2_import"], "downgrade")
+        self.assertFalse(r["imported"])
+        self.assertFalse(
+            json_dict(r["comparison_basis"])["installed_incomplete_hold"])
+        self.assertEqual(
+            classify_full_pipeline_decision(r),
+            ("confident_reject", True, "downgrade"),
+        )
+
+    def test_unknown_and_complete_installed_verdicts_change_nothing(self):
+        """Fail-safe direction: only a POSITIVE ``incomplete`` holds.
+
+        An unreadable Discogs mirror, an ambiguous identity, or a
+        never-measured row all resolve to ``unknown``, and ``unknown`` must
+        behave exactly as today — otherwise a transient mirror outage would
+        silently stop the pipeline rejecting anything.
+        """
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=196, avg_bitrate=196, is_cbr=False,
+        )
+        for label, completeness in (
+            ("never measured", None),
+            (
+                "unknown",
+                InstalledCompleteness(
+                    verdict="unknown",
+                    detail="discogs mirror unavailable",
+                ),
+            ),
+            (
+                "complete",
+                InstalledCompleteness(
+                    verdict="complete",
+                    source="discogs",
+                    declared_audio_components=5,
+                    physical_audio_files=5,
+                ),
+            ),
+        ):
+            with self.subTest(installed_completeness=label):
+                current = self._build_current(
+                    min_bitrate=128, avg_bitrate=128, format="AAC",
+                    is_cbr=False,
+                    mb_release_id=candidate.mb_release_id,
+                    installed_completeness=completeness,
+                )
+                r = full_pipeline_decision_from_evidence(
+                    candidate,
+                    current,
+                    facts=AlbumQualityEvidenceDecisionFacts(
+                        candidate_covers_declared_program=True,
+                    ),
+                )
+                self.assertEqual(r["stage2_import"], "downgrade")
+                self.assertEqual(
+                    classify_full_pipeline_decision(r),
+                    ("confident_reject", True, "downgrade"),
+                )
+
+    def test_a_worse_candidate_against_an_incomplete_install_still_rejects_via_evidence(
+        self,
+    ):
+        """Parity twin of the ``worse`` ceiling pin.
+
+        Both conjuncts hold and the installed copy is genuinely incomplete,
+        but the comparison said ``worse`` — issue #60's "worse is blocked
+        regardless" survives #1241 untouched.
+        """
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=96, avg_bitrate=96, is_cbr=True,
+        )
+        current = self._build_current(
+            min_bitrate=320, avg_bitrate=320, format="MP3", is_cbr=True,
+            mb_release_id=candidate.mb_release_id,
+            installed_completeness=InstalledCompleteness(
+                verdict="incomplete",
+                source="discogs",
+                declared_audio_components=5,
+                physical_audio_files=4,
+                detail="missing_source_audio: 4738671-1B",
+                measured_at=datetime.now(UTC),
+            ),
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate,
+            current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                candidate_covers_declared_program=True,
+            ),
+        )
+
+        basis = json_dict(r["comparison_basis"])
+        self.assertEqual(basis["verdict"], "worse")
+        self.assertFalse(basis["installed_incomplete_hold"])
+        self.assertEqual(r["stage2_import"], "downgrade")
+        self.assertFalse(r["imported"])
+        self.assertEqual(
+            classify_full_pipeline_decision(r),
+            ("confident_reject", True, "downgrade"),
+        )
 
 
 class TestUltrasonicProofGateV3(unittest.TestCase):

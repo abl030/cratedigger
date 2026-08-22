@@ -136,6 +136,7 @@ def _corpus_row(**overrides: object) -> dict[str, object]:
         "aac_lattice_modal_count": None,
         "aac_lattice_scored_tracks": None,
         "aac_lattice_max_z": None,
+        "installed_completeness": None,
         # The native replay resolves a candidate's installed side from this
         # request projection, not from a parallel hand-authored pairing file.
         "is_candidate": True,

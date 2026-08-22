@@ -55,6 +55,7 @@ from lib.quality import (
     AAC_LATTICE_PROOF_DENY_MODAL_COUNT,
     CODEC_FAMILY_MP3,
     COMPARISON_BASIS_BRANCHES,
+    DECISION_INSTALLED_INCOMPLETE_HOLD,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
     QUALITY_UPGRADE_TIERS,
@@ -70,6 +71,7 @@ from lib.quality import (
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     CodecFamily,
+    InstalledCompleteness,
     ProvisionalLosslessDecisionInput,
     QualityComparisonBasis,
     QualityRank,
@@ -2808,6 +2810,13 @@ class ParityWorld:
     # Action facts.
     target_format: str | None
     verified_lossless_target: str | None
+    # issue #1241 — the installed-incomplete hold's two conjuncts. Defaulted
+    # so the promoted @example pins below keep describing their own worlds.
+    # ``installed_incomplete`` is a POSITIVE "incomplete" verdict on the
+    # CURRENT row; ``candidate_covers_declared_program`` is the action-time
+    # fact beets' extra_tracks check supplies.
+    installed_incomplete: bool = False
+    candidate_covers_declared_program: bool = False
 
 
 @st.composite
@@ -2904,6 +2913,8 @@ def parity_worlds(draw) -> ParityWorld:
         v0_min=v0_min,
         target_format=target_format,
         verified_lossless_target=draw(st.sampled_from(_VL_TARGETS)),
+        installed_incomplete=draw(st.booleans()),
+        candidate_covers_declared_program=draw(st.booleans()),
     )
 
 
@@ -2958,6 +2969,10 @@ def _parity_simulator_result(world: ParityWorld) -> SimResult:
         album, download,
         verified_lossless_target=world.verified_lossless_target,
         current_verified_lossless_proof=world.current_verified_lossless_proof,
+        installed_incomplete=world.installed_incomplete,
+        candidate_covers_declared_program=(
+            world.candidate_covers_declared_program
+        ),
     )
 
 
@@ -3019,12 +3034,26 @@ def _parity_evidence_inputs(
                 classifier="generated",
             ),
         )
+    if current is not None and world.installed_incomplete:
+        current = msgspec.structs.replace(
+            current,
+            installed_completeness=InstalledCompleteness(
+                verdict="incomplete",
+                source="discogs",
+                declared_audio_components=5,
+                physical_audio_files=4,
+                detail="generated missing component",
+            ),
+        )
     facts = AlbumQualityEvidenceDecisionFacts(
         verified_lossless_target=world.verified_lossless_target,
         target_format=world.target_format,
         converted_count=world.converted_count,
         post_conversion_min_bitrate=world.post_conversion_min_bitrate,
         post_conversion_is_cbr=world.post_conversion_is_cbr,
+        candidate_covers_declared_program=(
+            world.candidate_covers_declared_program
+        ),
     )
     return candidate, current, facts
 
@@ -3150,6 +3179,24 @@ _PARTS_AND_LABOR_VORBIS_WORLD = ParityWorld(
     post_conversion_is_cbr=None,
     v0_min=None, target_format=None, verified_lossless_target=None,
 )
+# Issue #1241 pin — request 1852, Dirt Dress *Theme Songs* (Discogs
+# 4738671, download_log 40355). Installed AAC ~128 that is missing 700 s of
+# declared program; candidate MP3 ~196 that is complete. The comparison is a
+# genuine cross_family_same_rank "equivalent", so before #1241 the reducer
+# deleted the only copy of the missing half hour. Replayed first on every
+# run of the hold property.
+_DIRT_DRESS_INCOMPLETE_INSTALL_WORLD = ParityWorld(
+    current_min=128, current_avg=128, current_format="AAC",
+    current_is_cbr=False, current_grade=None,
+    current_spectral_bitrate=None, current_v0_avg=None,
+    current_verified_lossless_proof=False,
+    candidate_kind="lossy", min_bitrate=196, is_cbr=False, avg_bitrate=196,
+    grade=None, spectral_bitrate=None, candidate_format="MP3",
+    converted_count=0, post_conversion_min_bitrate=None, v0_avg=None,
+    post_conversion_is_cbr=None,
+    v0_min=None, target_format=None, verified_lossless_target=None,
+    installed_incomplete=True, candidate_covers_declared_program=True,
+)
 
 
 class TestGeneratedParity(unittest.TestCase):
@@ -3179,6 +3226,88 @@ class TestGeneratedParity(unittest.TestCase):
         evidence_result = _parity_evidence_result(proof_world)
         assert_verified_lossless_proof_locks_candidate(sim)
         assert_twins_agree(sim, evidence_result)
+
+    @given(world=parity_worlds())
+    @example(world=_DIRT_DRESS_INCOMPLETE_INSTALL_WORLD)
+    # The other three corners of the same world. Random worlds reach an
+    # equivalent-verdict downgrade only ~0.5% of the time, so without these
+    # the byte-identity half would be decided by luck: dropping either
+    # conjunct from the guard has to be caught HERE, deterministically, not
+    # only in the hand-written pins.
+    @example(world=replace(
+        _DIRT_DRESS_INCOMPLETE_INSTALL_WORLD, installed_incomplete=False))
+    @example(world=replace(
+        _DIRT_DRESS_INCOMPLETE_INSTALL_WORLD,
+        candidate_covers_declared_program=False))
+    @example(world=replace(
+        _DIRT_DRESS_INCOMPLETE_INSTALL_WORLD,
+        installed_incomplete=False,
+        candidate_covers_declared_program=False))
+    def test_installed_incomplete_hold_fires_exactly_where_it_must(
+        self, world,
+    ):
+        """Issue #1241, both halves of the invariant, on both twins.
+
+        Positive half — where the installed copy is positively incomplete,
+        the candidate provably covers the declared program, and the SAME
+        world's baseline decision was a destructive ``downgrade`` /
+        ``transcode_downgrade`` off an ``equivalent`` verdict: the decision
+        must be the hold, and must never be cleanup-eligible (that is what
+        stops the Wrong Matches reducer deleting the folder).
+
+        Negative half — in every OTHER world the decision dict must be
+        BYTE-IDENTICAL to the same world with both facts absent. Neither
+        conjunct alone may change anything, ``unknown``/never-measured
+        included. This is the no-regression half, and it is what makes the
+        property worth having.
+        """
+        baseline_world = replace(
+            world,
+            installed_incomplete=False,
+            candidate_covers_declared_program=False,
+        )
+        baseline = _parity_evidence_result(baseline_world)
+        sim = _parity_simulator_result(world)
+        evidence_result = _parity_evidence_result(world)
+        assert_twins_agree(sim, evidence_result)
+
+        baseline_basis = baseline.get("comparison_basis")
+        held = (
+            world.installed_incomplete
+            and world.candidate_covers_declared_program
+            and baseline.get("stage2_import") in (
+                "downgrade", "transcode_downgrade")
+            and isinstance(baseline_basis, dict)
+            and baseline_basis.get("verdict") == "equivalent"
+        )
+
+        if held:
+            self.assertEqual(
+                evidence_result["stage2_import"],
+                DECISION_INSTALLED_INCOMPLETE_HOLD,
+            )
+            self.assertFalse(evidence_result["imported"])
+            verdict, cleanup_eligible, reason = (
+                classify_full_pipeline_decision(evidence_result))
+            self.assertFalse(
+                cleanup_eligible,
+                "the hold must never authorize folder deletion",
+            )
+            self.assertEqual(verdict, "uncertain")
+            self.assertEqual(reason, DECISION_INSTALLED_INCOMPLETE_HOLD)
+            basis = evidence_result["comparison_basis"]
+            assert isinstance(basis, dict)
+            assert isinstance(baseline_basis, dict)
+            self.assertTrue(basis["installed_incomplete_hold"])
+            # The audit stays honest — only the consequence moved.
+            self.assertEqual(basis["verdict"], baseline_basis["verdict"])
+            self.assertEqual(basis["branch"], baseline_basis["branch"])
+        else:
+            self.assertEqual(
+                evidence_result,
+                baseline,
+                "neither #1241 fact may change any world it does not hold",
+            )
 
 
 # ===========================================================================

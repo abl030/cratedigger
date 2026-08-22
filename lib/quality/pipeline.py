@@ -16,6 +16,7 @@ import msgspec
 from lib.quality.compare import comparison_format_hint
 from lib.quality.decisions import (
     _LOSSLESS_EXTS,
+    DECISION_INSTALLED_INCOMPLETE_HOLD,
     DECISION_LOSSLESS_SOURCE_LOCKED,
     DECISION_VERIFIED_LOSSLESS_LOCKED,
     MeasuredImportDecisionInput,
@@ -169,6 +170,17 @@ def full_pipeline_decision(
     candidate_v0_probe_kind: str | None = None,
     supported_lossless_source: bool | None = None,
     current_verified_lossless_proof: bool = False,
+    # issue #1241 — the two conjuncts of the installed-incomplete hold.
+    # ``installed_incomplete`` is True ONLY for a positive "incomplete"
+    # verdict on the INSTALLED copy (``AlbumQualityEvidence.
+    # installed_completeness``); "unknown" and "never measured" both arrive
+    # here as False and change nothing.
+    # ``candidate_covers_declared_program`` is beets' own proof that THIS
+    # attempt's candidate carried no extra/missing declared track. Both must
+    # hold for the hold to fire — one incomplete copy never "upgrades"
+    # another.
+    installed_incomplete: bool = False,
+    candidate_covers_declared_program: bool = False,
     # issue #829 Phase 5 PR2b — the codec-resolution context the flat
     # ``spectral_grade``/``spectral_bitrate`` pair cannot carry. One keyword
     # per side; ``SpectralCodecContext.facts()`` recombines it with the flat
@@ -643,6 +655,10 @@ def full_pipeline_decision(
                     ),
                     source_spectral=candidate_spectral,
                     current_spectral=existing_spectral,
+                    installed_incomplete=installed_incomplete,
+                    candidate_covers_declared_program=(
+                        candidate_covers_declared_program
+                    ),
                 ),
                 cfg=cfg,
             )
@@ -651,7 +667,14 @@ def full_pipeline_decision(
                 msgspec.to_builtins(measured.comparison_basis)
                 if measured.comparison_basis is not None else None)
 
-            if result["stage2_import"] == "downgrade":
+            # issue #1241: the hold's importer-lane consequences are
+            # DELIBERATELY identical to ``downgrade`` — keep the installed
+            # album, keep searching, do not import. Only the Wrong Matches
+            # cleanup reducer treats it differently (it keeps the folder).
+            if result["stage2_import"] in (
+                "downgrade",
+                DECISION_INSTALLED_INCOMPLETE_HOLD,
+            ):
                 result["final_status"] = "imported"
                 result["keep_searching"] = True
                 return _finalize_denylist(result)
@@ -807,6 +830,10 @@ def full_pipeline_decision(
                     will_be_verified or verified_proof,
                     source_spectral=candidate_spectral,
                     current_spectral=existing_spectral,
+                    installed_incomplete=installed_incomplete,
+                    candidate_covers_declared_program=(
+                        candidate_covers_declared_program
+                    ),
                 ),
                 cfg=cfg,
             )
@@ -815,11 +842,21 @@ def full_pipeline_decision(
                 msgspec.to_builtins(measured.comparison_basis)
                 if measured.comparison_basis is not None else None)
 
-            if result["stage2_import"] == "downgrade":
+            # issue #1241: the hold replaces BOTH ``downgrade`` and
+            # ``transcode_downgrade`` before either string is assigned, so it
+            # takes the consequences of the string it REPLACED — split by the
+            # same ``is_transcode`` the decision itself used. Folding it into
+            # the downgrade arm would report a transcode world as
+            # ``final_status="imported"`` (satisfied by an installed copy the
+            # same decision just called incomplete).
+            hold = result["stage2_import"] == DECISION_INSTALLED_INCOMPLETE_HOLD
+            if result["stage2_import"] == "downgrade" or (
+                hold and not policy_is_transcode
+            ):
                 result["final_status"] = "imported"  # keeps existing
                 result["keep_searching"] = True
                 return _finalize_denylist(result)
-            elif result["stage2_import"] == "transcode_downgrade":
+            elif result["stage2_import"] == "transcode_downgrade" or hold:
                 result["final_status"] = "wanted"
                 result["keep_searching"] = True
                 return _finalize_denylist(result)
@@ -934,6 +971,10 @@ def full_pipeline_decision(
                     verified_lossless_proof=verified_proof,
                     source_spectral=candidate_spectral,
                     current_spectral=existing_spectral,
+                    installed_incomplete=installed_incomplete,
+                    candidate_covers_declared_program=(
+                        candidate_covers_declared_program
+                    ),
                 ),
                 cfg=cfg,
             )
@@ -942,7 +983,11 @@ def full_pipeline_decision(
                 msgspec.to_builtins(measured.comparison_basis)
                 if measured.comparison_basis is not None else None)
 
-            if result["stage2_import"] == "downgrade":
+            # issue #1241 — see the flac-keep branch above; same consequences.
+            if result["stage2_import"] in (
+                "downgrade",
+                DECISION_INSTALLED_INCOMPLETE_HOLD,
+            ):
                 result["final_status"] = "imported"  # keeps existing
                 result["keep_searching"] = True
                 return _finalize_denylist(result)
@@ -1072,6 +1117,18 @@ class AlbumQualityEvidenceDecisionFacts(msgspec.Struct, frozen=True):
     converted_count: int | None = None
     post_conversion_min_bitrate: int | None = None
     post_conversion_is_cbr: bool | None = None
+    #: Whether beets' own candidate check PROVED this attempt's candidate
+    #: covers every declared release track (``len(candidate.extra_tracks) == 0``
+    #: in ``lib/beets.py::apply_candidate_scenario``). Action-time, not
+    #: intrinsic: the SAME evidence row is judged with this True by the
+    #: importer (which only reaches dispatch through a valid ``strong_match``)
+    #: and False by the cleanup reducer when the row's persisted scenario is
+    #: ``extra_tracks`` / ``mbid_not_found`` / ``no_choose_match`` — none of
+    #: which ever produced a checked candidate summary, and the first of which
+    #: proves the OPPOSITE. Default False = unproven = the installed-incomplete
+    #: hold never fires, so one incomplete copy can never "upgrade" another
+    #: (issue #1241).
+    candidate_covers_declared_program: bool = False
 
 
 class QualityEvidenceActionPayload(msgspec.Struct, frozen=True):
@@ -1220,6 +1277,16 @@ QUALITY_DECISION_IMPORT_STAGE_DECISIONS: frozenset[str] = frozenset({
     "transcode_first",
     "provisional_lossless_upgrade",
 })
+#: Stage-2 decisions that are CONFIDENT rejects — cleanup-eligible, which is
+#: what authorizes the Wrong Matches reducer to delete the staged folder.
+#:
+#: ``installed_incomplete_hold`` is DELIBERATELY ABSENT (issue #1241). It is a
+#: reject in the importer lane (nothing is imported), but it is not a
+#: confident one: the installed copy is missing a declared component, so the
+#: comparison never compared the same program. Omitting it here routes the
+#: reducer to ``OUTCOME_KEPT_UNCERTAIN`` — the folder survives, stays visible
+#: in the worklist, and waits for the operator. Do not "complete" this set by
+#: adding it; that single omission IS the behaviour.
 QUALITY_DECISION_REJECT_STAGE_DECISIONS: frozenset[str] = frozenset({
     "downgrade",
     "transcode_downgrade",
@@ -1784,6 +1851,19 @@ def full_pipeline_decision_from_evidence(
         current_verified_lossless_proof=(
             current is not None
             and current.verified_lossless_proof is not None
+        ),
+        # issue #1241. Only a POSITIVE "incomplete" verdict on the installed
+        # row holds; ``unknown`` and a never-measured NULL are both False and
+        # behave exactly as before. The candidate conjunct is an action-time
+        # fact supplied by the caller (see the field's docstring) — the
+        # candidate row itself never carries a completeness measurement.
+        installed_incomplete=(
+            current is not None
+            and current.installed_completeness is not None
+            and current.installed_completeness.verdict == "incomplete"
+        ),
+        candidate_covers_declared_program=(
+            facts.candidate_covers_declared_program
         ),
         candidate_spectral_context=evidence_spectral_context(candidate),
         existing_spectral_context=evidence_spectral_context(current),

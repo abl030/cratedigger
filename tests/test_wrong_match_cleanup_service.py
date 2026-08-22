@@ -30,6 +30,7 @@ from lib.quality import (
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    InstalledCompleteness,
     QualityRankConfig,
     VerifiedLosslessProof,
     legacy_unrecorded_audio_validation_report,
@@ -41,6 +42,7 @@ from lib.wrong_match_cleanup_service import (
     OUTCOME_DELETE_FAILED,
     OUTCOME_DELETED,
     OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT,
+    OUTCOME_KEPT_UNCERTAIN,
     OUTCOME_KEPT_WOULD_IMPORT,
     OUTCOME_SKIPPED_ACTIVE_JOB,
     OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_MISSING,
@@ -1300,6 +1302,218 @@ if TYPE_CHECKING:
     _pipeline_db_satisfies_cleanup_protocol: _CleanupDB = cast("PipelineDB", None)
     _fake_db_satisfies_cleanup_protocol: _CleanupDB = cast("FakePipelineDB", None)
 
+
+class TestInstalledIncompleteHoldKeepsTheFolder(unittest.TestCase):
+    """Issue #1241, request 1852 — Dirt Dress *Theme Songs* (Discogs 4738671).
+
+    The live incident, driven end-to-end through the reducer that actually
+    deleted it. beets rejected the candidate as ``high_distance``
+    (distance=0.1667), the row landed in Wrong Matches, and the cleanup
+    reducer asked the quality question. The installed copy is 4 files /
+    719.4 s of AAC ~128 with 700 s of declared program (Discogs position 1B,
+    "Peter and the Wolf") simply absent; the candidate is 5 files / 1419.9 s
+    of MP3 ~196 and complete. The comparison said ``equivalent``, the
+    reducer read that as ``downgrade``, and deleted the only copy of the
+    missing half hour.
+
+    Required new behaviour: KEPT, not deleted. The folder stays on disk and
+    visible in the worklist for the operator to confirm.
+
+    On the peer: it IS still denylisted, and deliberately so. That write
+    happens in Lane A at beets-reject time
+    (``album_source.py::reject_and_requeue``), not here — the reducer writes
+    no denylist at all — and it is what stops the next cycle re-downloading
+    the identical bytes from the identical peer while the operator decides.
+    ``kept + banned + visible`` is issue #1077's invariant verbatim
+    (CLAUDE.md), so nothing in that contract moves.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.db = FakePipelineDB()
+        self.db.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="mbid-1",
+        ))
+        self._current_evidence_helper = lambda *_a, **_kw: None
+        helper_patch = _patch_current_evidence_helper(
+            lambda *a, **kw: self._current_evidence_helper(*a, **kw),
+        )
+        self.addCleanup(helper_patch.stop)
+        helper_patch.start()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _seed(
+        self,
+        *,
+        scenario: str,
+        installed_completeness: InstalledCompleteness | None,
+    ) -> tuple[str, int]:
+        source = _make_source(self.tmp, f"dirt-dress-{scenario}")
+        log_id = self.db.log_download(
+            1,
+            outcome="rejected",
+            validation_result={
+                "scenario": scenario,
+                "distance": 0.1667,
+                "failed_path": source,
+            },
+        )
+        candidate = msgspec.structs.replace(
+            _evidence(source),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=196,
+                avg_bitrate_kbps=196,
+                median_bitrate_kbps=196,
+                format="MP3",
+            ),
+            storage_format="MP3",
+        )
+        self.db.set_download_log_candidate_evidence(
+            log_id, _store_evidence(self.db, candidate))
+        current = msgspec.structs.replace(
+            _evidence(source, mb_release_id="mbid-1"),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=128,
+                format="AAC",
+            ),
+            codec="aac",
+            container="m4a",
+            storage_format="AAC",
+            filetype_band="aac",
+            installed_completeness=installed_completeness,
+        )
+        self._current_evidence_helper = (
+            lambda *_a, **_kw: CurrentEvidenceActionResult(
+                evidence=current,
+                provenance=ActionEvidenceProvenance(current_status="loaded"),
+            )
+        )
+        return source, log_id
+
+    @staticmethod
+    def _incomplete() -> InstalledCompleteness:
+        return InstalledCompleteness(
+            verdict="incomplete",
+            source="discogs",
+            declared_audio_components=5,
+            physical_audio_files=4,
+            detail="missing_source_audio: 4738671-1B",
+            measured_at=datetime(2026, 8, 20, tzinfo=UTC),
+        )
+
+    def _triage(self, log_id: int):
+        raw = self.db.get_download_log_entry(log_id)
+        assert raw is not None
+        audit = decode_validation_envelope(
+            raw["validation_result"]
+        ).wrong_match_triage
+        assert audit is not None
+        return audit
+
+    def test_high_distance_against_an_incomplete_install_is_kept(self) -> None:
+        source, log_id = self._seed(
+            scenario="high_distance",
+            installed_completeness=self._incomplete(),
+        )
+
+        def _unreachable(*_a: object, **_kw: object) -> None:
+            raise AssertionError(
+                "the reducer must not reach the deletion helper for an "
+                "installed-incomplete hold"
+            )
+
+        with patch.object(
+            wrong_match_cleanup_service,
+            "_perform_cleanup_deletion",
+            _unreachable,
+        ):
+            result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
+
+        self.assertEqual(result.outcome, OUTCOME_KEPT_UNCERTAIN)
+        self.assertEqual(result.verdict, "uncertain")
+        self.assertEqual(result.reason, "installed_incomplete_hold")
+        self.assertFalse(result.cleanup_eligible)
+        self.assertTrue(os.path.isdir(source))
+        self.assertTrue(os.path.exists(os.path.join(source, "01.mp3")))
+
+        audit = self._triage(log_id)
+        self.assertEqual(audit.action, OUTCOME_KEPT_UNCERTAIN)
+        self.assertEqual(audit.outcome, OUTCOME_KEPT_UNCERTAIN)
+        self.assertFalse(audit.success)
+        self.assertEqual(audit.reason, "installed_incomplete_hold")
+        self.assertEqual(audit.preview_decision, "installed_incomplete_hold")
+        self.assertFalse(audit.cleanup_eligible)
+        self.assertIn(
+            "stage2_import:installed_incomplete_hold", audit.stage_chain)
+        assert audit.comparison_basis is not None
+        # The comparison's own record stays honest — only the consequence
+        # changed, and the new flag is what says so.
+        self.assertEqual(audit.comparison_basis.verdict, "equivalent")
+        self.assertEqual(
+            audit.comparison_basis.branch, "cross_family_same_rank")
+        self.assertTrue(audit.comparison_basis.installed_incomplete_hold)
+
+    def test_extra_tracks_against_an_incomplete_install_still_deletes(
+        self,
+    ) -> None:
+        """The §0.1 guard, at the reducer.
+
+        ``extra_tracks`` is one of the four delete-eligible scenarios, and it
+        is beets' proof that the CANDIDATE is missing a declared track. An
+        incomplete candidate must never "upgrade" an incomplete install, so
+        this row keeps today's destructive outcome.
+        """
+        source, log_id = self._seed(
+            scenario="extra_tracks",
+            installed_completeness=self._incomplete(),
+        )
+
+        result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
+
+        self.assertEqual(result.outcome, OUTCOME_DELETED)
+        self.assertFalse(os.path.exists(source))
+        self.assertEqual(self._triage(log_id).preview_decision, "downgrade")
+
+    def test_high_distance_against_a_complete_install_still_deletes(
+        self,
+    ) -> None:
+        """Control: the hold is not "never delete a high_distance row"."""
+        source, log_id = self._seed(
+            scenario="high_distance",
+            installed_completeness=InstalledCompleteness(
+                verdict="complete",
+                source="discogs",
+                declared_audio_components=5,
+                physical_audio_files=5,
+            ),
+        )
+
+        result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
+
+        self.assertEqual(result.outcome, OUTCOME_DELETED)
+        self.assertFalse(os.path.exists(source))
+        self.assertEqual(self._triage(log_id).preview_decision, "downgrade")
+
+    def test_an_unknown_completeness_verdict_behaves_exactly_as_today(
+        self,
+    ) -> None:
+        """Fail-safe: an unreadable mirror must not stop the reducer."""
+        source, log_id = self._seed(
+            scenario="high_distance",
+            installed_completeness=InstalledCompleteness(
+                verdict="unknown",
+                detail="discogs mirror unavailable",
+            ),
+        )
+
+        result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
+
+        self.assertEqual(result.outcome, OUTCOME_DELETED)
+        self.assertFalse(os.path.exists(source))
 
 class TestCleanupDBProtocolParity(unittest.TestCase):
     """#409: PipelineDB and FakePipelineDB must satisfy WrongMatchCleanupDB.

@@ -40,6 +40,15 @@ DECISION_SUSPECT_LOSSLESS_DOWNGRADE = "suspect_lossless_downgrade"
 DECISION_SUSPECT_LOSSLESS_PROBE_MISSING = "suspect_lossless_probe_missing"
 DECISION_LOSSLESS_SOURCE_LOCKED = "lossless_source_locked"
 DECISION_VERIFIED_LOSSLESS_LOCKED = "verified_lossless_locked"
+#: Issue #1241. The quality comparison said "not better", but the INSTALLED
+#: copy is positively missing a declared audio component and this candidate
+#: provably covers the whole declared program — so the two sides are not the
+#: same program and the destructive reject is withheld. Deliberately NOT a
+#: member of ``QUALITY_DECISION_REJECT_STAGE_DECISIONS``: that omission is
+#: what makes the Wrong Matches cleanup reducer KEEP the folder for the
+#: operator instead of deleting it. See ``docs/quality-verification.md`` and
+#: ``docs/rejection-routing.md``.
+DECISION_INSTALLED_INCOMPLETE_HOLD = "installed_incomplete_hold"
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +191,8 @@ def import_quality_decision(
     verified_lossless_proof: bool = False,
     source_spectral: SpectralInterpretation | None = None,
     current_spectral: SpectralInterpretation | None = None,
+    installed_incomplete: bool = False,
+    candidate_covers_declared_program: bool = False,
 ) -> ImportQualityDecision:
     """Decide whether to import based on codec-aware quality comparison (issue #60).
 
@@ -211,6 +222,12 @@ def import_quality_decision(
         "transcode_upgrade"   — transcode but better than existing, import + denylist (exit 6)
         "transcode_downgrade" — transcode and not better, skip + denylist (exit 6)
         "transcode_first"     — transcode but nothing on disk yet, import (exit 6)
+        "installed_incomplete_hold"
+                              — the comparison said "equivalent", but the
+                                installed copy is positively missing a
+                                declared component and this candidate covers
+                                the whole declared program: withhold the
+                                reject and stage for the operator (#1241)
 
     Args:
         new: measurement of the new download
@@ -271,6 +288,30 @@ def import_quality_decision(
             basis=basis,
         )
 
+    # Issue #1241. An installed copy that is positively MISSING a declared
+    # audio component is not a sound baseline for a destructive "not better"
+    # verdict: the two sides are not the same program. When the candidate
+    # provably covers the whole declared program (beets' own extra_tracks
+    # reject at ``lib/beets.py::apply_candidate_scenario`` fell through for
+    # THIS attempt) and the comparison said "equivalent" — not "worse" —
+    # withhold the reject and hand the album to the operator instead of
+    # deleting the folder.
+    #
+    # "worse" stays blocked regardless, exactly as it is under the
+    # verified-lossless bypass above (issue #60 acceptance criterion). The
+    # accepted residual: a genuinely-worse-but-complete candidate against an
+    # incomplete installed copy is still rejected. That cohort is countable
+    # via this decision string before anyone widens the guard.
+    if (
+        verdict == "equivalent"
+        and installed_incomplete
+        and candidate_covers_declared_program
+    ):
+        return ImportQualityDecision(
+            decision=DECISION_INSTALLED_INCOMPLETE_HOLD,
+            basis=msgspec.structs.replace(basis, installed_incomplete_hold=True),
+        )
+
     # "worse" or "equivalent" without verified_lossless bypass → reject.
     return ImportQualityDecision(
         decision="transcode_downgrade" if is_transcode else "downgrade",
@@ -298,6 +339,13 @@ class MeasuredImportDecisionInput(msgspec.Struct, frozen=True):
     # what the harness does; supplying one can only ever withhold MORE.
     source_spectral: SpectralInterpretation | None = None
     current_spectral: SpectralInterpretation | None = None
+    # issue #1241 — the two conjuncts of the installed-incomplete hold.
+    # ``installed_incomplete`` is a POSITIVE verdict on the installed copy
+    # (never "unknown"); ``candidate_covers_declared_program`` is beets' own
+    # proof that this attempt's candidate carried no extra/missing declared
+    # track. Both default False, so an unmeasured world behaves as before.
+    installed_incomplete: bool = False
+    candidate_covers_declared_program: bool = False
 
 
 class MeasuredImportDecisionResult(msgspec.Struct, frozen=True):
@@ -619,6 +667,10 @@ def measured_import_decision(
         verified_lossless_proof=measured.verified_lossless_proof,
         source_spectral=measured.source_spectral,
         current_spectral=measured.current_spectral,
+        installed_incomplete=measured.installed_incomplete,
+        candidate_covers_declared_program=(
+            measured.candidate_covers_declared_program
+        ),
     )
     decision = quality.decision
     exit_code = 0
@@ -652,7 +704,9 @@ def measured_import_decision(
         exit_code=exit_code,
         would_import=would_import,
         confident_reject=confident_reject,
-        uncertain=False,
+        # issue #1241: the hold is the one measured outcome that neither
+        # imports nor confidently rejects — it stages for the operator.
+        uncertain=decision == DECISION_INSTALLED_INCOMPLETE_HOLD,
         cleanup_eligible=confident_reject,
         stage_chain=[f"stage2_import:{decision}"],
         reason=reason,

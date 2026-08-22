@@ -29,6 +29,7 @@ from lib.quality import (
     CdRipBitVerification,
     CdTocIdentity,
     ImportResult,
+    InstalledCompleteness,
     SpectralAnalysisDetail,
     SpectralDetail,
     V0ProbeEvidence,
@@ -1469,6 +1470,227 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertEqual(result.status, "incomplete")
         self.assertIn("duplicate snapshot relative_path", result.reason or "")
 
+
+class TestInstalledCompletenessGatesTheProofLock(unittest.TestCase):
+    """Issue #1241 part 4 — completeness is a PRECONDITION on granting the
+    verified-lossless proof lock.
+
+    The lock's semantics are unchanged: ``full_pipeline_decision_from_
+    evidence`` still returns ``verified_lossless_locked`` the instant
+    ``current.verified_lossless_proof`` is set, and nothing revokes an
+    existing proof. What changes is that an album demonstrably missing a
+    declared audio component never ENTERS the locked state.
+
+    The proof is minted for the candidate's own bytes in
+    ``evidence_from_import_result``; that site is deliberately untouched. The
+    two writers of a CURRENT row's proof are the ones gated here.
+    """
+
+    def setUp(self) -> None:
+        self.root = tempfile.mkdtemp()
+        with open(os.path.join(self.root, "01.flac"), "wb") as handle:
+            handle.write(b"audio 1")
+        self.proof = VerifiedLosslessProof(
+            provenance="measured",
+            source="flac",
+            classifier="spectral_verified_lossless",
+            detail="genuine",
+        )
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _album_info(self) -> AlbumInfo:
+        return AlbumInfo(
+            album_id=1,
+            track_count=1,
+            min_bitrate_kbps=850,
+            avg_bitrate_kbps=900,
+            median_bitrate_kbps=880,
+            is_cbr=False,
+            album_path=self.root,
+            format="FLAC",
+        )
+
+    def _propagate(self, candidate_program_complete: bool | None):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="mb-lock"))
+        candidate = make_album_quality_evidence(
+            mb_release_id="mb-lock",
+            files=snapshot_audio_files(self.root),
+            verified_lossless_proof=self.proof,
+        )
+        return propagate_candidate_evidence_to_current(
+            db,
+            request_id=42,
+            candidate_evidence=candidate,
+            album_info=self._album_info(),
+            candidate_program_complete=candidate_program_complete,
+        )
+
+    def test_a_force_imported_incomplete_candidate_never_mints_the_lock(
+        self,
+    ) -> None:
+        """The force-import hole.
+
+        Force imports DESPITE an invalid beets verdict, so an
+        ``extra_tracks`` folder — one beets rejected precisely because it is
+        missing a declared track — can become the installed album. Minting a
+        permanent archival-ceiling lock on it would close the release
+        forever, and the operator's only way back in would be Replace.
+        """
+        result = self._propagate(candidate_program_complete=False)
+
+        self.assertEqual(result.status, "ready")
+        assert result.evidence is not None
+        self.assertIsNone(result.evidence.verified_lossless_proof)
+
+    def test_a_proven_or_unknown_candidate_carries_the_lock_as_before(
+        self,
+    ) -> None:
+        """Fail-safe direction: only a POSITIVE False withholds."""
+        for label, complete in (("proven", True), ("unknown", None)):
+            with self.subTest(candidate_program_complete=label):
+                result = self._propagate(candidate_program_complete=complete)
+                self.assertEqual(result.status, "ready")
+                assert result.evidence is not None
+                assert result.evidence.verified_lossless_proof is not None
+                self.assertEqual(
+                    result.evidence.verified_lossless_proof.provenance,
+                    "carried",
+                )
+
+    def _backfill(self, installed_completeness, *, same_snapshot: bool = False):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="mb-lock"))
+        existing = make_album_quality_evidence(
+            mb_release_id="mb-lock",
+            source_path=self.root,
+            files=(
+                snapshot_audio_files(self.root)
+                if same_snapshot
+                else [AlbumQualityEvidenceFile(
+                    relative_path="00-old.flac",
+                    size_bytes=1,
+                    mtime_ns=1,
+                    extension="flac",
+                    container="flac",
+                    codec="flac",
+                )]
+            ),
+            verified_lossless_proof=self.proof,
+            installed_completeness=installed_completeness,
+        )
+        db.upsert_album_quality_evidence(existing)
+        stored = db.find_album_quality_evidence(
+            mb_release_id="mb-lock",
+            snapshot_fingerprint=existing.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        db.set_request_current_evidence(42, stored.id)
+        result = backfill_current_evidence_from_album_info(
+            db,
+            request_id=42,
+            mb_release_id="mb-lock",
+            album_info=self._album_info(),
+        )
+        return db, stored.id, result
+
+    def test_an_incomplete_row_does_not_carry_its_proof_to_a_new_snapshot(
+        self,
+    ) -> None:
+        """The live-reachable legacy hole.
+
+        This branch carries a proof across an installed-snapshot CHANGE —
+        files removed or damaged. Forward-only: the OLD row keeps its proof
+        untouched (no revocation, no backfill); the new snapshot simply does
+        not receive it.
+        """
+        db, old_id, result = self._backfill(InstalledCompleteness(
+            verdict="incomplete",
+            source="discogs",
+            declared_audio_components=5,
+            physical_audio_files=4,
+            detail="missing_source_audio: 4738671-1B",
+        ))
+
+        self.assertEqual(result.status, "ready")
+        assert result.evidence is not None
+        self.assertIsNone(result.evidence.verified_lossless_proof)
+        # Forward-only: nothing revoked the old row's proof.
+        old = db.load_album_quality_evidence_by_id(old_id)
+        assert old is not None and old.verified_lossless_proof is not None
+
+    def test_complete_and_unknown_rows_carry_the_proof_exactly_as_today(
+        self,
+    ) -> None:
+        for label, completeness in (
+            ("never measured", None),
+            (
+                "unknown",
+                InstalledCompleteness(
+                    verdict="unknown",
+                    detail="discogs mirror unavailable",
+                ),
+            ),
+            (
+                "complete",
+                InstalledCompleteness(
+                    verdict="complete",
+                    source="discogs",
+                    declared_audio_components=1,
+                    physical_audio_files=1,
+                ),
+            ),
+        ):
+            with self.subTest(installed_completeness=label):
+                _db, _old_id, result = self._backfill(completeness)
+                self.assertEqual(result.status, "ready")
+                assert result.evidence is not None
+                assert result.evidence.verified_lossless_proof is not None
+                self.assertEqual(
+                    result.evidence.verified_lossless_proof.provenance,
+                    "carried",
+                )
+
+    def test_a_rebuild_at_the_same_address_never_revokes_the_proof(
+        self,
+    ) -> None:
+        """#1241 is forward-only, and the withhold must not become one.
+
+        ``load_or_backfill_current_evidence`` reaches this function whenever
+        ``current_evidence_rebuild_reasons`` fires, INCLUDING when the beets
+        snapshot is unchanged — so the rebuilt row lands on the very
+        ``(mb_release_id, snapshot_fingerprint)`` address the proof already
+        lives on. Withholding there would REVOKE it: the evidence upsert's
+        ``verified_lossless`` merge only preserves a stored proof that also
+        carries a ``cd_rip_verification``, so a FLAC-source proof (this
+        fixture's) would be written away. The withhold is therefore scoped
+        to a CHANGED fingerprint.
+        """
+        db, old_id, result = self._backfill(
+            InstalledCompleteness(
+                verdict="incomplete",
+                source="discogs",
+                declared_audio_components=5,
+                physical_audio_files=4,
+                detail="missing_source_audio: 4738671-1B",
+            ),
+            same_snapshot=True,
+        )
+
+        self.assertEqual(result.status, "ready")
+        assert result.evidence is not None
+        old = db.load_album_quality_evidence_by_id(old_id)
+        assert old is not None
+        # Same content address — this IS the stored row.
+        self.assertEqual(
+            result.evidence.snapshot_fingerprint, old.snapshot_fingerprint)
+        assert result.evidence.verified_lossless_proof is not None
+        self.assertEqual(
+            result.evidence.verified_lossless_proof.classifier,
+            self.proof.classifier,
+        )
 
 class TestCaptureFieldsAreOneAtomicFactWithSpectralGrade(unittest.TestCase):
     """issue #829 Phase 5 PR1, review round 2 should-fix 6:

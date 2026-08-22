@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from lib.quality.decisions import (
+    DECISION_INSTALLED_INCOMPLETE_HOLD,
     DECISION_LOSSLESS_SOURCE_LOCKED,
     DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
     DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
@@ -51,6 +52,23 @@ def dispatch_action(decision: str) -> DispatchAction:
         return DispatchAction(mark_done=True, trigger_notifiers=True,
                               run_quality_gate=True, cleanup=True)
     elif decision == "downgrade":
+        return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
+    elif decision == DECISION_INSTALLED_INCOMPLETE_HOLD:
+        # Issue #1241. The IMPORTER lane's consequences are DELIBERATELY
+        # identical to ``downgrade``: record the rejection, denylist the peer,
+        # and clean the disposable staged source. Only the Wrong Matches
+        # CLEANUP REDUCER's consequences change — there the folder is already
+        # quarantined and worklist-visible, so keeping it for the operator is
+        # free (the hold is absent from
+        # ``QUALITY_DECISION_REJECT_STAGE_DECISIONS``, which routes the
+        # reducer to ``OUTCOME_KEPT_UNCERTAIN``).
+        #
+        # Preserving an IMPORTER-lane source instead would need a new
+        # quality-reject-writes-failed_path quarantine lane, which
+        # docs/rejection-routing.md § "What is deliberately unchanged" rules
+        # out and which collides with the owner-journaled processor cleanup.
+        # Named as follow-up work on issue #1241, not silently deferred: the
+        # distinct decision string makes that cohort countable first.
         return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
     elif decision == DECISION_VERIFIED_LOSSLESS_LOCKED:
         return DispatchAction(
@@ -242,7 +260,15 @@ def resolve_rejection_search_override(
     rejected-tier removal. Transcode downgrades and unrelated decisions leave
     the existing override untouched by returning ``override=None``.
     """
-    if decision not in ("downgrade", "transcode_downgrade"):
+    # ``installed_incomplete_hold`` (issue #1241) narrows exactly like the
+    # ``downgrade`` it replaced: the importer lane still rejected this
+    # candidate, so without the narrowing the search planner asks for the same
+    # tier from the same peers on every cycle.
+    if decision not in (
+        "downgrade",
+        "transcode_downgrade",
+        DECISION_INSTALLED_INCOMPLETE_HOLD,
+    ):
         return RejectionSearchOverrideResolution(None, "preserve")
 
     transparent_override = rejection_backfill_override(
@@ -257,7 +283,7 @@ def resolve_rejection_search_override(
             "transparent_have",
         )
 
-    if decision == "downgrade":
+    if decision in ("downgrade", DECISION_INSTALLED_INCOMPLETE_HOLD):
         tier_override = narrow_override_on_downgrade(
             current_override,
             dl_info,

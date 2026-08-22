@@ -38,6 +38,7 @@ from lib.dispatch.types import (
     PostCommitCleanup,
 )
 from lib.quality import (
+    DECISION_INSTALLED_INCOMPLETE_HOLD,
     DownloadInfo,
     QualityRankConfig,
     ValidationResult,
@@ -118,7 +119,16 @@ def _reject_import_from_evidence_decision(
         detail=detail,
     ).to_json()
     search_filetype_override = None
-    if decision in ("downgrade", "transcode_downgrade"):
+    # ``installed_incomplete_hold`` (issue #1241) is admitted here for the
+    # same reason ``resolve_rejection_search_override`` admits it: the
+    # importer lane still rejected this candidate, so its routing must be
+    # byte-identical to the ``downgrade`` it replaced. Omitting it here is
+    # what made the resolver's own branch unreachable in review round 1.
+    if decision in (
+        "downgrade",
+        "transcode_downgrade",
+        DECISION_INSTALLED_INCOMPLETE_HOLD,
+    ):
         current_override = None
         try:
             request = db.get_request(request_id)

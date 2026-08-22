@@ -22,6 +22,7 @@ import stat
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import msgspec
@@ -80,6 +81,7 @@ from lib.quality import (
     AudioValidationReport,
     CodecFamily,
     ImportResult,
+    InstalledCompleteness,
     MeasurementFailure,
     MeasurementFailureReason,
     QualityEvidenceActionPayload,
@@ -119,6 +121,7 @@ from lib.quality_evidence import (
     snapshot_audio_files,
     spectral_measurement_generation_is_current,
 )
+from lib.release_identity import ReleaseIdentity
 from lib.v0_probe import probe_installed_album_as_v0
 from lib.validation_envelope import decode_validation_envelope
 
@@ -809,6 +812,15 @@ class ImportPreviewDB(QualityEvidenceDB, Protocol):
         spectral_measurement_version: int | None = None,
     ) -> bool: ...
 
+    def persist_current_installed_completeness(
+        self,
+        *,
+        request_id: int,
+        expected_evidence_id: int,
+        expected_snapshot_fingerprint: str,
+        completeness: InstalledCompleteness,
+    ) -> bool: ...
+
     def claim_current_v0_research_attempt(
         self,
         *,
@@ -976,6 +988,183 @@ def persist_exact_current_spectral_from_attempt(
             loaded,
             "stale",
             "exact current evidence rejected HAVE spectral persistence",
+        )
+    return EvidenceBuildResult(loaded, "ready")
+
+
+InstalledCompletenessClassifier = Callable[
+    [ReleaseIdentity], InstalledCompleteness
+]
+"""Measure ONE installed release's completeness (issue #1241).
+
+Injected so the enrichment helpers stay pure of Beets/mirror collaborators;
+``production_installed_completeness_classifier`` builds the real one.
+"""
+
+
+def completeness_beets_storage(
+    *,
+    beets_library_db_path: str | None,
+    beets_library_root: str | None,
+) -> tuple[str | None, str | None] | None:
+    """Which Beets storage a decision-time completeness measurement opens.
+
+    ``None`` means the guarded deployment-owned runtime pair
+    (``open_beets_db``); a pair means ``BeetsDB(db_path, library_root=root)``
+    with ``None`` filling in the deployment default for whichever half the
+    caller omitted.
+
+    Mirrors ``lib/quality_evidence.py::load_or_backfill_current_evidence``
+    exactly, because the two run against the same library inside one
+    enrichment call: an explicit ``beets_library_root`` is ALWAYS honoured
+    even with no db path (``lib/download.py``'s failure-lane enrichment
+    passes exactly that pair). Silently discarding a half override and
+    reading the runtime config instead would measure a different library
+    than the caller named (issue #1241 review).
+    """
+    if beets_library_db_path is None and not beets_library_root:
+        return None
+    return (beets_library_db_path, beets_library_root or None)
+
+
+def _fetch_discogs_release_raw(release_id: str) -> dict[str, object]:
+    """Fetch one raw Discogs release for the completeness classifier.
+
+    ``ReleaseIdentity`` carries the Discogs id as a string;
+    ``web.discogs.get_release_raw`` takes an int. The ``ValueError`` from an
+    unparseable id is deliberately OUTSIDE
+    ``lib.library_completeness.SOURCE_READ_FAILURES``: that is a programmer
+    defect, not a mirror failure that should quietly resolve to ``unknown``.
+    """
+    from web import discogs
+
+    return discogs.get_release_raw(int(release_id))
+
+
+def production_installed_completeness_classifier(
+    *,
+    config: CratediggerConfig | None = None,
+    beets_library_db_path: str | None = None,
+    beets_library_root: str | None = None,
+) -> InstalledCompletenessClassifier:
+    """Wire the census's own classifier to the production Beets + mirrors.
+
+    Issue #1241. Deliberately the SAME collaborators the daily census uses
+    (``web.mb`` / ``web.discogs`` raw releases behind their 24h memoized
+    cache, and the production canonical-release resolver), so a decision-time
+    measurement and the census cannot disagree about the same album. It never
+    reads the census snapshot: it measures the one album under decision, now.
+
+    Beets storage selection is ``completeness_beets_storage``.
+    """
+
+    def classify(identity: ReleaseIdentity) -> InstalledCompleteness:
+        from lib.beets_db import BeetsDB, open_beets_db
+        from lib.library_completeness import classify_installed_release
+        from lib.mb_canonical import production_tagged_canonical_release_fn
+        from web import mb
+
+        storage = completeness_beets_storage(
+            beets_library_db_path=beets_library_db_path,
+            beets_library_root=beets_library_root,
+        )
+        handle = (
+            open_beets_db(config=config)
+            if storage is None
+            else BeetsDB(storage[0], library_root=storage[1])
+        )
+        with handle as beets:
+            return classify_installed_release(
+                identity,
+                beets=beets,
+                fetch_musicbrainz_raw=mb.get_release_raw,
+                fetch_discogs_raw=_fetch_discogs_release_raw,
+                resolve_musicbrainz_redirect=(
+                    production_tagged_canonical_release_fn()
+                ),
+            )
+
+    return classify
+
+
+def enrich_current_installed_completeness_for_preview(
+    db: ImportPreviewDB,
+    *,
+    request_id: int,
+    current_evidence: AlbumQualityEvidence | None,
+    classify_fn: InstalledCompletenessClassifier,
+) -> EvidenceBuildResult:
+    """Measure and persist installed completeness on one exact snapshot (#1241).
+
+    Preview measures; the importer decides. This makes the measured fact
+    durable on the already-linked, content-addressed current evidence row,
+    under the same request-FK + content-address guard every other
+    preview-owned writer uses.
+
+    A failed measurement is persisted as ``verdict="unknown"`` rather than
+    left NULL: an attempted-but-undecidable measurement is a real,
+    distinguishable state, it behaves exactly like never-measured for every
+    policy consumer, and recording it stops the enrichment lane re-fetching a
+    dead mirror on every cycle. This helper therefore never propagates a
+    classifier failure.
+    """
+    if current_evidence is None or current_evidence.id is None:
+        return EvidenceBuildResult(
+            None, "missing", "current evidence is missing",
+        )
+    identity = ReleaseIdentity.from_id(current_evidence.mb_release_id)
+    if identity is None:
+        completeness = InstalledCompleteness(
+            verdict="unknown",
+            detail=(
+                "current evidence names no exact release identity: "
+                f"{current_evidence.mb_release_id!r}"
+            ),
+            measured_at=datetime.now(UTC),
+        )
+    else:
+        try:
+            completeness = classify_fn(identity)
+        except Exception as exc:
+            logger.warning(
+                "Installed-completeness measurement failed for request %s",
+                request_id,
+                exc_info=True,
+            )
+            completeness = InstalledCompleteness(
+                verdict="unknown",
+                detail=f"measurement failed: {type(exc).__name__}: {exc}",
+                measured_at=datetime.now(UTC),
+            )
+    try:
+        persisted = db.persist_current_installed_completeness(
+            request_id=request_id,
+            expected_evidence_id=current_evidence.id,
+            expected_snapshot_fingerprint=(
+                current_evidence.snapshot_fingerprint
+            ),
+            completeness=completeness,
+        )
+        loaded = db.load_album_quality_evidence_by_id(current_evidence.id)
+        linked_id = db.get_request_current_evidence_id(request_id)
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+        return EvidenceBuildResult(None, "failed", f"{type(exc).__name__}: {exc}")
+    if (
+        linked_id != current_evidence.id
+        or loaded is None
+        or loaded.id != current_evidence.id
+        or loaded.snapshot_fingerprint != current_evidence.snapshot_fingerprint
+    ):
+        return EvidenceBuildResult(
+            current_evidence,
+            "stale",
+            "current evidence changed during installed-completeness persistence",
+        )
+    if not persisted:
+        return EvidenceBuildResult(
+            loaded,
+            "stale",
+            "exact current evidence rejected installed-completeness persistence",
         )
     return EvidenceBuildResult(loaded, "ready")
 
@@ -1269,10 +1458,11 @@ class EnrichmentPlan:
 
     spectral: bool
     v0: bool
+    completeness: bool
 
     @property
     def any(self) -> bool:
-        return self.spectral or self.v0
+        return self.spectral or self.v0 or self.completeness
 
 
 def plan_current_evidence_enrichment(
@@ -1286,6 +1476,10 @@ def plan_current_evidence_enrichment(
     The policy projection separately withholds error, blank, and unknown
     grades. A V0 metric or the attempted marker means the research probe
     already ran. Complete rows therefore cost nothing to re-plan.
+
+    Installed completeness (issue #1241) follows the same once-per-content
+    rule: a stored verdict of any value, ``unknown`` included, means the
+    measurement already ran on these exact bytes.
     """
     measurement = evidence.measurement
     preserve_source = current_evidence_preserves_source_spectral(evidence)
@@ -1304,6 +1498,10 @@ def plan_current_evidence_enrichment(
             evidence.v0_metric is None
             and not evidence.on_disk_v0_research_attempted
         ),
+        # Issue #1241: once-per-snapshot. A stored verdict -- including a
+        # stored ``unknown`` -- means the measurement already ran on these
+        # exact bytes and is not repeated.
+        completeness=evidence.installed_completeness is None,
     )
 
 
@@ -1429,6 +1627,7 @@ def enrich_incomplete_current_evidence_for_request(
     probe_fn: Callable[[str], V0ProbeEvidence | None] = (
         probe_installed_album_as_v0
     ),
+    completeness_classifier: InstalledCompletenessClassifier | None = None,
     load_fn: Callable[..., EvidenceBuildResult] = load_or_backfill_current_evidence,
 ) -> str:
     """Opportunistically complete a request's HAVE evidence in place.
@@ -1528,6 +1727,21 @@ def enrich_incomplete_current_evidence_for_request(
             probe_fn=probe_fn,
         )
         all_ok = all_ok and v0_result.status == "ready"
+    if plan.completeness:
+        completeness_result = enrich_current_installed_completeness_for_preview(
+            db,
+            request_id=request_id,
+            current_evidence=evidence,
+            classify_fn=(
+                completeness_classifier
+                if completeness_classifier is not None
+                else production_installed_completeness_classifier(
+                    beets_library_db_path=beets_library_db_path,
+                    beets_library_root=beets_library_root,
+                )
+            ),
+        )
+        all_ok = all_ok and completeness_result.status == "ready"
     return "enriched" if all_ok else "partial"
 
 
@@ -2088,6 +2302,9 @@ def measure_and_persist_candidate_evidence(
     repair_fn: HeaderRepairFn | None = None,
     cancellation_token: CancellationToken | None = None,
     aac_lattice_measure_fn: AacLatticeMeasureFn | None = measure_aac_lattice,
+    installed_completeness_classifier: (
+        InstalledCompletenessClassifier | None
+    ) = None,
 ) -> ImportPreviewResult:
     """Measure a source folder and persist candidate evidence; never decide.
 
@@ -2322,6 +2539,28 @@ def measure_and_persist_candidate_evidence(
                 )
                 if spectral_result.evidence is not None:
                     current_evidence = spectral_result.evidence
+            if (
+                current_evidence is not None
+                and current_evidence.installed_completeness is None
+            ):
+                # Issue #1241: once per content snapshot, on the same
+                # preview measurement lane as the HAVE spectral scan.
+                completeness_result = (
+                    enrich_current_installed_completeness_for_preview(
+                        db,
+                        request_id=request_id,
+                        current_evidence=current_evidence,
+                        classify_fn=(
+                            installed_completeness_classifier
+                            if installed_completeness_classifier is not None
+                            else production_installed_completeness_classifier(
+                                config=cfg,
+                            )
+                        ),
+                    )
+                )
+                if completeness_result.evidence is not None:
+                    current_evidence = completeness_result.evidence
         except ExecutionCancelled:
             raise
         except AudioValidationMeasurementError as exc:
@@ -2800,6 +3039,9 @@ def preview_import_from_path(
     persist_candidate_evidence: bool = False,
     _already_isolated: bool = False,
     cancellation_token: CancellationToken | None = None,
+    installed_completeness_classifier: (
+        InstalledCompletenessClassifier | None
+    ) = None,
 ) -> ImportPreviewResult:
     """Classify a real source folder without mutating source files or beets.
 
@@ -3060,6 +3302,32 @@ def preview_import_from_path(
                 )
                 if spectral_result.evidence is not None:
                     current_evidence = spectral_result.evidence
+            if (
+                current_evidence is not None
+                and current_evidence.installed_completeness is None
+            ):
+                # Issue #1241, once per content snapshot. Unlike the AAC
+                # lattice this surface deliberately skips, the measurement
+                # is a memoized mirror read plus one directory walk -- the
+                # same work the daily census does for 400+ releases -- so it
+                # is admissible on a synchronous operator surface, and this
+                # is the surface that populates the fact for a triage row.
+                completeness_result = (
+                    enrich_current_installed_completeness_for_preview(
+                        db,
+                        request_id=request_id,
+                        current_evidence=current_evidence,
+                        classify_fn=(
+                            installed_completeness_classifier
+                            if installed_completeness_classifier is not None
+                            else production_installed_completeness_classifier(
+                                config=cfg,
+                            )
+                        ),
+                    )
+                )
+                if completeness_result.evidence is not None:
+                    current_evidence = completeness_result.evidence
         except ExecutionCancelled:
             raise
         except AudioValidationMeasurementError as exc:

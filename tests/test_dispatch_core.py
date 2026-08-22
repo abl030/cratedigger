@@ -16,6 +16,11 @@ import msgspec
 
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
+from lib.dispatch.core import (
+    _attempt_beets_scenario,
+    _candidate_program_complete,
+    _resolve_rejection_override,
+)
 from lib.dispatch.types import DispatchOutcome, EvidenceImportGate, ImportOneRun
 from lib.import_execution import (
     CancellationToken,
@@ -26,15 +31,19 @@ from lib.import_execution import (
 from lib.import_queue import IMPORT_JOB_FORCE
 from lib.pipeline_db import DownloadLogOutcome
 from lib.quality import (
+    DECISION_INSTALLED_INCOMPLETE_HOLD,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     DownloadInfo,
     ImportResult,
     QualityEvidenceActionPayload,
     VerifiedLosslessProof,
+    dispatch_action,
+    resolve_rejection_search_override,
 )
 from lib.quality_evidence import snapshot_audio_files
 from lib.terminal_outcomes import ImportJobTerminal
+from lib.validation_envelope import scenario_covers_declared_program
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     claim_next_import_job,
@@ -1581,6 +1590,195 @@ class TestDispatchCoreSeams(unittest.TestCase):
         self.assertEqual(received["beets_python"], "/original/pinned-python")
         self.assertEqual(received["beets_library_db_path"], "/original/library.db")
         self.assertEqual(received["beets_library_root"], "/original/library")
+
+
+class TestAttemptBeetsScenario(unittest.TestCase):
+    """Issue #1241 — the ONE read both #1241 dispatch facts derive from.
+
+    Auto/local import is ``strong_match`` by admission; a force import acts
+    on a row beets REJECTED, so its scenario must be read back off the linked
+    ``download_log``. Reading it back is what stops the cleanup reducer and a
+    later force import of that very row deriving contradictory facts from it.
+    """
+
+    def setUp(self) -> None:
+        self.db = FakePipelineDB()
+        self.db.seed_request(make_request_row(id=1, mb_release_id="mbid-1"))
+
+    def _log(self, scenario: str) -> int:
+        return self.db.log_download(
+            1,
+            outcome="rejected",
+            validation_result={"scenario": scenario},
+        )
+
+    def test_a_non_force_lane_is_strong_match_by_admission(self) -> None:
+        self.assertEqual(
+            _attempt_beets_scenario(
+                self.db, scenario="auto_import", download_log_id=None,
+            ),
+            "strong_match",
+        )
+
+    def test_a_force_import_reads_the_linked_rows_scenario(self) -> None:
+        for scenario in (
+            "high_distance", "extra_tracks", "mbid_not_found",
+            "no_choose_match", "unmapped_audio",
+        ):
+            with self.subTest(scenario=scenario):
+                self.assertEqual(
+                    _attempt_beets_scenario(
+                        self.db,
+                        scenario="force_import",
+                        download_log_id=self._log(scenario),
+                    ),
+                    scenario,
+                )
+
+    def test_a_force_import_with_no_readable_row_is_unknown(self) -> None:
+        for download_log_id in (None, 9999):
+            with self.subTest(download_log_id=download_log_id):
+                self.assertIsNone(_attempt_beets_scenario(
+                    self.db,
+                    scenario="force_import",
+                    download_log_id=download_log_id,
+                ))
+
+    def test_the_force_lane_agrees_with_the_cleanup_reducer(self) -> None:
+        """The finding this split exists for: the reducer stages a
+        ``high_distance`` row as ``installed_incomplete_hold`` because it
+        PROVED the candidate covers the declared program, so a force import
+        of that same row must read the same True — not False-because-force.
+        """
+        for scenario, expected in (
+            ("high_distance", True),
+            ("unmapped_audio", True),
+            ("extra_tracks", False),
+            ("mbid_not_found", False),
+            ("no_choose_match", False),
+        ):
+            with self.subTest(scenario=scenario):
+                log_id = self._log(scenario)
+                # The dispatch (force) lane.
+                self.assertIs(
+                    scenario_covers_declared_program(_attempt_beets_scenario(
+                        self.db,
+                        scenario="force_import",
+                        download_log_id=log_id,
+                    )),
+                    expected,
+                )
+                # The cleanup reducer's own derivation, off the same row.
+                self.assertIs(
+                    scenario_covers_declared_program(scenario), expected,
+                )
+
+
+class TestCandidateProgramCompletePrecondition(unittest.TestCase):
+    """Issue #1241 — the tri-state precondition on GRANTING the proof lock.
+
+    Only a POSITIVE proof of incompleteness withholds a verified-lossless
+    proof from a new current row. That keeps issue #711's "the proof lock is
+    absolute for every import mode" invariant intact: a force import of an
+    ordinary ``high_distance`` wrong match still carries its proof; only the
+    ``extra_tracks`` shape — the one beets rejected precisely because the
+    candidate is missing a declared track — is refused.
+    """
+
+    def test_proven_coverage_is_complete(self) -> None:
+        for scenario in ("strong_match", "high_distance", "unmapped_audio"):
+            with self.subTest(scenario=scenario):
+                self.assertIs(_candidate_program_complete(scenario), True)
+
+    def test_extra_tracks_is_proven_incomplete(self) -> None:
+        self.assertIs(_candidate_program_complete("extra_tracks"), False)
+
+    def test_every_unproven_shape_is_unknown(self) -> None:
+        for scenario in ("mbid_not_found", "no_choose_match", None):
+            with self.subTest(scenario=scenario):
+                self.assertIsNone(_candidate_program_complete(scenario))
+
+
+class TestInstalledIncompleteHoldImporterLane(unittest.TestCase):
+    """Issue #1241 — the hold's IMPORTER-lane consequences, pinned.
+
+    The reducer lane keeps the folder; the importer lane deliberately does
+    not. Everything here is the documented "byte-identical to ``downgrade``"
+    claim in ``docs/rejection-routing.md``, asserted against literals rather
+    than against the production expression that computes them.
+    """
+
+    def test_the_hold_records_bans_and_cleans_exactly_like_downgrade(
+        self,
+    ) -> None:
+        hold = dispatch_action(DECISION_INSTALLED_INCOMPLETE_HOLD)
+        downgrade = dispatch_action("downgrade")
+        # Literal policy, not "whatever dispatch_action returns".
+        self.assertTrue(hold.record_rejection)
+        self.assertTrue(hold.denylist)
+        self.assertTrue(hold.cleanup)
+        self.assertFalse(hold.preserve_imported)
+        self.assertEqual(hold, downgrade)
+
+    def test_the_hold_narrows_the_rejected_tier_search_override(self) -> None:
+        """The resolver admits the hold AND both production callers gate on
+        it, so the narrowing actually reaches a rejected request."""
+        dl_info = DownloadInfo(
+            username="peer", filetype="mp3", bitrate=320000, is_vbr=False,
+        )
+        for decision in ("downgrade", DECISION_INSTALLED_INCOMPLETE_HOLD):
+            with self.subTest(decision=decision):
+                self.assertEqual(
+                    resolve_rejection_search_override(
+                        decision=decision,
+                        current_override="mp3 320,flac",
+                        dl_info=dl_info,
+                        current_measurement=None,
+                        spectral_evidence_source="attempt_have_audit",
+                        have_spectral_audit=None,
+                        cfg=None,
+                    ).override,
+                    "flac",
+                )
+
+    def test_the_dispatch_caller_reaches_the_resolver_for_the_hold(
+        self,
+    ) -> None:
+        """A resolver branch no caller can reach is dead code — this is the
+        mutant that survived review round 1. Drive the CALLER, not the pure
+        resolver, and assert it produced the narrowed override.
+
+        (``lib/dispatch/outcome_actions.py``'s caller is pinned end-to-end in
+        ``tests/test_import_dispatch.py::
+        TestRejectImportFromEvidenceDecision::
+        test_installed_incomplete_hold_narrows_the_search_override``.)
+        """
+        dl_info = DownloadInfo(
+            username="peer", filetype="mp3", bitrate=320000, is_vbr=False,
+        )
+        import_result = ImportResult(
+            decision=DECISION_INSTALLED_INCOMPLETE_HOLD,
+            source_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320, avg_bitrate_kbps=320,
+                format="MP3", is_cbr=True,
+            ),
+        )
+        for decision in ("downgrade", DECISION_INSTALLED_INCOMPLETE_HOLD):
+            with self.subTest(decision=decision):
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(
+                    id=7, search_filetype_override="mp3 320,flac",
+                ))
+                current, narrowed = _resolve_rejection_override(
+                    db,  # type: ignore[arg-type]
+                    request_id=7,
+                    decision=decision,
+                    dl_info=dl_info,
+                    import_result=import_result,
+                    cfg=None,
+                )
+                self.assertEqual(current, "mp3 320,flac")
+                self.assertEqual(narrowed, "flac")
 
 
 if __name__ == "__main__":

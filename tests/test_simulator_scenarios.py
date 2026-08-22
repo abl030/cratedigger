@@ -324,6 +324,8 @@ def simulate(
     verified_lossless_target: str | None = None,
     *,
     current_verified_lossless_proof: bool | None = None,
+    installed_incomplete: bool = False,
+    candidate_covers_declared_program: bool = False,
 ) -> SimResult:
     """Run full_pipeline_decision + rejection backfill."""
     # Derive existing state params (same logic as cmd_quality)
@@ -363,6 +365,8 @@ def simulate(
         verified_lossless_target=verified_lossless_target,
         target_format=album.target_format,
         existing_v0_probe_avg=album.existing_v0_probe_avg,
+        installed_incomplete=installed_incomplete,
+        candidate_covers_declared_program=candidate_covers_declared_program,
         **download.dl_params(),
     )
 

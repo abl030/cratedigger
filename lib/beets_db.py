@@ -424,6 +424,27 @@ def album_info_from_current(
     )
 
 
+#: The ONE completeness projection, shared by the whole-library census and
+#: the single-album decision-time read (issue #1241). Two fully-formed
+#: statements over one prefix: the scoped form must stay a plain primary-key
+#: equality so SQLite can use ``SEARCH a USING INTEGER PRIMARY KEY``.
+_LIBRARY_COMPLETENESS_PROJECTION = (
+    "SELECT a.id, a.albumartist, a.album, a.mb_albumid, "
+    "a.discogs_albumid, i.path, i.mb_releasetrackid, i.mb_trackid, "
+    "i.title, i.track "
+    "FROM albums a LEFT JOIN items i ON i.album_id = a.id "
+)
+_LIBRARY_COMPLETENESS_ORDER = "ORDER BY a.id ASC, i.id ASC"
+_LIBRARY_COMPLETENESS_SQL_ALL = (
+    _LIBRARY_COMPLETENESS_PROJECTION + _LIBRARY_COMPLETENESS_ORDER
+)
+_LIBRARY_COMPLETENESS_SQL_ONE = (
+    _LIBRARY_COMPLETENESS_PROJECTION
+    + "WHERE a.id = :album_id "
+    + _LIBRARY_COMPLETENESS_ORDER
+)
+
+
 class BeetsDB:
     """Read-only connection to the beets SQLite library database."""
 
@@ -1445,15 +1466,53 @@ class BeetsDB:
         Beets snapshot.  Filesystem/source reads happen in the classifier and
         remain independent observations.
         """
+        return self._library_completeness_albums()
+
+    def library_completeness_album(
+        self, identity: ReleaseIdentity,
+    ) -> "LibraryAlbum | None":
+        """Scoped counterpart of the census projection for ONE exact identity.
+
+        Issue #1241: a live import decision measures the one album under
+        decision, never the whole library. Returns ``None`` for an absent
+        identity AND for an ambiguous one (more than one matching album row)
+        -- ambiguity is unknown, never a guess, matching
+        :meth:`resolve_current_release`'s own contract.
+        """
+        album_ids = self._matching_album_ids(identity)
+        if len(album_ids) != 1:
+            return None
+        albums = self._library_completeness_albums(album_id=album_ids[0])
+        return albums[0] if albums else None
+
+    def _library_completeness_albums(
+        self, *, album_id: int | None = None,
+    ) -> "list[LibraryAlbum]":
+        """The one completeness projection and its one decoder.
+
+        Both the whole-library census and the single-album decision-time read
+        (issue #1241) select exactly these columns in exactly this order and
+        decode them here, so the two callers cannot drift on identity
+        derivation, source-key selection, containment refusal, or the
+        single-directory reduction.
+
+        ``album_id`` narrows to one album, through a SECOND fully-formed
+        statement rather than a null-tolerant ``:album_id IS NULL OR a.id =
+        :album_id`` predicate. That predicate is unindexable -- SQLite plans
+        it as ``SCAN a`` -- so every decision-time measurement would walk the
+        whole albums table; the two constants below share one projection
+        prefix, keep both callers provably on the same columns, and still
+        contain no runtime-assembled SQL.
+        """
         from lib.library_completeness import CatalogItem, LibraryAlbum
 
-        rows = self._conn.execute(
-            "SELECT a.id, a.albumartist, a.album, a.mb_albumid, "
-            "a.discogs_albumid, i.path, i.mb_releasetrackid, i.mb_trackid, "
-            "i.title, i.track "
-            "FROM albums a LEFT JOIN items i ON i.album_id = a.id "
-            "ORDER BY a.id ASC, i.id ASC"
-        ).fetchall()
+        rows = (
+            self._conn.execute(_LIBRARY_COMPLETENESS_SQL_ALL).fetchall()
+            if album_id is None
+            else self._conn.execute(
+                _LIBRARY_COMPLETENESS_SQL_ONE, {"album_id": album_id},
+            ).fetchall()
+        )
         artists: dict[int, str] = {}
         titles: dict[int, str] = {}
         identities: dict[int, ReleaseIdentity | None] = {}

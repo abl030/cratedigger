@@ -163,6 +163,7 @@ from lib.quality import (
     AlbumQualityV0Metric,
     CodecFamily,
     CooldownConfig,
+    InstalledCompleteness,
     evidence_is_source_semantic,
 )
 from lib.quality_evidence import (
@@ -5201,6 +5202,24 @@ class FakePipelineDB:
                 evidence,
                 aac_lattice=existing.aac_lattice,
             )
+        # Installed completeness (issue #1241) mirrors the real SQL's
+        # ``COALESCE(EXCLUDED.installed_completeness,
+        # album_quality_evidence.installed_completeness)``: an ordinary
+        # evidence rebuild at the same content address carries no verdict
+        # (only the preview enrichment lane measures one), so a NULL writer
+        # must never erase what was measured on these exact bytes. Without
+        # this mirror the fake is STRICTER than production and a passing
+        # test would describe a world the real DB never produces
+        # (test-fidelity Rule A).
+        if (
+            existing is not None
+            and existing.installed_completeness is not None
+            and evidence.installed_completeness is None
+        ):
+            evidence = msgspec.structs.replace(
+                evidence,
+                installed_completeness=existing.installed_completeness,
+            )
         if (
             existing is not None
             and existing.on_disk_v0_research_attempted
@@ -5353,6 +5372,33 @@ class FakePipelineDB:
             measurement=measurement,
         )
         self._store_album_quality_evidence(completed)
+        return True
+
+    def persist_current_installed_completeness(
+        self,
+        *,
+        request_id: int,
+        expected_evidence_id: int,
+        expected_snapshot_fingerprint: str,
+        completeness: InstalledCompleteness,
+    ) -> bool:
+        """Mirror the production writer's guard and fresh-measurement-wins."""
+        errors = completeness.validation_errors()
+        if errors:
+            raise ValueError("; ".join(errors))
+        request = self._requests.get(int(request_id))
+        evidence = self._evidence_by_id.get(int(expected_evidence_id))
+        if (
+            request is None
+            or request.get("current_evidence_id") != int(expected_evidence_id)
+            or evidence is None
+            or evidence.snapshot_fingerprint != expected_snapshot_fingerprint
+        ):
+            return False
+        self._store_album_quality_evidence(msgspec.structs.replace(
+            evidence,
+            installed_completeness=completeness,
+        ))
         return True
 
     def persist_current_v0_research_metric(

@@ -10,19 +10,25 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
+import msgspec
+
 from lib.config import CratediggerConfig
 from lib.dispatch.types import ImportOneRun
 from lib.import_preview import (
     ImportPreviewValues,
+    _fetch_discogs_release_raw,
     _lossless_candidate_spectral_failure,
     _prefer_successful_spectral_detail,
+    completeness_beets_storage,
     compose_attempt_spectral_audit,
     current_spectral_evidence_reusable,
+    enrich_current_installed_completeness_for_preview,
     enrich_current_v0_research_for_preview,
     enrich_incomplete_current_evidence_for_request,
     load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
     persist_exact_current_spectral_from_attempt,
+    plan_current_evidence_enrichment,
     prepare_current_evidence_for_failure,
     preview_import_from_path,
     preview_import_from_values,
@@ -38,6 +44,8 @@ from lib.quality import (
     AudioToolDiagnostic,
     AudioValidationReport,
     ImportResult,
+    InstalledCompleteness,
+    InstalledCompletenessVerdict,
     QualityRankConfig,
     SpectralAnalysisDetail,
     SpectralDetail,
@@ -50,6 +58,7 @@ from lib.quality_evidence import (
     snapshot_audio_files,
     snapshot_fingerprint,
 )
+from lib.release_identity import ReleaseIdentity
 from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
@@ -3342,9 +3351,11 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         *,
         spectral_present: bool,
         v0_attempted: bool = False,
+        completeness_present: bool = False,
+        mb_release_id: str = "mbid-42",
     ):
         evidence = make_album_quality_evidence(
-            mb_release_id="mbid-42",
+            mb_release_id=mb_release_id,
             source_path=source,
             files=snapshot_audio_files(source),
             measurement=AudioQualityMeasurement(
@@ -3362,6 +3373,16 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
             ),
             v0_metric=None,
             on_disk_v0_research_attempted=v0_attempted,
+            installed_completeness=(
+                InstalledCompleteness(
+                    verdict="complete",
+                    source="musicbrainz",
+                    declared_audio_components=1,
+                    physical_audio_files=1,
+                )
+                if completeness_present
+                else None
+            ),
         )
         db.upsert_album_quality_evidence(evidence)
         stored = db.find_album_quality_evidence(
@@ -3395,13 +3416,32 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
 
         return probe, calls
 
+    def _completeness_recorder(
+        self, verdict: InstalledCompletenessVerdict = "complete",
+    ):
+        calls: list[ReleaseIdentity] = []
+
+        def classify(identity: ReleaseIdentity) -> InstalledCompleteness:
+            calls.append(identity)
+            return InstalledCompleteness(
+                verdict=verdict,
+                source=identity.source,
+                declared_audio_components=1,
+                physical_audio_files=1,
+                detail=None if verdict == "complete" else "synthetic",
+            )
+
+        return classify, calls
+
     def _good_scan(self) -> SpectralAnalysisDetail:
         return SpectralAnalysisDetail(
             attempted=True, grade="genuine", bitrate_kbps=96,
             spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
         )
 
-    def _enrich(self, db, analyzer, probe):
+    def _enrich(
+        self, db, analyzer, probe, classify=None, mb_release_id="mbid-42",
+    ):
         def load_current(db_arg, **_kwargs):
             evidence_id = db_arg.get_request_current_evidence_id(42)
             evidence = db_arg.load_album_quality_evidence_by_id(evidence_id)
@@ -3420,26 +3460,92 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         return enrich_incomplete_current_evidence_for_request(
             db,
             request_id=42,
-            mb_release_id="mbid-42",
+            mb_release_id=mb_release_id,
             quality_ranks=QualityRankConfig.defaults(),
             beets_library_root="",
             spectral_analyzer=analyzer,
             probe_fn=probe,
+            completeness_classifier=(
+                classify
+                if classify is not None
+                else self._completeness_recorder()[0]
+            ),
             load_fn=load_current,
         )
 
     def test_complete_row_skips_all_measurement(self):
         db = self._db()
         source = self._source_dir()
-        self._seed_current(db, source, spectral_present=True, v0_attempted=True)
+        self._seed_current(
+            db, source,
+            spectral_present=True, v0_attempted=True, completeness_present=True,
+        )
         analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
         probe, probe_calls = self._probe_recorder()
+        classify, completeness_calls = self._completeness_recorder()
 
-        outcome = self._enrich(db, analyzer, probe)
+        outcome = self._enrich(db, analyzer, probe, classify)
 
         self.assertEqual(outcome, "complete")
         self.assertEqual(spectral_calls, [])
         self.assertEqual(probe_calls, [])
+        self.assertEqual(completeness_calls, [])
+
+    MBID = "5f3d9c02-3a3a-4c1c-9f2f-2d1f8a7c4b91"
+
+    def test_missing_completeness_alone_still_runs_that_one_measurement(self):
+        """Issue #1241: installed completeness joins the once-per-snapshot
+        enrichment plan, so a row holding every other fact still gets it --
+        and only it, with the MEASURED verdict landing on the exact row."""
+        db = self._db()
+        source = self._source_dir()
+        stored = self._seed_current(
+            db, source, spectral_present=True, v0_attempted=True,
+            mb_release_id=self.MBID,
+        )
+        analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
+        probe, probe_calls = self._probe_recorder()
+        classify, completeness_calls = self._completeness_recorder("incomplete")
+
+        outcome = self._enrich(
+            db, analyzer, probe, classify, mb_release_id=self.MBID,
+        )
+
+        self.assertEqual(outcome, "enriched")
+        self.assertEqual(spectral_calls, [])
+        self.assertEqual(probe_calls, [])
+        self.assertEqual(
+            [identity.release_id for identity in completeness_calls],
+            [self.MBID],
+        )
+        reloaded = db.load_album_quality_evidence_by_id(stored.id)
+        assert reloaded is not None
+        assert reloaded.installed_completeness is not None
+        self.assertEqual(reloaded.installed_completeness.verdict, "incomplete")
+
+    def test_an_unclassifiable_identity_persists_the_fail_safe_unknown(self):
+        """The fixture's legacy ``mbid-42`` is not a decodable exact release
+        identity, so the classifier is never consulted and ``unknown`` is
+        persisted instead. That is the required behaviour, not a workaround:
+        an unclassifiable identity must never guess, and recording the
+        attempt stops the lane retrying it every cycle."""
+        db = self._db()
+        source = self._source_dir()
+        stored = self._seed_current(
+            db, source, spectral_present=True, v0_attempted=True,
+        )
+        analyzer, _spectral_calls = self._spectral_recorder(self._good_scan())
+        probe, _probe_calls = self._probe_recorder()
+        classify, completeness_calls = self._completeness_recorder("incomplete")
+
+        outcome = self._enrich(db, analyzer, probe, classify)
+
+        self.assertEqual(outcome, "enriched")
+        self.assertEqual(completeness_calls, [])
+        reloaded = db.load_album_quality_evidence_by_id(stored.id)
+        assert reloaded is not None
+        assert reloaded.installed_completeness is not None
+        self.assertEqual(reloaded.installed_completeness.verdict, "unknown")
 
     def test_preparation_preserves_an_existing_complete_current_row(self):
         db = self._db()
@@ -3759,6 +3865,390 @@ class TestPreviewDBProtocolParity(unittest.TestCase):
         from lib.quality_evidence import QualityEvidenceDB
 
         self.assertTrue(issubclass(ImportPreviewDB, QualityEvidenceDB))
+
+
+class TestInstalledCompletenessEnrichment(unittest.TestCase):
+    """Issue #1241: preview measures installed completeness; it never decides."""
+
+    MBID = "11111111-2222-4333-8444-555555555555"
+
+    def _source_dir(self) -> str:
+        source = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
+        with open(os.path.join(source, "01.mp3"), "wb") as handle:
+            handle.write(b"not real audio but never inspected in this test")
+        return source
+
+    def _linked_current(self, *, mb_release_id: str | None = None):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=7, status="wanted"))
+        source = self._source_dir()
+        evidence = make_album_quality_evidence(
+            mb_release_id=mb_release_id or self.MBID,
+            source_path=source,
+            files=snapshot_audio_files(source),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        db.set_request_current_evidence(7, stored.id)
+        return db, stored
+
+    def _verdict(
+        self, verdict: InstalledCompletenessVerdict,
+    ) -> InstalledCompleteness:
+        return InstalledCompleteness(
+            verdict=verdict,
+            source="musicbrainz",
+            declared_audio_components=5,
+            physical_audio_files=4,
+            detail=None if verdict == "complete" else "1B: Peter and the Wolf",
+        )
+
+    def test_planner_wants_completeness_only_while_the_row_has_none(self) -> None:
+        _db, stored = self._linked_current()
+        self.assertTrue(plan_current_evidence_enrichment(stored).completeness)
+        measured = msgspec.structs.replace(
+            stored, installed_completeness=self._verdict("unknown"),
+        )
+        self.assertFalse(
+            plan_current_evidence_enrichment(measured).completeness,
+            "a stored unknown means the measurement already ran on these bytes",
+        )
+
+    def test_measured_verdict_persists_on_the_exact_snapshot(self) -> None:
+        db, stored = self._linked_current()
+        seen: list[ReleaseIdentity] = []
+
+        def classify(identity: ReleaseIdentity) -> InstalledCompleteness:
+            seen.append(identity)
+            return self._verdict("incomplete")
+
+        result = enrich_current_installed_completeness_for_preview(
+            db, request_id=7, current_evidence=stored, classify_fn=classify,
+        )
+
+        self.assertEqual(result.status, "ready")
+        self.assertEqual(seen, [ReleaseIdentity("musicbrainz", self.MBID)])
+        reloaded = db.load_album_quality_evidence_by_id(stored.id)
+        assert reloaded is not None
+        completeness = reloaded.installed_completeness
+        assert completeness is not None
+        self.assertEqual(completeness.verdict, "incomplete")
+        self.assertEqual(completeness.declared_audio_components, 5)
+        self.assertEqual(completeness.physical_audio_files, 4)
+
+    def test_a_raising_classifier_persists_unknown_and_never_propagates(
+        self,
+    ) -> None:
+        """Fail-safe: an unreachable mirror leaves behaviour exactly as it is
+        today, and records the attempt so the dead mirror is not re-fetched
+        on every cycle."""
+        db, stored = self._linked_current()
+
+        def classify(_identity: ReleaseIdentity) -> InstalledCompleteness:
+            raise OSError("mirror unreachable")
+
+        result = enrich_current_installed_completeness_for_preview(
+            db, request_id=7, current_evidence=stored, classify_fn=classify,
+        )
+
+        self.assertEqual(result.status, "ready")
+        reloaded = db.load_album_quality_evidence_by_id(stored.id)
+        assert reloaded is not None
+        completeness = reloaded.installed_completeness
+        assert completeness is not None
+        self.assertEqual(completeness.verdict, "unknown")
+        self.assertIn("mirror unreachable", completeness.detail or "")
+
+    def test_unclassifiable_release_identity_never_consults_the_classifier(
+        self,
+    ) -> None:
+        db, stored = self._linked_current(mb_release_id="not-an-identity")
+
+        def classify(_identity: ReleaseIdentity) -> InstalledCompleteness:
+            raise AssertionError("unclassifiable identity must not be guessed")
+
+        result = enrich_current_installed_completeness_for_preview(
+            db, request_id=7, current_evidence=stored, classify_fn=classify,
+        )
+
+        self.assertEqual(result.status, "ready")
+        reloaded = db.load_album_quality_evidence_by_id(stored.id)
+        assert reloaded is not None
+        assert reloaded.installed_completeness is not None
+        self.assertEqual(reloaded.installed_completeness.verdict, "unknown")
+
+    def test_a_stale_snapshot_is_a_zero_write(self) -> None:
+        """The content address is checked in the same write, so a producer
+        holding a superseded snapshot can never stamp the current row."""
+        db, stored = self._linked_current()
+        stale = msgspec.structs.replace(
+            stored, snapshot_fingerprint="sha256:not-the-stored-one",
+        )
+
+        result = enrich_current_installed_completeness_for_preview(
+            db,
+            request_id=7,
+            current_evidence=stale,
+            classify_fn=lambda _identity: self._verdict("incomplete"),
+        )
+
+        self.assertEqual(result.status, "stale")
+        reloaded = db.load_album_quality_evidence_by_id(stored.id)
+        assert reloaded is not None
+        self.assertIsNone(reloaded.installed_completeness)
+
+
+class TestInstalledCompletenessMeasurementSites(unittest.TestCase):
+    """Issue #1241: each of the THREE measurement entry points is driven.
+
+    Review round 1 deleted the completeness block from BOTH of the sites
+    below and the whole python phase stayed green -- only vulture noticed,
+    and only as a dead-parameter lint. These tests inject a recording
+    classifier and assert the verdict landed on the exact current row, so a
+    deletion at either site is a behavioural failure.
+
+    (The third entry point, the failure-lane enrichment plan, is pinned by
+    ``TestEnrichIncompleteCurrentEvidence``.)
+    """
+
+    MBID = "77777777-8888-4999-8aaa-bbbbbbbbbbbb"
+
+    def _source_dir(self) -> str:
+        source = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
+        with open(os.path.join(source, "01.mp3"), "wb") as handle:
+            handle.write(b"not real audio but never inspected in this test")
+        return source
+
+    def _world(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="wanted", mb_release_id=self.MBID,
+        ))
+        installed = self._source_dir()
+        evidence = make_album_quality_evidence(
+            mb_release_id=self.MBID,
+            source_path=installed,
+            files=snapshot_audio_files(installed),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=self.MBID,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        db.set_request_current_evidence(42, stored.id)
+        return db, stored, installed
+
+    def _recorder(self):
+        seen: list[ReleaseIdentity] = []
+
+        def classify(identity: ReleaseIdentity) -> InstalledCompleteness:
+            seen.append(identity)
+            return InstalledCompleteness(
+                verdict="incomplete",
+                source=identity.source,
+                declared_audio_components=5,
+                physical_audio_files=4,
+                detail="1B: Peter and the Wolf",
+            )
+
+        return classify, seen
+
+    def _assert_measured(self, db, stored, seen) -> None:
+        self.assertEqual(
+            [identity.release_id for identity in seen], [self.MBID])
+        reloaded = db.load_album_quality_evidence_by_id(stored.id)
+        assert reloaded is not None
+        completeness = reloaded.installed_completeness
+        assert completeness is not None, (
+            "the measurement site never reached the persister"
+        )
+        self.assertEqual(completeness.verdict, "incomplete")
+        self.assertEqual(completeness.physical_audio_files, 4)
+
+    def test_measure_and_persist_candidate_evidence_measures_completeness(
+        self,
+    ) -> None:
+        db, stored, _installed = self._world()
+        candidate = self._source_dir()
+        classify, seen = self._recorder()
+
+        def load_current(*_args: object, **_kwargs: object) -> EvidenceBuildResult:
+            return EvidenceBuildResult(
+                stored, "ready", current_album_path=stored.source_path,
+            )
+
+        with patch(
+            "lib.config.read_runtime_config",
+            return_value=_preview_runtime_config(
+                beets_harness_path="/fake/harness/run_beets_harness.sh",
+                pipeline_db_enabled=True,
+            ),
+        ), patch(
+            "lib.import_preview.inspect_local_files",
+            return_value=LocalFileInspection(filetype="mp3"),
+        ), patch(
+            "lib.import_preview.measure_preimport_state",
+            return_value=PreimportMeasurement(
+                folder_layout="flat", audio_file_count=1,
+            ),
+        ):
+            result = measure_and_persist_candidate_evidence(
+                db,
+                request_id=42,
+                path=candidate,
+                download_log_id=db.log_download(42, outcome="success"),
+                current_evidence_loader=load_current,
+                installed_completeness_classifier=classify,
+                run_import_fn=lambda *_args, **_kwargs: ImportOneRun(
+                    command=(),
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                    import_result=ImportResult(
+                        decision="import",
+                        source_measurement=AudioQualityMeasurement(
+                            min_bitrate_kbps=160,
+                            avg_bitrate_kbps=160,
+                            median_bitrate_kbps=160,
+                            format="mp3",
+                        ),
+                    ),
+                ),
+            )
+
+        self.assertEqual(result.verdict, "evidence_ready")
+        self._assert_measured(db, stored, seen)
+
+    def test_preview_import_from_path_measures_completeness(self) -> None:
+        """This surface has no current-evidence injection seam, so the real
+        ``_authorize_current_evidence_for_preview`` runs against a seeded
+        ``FakeBeetsDB`` whose one item lives in the installed directory --
+        the same content address the stored row already holds."""
+        db, stored, installed = self._world()
+        candidate = self._source_dir()
+        classify, seen = self._recorder()
+        fake_beets = FakeBeetsDB(library_root=installed)
+        fake_beets.set_album_ids_for_release(self.MBID, [1])
+        fake_beets.set_item_paths(
+            self.MBID, [(1, os.path.join(installed, "01.mp3"))],
+        )
+
+        with patch(
+            "lib.config.read_runtime_config",
+            return_value=_preview_runtime_config(
+                beets_harness_path="/fake/harness/run_beets_harness.sh",
+                pipeline_db_enabled=True,
+            ),
+        ), patch(
+            "lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets,
+        ), patch(
+            "lib.import_preview.inspect_local_files",
+            return_value=LocalFileInspection(
+                filetype="mp3", min_bitrate_bps=160000, is_vbr=True,
+            ),
+        ), patch(
+            "lib.import_preview.measure_preimport_state",
+            return_value=PreimportMeasurement(
+                folder_layout="flat", audio_file_count=1,
+            ),
+        ), patch(
+            "lib.import_preview.run_import_one",
+            return_value=ImportOneRun(
+                command=(),
+                returncode=0,
+                stdout="",
+                stderr="",
+                import_result=ImportResult(
+                    decision="import",
+                    source_measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=160,
+                        avg_bitrate_kbps=160,
+                        median_bitrate_kbps=160,
+                        format="mp3",
+                    ),
+                ),
+            ),
+        ):
+            preview = preview_import_from_path(
+                db,
+                request_id=42,
+                path=candidate,
+                installed_completeness_classifier=classify,
+            )
+
+        self.assertNotEqual(preview.verdict, "measurement_failed")
+        self._assert_measured(db, stored, seen)
+
+
+class TestCompletenessBeetsStorageSelection(unittest.TestCase):
+    """Issue #1241: which Beets library a decision-time measurement opens.
+
+    Pure, so it needs no patching. The defect it pins is real:
+    ``lib/download.py``'s failure-lane enrichment supplies
+    ``beets_library_root`` with NO db path, and an all-or-nothing rule
+    silently discarded it and read the deployment runtime config instead --
+    measuring a different library than the caller named.
+    """
+
+    def test_a_lone_library_root_is_honoured(self) -> None:
+        self.assertEqual(
+            completeness_beets_storage(
+                beets_library_db_path=None,
+                beets_library_root="/isolated/library",
+            ),
+            (None, "/isolated/library"),
+        )
+
+    def test_a_full_pair_is_honoured(self) -> None:
+        self.assertEqual(
+            completeness_beets_storage(
+                beets_library_db_path="/isolated/library.db",
+                beets_library_root="/isolated/library",
+            ),
+            ("/isolated/library.db", "/isolated/library"),
+        )
+
+    def test_neither_half_means_the_deployment_runtime_pair(self) -> None:
+        for library_root in (None, ""):
+            with self.subTest(beets_library_root=library_root):
+                self.assertIsNone(completeness_beets_storage(
+                    beets_library_db_path=None,
+                    beets_library_root=library_root,
+                ))
+
+
+class TestDiscogsReleaseFetchCoercion(unittest.TestCase):
+    """Issue #1241: ``ReleaseIdentity`` carries the Discogs id as a string;
+    ``web.discogs.get_release_raw`` takes an int. This one coercion is the
+    whole adapter, and its ``ValueError`` is deliberately OUTSIDE
+    ``SOURCE_READ_FAILURES`` -- an unparseable Discogs id is a programmer
+    defect, not a mirror failure that resolves to ``unknown``."""
+
+    def test_the_string_release_id_is_coerced_to_an_int(self) -> None:
+        seen: list[object] = []
+
+        def fake_get_release_raw(release_id):
+            seen.append(release_id)
+            return {}
+
+        with patch("web.discogs.get_release_raw", fake_get_release_raw):
+            self.assertEqual(_fetch_discogs_release_raw("4738671"), {})
+        self.assertEqual(seen, [4738671])
+
+    def test_an_unparseable_release_id_stays_loud(self) -> None:
+        from lib.library_completeness import SOURCE_READ_FAILURES
+
+        with self.assertRaises(ValueError) as caught:
+            _fetch_discogs_release_raw("not-a-number")
+        self.assertNotIsInstance(caught.exception, SOURCE_READ_FAILURES)
+
 
 
 if __name__ == "__main__":

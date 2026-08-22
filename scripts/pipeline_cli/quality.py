@@ -343,7 +343,28 @@ def _print_live_candidate_replay(
         audio_check_mode=runtime_audio_check,
         target_format=target_format,
         verified_lossless_target=verified_lossless_target,
+        # Issue #1241. Deliberately False: this replay is addressed by
+        # candidate EVIDENCE id, not by attempt, so it has no beets scenario
+        # to read and cannot PROVE the candidate covered the declared
+        # program. Unproven means the installed-incomplete hold never fires,
+        # which is the fail-safe direction for a what-if tool — but it also
+        # means the replay can print ``downgrade`` where the live reducer
+        # produces ``installed_incomplete_hold``, so say so out loud whenever
+        # the installed copy is positively incomplete.
+        candidate_covers_declared_program=False,
     )
+    if (
+        current is not None
+        and current.installed_completeness is not None
+        and current.installed_completeness.verdict == "incomplete"
+    ):
+        print(
+            "    (note: the installed copy is measured INCOMPLETE. This "
+            "replay cannot evaluate the #1241 installed-incomplete hold — "
+            "it has no attempt scenario to prove the candidate covers the "
+            "declared program — so a 'downgrade' below may be an "
+            "'installed_incomplete_hold' in the live lanes.)"
+        )
     m = candidate.measurement
     label = (
         f"Candidate evidence #{candidate.id} "

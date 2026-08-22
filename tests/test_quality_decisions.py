@@ -1076,6 +1076,10 @@ EXPECTED_PARAMS = {
     # frame-lattice capture. Candidate-only — this leg gates a PROMOTION
     # and the installed side is never promoted by this decision.
     "candidate_aac_lattice",
+    # issue #1241: the installed-incomplete hold's two conjuncts. Both must
+    # hold for the hold to fire, so one incomplete copy can never "upgrade"
+    # another.
+    "installed_incomplete", "candidate_covers_declared_program",
 }
 
 

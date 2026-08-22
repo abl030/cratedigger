@@ -350,6 +350,19 @@ true; issue #1077 widens which of those rows are worklist-visible in the
 first place (D1: kept implies visible), so the "visible with no triage chip"
 population is now larger than before, not new.
 
+A reducer-evaluated row can also come back **kept** with a quality reason:
+issue #1241's `installed_incomplete_hold` is a `stage2_import` decision (not a
+`validation_result.scenario`), so it reaches this block as
+`wrong_match_triage.preview_decision` / `.reason` with
+`action = outcome = "kept_uncertain"`, `success = false` and
+`cleanup_eligible = false`. It is deliberately absent from
+`QUALITY_DECISION_REJECT_STAGE_DECISIONS`, which is the single omission that
+makes `classify_quality_import_stages` return `uncertain` and the reducer keep
+the folder. The lane-admission allowlist, the visibility predicate and the
+"kept iff its contributing peers are denylisted" invariant are all unchanged:
+the outcome is kept + banned + visible, and the ban is Lane A's own
+`"beets validation rejected"` write, exactly as before.
+
 `web/js/recents.js` and `web/js/history.js` both render the
 `wrong_match_triage_*` fields conditionally (`if (h.wrong_match_triage_summary)
 { … }` in `history.js`; the equivalent guard in `recents.js`) — a row with no
@@ -366,3 +379,19 @@ least once) ever carries this block.
   delete-the-source stays exactly as it was: "library holds better" is the
   redundancy proof by definition, and neither of these ever reaches a
   Wrong-Matches-visible state anyway (they never get a `failed_path`).
+- **The importer lane's routing for `installed_incomplete_hold`** (issue
+  #1241) is byte-identical to `downgrade`: record the rejection, ban the peer,
+  clean the disposable staged source, narrow the rejected-tier
+  `search_filetype_override` (`resolve_rejection_search_override` and BOTH of
+  its callers — `lib/dispatch/core.py::_resolve_rejection_override` and
+  `lib/dispatch/outcome_actions.py::_reject_import_from_evidence_decision` —
+  admit the decision, or the resolver's own branch would be unreachable), keep
+  the installed album, keep searching. Only the CLEANUP REDUCER's consequence
+  changes, because there the folder is already quarantined and
+  worklist-visible so keeping it is free. In particular the auto-import lane
+  still DELETES the staged source; the "folder is kept" outcome is the reducer
+  lane's alone.
+  Preserving an importer-lane source instead would need a new
+  quality-reject-writes-`failed_path` quarantine lane, which the bullet above
+  rules out; that stays follow-up work on #1241, and the distinct decision
+  string makes the cohort countable first.

@@ -67,6 +67,7 @@ from lib.quality import (
     DisambiguationFailure,
     DownloadInfo,
     ImportResult,
+    InstalledCompleteness,
     PostflightInfo,
     QualityRankConfig,
     RankBitrateMetric,
@@ -455,6 +456,7 @@ def make_album_quality_evidence(
     audio_error: str | None = None,
     audio_validation: AudioValidationReport | None = None,
     aac_lattice: AacLatticeCapture | None = None,
+    installed_completeness: InstalledCompleteness | None = None,
 ) -> AlbumQualityEvidence:
     """Build production-shaped active album-quality evidence.
 
@@ -555,6 +557,7 @@ def make_album_quality_evidence(
         audio_corrupt=audio_corrupt,
         audio_error=audio_error,
         aac_lattice=aac_lattice,
+        installed_completeness=installed_completeness,
     )
 
 
@@ -1109,6 +1112,7 @@ def build_parity_current_evidence(
     codec_family: CodecFamily | None = None,
     filetype_band: str | None = None,
     was_converted_from: str | None = None,
+    installed_completeness: InstalledCompleteness | None = None,
 ) -> AlbumQualityEvidence | None:
     """Build the existing-album evidence row for parity scenarios.
 
@@ -1190,6 +1194,7 @@ def build_parity_current_evidence(
         v0_metric=v0_metric,
         matched_bad_audio_hash_id=matched_bad_audio_hash_id,
         matched_bad_audio_hash_path=matched_bad_audio_hash_path,
+        installed_completeness=installed_completeness,
     )
 
 
