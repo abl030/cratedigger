@@ -2561,7 +2561,15 @@ class TestLocalImportSlice(unittest.TestCase):
         # status here rather than flipping it, since neither side of this
         # slice's job is to exercise that separate upgrade-delta path.
         self.assertEqual(row["status"], "wanted")
-        db.assert_log(self, 0, outcome="local_import")
+        # Issue #1211: unlike force (which audits NULL — the distance
+        # check is deliberately overridden, never absent), a local import
+        # only reaches this dispatch call after PASSING strict validation,
+        # so its real measured distance (0.01, patched into
+        # beets_validate above) is a genuine accepted measurement and is
+        # recorded on both sinks, not silently dropped as an em-dash in
+        # Recents.
+        self.assertEqual(row["beets_distance"], 0.01)
+        db.assert_log(self, 0, outcome="local_import", beets_distance=0.01)
         # Hazard B, end to end: the terminal audit never names the
         # operator's real folder.
         raw = db.download_logs[0].validation_result

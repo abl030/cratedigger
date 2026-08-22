@@ -561,9 +561,26 @@ def _dispatch_import_from_db_locked(
         beets_harness_path=resolved_cfg.beets_harness_path,
         db=db,
         dl_info=dl_info,
-        # Force-import explicitly bypasses the beets distance
-        # check — no measurement exists to report (#550 defect #4).
-        distance=None,
+        # Since #1080 a measurement DOES exist for both lanes — the
+        # exact-release validation above always runs first. Force
+        # deliberately overrides that verdict rather than lacking one (it
+        # imports despite the result, per Authority: "D19 — Force-import
+        # overrides the beets distance and nothing else." —
+        # https://github.com/abl030/cratedigger/issues/711#issuecomment-4999204451),
+        # so recording it here would misrepresent an overridden decision
+        # as a passing measurement: force keeps auditing NULL (#550
+        # defect #4). Local-import, by contrast, only reaches this call
+        # after PASSING strict validation at the ordinary threshold (the
+        # strict-validation guard above rejects it otherwise, per
+        # CLAUDE.md's decision 3 for #1176) — its distance is a genuine
+        # accepted measurement, so it is recorded for audit (issue
+        # #1211). ``scenario`` is the lane discriminator already in scope
+        # here: every production caller sets it to exactly
+        # "force_import" or "local_import"
+        # (scripts/importer.py::execute_import_job).
+        distance=(
+            validation.result.distance if scenario == "local_import" else None
+        ),
         scenario=scenario,
         files=files,
         cfg=resolved_cfg,
