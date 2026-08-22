@@ -369,5 +369,22 @@ class TestDetectCompositeSilenceGap(unittest.TestCase):
         self.assertFalse(detect_composite_silence_gap(path))
 
 
+class TestGapThresholdConstantValues(unittest.TestCase):
+    """The boundary tests above (``TestGapDecisionFromSilenceFlags``, the
+    generated reference oracle) deliberately hardcode literal 5/10 rather
+    than importing these constants (review D2 — importing them would make
+    a mutated constant agree with itself by construction). This is
+    therefore the only place either constant's OWN value is pinned; a
+    changed threshold moves which physical gaps the detector flags as a
+    composite-audio splice and must be a deliberate edit.
+    """
+
+    def test_min_silence_seconds(self) -> None:
+        self.assertEqual(MIN_SILENCE_SECONDS, 5)
+
+    def test_min_trailing_audio_seconds(self) -> None:
+        self.assertEqual(MIN_TRAILING_AUDIO_SECONDS, 10)
+
+
 if __name__ == "__main__":
     unittest.main()

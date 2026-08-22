@@ -1514,5 +1514,16 @@ class TestQueryTemplateForStrategy(unittest.TestCase):
                 )
 
 
+class TestMaxVaTrackArtistSlotsConstant(unittest.TestCase):
+    """``TestGenerateSearchPlanSlotMix`` exercises this cap only relative to
+    itself (``MAX_VA_TRACK_ARTIST_SLOTS + 2``), never pins its own value —
+    a changed cap moves how many VA per-track-artist slots a plan emits
+    and must be a deliberate edit.
+    """
+
+    def test_value(self) -> None:
+        self.assertEqual(MAX_VA_TRACK_ARTIST_SLOTS, 3)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -51,6 +51,17 @@ def _lattice(modal_count, scored_tracks=6):
         modal_count=modal_count, scored_tracks=scored_tracks, max_z=3.0))
 
 
+class TestUltrasonicProofDenyDeficitConstant(unittest.TestCase):
+    """Every other test here exercises this deny threshold only relative to
+    itself (``_ultrasonic(ULTRASONIC_PROOF_DENY_DEFICIT_DB)``,
+    ``... + 5.0``), never pins its own value — a changed threshold moves
+    which albums the proof gate denies and must be a deliberate edit.
+    """
+
+    def test_value(self) -> None:
+        self.assertEqual(ULTRASONIC_PROOF_DENY_DEFICIT_DB, 59.5)
+
+
 class TestAlbumProofVerdict(unittest.TestCase):
     """Every branch of the tier ladder, one row per branch."""
 

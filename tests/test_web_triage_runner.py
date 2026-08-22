@@ -44,6 +44,17 @@ class _FakeClock:
         self.value += delta
 
 
+class TestPendingCancelWindowConstant(unittest.TestCase):
+    """Every cancellation test below exercises this window only relative to
+    itself (``/ 2``, ``+ 1.0``), never pins its own value — a changed window
+    moves when a re-armed triage run lands pre-cancelled instead of
+    executing and must be a deliberate edit.
+    """
+
+    def test_value(self) -> None:
+        self.assertEqual(PENDING_CANCEL_WINDOW_SECONDS, 10.0)
+
+
 class TriageRunnerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.runner = TriageRunner()
