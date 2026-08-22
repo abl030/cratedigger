@@ -28,7 +28,10 @@ instances in one run:
   "stop the docstrings over-claiming".
 
 Recurred 2026-08-22 in the #1211 series (PRs #1242/#1243/#1244/#1245), three
-more instances in one run, all caught only by independent review:
+more instances in one run. Two shipped and were caught only by independent
+review; the third never shipped, because the implementer verified the count
+before writing it -- which is the mitigation below working, not another
+failure of it:
 
 - Claimed the 71 `db=... # type: ignore[arg-type]` findings are the shape
   `finalize_claimed_dispatch`/`make_ctx_with_fake_db` "exist to replace".
