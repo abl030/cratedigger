@@ -569,17 +569,22 @@ def _dispatch_import_from_db_locked(
         # https://github.com/abl030/cratedigger/issues/711#issuecomment-4999204451),
         # so recording it here would misrepresent an overridden decision
         # as a passing measurement: force keeps auditing NULL (#550
-        # defect #4). Local-import, by contrast, only reaches this call
-        # after PASSING strict validation at the ordinary threshold (the
-        # strict-validation guard above rejects it otherwise, per
-        # CLAUDE.md's decision 3 for #1176) — its distance is a genuine
-        # accepted measurement, so it is recorded for audit (issue
-        # #1211). ``scenario`` is the lane discriminator already in scope
-        # here: every production caller sets it to exactly
-        # "force_import" or "local_import"
-        # (scripts/importer.py::execute_import_job).
+        # defect #4). Keyed on ``distance_threshold is not None`` — the
+        # SAME condition the strict-validation guard above (this
+        # function, ~line 429) tests before this call is ever reached —
+        # rather than on the ``scenario`` label a caller happens to pass:
+        # only that guard's caller (local-import) sets an explicit
+        # threshold, and only after PASSING validation AT it (the guard
+        # rejects and returns early otherwise, per CLAUDE.md's decision 3
+        # for #1176), so by construction, reaching this line with
+        # ``distance_threshold is not None`` means the recorded distance
+        # is a genuine accepted measurement (issue #1211). Tying the
+        # audit write to the guard that earns it, rather than to a
+        # same-caller label that merely happens to agree with it today,
+        # keeps the two from drifting apart under a future caller.
         distance=(
-            validation.result.distance if scenario == "local_import" else None
+            validation.result.distance
+            if distance_threshold is not None else None
         ),
         scenario=scenario,
         files=files,
