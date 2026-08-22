@@ -422,12 +422,21 @@ class TestRunOnceClaimsLocalImportCandidate(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        # Mirrors tests/test_import_queue.py::TestImporterWorker.setUp — the
+        # Mirrors tests/test_import_queue.py::TestImporterWorker.setUp. The
         # terminal cleanup this test exercises (_record_terminal_force_
-        # action_cleanup -> cleanup_force_action_copy_for_job) asserts the
-        # private processing root is mode 0700 (lib/fs_authority.py), so
-        # plain os.makedirs (as TestExecuteImportJobLocalBranchSeam uses,
-        # which never reaches terminal cleanup) is not enough here.
+        # action_cleanup -> cleanup_force_action_copy_for_job) requires the
+        # private processing root to be mode 0700 (lib/fs_authority.py) for
+        # the reap to SUCCEED -- _cleanup_terminal_force_action's blanket
+        # except Exception (scripts/importer.py) means a wrong mode does not
+        # fail this test; it silently folds into a logged
+        # {"removed": False, "error": "FilesystemAuthorityError: ..."}
+        # instead. The mode is asserted here (test_run_once_claims_and_
+        # completes_a_local_import_candidate below reads "removed": True and
+        # confirms the action copy no longer exists on disk) so that
+        # assertion is checking real cleanup, not a silently-failed one.
+        # Plain os.makedirs (as TestExecuteImportJobLocalBranchSeam uses,
+        # which never reaches terminal cleanup) would leave that assertion
+        # false.
         self._root = tempfile.mkdtemp(prefix="cratedigger-local-import-run-once-")
         self.addCleanup(lambda: shutil.rmtree(self._root, ignore_errors=True))
         downloads = os.path.join(self._root, "downloads")
@@ -506,6 +515,15 @@ class TestRunOnceClaimsLocalImportCandidate(unittest.TestCase):
         stored = db.get_import_job(job.id)
         assert stored is not None
         self.assertEqual(stored.status, "completed")
+        # ImportJob.result is already dict[str, Any] | None -- no cast
+        # needed to index it.
+        assert stored.result is not None
+        force_action_cleanup = stored.result["force_action_cleanup"]
+        assert isinstance(force_action_cleanup, dict)
+        # The action copy really was reaped, not silently left behind
+        # a logged {"removed": False} (see setUp's docstring).
+        self.assertTrue(force_action_cleanup["removed"])
+        self.assertFalse(os.path.exists(action_path))
 
         self.assertEqual(len(dispatch_calls), 1)
         dispatch_kwargs = dispatch_calls[0]
