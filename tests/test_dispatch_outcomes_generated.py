@@ -68,7 +68,7 @@ from unittest.mock import MagicMock, mock_open, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
@@ -593,6 +593,18 @@ class TestGeneratedLaneDistanceAudit(unittest.TestCase):
         self.beets = BeetsWorld(_REPO_ROOT)
         self.addCleanup(self.beets.close)
 
+    # code-quality.md: "an entropy budget miss [gets] pin[ned as] the
+    # decisive world as an `@example`". `measured=None` lands exactly
+    # once per lane in 150 derandomized examples, and local/None is the
+    # one cell no deterministic pin covers (see the harness comment
+    # above) — nothing else in this property proves that cell is
+    # exercised. All four lane x measured-presence cells are pinned
+    # explicitly so a future Hypothesis version or strategy tweak cannot
+    # silently drop the edge probe and still report green.
+    @example(lane="force_import", measured=None)
+    @example(lane="force_import", measured=0.42)
+    @example(lane="local_import", measured=None)
+    @example(lane="local_import", measured=0.42)
     @given(
         lane=st.sampled_from(("force_import", "local_import")),
         measured=st.one_of(

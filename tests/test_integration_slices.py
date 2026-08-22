@@ -2383,12 +2383,11 @@ class TestForceImportSlice(unittest.TestCase):
         ``lib.dispatch.entry_points._dispatch_import_from_db_locked``
         holds. That makes its ``beets_distance=None`` assertion unable to
         distinguish "the guard held" from "the guard is gone" — a
-        `distance=validation.result.distance` mutant with the ``scenario
-        == "local_import"`` check removed survives it. This test patches
-        ``beets_validate`` to return a real, PASSING measurement
-        (``distance=0.42``) and proves force still audits NULL: the
-        override is deliberate (Authority D19), not an absence of
-        measurement.
+        `distance=validation.result.distance` mutant with the lane guard
+        removed survives it. This test patches ``beets_validate`` to
+        return a real, PASSING measurement (``distance=0.42``) and proves
+        force still audits NULL: the override is deliberate (Authority
+        D19), not an absence of measurement.
         """
         from lib.dispatch import dispatch_import_from_db
         from lib.import_queue import IMPORT_JOB_FORCE
@@ -2398,6 +2397,13 @@ class TestForceImportSlice(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=91, status="wanted", mb_release_id="mbid-distance-force",
+            # Stale non-None value, exactly like test_force_import_success
+            # above: without this seed, the request row's default
+            # beets_distance is already None (make_request_row's default),
+            # so assertIsNone below couldn't distinguish "force wrote
+            # NULL" from "nothing wrote this column at all" — the same
+            # unfalsifiability class this test exists to fix.
+            beets_distance=0.31,
         ))
         db.set_tracks(91, [{"track_number": 1, "title": "Track"}])
 
