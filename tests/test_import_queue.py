@@ -62,6 +62,7 @@ from lib.import_queue import (
     AutomationImportPayload,
     ForceImportPayload,
     ImportJob,
+    ImportJobPayload,
     YoutubeImportPayload,
     force_import_dedupe_key,
     force_import_payload,
@@ -3700,6 +3701,109 @@ class TestImporterWorker(unittest.TestCase):
         self.assertEqual(
             observed_offsets,
             [0, importer.IMPORT_CANDIDATE_SCAN_LIMIT],
+        )
+
+
+class TestCleanupTerminalForceActionFailsClosed(unittest.TestCase):
+    """Issue #1246 item 2: ``scripts.importer._cleanup_terminal_force_
+    action``'s prefix lookup must fail CLOSED on a job type
+    ``ACTION_COPY_PREFIX_BY_JOB_TYPE`` does not map, matching the sibling
+    ``scripts.import_preview_worker._cleanup_terminal_preview_force_
+    action``'s own ``prefix is None`` early return — rather than silently
+    defaulting to ``FORCE_ACTION_PREFIX`` and comparing an unrelated job's
+    action path against force-import's deterministic name.
+
+    Both the old fail-open default and the new fail-closed guard are
+    unreachable in production today: ``ImportJob.from_row`` runs
+    ``validate_job_type``, so a real job's ``job_type`` can only ever be one
+    of the four ``IMPORT_JOB_TYPES``, and of the two the table omits
+    (``automation_import``, ``youtube_import``), every live doc2 row carries
+    a JSON ``null`` ``action_path`` (measured 2026-08-22), so ``_force_
+    action_path`` already returns ``None`` first. This test bypasses both
+    guards by constructing the ``ImportJob`` directly (not through ``from_
+    row``) with a real, unmapped job type and a synthetic non-null
+    ``action_path``, to pin the guard itself independent of today's live
+    reachability.
+    """
+
+    def _job(
+        self, *, job_type: str, payload: ImportJobPayload, action_path: str,
+    ) -> ImportJob:
+        now = datetime(2026, 8, 22, tzinfo=UTC)
+        return ImportJob(
+            id=9001,
+            job_type=job_type,
+            status="running",
+            request_id=9001,
+            dedupe_key=None,
+            payload=payload,
+            result=None,
+            message=None,
+            error=None,
+            attempts=0,
+            worker_id="w",
+            created_at=now,
+            updated_at=now,
+            started_at=now,
+            heartbeat_at=now,
+            completed_at=None,
+            preview_result={"action_path": action_path},
+        )
+
+    # Exhaustive over the two job types ACTION_COPY_PREFIX_BY_JOB_TYPE
+    # omits -- the entire "unmapped" half of the four IMPORT_JOB_TYPES.
+    UNMAPPED_CASES: ClassVar[list[tuple[str, str, ImportJobPayload]]] = [
+        ("automation_import", IMPORT_JOB_AUTOMATION, AutomationImportPayload()),
+        ("youtube_import", IMPORT_JOB_YOUTUBE, YoutubeImportPayload(
+            staged_path="/tmp/staged", request_id=9001,
+            browse_id="MPREb_x", download_log_id=1,
+        )),
+    ]
+
+    def test_unmapped_job_types_skip_cleanup_instead_of_using_force_prefix(
+        self,
+    ) -> None:
+        from scripts import importer
+
+        for desc, job_type, payload in self.UNMAPPED_CASES:
+            with self.subTest(desc=desc):
+                job = self._job(
+                    job_type=job_type, payload=payload,
+                    action_path="/tmp/not-a-real-action-copy",
+                )
+
+                result = importer._cleanup_terminal_force_action(job)
+
+                # Fail-closed: no cleanup metadata at all, not a
+                # {"removed": False, "error": ...} dict from a raised
+                # FilesystemAuthorityError -- that dict is exactly what the
+                # old fail-open default
+                # (`.get(job.job_type, FORCE_ACTION_PREFIX)`) produced here,
+                # since the synthetic path never matches
+                # force_action_copy_path(cfg, job.id, prefix=FORCE_ACTION_
+                # PREFIX).
+                self.assertIsNone(result)
+
+    def test_mapped_job_types_still_resolve_a_real_prefix(self) -> None:
+        """Must-still-work: the two job types the table DOES map --
+        together with the two proven unmapped above, the full, exhaustive
+        four-member IMPORT_JOB_TYPES domain -- keep resolving their own
+        real prefix, unaffected by the fail-closed guard for the two it
+        omits. Full end-to-end cleanup success for these two (a real
+        on-disk action copy actually removed) is already proven by
+        tests/test_integration_slices.py's F5 slice and its
+        force_import sibling; this only pins the lookup the guard itself
+        depends on."""
+        from lib.import_preview import ACTION_COPY_PREFIX_BY_JOB_TYPE
+        from lib.import_queue import IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL
+
+        self.assertEqual(
+            ACTION_COPY_PREFIX_BY_JOB_TYPE.get(IMPORT_JOB_FORCE),
+            "force-action-",
+        )
+        self.assertEqual(
+            ACTION_COPY_PREFIX_BY_JOB_TYPE.get(IMPORT_JOB_LOCAL),
+            "local-import-action-",
         )
 
 

@@ -464,7 +464,6 @@ def _cleanup_terminal_force_action(job: ImportJob) -> dict[str, object] | None:
         from lib.config import read_runtime_config
         from lib.import_preview import (
             ACTION_COPY_PREFIX_BY_JOB_TYPE,
-            FORCE_ACTION_PREFIX,
             cleanup_force_action_copy_for_job,
         )
 
@@ -476,16 +475,25 @@ def _cleanup_terminal_force_action(job: ImportJob) -> dict[str, object] | None:
         # re-raised on every subsequent importer startup recovery sweep.
         # ``ACTION_COPY_PREFIX_BY_JOB_TYPE`` is the same table
         # scripts/import_preview_worker.py's sibling cleanup already uses.
-        # The fallback stays ``FORCE_ACTION_PREFIX`` (issue #1211 PR1): the
-        # table deliberately omits ``automation_import``/``youtube_import``,
-        # neither of which ever retains a private action copy, so
-        # ``_force_action_path`` above already returns ``None`` and short-
-        # circuits before this line for both — this default is provably dead
-        # for every current job type. Whether ``.get(...)`` should instead
-        # fail closed on an unrecognized job type is an open question left
-        # for a follow-up; this PR only collapses the eight literal spellings
-        # onto one constant and preserves every existing fallback behavior.
-        prefix = ACTION_COPY_PREFIX_BY_JOB_TYPE.get(job.job_type, FORCE_ACTION_PREFIX)
+        # issue #1246 item 2: an unrecognized ``job.job_type`` now fails
+        # CLOSED (skips cleanup, returns ``None``) instead of silently
+        # defaulting to ``FORCE_ACTION_PREFIX`` — matching the sibling
+        # ``scripts/import_preview_worker.py::_cleanup_terminal_preview_
+        # force_action``'s own ``prefix is None`` early return. The
+        # fail-open default was left in place by issue #1211 PR1 as an
+        # explicit open question; this closes it now that the prefix table
+        # is single-sourced. Both the old default and the new early return
+        # are dead today two independent ways: ``ImportJob.from_row`` runs
+        # ``validate_job_type``, so ``job.job_type`` can only ever be one of
+        # the four ``IMPORT_JOB_TYPES``; and of the two types this table
+        # omits (``automation_import``, ``youtube_import``), every live
+        # doc2 row carries a JSON ``null`` ``action_path`` (measured
+        # 2026-08-22: 1542 automation_import + 8 youtube_import rows, zero
+        # non-null), so ``_force_action_path`` above already returns
+        # ``None`` and this function never reaches here for either.
+        prefix = ACTION_COPY_PREFIX_BY_JOB_TYPE.get(job.job_type)
+        if prefix is None:
+            return None
         cleanup_force_action_copy_for_job(
             action_path, cfg, import_job_id=job.id, prefix=prefix,
         )
