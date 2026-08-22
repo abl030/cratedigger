@@ -2453,12 +2453,14 @@ class TestForceImportSlice(unittest.TestCase):
         self.assertNotIn("imported_path", row)
 
     def test_force_action_copy_retain_cleanup_round_trip(self):
-        """Issue #1211: ``FORCE_ACTION_PREFIX`` is spelled independently at
-        eight functional sites across ``lib/import_preview.py``,
-        ``scripts/importer.py``, and ``scripts/import_preview_worker.py``.
-        All eight are byte-identical today, so nothing is currently broken —
-        this is a latent-defect regression guard, mirroring the local-import
-        mandatory slice
+        """Issue #1211: ``FORCE_ACTION_PREFIX`` USED TO BE spelled
+        independently at eight functional sites across
+        ``lib/import_preview.py``, ``scripts/importer.py``, and
+        ``scripts/import_preview_worker.py``. All eight were byte-identical
+        at the time, so nothing was broken yet, but editing any one alone
+        would have silently drifted the importer's terminal cleanup
+        comparison — the latent-defect hazard this slice exists to guard
+        against, mirroring the local-import mandatory slice
         (``test_local_import_terminal_acceptance_drives_real_process_
         claimed_job``) but for the force lane, and composing the REAL
         producer with the REAL consumer instead of hand-building the
@@ -2474,14 +2476,37 @@ class TestForceImportSlice(unittest.TestCase):
           ``finalize_claimed_dispatch``) reaps it on a successful terminal
           acceptance.
 
-        If any ONE of the eight sites drifts from the others,
-        ``cleanup_force_action_copy_for_job``'s deterministic-name
-        comparison raises ``FilesystemAuthorityError`` BEFORE ever touching
-        the filesystem: the retained copy leaks permanently and
+        After the fix the string is spelled ONCE (``FORCE_ACTION_PREFIX`` in
+        ``lib/import_preview.py``). Five of the original eight sites
+        (``ACTION_COPY_PREFIX_BY_JOB_TYPE``, ``force_action_copy_path``'s
+        default, ``importer.py``'s ``.get(...)`` fallback, ``execute_import_
+        job``'s ``action_prefix=``, and ``_FORCE_ACTION_AUTHORITY.action_
+        prefix``) now reference it by name. The remaining three
+        (``retain_preview_snapshot_for_force_action``, ``remove_force_
+        action_copy``, ``cleanup_force_action_copy_for_job``) went further:
+        ``prefix`` is now a required keyword-only parameter with no default
+        at all, since every real caller already supplied it explicitly (an
+        unreachable default silently supplying force's prefix was itself
+        the implicit-inheritance hazard this module exists to remove) — a
+        caller that omits it now fails at Pyright type-check time
+        (``reportCallIssue: Argument missing for parameter "prefix"``)
+        before any test even runs.
+
+        So per-site drift can no longer come from editing one site in
+        isolation — every site moves together. What remains reachable is
+        (a) reintroducing an independent literal at one site, which still
+        raises ``cleanup_force_action_copy_for_job``'s
+        ``FilesystemAuthorityError`` BEFORE ever touching the filesystem
+        exactly as before (the retained copy leaks permanently and
         ``force_action_cleanup.removed`` is always ``False`` — the exact
         defect already recorded for the local-import lane at
-        ``scripts/importer.py``'s ``_cleanup_terminal_force_action``
-        (issue #1176 PR3 F5).
+        ``scripts/importer.py``'s ``_cleanup_terminal_force_action``, issue
+        #1176 PR3 F5), and (b) renaming the shared constant's VALUE, which
+        moves every site together and so would pass a mere
+        cross-site-agreement check. This slice pins the VALUE, not just
+        cross-site agreement: the assertion below hardcodes the literal
+        ``"force-action-"`` rather than deriving it from the constant, so a
+        consistent global rename (e.g. to ``"force-act-"``) still fails it.
         """
         from lib.dispatch.types import DispatchOutcome
         from lib.import_queue import (
@@ -2538,8 +2563,9 @@ class TestForceImportSlice(unittest.TestCase):
             )
 
             # Real producer: publishes the job-scoped action copy for real,
-            # under the deterministic name every one of the eight sites
-            # must agree on.
+            # under the deterministic name every one of the (now-unified)
+            # sites must agree on — the literal below pins the VALUE, not
+            # just cross-site agreement.
             action_path = import_preview_worker._prepare_force_action_path(
                 db, preview_claim, cfg, raw_path=source,
             )
