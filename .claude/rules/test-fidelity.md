@@ -273,24 +273,30 @@ PR body in place of a differential. Running the differential machinery
 anyway would only reproduce the same zero the population query already
 proved, for no additional confidence.
 
-**Writer changes and renderer changes answer different questions.** Rule D
-is written for a RENDERER change — the same stored rows, displayed
-differently — where the differential is the only instrument that settles
-"what does this change on the rows that exist?" A change to what gets
-WRITTEN going forward is a different claim: it moves no existing row's
-appearance at all, so a differential over already-written rows would
-correctly report zero regardless of whether the writer change is even
-correct. The right evidence for a writer change is that the new rows it
-produces carry the intended values (an ordinary behavior test), not a
-render differential.
+**A writer change's differential reports zero for a mechanical reason, not
+a licensing one.** `beets_distance` IS rendered on the Recents card, so
+Rule D's own scope ("presentation **or output**") applies to changing what
+gets written into it, exactly as it applies to a renderer change. The
+render-differential mechanism compares old-renderer-output to
+new-renderer-output over the SAME already-written rows; a change to what
+gets WRITTEN going forward touches none of those rows, so the differential
+correctly reports zero regardless of whether the writer change is even
+correct. That mechanical zero is not, by itself, evidence — a writer
+change with a nonempty forward population still owes Rule D's live-corpus
+tally, just answered by a different instrument (the new rows it produces
+carry the intended values) rather than the render-differential's specific
+before/after shape.
 
-PR #1245 is the worked example, and had to argue this from first
-principles: `source='local'` has exactly one row in the entire live
-`download_log`, and it is a rejection that already carries a real
-distance (measured 2026-08-22: id 40287, outcome `rejected`, scenario
-`high_distance`, `beets_distance=0.5401`) — zero accepted local imports
-exist in production. The change there was to what gets written on a
-future accepted local import, not to how any existing row renders.
+What actually licensed skipping live-corpus evidence for PR #1245 is the
+vacuous-case argument above, not the writer/renderer distinction on its
+own: `source='local'` has exactly one row in the entire live
+`download_log`, and it is a rejection that already carries a real distance
+(measured 2026-08-22: id 40287, outcome `rejected`, scenario
+`high_distance`, `beets_distance=0.5401`) — the forward population of
+future accepted local imports the writer change affects was itself zero
+at ship time. A future writer change whose forward population is
+NOT empty does not get to cite this distinction to skip a live-corpus
+tally.
 
 ## Executable coverage and its boundary
 
