@@ -3717,13 +3717,14 @@ class TestCleanupTerminalForceActionFailsClosed(unittest.TestCase):
     unreachable in production today: ``ImportJob.from_row`` runs
     ``validate_job_type``, so a real job's ``job_type`` can only ever be one
     of the four ``IMPORT_JOB_TYPES``, and of the two the table omits
-    (``automation_import``, ``youtube_import``), every live doc2 row carries
-    a JSON ``null`` ``action_path`` (measured 2026-08-22), so ``_force_
-    action_path`` already returns ``None`` first. This test bypasses both
-    guards by constructing the ``ImportJob`` directly (not through ``from_
-    row``) with a real, unmapped job type and a synthetic non-null
-    ``action_path``, to pin the guard itself independent of today's live
-    reachability.
+    (``automation_import``, ``youtube_import``), the small minority of live
+    doc2 rows of either type that carry an ``action_path`` key at all carry
+    it as JSON ``null`` -- most rows have no such key, and none observed to
+    date has a non-null one (issue #1246 F5) -- so ``_force_action_path``
+    already returns ``None`` first. This test bypasses both guards by
+    constructing the ``ImportJob`` directly (not through ``from_row``) with
+    a real, unmapped job type and a synthetic non-null ``action_path``, to
+    pin the guard itself independent of today's live reachability.
     """
 
     def _job(
@@ -3763,7 +3764,19 @@ class TestCleanupTerminalForceActionFailsClosed(unittest.TestCase):
     def test_unmapped_job_types_skip_cleanup_instead_of_using_force_prefix(
         self,
     ) -> None:
+        from lib.import_preview import ACTION_COPY_PREFIX_BY_JOB_TYPE
+        from lib.import_queue import IMPORT_JOB_TYPES
         from scripts import importer
+
+        # Derive exhaustiveness rather than asserting it in prose: a
+        # future fifth IMPORT_JOB_TYPES member would silently escape both
+        # this loop and the mapped test below unless this equality is
+        # checked against the real enum and the real table (issue #1246
+        # F4).
+        self.assertEqual(
+            {job_type for _, job_type, _ in self.UNMAPPED_CASES},
+            IMPORT_JOB_TYPES - set(ACTION_COPY_PREFIX_BY_JOB_TYPE),
+        )
 
         for desc, job_type, payload in self.UNMAPPED_CASES:
             with self.subTest(desc=desc):
@@ -3796,6 +3809,15 @@ class TestCleanupTerminalForceActionFailsClosed(unittest.TestCase):
         depends on."""
         from lib.import_preview import ACTION_COPY_PREFIX_BY_JOB_TYPE
         from lib.import_queue import IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL
+
+        # Derive, not assert in prose: the mapped half is EXACTLY these
+        # two -- no more, no fewer (issue #1246 F4). Paired with the
+        # unmapped test's own derived equality above, this proves the two
+        # halves partition the full IMPORT_JOB_TYPES domain rather than
+        # merely covering four hand-picked members of it.
+        self.assertEqual(
+            set(ACTION_COPY_PREFIX_BY_JOB_TYPE), {IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL},
+        )
 
         self.assertEqual(
             ACTION_COPY_PREFIX_BY_JOB_TYPE.get(IMPORT_JOB_FORCE),

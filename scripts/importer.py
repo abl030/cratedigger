@@ -486,11 +486,17 @@ def _cleanup_terminal_force_action(job: ImportJob) -> dict[str, object] | None:
         # are dead today two independent ways: ``ImportJob.from_row`` runs
         # ``validate_job_type``, so ``job.job_type`` can only ever be one of
         # the four ``IMPORT_JOB_TYPES``; and of the two types this table
-        # omits (``automation_import``, ``youtube_import``), every live
-        # doc2 row carries a JSON ``null`` ``action_path`` (measured
-        # 2026-08-22: 1542 automation_import + 8 youtube_import rows, zero
-        # non-null), so ``_force_action_path`` above already returns
-        # ``None`` and this function never reaches here for either.
+        # omits (``automation_import``, ``youtube_import``), the small
+        # minority of live doc2 rows of either type that carry an
+        # ``action_path`` key AT ALL carry it as JSON ``null`` (not a
+        # string) -- most rows of both types have no such key, and none
+        # observed to date has a non-null one -- so ``_force_action_path``
+        # above already returns ``None`` and this function never reaches
+        # here for either. See issue #1246 F5 for the live query and its
+        # exact counts as of the review round that found this; that count
+        # is not reproduced here since a frozen number inside a permanent
+        # comment only drifts (it moved between two measurements taken
+        # hours apart in that same review round).
         prefix = ACTION_COPY_PREFIX_BY_JOB_TYPE.get(job.job_type)
         if prefix is None:
             return None
