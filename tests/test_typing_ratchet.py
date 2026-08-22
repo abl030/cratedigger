@@ -185,8 +185,11 @@ class TestTestsEscapeHatchFreeze(unittest.TestCase):
         msg = ["Tests escape-hatch freeze mismatch (issue #784)."]
         if regressions:
             msg.append(
-                "NEW escape hatches in tests — write typed test code "
-                "instead (Any/cast/type-ignore are frozen, only-decrease):"
+                "NEW escape hatches in tests — check tests/helpers.py's "
+                "typed bridges first (finalize_claimed_dispatch, "
+                "make_ctx_with_fake_db) before adding a new one; write "
+                "typed test code instead (Any/cast/type-ignore are frozen, "
+                "only-decrease):"
                 "\n  " + "\n  ".join(regressions))
         if improvements:
             msg.append(

@@ -556,6 +556,44 @@ Two independent gates enforce this:
   `derandomize` and `database` are legitimately varied by
   `tests/world_model/state_machine.py` under `CRATEDIGGER_WORLD_RANDOMIZED=1`.
 
+**A related hazard has no audit, by design — this is a review concern, not a
+checked one.** Both gates above assume the property is DISCOVERED at all.
+Every runner in this repo (targeted selection, the full suite, the fuzz
+burst) collects tests via `unittest.defaultTestLoader`, which finds only
+`TestCase` methods — a module-level `@given`-decorated function is silently
+never executed, with no error and no skip notice. The operator declined
+building an audit for this shape specifically (unlike the profile-loading
+hazard just above, which the two gates enforce mechanically), so treat a
+bare module-level `@given` function as a review flag. Both known instances
+of this shape shipped in the same commit (`12e38e3c`) and are both fixed
+today: `tests/test_composite_audio_gap.py` wraps its module-level properties
+in `test_*` methods that call them (the correct pattern from the start);
+`tests/test_beets_candidate_coverage.py` originally shipped bare
+module-level `def test_generated_...` functions — invisible to
+`unittest.defaultTestLoader` despite the `test_` name — and was wrapped the
+same way in a later review round. Nothing is known to be unreachable today.
+
+**Gated correctly is not the same as fuzz-patrolled — name the two tiers
+explicitly.** `scripts/run_fuzz_tests.py`'s own module discovery
+(`_default_modules`) globs only `tests/test_*_generated.py`, narrower than
+the profile audit's whole-`tests/`-tree sweep above and non-recursive, so a
+module in a subdirectory never matches regardless of its name. A module can
+pass both gates above — profile imported correctly, deadline disabled,
+every property genuinely discoverable by `unittest` — and still never be
+selected for a randomized burst, because its filename doesn't match the
+pattern. As of this writing, 12 files outside the glob hold 33 such
+properties (real, discoverable, production-facing — not the test-machinery
+self-tests the "Never property-test the test machinery" rule in
+`.claude/rules/code-quality.md` already excludes, such as
+`tests/test_parallel_test_runner.py`'s own Hypothesis-integration fixtures),
+running only at the deterministic suite's bounded budget (150 examples,
+`derandomize=True`) and never at daily fuzz depth:
+`tests/test_convergence_service.py`,
+`tests/test_import_queue.py`, `tests/web/test_server_endpoints.py`, and
+`tests/test_composite_audio_gap.py` are four of them. A property that passes
+both gates above is wired correctly, not fuzz-patrolled — the two are
+independent facts and neither implies the other.
+
 `scripts/fuzz_burst.sh` discovers the exact unittest IDs and effective
 Hypothesis settings in every generated module. Ordinary deterministic pins run
 once; modules already audited as deterministic-suite hotspots reuse that
@@ -885,9 +923,14 @@ fuzz entropy** = the deterministic suite budget misses the decisive world, so
 pin it as an `@example`; **survived both tiers** = either a missing invariant
 (add it, with a known-bad self-test) or a world the strategies rarely make
 decisive (again, pin the decisive world). The mutation driver is an
-operator/agent one-shot — never committed (`.claude/rules/scope.md`); fill
-the per-diff-site kill matrix in `.github/pull_request_template.md`. A
-summary "planted a mutant, confirmed RED" is not a matrix.
+operator/agent one-shot — never committed (`.claude/rules/scope.md`); record
+what you tried and what happened in the PR's Fault injection section
+(`.github/pull_request_template.md`) — name the mutant and the test, not just
+"planted a mutant, confirmed RED". That section used to be a mandatory
+per-diff-site table; it is a one-sentence account now
+(`.claude/rules/code-quality.md` § "Testing — Red/Green TDD" has the
+reasoning), while the regression-pin and adapter mutant rules in that same
+section stay unconditional.
 
 Canonical run (issue #548, 2026-07-08): 13 mutants — including reverting
 fix `6cf26a4`, which the generated lifecycle property killed independently
@@ -1007,6 +1050,35 @@ may still be correct. Three dispositions, and the PR must say which applies:
   reintroduce. Delete it. This is the rarest of the three; prefer the two
   above unless you can name why no future caller could ever want the guard.
 
+**A clause can also be unobservable by construction, independent of
+reachability — say so and defer to a pin.** The three dispositions above are
+about whether the WORLD is producible. A clause can clear that bar — the
+world is real, the mutant is real — and still be unprovable by the property,
+because the property's own output cannot tell the mutant from the fix.
+`tests/test_path_authority_generated.py`'s `root_relative` world (lines
+2237-2258) is the worked example already in-tree: bypassing the
+root-absoluteness guard does not change what a fixed candidate like `/etc`
+resolves to, because `_relative_to` calls `os.path.relpath` against the
+current working directory either way, and the result is `..`-laden and
+refused regardless of whether the guard fired — every refusal looks the same
+to a property that only ever compares authorized-vs-refused. When you find
+this shape, say so in a comment at the clause, the way that world's own
+comment does, and defer the proof to a deterministic message-asserting pin
+that asserts the exact exception type and message
+(`test_relative_root_refuses_without_blaming_the_candidate` in
+`tests/test_path_authority.py`) — not a property retrofit that cannot
+actually observe the distinction. Keep the world in the generated strategy
+anyway so a change that made it spuriously AUTHORIZE something is still
+caught; that is a materially weaker, cheaper claim than "this property
+patrols this clause," and the comment must not overstate it.
+
+**A mutant killed only by the deferred pin does not clear the property.**
+When a clause is deferred this way, reviewers must still plant the
+clause-deletion mutant against the PROPERTY itself, not only against the
+pin — a pin-only kill proves the pin works and says nothing about whether
+the property is load-bearing for anything else at that clause. Record both
+results.
+
 **Prefer accumulating checkers in new code.** A checker that returns
 `list[str]` violations evaluates every clause, so ordering cannot mask one
 and each clause carries a distinct message the self-test can name
@@ -1026,7 +1098,8 @@ artifacts are deterministic-only — never schedule a generated audit of the
 audit. Do not build a scanner that infers clause reachability from source
 (`.claude/rules/code-quality.md` § "Semantic source scanners are
 prohibited"); the evidence is the named world and the killed mutant,
-recorded in the PR exactly as the fault-injection kill matrices are.
+recorded in the PR's Fault injection sentence exactly as the fault-injection
+account above is.
 
 ## Every property must use every input it draws
 
