@@ -2360,13 +2360,131 @@ class TestForceImportSlice(unittest.TestCase):
         # Decision 19 keeps the quality/search policy identical; terminal
         # persistence preserves the current operator-owned search stop.
         self.assertEqual(row["status"], "unsearchable")
-        # #550 defect #4: force import bypasses the beets distance check —
-        # no measurement exists, so the write is NULL (was a fabricated
-        # 0.0), overwriting the stale 0.31 seeded above.
+        # #550 defect #4: force import overrides the beets distance check
+        # (issue #1211: a measurement DOES exist since #1080 — this fixture's
+        # fake harness path just happens to leave it None too — force
+        # deliberately discards it either way), so the write is NULL (was a
+        # fabricated 0.0), overwriting the stale 0.31 seeded above. The
+        # override-even-when-real case is isolated in
+        # test_force_import_ignores_measured_distance below.
         self.assertIsNone(
             row["beets_distance"],
-            "a successful force import has no measured beets distance and "
+            "a successful force import overrides its beets distance and "
             "must record NULL on the request row, not a fabricated number")
+        db.assert_log(self, 0, outcome="force_import", beets_distance=None)
+
+    def test_force_import_ignores_measured_distance(self):
+        """Issue #1211 review F1 — isolate the guard from the fixture.
+
+        ``test_force_import_success`` above never patches
+        ``lib.beets.beets_validate``, so its fake harness path
+        (``_HARNESS``) fails to start and ``validation.result.distance``
+        is naturally ``None`` regardless of whether the lane guard in
+        ``lib.dispatch.entry_points._dispatch_import_from_db_locked``
+        holds. That makes its ``beets_distance=None`` assertion unable to
+        distinguish "the guard held" from "the guard is gone" — a
+        `distance=validation.result.distance` mutant with the lane guard
+        removed survives it. This test patches ``beets_validate`` to
+        return a real, PASSING measurement (``distance=0.42``) and proves
+        force still audits NULL: the override is deliberate (Authority
+        D19), not an absence of measurement.
+        """
+        from lib.dispatch import dispatch_import_from_db
+        from lib.import_queue import IMPORT_JOB_FORCE
+        from lib.quality import AudioQualityMeasurement, ValidationResult
+        from lib.quality_evidence import snapshot_audio_files
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=91, status="wanted", mb_release_id="mbid-distance-force",
+            # Stale non-None value, exactly like test_force_import_success
+            # above: without this seed, the request row's default
+            # beets_distance is already None (make_request_row's default),
+            # so assertIsNone below couldn't distinguish "force wrote
+            # NULL" from "nothing wrote this column at all" — the same
+            # unfalsifiability class this test exists to fix.
+            beets_distance=0.31,
+        ))
+        db.set_tracks(91, [{"track_number": 1, "title": "Track"}])
+
+        ir = make_import_result(decision="import", new_min_bitrate=320)
+        stdout = _make_stdout(ir)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=10, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, format="MP3",
+            is_cbr=False, album_path="/Beets/Test")
+
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=91,
+                payload={"download_log_id": 1, "failed_path": tmpdir},
+            )
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-distance-force",
+                source_path=tmpdir,
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320, avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320, format="MP3",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3", container="mp3", storage_format="MP3",
+            )
+            db.mark_import_job_preview_importable(
+                job.id, preview_result={"ready": True},
+            )
+            claimed = claim_next_import_job(db, worker_id="force-distance-slice")
+            assert claimed is not None and claimed.id == job.id
+            _seed_current_for_request(
+                db, 91,
+                mb_release_id="mbid-distance-force",
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=180, avg_bitrate_kbps=180,
+                    median_bitrate_kbps=180, format="MP3",
+                    spectral_bitrate_kbps=128,
+                    spectral_grade="likely_transcode",
+                ),
+                codec="mp3", container="mp3", storage_format="mp3",
+            )
+            with patch_dispatch_externals() as ext, \
+                 _patch_linked_current_beets(db, 91, beets_info), \
+                 patch("lib.config.read_runtime_config", return_value=cfg), \
+                 patch(
+                     "lib.beets.beets_validate",
+                     return_value=ValidationResult(
+                         valid=True, scenario="strong_match", distance=0.42,
+                         target_mbid="mbid-distance-force",
+                     ),
+                 ):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout=stdout, stderr="")
+                result = dispatch_import_from_db(
+                    db, request_id=91, failed_path=tmpdir,  # pyright: ignore[reportArgumentType]
+                    source_username="user1",
+                    import_job_id=claimed.id,
+                )
+                finalize_claimed_dispatch(db, claimed, result)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        self.assertTrue(result.success)
+        row = db.request(91)
+        self.assertIsNone(
+            row["beets_distance"],
+            "force must audit NULL even when the strict-validation seam "
+            "returns a real, PASSING measurement (distance=0.42) — the "
+            "distance check is deliberately overridden, not merely absent "
+            "(issue #1211)")
         db.assert_log(self, 0, outcome="force_import", beets_distance=None)
 
     def test_force_import_does_not_copy_postflight_path_to_request(self):
@@ -2721,7 +2839,15 @@ class TestLocalImportSlice(unittest.TestCase):
         # status here rather than flipping it, since neither side of this
         # slice's job is to exercise that separate upgrade-delta path.
         self.assertEqual(row["status"], "wanted")
-        db.assert_log(self, 0, outcome="local_import")
+        # Issue #1211: unlike force (which audits NULL — the distance
+        # check is deliberately overridden, never absent), a local import
+        # only reaches this dispatch call after PASSING strict validation,
+        # so its real measured distance (0.01, patched into
+        # beets_validate above) is a genuine accepted measurement and is
+        # recorded on both sinks, not silently dropped as an em-dash in
+        # Recents.
+        self.assertEqual(row["beets_distance"], 0.01)
+        db.assert_log(self, 0, outcome="local_import", beets_distance=0.01)
         # Hazard B, end to end: the terminal audit never names the
         # operator's real folder.
         raw = db.download_logs[0].validation_result

@@ -1752,6 +1752,19 @@ class TestFakePipelineDB(unittest.TestCase):
         # Extra field goes into .extra dict
         self.assertEqual(db.download_logs[0].extra["spectral_grade"], "genuine")
 
+    def test_assert_log_failure_message_names_the_real_field(self):
+        """Issue #1211 review F4 regression pin: assert_log's f-string used
+        to interpolate ``{field}`` (``dataclasses.field``, imported at
+        module scope in ``tests/fakes/pipeline_db.py``) instead of
+        ``{field_name}``, so every failure printed the function's repr
+        instead of the actual column name. Assert the real field name
+        appears in the message, not just that it raises."""
+        db = FakePipelineDB()
+        db.log_download(42, outcome="success", beets_distance=None)
+
+        with self.assertRaisesRegex(AssertionError, r"beets_distance"):
+            db.assert_log(self, 0, beets_distance=0.01)
+
     def test_advisory_lock_default_yields_true(self):
         db = FakePipelineDB()
         with db.advisory_lock(0x1234, 42) as acquired:

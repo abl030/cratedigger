@@ -9574,7 +9574,7 @@ class FakePipelineDB:
         for field_name, value in expected.items():
             actual = getattr(entry, field_name, entry.extra.get(field_name))
             test.assertEqual(actual, value,
-                             f"download_log[{index}].{field}: "
+                             f"download_log[{index}].{field_name}: "
                              f"expected {value!r}, got {actual!r}")
 
 

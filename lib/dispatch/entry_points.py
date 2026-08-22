@@ -561,9 +561,31 @@ def _dispatch_import_from_db_locked(
         beets_harness_path=resolved_cfg.beets_harness_path,
         db=db,
         dl_info=dl_info,
-        # Force-import explicitly bypasses the beets distance
-        # check — no measurement exists to report (#550 defect #4).
-        distance=None,
+        # Since #1080 a measurement DOES exist for both lanes — the
+        # exact-release validation above always runs first. Force
+        # deliberately overrides that verdict rather than lacking one (it
+        # imports despite the result, per Authority: "D19 — Force-import
+        # overrides the beets distance and nothing else." —
+        # https://github.com/abl030/cratedigger/issues/711#issuecomment-4999204451),
+        # so recording it here would misrepresent an overridden decision
+        # as a passing measurement: force keeps auditing NULL (#550
+        # defect #4). Keyed on ``distance_threshold is not None`` — the
+        # SAME condition the strict-validation guard above (this
+        # function, ~line 429) tests before this call is ever reached —
+        # rather than on the ``scenario`` label a caller happens to pass:
+        # only that guard's caller (local-import) sets an explicit
+        # threshold, and only after PASSING validation AT it (the guard
+        # rejects and returns early otherwise, per CLAUDE.md's decision 3
+        # for #1176), so by construction, reaching this line with
+        # ``distance_threshold is not None`` means the recorded distance
+        # is a genuine accepted measurement (issue #1211). Tying the
+        # audit write to the guard that earns it, rather than to a
+        # same-caller label that merely happens to agree with it today,
+        # keeps the two from drifting apart under a future caller.
+        distance=(
+            validation.result.distance
+            if distance_threshold is not None else None
+        ),
         scenario=scenario,
         files=files,
         cfg=resolved_cfg,

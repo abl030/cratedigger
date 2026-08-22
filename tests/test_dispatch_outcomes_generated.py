@@ -68,7 +68,7 @@ from unittest.mock import MagicMock, mock_open, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
@@ -465,6 +465,164 @@ def _run_dispatch(
     finally:
         shutil.rmtree(root, ignore_errors=True)
     return {"db": db, "result": result}
+
+
+# ===========================================================================
+# World + harness — the entry-point lane/distance seam (issue #1211 F2).
+# ===========================================================================
+#
+# ``_run_dispatch`` above deliberately calls ``dispatch_import_core``
+# directly, bypassing ``lib.dispatch.entry_points.dispatch_import_from_db``
+# entirely — so it never exercises the lane ternary this property patrols.
+# The real space is lane x validation-distance-presence (four cells); the
+# deterministic pins in ``tests/test_integration_slices.py`` occupy three
+# of them — ``TestForceImportSlice.test_force_import_success``
+# (force/None, incidentally: its fake harness path never starts, so the
+# validation seam measures nothing), ``test_force_import_ignores_
+# measured_distance`` (force/present, explicit 0.42), and
+# ``TestLocalImportSlice.test_local_import_success`` (local/present,
+# explicit 0.01). Only local/None has no deterministic pin. This property
+# drives the REAL ``dispatch_import_from_db`` over the full two-lane x
+# float-or-None distance grid, covering all four cells including that gap.
+
+def _run_dispatch_from_db(
+    lane: str,
+    measured_distance: float | None,
+    *,
+    beets: BeetsWorld,
+) -> dict:
+    """Drive the REAL ``dispatch_import_from_db`` entry point.
+
+    ``lane`` is one of the exact two ``scenario`` literals the sole
+    production caller (``scripts/importer.py::execute_import_job``) ever
+    passes. ``lib.beets.beets_validate`` is patched to return a PASSING
+    (``valid=True``) verdict carrying ``measured_distance`` for both
+    lanes, so both reach the accept-path ternary in
+    ``lib.dispatch.entry_points._dispatch_import_from_db_locked`` rather
+    than local-import's separate strict-validation reject branch — that
+    branch is a pre-existing, unaffected-by-#1211 path already covered by
+    ``TestLocalImportSlice.test_local_import_strict_reject_lands_as_
+    ordinary_wrong_match`` in ``tests/test_integration_slices.py``.
+    """
+    from lib.dispatch import dispatch_import_from_db
+    from lib.import_queue import IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL
+    from lib.pipeline_db.download_log import DownloadLogOutcome
+    from lib.quality import ValidationResult
+
+    scenario: DownloadLogOutcome = (
+        "force_import" if lane == "force_import" else "local_import"
+    )
+
+    root = tempfile.mkdtemp()
+    processing_dir = os.path.join(root, "processing")
+    processing_albums = os.path.join(processing_dir, "albums")
+    os.makedirs(processing_albums)
+    tmpdir = tempfile.mkdtemp(dir=processing_albums)
+    cfg = CratediggerConfig(
+        beets_harness_path=_HARNESS,
+        pipeline_db_enabled=True,
+        processing_dir=processing_dir,
+        beets_distance_threshold=0.15,
+    )
+    try:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="wanted", mb_release_id="mbid-lane-distance",
+        ))
+        db.set_tracks(42, [{"track_number": 1, "title": "Track"}])
+        with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
+            handle.write(b"generated fixture audio")
+
+        job_type = IMPORT_JOB_FORCE if lane == "force_import" else IMPORT_JOB_LOCAL
+        payload = (
+            {"download_log_id": 1, "failed_path": tmpdir}
+            if lane == "force_import"
+            else {"source_path": tmpdir, "request_id": 42}
+        )
+        job = db.enqueue_import_job(job_type, request_id=42, payload=payload)
+        evidence = make_album_quality_evidence(
+            mb_release_id="mbid-lane-distance",
+            source_path=tmpdir,
+            files=snapshot_audio_files(tmpdir),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        assert db.set_import_job_candidate_evidence(job.id, persisted.id)
+        assert db.mark_import_job_preview_importable(
+            job.id, preview_result={"ready": True},
+        )
+        claimed = claim_next_import_job(db, worker_id="generated-dispatch-from-db")
+        assert claimed is not None
+
+        ir = make_import_result(decision="import", new_min_bitrate=320)
+        distance_threshold = (
+            cfg.beets_distance_threshold if lane == "local_import" else None
+        )
+        with patch_dispatch_externals(), \
+             patch("lib.dispatch.subprocess_runner.parse_import_result",
+                   return_value=ir), \
+             patch("lib.beets.beets_validate", return_value=ValidationResult(
+                 valid=True, scenario="strong_match",
+                 distance=measured_distance, target_mbid="mbid-lane-distance",
+             )), \
+             patch("lib.config.read_runtime_config", return_value=cfg):
+            result = dispatch_import_from_db(
+                db, request_id=42, failed_path=tmpdir,  # pyright: ignore[reportArgumentType]
+                import_job_id=claimed.id,
+                distance_threshold=distance_threshold,
+                scenario=scenario,
+                quality_gate_fn=noop_quality_gate,
+                beets_library_db_path=str(beets.library_db),
+                beets_library_root=str(beets.library_root),
+            )
+        finalize_claimed_dispatch(db, claimed, result)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    return {"db": db, "result": result}
+
+
+class TestGeneratedLaneDistanceAudit(unittest.TestCase):
+    """Issue #1211 F2 — the lane x distance-presence grid, through the
+    real entry point."""
+
+    def setUp(self) -> None:
+        self.beets = BeetsWorld(_REPO_ROOT)
+        self.addCleanup(self.beets.close)
+
+    # code-quality.md: "an entropy budget miss [gets] pin[ned as] the
+    # decisive world as an `@example`". `measured=None` lands exactly
+    # once per lane in 150 derandomized examples, and local/None is the
+    # one cell no deterministic pin covers (see the harness comment
+    # above) — nothing else in this property proves that cell is
+    # exercised. All four lane x measured-presence cells are pinned
+    # explicitly so a future Hypothesis version or strategy tweak cannot
+    # silently drop the edge probe and still report green.
+    @example(lane="force_import", measured=None)
+    @example(lane="force_import", measured=0.42)
+    @example(lane="local_import", measured=None)
+    @example(lane="local_import", measured=0.42)
+    @given(
+        lane=st.sampled_from(("force_import", "local_import")),
+        measured=st.one_of(
+            st.none(),
+            st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+        ),
+    )
+    def test_persisted_distance_matches_lane(self, lane, measured):
+        """The accept-path terminal audit records the measured distance
+        for local-import and NULL for force-import, regardless of what
+        the validation seam actually measured — force's own suppression
+        is deliberate, not an absence of a measurement (issue #1211)."""
+        outcome = _run_dispatch_from_db(lane, measured, beets=self.beets)
+        self.assertTrue(outcome["result"].success)
+        expected = measured if lane == "local_import" else None
+        row = outcome["db"].request(42)
+        self.assertEqual(row["beets_distance"], expected)
+        outcome["db"].assert_log(self, 0, beets_distance=expected)
 
 
 # ===========================================================================
