@@ -18,8 +18,11 @@ import unittest
 from tests._tests_typing_ratchet_baseline import TESTS_TYPING_RATCHET_BASELINE
 from tests._typing_ratchet_baseline import TYPING_RATCHET_BASELINE
 from tests._typing_ratchet_scanner import (
+    REPO_ROOT,
     count_escape_hatches,
     iter_production_paths,
+    render_baseline_module,
+    render_tests_baseline_module,
     scan_production_tree,
     scan_tests_tree,
 )
@@ -206,6 +209,31 @@ class TestTestsEscapeHatchFreeze(unittest.TestCase):
                 "tests/_tests_typing_ratchet_baseline.py\nImproved:\n  "
                 + "\n  ".join(improvements))
         self.fail("\n".join(msg))
+
+
+class TestBaselineFilesMatchTheirRenderer(unittest.TestCase):
+    """The checked-in baseline files must render byte-identical to what the
+    scanner would produce right now. Without this, a hand-edited docstring
+    (or any other drift between a baseline file and its render template)
+    goes undetected and silently reverts on the next regeneration, with
+    nothing going red — a direct equality check, not history-aware or
+    semantic-scanner machinery.
+    """
+
+    def test_production_baseline_file_matches_its_renderer(self) -> None:
+        path = os.path.join(REPO_ROOT, "tests", "_typing_ratchet_baseline.py")
+        with open(path, encoding="utf-8") as f:
+            committed = f.read()
+        self.assertEqual(render_baseline_module(scan_production_tree()), committed)
+
+    def test_tests_baseline_file_matches_its_renderer(self) -> None:
+        path = os.path.join(
+            REPO_ROOT, "tests", "_tests_typing_ratchet_baseline.py")
+        with open(path, encoding="utf-8") as f:
+            committed = f.read()
+        self.assertEqual(
+            render_tests_baseline_module(scan_tests_tree()), committed)
+
 
 if __name__ == "__main__":
     unittest.main()

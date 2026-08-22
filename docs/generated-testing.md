@@ -565,16 +565,19 @@ never executed, with no error and no skip notice. The operator declined
 building an audit for this shape specifically (unlike the profile-loading
 hazard just above, which the two gates enforce mechanically), so treat a
 bare module-level `@given` function as a review flag. The instructive
-detail: the SAME commit (`12e38e3c`) shipped both the correct pattern and
-the broken one, in two different new files, on the same day.
-`tests/test_composite_audio_gap.py` was never an instance of the hazard —
-it wraps its module-level properties in `test_*` methods that call them,
-the correct pattern from the start. `tests/test_beets_candidate_coverage.py`
-was the broken instance: it originally shipped bare module-level
-`def test_generated_...` functions — invisible to
-`unittest.defaultTestLoader` despite the `test_` name — and was wrapped the
-same way as the other file in a later review round. Nothing is known to be
-unreachable today.
+history: `tests/test_beets_candidate_coverage.py` shipped the broken shape
+at its creation (`b1d5f7b5`, 2026-08-18) — a bare module-level
+`def test_generated_candidate_coverage_oracle` invisible to
+`unittest.defaultTestLoader` despite the `test_` name — and kept it through
+two later commits that touched the same file without noticing
+(`2f887859`, `c33c6557`, same day). Three days after that, `12e38e3c`
+(2026-08-21) added TWO MORE bare module-level `@given` functions to the
+same file, growing the invisible cohort to three, and in that SAME commit
+also added a brand-new `tests/test_composite_audio_gap.py` that used the
+correct wrapper pattern from the start — wrapping its module-level
+properties in `test_*` methods that call them. The broken file was finally
+wrapped the same way in a later review round (`75e3a3b7`, "#1237 review
+C1-C9"). Nothing is known to be unreachable today.
 
 **Gated correctly is not the same as fuzz-patrolled — name the two tiers
 explicitly.** `scripts/run_fuzz_tests.py`'s own module discovery
@@ -597,13 +600,25 @@ by it):
 are four of them, running only at the deterministic suite's bounded budget
 (150 examples, `derandomize=True`) and never at `scripts/fuzz_burst.sh`'s
 daily depth. One exception worth naming: `tests/world_model/state_machine.py`
-is one of the 15, but its `RuleBasedStateMachine` properties DO get separate
-randomized coverage through `scripts/run_world_model_burst.py`, an entirely
-different burst mechanism keyed on `tests.world_model.state_machine`
-specifically — so unlike the other 14, it is not actually starved of
-randomized depth, only of THIS burst. A property that passes both gates
-above is wired correctly, not fuzz-patrolled — the two are independent
-facts and neither implies the other.
+is one of the 15 — the four `@given` decorators contributing to its share of
+the 39 are on ordinary `TestCase` methods
+(`test_force_import_refreshes_relocated_candidate_authority:1208`,
+`test_candidate_measurement_is_once_per_snapshot:1273`,
+`test_live_drift_worlds_relink_without_retry_bypass:1346`,
+`test_fresh_audit_overwrites_installed_spectral_landmine:1430`), unrelated to
+the file's separate `LifecycleWorldMachine(RuleBasedStateMachine)` at `:942`,
+which carries no `@given` at all — but `scripts/run_world_model_burst.py`'s
+own discovery (`unittest.defaultTestLoader.loadTestsFromName`) targets the
+WHOLE module, `tests.world_model.state_machine`, not the state machine
+specifically — its own hard-coded `expected_generated = 5` and the fail-
+closed count check against it (both in that script) are the evidence: all
+five Hypothesis-testable units in the file — the four `@given` methods and
+the one stateful machine — are discovered together. So unlike the other 14
+files, none of this file's contribution to the 39 is actually starved of
+randomized depth, only of THIS particular burst (`scripts/fuzz_burst.sh`).
+A property that passes both gates above is wired correctly, not
+fuzz-patrolled — the two are independent facts and neither implies the
+other.
 
 `scripts/fuzz_burst.sh` discovers the exact unittest IDs and effective
 Hypothesis settings in every generated module. Ordinary deterministic pins run

@@ -98,10 +98,10 @@ protocol-conformance checks conflict with production strict rules.
 file to match the checked-in baseline (`tests/_typing_ratchet_baseline.py`,
 `tests/_tests_typing_ratchet_baseline.py`) EXACTLY — a straight dict-equality
 check (`if live == TESTS_TYPING_RATCHET_BASELINE:` at
-`tests/test_typing_ratchet.py:178`), not a monotonic comparison. Say plainly
-what that does and does not enforce: any escape hatch added WITHOUT
-regenerating the baseline fails the test immediately, because the live count
-no longer equals the committed one. What no code enforces:
+`tests/test_typing_ratchet.py:178`), not a monotonic comparison. What that
+enforces: any escape hatch added WITHOUT regenerating the baseline fails
+the test immediately, because the live count no longer equals the
+committed one. What no code enforces:
 `tests/_typing_ratchet_scanner.py`'s regeneration path
 (`render_baseline_module`/`render_tests_baseline_module`) prints whatever the
 tree currently contains — it never reads the baseline it is about to
@@ -115,8 +115,8 @@ path and retain a direct zero-tolerance check; delete the scanner only when a
 configured tool enforces the same syntax.
 
 Before adding a new escape hatch in tests, or before widening the tests
-baseline to admit one, check the file's existing typed bridges first. The
-largest single cluster of frozen tests-side `type_ignore` debt is the
+baseline to admit one, check `tests/helpers.py`'s existing typed bridges
+first. The largest single cluster of frozen tests-side `type_ignore` debt is the
 `db=<FakePipelineDB>` kwarg gap: 71 of the tests baseline's 198
 `type_ignore` findings share that shape, clustered mostly at three call
 sites — `dispatch_import_core` (34), `measure_preimport_state` (14), and
@@ -141,9 +141,17 @@ affected file and finding kind, finish with the committed count at least ten
 below the baseline at the start of the change, or at zero if fewer than ten
 remain, then regenerate the baseline. This is deliberately a convergence rule,
 not another checker: do not add stable-site, diff-aware, or history-aware
-machinery to catch delete-and-add laundering — a real guard against that
-would need to read the PREVIOUS baseline value, which is exactly the
-history-aware machinery this rule forbids.
+machinery to catch delete-and-add laundering (deleting one escape hatch and
+adding a different one elsewhere in the same file, netting an equal or lower
+per-file count that sails through the exact-match check unnoticed) — a real
+guard against THAT would need per-SITE identity (a stable fingerprint for
+each occurrence, tracked across commits), not just the aggregate count the
+baseline already holds; laundering leaves the count itself equal or lower,
+so the count reveals nothing. That per-site tracking is exactly the
+stable-site/diff-aware/history-aware machinery this rule forbids building.
+This is a distinct escape from the upward-regeneration one above — that one
+is caught by noticing the baseline's count go UP in the diff; laundering
+never moves the count at all.
 
 ## HTTP request bodies — use `pydantic.BaseModel`
 
@@ -1045,4 +1053,4 @@ rationale; never allowlist a pure decision.
 - Non-trivial work goes on a feature branch with a PR (e.g. `feat/cooldowns`, `fix/spectral-race`)
 - PRs are merged via GitHub **Create a merge commit** (not Rebase-and-merge, not Squash-and-merge). This keeps the PR attached to mainline history while preserving the individual commits, so write them well.
 - Deploy and verify live after merging
-- PR body follows `.github/pull_request_template.md`. The Fault injection section is a short account (one sentence, or a short list for per-clause proof against a many-clause checker) naming what you tried and what happened, not an exhaustive table; whether to run fault injection at all is the "when in doubt" judgment call in § "Testing — Red/Green TDD", not something every PR owes — but the regression-pin and adapter mutant rules in that same section stay unconditional, and the reviewer's two-mutants-per-changed-test obligation is separate and always applies.
+- PR body follows `.github/pull_request_template.md`. The Fault injection section is a short account (one sentence, or a short list for per-clause proof against a many-clause checker) naming what you tried and what happened, not an exhaustive table; whether to run fault injection at all is the "when in doubt" judgment call in § "Testing — Red/Green TDD", not something every PR owes — but three obligations in that same section stay unconditional regardless: the regression-pin rule, the adapter mutant rule, and Standing scope (a PR adding or changing a checker clause records per-clause evidence there, not "N/A"). The reviewer's two-mutants-per-changed-test obligation is separate and always applies.
