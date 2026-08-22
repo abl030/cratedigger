@@ -125,9 +125,22 @@ class TestLibSelectionCoverageRegistryIsExact(unittest.TestCase):
 
 
 class TestLibSelectionCoverageCheckerTripsOnViolations(unittest.TestCase):
-    """Known-bad self-tests, driven through synthetic registries/paths —
-    never the real registry — so the checker's own correctness is proven
-    independently of today's registrations happening to be clean."""
+    """Known-bad self-tests proving the checker's own correctness, split
+    two ways (issue #1248 review correction — a prior version of this
+    docstring claimed ALL six tests below use only synthetic registries/
+    paths; three do not). The two "fails closed" tests (unmapped
+    top-level / nested lib/ paths) and the stale-registration trip test
+    drive entirely synthetic paths/registries never present in the real
+    module-level data. The remaining three ("admitted gap log names
+    itself", "registered zero-neighbour gap does not raise", "stale
+    checker is quiet on a genuine gap") deliberately drive the REAL
+    registry's first entry via
+    `next(iter(LIB_MODULES_WITHOUT_SELECTION_COVERAGE))` — they are
+    must-still-work controls proving a real admitted gap behaves
+    correctly, not proof the checker fires on a violation; they depend on
+    today's registry actually holding a genuine, non-stale gap, which
+    `TestLibSelectionCoverageRegistryIsExact` above independently
+    proves."""
 
     def test_unmapped_zero_neighbour_lib_file_fails_closed_with_its_name(
         self,
