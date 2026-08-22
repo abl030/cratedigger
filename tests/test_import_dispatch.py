@@ -1807,8 +1807,9 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
         cleanup call the shared ``_reject`` helper (and every other test
         in this class) already exercises, so this reuses that call site's
         existing ``# type: ignore[arg-type]`` rather than adding a new one
-        (tests/test_typing_ratchet.py's escape-hatch ratchet is frozen,
-        only-decrease). The real (unpatched) ``_cleanup_staged_dir``
+        (tests/test_typing_ratchet.py's escape-hatch baseline must match
+        the live scan exactly; adding one here would grow it). The real
+        (unpatched) ``_cleanup_staged_dir``
         honouring this guard is proven separately by
         ``TestCleanupStagedDir.
         test_realpath_protects_a_protected_parent_reached_via_symlink``."""

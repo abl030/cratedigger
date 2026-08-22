@@ -1,10 +1,13 @@
-"""Audit: production typing escape hatches only ever decrease (issue #765).
+"""Audit: production typing escape-hatch counts match the checked-in
+baseline exactly (issue #765).
 
 Production code is migrating to pyright strict; explicit ``Any``,
 ``cast(...)``, ``# type: ignore``, and bare ``# pyright: ignore`` are banned.
 Existing debt is held in ``tests/_typing_ratchet_baseline.py`` and must
-match the live scan EXACTLY: new escape hatches fail, and improvements must
-shrink the baseline in the same PR.
+match the live scan EXACTLY: new escape hatches fail unless the baseline is
+regenerated in the same change (a reviewer must catch that in the diff —
+this is not code-enforced), and improvements must shrink the baseline in
+the same PR.
 """
 
 from __future__ import annotations
@@ -15,8 +18,11 @@ import unittest
 from tests._tests_typing_ratchet_baseline import TESTS_TYPING_RATCHET_BASELINE
 from tests._typing_ratchet_baseline import TYPING_RATCHET_BASELINE
 from tests._typing_ratchet_scanner import (
+    REPO_ROOT,
     count_escape_hatches,
     iter_production_paths,
+    render_baseline_module,
+    render_tests_baseline_module,
     scan_production_tree,
     scan_tests_tree,
 )
@@ -160,11 +166,14 @@ class TestProductionWalk(unittest.TestCase):
 
 
 class TestTestsEscapeHatchFreeze(unittest.TestCase):
-    """Tests escape-hatch debt (Any/cast/type-ignore) may only DECREASE.
+    """Tests escape-hatch debt (Any/cast/type-ignore) must match the
+    checked-in baseline exactly.
 
-    Tests are never strict-annotated (issue #784 decision), but freezing
-    their hatch counts stops the debt growing. Exact-match: a new hatch in
-    any tests file fails; removing hatches must tighten the baseline.
+    Tests are never strict-annotated (issue #784 decision). Exact-match: a
+    new hatch in any tests file fails UNLESS the baseline is regenerated in
+    the same change — that upward regeneration is not itself detected here,
+    so a reviewer must notice it in the diff; removing hatches must tighten
+    the baseline.
     """
 
     def test_tests_counts_match_baseline_exactly(self) -> None:
@@ -185,8 +194,12 @@ class TestTestsEscapeHatchFreeze(unittest.TestCase):
         msg = ["Tests escape-hatch freeze mismatch (issue #784)."]
         if regressions:
             msg.append(
-                "NEW escape hatches in tests — write typed test code "
-                "instead (Any/cast/type-ignore are frozen, only-decrease):"
+                "NEW escape hatches in tests — check tests/helpers.py's "
+                "typed bridges first (finalize_claimed_dispatch, "
+                "make_ctx_with_fake_db): reuse one if your call site "
+                "matches, or extend the bridge set for the call site you "
+                "need, before adding a new hatch here (frozen, exact-match "
+                "against the baseline):"
                 "\n  " + "\n  ".join(regressions))
         if improvements:
             msg.append(
@@ -196,6 +209,31 @@ class TestTestsEscapeHatchFreeze(unittest.TestCase):
                 "tests/_tests_typing_ratchet_baseline.py\nImproved:\n  "
                 + "\n  ".join(improvements))
         self.fail("\n".join(msg))
+
+
+class TestBaselineFilesMatchTheirRenderer(unittest.TestCase):
+    """The checked-in baseline files must render byte-identical to what the
+    scanner would produce right now. Without this, a hand-edited docstring
+    (or any other drift between a baseline file and its render template)
+    goes undetected and silently reverts on the next regeneration, with
+    nothing going red — a direct equality check, not history-aware or
+    semantic-scanner machinery.
+    """
+
+    def test_production_baseline_file_matches_its_renderer(self) -> None:
+        path = os.path.join(REPO_ROOT, "tests", "_typing_ratchet_baseline.py")
+        with open(path, encoding="utf-8") as f:
+            committed = f.read()
+        self.assertEqual(render_baseline_module(scan_production_tree()), committed)
+
+    def test_tests_baseline_file_matches_its_renderer(self) -> None:
+        path = os.path.join(
+            REPO_ROOT, "tests", "_tests_typing_ratchet_baseline.py")
+        with open(path, encoding="utf-8") as f:
+            committed = f.read()
+        self.assertEqual(
+            render_tests_baseline_module(scan_tests_tree()), committed)
+
 
 if __name__ == "__main__":
     unittest.main()

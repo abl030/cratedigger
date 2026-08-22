@@ -556,6 +556,78 @@ Two independent gates enforce this:
   `derandomize` and `database` are legitimately varied by
   `tests/world_model/state_machine.py` under `CRATEDIGGER_WORLD_RANDOMIZED=1`.
 
+**A related hazard has no audit, by design — this is a review concern, not a
+checked one.** Both gates above assume the property is DISCOVERED at all.
+Every runner in this repo (targeted selection, the full suite, the fuzz
+burst) collects tests via `unittest.defaultTestLoader`, which finds only
+`TestCase` methods — a module-level `@given`-decorated function is silently
+never executed, with no error and no skip notice. The operator declined
+building an audit for this shape specifically (unlike the profile-loading
+hazard just above, which the two gates enforce mechanically), so treat a
+bare module-level `@given` function as a review flag — and more generally,
+any bare module-level `test_*` function outside a `TestCase`, `@given` or
+not, since `unittest.defaultTestLoader` is blind to the shape itself, not
+specifically to Hypothesis. The instructive history:
+`tests/test_beets_candidate_coverage.py` shipped the broken shape at its
+creation (`b1d5f7b5`, 2026-08-18) with TWO invisible module-level
+functions — `test_generated_candidate_coverage_oracle` (`@given`) and
+`test_generated_oracle_kills_count_only_mutant` (a plain known-bad
+self-test, no Hypothesis at all) — and kept both through two later commits
+that touched the same file without noticing (`2f887859`, `c33c6557`, same
+day). Three days after that, `12e38e3c` (2026-08-21) added TWO MORE bare
+module-level `@given` functions to the same file, growing the invisible
+set to FOUR, and in that SAME commit also added a brand-new
+`tests/test_composite_audio_gap.py` that used the correct wrapper pattern
+from the start — wrapping its module-level properties in `test_*` methods
+that call them. All four were finally wrapped the same way in the
+`#1237` review-correction commit (`75e3a3b7`). The most damning of the
+four: the known-bad self-test is exactly the artifact
+`.claude/rules/code-quality.md`'s "Every invariant checker owes a
+known-bad self-test" rule makes mandatory — the ONE test meant to prove a
+checker clause actually trips never ran at all, invisibly, the whole time.
+Nothing is known to be unreachable today.
+
+**Gated correctly is not the same as fuzz-patrolled — name the two tiers
+explicitly.** `scripts/run_fuzz_tests.py`'s own module discovery
+(`_default_modules`) globs only `tests/test_*_generated.py`, narrower than
+the profile audit's whole-`tests/`-tree sweep above and non-recursive, so a
+module in a subdirectory never matches regardless of its name. A module can
+pass both gates above — profile imported correctly, deadline disabled,
+every property genuinely discoverable by `unittest` — and still never be
+selected for a randomized burst, because its filename doesn't match the
+pattern. As of this writing, 15 files outside the glob carry 39 `@given`
+decorators (counted directly from each file's AST, not by grepping text —
+the count includes every `@given` regardless of whether the decorated
+function is a production-facing property or a deliberate Hypothesis-
+integration self-test under the "Never property-test the test machinery"
+rule in `.claude/rules/code-quality.md`, because BOTH shapes are equally
+invisible to this specific glob and both are equally stuck at suite depth
+by it):
+`tests/test_convergence_service.py`, `tests/test_import_queue.py`,
+`tests/web/test_server_endpoints.py`, and `tests/test_composite_audio_gap.py`
+are four of them, running only at the deterministic suite's bounded budget
+(150 examples, `derandomize=True`) and never at `scripts/fuzz_burst.sh`'s
+daily depth. One exception worth naming: `tests/world_model/state_machine.py`
+is one of the 15 — the four `@given` decorators contributing to its share of
+the 39 are on ordinary `TestCase` methods
+(`test_force_import_refreshes_relocated_candidate_authority:1208`,
+`test_candidate_measurement_is_once_per_snapshot:1273`,
+`test_live_drift_worlds_relink_without_retry_bypass:1346`,
+`test_fresh_audit_overwrites_installed_spectral_landmine:1430`), unrelated to
+the file's separate `LifecycleWorldMachine(RuleBasedStateMachine)` at `:942`,
+which carries no `@given` at all — but `scripts/run_world_model_burst.py`'s
+own discovery (`unittest.defaultTestLoader.loadTestsFromName`) targets the
+WHOLE module, `tests.world_model.state_machine`, not the state machine
+specifically — its own hard-coded `expected_generated = 5` and the fail-
+closed count check against it (both in that script) are the evidence: all
+five Hypothesis-testable units in the file — the four `@given` methods and
+the one stateful machine — are discovered together. So unlike the other 14
+files, none of this file's contribution to the 39 is actually starved of
+randomized depth, only of THIS particular burst (`scripts/fuzz_burst.sh`).
+A property that passes both gates above is wired correctly, not
+fuzz-patrolled — the two are independent facts and neither implies the
+other.
+
 `scripts/fuzz_burst.sh` discovers the exact unittest IDs and effective
 Hypothesis settings in every generated module. Ordinary deterministic pins run
 once; modules already audited as deterministic-suite hotspots reuse that
@@ -885,9 +957,16 @@ fuzz entropy** = the deterministic suite budget misses the decisive world, so
 pin it as an `@example`; **survived both tiers** = either a missing invariant
 (add it, with a known-bad self-test) or a world the strategies rarely make
 decisive (again, pin the decisive world). The mutation driver is an
-operator/agent one-shot — never committed (`.claude/rules/scope.md`); fill
-the per-diff-site kill matrix in `.github/pull_request_template.md`. A
-summary "planted a mutant, confirmed RED" is not a matrix.
+operator/agent one-shot — never committed (`.claude/rules/scope.md`); record
+what you tried and what happened in the PR's Fault injection section
+(`.github/pull_request_template.md`) — name the mutant and the test, not just
+"planted a mutant, confirmed RED". That section used to be a mandatory
+per-diff-site table; it is a short account now — one sentence, or a short
+list for per-clause proof against a many-clause checker
+(`.claude/rules/code-quality.md` § "Testing — Red/Green TDD" has the
+reasoning), while the regression-pin rule, the adapter mutant rule, and the
+Standing scope per-clause obligation in that same section all stay
+unconditional.
 
 Canonical run (issue #548, 2026-07-08): 13 mutants — including reverting
 fix `6cf26a4`, which the generated lifecycle property killed independently
@@ -1007,6 +1086,35 @@ may still be correct. Three dispositions, and the PR must say which applies:
   reintroduce. Delete it. This is the rarest of the three; prefer the two
   above unless you can name why no future caller could ever want the guard.
 
+**A clause can also be unobservable by construction, independent of
+reachability — say so and defer to a pin.** The three dispositions above are
+about whether the WORLD is producible. A clause can clear that bar — the
+world is real, the mutant is real — and still be unprovable by the property,
+because the property's own output cannot tell the mutant from the fix.
+`tests/test_path_authority_generated.py`'s `root_relative` world (lines
+2237-2258) is the worked example already in-tree: bypassing the
+root-absoluteness guard does not change what a fixed candidate like `/etc`
+resolves to, because `_relative_to` calls `os.path.relpath` against the
+current working directory either way, and the result is `..`-laden and
+refused regardless of whether the guard fired — every refusal looks the same
+to a property that only ever compares authorized-vs-refused. When you find
+this shape, say so in a comment at the clause, the way that world's own
+comment does, and defer the proof to a deterministic message-asserting pin
+that asserts the exact exception type and message
+(`test_relative_root_refuses_without_blaming_the_candidate` in
+`tests/test_path_authority.py`) — not a property retrofit that cannot
+actually observe the distinction. Keep the world in the generated strategy
+anyway so a change that made it spuriously AUTHORIZE something is still
+caught; that is a materially weaker, cheaper claim than "this property
+patrols this clause," and the comment must not overstate it.
+
+**A mutant killed only by the deferred pin does not clear the property.**
+When a clause is deferred this way, reviewers must still plant the
+clause-deletion mutant against the PROPERTY itself, not only against the
+pin — a pin-only kill proves the pin works and says nothing about whether
+the property is load-bearing for anything else at that clause. Record both
+results.
+
 **Prefer accumulating checkers in new code.** A checker that returns
 `list[str]` violations evaluates every clause, so ordering cannot mask one
 and each clause carries a distinct message the self-test can name
@@ -1026,7 +1134,9 @@ artifacts are deterministic-only — never schedule a generated audit of the
 audit. Do not build a scanner that infers clause reachability from source
 (`.claude/rules/code-quality.md` § "Semantic source scanners are
 prohibited"); the evidence is the named world and the killed mutant,
-recorded in the PR exactly as the fault-injection kill matrices are.
+recorded in the PR's Fault injection section exactly as the fault-injection
+account above is — one clause fits in a sentence, several clauses are a
+short list, one line per clause.
 
 ## Every property must use every input it draws
 

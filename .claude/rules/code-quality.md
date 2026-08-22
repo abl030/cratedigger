@@ -93,20 +93,73 @@ because cross-module private imports are the house convention (PR #775).
 Tests remain on the whole-repo standard config because their deliberate
 protocol-conformance checks conflict with production strict rules.
 
-`tests/test_typing_ratchet.py` separately requires explicit `Any`, `cast(...)`,
-`# type: ignore`, and bare `# pyright: ignore` debt to match the production and
-tests baselines exactly and only decrease. Scoped
-`# pyright: ignore[rule]` is the sanctioned form. When a baseline reaches zero,
-delete its generated baseline/regeneration path and retain a direct
-zero-tolerance check; delete the scanner only when a configured tool enforces
-the same syntax.
+`tests/test_typing_ratchet.py` requires the LIVE scanned count of explicit
+`Any`, `cast(...)`, `# type: ignore`, and bare `# pyright: ignore` for every
+file to match the checked-in baseline (`tests/_typing_ratchet_baseline.py`,
+`tests/_tests_typing_ratchet_baseline.py`) EXACTLY — a straight dict-equality
+check (`if live == TESTS_TYPING_RATCHET_BASELINE:` at
+`tests/test_typing_ratchet.py:181`), not a monotonic comparison. What that
+enforces: any escape hatch added WITHOUT regenerating the baseline fails
+the test immediately, because the live count no longer equals the
+committed one. What no code enforces:
+`tests/_typing_ratchet_scanner.py`'s regeneration path
+(`render_baseline_module`/`render_tests_baseline_module`) prints whatever the
+tree currently contains — it never reads the baseline it is about to
+overwrite — so a change that adds an escape hatch AND regenerates the
+baseline in the same PR produces a green, growing baseline. "Only decrease"
+is a property of the checked-in baseline file's git history that a reviewer
+must notice in the diff (the baseline's numbers going up), not a property any
+test enforces. Scoped `# pyright: ignore[rule]` is the sanctioned escape
+hatch. When a baseline reaches zero, delete its generated baseline/regeneration
+path and retain a direct zero-tolerance check; delete the scanner only when a
+configured tool enforces the same syntax.
+
+Before adding a new escape hatch in tests, or before widening the tests
+baseline to admit one, check `tests/helpers.py`'s existing typed bridges
+first. The largest single cluster of frozen tests-side `type_ignore` debt is the
+`db=<FakePipelineDB>` kwarg gap: 71 of the tests baseline's 198
+`type_ignore` findings share that shape, clustered mostly at three call
+sites — `dispatch_import_core` (34), `measure_preimport_state` (14), and
+`_check_quality_gate_core` (11) — with the rest spread across five other
+functions. `tests/helpers.py` already provides typed bridges for two
+DIFFERENT call shapes in the same family —
+`tests/helpers.py::finalize_claimed_dispatch` (an `Any`-typed bridge from a
+`FakePipelineDB` fixture into the `PipelineDB`-typed `process_claimed_job`)
+and `make_ctx_with_fake_db` (wraps a fake in `FakePipelineDBSource` so
+production code hits a typed `CratediggerContext`, not a `PipelineDB`) —
+but NEITHER covers the three call sites above: zero of the 71 findings sit
+at `process_claimed_job`, and `make_ctx_with_fake_db` doesn't return a
+`PipelineDB` at all. The first remedy for a new hatch of this shape is
+still to check `tests/helpers.py` first: reuse an existing bridge where
+the call site actually matches one, or EXTEND the bridge set with a new
+one for the call site you need — never a bare `# type: ignore`, and never
+a baseline sweep. The aim for a NEW test file is zero escape hatches
+reached via a bridge, not a fresh baseline entry.
 
 When either typing ratchet trips, do not stop at making it green. For every
 affected file and finding kind, finish with the committed count at least ten
 below the baseline at the start of the change, or at zero if fewer than ten
 remain, then regenerate the baseline. This is deliberately a convergence rule,
 not another checker: do not add stable-site, diff-aware, or history-aware
-machinery to catch delete-and-add laundering.
+machinery to catch delete-and-add laundering (deleting one escape hatch of a
+kind and adding a DIFFERENT one of the same kind elsewhere in the same file).
+Both ratchet tests return early, silently, ONLY on exact dict equality
+between the live scan and the baseline; any other outcome builds
+`regressions`/`improvements` lists and calls `self.fail(...)` unconditionally.
+That means only the EQUAL-count case of laundering is genuinely invisible to
+the check — it hits the same early-return the unchanged case does, because
+the (file, key) count is identical to the baseline either way. A laundering
+edit that nets a DECREASE is not silent: it fails, with the "escape hatches
+removed — tighten the baseline" message, exactly like a real improvement
+would — the residual risk there is a reviewer who reads the celebratory
+framing and regenerates the smaller number without checking WHICH specific
+occurrence changed. Catching either shape for real would need per-SITE
+identity (a stable fingerprint for each occurrence, tracked across commits),
+not just the aggregate count the baseline already holds — that per-site
+tracking is exactly the stable-site/diff-aware/history-aware machinery this
+rule forbids building. This is a distinct escape from the upward-regeneration
+one above — that one is caught by noticing the baseline's count go UP in the
+diff; the equal-count laundering case never shows a diff at all.
 
 ## HTTP request bodies — use `pydantic.BaseModel`
 
@@ -244,8 +297,10 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   `fuzz` is not killed for gating purposes — pin that world as an
   `@example` and re-measure. **Standing scope:** a PR adding or changing a
   checker clause audits that checker's clauses as part of the change, and
-  fills the per-diff-site kill matrix in
-  `.github/pull_request_template.md`. The audit examines test
+  records the result — the named world and the killed mutant, per clause —
+  in the PR's Fault injection section (`.github/pull_request_template.md`);
+  one clause fits in a sentence, a checker with many clauses is a short
+  list, one line per clause. The audit examines test
   machinery, so its artifacts are deterministic-only, and its evidence is a
   named world plus a killed mutant — never a scanner inferring reachability
   from source (issue #1094). Procedure: `docs/generated-testing.md`
@@ -257,13 +312,18 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   property's claimed coverage) and run the relevant tests against each. A
   surviving mutant is either a missing invariant (add it) or an entropy
   budget miss (pin the decisive world as an `@example`). The driver is an
-  operator/agent one-shot — never committed (`scope.md`). Record the kill
-  matrix as one row per diff site, not one summary per PR:
-
-  | Site (assertion / clause / constant) | One-line mutant | Test that goes RED | Result |
-  | --- | --- | --- | --- |
-
-  Fill that table in `.github/pull_request_template.md`. A mutant that
+  operator/agent one-shot — never committed (`scope.md`). Report what you
+  tried and what happened in one sentence (a short list, one line per
+  clause, when the change is per-clause proof against a many-clause
+  checker), in the PR's Fault injection section
+  (`.github/pull_request_template.md`) — name the mutant and the
+  test, not just "planted a mutant, confirmed RED". This used to be a
+  mandatory per-diff-site table; it is a short account now because the
+  table is where confabulation happened: PR #1209's matrix claimed "RED at the
+  property, not just a pin" for the exact property later proved
+  agree-by-construction, while the regression-pin and adapter mutant rules
+  above — which caught real defects — stay unconditional, alongside the
+  Standing scope per-clause obligation just above them. A mutant that
   kills test A does not qualify test B. Canonical run: issue #548,
   2026-07-08 — 13 mutants, incl. reverting fix `6cf26a4`, led to PR #555.
   Lesson (#1110): the implementer reported reverting each fix and
@@ -992,9 +1052,9 @@ rationale; never allowlist a pure decision.
   new false claim can hide. Earned four times in one batch (#1101,
   #1102, #1107, #1110); in each, the false claim was caught only by the
   next independent read, never by the round that wrote it.
-- Independent review plants at least two mutants at the named subject of
-  each new or changed test, not only at sites the author's kill matrix
-  already lists (issue #1143 / #1155).
+- Independent review plants at least two mutants PER new or changed test,
+  aimed at that test's named subject, not only at sites the author's Fault
+  injection sentence already covers (issue #1143 / #1155).
 - Fix everything it finds before committing. This is not optional.
 
 ## Commits & PRs
@@ -1002,4 +1062,4 @@ rationale; never allowlist a pure decision.
 - Non-trivial work goes on a feature branch with a PR (e.g. `feat/cooldowns`, `fix/spectral-race`)
 - PRs are merged via GitHub **Create a merge commit** (not Rebase-and-merge, not Squash-and-merge). This keeps the PR attached to mainline history while preserving the individual commits, so write them well.
 - Deploy and verify live after merging
-- PR body follows `.github/pull_request_template.md`. The kill matrix is per diff site (assertion / clause / constant → one-line mutant → test that goes RED). A summary is not a matrix.
+- PR body follows `.github/pull_request_template.md`. The Fault injection section is a short account (one sentence, or a short list for per-clause proof against a many-clause checker) naming what you tried and what happened, not an exhaustive table; whether to run fault injection at all is the "when in doubt" judgment call in § "Testing — Red/Green TDD", not something every PR owes — but three obligations in that same section stay unconditional regardless: the regression-pin rule, the adapter mutant rule, and Standing scope (a PR adding or changing a checker clause records per-clause evidence there, not "N/A"). The reviewer's two-mutants-per-changed-test obligation is separate and always applies.
