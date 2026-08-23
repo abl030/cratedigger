@@ -253,6 +253,83 @@ class TestDeployPinScript(unittest.TestCase):
         self.assertEqual(state["receipt_rev"], pending)
         self.assertIsNone(state["pending_rev"])
 
+    def test_guarded_kill_reaches_the_real_shell_parent(self) -> None:
+        """Issue #1250 review finding F2: every fault-injection assertion
+        above (and elsewhere in this file) only checks `returncode != 0`,
+        which the fake git shim's own unconditional `raise
+        SystemExit(143)` satisfies whether or not the guarded kill inside
+        it ever actually fires -- production `pin_nixosconfig.sh`'s `set
+        -euo pipefail` plus its `trap 'exit 143' TERM` are DESIGNED so a
+        real async SIGTERM and an ordinary same-numbered command failure
+        converge on the identical observable exit code, so none of the
+        57 tests in this module constrain the three guarded kills in
+        `tests/fakes/deploy_pin.py`'s shim at all (confirmed empirically:
+        both an "always refuse" mutant on
+        `parent_signal_guard.guard_source_prelude`'s emitted text and the
+        realistic one-line `guard_source_prelude(expected_signature=None)`
+        -> `guard_source_prelude()` edit at `tests/fakes/deploy_pin.py`
+        leave every existing assertion green).
+
+        This drives the SAME fake git stub `deploy_pin.py` ships (the
+        real `_SHIM_MODULE` source, same guard) directly, against a
+        minimal, fully-controlled bash parent that installs its own TERM
+        trap writing a marker file. Bash's own documented deferred-trap
+        behaviour -- a pending trap only runs once the CURRENTLY
+        EXECUTING foreground command completes -- makes "did the trap
+        fire before the no-signal fallthrough line" a clean, non-racy
+        proof that the kernel actually delivered a real SIGTERM to this
+        exact parent PID: with the guard refusing, bash never receives
+        anything asynchronous at all and simply continues past the child
+        to the fallthrough `printf` line once it exits (empirically
+        measured: 5/5 trials for each of the two mutants above showed
+        `marker` absent, wrapper exit 0, `no-signal rc=143` on stdout);
+        with the guard correctly firing, the trap always wins the race
+        (5/5 trials: marker present, wrapper exit 143, empty stdout).
+        """
+        commit_rev = "a" * 40
+        self.fake.update_state(
+            fault="signal_after_commit",
+            receipt_rev=commit_rev,
+            commits={
+                commit_rev: {
+                    "parent": "0" * 40,
+                    "target": "1" * 40,
+                    "message": "test",
+                    "signature_material": "good",
+                    "changed_paths": ["flake.lock"],
+                },
+            },
+        )
+        marker = Path(self.tempdir.name) / "sigterm-received"
+        git_stub = self.fake.fake_bin / "git"
+        wrapper_source = (
+            f"trap 'printf caught > {marker} ; exit 143' TERM\n"
+            '"$1" "$2" "$3" "$4" "$5"\n'
+            'printf "no-signal rc=$?\\n"\n'
+        )
+
+        proc = subprocess.run(
+            [
+                "bash", "-c", wrapper_source, "wrapper",
+                str(git_stub), "rev-parse", "--verify", "--quiet",
+                "refs/cratedigger-deploy/cratedigger-src",
+            ],
+            env=self.fake.environment(self.fake.TARGET_REV),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+
+        self.assertEqual(proc.returncode, 143, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout, "")
+        self.assertTrue(
+            marker.exists(),
+            "the guarded kill in tests/fakes/deploy_pin.py never "
+            "delivered a real SIGTERM to this wrapper's own parent PID "
+            f"-- wrapper stdout={proc.stdout!r}",
+        )
+
     def test_recovery_discards_persistently_invalid_pending_commit(self) -> None:
         self.fake.update_state(fault="invalid_signature_signal_after_commit")
         interrupted = self.fake.run(SCRIPT)

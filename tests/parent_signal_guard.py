@@ -2,17 +2,21 @@
 simulate a broken/dead worker (BrokenProcessPool fixtures, drained-signal
 fixtures, deploy-pin fault injection).
 
-THE HAZARD (issue #1250): ``os.getppid()`` is a snapshot of "whoever is my
-parent RIGHT NOW", re-read fresh every time it is called. A test that
-captures the intended parent's PID once, early, and later signals THAT
-value is narrowing the race window; a test that calls
-``os.kill(os.getppid(), SIG)`` at signal time reads ``getppid()`` twice --
-once implicitly at "the moment I decided to kill my parent" -- with
-whatever happened to this process's parentage in between silently baked
-into the second read. If the INTENDED parent (a ``ProcessPoolExecutor``
-pool worker, or another process expected to still be alive) has already
-exited, the OS has already reparented this process to whatever subreaper
-claims orphans. On a bare/container init, orphans reparent to PID 1, which
+THE HAZARD (issue #1250): ``os.kill(os.getppid(), SIG)`` performs exactly
+ONE ``getppid()`` syscall -- not two -- and that single read is a
+snapshot of "whoever is my parent RIGHT NOW," evaluated the instant the
+kill fires, not whenever the test's author reasoned about "my parent."
+A test that captures the intended parent's PID once, early, and signals
+THAT value later is narrowing the window between "decided to kill" and
+"actually killed"; a test that reads ``os.getppid()`` bare, inline, as
+the kill's own argument, has no such window to narrow at all -- it
+trusts whatever the OS reports at that exact moment, with no record of
+who the parent was ever supposed to be. If the INTENDED parent (a
+``ProcessPoolExecutor`` pool worker, or another process expected to
+still be alive) has already exited, the OS has already reparented this
+process to whatever subreaper claims orphans, and that single late read
+reports the ADOPTER, not the intended target. On a bare/container init,
+orphans reparent to PID 1, which
 refuses arbitrary signals from a non-root sender (EPERM) -- harmless. Under
 a ``systemd --user`` session (interactive desktop/dev-host use, e.g. doc1),
 ``PR_SET_CHILD_SUBREAPER`` makes the **user manager itself** the new
@@ -37,7 +41,16 @@ text-pattern audit, modelled on
 ``os.kill(os.getppid(), ...)`` call anywhere in the tree -- including
 inside a generated child body written as a Python string, which is how
 every real call site in this repo actually spells the hazard (see that
-audit's own docstring for why a plain AST walk would miss those).
+audit's own docstring for why a plain AST walk would miss those). This
+is a bounded LITERAL-shape match, not semantic tracking: it does not
+catch, and is not meant to catch, the shape a captured-and-verified kill
+actually takes -- ``__pg_intended = os.getppid()`` followed later by
+``os.kill(__pg_intended, SIG)`` -- which is exactly what
+``guard_kill_statement`` below emits, and exactly what
+``tests/fakes/deploy_pin.py``'s three real, literal, on-disk kill sites
+now read. That shape is the FIX, not the hazard; widening the grammar to
+flag it would also flag every ordinary known-PID kill elsewhere in the
+tree that has nothing to do with this module at all.
 
 Two call shapes are exposed, because not every call site can import this
 module:
@@ -75,9 +88,18 @@ from collections.abc import Callable
 #: this repository's runner path -- issue #1250's own suggested
 #: "``/proc/<ppid>/cmdline`` contains the runner path" guard was measured
 #: and silently disables the fixture (zero kills fire, no markers, exit 0)
-#: because that substring is never present. Only meaningful when the
-#: intended parent actually IS expected to be a pool worker; pass
-#: ``expected_signature=None`` when it is not (see module docstring).
+#: because that substring is never present. This flag is specific to the
+#: ``spawn`` multiprocessing start method: CPython 3.14's own DEFAULT
+#: start method is ``forkserver``, whose worker cmdline does NOT carry
+#: ``--multiprocessing-fork`` at all -- this constant is only ever true
+#: because ``scripts/run_python_tests.py`` explicitly pins
+#: ``multiprocessing.get_context("spawn")`` for its own pool. If that pin
+#: is ever dropped, every real call site using this default fails LOUDLY
+#: (every kill refuses, the fixture stops exercising anything, and the
+#: existing "does the fixture still work" assertions catch it), not
+#: silently. Only meaningful when the intended parent actually IS
+#: expected to be a pool worker; pass ``expected_signature=None`` when it
+#: is not (see module docstring).
 DEFAULT_PARENT_SIGNATURE = "--multiprocessing-fork"
 
 #: A function that reads one ``/proc/<pid>/...`` pseudo-file's text, or

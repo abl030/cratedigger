@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -43,12 +44,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # checkouts of this very repo, which would otherwise be scanned too.
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules", ".claude"}
 
-# The ONE file allowed to spell the hazardous shape literally -- it is the
-# module docstring explaining the hazard this audit exists to reject
-# everywhere else. tests/test_parent_signal_guard_audit.py (this file) is
-# implicitly excluded too: its own known-bad self-test constructs the
-# literal shape as a string to prove the checker catches it, which would
-# otherwise trip the repo-wide scan against itself.
+# The two files allowed to spell the hazardous shape literally, both
+# EXPLICITLY listed here (never inferred): tests/parent_signal_guard.py's
+# own module docstring explains the hazard this audit exists to reject
+# everywhere else, and this file's own known-bad self-tests below
+# construct the literal shape as a string to prove the checker catches
+# it -- both would otherwise trip the repo-wide scan against themselves.
 ALLOWLISTED_FILES = {
     "tests/parent_signal_guard.py",
     "tests/test_parent_signal_guard_audit.py",
@@ -174,6 +175,39 @@ class TestParentSignalGuardAudit(unittest.TestCase):
             ALLOWLISTED_FILES,
             {"tests/parent_signal_guard.py", "tests/test_parent_signal_guard_audit.py"},
         )
+
+    def test_audit_finds_a_planted_offender_on_a_real_filesystem_walk(
+        self,
+    ) -> None:
+        """F10 (#1250 review): every other test here calls
+        `find_unguarded_getppid_kill` directly on an in-memory string --
+        none of them proves the repo-wide `os.walk` + file-collection
+        pipeline in `audit_unguarded_getppid_kills` actually reaches a
+        real offending file. `assertEqual(offenders, [])` over a scan
+        that silently finds nothing (a mutant emptying `SKIP_DIRS`'
+        complement, breaking the `.py` suffix filter, or otherwise
+        skipping every file) would still pass every existing test. Drive
+        the real function against a throwaway root with one planted
+        offender and one clean neighbour using the guard's OWN accepted
+        shape, and assert the offender -- and ONLY the offender -- is
+        found."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "planted_offender.py").write_text(
+                "import os\n"
+                "import signal\n\n"
+                "def test_worker_dies(self):\n"
+                "    os.kill(os.getppid(), signal.SIGKILL)\n",
+                encoding="utf-8",
+            )
+            (root / "clean_neighbour.py").write_text(
+                "import os\n\n"
+                "def guard_and_signal_parent(intended_parent_pid, sig):\n"
+                "    os.kill(intended_parent_pid, sig)\n",
+                encoding="utf-8",
+            )
+            offenders = audit_unguarded_getppid_kills(root=root)
+        self.assertEqual(offenders, ["planted_offender.py:5"])
 
     def test_scan_reaches_tests_fakes_subpackage(self) -> None:
         """Pin the recursive walk -- tests/fakes/deploy_pin.py is exactly

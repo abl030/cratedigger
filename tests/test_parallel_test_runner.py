@@ -1728,13 +1728,36 @@ class TestRunnerProcessContract(unittest.TestCase):
         parent's `future.result()` genuinely raises `BrokenProcessPool`
         for EACH ONE -- the SAME exception shape an OOM kill produces.
         `os.getppid()` inside the nested `--_run-target` child, captured
-        ONCE at spawn via `tests.parent_signal_guard.
-        capture_intended_parent_pid`, names the pool worker's PID: killing
-        IT (not the child's own PID) reproduces the real production
-        shape, confirmed live (issue #1156 item 2). Independent review
-        F10: count=1 cannot distinguish "folded into one marker" from
-        "there was only ever one failure to report" -- count>1 is
-        required to prove the fold actually collapses N>1 into ONE.
+        once, at MODULE IMPORT time, via `tests.parent_signal_guard.
+        capture_intended_parent_pid` (module scope in the generated
+        fixture file below -- the earliest point this dynamically-loaded
+        module can run any code at all), names the pool worker's PID:
+        killing IT (not the child's own PID) reproduces the real
+        production shape, confirmed live (issue #1156 item 2).
+        Independent review F10: count=1 cannot distinguish "folded into
+        one marker" from "there was only ever one failure to report" --
+        count>1 is required to prove the fold actually collapses N>1 into
+        ONE.
+
+        Issue #1250 review finding F4, stated honestly: at THIS site,
+        "captured early" does not reliably narrow the race window the
+        way the module docstring's general claim describes. An
+        instrumented replica driving the real runner and the real guard
+        recorded refusal reasons across 20 instance records (11 runs):
+        `{None: 17, 'refusing to signal pid 1': 3}` -- clause 1
+        ("reparented") fired ZERO times. A `pid 1` verdict is only
+        reachable AFTER clause 1 already agreed the live parent still
+        matched the captured value, which means in those 3/20 instances
+        the captured value was ALREADY 1: this fixture instance's real
+        pool worker had already been torn down, and this child had
+        already been reparented, before its own module import even ran.
+        The import-time capture narrowed nothing there -- it simply
+        recorded the post-reparenting PID as faithfully as the pre-
+        reparenting one. What actually protects this site is clauses 2
+        and 3 (PID-1 / systemd-comm), not clause 1; the general "capture
+        early, then re-verify" design is still correct (the live
+        re-check is what catches the already-reparented 15%), the prose
+        just used to credit the wrong half of it.
 
         Issue #1250 correction: each instance signals through
         `tests.parent_signal_guard.guard_and_signal_parent`, never a bare

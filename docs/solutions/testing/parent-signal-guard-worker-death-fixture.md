@@ -48,7 +48,7 @@ Two things make this genuinely hard to catch by review or by CI:
 1. **It's invisible off doc1.** In a bare container init (no subreaper), an orphan reparents to PID 1, and PID 1 refuses arbitrary signals from a non-root sender (EPERM) — a completely silent no-op. CI never showed a symptom because CI never runs under a `systemd --user` session. The bug was real, dormant, and load-bearing for two days before doc1 (an interactive dev host with tmux + agents living in a user session) actually exercised the reparenting path.
 2. **It's genuinely non-deterministic.** Whether it fires depends on which sibling instance's pool worker dies first — a race against the OTHER instances' own teardown, not against anything the test itself controls.
 
-### The CPython mechanism that makes even a single-instance run risky
+### The CPython mechanism that turns one instance's kill into a sibling's orphaning
 
 CPython's `concurrent.futures.process._ExecutorManagerThread._terminate_broken` (verified on 3.14.7, the interpreter this repo runs) does:
 
@@ -75,10 +75,12 @@ A guard checking for the runner's own path was implemented and measured directly
 
 `tests/parent_signal_guard.py` is the one shared implementation. Two ideas, both required together — neither is sufficient alone:
 
-1. **Capture the intended parent PID once, at spawn/import time** (`capture_intended_parent_pid()`), never re-read it at signal time. This alone narrows the race window but is **not sufficient**: a captured PID can, in principle, be recycled by the OS before the signal fires, silently naming an unrelated process.
+1. **Capture the intended parent PID once, at spawn/import time** (`capture_intended_parent_pid()`), never re-read it at signal time. In general this narrows the race window but is **not sufficient on its own**: a captured PID can, in principle, be recycled by the OS before the signal fires, silently naming an unrelated process.
 2. **Re-verify live identity immediately before signalling** (`guard_refusal_reason` / `guard_and_signal_parent`): refuse unless `os.getppid()` still equals the captured value AND (when a signature is expected) the live parent's `/proc/<pid>/cmdline` still contains it. Belt-and-braces regardless of the above: never signal PID 1, never signal a process whose `/proc/<pid>/comm` is `systemd`.
 
 A refusal is always a plain returned reason string, never an exception — a guard that could itself crash the fixture would defeat the point.
+
+**Stated honestly (issue #1250 review finding F4): at the worker-death site specifically, step 1 often narrows nothing.** An instrumented replica driving the real runner and the real guard over 20 instance records (11 runs) recorded refusal reasons `{None: 17, 'refusing to signal pid 1': 3}` — clause 1 ("reparented") fired ZERO times. A `pid 1` verdict is only reachable once clause 1 has already agreed the live parent still matches the captured value, which means in those 3/20 instances the captured value was ALREADY `1`: this fixture instance's own pool worker had already been torn down, and this instance had already been reparented, before its module-import-time capture even ran. The capture didn't narrow that race; it simply recorded the post-reparenting PID as faithfully as it would have recorded the pre-reparenting one. What actually protects this site is step 2's PID-1/systemd-comm clauses, not step 1. The general two-step design is still correct — capture-then-verify is what catches the already-reparented 15% at all — the earlier prose here just credited the wrong half of it.
 
 Two call shapes cover every real site, because not every generated child can `import tests.parent_signal_guard`:
 
@@ -96,6 +98,8 @@ Before this fix, the fixture's docstring claimed the two-instance run produced "
 ## Why a bounded text scan, not an AST walk, is the right audit here
 
 Every one of the six real occurrences of the hazardous shape lived inside a **Python string literal** — a generated unittest fixture body, a `python -c` argv element, or a stdlib-only shim's source text — never as a literal call expression in the file that spelled it. An AST-`Call`-node audit (the pattern `tests/test_generated_node_worker_audit.py` uses for a real `subprocess.run(["node", ...])` call site) would see only one big string constant in each of these files, not a nested call node, and would silently miss all six. `tests/test_parent_signal_guard_audit.py` instead scans raw file text for the literal `os.kill(os.getppid()` substring shape (flexible whitespace, so a call split across lines is still caught) — the text is what actually decides the eventual child process's behavior, whether or not it happens to be "real code" in the scanning file's own AST.
+
+**This is a literal-shape match, not semantic tracking, and it is not meant to catch every possible misuse.** It does NOT catch, and was never intended to catch, `__pg_intended = os.getppid()` followed later by `os.kill(__pg_intended, SIG)` — exactly what `guard_kill_statement` emits, and exactly what `tests/fakes/deploy_pin.py`'s three real, literal, on-disk kill sites now read (the two `tests/test_suite_coordinator.py` sites produce the same shape too, but only in a runtime-assembled subprocess argv string, never as literal text in that file itself, so the audit's grammar choice isn't even exercised there). Widening the grammar to flag a captured-variable kill would also flag every ordinary known-PID kill elsewhere in the tree that has nothing to do with this hazard at all — a much larger, noisier grammar for no real gain, since every legitimate call site here already goes through this module. `tests/test_parent_signal_guard_audit.py::test_checker_accepts_a_captured_variable_kill` pins that this shape is deliberately accepted, not an oversight.
 
 ## When to apply
 

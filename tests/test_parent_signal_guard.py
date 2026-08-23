@@ -179,6 +179,47 @@ class TestGuardAndSignalParent(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(calls, [(4242, 9)])
 
+    def test_kill_fn_receives_the_checked_intended_pid_not_a_fresh_read(
+        self,
+    ) -> None:
+        """Issue #1250 review finding F3: the central property this whole
+        module exists for is "signal the PID that was JUST VERIFIED safe,
+        not whatever a fresh getppid() happens to return a moment later"
+        -- re-reading between the check and the kill re-introduces #1250
+        in miniature. `current_ppid_fn=lambda: 4242` (a constant) cannot
+        prove this: it agrees with `intended_parent_pid` by construction,
+        so a mutant that swaps `kill_fn(intended_parent_pid, sig)` for
+        `kill_fn(current_ppid_fn(), sig)` is invisible to it. This test
+        gives `current_ppid_fn` a stateful sequence: `intended_parent_pid`
+        on its first call (satisfies `guard_refusal_reason`'s own single
+        read), then a DIFFERENT PID on any later call. The correct
+        implementation calls `current_ppid_fn` exactly once (inside
+        `guard_refusal_reason`) and passes the already-checked
+        `intended_parent_pid` straight to `kill_fn`; a mutant that reads
+        again at kill time observes the second, different value."""
+        intended = 4242
+        reparented_to = 9999
+        reads = iter([intended, reparented_to])
+        calls: list[tuple[int, int]] = []
+
+        result = guard_and_signal_parent(
+            intended,
+            9,
+            expected_signature=None,
+            current_ppid_fn=lambda: next(reads),
+            read_proc_fn=_proc_reader({_REAL_COMM: "bash\n"}),
+            kill_fn=lambda pid, sig: calls.append((pid, sig)),
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            calls,
+            [(intended, 9)],
+            "kill_fn must receive the PID guard_refusal_reason already "
+            "verified, never a fresh current_ppid_fn() read taken after "
+            "that check",
+        )
+
     def test_never_raises_for_a_refusal(self) -> None:
         """A skip must be a silent, successful no-op -- assert no
         exception propagates for every refusal clause's world, not just

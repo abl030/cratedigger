@@ -468,16 +468,25 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     (
                         # Issue #1250: guarded the same way as the
                         # "interrupting" phase above -- see that phase's
-                        # comment for why expected_signature=None.
+                        # comment for why expected_signature=None. The
+                        # capture happens BEFORE the up-to-5s marker-wait
+                        # loop below, not after: review finding F1 caught
+                        # an earlier version that captured _pg_intended
+                        # only after the wait, which is exactly the widest
+                        # window this whole guard exists to close -- if
+                        # the real parent were to exit during that wait,
+                        # the late capture would already read the
+                        # adopter's PID, and clause 1 (reparented) would
+                        # trivially agree with itself forever.
                         "import os, pathlib, signal, time, sys\n"
                         f"{guard_source_prelude(expected_signature=None)}"
+                        "_pg_intended = os.getppid()\n"
                         f"target = pathlib.Path({str(leading_marker)!r})\n"
                         "deadline = time.monotonic() + 5.0\n"
                         "while not target.exists():\n"
                         "    if time.monotonic() > deadline:\n"
                         "        sys.exit(1)\n"
                         "    time.sleep(0.02)\n"
-                        "_pg_intended = os.getppid()\n"
                         f"{guard_kill_statement('_pg_intended', 'signal.SIGTERM')}"
                         "time.sleep(30)\n"
                     ),
