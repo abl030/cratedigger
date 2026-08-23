@@ -253,6 +253,119 @@ class TestDeployPinScript(unittest.TestCase):
         self.assertEqual(state["receipt_rev"], pending)
         self.assertIsNone(state["pending_rev"])
 
+    def test_guarded_kill_reaches_the_real_shell_parent(self) -> None:
+        """Issue #1250 review finding F2 (and R1's follow-up correction):
+        every fault-injection assertion above (and elsewhere in this
+        file) only checks `returncode != 0`, which the fake git shim's
+        own unconditional `raise SystemExit(143)` satisfies whether or
+        not the guarded kill inside it ever actually fires --
+        production `pin_nixosconfig.sh`'s `set -euo pipefail` plus its
+        `trap 'exit 143' TERM` are DESIGNED so a real async SIGTERM and
+        an ordinary same-numbered command failure converge on the
+        identical observable exit code, so none of the other tests in
+        this module constrain the three guarded kills in
+        `tests/fakes/deploy_pin.py`'s shim at all.
+
+        This drives the SAME fake git stub `deploy_pin.py` ships (the
+        real `_SHIM_MODULE` source, same guard) directly, against a
+        minimal, fully-controlled bash parent that installs its own TERM
+        trap writing a marker file. Bash's own documented deferred-trap
+        behaviour -- a pending trap only runs once the CURRENTLY
+        EXECUTING foreground command completes -- makes "did the trap
+        fire before the no-signal fallthrough line" a clean, non-racy
+        proof that the kernel actually delivered a real SIGTERM to this
+        exact parent PID: with the guard refusing, bash never receives
+        anything asynchronous at all and simply continues past the child
+        to the fallthrough `printf` line once it exits; with the guard
+        correctly firing, the trap always wins the race. Method and
+        measured trial counts:
+        `docs/solutions/testing/parent-signal-guard-worker-death-fixture.md`.
+
+        R1: a subTest per ARGV SHAPE, one for each of the three guarded
+        kill call sites in `deploy_pin.py` (`rev-parse --verify --quiet`
+        against the receipt ref, `rev-parse --verify` against the
+        pending ref, and `rev-parse HEAD`) -- a single case exercising
+        only the first left the other two completely unconstrained.
+        """
+        commit_stub = {
+            "parent": "0" * 40,
+            "target": "1" * 40,
+            "message": "test",
+            "signature_material": "good",
+            "changed_paths": ["flake.lock"],
+        }
+        cases = (
+            (
+                "rev-parse --verify --quiet (receipt ref)",
+                {
+                    "fault": "signal_after_commit",
+                    "receipt_rev": "a" * 40,
+                    "pending_rev": None,
+                    "commits": {"a" * 40: commit_stub},
+                },
+                [
+                    "rev-parse", "--verify", "--quiet",
+                    "refs/cratedigger-deploy/cratedigger-src",
+                ],
+            ),
+            (
+                "rev-parse --verify (pending ref, non-quiet)",
+                {
+                    "fault": "signal_after_pending_commit",
+                    "receipt_rev": None,
+                    "pending_rev": "b" * 40,
+                    "commits": {"b" * 40: commit_stub},
+                },
+                [
+                    "rev-parse", "--verify",
+                    "refs/cratedigger-deploy/cratedigger-src-pending",
+                ],
+            ),
+            (
+                "rev-parse HEAD",
+                {
+                    "fault": "signal_after_commit",
+                    "receipt_rev": None,
+                    "pending_rev": None,
+                    "commits": {},
+                },
+                ["rev-parse", "HEAD"],
+            ),
+        )
+        git_stub = self.fake.fake_bin / "git"
+
+        for index, (description, state_changes, argv) in enumerate(cases):
+            with self.subTest(site=description):
+                self.fake.update_state(**state_changes)
+                marker = Path(self.tempdir.name) / f"sigterm-received-{index}"
+                wrapper_source = (
+                    f"trap 'printf caught > {marker} ; exit 143' TERM\n"
+                    '"$@"\n'
+                    'printf "no-signal rc=$?\\n"\n'
+                )
+
+                proc = subprocess.run(
+                    ["bash", "-c", wrapper_source, "wrapper",
+                     str(git_stub), *argv],
+                    env=self.fake.environment(self.fake.TARGET_REV),
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+
+                self.assertEqual(
+                    proc.returncode, 143, proc.stdout + proc.stderr,
+                )
+                self.assertEqual(proc.stdout, "")
+                self.assertTrue(
+                    marker.exists(),
+                    "the guarded kill in tests/fakes/deploy_pin.py never "
+                    "delivered a real SIGTERM to this wrapper's own "
+                    f"parent PID for {description!r} -- wrapper "
+                    f"stdout={proc.stdout!r}",
+                )
+
     def test_recovery_discards_persistently_invalid_pending_commit(self) -> None:
         self.fake.update_state(fault="invalid_signature_signal_after_commit")
         interrupted = self.fake.run(SCRIPT)

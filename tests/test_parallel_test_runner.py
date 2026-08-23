@@ -1723,17 +1723,76 @@ class TestRunnerProcessContract(unittest.TestCase):
     def _run_worker_death_fixture(
         self, *, count: int = 2, env_overrides: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[str]:
-        """Kill `count` INDEPENDENT ProcessPoolExecutor worker processes
-        (not the nested per-target subprocess `_run_test_target` spawns)
-        so the parent's `future.result()` genuinely raises
-        `BrokenProcessPool` for EACH ONE -- the SAME exception shape an
-        OOM kill produces. `os.getppid()` inside the nested `--_run-target`
-        child is the pool worker's PID: killing IT (not the child's own
-        PID) reproduces the real production shape, confirmed live (issue
-        #1156 item 2). Independent review F10: count=1 cannot distinguish
-        "folded into one marker" from "there was only ever one failure to
-        report" -- count>1 real, independent deaths is required to prove
-        the fold actually collapses N>1 into ONE.
+        """Kill `count` ProcessPoolExecutor worker processes (not the
+        nested per-target subprocess `_run_test_target` spawns) so the
+        parent's `future.result()` genuinely raises `BrokenProcessPool`
+        for EACH ONE -- the SAME exception shape an OOM kill produces.
+        `os.getppid()` inside the nested `--_run-target` child, captured
+        once, at MODULE IMPORT time, via `tests.parent_signal_guard.
+        capture_intended_parent_pid` (module scope in the generated
+        fixture file below -- the earliest point this dynamically-loaded
+        module can run any code at all), names the pool worker's PID:
+        killing IT (not the child's own PID) reproduces the real
+        production shape, confirmed live (issue #1156 item 2).
+        Independent review F10: count=1 cannot distinguish "folded into
+        one marker" from "there was only ever one failure to report" --
+        count>1 is required to prove the fold actually collapses N>1 into
+        ONE.
+
+        Issue #1250 review finding F4, stated honestly: at THIS site,
+        "captured early" USUALLY narrows nothing, though not never --
+        method, measurements, and the exact clause attribution (review
+        findings R3, then corrected again by V2/V3 after that
+        correction pass itself mis-described what one clause catches
+        and overstated another's durability) all live in
+        `docs/solutions/testing/parent-signal-guard-worker-death-fixture.md`,
+        not restated here. The short version: a `pid 1` verdict is only
+        reachable AFTER the reparented-check clause already agreed the
+        live parent still matched the captured value, which means
+        whenever that verdict occurs the captured value was ALREADY 1 --
+        this fixture instance's real pool worker had already been torn
+        down, and this child had already been reparented, before its
+        own module import even ran. The import-time capture narrowed
+        nothing in that case; it simply recorded the post-reparenting
+        PID as faithfully as the pre-reparenting one. The general
+        "capture early, then re-verify" design is still correct -- the
+        rare case where the parent is still alive at capture and exits
+        before the live re-check is exactly what justifies capturing
+        early at all -- see the doc for the measured, corrected
+        attribution rather than a number restated here.
+
+        Issue #1250 correction: each instance signals through
+        `tests.parent_signal_guard.guard_and_signal_parent`, never a bare
+        getppid() re-read at signal time. Re-reading it there races every
+        OTHER instance's own kill --
+        whichever instance's real pool worker exits first orphans the
+        rest, and CPython's `_ExecutorManagerThread._terminate_broken`
+        then calls `.terminate()` on every REMAINING pool worker while
+        tearing the broken pool down. In a bare/CI process tree that just
+        means the next instance's `os.getppid()` returns PID 1 (harmless,
+        EPERM). Under a `systemd --user` session
+        (`PR_SET_CHILD_SUBREAPER` makes the user manager the orphan
+        reaper) it instead returns the MANAGER's own PID, and the raw
+        form SIGKILLs it -- taking the whole interactive session down.
+        Measured live twice on doc1 (2026-08-22, 2026-08-23); full account
+        in `docs/solutions/testing/parent-signal-guard-worker-death-fixture.md`.
+
+        With the guard active, `count` INDEPENDENT ProcessPoolExecutor
+        deaths are no longer guaranteed: whichever instance's kill fires
+        first may itself orphan a sibling before the sibling's own
+        guarded kill runs, and the sibling then correctly REFUSES (its
+        captured parent is no longer its live parent) instead of
+        escalating to whatever it got reparented to. That sibling's own
+        pool worker still dies -- via the SAME `_terminate_broken`
+        cascade the executor already runs while tearing down the pool --
+        so `future.result()` still raises `BrokenProcessPool` for it.
+        This is arguably BETTER production fidelity, not worse: a real
+        OOM kill hits one worker directly and the executor's own teardown
+        cascades `.terminate()` to the rest, which is exactly this shape.
+        What this fixture actually proves, either way, is that `count`
+        targets each report `BrokenProcessPool` and fold into ONE marker
+        -- not that each one's exception was raised by this fixture's own
+        signal specifically.
 
         Independent review B2 (HIGH): CRATEDIGGER_TEST_RAM_MIN_BYTES is
         pinned to "0" by default -- disk_full is checked BEFORE memory in
@@ -1751,12 +1810,16 @@ class TestRunnerProcessContract(unittest.TestCase):
             (tests_dir / "__init__.py").write_text("", encoding="utf-8")
             for index in range(count):
                 (tests_dir / f"test_alpha{index}.py").write_text(
-                    "import os\n"
                     "import signal\n"
                     "import unittest\n\n"
+                    "import tests.parent_signal_guard as parent_signal_guard\n\n"
+                    "_INTENDED_PARENT_PID = ("
+                    "parent_signal_guard.capture_intended_parent_pid())\n\n"
                     "class Alpha(unittest.TestCase):\n"
                     "    def test_worker_dies(self):\n"
-                    "        os.kill(os.getppid(), signal.SIGKILL)\n",
+                    "        parent_signal_guard.guard_and_signal_parent(\n"
+                    "            _INTENDED_PARENT_PID, signal.SIGKILL,\n"
+                    "        )\n",
                     encoding="utf-8",
                 )
             env = {
@@ -1787,14 +1850,21 @@ class TestRunnerProcessContract(unittest.TestCase):
     def test_worker_death_under_exhausted_memory_floor_collapses_to_one_named_failure(
         self,
     ) -> None:
-        """End-to-end (issue #1156 item 2): TWO REAL, INDEPENDENT
-        BrokenProcessPool deaths, not fakes, folded into ONE marker
-        instead of an ordinary per-target disguise -- the
-        CRATEDIGGER_TEST_MEMORY_MIN_BYTES override is the same
-        deterministic trick TestRunTargetsWorkerExceptionWiring documents
-        for the disk-full floor, applied to the memory one. Independent
-        review F10: N=2 (not 1) so "exactly one marker" actually proves
-        folding, not just that there was one failure to report."""
+        """End-to-end (issue #1156 item 2): TWO REAL BrokenProcessPool
+        deaths, not fakes, folded into ONE marker instead of an ordinary
+        per-target disguise -- the CRATEDIGGER_TEST_MEMORY_MIN_BYTES
+        override is the same deterministic trick
+        TestRunTargetsWorkerExceptionWiring documents for the disk-full
+        floor, applied to the memory one. Independent review F10: N=2
+        (not 1) so "exactly one marker" actually proves folding, not just
+        that there was one failure to report. Issue #1250 correction:
+        "independent" no longer describes the two deaths' CAUSE -- with
+        the parent-signal guard active, one instance's own kill can
+        orphan the other before its guarded kill runs, so the second
+        death may come from the executor's own `_terminate_broken`
+        cascade rather than a second fixture signal. Both still produce a
+        genuine, distinct `BrokenProcessPool` for their own target, which
+        is what this test actually asserts."""
         result = self._run_worker_death_fixture(count=2)
 
         self.assertEqual(
@@ -1833,9 +1903,11 @@ class TestRunnerProcessContract(unittest.TestCase):
         main() itself fed `_collapse_memory_exhausted_failures` the RAW
         `infrastructure_failures` list instead of the disk-full-FILTERED
         `remaining_infrastructure_failures` (line ~1706). This test drives
-        the real subprocess end-to-end instead: TWO real, independent
-        BrokenProcessPool deaths, both forced disk_full via an impossibly
-        high CRATEDIGGER_TEST_RAM_MIN_BYTES (the memory floor is left at
+        the real subprocess end-to-end instead: TWO real BrokenProcessPool
+        deaths (see `_run_worker_death_fixture`'s own docstring, issue
+        #1250, for why "independent" no longer describes their cause with
+        the parent-signal guard active), both forced disk_full via an
+        impossibly high CRATEDIGGER_TEST_RAM_MIN_BYTES (the memory floor is left at
         the fixture's own high default, but never evaluated -- disk_full
         short-circuits the memory branch in _classify_target_infrastructure_
         failure). Correct wiring: both fold into ONE ram-root marker, exit

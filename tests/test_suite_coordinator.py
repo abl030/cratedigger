@@ -54,6 +54,7 @@ from scripts.run_test_suite import (
     reap_stale_final_gate_receipts,
     run_suite,
 )
+from tests.parent_signal_guard import guard_kill_statement, guard_source_prelude
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 JS_HELPER = REPO_ROOT / "scripts" / "run_js_checks.sh"
@@ -68,6 +69,33 @@ def _python_command(output: str, exit_code: int) -> tuple[str, ...]:
         sys.executable,
         "-c",
         f"import sys; print({output!r}); raise SystemExit({exit_code})",
+    )
+
+
+def _marker_wait_then_guarded_sigterm_source(marker: Path) -> str:
+    """Generated body for the trailing "python" phase in
+    ``test_sigterm_kills_every_concurrently_active_phase``: wait for
+    ``marker`` to exist (up to 5s), then guarded-signal this process's
+    real parent. Extracted into its own function -- rather than inlined
+    at the one call site -- so a dedicated test can assert the capture
+    precedes the wait loop without duplicating the source text (issue
+    #1250 review finding R6): the audit's bounded text-pattern grammar
+    sees only the literal hazard SHAPE, never capture PLACEMENT, so a
+    regression back to capturing after the wait (exactly what review
+    finding F1 caught and fixed) is invisible to every other test here.
+    """
+    return (
+        "import os, pathlib, signal, time, sys\n"
+        f"{guard_source_prelude(expected_signature=None)}"
+        "_pg_intended = os.getppid()\n"
+        f"target = pathlib.Path({str(marker)!r})\n"
+        "deadline = time.monotonic() + 5.0\n"
+        "while not target.exists():\n"
+        "    if time.monotonic() > deadline:\n"
+        "        sys.exit(1)\n"
+        "    time.sleep(0.02)\n"
+        f"{guard_kill_statement('_pg_intended', 'signal.SIGTERM')}"
+        "time.sleep(30)\n"
     )
 
 
@@ -311,8 +339,21 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     sys.executable,
                     "-c",
                     (
-                        "import os, signal, time; "
-                        "os.kill(os.getppid(), signal.SIGTERM); time.sleep(30)"
+                        # Issue #1250: never signal a bare, re-read-at-kill-
+                        # time os.getppid() -- the intended parent here is
+                        # this test's own process, which stays alive
+                        # throughout, but the guard is cheap belt-and-braces
+                        # against ever signalling a reparented-to
+                        # systemd/pid-1 manager if that assumption is ever
+                        # wrong. No --multiprocessing-fork signature applies
+                        # to this parent (it is the coordinator test
+                        # process, not a pool worker), so
+                        # expected_signature=None.
+                        "import os, signal, time\n"
+                        f"{guard_source_prelude(expected_signature=None)}"
+                        "_pg_intended = os.getppid()\n"
+                        f"{guard_kill_statement('_pg_intended', 'signal.SIGTERM')}"
+                        "time.sleep(30)\n"
                     ),
                 ),
                 "interrupting-check",
@@ -451,17 +492,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                 (
                     sys.executable,
                     "-c",
-                    (
-                        "import os, pathlib, signal, time, sys\n"
-                        f"target = pathlib.Path({str(leading_marker)!r})\n"
-                        "deadline = time.monotonic() + 5.0\n"
-                        "while not target.exists():\n"
-                        "    if time.monotonic() > deadline:\n"
-                        "        sys.exit(1)\n"
-                        "    time.sleep(0.02)\n"
-                        "os.kill(os.getppid(), signal.SIGTERM)\n"
-                        "time.sleep(30)\n"
-                    ),
+                    _marker_wait_then_guarded_sigterm_source(leading_marker),
                 ),
                 "python3 scripts/run_python_tests.py",
                 "python",
@@ -486,6 +517,60 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         self.assertFalse(leading_survived_sentinel.exists())
         self.assertIn("INTERRUPTED: signal 15", terminal)
         self.assertFalse(js_unit_sentinel.exists())
+
+    def test_marker_wait_source_captures_the_parent_before_the_wait_loop(
+        self,
+    ) -> None:
+        """Issue #1250 review finding R6: the parent-signal audit's
+        bounded text-pattern grammar sees only the literal hazard SHAPE
+        (a bare getppid() read spelled directly as os.kill's own
+        argument), never capture PLACEMENT -- reverting
+        ``_marker_wait_then_guarded_sigterm_source`` to capture
+        ``_pg_intended`` back BELOW the wait loop (byte-for-byte the
+        shape review finding F1 caught) leaves every audit test and
+        ``test_sigterm_kills_every_concurrently_active_phase`` itself
+        green, since the guard still correctly refuses whatever it
+        observes -- it is just observing too late by then. Pin the
+        source order directly instead."""
+        source = _marker_wait_then_guarded_sigterm_source(
+            Path("/tmp/unused-marker-for-ordering-check")
+        )
+        self.assertLess(
+            source.index("_pg_intended = os.getppid()"),
+            source.index("while not target.exists()"),
+            "the parent PID must be captured BEFORE the marker-wait "
+            "loop, not after -- capturing late reads the "
+            "already-reparented adopter's PID in exactly the scenario "
+            "this guard exists to catch",
+        )
+
+    def test_marker_wait_source_signals_the_captured_pid_not_a_fresh_read(
+        self,
+    ) -> None:
+        """Issue #1250 review finding V1: the parent-signal audit scans
+        FILE source text -- it cannot see the shape
+        ``guard_kill_statement`` assembles at RUNTIME, so a mutant that
+        swaps the captured-variable argument for a live getppid()
+        re-read (reintroducing the exact #1250 hazard as the kill's own
+        argument) is invisible to every audit test AND to
+        ``test_sigterm_kills_every_concurrently_active_phase`` itself --
+        that test's real parent never dies mid-run, so a fresh read
+        still happens to name the right process there too. Pin the
+        assembled TEXT directly instead. (The hazard shape below is
+        built by concatenation rather than spelled as one literal, so
+        this file's own static source never contains the substring the
+        audit exists to reject.)"""
+        source = _marker_wait_then_guarded_sigterm_source(
+            Path("/tmp/unused-marker-for-shape-check")
+        )
+        hazard_shape = "os.kill(" + "os.getppid()"
+        self.assertIn("os.kill(_pg_intended,", source)
+        self.assertNotIn(
+            hazard_shape,
+            source,
+            "the generated body must signal the CAPTURED pid, never a "
+            "fresh os.getppid() read taken at kill time",
+        )
 
     def test_leading_thread_start_failure_does_not_mask_the_real_exception(
         self,
