@@ -181,16 +181,24 @@ class TestParentSignalGuardAudit(unittest.TestCase):
     ) -> None:
         """F10 (#1250 review): every other test here calls
         `find_unguarded_getppid_kill` directly on an in-memory string --
-        none of them proves the repo-wide `os.walk` + file-collection
-        pipeline in `audit_unguarded_getppid_kills` actually reaches a
-        real offending file. `assertEqual(offenders, [])` over a scan
-        that silently finds nothing (a mutant emptying `SKIP_DIRS`'
-        complement, breaking the `.py` suffix filter, or otherwise
-        skipping every file) would still pass every existing test. Drive
-        the real function against a throwaway root with one planted
-        offender and one clean neighbour using the guard's OWN accepted
-        shape, and assert the offender -- and ONLY the offender -- is
-        found."""
+        none of them drives `audit_unguarded_getppid_kills` itself, the
+        function `test_no_unguarded_getppid_kill_anywhere_in_the_repo`
+        actually calls. Concretely, this closes the gap a mutant that
+        makes `audit_unguarded_getppid_kills` return an empty list
+        unconditionally (e.g. before its file loop ever runs) would
+        otherwise leave open: `test_scan_reaches_tests_fakes_subpackage`
+        exercises `_iter_python_files` directly and does not call
+        `audit_unguarded_getppid_kills` at all, so it cannot catch a
+        defect scoped to that function. (Review finding R4: an
+        os.walk-pruning mutant is a DIFFERENT gap this specific test does
+        NOT close -- `test_scan_reaches_tests_fakes_subpackage` already
+        catches that one, since it walks the real repo tree where
+        pruning has something to prune; this test's planted offender
+        sits at its temp root, which `os.walk` always visits regardless
+        of subdirectory pruning.) Drive the real function against a
+        throwaway root with one planted offender and one clean neighbour
+        using the guard's OWN accepted shape, and assert the offender --
+        and ONLY the offender -- is found."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "planted_offender.py").write_text(

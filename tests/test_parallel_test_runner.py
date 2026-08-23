@@ -1741,23 +1741,23 @@ class TestRunnerProcessContract(unittest.TestCase):
 
         Issue #1250 review finding F4, stated honestly: at THIS site,
         "captured early" does not reliably narrow the race window the
-        way the module docstring's general claim describes. An
-        instrumented replica driving the real runner and the real guard
-        recorded refusal reasons across 20 instance records (11 runs):
-        `{None: 17, 'refusing to signal pid 1': 3}` -- clause 1
-        ("reparented") fired ZERO times. A `pid 1` verdict is only
-        reachable AFTER clause 1 already agreed the live parent still
-        matched the captured value, which means in those 3/20 instances
-        the captured value was ALREADY 1: this fixture instance's real
-        pool worker had already been torn down, and this child had
-        already been reparented, before its own module import even ran.
-        The import-time capture narrowed nothing there -- it simply
-        recorded the post-reparenting PID as faithfully as the pre-
-        reparenting one. What actually protects this site is clauses 2
-        and 3 (PID-1 / systemd-comm), not clause 1; the general "capture
+        way the module docstring's general claim describes. Measured
+        (method + numbers, re-run to reproduce, in
+        `docs/solutions/testing/parent-signal-guard-worker-death-fixture.md`):
+        clause 1 ("reparented") essentially never fires here. A `pid 1`
+        verdict is only reachable AFTER clause 1 already agreed the live
+        parent still matched the captured value, which means whenever
+        that verdict occurs the captured value was ALREADY 1: this
+        fixture instance's real pool worker had already been torn down,
+        and this child had already been reparented, before its own
+        module import even ran. The import-time capture narrowed
+        nothing there -- it simply recorded the post-reparenting PID as
+        faithfully as the pre-reparenting one. The general "capture
         early, then re-verify" design is still correct (the live
-        re-check is what catches the already-reparented 15%), the prose
-        just used to credit the wrong half of it.
+        re-check is what catches the already-reparented case at all);
+        the prose here previously credited the wrong clauses for doing
+        the catching (review finding R3) -- see the doc for the
+        corrected, measured attribution.
 
         Issue #1250 correction: each instance signals through
         `tests.parent_signal_guard.guard_and_signal_parent`, never a bare

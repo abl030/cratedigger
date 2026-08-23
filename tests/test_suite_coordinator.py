@@ -72,6 +72,33 @@ def _python_command(output: str, exit_code: int) -> tuple[str, ...]:
     )
 
 
+def _marker_wait_then_guarded_sigterm_source(marker: Path) -> str:
+    """Generated body for the trailing "python" phase in
+    ``test_sigterm_kills_every_concurrently_active_phase``: wait for
+    ``marker`` to exist (up to 5s), then guarded-signal this process's
+    real parent. Extracted into its own function -- rather than inlined
+    at the one call site -- so a dedicated test can assert the capture
+    precedes the wait loop without duplicating the source text (issue
+    #1250 review finding R6): the audit's bounded text-pattern grammar
+    sees only the literal hazard SHAPE, never capture PLACEMENT, so a
+    regression back to capturing after the wait (exactly what review
+    finding F1 caught and fixed) is invisible to every other test here.
+    """
+    return (
+        "import os, pathlib, signal, time, sys\n"
+        f"{guard_source_prelude(expected_signature=None)}"
+        "_pg_intended = os.getppid()\n"
+        f"target = pathlib.Path({str(marker)!r})\n"
+        "deadline = time.monotonic() + 5.0\n"
+        "while not target.exists():\n"
+        "    if time.monotonic() > deadline:\n"
+        "        sys.exit(1)\n"
+        "    time.sleep(0.02)\n"
+        f"{guard_kill_statement('_pg_intended', 'signal.SIGTERM')}"
+        "time.sleep(30)\n"
+    )
+
+
 class SuiteCoordinatorTestCase(unittest.TestCase):
     def setUp(self) -> None:
         shared = Path(
@@ -465,31 +492,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                 (
                     sys.executable,
                     "-c",
-                    (
-                        # Issue #1250: guarded the same way as the
-                        # "interrupting" phase above -- see that phase's
-                        # comment for why expected_signature=None. The
-                        # capture happens BEFORE the up-to-5s marker-wait
-                        # loop below, not after: review finding F1 caught
-                        # an earlier version that captured _pg_intended
-                        # only after the wait, which is exactly the widest
-                        # window this whole guard exists to close -- if
-                        # the real parent were to exit during that wait,
-                        # the late capture would already read the
-                        # adopter's PID, and clause 1 (reparented) would
-                        # trivially agree with itself forever.
-                        "import os, pathlib, signal, time, sys\n"
-                        f"{guard_source_prelude(expected_signature=None)}"
-                        "_pg_intended = os.getppid()\n"
-                        f"target = pathlib.Path({str(leading_marker)!r})\n"
-                        "deadline = time.monotonic() + 5.0\n"
-                        "while not target.exists():\n"
-                        "    if time.monotonic() > deadline:\n"
-                        "        sys.exit(1)\n"
-                        "    time.sleep(0.02)\n"
-                        f"{guard_kill_statement('_pg_intended', 'signal.SIGTERM')}"
-                        "time.sleep(30)\n"
-                    ),
+                    _marker_wait_then_guarded_sigterm_source(leading_marker),
                 ),
                 "python3 scripts/run_python_tests.py",
                 "python",
@@ -514,6 +517,32 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         self.assertFalse(leading_survived_sentinel.exists())
         self.assertIn("INTERRUPTED: signal 15", terminal)
         self.assertFalse(js_unit_sentinel.exists())
+
+    def test_marker_wait_source_captures_the_parent_before_the_wait_loop(
+        self,
+    ) -> None:
+        """Issue #1250 review finding R6: the parent-signal audit's
+        bounded text-pattern grammar sees only the literal hazard SHAPE
+        (a bare getppid() read spelled directly as os.kill's own
+        argument), never capture PLACEMENT -- reverting
+        ``_marker_wait_then_guarded_sigterm_source`` to capture
+        ``_pg_intended`` back BELOW the wait loop (byte-for-byte the
+        shape review finding F1 caught) leaves every audit test and
+        ``test_sigterm_kills_every_concurrently_active_phase`` itself
+        green, since the guard still correctly refuses whatever it
+        observes -- it is just observing too late by then. Pin the
+        source order directly instead."""
+        source = _marker_wait_then_guarded_sigterm_source(
+            Path("/tmp/unused-marker-for-ordering-check")
+        )
+        self.assertLess(
+            source.index("_pg_intended = os.getppid()"),
+            source.index("while not target.exists()"),
+            "the parent PID must be captured BEFORE the marker-wait "
+            "loop, not after -- capturing late reads the "
+            "already-reparented adopter's PID in exactly the scenario "
+            "this guard exists to catch",
+        )
 
     def test_leading_thread_start_failure_does_not_mask_the_real_exception(
         self,
