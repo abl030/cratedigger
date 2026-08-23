@@ -544,6 +544,34 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
             "this guard exists to catch",
         )
 
+    def test_marker_wait_source_signals_the_captured_pid_not_a_fresh_read(
+        self,
+    ) -> None:
+        """Issue #1250 review finding V1: the parent-signal audit scans
+        FILE source text -- it cannot see the shape
+        ``guard_kill_statement`` assembles at RUNTIME, so a mutant that
+        swaps the captured-variable argument for a live getppid()
+        re-read (reintroducing the exact #1250 hazard as the kill's own
+        argument) is invisible to every audit test AND to
+        ``test_sigterm_kills_every_concurrently_active_phase`` itself --
+        that test's real parent never dies mid-run, so a fresh read
+        still happens to name the right process there too. Pin the
+        assembled TEXT directly instead. (The hazard shape below is
+        built by concatenation rather than spelled as one literal, so
+        this file's own static source never contains the substring the
+        audit exists to reject.)"""
+        source = _marker_wait_then_guarded_sigterm_source(
+            Path("/tmp/unused-marker-for-shape-check")
+        )
+        hazard_shape = "os.kill(" + "os.getppid()"
+        self.assertIn("os.kill(_pg_intended,", source)
+        self.assertNotIn(
+            hazard_shape,
+            source,
+            "the generated body must signal the CAPTURED pid, never a "
+            "fresh os.getppid() read taken at kill time",
+        )
+
     def test_leading_thread_start_failure_does_not_mask_the_real_exception(
         self,
     ) -> None:

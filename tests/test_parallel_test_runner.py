@@ -1740,24 +1740,26 @@ class TestRunnerProcessContract(unittest.TestCase):
         ONE.
 
         Issue #1250 review finding F4, stated honestly: at THIS site,
-        "captured early" does not reliably narrow the race window the
-        way the module docstring's general claim describes. Measured
-        (method + numbers, re-run to reproduce, in
-        `docs/solutions/testing/parent-signal-guard-worker-death-fixture.md`):
-        clause 1 ("reparented") essentially never fires here. A `pid 1`
-        verdict is only reachable AFTER clause 1 already agreed the live
-        parent still matched the captured value, which means whenever
-        that verdict occurs the captured value was ALREADY 1: this
-        fixture instance's real pool worker had already been torn down,
-        and this child had already been reparented, before its own
-        module import even ran. The import-time capture narrowed
-        nothing there -- it simply recorded the post-reparenting PID as
-        faithfully as the pre-reparenting one. The general "capture
-        early, then re-verify" design is still correct (the live
-        re-check is what catches the already-reparented case at all);
-        the prose here previously credited the wrong clauses for doing
-        the catching (review finding R3) -- see the doc for the
-        corrected, measured attribution.
+        "captured early" USUALLY narrows nothing, though not never --
+        method, measurements, and the exact clause attribution (review
+        findings R3, then corrected again by V2/V3 after that
+        correction pass itself mis-described what one clause catches
+        and overstated another's durability) all live in
+        `docs/solutions/testing/parent-signal-guard-worker-death-fixture.md`,
+        not restated here. The short version: a `pid 1` verdict is only
+        reachable AFTER the reparented-check clause already agreed the
+        live parent still matched the captured value, which means
+        whenever that verdict occurs the captured value was ALREADY 1 --
+        this fixture instance's real pool worker had already been torn
+        down, and this child had already been reparented, before its
+        own module import even ran. The import-time capture narrowed
+        nothing in that case; it simply recorded the post-reparenting
+        PID as faithfully as the pre-reparenting one. The general
+        "capture early, then re-verify" design is still correct -- the
+        rare case where the parent is still alive at capture and exits
+        before the live re-check is exactly what justifies capturing
+        early at all -- see the doc for the measured, corrected
+        attribution rather than a number restated here.
 
         Issue #1250 correction: each instance signals through
         `tests.parent_signal_guard.guard_and_signal_parent`, never a bare
