@@ -903,23 +903,25 @@ class TestLiveBugReproductions(unittest.TestCase):
             ("confident_reject", True, "downgrade"),
         )
 
-    def test_a_worse_candidate_against_an_incomplete_install_still_rejects(
+    def test_a_worse_but_complete_candidate_against_an_incomplete_install_holds(
         self,
     ):
-        """The hold's deliberate ceiling: ``equivalent`` only, never ``worse``.
+        """Completeness outranks quality at EVERY level, ``worse`` included.
 
-        MP3 96 CBR against an installed MP3 320 is a ``rank`` verdict of
-        ``worse``, and "worse is blocked regardless" is issue #60's
-        acceptance criterion — the same rule that already stops a
-        deliberately low verified-lossless target replacing a good album.
-        Widening the hold to cover it would let a 96 kbps rip stage itself
-        against any incomplete album.
+        MP3 96 CBR against an installed MP3 320 is an unambiguous ``rank``
+        verdict of ``worse`` — the widest quality gap the hold has to
+        survive. It still holds, because the two sides are not the same
+        program: a 96 kbps copy that has the whole record and a 320 kbps
+        copy that is missing a component are not comparable on bitrate, and
+        the incomplete side is not a baseline that a higher bitrate should
+        be able to defend. Issue #1241's operator framing: "if complete and
+        worse quality than incomplete then import it."
 
-        Accepted residual, recorded here so it is a decision and not an
-        oversight: a genuinely worse but complete candidate that holds the
-        missing component is still rejected. Widening is one conjunct away
-        and the hold's own decision string makes that cohort countable
-        first (issue #1241).
+        This does not weaken issue #60's "worse is blocked regardless"
+        acceptance criterion, which governs IMPORT. Nothing is imported here
+        — ``imported`` stays False and the folder is staged for the operator
+        under ``installed_incomplete_hold``. The 96 kbps rip becomes a
+        worklist entry that a human confirms, never a silent replacement.
         """
         r = full_pipeline_decision(
             is_flac=False,
@@ -931,6 +933,41 @@ class TestLiveBugReproductions(unittest.TestCase):
             existing_min_bitrate=320,
             existing_avg_bitrate=320,
             installed_incomplete=True,
+            candidate_covers_declared_program=True,
+        )
+
+        basis = json_dict(r["comparison_basis"])
+        # The audit stays honest: the quality verdict is still "worse".
+        # Only the CONSEQUENCE moved.
+        self.assertEqual(basis["verdict"], "worse")
+        self.assertTrue(basis["installed_incomplete_hold"])
+        self.assertEqual(
+            r["stage2_import"], DECISION_INSTALLED_INCOMPLETE_HOLD)
+        self.assertFalse(r["imported"])
+        self.assertEqual(
+            classify_full_pipeline_decision(r),
+            ("uncertain", False, DECISION_INSTALLED_INCOMPLETE_HOLD),
+        )
+
+    def test_a_worse_candidate_against_a_COMPLETE_install_still_rejects(
+        self,
+    ):
+        """The no-regression twin: without incompleteness nothing changed.
+
+        Same 96-vs-320 world, installed copy complete. This is the pin that
+        stops the widened hold from becoming "any complete candidate stages
+        itself against anything".
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=96,
+            avg_bitrate=96,
+            is_cbr=True,
+            new_format="MP3",
+            existing_format="MP3",
+            existing_min_bitrate=320,
+            existing_avg_bitrate=320,
+            installed_incomplete=False,
             candidate_covers_declared_program=True,
         )
 
@@ -2287,14 +2324,17 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
                     ("confident_reject", True, "downgrade"),
                 )
 
-    def test_a_worse_candidate_against_an_incomplete_install_still_rejects_via_evidence(
+    def test_a_worse_but_complete_candidate_holds_via_evidence(
         self,
     ):
-        """Parity twin of the ``worse`` ceiling pin.
+        """Parity twin of the widened-hold pin, through real evidence rows.
 
-        Both conjuncts hold and the installed copy is genuinely incomplete,
-        but the comparison said ``worse`` — issue #60's "worse is blocked
-        regardless" survives #1241 untouched.
+        Both conjuncts hold, the installed copy carries a positive
+        ``incomplete`` verdict, and the comparison said ``worse``. The hold
+        still fires: completeness outranks quality at every level (#1241).
+        Issue #60's "worse is blocked regardless" is untouched because
+        nothing is imported — ``imported`` stays False and the folder is
+        staged for the operator rather than deleted.
         """
         from lib.quality import full_pipeline_decision_from_evidence
 
@@ -2323,13 +2363,15 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         )
 
         basis = json_dict(r["comparison_basis"])
+        # The audit stays honest: still "worse". Only the consequence moved.
         self.assertEqual(basis["verdict"], "worse")
-        self.assertFalse(basis["installed_incomplete_hold"])
-        self.assertEqual(r["stage2_import"], "downgrade")
+        self.assertTrue(basis["installed_incomplete_hold"])
+        self.assertEqual(
+            r["stage2_import"], DECISION_INSTALLED_INCOMPLETE_HOLD)
         self.assertFalse(r["imported"])
         self.assertEqual(
             classify_full_pipeline_decision(r),
-            ("confident_reject", True, "downgrade"),
+            ("uncertain", False, DECISION_INSTALLED_INCOMPLETE_HOLD),
         )
 
 

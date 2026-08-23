@@ -3243,6 +3243,17 @@ class TestGeneratedParity(unittest.TestCase):
         _DIRT_DRESS_INCOMPLETE_INSTALL_WORLD,
         installed_incomplete=False,
         candidate_covers_declared_program=False))
+    # Issue #1241: the hold is NOT capped at ``equivalent``. A complete
+    # candidate that measures genuinely WORSE than an incomplete installed
+    # copy still holds, because completeness is lexicographically above
+    # quality. MP3 96 CBR against an installed MP3 320 is an unambiguous
+    # ``worse`` rank verdict; random worlds reach a worse-verdict downgrade
+    # with both conjuncts set far too rarely to rely on, so it is pinned.
+    @example(world=replace(
+        _DIRT_DRESS_INCOMPLETE_INSTALL_WORLD,
+        current_format="MP3", current_min=320, current_avg=320,
+        current_is_cbr=True,
+        candidate_format="MP3", min_bitrate=96, avg_bitrate=96, is_cbr=True))
     def test_installed_incomplete_hold_fires_exactly_where_it_must(
         self, world,
     ):
@@ -3272,13 +3283,16 @@ class TestGeneratedParity(unittest.TestCase):
         assert_twins_agree(sim, evidence_result)
 
         baseline_basis = baseline.get("comparison_basis")
+        # Issue #1241: the hold covers EVERY "not better" verdict, ``worse``
+        # included — completeness is lexicographically above quality. The
+        # baseline reaching ``downgrade``/``transcode_downgrade`` is exactly
+        # the "not better" condition, so no verdict clause belongs here.
         held = (
             world.installed_incomplete
             and world.candidate_covers_declared_program
             and baseline.get("stage2_import") in (
                 "downgrade", "transcode_downgrade")
             and isinstance(baseline_basis, dict)
-            and baseline_basis.get("verdict") == "equivalent"
         )
 
         if held:

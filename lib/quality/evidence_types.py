@@ -1135,12 +1135,13 @@ class QualityComparisonBasis(
     tolerance_kbps: int | None = None
     verified_lossless_bypass: bool = False
     #: True only when the installed-incomplete hold CHANGED the outcome: the
-    #: comparison genuinely said "equivalent" and the reject was withheld
-    #: because the installed copy is positively incomplete and this candidate
-    #: provably covers the declared program. Never merely because the
-    #: installed copy is incomplete. ``verdict``/``branch`` above stay the
-    #: honest record of what ``compare_quality()`` actually found, exactly as
-    #: they do for ``verified_lossless_bypass`` (issue #1241).
+    #: comparison genuinely said "not better" — ``equivalent`` OR ``worse``,
+    #: since completeness outranks quality at every level — and the reject
+    #: was withheld because the installed copy is positively incomplete and
+    #: this candidate provably covers the declared program. Never merely
+    #: because the installed copy is incomplete. ``verdict``/``branch`` above
+    #: stay the honest record of what ``compare_quality()`` actually found,
+    #: exactly as they do for ``verified_lossless_bypass`` (issue #1241).
     installed_incomplete_hold: bool = False
 
 

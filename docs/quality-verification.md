@@ -522,16 +522,22 @@ verdict:
 
 1. **The measured comparison.** `import_quality_decision` returns the
    `installed_incomplete_hold` decision instead of `downgrade` /
-   `transcode_downgrade` when the comparison said `equivalent`, the installed
+   `transcode_downgrade` when the comparison said "not better", the installed
    copy is positively incomplete, AND this attempt PROVED its candidate
    covers the whole declared program
    (`AlbumQualityEvidenceDecisionFacts.candidate_covers_declared_program`,
    from beets' own `extra_tracks` check). Both conjuncts are required — one
-   incomplete copy must never "upgrade" another. `worse` stays blocked
-   regardless, exactly as it is under the verified-lossless bypass (issue
-   #60). The comparison basis keeps its honest `verdict` / `branch` and
-   records `installed_incomplete_hold=True` only when the hold CHANGED the
-   outcome.
+   incomplete copy must never "upgrade" another.
+
+   **`worse` is covered as well as `equivalent`.** Completeness is
+   lexicographically ABOVE quality: a copy holding the whole program outranks
+   one that does not, at every quality level. A 96 kbps complete rip against
+   an incomplete 320 kbps album holds. That does not contradict issue #60's
+   "worse is blocked regardless", which governs IMPORT — the hold imports
+   nothing. It withholds a destructive reject and stages the folder for the
+   operator, who decides. The comparison basis keeps its honest `verdict` /
+   `branch` and records `installed_incomplete_hold=True` only when the hold
+   CHANGED the outcome, so a held `worse` world still audits as `worse`.
 
    **The "folder is kept" outcome is the CLEANUP REDUCER lane only.** In the
    importer lane the hold's routing is byte-identical to the `downgrade` it

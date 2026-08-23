@@ -223,11 +223,13 @@ def import_quality_decision(
         "transcode_downgrade" — transcode and not better, skip + denylist (exit 6)
         "transcode_first"     — transcode but nothing on disk yet, import (exit 6)
         "installed_incomplete_hold"
-                              — the comparison said "equivalent", but the
-                                installed copy is positively missing a
-                                declared component and this candidate covers
-                                the whole declared program: withhold the
-                                reject and stage for the operator (#1241)
+                              — the comparison said "not better" (either
+                                "equivalent" or "worse"), but the installed
+                                copy is positively missing a declared
+                                component and this candidate covers the whole
+                                declared program: completeness outranks
+                                quality, so withhold the reject and stage for
+                                the operator (#1241)
 
     Args:
         new: measurement of the new download
@@ -290,23 +292,27 @@ def import_quality_decision(
 
     # Issue #1241. An installed copy that is positively MISSING a declared
     # audio component is not a sound baseline for a destructive "not better"
-    # verdict: the two sides are not the same program. When the candidate
-    # provably covers the whole declared program (beets' own extra_tracks
-    # reject at ``lib/beets.py::apply_candidate_scenario`` fell through for
-    # THIS attempt) and the comparison said "equivalent" — not "worse" —
-    # withhold the reject and hand the album to the operator instead of
-    # deleting the folder.
+    # verdict: the two sides are not the same program, so the quality
+    # comparison between them is not the question that was asked. When the
+    # candidate provably covers the whole declared program (beets' own
+    # extra_tracks reject at ``lib/beets.py::apply_candidate_scenario`` fell
+    # through for THIS attempt), withhold the reject and hand the album to
+    # the operator instead of deleting the folder.
     #
-    # "worse" stays blocked regardless, exactly as it is under the
-    # verified-lossless bypass above (issue #60 acceptance criterion). The
-    # accepted residual: a genuinely-worse-but-complete candidate against an
-    # incomplete installed copy is still rejected. That cohort is countable
-    # via this decision string before anyone widens the guard.
-    if (
-        verdict == "equivalent"
-        and installed_incomplete
-        and candidate_covers_declared_program
-    ):
+    # This deliberately covers ``worse`` as well as ``equivalent``.
+    # Completeness is lexicographically ABOVE quality: a copy that holds the
+    # whole program outranks one that does not, at every quality level. That
+    # is the whole point of #1241 — the Dirt Dress incident was ``equivalent``
+    # only by accident of bitrate, and a 49%-complete album is not a baseline
+    # that a lower bitrate should be able to defend.
+    #
+    # This does NOT contradict issue #60's "worse is blocked regardless"
+    # acceptance criterion, which governs IMPORT. The hold imports nothing:
+    # it withholds a destructive reject and stages the folder for the
+    # operator, who decides (issue #1241 — "stage with new reason code").
+    # A 96 kbps complete rip against an incomplete 320 album therefore
+    # becomes a worklist entry, never a silent replacement.
+    if installed_incomplete and candidate_covers_declared_program:
         return ImportQualityDecision(
             decision=DECISION_INSTALLED_INCOMPLETE_HOLD,
             basis=msgspec.structs.replace(basis, installed_incomplete_hold=True),
