@@ -8,7 +8,19 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-_SHIM_MODULE = r'''# Shared body for the nixosconfig deploy-pin fake git/nix/hostname commands.
+from tests.parent_signal_guard import guard_source_prelude
+
+# _SHIM_MODULE_HEADER/_SHIM_MODULE_BODY are split around the guard prelude
+# (issue #1250) so that generated text can be spliced in at define time --
+# deploy_pin.py is a normal importable module (unlike the -S shim itself)
+# and can call tests.parent_signal_guard directly. expected_signature=None:
+# this shim's real parent is never a ProcessPoolExecutor pool worker (it is
+# whatever invoked scripts/pin_nixosconfig.sh under test -- bash or pytest),
+# so there is no --multiprocessing-fork shape to check, and skipping that
+# clause also means one fewer /proc read per guarded call (see
+# tests/parent_signal_guard.py's own docstring for the budget this respects:
+# the shim runs with `-S` and must add no new imports).
+_SHIM_MODULE_HEADER = r'''# Shared body for the nixosconfig deploy-pin fake git/nix/hostname commands.
 # Imported by a tiny per-command stub (never executed directly as __main__)
 # so CPython compiles it once and caches the bytecode in __pycache__: the
 # ~28 subprocess spawns per script run (tests/fakes/deploy_pin.py profiling,
@@ -27,9 +39,18 @@ import time
 # profiling, issue #1131): the `signal` module costs real per-process import
 # time and this fake never needs anything from it beyond this one constant.
 SIGTERM = 15
+'''
 
+_SHIM_MODULE_BODY = r'''
 
 def main():
+    # Issue #1250: captured ONCE, as the very first statement -- never a
+    # bare getppid() re-read right before each signal below. See
+    # tests/parent_signal_guard.py's module docstring for why capturing
+    # early is necessary but not, on its own, sufficient; __pg_refusal_reason
+    # (defined above, spliced in from guard_source_prelude()) is the live
+    # re-check that actually makes each guarded kill below safe.
+    __pg_intended_parent = os.getppid()
     state_path = os.environ["DEPLOY_PIN_FAKE_STATE"]
     lock_path = os.path.splitext(state_path)[0] + ".lock"
     state_lock = open(lock_path, "a+", encoding="utf-8")
@@ -221,7 +242,8 @@ def main():
                 and value in state["commits"]
             ):
                 save()
-                os.kill(os.getppid(), SIGTERM)
+                if __pg_refusal_reason(__pg_intended_parent) is None:
+                    os.kill(__pg_intended_parent, SIGTERM)
                 time.sleep(0.1)
                 raise SystemExit(143)
             print(value)
@@ -246,7 +268,8 @@ def main():
             and value in state["commits"]
         ):
             save()
-            os.kill(os.getppid(), SIGTERM)
+            if __pg_refusal_reason(__pg_intended_parent) is None:
+                os.kill(__pg_intended_parent, SIGTERM)
             time.sleep(0.1)
             raise SystemExit(143)
         print(value)
@@ -311,7 +334,8 @@ def main():
             "invalid_signature_signal_after_commit",
         }:
             save()
-            os.kill(os.getppid(), SIGTERM)
+            if __pg_refusal_reason(__pg_intended_parent) is None:
+                os.kill(__pg_intended_parent, SIGTERM)
             time.sleep(0.1)
             raise SystemExit(143)
         print(state["worktree_head"])
@@ -452,6 +476,12 @@ def main():
 
     save()
 '''
+
+_SHIM_MODULE = (
+    _SHIM_MODULE_HEADER
+    + guard_source_prelude(expected_signature=None)
+    + _SHIM_MODULE_BODY
+)
 
 # Each fake command is this tiny stub, not the shim body itself: the body
 # lives in one shared `_shim.py` module written once per fixture instance

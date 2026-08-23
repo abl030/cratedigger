@@ -54,6 +54,7 @@ from scripts.run_test_suite import (
     reap_stale_final_gate_receipts,
     run_suite,
 )
+from tests.parent_signal_guard import guard_kill_statement, guard_source_prelude
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 JS_HELPER = REPO_ROOT / "scripts" / "run_js_checks.sh"
@@ -311,8 +312,21 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     sys.executable,
                     "-c",
                     (
-                        "import os, signal, time; "
-                        "os.kill(os.getppid(), signal.SIGTERM); time.sleep(30)"
+                        # Issue #1250: never signal a bare, re-read-at-kill-
+                        # time os.getppid() -- the intended parent here is
+                        # this test's own process, which stays alive
+                        # throughout, but the guard is cheap belt-and-braces
+                        # against ever signalling a reparented-to
+                        # systemd/pid-1 manager if that assumption is ever
+                        # wrong. No --multiprocessing-fork signature applies
+                        # to this parent (it is the coordinator test
+                        # process, not a pool worker), so
+                        # expected_signature=None.
+                        "import os, signal, time\n"
+                        f"{guard_source_prelude(expected_signature=None)}"
+                        "_pg_intended = os.getppid()\n"
+                        f"{guard_kill_statement('_pg_intended', 'signal.SIGTERM')}"
+                        "time.sleep(30)\n"
                     ),
                 ),
                 "interrupting-check",
@@ -452,14 +466,19 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     sys.executable,
                     "-c",
                     (
+                        # Issue #1250: guarded the same way as the
+                        # "interrupting" phase above -- see that phase's
+                        # comment for why expected_signature=None.
                         "import os, pathlib, signal, time, sys\n"
+                        f"{guard_source_prelude(expected_signature=None)}"
                         f"target = pathlib.Path({str(leading_marker)!r})\n"
                         "deadline = time.monotonic() + 5.0\n"
                         "while not target.exists():\n"
                         "    if time.monotonic() > deadline:\n"
                         "        sys.exit(1)\n"
                         "    time.sleep(0.02)\n"
-                        "os.kill(os.getppid(), signal.SIGTERM)\n"
+                        "_pg_intended = os.getppid()\n"
+                        f"{guard_kill_statement('_pg_intended', 'signal.SIGTERM')}"
                         "time.sleep(30)\n"
                     ),
                 ),

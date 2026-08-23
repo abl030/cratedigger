@@ -274,6 +274,16 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_node_jsonl_worker",
         "tests.test_generated_node_worker_audit",
     ),
+    # Shared guard for every test that intentionally signals "the parent
+    # process" (issue #1250). Not itself a discoverable test module, and
+    # no prefix rule covers a bare tests/*.py file, so it needs an
+    # explicit mapping: the direct unit/per-clause tests plus the
+    # repo-wide bounded audit that rejects any OTHER unguarded getppid()
+    # kill call site.
+    "tests/parent_signal_guard.py": (
+        "tests.test_parent_signal_guard",
+        "tests.test_parent_signal_guard_audit",
+    ),
     "tests/read_projection_registry.py": (
         "tests.test_pipeline_db",
         "tests.test_read_projection_audit",
