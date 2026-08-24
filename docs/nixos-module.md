@@ -4,8 +4,8 @@ The upstream module lives in this repo at `nix/module.nix`, exposed via
 `nixosModules.default` in `flake.nix`. It is generic and homelab-agnostic:
 every secret is a `*File` path, the DB is a `dsn` string, and there are no
 sops/nspawn or site-specific public-proxy assumptions. The module does own its
-loopback nginx authentication gateway; the consumer supplies the public HTTPS
-edge that forwards to it.
+nginx authentication gateway, which defaults to loopback listeners; the
+consumer supplies the HTTPS edge that forwards to it.
 
 The flake export pins the module's package set to **Cratedigger's own
 flake.lock**. The application environment is built from the nixpkgs revision
@@ -61,9 +61,10 @@ upstream module and adds:
 | `redis.{enable,host,port,maxmemory}` | enabled, `127.0.0.1:6379`, `2gb` | App-owned local Redis server for the pipeline peer cache and web metadata cache. Uses `allkeys-lru`. |
 | `peerCache.{ttlSeconds,speedTtlSeconds,redisConnectTimeoutMs,redisOperationTimeoutMs}` | 7d, 24h, 200ms, 100ms | Redis TTL and timeout settings rendered into `[Peer Cache]`. |
 | `beets.validation.{enable,distanceThreshold,stagingDir,trackingFile,verifiedLosslessTarget}` | sensible defaults | Beets validation config. |
-| `web.enable` | `false` | Enable the Unix-only web backend and module-owned loopback nginx gateway. Exactly one of `basicAuthFile`, `enableInsecure = true`, or `externalAuth = true` is then required. |
+| `web.enable` | `false` | Enable the Unix-only web backend and module-owned nginx gateway. The gateway defaults to host loopback only. Exactly one of `basicAuthFile`, `enableInsecure = true`, or `externalAuth = true` is then required. |
 | `web.hostName` | `null` | Lowercase canonical public DNS hostname. Required when web is enabled; it defines the fixed `https://` browser origin and exact gateway vhost. IP literals are rejected. |
-| `web.gatewayPort` | `8086` | Loopback-only nginx gateway port. The public HTTPS reverse proxy forwards here; this is not a Python application listener. |
+| `web.gatewayPort` | `8086` | Module-owned nginx gateway port. The HTTPS reverse proxy forwards here; this is not a Python application listener. |
+| `web.gatewayAddresses` | IPv4 loopback plus IPv6 loopback when enabled | Non-empty nginx listener-address set for `web.gatewayPort`. Keep the default for a same-host proxy. A deployment may explicitly add a private bridge address for a sandboxed proxy, but then owns the firewall and network-perimeter restriction for that address. |
 | `web.accessGroup` | `"cratedigger-web"` | Dedicated group authorized to connect to the web backend Unix socket. This grants complete HTTP/API authority, not Basic-password-file access or unrelated CLI authority. Known privileged or overlapping authority groups are rejected. |
 | `web.basicAuthFile` | `null` | Absolute runtime `htpasswd` file outside `/nix/store`. Basic mode requires a root-owned, non-empty `root:<nginx-group>` `0440` target readable by nginx and denied to the application/non-nginx socket users. |
 | `web.enableInsecure` | `false` | Explicitly disable browser authentication while retaining the gateway, Unix socket, canonical-origin checks, and all other request-security controls. Mutually exclusive with `basicAuthFile` and `externalAuth`. |
@@ -123,7 +124,7 @@ The production web path has three separate listeners/authorities:
 ```text
 browser
   -> https://music.example.net (operator-owned DNS, ACME, and TLS proxy)
-  -> 127.0.0.1:<web.gatewayPort> (module-owned nginx auth gateway)
+  -> <web.gatewayAddresses>:<web.gatewayPort> (module-owned nginx auth gateway)
   -> /run/cratedigger-web/web.sock (systemd-owned, root:<web.accessGroup> 0660)
   -> web/server.py (one inherited Unix listener; no production TCP listener)
 
@@ -150,10 +151,14 @@ release IDs and master IDs share the integer namespace; after the mirror
 establishes the master, the normal post-widen durable-cache read may return
 from cache.
 
-The outer HTTPS proxy and the loopback gateway may be server blocks in the
-same nginx process, but they remain distinct listeners. Configure the outer
-proxy to forward only to `127.0.0.1:<web.gatewayPort>`. Do not publish that
-port, expose the Unix socket, or recreate the retired Python port `8085`.
+The outer HTTPS proxy and the default loopback gateway may be server blocks in
+the same nginx process, but they remain distinct listeners. With the default
+`web.gatewayAddresses`, configure the outer proxy to forward only to
+`127.0.0.1:<web.gatewayPort>`. A sandboxed proxy may instead require an
+explicit private bridge address; restrict that listener to the bridge at the
+deployment firewall and do not add a routable host address. Never publish the
+gateway port, expose the Unix socket, or recreate the retired Python port
+`8085`.
 `web.hostName` is the canonical public hostname in both modes; the application
 uses exactly `https://<web.hostName>` for mutation provenance rather than
 trusting `Host` or any forwarded-host header.
@@ -194,8 +199,10 @@ instead of logging a `[CRITICAL]` warning that authentication is absent.
 
 The deployment contract you are asserting:
 
-- Your proxy runs on the same host. The module gateway listens on loopback
-  only, so nothing can reach it from another machine without host access.
+- With default `web.gatewayAddresses`, your proxy runs on the same host and
+  nothing can reach the loopback gateway from another machine. A sandboxed
+  same-host proxy may instead use an explicitly configured private bridge
+  listener; the deployment firewall must admit only that bridge.
 - Your proxy forwards the canonical `web.hostName` as the `Host` header. A
   non-canonical Host is rejected by the module's own default vhost.
 - You decide whether `/healthz` stays anonymous at your layer. The module's
@@ -345,8 +352,8 @@ and service dependencies may still prevent the web process from starting.
 
 ### Explicit insecure mode
 
-Insecure mode removes only nginx's Basic challenge. It keeps the loopback
-gateway, Unix backend, canonical Host/origin, header reconstruction,
+Insecure mode removes only nginx's Basic challenge. It keeps the module-owned
+gateway on the configured addresses, Unix backend, canonical Host/origin, header reconstruction,
 same-origin mutation checks, CORS removal, response isolation, request-channel
 classification, and destructive intent gates. Every application start logs
 `Authentication is disabled for this Cratedigger instance.` at `CRITICAL`, and
@@ -822,8 +829,8 @@ See [`examples/cratedigger.nix`](../examples/cratedigger.nix) for the full worke
 - `cratedigger-web.service` — long-running Unix-only web backend. It requires
   the socket and adopts exactly its one inherited fd; a direct start activates
   the same socket rather than creating a bypass listener.
-- `nginx.service` — when web is enabled, the module adds an exact-host
-  loopback gateway plus a default-reject vhost, joins nginx only to the
+- `nginx.service` — when web is enabled, the module adds an exact-host gateway
+  on `web.gatewayAddresses` plus a default-reject vhost, joins nginx only to the
   dedicated web access group, and validates Basic runtime material before
   start/reload. The module requires nginx reload support so policy and
   credential changes validate before HUP without stopping unrelated vhosts.
