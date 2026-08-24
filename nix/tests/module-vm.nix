@@ -748,6 +748,7 @@ pkgs.testers.nixosTest {
         enable = true;
         hostName = "music.vm.test";
         gatewayPort = 18086;
+        gatewayAddresses = ["127.0.0.1" "127.0.0.2" "[::1]"];
         basicAuthFile = "/run/cratedigger-test-auth/basic.htpasswd";
       };
       # Enable the YouTube-rescue ingest worker so its unit is rendered.
@@ -2381,7 +2382,8 @@ pkgs.testers.nixosTest {
     )
     machine.succeed(
         "actual=$(ss -H -ltn 'sport = :18086' | awk '{print $4}' | sort); "
-        "expected=$(printf '%s\\n' '127.0.0.1:18086' '[::1]:18086' | sort); "
+        "expected=$(printf '%s\\n' '127.0.0.1:18086' '127.0.0.2:18086' "
+        "'[::1]:18086' | sort); "
         "test \"$actual\" = \"$expected\""
     )
     machine.fail("ss -H -ltn 'sport = :8085' | grep -q .")
@@ -4003,7 +4005,8 @@ pkgs.testers.nixosTest {
             "actual=$(ss -H -ltn 'sport = :18086' "
             "| awk '{print $4}' | sort); "
             "expected=$(printf '%s\\n' "
-            "'127.0.0.1:18086' '[::1]:18086' | sort); "
+            "'127.0.0.1:18086' '127.0.0.2:18086' "
+            "'[::1]:18086' | sort); "
             "test \"$actual\" = \"$expected\""
         )
         machine.fail("ss -H -ltn 'sport = :8085' | grep -q .")

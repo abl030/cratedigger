@@ -2030,12 +2030,17 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
             text,
         )
 
-    def test_gateway_is_exact_host_loopback_and_default_reject(self) -> None:
+    def test_gateway_uses_configured_addresses_and_default_reject(self) -> None:
         text = _nix_source(MODULE_NIX)
         self.assertNotIn("cfg.web.port", text)
         self.assertIn("services.nginx.virtualHosts", text)
-        self.assertIn('addr = "127.0.0.1";', text)
-        self.assertIn('addr = "[::1]";', text)
+        self.assertIn("webGatewayListen = map", text)
+        self.assertIn("inherit addr;", text)
+        self.assertIn("cfg.web.gatewayAddresses;", text)
+        self.assertIn(
+            'default = ["127.0.0.1"] ++ optional config.networking.enableIPv6 "[::1]";',
+            text,
+        )
         self.assertIn("port = cfg.web.gatewayPort;", text)
         self.assertIn("serverName = webHostName;", text)
         self.assertIn("default = true;", text)

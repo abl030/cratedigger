@@ -137,17 +137,12 @@
       webBasicAuthPathSegments
     && cfg.web.basicAuthFile != "/nix/store"
     && !lib.hasPrefix "/nix/store/" cfg.web.basicAuthFile;
-  webGatewayListen =
-    [
-      {
-        addr = "127.0.0.1";
-        port = cfg.web.gatewayPort;
-      }
-    ]
-    ++ optional config.networking.enableIPv6 {
-      addr = "[::1]";
+  webGatewayListen = map
+    (addr: {
+      inherit addr;
       port = cfg.web.gatewayPort;
-    };
+    })
+    cfg.web.gatewayAddresses;
   webProxyRequestConfig = ''
     proxy_http_version 1.1;
     proxy_pass_request_headers off;
@@ -1705,8 +1700,21 @@ in {
         type = types.port;
         default = 8086;
         description = ''
-          Loopback-only port for the module-owned nginx authentication
-          gateway. The public TLS reverse proxy should forward to this port.
+          Port for the module-owned nginx authentication gateway. Listener
+          addresses are controlled by gatewayAddresses; the public TLS reverse
+          proxy should forward to this port.
+        '';
+      };
+      gatewayAddresses = mkOption {
+        type = types.nonEmptyListOf types.nonEmptyStr;
+        default = ["127.0.0.1"] ++ optional config.networking.enableIPv6 "[::1]";
+        defaultText = lib.literalExpression ''["127.0.0.1"] ++ lib.optional config.networking.enableIPv6 "[::1]"'';
+        description = ''
+          Addresses for the module-owned nginx authentication gateway. The
+          default is loopback-only. A deployment may add an address belonging
+          to a private container bridge when a separately isolated ingress
+          sidecar must reach the gateway; perimeter firewall policy remains
+          deployment-owned.
         '';
       };
       accessGroup = mkOption {
