@@ -411,6 +411,8 @@ console.log('mergeRekeyRequest() success path posts, toasts, and reloads the das
   assertEqual(calls[0].options.body, '{}', 'sends an empty JSON body — no request payload');
   assert(calls.some(c => c.url === '/api/pipeline/dashboard'),
     'success reloads the dashboard so the healed row disappears');
+  assert(dom.isReloaded(),
+    'the reload really rewrote #pipeline-content — the note nodes were replaced');
   assertEqual(dom.toast.textContent,
     'Request #8792 rekeyed to 9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4',
     'toasts the exact survivor id');
