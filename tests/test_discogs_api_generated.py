@@ -288,14 +288,16 @@ _HEADING_PIN = World(
     ),
 )
 
+# Empty durations ON PURPOSE: these rows must reach the any_positioned
+# clause of the heading predicate (a duration short-circuits it first).
 _ALL_UNPOSITIONED_PIN = World(
     wire=(
-        ("", Entry("First", "3:00", 180)),
-        ("", Entry("Second", "2:00", 120)),
+        ("", Entry("First", "", None)),
+        ("", Entry("Second", "", None)),
     ),
     expected=(
-        (1, 0, "First", 180),
-        (1, 0, "Second", 120),
+        (1, 0, "First", None),
+        (1, 0, "Second", None),
     ),
 )
 

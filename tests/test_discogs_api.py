@@ -459,10 +459,13 @@ class TestGetReleaseSubPositionTracks(unittest.TestCase):
 
     def test_all_empty_positions_are_preserved(self):
         # A release that positions NOTHING has no heading signal — every
-        # row is a real track and the count must survive.
+        # row is a real track and the count must survive. Durations are
+        # empty ON PURPOSE: rows must reach the any_positioned clause
+        # (a duration short-circuits the heading predicate first and
+        # turns this pin into a bystander for its named clause).
         tracks = self._tracks(910012, [
-            {"position": "", "title": "First", "duration": "3:00"},
-            {"position": "", "title": "Second", "duration": "2:00"},
+            {"position": "", "title": "First", "duration": ""},
+            {"position": "", "title": "Second", "duration": ""},
         ])
         self.assertEqual(len(tracks), 2)
 
