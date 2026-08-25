@@ -220,23 +220,40 @@ def _primary_artist_id(artists: list[_DiscogsArtistRefJSON]) -> int | None:
     return artists[0].get("id")
 
 
+_SUB_POSITION_RE = re.compile(r"^(.+)\.(\d+)$")
+# Discogs hidden-track placeholder titles: "(silence)", "[silence]",
+# bare "silence". These never name an audio file in a rip.
+_SILENCE_TITLE_RE = re.compile(r"^[\[(]?\s*silence\s*[\])]?$", re.IGNORECASE)
+
+
+def _split_sub_position(position: str) -> tuple[str, int | None]:
+    """Split sub-position notation: '10.2' → ('10', 2); '7' → ('7', None)."""
+    m = _SUB_POSITION_RE.match(position)
+    if m:
+        return m.group(1), int(m.group(2))
+    return position, None
+
+
 def _parse_position(position: str) -> tuple[int, int]:
     """Parse a Discogs track position like '1', 'A1', '1-3' into (disc, track).
 
     Simple numeric: disc=1, track=N
     Letter prefix (vinyl): disc=ord(letter)-ord('A')+1, track from digits
+    Bare side letter ('A'): disc from the letter, track 1
     Disc-track (CD): split on '-'
+    Sub-position ('10.2', 'A2.1'): parsed by the base ('10', 'A2')
     """
     if not position:
         return 1, 0
-    m = re.match(r"^(\d+)-(\d+)$", position)
+    base, _sub = _split_sub_position(position)
+    m = re.match(r"^(\d+)-(\d+)$", base)
     if m:
         return int(m.group(1)), int(m.group(2))
-    m = re.match(r"^([A-Za-z])(\d+)$", position)
+    m = re.match(r"^([A-Za-z])(\d*)$", base)
     if m:
         disc = ord(m.group(1).upper()) - ord("A") + 1
-        return disc, int(m.group(2))
-    m = re.match(r"^(\d+)$", position)
+        return disc, int(m.group(2)) if m.group(2) else 1
+    m = re.match(r"^(\d+)$", base)
     if m:
         return 1, int(m.group(1))
     return 1, 0
@@ -630,6 +647,78 @@ class _DiscogsReleaseDetailJSON(TypedDict, total=False):
     labels: list[dict[str, object]]
 
 
+class _SubPositionGroup:
+    """Accumulator for one run of ``N.M`` sub-entries (one physical track).
+
+    Discogs encodes hidden-track runs as sub-positions of a single
+    position ('10.1 Song / 10.2 (silence) / 10.3 Untitled'); a rip of the
+    disc has ONE file there, so the persisted manifest must too — the
+    matcher count gate compares a candidate folder's file count against
+    this manifest (issue #1261).
+    """
+
+    def __init__(self, disc: int, track: int) -> None:
+        self.disc = disc
+        self.track = track
+        self.titles: list[str] = []
+        self.durations: list[float | None] = []
+
+    def add(self, title: str, duration: float | None) -> None:
+        self.titles.append(title)
+        self.durations.append(duration)
+
+    def row(self) -> dict[str, object]:
+        real = [t for t in self.titles if not _SILENCE_TITLE_RE.match(t.strip())]
+        title = real[0] if real else (self.titles[0] if self.titles else "")
+        known = [d for d in self.durations if d is not None]
+        return {
+            "disc_number": self.disc,
+            "track_number": self.track,
+            "title": title,
+            "length_seconds": sum(known) if known else None,
+        }
+
+
+def _normalize_release_tracks(
+    raw_tracks: list[_DiscogsTrackJSON],
+) -> list[dict[str, object]]:
+    """Collapse flat sub-position notation into rip-shaped manifest rows.
+
+    One row per top-level position, in first-appearance order: flat
+    positions pass through unchanged; a sub-position group merges into a
+    single row titled by its first non-placeholder sub-entry with the
+    known durations summed. ``get_release_raw`` keeps literal positions
+    for source-audit consumers.
+    """
+    items: list[dict[str, object] | _SubPositionGroup] = []
+    open_groups: dict[tuple[int, int], _SubPositionGroup] = {}
+    for track in raw_tracks:
+        position = track.get("position", "")
+        title = track.get("title", "")
+        length = _parse_duration(track.get("duration", ""))
+        _base, sub = _split_sub_position(position)
+        disc, track_num = _parse_position(position)
+        if sub is None:
+            items.append({
+                "disc_number": disc,
+                "track_number": track_num,
+                "title": title,
+                "length_seconds": length,
+            })
+            continue
+        key = (disc, track_num)
+        group = open_groups.get(key)
+        if group is None:
+            group = _SubPositionGroup(disc, track_num)
+            open_groups[key] = group
+            items.append(group)
+        group.add(title, length)
+    return [
+        item.row() if isinstance(item, _SubPositionGroup) else item
+        for item in items
+    ]
+
+
 def _status_from_formats(formats: list[_DiscogsFormatJSON]) -> str:
     """Project Discogs format descriptions into truthful display status."""
     qualifiers: set[str] = set()
@@ -734,15 +823,7 @@ def get_release(release_id: int, *, fresh: bool = False) -> dict[str, object]:
         artist_name = _primary_artist_name(artists)
         artist_id = _primary_artist_id(artists)
 
-        tracks: list[dict[str, object]] = []
-        for track in data.get("tracks", []):
-            disc, track_num = _parse_position(track.get("position", ""))
-            tracks.append({
-                "disc_number": disc,
-                "track_number": track_num,
-                "title": track.get("title", ""),
-                "length_seconds": _parse_duration(track.get("duration", "")),
-            })
+        tracks = _normalize_release_tracks(data.get("tracks", []))
 
         year = _parse_year(data.get("released", ""))
 

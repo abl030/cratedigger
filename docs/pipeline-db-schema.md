@@ -1099,6 +1099,20 @@ rejects any reference to cursor-mutation names.
 |---|---|---|
 | `track_artist` | `TEXT NULL` | Per-track artist persisted from the resolver output. Consumed by PR2's VA plan generation (`va_track_artist_*` slots). NULL until resolution succeeds for that track. |
 
+### `album_tracks` manifests are rip-shaped (issue #1261, no migration)
+
+Discogs encodes hidden-track runs as sub-positions of one physical track
+(`10.1 Song / 10.2 (silence) / 10.3 Untitled`), and a rip of that disc has
+ONE file at position 10. `web/discogs.py::_normalize_release_tracks`
+collapses each sub-position group into a single manifest row at persist
+time — title from the first non-`(silence)` sub-entry, known durations
+summed — and parses bare vinyl side letters (`A`/`B`) as track 1 of their
+side. The matcher's strict count gate compares candidate folders against
+this manifest, so a per-sub-entry manifest makes every real copy
+unmatchable forever (28 wanted requests, including Kid A, were stuck this
+way). `get_release_raw` keeps literal positions for source-audit
+consumers.
+
 ### `album_request_field_resolutions` (migration 030, side table)
 
 Tracks per-(request, field) resolution attempts for the four
