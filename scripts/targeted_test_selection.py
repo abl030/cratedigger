@@ -309,18 +309,25 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_protected_path_truth_generated",
         "tests.test_render_differential",
     ),
-    # web/discogs.py's real coverage lives in tests/test_discogs_api and
-    # its generated sibling — names _direct_test_candidates cannot derive
-    # (the basename probes tests.test_discogs only). It also carries a
-    # coupling no derivation can see: the release cache-key string is
-    # pinned by a bare literal in tests/test_web_dev_server.py, and the
-    # #1262 v2→v3 bump shipped a RED tree that diff-derived selection
-    # called green — both independent reviewers caught it, selection
-    # could not (issue #1263 item 2).
+    # web/discogs.py has no derivable neighbours: neither
+    # tests.test_web_discogs nor tests.web.test_discogs exists on disk
+    # (same mechanism as wrong_match_file_service.py above). It also
+    # carries a coupling no derivation can see: the release cache-key
+    # string is pinned by a bare literal in tests/test_web_dev_server.py,
+    # and the #1262 v2→v3 bump shipped a RED tree that diff-derived
+    # selection called green — both independent reviewers caught it,
+    # selection could not (issue #1263 item 2). This list is a qualified
+    # subset, not full coverage: several other modules import
+    # web.discogs directly (test_discogs_fail_closed, the artist-bulk /
+    # pressing-provenance / artist-compare generated modules) — the
+    # entry names the modules whose subjects a solo web/discogs.py diff
+    # most plausibly regresses, mutant-qualified at review time
+    # (formats/status, artist releases, cache key, mirror concurrency).
     "web/discogs.py": (
         "tests.test_discogs_api",
         "tests.test_discogs_api_generated",
         "tests.test_web_dev_server",
+        "tests.test_discogs_artist_concurrency",
     ),
     # cratedigger.py is a single top-level file (``len(path.parts) == 1``),
     # so ``_direct_test_candidates`` looks for ``tests.test_cratedigger`` —

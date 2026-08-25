@@ -627,7 +627,7 @@ def make_database_source_with_fake_db(
     musicbrainz_ws2_base: str,
     discogs_api_base: str,
 ) -> DatabaseSource:
-    """``Any``-typed bridge from a ``FakePipelineDB`` fixture into
+    """``Any``-accepting bridge from a ``FakePipelineDB`` fixture into
     ``DatabaseSource``'s ``PipelineDB``-typed ``borrowed_db`` kwarg — same
     established pattern as ``dispatch_import_with_fake_db`` below: one
     bridge, zero per-call-site escape hatches. Added for issue #1261's
@@ -645,7 +645,7 @@ def make_database_source_with_fake_db(
 
 
 def dispatch_import_with_fake_db(db: Any, **kwargs: Any) -> DispatchOutcome:
-    """``Any``-typed bridge from a ``FakePipelineDB`` fixture into the
+    """``Any``-accepting bridge from a ``FakePipelineDB`` fixture into the
     ``PipelineDB``-typed ``dispatch_import_core`` — the largest single call
     site of the frozen ``db=… # type: ignore[arg-type]`` cluster (34 of the
     tests baseline's 71 findings of that shape; issue #1246 /
