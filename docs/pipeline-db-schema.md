@@ -1104,22 +1104,35 @@ rejects any reference to cursor-mutation names.
 Discogs encodes hidden-track runs as sub-positions of one physical track
 (`10.1 Song / 10.2 (silence) / 10.3 Untitled`), and a rip of that disc has
 ONE file at position 10. `lib/discogs_positions.py::normalize_release_tracks`
-— the one canonical parser, run by both production writers of Discogs
-manifests (`web/discogs.py::get_release` for the add/Replace flows and
-`album_source.py::_populate_tracks_discogs` for the search worker's
-empty-manifest fallback) — collapses each sub-position group into a
-single row: title from the first non-placeholder sub-entry (blank and
-`(silence)`-style titles are placeholders), known durations summed,
-grouping keyed on the literal position base so unparseable bases stay
-distinct. Bare vinyl side letters (`A`/`B`) parse as track 1 of their
-side, consistent with the existing `A1`/`B1` side-as-disc convention.
+— the one canonical parser, feeding every Discogs manifest persist path
+(`web/discogs.py::get_release` for the add/Replace/CLI persist callers
+and the browse display, `album_source.py::_populate_tracks_discogs` for
+the search worker's empty-manifest fallback) — collapses each
+sub-position group into a single row: title from the first
+non-placeholder sub-entry (blank and `(silence)`-style titles are
+placeholders), known durations summed, grouping keyed on the literal
+position base so unparseable bases stay distinct; a flat index parent
+sharing the base joins its group with its title authoritative and its
+duration, when present, taken as the physical track's total.
+Empty-position-AND-empty-duration heading rows (Discogs side/disc/bonus
+section labels the mirror flattens into the tracklist — the flavor that
+stuck Kid A at 14 expected tracks for a 10-file rip) are dropped when
+the release positions its other tracks; an empty position WITH a
+duration is ambiguous and survives (the measured mirror rule in
+`lib/library_completeness.py`), an all-unpositioned tracklist keeps
+every row, and a nested `sub_tracks` index parent is never treated as a
+heading. Bare vinyl side letters (`A`/`B`) parse as track 1 of their
+side, consistent with the existing `A1`/`B1` side-as-disc convention;
+`1A`-style and trailing-dot (`1.`) positions parse instead of falling
+to the track-0 sentinel.
 The matcher's strict count gate compares candidate folders against this
 manifest, so a per-sub-entry manifest makes every real copy unmatchable
-forever (28 wanted requests, including Kid A, were stuck this way; their
-already-persisted rows were corrected by a deploy-window one-shot —
-re-fetch through the fixed normalizer plus plan regeneration — not by
-this code, which only shapes fetches from the mirror). `get_release_raw`
-keeps literal positions for source-audit consumers.
+forever (28 wanted requests, including Kid A, were stuck this way; this
+code only shapes fetches from the mirror going forward — their
+already-persisted rows are corrected by a deploy-window one-shot,
+re-fetch through the fixed normalizer plus plan regeneration, run when
+this change deploys). `get_release_raw` keeps literal positions for
+source-audit consumers.
 
 ### `album_request_field_resolutions` (migration 030, side table)
 

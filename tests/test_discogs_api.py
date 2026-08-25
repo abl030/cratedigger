@@ -352,6 +352,46 @@ class TestGetReleaseSubPositionTracks(unittest.TestCase):
         self.assertEqual(only["title"], "Medley")
         self.assertEqual(only["length_seconds"], 180.0)
 
+    def test_parent_duration_is_authoritative_total(self):
+        # An index parent's duration is the physical track's total (the
+        # shape Beets' own nested-index fixtures document) — it replaces
+        # the children's sum, never adds to it.
+        tracks = self._tracks(910015, [
+            {"position": "10", "title": "Suite", "duration": "8:00"},
+            {"position": "10.1", "title": "Part One", "duration": "4:00"},
+            {"position": "10.2", "title": "Part Two", "duration": "4:00"},
+        ])
+        self.assertEqual(len(tracks), 1)
+        only = tracks[0]
+        assert _is_dict(only)
+        self.assertEqual(only["length_seconds"], 480.0)
+
+    def test_parent_after_subs_still_titles_the_group(self):
+        # The parent's title is authoritative wherever the row sits.
+        tracks = self._tracks(910016, [
+            {"position": "10.1", "title": "Part One", "duration": "1:00"},
+            {"position": "10.2", "title": "Part Two", "duration": "1:00"},
+            {"position": "10", "title": "Medley", "duration": ""},
+        ])
+        self.assertEqual(len(tracks), 1)
+        only = tracks[0]
+        assert _is_dict(only)
+        self.assertEqual(only["title"], "Medley")
+        self.assertEqual(only["length_seconds"], 120.0)
+
+    def test_empty_position_row_with_duration_is_kept(self):
+        # Only empty-position AND empty-duration rows are headings (the
+        # measured mirror rule in lib/library_completeness.py); an
+        # empty position with a duration is ambiguous and survives.
+        tracks = self._tracks(910017, [
+            {"position": "1", "title": "Opener", "duration": "3:00"},
+            {"position": "", "title": "Ambiguous", "duration": "2:00"},
+        ])
+        self.assertEqual(len(tracks), 2)
+        kept = tracks[1]
+        assert _is_dict(kept)
+        self.assertEqual(kept["title"], "Ambiguous")
+
     def test_blank_sub_title_is_placeholder(self):
         tracks = self._tracks(910009, [
             {"position": "1.1", "title": "", "duration": "0:10"},
@@ -375,6 +415,60 @@ class TestGetReleaseSubPositionTracks(unittest.TestCase):
         assert _is_dict(first) and _is_dict(second)
         self.assertEqual(first["title"], "Take One")
         self.assertEqual(second["title"], "Take Two")
+
+    def test_heading_rows_are_dropped_when_release_positions_its_tracks(self):
+        # The live Kid A vinyl shape (Discogs 1450555): side-name heading
+        # rows carry an empty position and no duration; a rip has no file
+        # for them. 14 raw entries, 10 real tracks.
+        tracks = self._tracks(910011, [
+            {"position": "", "title": "Alpha", "duration": ""},
+            {"position": "A1", "title": "Everything in Its Right Place", "duration": "4:11"},
+            {"position": "A2", "title": "Kid A", "duration": "4:44"},
+            {"position": "", "title": "Beta", "duration": ""},
+            {"position": "B1", "title": "The National Anthem", "duration": "5:50"},
+        ])
+        self.assertEqual(len(tracks), 3)
+        numbers = [
+            (t["disc_number"], t["track_number"]) for t in tracks if _is_dict(t)
+        ]
+        self.assertEqual(numbers, [(1, 1), (1, 2), (2, 1)])
+
+    def test_all_empty_positions_are_preserved(self):
+        # A release that positions NOTHING has no heading signal — every
+        # row is a real track and the count must survive.
+        tracks = self._tracks(910012, [
+            {"position": "", "title": "First", "duration": "3:00"},
+            {"position": "", "title": "Second", "duration": "2:00"},
+        ])
+        self.assertEqual(len(tracks), 2)
+
+    def test_empty_position_index_parent_with_subtracks_is_kept(self):
+        # A nested index parent (mirror keeps children under sub_tracks)
+        # is a real physical track, not a heading, even at position "".
+        tracks = self._tracks(910013, [
+            {"position": "1", "title": "Opener", "duration": "3:00"},
+            {"position": "", "title": "Medley", "duration": "", "sub_tracks": [
+                {"position": "2.1", "title": "Part One", "duration": "1:00"},
+            ]},
+        ])
+        self.assertEqual(len(tracks), 2)
+        medley = tracks[1]
+        assert _is_dict(medley)
+        self.assertEqual(medley["title"], "Medley")
+
+    def test_number_letter_and_trailing_dot_positions_parse(self):
+        # Live cohort grammars: '1A/2A/1B' (Dirt Dress 4738671) and
+        # '1./2.' (Deloris 3938744) used to land at track 0.
+        tracks = self._tracks(910014, [
+            {"position": "1A", "title": "Side A One", "duration": "2:00"},
+            {"position": "2A", "title": "Side A Two", "duration": "2:00"},
+            {"position": "1B", "title": "Side B One", "duration": "2:00"},
+            {"position": "1.", "title": "Dotted One", "duration": "2:00"},
+        ])
+        numbers = [
+            (t["disc_number"], t["track_number"]) for t in tracks if _is_dict(t)
+        ]
+        self.assertEqual(numbers, [(1, 1), (1, 2), (2, 1), (1, 1)])
 
     def test_flat_tracklists_pass_through_unchanged(self):
         tracks = self._tracks(910005, [

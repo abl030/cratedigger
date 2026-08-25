@@ -23,17 +23,23 @@ sub-position run merges to one row keyed by its literal base (so
 unparseable bases like ``CD1``/``CD2`` stay distinct), titled by its
 first non-placeholder sub-entry (blank counts as placeholder), durations
 summed losslessly; a flat parent row sharing a sub run's base joins that
-run instead of duplicating its position.
+run instead of duplicating its position, with its title authoritative
+and its duration, when present, replacing the children's sum;
+empty-position-AND-empty-duration heading rows are dropped exactly when
+some other row is positioned (an all-unpositioned tracklist keeps every
+row, and an empty position with a duration survives).
 
 **P2 — flat tracklists are untouched.** The no-sub-position subset of
 P1, kept as an explicitly named law: normalization must never reshape an
 ordinary release.
 
-Known limit (deliberate): the placeholder-title alphabet here is the
+Known limits (deliberate): the placeholder-title alphabet here is the
 exact marker list, so these worlds cannot distinguish production's
 anchored ``SILENCE_TITLE_RE`` from a substring check — the deterministic
 pin ``test_title_containing_silence_is_not_a_placeholder`` owns that
-axis.
+axis; and sub-parent rows are always emitted immediately before their
+run, so parent-position independence is owned by the deterministic pin
+``test_parent_after_subs_still_titles_the_group``.
 """
 
 from __future__ import annotations
@@ -59,6 +65,19 @@ class Entry:
 class World:
     wire: tuple[tuple[str, Entry], ...]
     expected: tuple[tuple[int, int, str, float | None], ...]
+
+
+@dataclass(frozen=True)
+class _FlatSlot:
+    position: str
+    disc: int
+    track: int
+    entry: Entry
+
+
+@dataclass(frozen=True)
+class _MergedSlot:
+    row: tuple[int, int, str, float | None]
 
 
 _SILENCE_TITLES = ("(silence)", "[silence]", "silence", "(Silence)", " (silence) ")
@@ -91,11 +110,15 @@ def _entries(draw: st.DrawFn) -> Entry:
 
 
 def _merged_expectation(
-    disc: int, track: int, members: list[Entry],
+    disc: int, track: int, parent: Entry | None, members: list[Entry],
 ) -> tuple[int, int, str, float | None]:
-    titles = [entry.title for entry in members]
+    titles = ([parent.title] if parent is not None else []) + [
+        entry.title for entry in members
+    ]
     real = [t for t in titles if not _is_placeholder(t)]
     title = real[0] if real else titles[0]
+    if parent is not None and parent.duration_seconds is not None:
+        return (disc, track, title, parent.duration_seconds)
     known = [
         entry.duration_seconds
         for entry in members
@@ -112,11 +135,14 @@ def worlds(draw: st.DrawFn) -> World:
     literals from ``parse_position``'s documented grammar; sub bases are
     unique per group by construction (index-derived), covering both
     parseable numeric bases and unparseable ``CD<n>`` bases that all
-    parse to the ``(1, 0)`` sentinel.
+    parse to the ``(1, 0)`` sentinel. Empty-position flat rows with no
+    duration are HEADINGS when any other row in the world is positioned
+    — expected to be dropped — and real tracks when they carry a
+    duration or the whole world is unpositioned.
     """
     count = draw(st.integers(min_value=0, max_value=6))
+    slots: list[_FlatSlot | _MergedSlot] = []
     wire: list[tuple[str, Entry]] = []
-    expected: list[tuple[int, int, str, float | None]] = []
     for index in range(count):
         number = index + 1
         kind = draw(st.sampled_from(("flat", "flat_dup", "sub", "sub_parent")))
@@ -125,32 +151,50 @@ def worlds(draw: st.DrawFn) -> World:
                 (str(number), 1, number),
                 (f"1-{number}", 1, number),
                 (f"A{number}", 1, number),
+                (f"{number}A", 1, number),
+                (f"{number}.", 1, number),
                 (chr(ord("A") + index), index + 1, 1),
                 ("", 1, 0),
             )))
-            entry = draw(_entries())
-            wire.append((position, entry))
-            expected.append((disc, track, entry.title, entry.duration_seconds))
-            if kind == "flat_dup":
-                dup = draw(_entries())
-                wire.append((position, dup))
-                expected.append((disc, track, dup.title, dup.duration_seconds))
+            copies = 2 if kind == "flat_dup" else 1
+            for _ in range(copies):
+                entry = draw(_entries())
+                wire.append((position, entry))
+                slots.append(_FlatSlot(position, disc, track, entry))
         else:
             base, disc, track = draw(st.sampled_from((
                 (str(number), 1, number),
                 (f"CD{number}", 1, 0),
             )))
             members: list[Entry] = []
+            parent: Entry | None = None
             if kind == "sub_parent":
                 parent = draw(_entries())
                 wire.append((base, parent))
-                members.append(parent)
             sub_count = draw(st.integers(min_value=1, max_value=4))
             for sub_index in range(1, sub_count + 1):
                 entry = draw(_entries())
                 wire.append((f"{base}.{sub_index}", entry))
                 members.append(entry)
-            expected.append(_merged_expectation(disc, track, members))
+            slots.append(
+                _MergedSlot(_merged_expectation(disc, track, parent, members)),
+            )
+
+    any_positioned = any(position for position, _ in wire)
+    expected: list[tuple[int, int, str, float | None]] = []
+    for slot in slots:
+        if isinstance(slot, _MergedSlot):
+            expected.append(slot.row)
+            continue
+        if (
+            not slot.position
+            and not slot.entry.duration_text
+            and any_positioned
+        ):
+            continue  # heading row — dropped
+        expected.append(
+            (slot.disc, slot.track, slot.entry.title, slot.entry.duration_seconds),
+        )
     return World(wire=tuple(wire), expected=tuple(expected))
 
 
@@ -218,6 +262,39 @@ _FLAT_DUP_PIN = World(
     ),
 )
 
+_PARENT_TOTAL_PIN = World(
+    wire=(
+        ("10", Entry("Suite", "8:00", 480)),
+        ("10.1", Entry("Part One", "4:00", 240)),
+        ("10.2", Entry("Part Two", "4:00", 240)),
+    ),
+    expected=((1, 10, "Suite", 480),),
+)
+
+_HEADING_PIN = World(
+    wire=(
+        ("", Entry("Alpha", "", None)),
+        ("A1", Entry("Everything in Its Right Place", "4:11", 251)),
+        ("", Entry("Beta", "", None)),
+        ("B1", Entry("The National Anthem", "5:50", 350)),
+    ),
+    expected=(
+        (1, 1, "Everything in Its Right Place", 251),
+        (2, 1, "The National Anthem", 350),
+    ),
+)
+
+_ALL_UNPOSITIONED_PIN = World(
+    wire=(
+        ("", Entry("First", "3:00", 180)),
+        ("", Entry("Second", "2:00", 120)),
+    ),
+    expected=(
+        (1, 0, "First", 180),
+        (1, 0, "Second", 120),
+    ),
+)
+
 
 class TestNormalizeReleaseTracksProperties(unittest.TestCase):
     @given(worlds())
@@ -225,6 +302,9 @@ class TestNormalizeReleaseTracksProperties(unittest.TestCase):
     @example(_UNPARSEABLE_BASES_PIN)
     @example(_FLAT_PARENT_PIN)
     @example(_FLAT_DUP_PIN)
+    @example(_HEADING_PIN)
+    @example(_ALL_UNPOSITIONED_PIN)
+    @example(_PARENT_TOTAL_PIN)
     def test_normalizer_emits_exactly_the_spec_rows(self, world: World):
         self.assertEqual(
             _to_rows(world), _spec_rows(world),
@@ -235,15 +315,16 @@ class TestNormalizeReleaseTracksProperties(unittest.TestCase):
         lambda w: all("." not in position for position, _ in w.wire)
     ))
     @example(_FLAT_DUP_PIN)
+    @example(_ALL_UNPOSITIONED_PIN)
     def test_flat_tracklists_are_untouched(self, world: World):
         rows = _to_rows(world)
+        # Full equality against the spec is the merge guard too: the spec
+        # holds one row per surviving flat entry by construction (only
+        # heading rows are absent), so any flat-row merge changes both
+        # the length and the content of `rows`.
         self.assertEqual(
             rows, _spec_rows(world),
             "P2: a tracklist with no sub-positions passes through verbatim",
-        )
-        self.assertEqual(
-            len(rows), len(world.wire),
-            "P2: flat rows are never merged with each other",
         )
 
 

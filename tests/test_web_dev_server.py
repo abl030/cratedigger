@@ -889,7 +889,9 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
             resolve_payload["target_identity_kind"], {"work", "release"},
         )
         self.assertTrue({
-            "meta:discogs:release:v2:60",
+            # v3: issue #1261 bumped the release key so warm pre-fix
+            # manifests age out; this literal is the bump's pin.
+            "meta:discogs:release:v3:60",
             "meta:browse-resolve:v2:discogs:release:60",
         }.issubset(self.metadata_cache._store))
 
