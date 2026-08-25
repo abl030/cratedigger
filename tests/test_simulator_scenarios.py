@@ -142,6 +142,9 @@ class SimResult:
     # QualityComparisonBasis as plain builtins (dict) from the decision
     # dict, None when stage 2 never compared against an existing album.
     comparison_basis: dict | None = None
+    # Issue #1241 audit flag: the operator's incomplete mark plus beets'
+    # coverage proof made this decision disregard the installed side.
+    installed_incomplete_disregarded: bool = False
 
 
 # --- 13 album state fixtures ---
@@ -324,6 +327,8 @@ def simulate(
     verified_lossless_target: str | None = None,
     *,
     current_verified_lossless_proof: bool | None = None,
+    installed_marked_incomplete: bool = False,
+    candidate_covers_declared_program: bool = False,
 ) -> SimResult:
     """Run full_pipeline_decision + rejection backfill."""
     # Derive existing state params (same logic as cmd_quality)
@@ -363,6 +368,8 @@ def simulate(
         verified_lossless_target=verified_lossless_target,
         target_format=album.target_format,
         existing_v0_probe_avg=album.existing_v0_probe_avg,
+        installed_marked_incomplete=installed_marked_incomplete,
+        candidate_covers_declared_program=candidate_covers_declared_program,
         **download.dl_params(),
     )
 
@@ -455,6 +462,9 @@ def simulate(
         search_filetype_override_after=override_after,
         target_format_after=album.target_format,  # always preserved
         comparison_basis=result["comparison_basis"],
+        installed_incomplete_disregarded=(
+            result["installed_incomplete_disregarded"]
+        ),
     )
 
 

@@ -1382,6 +1382,7 @@ _PARITY_FIELDS = (
     "stage2_import",
     "stage3_quality_gate",
     "comparison_basis",
+    "installed_incomplete_disregarded",
 )
 
 
@@ -2808,6 +2809,11 @@ class ParityWorld:
     # Action facts.
     target_format: str | None
     verified_lossless_target: str | None
+    # issue #1241 — the operator's incomplete mark and beets' coverage
+    # proof. Defaulted so the promoted @example pins above this change keep
+    # describing their own worlds.
+    installed_marked_incomplete: bool = False
+    candidate_covers_declared_program: bool = False
 
 
 @st.composite
@@ -2904,6 +2910,8 @@ def parity_worlds(draw) -> ParityWorld:
         v0_min=v0_min,
         target_format=target_format,
         verified_lossless_target=draw(st.sampled_from(_VL_TARGETS)),
+        installed_marked_incomplete=draw(st.booleans()),
+        candidate_covers_declared_program=draw(st.booleans()),
     )
 
 
@@ -2958,6 +2966,10 @@ def _parity_simulator_result(world: ParityWorld) -> SimResult:
         album, download,
         verified_lossless_target=world.verified_lossless_target,
         current_verified_lossless_proof=world.current_verified_lossless_proof,
+        installed_marked_incomplete=world.installed_marked_incomplete,
+        candidate_covers_declared_program=(
+            world.candidate_covers_declared_program
+        ),
     )
 
 
@@ -3025,6 +3037,10 @@ def _parity_evidence_inputs(
         converted_count=world.converted_count,
         post_conversion_min_bitrate=world.post_conversion_min_bitrate,
         post_conversion_is_cbr=world.post_conversion_is_cbr,
+        installed_marked_incomplete=world.installed_marked_incomplete,
+        candidate_covers_declared_program=(
+            world.candidate_covers_declared_program
+        ),
     )
     return candidate, current, facts
 
@@ -3139,6 +3155,26 @@ _UNANCHORED_MEASURED_REJECT_WORLD = replace(
     target_format="opus 64",
     verified_lossless_target="opus 64",
 )
+# Issue #1241 pin — request 1852, Dirt Dress *Theme Songs* (Discogs
+# 4738671, download_log 40355). Installed AAC ~128 missing 700 s of declared
+# program (operator-marked incomplete); candidate MP3 ~196 that beets proved
+# complete. The unmarked comparison is an honest cross_family_same_rank
+# "equivalent" → downgrade, which is exactly how the reducer deleted the
+# only copy of the missing half hour. Replayed first on every run of the
+# disregard property.
+_DIRT_DRESS_MARKED_INCOMPLETE_WORLD = ParityWorld(
+    current_min=128, current_avg=128, current_format="AAC",
+    current_is_cbr=False, current_grade=None,
+    current_spectral_bitrate=None, current_v0_avg=None,
+    current_verified_lossless_proof=False,
+    candidate_kind="lossy", min_bitrate=196, is_cbr=False, avg_bitrate=196,
+    grade=None, spectral_bitrate=None, candidate_format="MP3",
+    converted_count=0, post_conversion_min_bitrate=None, v0_avg=None,
+    post_conversion_is_cbr=None,
+    v0_min=None, target_format=None, verified_lossless_target=None,
+    installed_marked_incomplete=True,
+    candidate_covers_declared_program=True,
+)
 _PARTS_AND_LABOR_VORBIS_WORLD = ParityWorld(
     current_min=128, current_avg=128, current_format="MP3",
     current_is_cbr=True, current_grade=None,
@@ -3169,16 +3205,106 @@ class TestGeneratedParity(unittest.TestCase):
     @given(world=parity_worlds())
     def test_proof_bearing_current_blocks_every_candidate_in_both_twins(
             self, world):
+        # ``installed_marked_incomplete=False``: the ONE thing that outranks
+        # the decision-21 ceiling is the operator's own incomplete mark
+        # (issue #1241), whose disarm has its own property below. This
+        # property states the lock's contract for every UNMARKED world.
         proof_world = replace(
             world,
             current_min=(world.current_min or 245),
             current_avg=(world.current_avg or 245),
             current_verified_lossless_proof=True,
+            installed_marked_incomplete=False,
         )
         sim = _parity_simulator_result(proof_world)
         evidence_result = _parity_evidence_result(proof_world)
         assert_verified_lossless_proof_locks_candidate(sim)
         assert_twins_agree(sim, evidence_result)
+
+    @given(world=parity_worlds())
+    @example(world=_DIRT_DRESS_MARKED_INCOMPLETE_WORLD)
+    # The other three corners of the same world: neither conjunct alone may
+    # change anything. Random worlds reach this exact equivalent-verdict
+    # downgrade shape rarely, so the corners are pinned deterministically.
+    @example(world=replace(
+        _DIRT_DRESS_MARKED_INCOMPLETE_WORLD,
+        installed_marked_incomplete=False))
+    @example(world=replace(
+        _DIRT_DRESS_MARKED_INCOMPLETE_WORLD,
+        candidate_covers_declared_program=False))
+    @example(world=replace(
+        _DIRT_DRESS_MARKED_INCOMPLETE_WORLD,
+        installed_marked_incomplete=False,
+        candidate_covers_declared_program=False))
+    # Completeness outranks quality at EVERY level: a complete 96 CBR
+    # candidate against a marked incomplete 320 install still imports.
+    @example(world=replace(
+        _DIRT_DRESS_MARKED_INCOMPLETE_WORLD,
+        current_format="MP3", current_min=320, current_avg=320,
+        current_is_cbr=True,
+        candidate_format="MP3", min_bitrate=96, avg_bitrate=96, is_cbr=True))
+    # The decision-21 ceiling yields to the mark: a proof-LOCKED installed
+    # copy is disregarded like any other when the operator marked it.
+    @example(world=replace(
+        _DIRT_DRESS_MARKED_INCOMPLETE_WORLD,
+        current_verified_lossless_proof=True))
+    def test_operator_incomplete_mark_disregards_the_installed_side(
+        self, world,
+    ):
+        """Issue #1241, both halves of the invariant, on both twins.
+
+        Positive half — when the operator marked the installed copy
+        incomplete AND beets proved this attempt's candidate covers the
+        declared program, the decision must be BYTE-IDENTICAL to the same
+        candidate arriving at an empty slot (no current album at all),
+        except for the audit flag recording the disregard. Fresh-import
+        admission IS the policy: the absolute candidate-side floors still
+        apply, nothing existing-side can block, and the post-import gate
+        still keeps a below-par import searching.
+
+        Negative half — in every other world the decision dict must be
+        byte-identical to the same world with both facts absent. Neither
+        conjunct alone may change anything. This is the no-regression half.
+        """
+        disregarded = (
+            world.installed_marked_incomplete
+            and world.candidate_covers_declared_program
+        )
+        sim = _parity_simulator_result(world)
+        evidence_result = _parity_evidence_result(world)
+        assert_twins_agree(sim, evidence_result)
+
+        if disregarded:
+            fresh_world = replace(
+                world,
+                current_min=None, current_avg=None,
+                current_format="MP3", current_is_cbr=False,
+                current_grade=None, current_spectral_bitrate=None,
+                current_v0_avg=None,
+                current_verified_lossless_proof=False,
+                installed_marked_incomplete=False,
+                candidate_covers_declared_program=False,
+            )
+            expected = dict(_parity_evidence_result(fresh_world))
+            expected["installed_incomplete_disregarded"] = True
+            self.assertEqual(
+                evidence_result,
+                expected,
+                "a marked+covered world must decide exactly as the same "
+                "candidate arriving at an empty slot",
+            )
+        else:
+            baseline_world = replace(
+                world,
+                installed_marked_incomplete=False,
+                candidate_covers_declared_program=False,
+            )
+            self.assertEqual(
+                evidence_result,
+                _parity_evidence_result(baseline_world),
+                "neither #1241 fact may change any world where the "
+                "predicate does not hold",
+            )
 
 
 # ===========================================================================

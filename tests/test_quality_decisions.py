@@ -1028,6 +1028,9 @@ EXPECTED_RESULT_KEYS = {
     # Stage 2 runs. Reporting keys — no branch reads them.
     "stage2_import_if_stage1_deferred",
     "comparison_basis_if_stage1_deferred",
+    # AUDIT ONLY (issue #1241): the operator's incomplete mark plus beets'
+    # coverage proof made this decision disregard the installed side.
+    "installed_incomplete_disregarded",
 }
 
 # Valid values for each stage (None means stage was skipped)
@@ -1076,6 +1079,10 @@ EXPECTED_PARAMS = {
     # frame-lattice capture. Candidate-only — this leg gates a PROMOTION
     # and the installed side is never promoted by this decision.
     "candidate_aac_lattice",
+    # issue #1241: the operator's incomplete mark and beets' coverage
+    # proof. When both are true the installed side is disregarded and the
+    # candidate is admitted as into an empty slot.
+    "installed_marked_incomplete", "candidate_covers_declared_program",
 }
 
 
