@@ -421,6 +421,16 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_dispatch_outcomes_generated",
         "tests.test_local_import_lane",
     ),
+    # lib/discogs_positions.py has no tests.test_discogs_positions module:
+    # its deterministic pins live with its two production consumers (the
+    # get_release adapter pins in tests.test_discogs_api, the search-worker
+    # fallback-writer pins in tests.test_album_source) and its generated
+    # properties in tests.test_discogs_api_generated (issue #1261).
+    "lib/discogs_positions.py": (
+        "tests.test_discogs_api",
+        "tests.test_discogs_api_generated",
+        "tests.test_album_source",
+    ),
     # scripts/importer.py and scripts/import_preview_worker.py live under
     # scripts/, so _direct_test_candidates probes tests.test_importer and
     # tests.test_import_preview_worker respectively -- neither exists, so

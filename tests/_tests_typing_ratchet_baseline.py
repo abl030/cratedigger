@@ -25,7 +25,7 @@ TESTS_TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "tests/fakes/rows.py": {"any": 6},
     "tests/fakes/slskd.py": {"any": 48},
     "tests/fakes/ytmusic.py": {"any": 13},
-    "tests/helpers.py": {"any": 28},
+    "tests/helpers.py": {"any": 30},
     "tests/read_projection_registry.py": {"any": 34},
     "tests/test_album_source.py": {"type_ignore": 2},
     "tests/test_artist_compare.py": {"cast": 3},

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cratedigger")
 
+from lib.discogs_positions import normalize_release_tracks
 from lib.release_identity import detect_release_source
 
 
@@ -494,8 +495,15 @@ class DatabaseSource:
         row: Mapping[str, object],
         discogs_id: str,
     ) -> list[dict[str, object]]:
-        """Fetch tracks from the Discogs mirror API."""
-        import re
+        """Fetch tracks from the Discogs mirror API.
+
+        Parses through the one canonical normalizer
+        (`lib.discogs_positions.normalize_release_tracks`) so this
+        fallback writer produces the same rip-shaped manifest as the
+        add/Replace flows — a divergent inline parser here shipped
+        per-sub-entry manifests the matcher count gate can never pass
+        (issue #1261).
+        """
         try:
             url = f"{self.discogs_api_base}/api/releases/{discogs_id}"
             req = urllib.request.Request(url)
@@ -506,32 +514,7 @@ class DatabaseSource:
             logger.warning(f"Failed to fetch tracks from Discogs API for {discogs_id}")
             return []
 
-        tracks: list[dict[str, object]] = []
-        for track in data.get("tracks", []):
-            pos = track.get("position", "")
-            disc, track_num = 1, 0
-            m = re.match(r"^(\d+)-(\d+)$", pos)
-            if m:
-                disc, track_num = int(m.group(1)), int(m.group(2))
-            elif re.match(r"^\d+$", pos):
-                track_num = int(pos)
-
-            duration_str = track.get("duration", "")
-            length_seconds: float | None = None
-            if duration_str:
-                parts = duration_str.split(":")
-                try:
-                    if len(parts) == 2:
-                        length_seconds = round(int(parts[0]) * 60 + int(parts[1]), 1)
-                except ValueError:
-                    pass
-
-            tracks.append({
-                "disc_number": disc,
-                "track_number": track_num,
-                "title": track.get("title", ""),
-                "length_seconds": length_seconds,
-            })
+        tracks = normalize_release_tracks(data.get("tracks", []))
 
         if tracks:
             row_id = row["id"]

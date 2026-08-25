@@ -38,10 +38,14 @@ def tearDownModule() -> None:
     web.discogs.DISCOGS_API_BASE = None
 
 
+from lib.discogs_positions import (
+    parse_duration as _parse_duration,
+)
+from lib.discogs_positions import (
+    parse_position as _parse_position,
+)
 from web.discogs import (
     LabelEntity,
-    _parse_duration,
-    _parse_position,
     _parse_year,
     _primary_artist_name,
     get_artist_name,
@@ -80,6 +84,11 @@ class TestParsePosition(unittest.TestCase):
         ("vinyl side", "A1", (1, 1)),
         ("vinyl side B", "B3", (2, 3)),
         ("empty", "", (1, 0)),
+        ("cd sub-position", "10.1", (1, 10)),
+        ("vinyl sub-position", "A2.2", (1, 2)),
+        ("disc-track sub-position", "2-5.3", (2, 5)),
+        ("bare vinyl side A", "A", (1, 1)),
+        ("bare vinyl side B", "B", (2, 1)),
     ]
 
     def test_parse_position(self):
@@ -187,6 +196,318 @@ class TestGetRelease(unittest.TestCase):
             "disc_number": 1, "track_number": 2, "title": "Index",
             "length_seconds": None,
         })
+
+
+class TestGetReleaseSubPositionTracks(unittest.TestCase):
+    """Issue #1261 — flat ``N.M`` sub-positions collapse to rip-shaped rows.
+
+    Discogs encodes hidden-track runs as sub-positions of one physical
+    track; a rip of the disc has ONE file for that position. The slim
+    ``get_release()`` manifest must count tracks the way a rip does, or
+    the matcher count gate rejects every real copy forever.
+    """
+
+    @staticmethod
+    def _release(release_id: int, tracks: list[dict[str, object]]) -> dict[str, object]:
+        return {
+            "id": release_id,
+            "title": "Harmonies For The Haunted",
+            "country": "US",
+            "released": "2005-09-13",
+            "master_id": 158925,
+            "artists": [{"id": 272594, "name": "Stellastarr*", "role": "", "anv": ""}],
+            "labels": [],
+            "formats": [{"name": "CD", "qty": 1, "descriptions": "Album"}],
+            "tracks": tracks,
+        }
+
+    def _tracks(self, release_id: int, tracks: list[dict[str, object]]) -> list[object]:
+        with _mock_urlopen(self._release(release_id, tracks)):
+            result = get_release(release_id, fresh=True)
+        out = result["tracks"]
+        assert _is_list(out)
+        return out
+
+    def test_hidden_track_subgroup_collapses_to_single_track(self):
+        # The live defect shape: Discogs release 521474 (request 6188).
+        tracks = self._tracks(521474, [
+            {"position": "1", "title": "Lost In Time", "duration": "4:31"},
+            {"position": "2", "title": "Damn This Foolish Heart", "duration": "3:30"},
+            {"position": "3", "title": "The Diver", "duration": "4:32"},
+            {"position": "4", "title": "Sweet Troubled Soul", "duration": "4:07"},
+            {"position": "5", "title": "Born In A Fleamarket", "duration": "2:34"},
+            {"position": "6", "title": "On My Own", "duration": "4:52"},
+            {"position": "7", "title": "When I Disappeaar", "duration": "3:48"},
+            {"position": "8", "title": "Love And Longing", "duration": "4:17"},
+            {"position": "9", "title": "Stay Entertained", "duration": "3:46"},
+            {"position": "10.1", "title": "Island Lost At Sea", "duration": "3:46"},
+            {"position": "10.2", "title": "(silence)", "duration": "0:20"},
+            {"position": "10.3", "title": "Untitled", "duration": "3:49"},
+        ])
+        self.assertEqual(len(tracks), 10)
+        numbers = [t["track_number"] for t in tracks if _is_dict(t)]
+        self.assertEqual(numbers, list(range(1, 11)))
+        last = tracks[9]
+        assert _is_dict(last)
+        self.assertEqual(last["title"], "Island Lost At Sea")
+        self.assertEqual(last["length_seconds"], 226.0 + 20.0 + 229.0)
+        # Source data passes through verbatim otherwise — the Discogs
+        # typo is not ours to fix.
+        seventh = tracks[6]
+        assert _is_dict(seventh)
+        self.assertEqual(seventh["title"], "When I Disappeaar")
+
+    def test_leading_silence_sub_entry_yields_first_real_title(self):
+        tracks = self._tracks(910001, [
+            {"position": "1", "title": "Opener", "duration": "3:00"},
+            {"position": "2.1", "title": "(silence)", "duration": "0:10"},
+            {"position": "2.2", "title": "Hidden Song", "duration": "3:00"},
+        ])
+        self.assertEqual(len(tracks), 2)
+        hidden = tracks[1]
+        assert _is_dict(hidden)
+        self.assertEqual(hidden["track_number"], 2)
+        self.assertEqual(hidden["title"], "Hidden Song")
+        self.assertEqual(hidden["length_seconds"], 190.0)
+
+    def test_title_containing_silence_is_not_a_placeholder(self):
+        # Only exact "(silence)"-style placeholders are skipped — a real
+        # song title that merely contains the word keeps its slot.
+        tracks = self._tracks(910006, [
+            {"position": "1.1", "title": "Silence Kit", "duration": "5:00"},
+            {"position": "1.2", "title": "Untitled", "duration": "1:00"},
+        ])
+        self.assertEqual(len(tracks), 1)
+        only = tracks[0]
+        assert _is_dict(only)
+        self.assertEqual(only["title"], "Silence Kit")
+
+    def test_all_silence_subgroup_keeps_first_title(self):
+        tracks = self._tracks(910002, [
+            {"position": "1.1", "title": "(silence)", "duration": "0:10"},
+            {"position": "1.2", "title": "[silence]", "duration": "0:20"},
+        ])
+        self.assertEqual(len(tracks), 1)
+        only = tracks[0]
+        assert _is_dict(only)
+        self.assertEqual(only["title"], "(silence)")
+        self.assertEqual(only["length_seconds"], 30.0)
+
+    def test_sub_entry_durations_sum_known_or_stay_none(self):
+        tracks = self._tracks(910003, [
+            {"position": "1.1", "title": "Song", "duration": ""},
+            {"position": "1.2", "title": "Coda", "duration": "1:00"},
+            {"position": "2.1", "title": "Unknown A", "duration": ""},
+            {"position": "2.2", "title": "Unknown B", "duration": ""},
+        ])
+        self.assertEqual(len(tracks), 2)
+        first, second = tracks[0], tracks[1]
+        assert _is_dict(first) and _is_dict(second)
+        self.assertEqual(first["length_seconds"], 60.0)
+        self.assertIsNone(second["length_seconds"])
+
+    def test_bare_letter_sides_number_as_track_one(self):
+        # 7" singles list positions as bare 'A'/'B'; both used to land at
+        # track 0, scrambling manifest order (issue #1261 second flavor).
+        tracks = self._tracks(910004, [
+            {"position": "A", "title": "Side A Song", "duration": "3:10"},
+            {"position": "B", "title": "Side B Song", "duration": "2:50"},
+        ])
+        self.assertEqual(len(tracks), 2)
+        side_a, side_b = tracks[0], tracks[1]
+        assert _is_dict(side_a) and _is_dict(side_b)
+        self.assertEqual(
+            (side_a["disc_number"], side_a["track_number"]), (1, 1))
+        self.assertEqual(
+            (side_b["disc_number"], side_b["track_number"]), (2, 1))
+
+    def test_unparseable_sub_bases_group_separately(self):
+        # Grouping keys on the literal base string: 'CD1.x' and 'CD2.x'
+        # both parse to the (1, 0) sentinel but are distinct physical
+        # tracks and must stay distinct rows.
+        tracks = self._tracks(910007, [
+            {"position": "CD1.1", "title": "One A", "duration": "1:00"},
+            {"position": "CD1.2", "title": "One B", "duration": "1:00"},
+            {"position": "CD2.1", "title": "Two A", "duration": "1:00"},
+        ])
+        self.assertEqual(len(tracks), 2)
+        first, second = tracks[0], tracks[1]
+        assert _is_dict(first) and _is_dict(second)
+        self.assertEqual(first["title"], "One A")
+        self.assertEqual(first["length_seconds"], 120.0)
+        self.assertEqual(second["title"], "Two A")
+
+    def test_flat_parent_row_joins_its_sub_group(self):
+        # An index-style parent row sharing a sub run's base merges into
+        # that run instead of duplicating its (disc, track).
+        tracks = self._tracks(910008, [
+            {"position": "10", "title": "Medley", "duration": ""},
+            {"position": "10.1", "title": "Part One", "duration": "1:00"},
+            {"position": "10.2", "title": "Part Two", "duration": "2:00"},
+        ])
+        self.assertEqual(len(tracks), 1)
+        only = tracks[0]
+        assert _is_dict(only)
+        self.assertEqual(only["track_number"], 10)
+        self.assertEqual(only["title"], "Medley")
+        self.assertEqual(only["length_seconds"], 180.0)
+
+    def test_parent_duration_is_authoritative_total(self):
+        # An index parent's duration is the physical track's total (the
+        # shape Beets' own nested-index fixtures document) — it replaces
+        # the children's sum, never adds to it.
+        tracks = self._tracks(910015, [
+            {"position": "10", "title": "Suite", "duration": "8:00"},
+            {"position": "10.1", "title": "Part One", "duration": "4:00"},
+            {"position": "10.2", "title": "Part Two", "duration": "4:00"},
+        ])
+        self.assertEqual(len(tracks), 1)
+        only = tracks[0]
+        assert _is_dict(only)
+        self.assertEqual(only["length_seconds"], 480.0)
+
+    def test_zero_duration_parent_does_not_zero_the_group(self):
+        # A 0:00 parent is upstream nonsense, not an authoritative
+        # total — the children's sum stands.
+        tracks = self._tracks(910018, [
+            {"position": "10", "title": "Medley", "duration": "0:00"},
+            {"position": "10.1", "title": "Part One", "duration": "3:00"},
+        ])
+        self.assertEqual(len(tracks), 1)
+        only = tracks[0]
+        assert _is_dict(only)
+        self.assertEqual(only["length_seconds"], 180.0)
+
+    def test_absent_duration_key_heading_shape_is_kept(self):
+        # library_completeness's exact rule: only a literal empty-string
+        # duration marks a heading; an ABSENT key is ambiguous.
+        tracks = self._tracks(910019, [
+            {"position": "1", "title": "One", "duration": "3:00"},
+            {"position": "", "title": "Mystery"},
+        ])
+        self.assertEqual(len(tracks), 2)
+        kept = tracks[1]
+        assert _is_dict(kept)
+        self.assertEqual(kept["title"], "Mystery")
+
+    def test_parent_after_subs_still_titles_the_group(self):
+        # The parent's title is authoritative wherever the row sits.
+        tracks = self._tracks(910016, [
+            {"position": "10.1", "title": "Part One", "duration": "1:00"},
+            {"position": "10.2", "title": "Part Two", "duration": "1:00"},
+            {"position": "10", "title": "Medley", "duration": ""},
+        ])
+        self.assertEqual(len(tracks), 1)
+        only = tracks[0]
+        assert _is_dict(only)
+        self.assertEqual(only["title"], "Medley")
+        self.assertEqual(only["length_seconds"], 120.0)
+
+    def test_empty_position_row_with_duration_is_kept(self):
+        # Only empty-position AND empty-duration rows are headings (the
+        # measured mirror rule in lib/library_completeness.py); an
+        # empty position with a duration is ambiguous and survives.
+        tracks = self._tracks(910017, [
+            {"position": "1", "title": "Opener", "duration": "3:00"},
+            {"position": "", "title": "Ambiguous", "duration": "2:00"},
+        ])
+        self.assertEqual(len(tracks), 2)
+        kept = tracks[1]
+        assert _is_dict(kept)
+        self.assertEqual(kept["title"], "Ambiguous")
+
+    def test_blank_sub_title_is_placeholder(self):
+        tracks = self._tracks(910009, [
+            {"position": "1.1", "title": "", "duration": "0:10"},
+            {"position": "1.2", "title": "Real Song", "duration": "3:00"},
+        ])
+        self.assertEqual(len(tracks), 1)
+        only = tracks[0]
+        assert _is_dict(only)
+        self.assertEqual(only["title"], "Real Song")
+        self.assertEqual(only["length_seconds"], 190.0)
+
+    def test_duplicate_flat_positions_stay_separate(self):
+        # Flat rows never merge with each other, even on identical
+        # positions (upstream data errors, heading rows).
+        tracks = self._tracks(910010, [
+            {"position": "1", "title": "Take One", "duration": "1:00"},
+            {"position": "1", "title": "Take Two", "duration": "2:00"},
+        ])
+        self.assertEqual(len(tracks), 2)
+        first, second = tracks[0], tracks[1]
+        assert _is_dict(first) and _is_dict(second)
+        self.assertEqual(first["title"], "Take One")
+        self.assertEqual(second["title"], "Take Two")
+
+    def test_heading_rows_are_dropped_when_release_positions_its_tracks(self):
+        # The live Kid A vinyl shape (Discogs 1450555): side-name heading
+        # rows carry an empty position and no duration; a rip has no file
+        # for them. 14 raw entries, 10 real tracks.
+        tracks = self._tracks(910011, [
+            {"position": "", "title": "Alpha", "duration": ""},
+            {"position": "A1", "title": "Everything in Its Right Place", "duration": "4:11"},
+            {"position": "A2", "title": "Kid A", "duration": "4:44"},
+            {"position": "", "title": "Beta", "duration": ""},
+            {"position": "B1", "title": "The National Anthem", "duration": "5:50"},
+        ])
+        self.assertEqual(len(tracks), 3)
+        numbers = [
+            (t["disc_number"], t["track_number"]) for t in tracks if _is_dict(t)
+        ]
+        self.assertEqual(numbers, [(1, 1), (1, 2), (2, 1)])
+
+    def test_all_empty_positions_are_preserved(self):
+        # A release that positions NOTHING has no heading signal — every
+        # row is a real track and the count must survive. Durations are
+        # empty ON PURPOSE: rows must reach the any_positioned clause
+        # (a duration short-circuits the heading predicate first and
+        # turns this pin into a bystander for its named clause).
+        tracks = self._tracks(910012, [
+            {"position": "", "title": "First", "duration": ""},
+            {"position": "", "title": "Second", "duration": ""},
+        ])
+        self.assertEqual(len(tracks), 2)
+
+    def test_empty_position_index_parent_with_subtracks_is_kept(self):
+        # A nested index parent (mirror keeps children under sub_tracks)
+        # is a real physical track, not a heading, even at position "".
+        tracks = self._tracks(910013, [
+            {"position": "1", "title": "Opener", "duration": "3:00"},
+            {"position": "", "title": "Medley", "duration": "", "sub_tracks": [
+                {"position": "2.1", "title": "Part One", "duration": "1:00"},
+            ]},
+        ])
+        self.assertEqual(len(tracks), 2)
+        medley = tracks[1]
+        assert _is_dict(medley)
+        self.assertEqual(medley["title"], "Medley")
+
+    def test_number_letter_and_trailing_dot_positions_parse(self):
+        # Live cohort grammars: '1A/2A/1B' (Dirt Dress 4738671) and
+        # '1./2.' (Deloris 3938744) used to land at track 0.
+        tracks = self._tracks(910014, [
+            {"position": "1A", "title": "Side A One", "duration": "2:00"},
+            {"position": "2A", "title": "Side A Two", "duration": "2:00"},
+            {"position": "1B", "title": "Side B One", "duration": "2:00"},
+            {"position": "1.", "title": "Dotted One", "duration": "2:00"},
+        ])
+        numbers = [
+            (t["disc_number"], t["track_number"]) for t in tracks if _is_dict(t)
+        ]
+        self.assertEqual(numbers, [(1, 1), (1, 2), (2, 1), (1, 1)])
+
+    def test_flat_tracklists_pass_through_unchanged(self):
+        tracks = self._tracks(910005, [
+            {"position": "1", "title": "Airbag", "duration": "4:44"},
+            {"position": "2", "title": "Paranoid Android", "duration": "6:23"},
+        ])
+        self.assertEqual(tracks, [
+            {"disc_number": 1, "track_number": 1, "title": "Airbag",
+             "length_seconds": 284.0},
+            {"disc_number": 1, "track_number": 2, "title": "Paranoid Android",
+             "length_seconds": 383.0},
+        ])
 
 
 class TestGetMasterReleases(unittest.TestCase):

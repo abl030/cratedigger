@@ -27,6 +27,9 @@ from typing import Any, Literal, TypedDict
 import msgspec
 
 from lib.artist_catalogue import ArtistCatalogueRow
+from lib.discogs_positions import (
+    normalize_release_tracks as _normalize_release_tracks,
+)
 from web import cache as _cache
 from web.artist_search import ArtistHit, merge_exact_artist_identities
 
@@ -174,21 +177,6 @@ def _assert_discogs_label_id(label_id: int | str) -> str:
     return label_id_str
 
 
-def _parse_duration(duration_str: str) -> float | None:
-    """Parse Discogs duration string (e.g. '4:44') to seconds."""
-    if not duration_str:
-        return None
-    parts = duration_str.split(":")
-    try:
-        if len(parts) == 2:
-            return int(parts[0]) * 60 + int(parts[1])
-        if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-    except ValueError:
-        return None
-    return None
-
-
 def _parse_year(date_str: str) -> int | None:
     """Extract year from Discogs date string (e.g. '1997-06-16' or '1997')."""
     if not date_str:
@@ -218,28 +206,6 @@ def _primary_artist_id(artists: list[_DiscogsArtistRefJSON]) -> int | None:
     if not artists:
         return None
     return artists[0].get("id")
-
-
-def _parse_position(position: str) -> tuple[int, int]:
-    """Parse a Discogs track position like '1', 'A1', '1-3' into (disc, track).
-
-    Simple numeric: disc=1, track=N
-    Letter prefix (vinyl): disc=ord(letter)-ord('A')+1, track from digits
-    Disc-track (CD): split on '-'
-    """
-    if not position:
-        return 1, 0
-    m = re.match(r"^(\d+)-(\d+)$", position)
-    if m:
-        return int(m.group(1)), int(m.group(2))
-    m = re.match(r"^([A-Za-z])(\d+)$", position)
-    if m:
-        disc = ord(m.group(1).upper()) - ord("A") + 1
-        return disc, int(m.group(2))
-    m = re.match(r"^(\d+)$", position)
-    if m:
-        return 1, int(m.group(1))
-    return 1, 0
 
 
 class _DiscogsSearchHitJSON(TypedDict, total=False):
@@ -734,15 +700,7 @@ def get_release(release_id: int, *, fresh: bool = False) -> dict[str, object]:
         artist_name = _primary_artist_name(artists)
         artist_id = _primary_artist_id(artists)
 
-        tracks: list[dict[str, object]] = []
-        for track in data.get("tracks", []):
-            disc, track_num = _parse_position(track.get("position", ""))
-            tracks.append({
-                "disc_number": disc,
-                "track_number": track_num,
-                "title": track.get("title", ""),
-                "length_seconds": _parse_duration(track.get("duration", "")),
-            })
+        tracks = _normalize_release_tracks(data.get("tracks", []))
 
         year = _parse_year(data.get("released", ""))
 
@@ -762,7 +720,7 @@ def get_release(release_id: int, *, fresh: bool = False) -> dict[str, object]:
         }
 
     return _cache.memoize_meta(
-        f"discogs:release:v2:{release_id}", _fetch, fresh=fresh)
+        f"discogs:release:v3:{release_id}", _fetch, fresh=fresh)
 
 
 def get_artist_name(artist_id: int) -> str:

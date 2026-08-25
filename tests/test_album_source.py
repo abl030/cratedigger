@@ -1,5 +1,6 @@
 """Tests for album_source.py — AlbumRecord and DatabaseSource."""
 
+import json
 import os
 import string
 import sys
@@ -24,6 +25,7 @@ from tests.fakes import FakePipelineDB
 from tests.helpers import (
     REQUEST_CASCADE_RESET_TABLES,
     delete_all_rows,
+    make_database_source_with_fake_db,
     make_request_row,
 )
 
@@ -214,6 +216,79 @@ class TestDatabaseSourceDiscogsFallbackUrl(unittest.TestCase):
                 "83182",
                 "https://discogs.ablz.au/api/releases/83182",
             )
+
+
+class TestPopulateTracksDiscogsNormalization(unittest.TestCase):
+    """Issue #1261 — the search worker's fallback writer must persist the
+    same rip-shaped manifest as the add/Replace flows.
+
+    This is the second production writer of ``album_tracks``; before the
+    fix it carried its own inline parser that kept every ``N.M``
+    sub-entry as its own row (all at track 0), so an empty-manifest
+    request repopulated by the worker got a manifest the matcher count
+    gate could never pass.
+    """
+
+    def _populate(self, tracks_json: list[dict[str, str]]) -> tuple[
+        list[dict[str, object]], FakePipelineDB,
+    ]:
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(id=42, status="wanted"))
+        source = make_database_source_with_fake_db(
+            fake_db,
+            musicbrainz_ws2_base=TEST_MB_WS2_BASE,
+            discogs_api_base=TEST_DISCOGS_BASE,
+        )
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(
+            {"tracks": tracks_json},
+        ).encode()
+        with patch("album_source.urllib.request.urlopen", return_value=response):
+            tracks = source._populate_tracks_discogs({"id": 42}, "521474")
+        return tracks, fake_db
+
+    def _persisted(self, fake_db: FakePipelineDB) -> list[dict[str, object]]:
+        return [
+            {
+                "disc_number": row["disc_number"],
+                "track_number": row["track_number"],
+                "title": row["title"],
+                "length_seconds": row["length_seconds"],
+            }
+            for row in fake_db.get_tracks(42)
+        ]
+
+    def test_subposition_hidden_track_run_collapses(self):
+        # The live 521474 tail: 9 flat + a 10.1/10.2/10.3 hidden-track run.
+        tracks, fake_db = self._populate([
+            {"position": "9", "title": "Stay Entertained", "duration": "3:46"},
+            {"position": "10.1", "title": "Island Lost At Sea", "duration": "3:46"},
+            {"position": "10.2", "title": "(silence)", "duration": "0:20"},
+            {"position": "10.3", "title": "Untitled", "duration": "3:49"},
+        ])
+        expected = [
+            {"disc_number": 1, "track_number": 9, "title": "Stay Entertained",
+             "length_seconds": 226},
+            {"disc_number": 1, "track_number": 10, "title": "Island Lost At Sea",
+             "length_seconds": 475},
+        ]
+        self.assertEqual(tracks, expected)
+        self.assertEqual(self._persisted(fake_db), expected)
+
+    def test_vinyl_positions_parse_instead_of_flattening_to_zero(self):
+        # The old inline parser had no letter-prefix case at all.
+        tracks, fake_db = self._populate([
+            {"position": "A1", "title": "Side A Song", "duration": "3:00"},
+            {"position": "B1", "title": "Side B Song", "duration": "2:00"},
+        ])
+        self.assertEqual(
+            [(t["disc_number"], t["track_number"]) for t in tracks],
+            [(1, 1), (2, 1)],
+        )
+        self.assertEqual(
+            [(t["disc_number"], t["track_number"]) for t in self._persisted(fake_db)],
+            [(1, 1), (2, 1)],
+        )
 
 
 class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
