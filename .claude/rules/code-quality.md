@@ -1079,14 +1079,47 @@ rationale; never allowlist a pure decision.
   never shipped: the implementer verified the count before writing it and
   caught the error. That third instance is the rule working as intended,
   not another failure of it.
-- Independent review plants at least two mutants PER new or changed test,
-  aimed at that test's named subject, not only at sites the author's Fault
-  injection sentence already covers (issue #1143 / #1155).
-- Fix everything it finds before committing. This is not optional.
+- **Independent review of a non-trivial PR is TWO agents with disjoint
+  jobs, not one agent doing both.** Operator decision 2026-08-25, after
+  PR #1257's review round supplied the evidence
+  (https://github.com/abl030/cratedigger/pull/1257#issuecomment-5404791514):
+  the round's one real production bug was found by close reading (a
+  missing carve-out spotted by comparing adjacent arguments on the same
+  call), while every mutant finding was a TEST-lattice gap — and a single
+  agent's mutant quota taxes exactly the reading budget that finds bugs.
+  The roles:
+  - **The reader** reads, thinks, and prods production code: re-derives
+    the PR's load-bearing claims, cross-references the touched namespaces
+    (readers/writers, per the widest-boundary rule), checks composition
+    seams, re-reads every claim the series itself added, and greps docs by
+    artifact. It plants NO mutants — its entire budget is thought. It MAY
+    name suspect tests ("this looks like a bystander — prove it
+    constrains X") as extra targets for the runner. Output: ranked
+    findings, each labeled MEASURED or INFERRED. Model tier: the
+    quality-core reader runs fable; opus elsewhere.
+  - **The mutant runner** plants at least two mutants PER new or changed
+    test, aimed at that test's named subject, not only at sites the
+    author's Fault injection sentence already covers (issue #1143 /
+    #1155), plus any suspects the reader handed over. Mechanical
+    discipline, not judgment: `PYTHONDONTWRITEBYTECODE=1`, its OWN
+    isolated worktree (mutant planting mutates production files — a
+    shared tree makes the reader read lies), every edit restored exactly
+    and proven restored (`git status --porcelain` empty), and a final
+    table where every row carries the actual command evidence for
+    KILLED/SURVIVED — a prose claim of RED without output is the #1209
+    confabulation shape and counts as no evidence. A SURVIVOR is a
+    finding, never a footnote. The work needs no premium model tier.
+  The two run in parallel against the same commit. One agent may still do
+  both jobs on a small, low-risk diff — the split is mandatory where the
+  old single-reviewer rule demanded mutants at all, i.e. non-trivial PRs
+  with new or changed tests.
+- Fix everything the review finds before committing. This is not
+  optional. (Severity still orders the work: a reader finding on
+  production code outranks a runner's minor survivor.)
 
 ## Commits & PRs
 - One logical change per commit
 - Non-trivial work goes on a feature branch with a PR (e.g. `feat/cooldowns`, `fix/spectral-race`)
 - PRs are merged via GitHub **Create a merge commit** (not Rebase-and-merge, not Squash-and-merge). This keeps the PR attached to mainline history while preserving the individual commits, so write them well.
 - Deploy and verify live after merging
-- PR body follows `.github/pull_request_template.md`. The Fault injection section is a short account (one sentence, or a short list for per-clause proof against a many-clause checker) naming what you tried and what happened, not an exhaustive table; whether to run fault injection at all is the "when in doubt" judgment call in § "Testing — Red/Green TDD", not something every PR owes — but three obligations in that same section stay unconditional regardless: the regression-pin rule, the adapter mutant rule, and Standing scope (a PR adding or changing a checker clause records per-clause evidence there, not "N/A"). The reviewer's two-mutants-per-changed-test obligation is separate and always applies.
+- PR body follows `.github/pull_request_template.md`. The Fault injection section is a short account (one sentence, or a short list for per-clause proof against a many-clause checker) naming what you tried and what happened, not an exhaustive table; whether to run fault injection at all is the "when in doubt" judgment call in § "Testing — Red/Green TDD", not something every PR owes — but three obligations in that same section stay unconditional regardless: the regression-pin rule, the adapter mutant rule, and Standing scope (a PR adding or changing a checker clause records per-clause evidence there, not "N/A"). The mutant RUNNER's two-mutants-per-changed-test obligation (§ "Pre-Commit Review Gate", the two-reviewer split) is separate and always applies.
