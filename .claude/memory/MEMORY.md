@@ -106,3 +106,4 @@
 - [#1229 suite residuals CLOSED](project_1229_suite_residuals.md) — `nix develop` hits Nix's eval cache where `nix-shell` cannot; LPT queue ordering; gate 109s→93s
 - [Alert blast radius](feedback_alert_blast_radius.md) — never fix a silent-alert path by paging unconditionally; enumerate cases, fix only the broken one
 - [Poll gates at short intervals](feedback_poll_gates_short_intervals.md) — doc1 gates run ~2 min now; 60-90s polls, never long sleeps
+- [Mutant restore git-checkout trap](feedback_mutant_restore_git_checkout_trap.md) — restoring a mutant via git checkout wipes uncommitted edits in the same file; restore by inverse edit
