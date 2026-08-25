@@ -6199,6 +6199,8 @@ class FakePipelineDB:
             # Migration 028 / U14 — long-tail-rescue audit columns.
             "rescued_at": None,
             "prior_unfindable_category": None,
+            # Migration 082 / issue #1241 — operator incomplete mark.
+            "marked_incomplete_at": None,
             # Migration 021 addressing FK.
             "current_evidence_id": None,
             # Migration 023 — supersede lineage.

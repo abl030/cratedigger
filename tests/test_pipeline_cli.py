@@ -2745,7 +2745,7 @@ class TestCmdMarkIncomplete(unittest.TestCase):
         ))
         self.assertEqual(
             pipeline_cli.cmd_mark_incomplete(
-                cast(Any, db), MagicMock(id=1, clear=False)),
+                db, MagicMock(id=1, clear=False)),
             0,
         )
         row = db.get_request(1)
@@ -2753,7 +2753,7 @@ class TestCmdMarkIncomplete(unittest.TestCase):
         self.assertIsNotNone(row["marked_incomplete_at"])
         self.assertEqual(
             pipeline_cli.cmd_mark_incomplete(
-                cast(Any, db), MagicMock(id=1, clear=True)),
+                db, MagicMock(id=1, clear=True)),
             0,
         )
         row = db.get_request(1)
@@ -2766,14 +2766,14 @@ class TestCmdMarkIncomplete(unittest.TestCase):
         db.seed_request(make_request_row(id=1, status="imported"))
         self.assertEqual(
             pipeline_cli.cmd_mark_incomplete(
-                cast(Any, db), MagicMock(id=1, clear=True)),
+                db, MagicMock(id=1, clear=True)),
             0,
         )
         pipeline_cli.cmd_mark_incomplete(
-            cast(Any, db), MagicMock(id=1, clear=False))
+            db, MagicMock(id=1, clear=False))
         self.assertEqual(
             pipeline_cli.cmd_mark_incomplete(
-                cast(Any, db), MagicMock(id=1, clear=False)),
+                db, MagicMock(id=1, clear=False)),
             0,
         )
 
@@ -2782,7 +2782,7 @@ class TestCmdMarkIncomplete(unittest.TestCase):
         db = FakePipelineDB()
         self.assertEqual(
             pipeline_cli.cmd_mark_incomplete(
-                cast(Any, db), MagicMock(id=99, clear=False)),
+                db, MagicMock(id=99, clear=False)),
             2,
         )
 
@@ -2792,7 +2792,7 @@ class TestCmdMarkIncomplete(unittest.TestCase):
         db.seed_request(make_request_row(id=2, status="replaced"))
         self.assertEqual(
             pipeline_cli.cmd_mark_incomplete(
-                cast(Any, db), MagicMock(id=2, clear=False)),
+                db, MagicMock(id=2, clear=False)),
             4,
         )
 

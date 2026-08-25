@@ -1346,7 +1346,9 @@ class TestOperatorIncompleteMarkKeepsTheFolder(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _seed(self, *, scenario: str, marked: bool) -> tuple[str, int]:
+    def _seed(
+        self, *, scenario: str, marked: bool, current_proof: bool = False,
+    ) -> tuple[str, int]:
         if marked:
             self.db.set_marked_incomplete(1, marked=True)
         source = _make_source(self.tmp, f"dirt-dress-{scenario}")
@@ -1384,6 +1386,16 @@ class TestOperatorIncompleteMarkKeepsTheFolder(unittest.TestCase):
             storage_format="AAC",
             filetype_band="aac",
         )
+        if current_proof:
+            current = msgspec.structs.replace(
+                current,
+                verified_lossless_proof=VerifiedLosslessProof(
+                    provenance="measured",
+                    source="library_audit",
+                    classifier="verified_lossless",
+                    detail="parent_lossless_proof",
+                ),
+            )
         self._current_evidence_helper = (
             lambda *_a, **_kw: CurrentEvidenceActionResult(
                 evidence=current,
@@ -1462,6 +1474,42 @@ class TestOperatorIncompleteMarkKeepsTheFolder(unittest.TestCase):
         self.assertEqual(result.outcome, OUTCOME_DELETED)
         self.assertFalse(os.path.exists(source))
         self.assertEqual(self._triage(log_id).preview_decision, "downgrade")
+
+    def test_marked_install_disarms_the_verified_lossless_parent_shortcut(
+        self,
+    ) -> None:
+        """A proof-LOCKED parent normally short-circuits deletion before the
+        decider ever runs (``TestVerifiedLosslessShortCircuit``). With the
+        mark set and this row's candidate proven whole, the shortcut's
+        "guaranteed to lose the upgrade gate" premise no longer holds, so
+        the full decider runs, disregards the locked installed side, and
+        the folder is KEPT."""
+        source, log_id = self._seed(
+            scenario="high_distance", marked=True, current_proof=True,
+        )
+
+        result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
+
+        self.assertEqual(result.outcome, OUTCOME_KEPT_WOULD_IMPORT)
+        self.assertNotEqual(
+            result.outcome, OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT)
+        self.assertTrue(os.path.isdir(source))
+        self.assertEqual(self._triage(log_id).preview_decision, "import")
+
+    def test_unmarked_install_keeps_the_verified_lossless_parent_shortcut(
+        self,
+    ) -> None:
+        """Control: without the mark the shortcut still deletes — the
+        disarm is keyed on the operator's mark, never on the proof."""
+        source, log_id = self._seed(
+            scenario="high_distance", marked=False, current_proof=True,
+        )
+
+        result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
+
+        self.assertEqual(
+            result.outcome, OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT)
+        self.assertFalse(os.path.exists(source))
 
 
 class TestCleanupDBProtocolParity(unittest.TestCase):

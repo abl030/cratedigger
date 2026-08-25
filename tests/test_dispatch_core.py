@@ -40,6 +40,7 @@ from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
+    dispatch_import_with_fake_db,
     finalize_claimed_dispatch,
     handoff_automation_owner,
     make_album_quality_evidence,
@@ -189,7 +190,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                       [DispatchOutcome, FakePipelineDB, str], None,
                   ] | None = None,
                   finalize: bool = True) -> _DispatchWorld:
-        from lib.dispatch import dispatch_import_core
         if ir is None:
             ir = make_import_result(decision="import", new_min_bitrate=245)
 
@@ -287,7 +287,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                      execution_lease,
                      cancellation_token=cancellation_token,
                  ) as (cancellation_token, owner_session_identity):
-                result = dispatch_import_core(
+                result = dispatch_import_with_fake_db(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
@@ -297,7 +297,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     target_format=target_format,
                     verified_lossless_target=verified_lossless_target,
                     beets_harness_path=cfg.beets_harness_path,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,
                     dl_info=dl_info,
                     distance=0.05,
                     scenario="strong_match",
@@ -502,7 +502,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         self.assertEqual(cleanup.staged_path, r["path"])
 
     def test_stale_request_stops_before_import_subprocess(self):
-        from lib.dispatch import dispatch_import_core
 
         class StaleDB(FakePipelineDB):
             def authorize_import_job_launch(self, *args, **kwargs):
@@ -573,7 +572,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                      execution_lease,
                      cancellation_token=cancellation_token,
                  ) as (cancellation_token, owner_session_identity):
-                outcome = dispatch_import_core(
+                outcome = dispatch_import_with_fake_db(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
@@ -583,7 +582,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     target_format=None,
                     verified_lossless_target="",
                     beets_harness_path=cfg.beets_harness_path,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,
                     dl_info=DownloadInfo(username="user1"),
                     distance=0.05,
                     scenario="strong_match",
@@ -607,7 +606,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         self.assertEqual(db.download_logs, [])
 
     def test_force_job_status_change_after_enqueue_stops_before_beets(self):
-        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         cfg = CratediggerConfig(
@@ -643,14 +641,14 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             # cannot become its own expectation at the launch boundary.
             db.request(42)["status"] = "imported"
             recorder = MagicMock()
-            outcome = dispatch_import_core(
+            outcome = dispatch_import_with_fake_db(
                 path=tmpdir,
                 mb_release_id="mbid-123",
                 request_id=42,
                 label="Test Artist - Test Album",
                 force=True,
                 beets_harness_path=cfg.beets_harness_path,
-                db=db,  # type: ignore[arg-type]
+                db=db,
                 dl_info=DownloadInfo(username="user1"),
                 distance=0.05,
                 scenario="force_import",
@@ -714,7 +712,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         self.assertIn("baduser", denylisted)
 
     def test_persisted_candidate_evidence_rejects_before_mutating_import(self):
-        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -796,7 +793,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     "importer measurement/probe mutant executed"
                 )
                 with _patch_beets_album(current_dir, min_bitrate=116):
-                    result = dispatch_import_core(
+                    result = dispatch_import_with_fake_db(
                         path=tmpdir,
                         mb_release_id="mbid-123",
                         request_id=42,
@@ -805,7 +802,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                         target_format="opus 128",
                         verified_lossless_target="opus 128",
                         beets_harness_path=cfg.beets_harness_path,
-                        db=db,  # type: ignore[arg-type]
+                        db=db,
                         dl_info=DownloadInfo(username="baduser"),
                         distance=0.99,
                         scenario="force_import",
@@ -835,7 +832,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             shutil.rmtree(current_dir, ignore_errors=True)
 
     def test_persisted_candidate_evidence_imports_via_evidence_action_file(self):
-        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -914,13 +910,13 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     return MagicMock(returncode=0, stdout="", stderr="")
 
                 ext.run.side_effect = run_side_effect
-                result = dispatch_import_core(
+                result = dispatch_import_with_fake_db(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
                     label="Test Artist - Test Album",
                     beets_harness_path=cfg.beets_harness_path,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,
                     dl_info=DownloadInfo(username="user1"),
                     distance=0.05,
                     scenario="strong_match",
@@ -1004,7 +1000,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         self.assertIsNone(loaded.verified_lossless_proof)
 
     def test_persisted_candidate_evidence_imports_when_no_current_album(self):
-        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1063,13 +1058,13 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     return MagicMock(returncode=0, stdout="", stderr="")
 
                 ext.run.side_effect = run_side_effect
-                result = dispatch_import_core(
+                result = dispatch_import_with_fake_db(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
                     label="Test Artist - Test Album",
                     beets_harness_path=cfg.beets_harness_path,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,
                     dl_info=DownloadInfo(username="user1"),
                     distance=0.05,
                     scenario="strong_match",
@@ -1088,7 +1083,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_stale_current_backfill_requires_fresh_enrichment_before_decision(self):
-        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -1147,13 +1141,13 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 ext.run.side_effect = AssertionError(
                     "importer measurement/probe mutant executed"
                 )
-                result = dispatch_import_core(
+                result = dispatch_import_with_fake_db(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
                     label="Test Artist - Test Album",
                     beets_harness_path=cfg.beets_harness_path,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,
                     dl_info=DownloadInfo(username="user1"),
                     distance=0.05,
                     scenario="strong_match",
@@ -1180,7 +1174,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             shutil.rmtree(current_dir, ignore_errors=True)
 
     def test_persisted_candidate_evidence_fails_when_current_album_has_no_files(self):
-        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -1216,13 +1209,13 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             )
             with patch_dispatch_externals() as ext, \
                  _patch_beets_album(current_dir, min_bitrate=320):
-                result = dispatch_import_core(
+                result = dispatch_import_with_fake_db(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
                     label="Test Artist - Test Album",
                     beets_harness_path=cfg.beets_harness_path,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,
                     dl_info=DownloadInfo(username="user1"),
                     distance=0.05,
                     scenario="strong_match",
@@ -1241,7 +1234,6 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             shutil.rmtree(current_dir, ignore_errors=True)
 
     def test_persisted_candidate_evidence_fails_closed_on_current_error(self):
-        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
@@ -1280,13 +1272,13 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                      "lib.import_evidence.ensure_current_evidence_for_action",
                      side_effect=RuntimeError("beets unavailable"),
                  ):
-                result = dispatch_import_core(
+                result = dispatch_import_with_fake_db(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
                     label="Test Artist - Test Album",
                     beets_harness_path=cfg.beets_harness_path,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,
                     dl_info=DownloadInfo(username="user1"),
                     distance=0.05,
                     scenario="strong_match",
@@ -1396,7 +1388,6 @@ class TestDispatchCoreSeams(unittest.TestCase):
     """Seam tests — assert subprocess argv construction."""
 
     def _get_cmd(self, **kwargs):
-        from lib.dispatch import dispatch_import_core
         ir = kwargs.pop("ir", make_import_result())
         beets_directory = kwargs.pop("beets_directory", "")
         beets_config_dir = kwargs.pop("beets_config_dir", "")
@@ -1488,13 +1479,13 @@ class TestDispatchCoreSeams(unittest.TestCase):
                     kwargs["run_import_fn"] = runner_hook
                 elif execution_lease is not None:
                     kwargs["run_import_fn"] = _owned_test_runner
-                dispatch_import_core(
+                dispatch_import_with_fake_db(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
                     label="Test",
                     beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,
                     dl_info=DownloadInfo(),
                     cfg=cfg,
                     candidate_import_job_id=job.id,
@@ -1711,7 +1702,6 @@ class TestOperatorIncompleteMarkImporterLane(unittest.TestCase):
         candidate whole, so dispatch launches the import instead of
         rejecting, and the terminal acceptance clears the mark.
         """
-        from lib.dispatch import dispatch_import_core
         from lib.terminal_outcomes import ImportJobTerminal
 
         db = FakePipelineDB()
@@ -1787,14 +1777,14 @@ class TestOperatorIncompleteMarkImporterLane(unittest.TestCase):
                  _patch_beets_album(current_dir, min_bitrate=320):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout="", stderr="")
-                result = dispatch_import_core(
+                result = dispatch_import_with_fake_db(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
                     label="Dirt Dress - Theme Songs",
                     force=True,
                     beets_harness_path=cfg.beets_harness_path,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,
                     dl_info=DownloadInfo(username="iosononessuno"),
                     distance=0.17,
                     scenario="force_import",
@@ -1835,7 +1825,6 @@ class TestOperatorIncompleteMarkImporterLane(unittest.TestCase):
     ) -> None:
         """Control for the flip test: identical world, no mark — the
         evidence decision stays ``downgrade`` and import never launches."""
-        from lib.dispatch import dispatch_import_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1898,14 +1887,14 @@ class TestOperatorIncompleteMarkImporterLane(unittest.TestCase):
             )
             with patch_dispatch_externals() as ext, \
                  _patch_beets_album(current_dir, min_bitrate=320):
-                result = dispatch_import_core(
+                result = dispatch_import_with_fake_db(
                     path=tmpdir,
                     mb_release_id="mbid-123",
                     request_id=42,
                     label="Dirt Dress - Theme Songs",
                     force=True,
                     beets_harness_path=cfg.beets_harness_path,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,
                     dl_info=DownloadInfo(username="iosononessuno"),
                     distance=0.17,
                     scenario="force_import",

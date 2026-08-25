@@ -619,6 +619,20 @@ def pinned_dispatch_authority(
         yield token, identity
 
 
+def dispatch_import_with_fake_db(db: Any, **kwargs: Any) -> Any:
+    """``Any``-typed bridge from a ``FakePipelineDB`` fixture into the
+    ``PipelineDB``-typed ``dispatch_import_core`` — the largest single call
+    site of the frozen ``db=… # type: ignore[arg-type]`` cluster (34 of the
+    tests baseline's 71 findings of that shape; issue #1246 /
+    ``.claude/rules/code-quality.md`` § "Typing enforcement"). Same
+    established pattern as ``finalize_claimed_dispatch`` below: one bridge,
+    zero per-call-site escape hatches.
+    """
+    from lib.dispatch import dispatch_import_core
+
+    return dispatch_import_core(db=db, **kwargs)
+
+
 def finalize_claimed_dispatch(db: Any, job: Any, outcome: Any) -> Any:
     """Apply a direct dispatch result through the production queue owner.
 
