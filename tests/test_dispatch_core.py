@@ -373,8 +373,8 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         """#1257 review F1: ``preflight_existing`` keeps the EXISTING import
         with nothing installed — the still-incomplete copy on disk is
         untouched, so the acceptance satisfies nothing and the operator's
-        mark must survive (the same no-new-files fact the
-        ``clear_stale_v0_probe`` carve-out records)."""
+        mark must survive (the no-new-files fact
+        ``acceptance_installs_new_files`` spells for both carve-outs)."""
         marked_at = datetime(2026, 8, 20, tzinfo=UTC)
         r = self._dispatch(
             ir=make_import_result(decision="preflight_existing"),

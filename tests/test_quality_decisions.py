@@ -2644,6 +2644,33 @@ class TestDispatchActionContract(unittest.TestCase):
                             "record_rejection")
 
 
+class TestAcceptanceInstallsNewFiles(unittest.TestCase):
+    """One named spelling of "this acceptance installed new files" (#1258 item 3)."""
+
+    # (decision, installs_new_files) — every mark_done decision takes a stance.
+    CASES: ClassVar = [
+        ("import", True),
+        ("preflight_existing", False),
+        ("provisional_lossless_upgrade", True),
+        ("transcode_upgrade", True),
+        ("transcode_first", True),
+    ]
+
+    def test_acceptance_installs_new_files_table(self):
+        from lib.quality import acceptance_installs_new_files
+        for decision, expected in self.CASES:
+            with self.subTest(decision=decision):
+                self.assertEqual(
+                    acceptance_installs_new_files(decision), expected)
+
+    def test_every_mark_done_decision_has_a_stance(self):
+        """A new acceptance decision must be added to CASES explicitly."""
+        from lib.quality import dispatch_action
+        accepted = {d for d in VALID_STAGE2 - {None}
+                    if dispatch_action(d).mark_done}
+        self.assertEqual(accepted, {decision for decision, _ in self.CASES})
+
+
 # ============================================================================
 # rejected_download_tier + narrow_override_on_downgrade
 # ============================================================================
