@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_pipeline.mjs
  */
 
-import { __test__, mergeRekeyRequest, recheckRetagDivergenceAlbum } from '../web/js/pipeline.js';
+import { __test__, mergeRekeyRequest, recheckRetagDivergenceAlbum, syncRetagDivergenceAlbum } from '../web/js/pipeline.js';
 import { state } from '../web/js/state.js';
 
 let passed = 0;
@@ -618,6 +618,172 @@ console.log('recheckRetagDivergenceAlbum() network-error path re-arms the button
   assertEqual(btn.textContent, 'Recheck', 'the button label resets');
   assertEqual(dom.note.textContent, 'Recheck request failed',
     'the inline note falls back to a generic message with no response to read');
+  assertEqual(dom.toast.className, 'toast error', 'a network failure toast is an error');
+}
+
+/**
+ * Sync-specific DOM: models node REPLACEMENT on re-render (#1260 review
+ * S1/M26). `container.innerHTML = …` swaps which note object
+ * `getElementById` returns, so a handler that captures the note BEFORE
+ * re-rendering writes to a detached node and the post-render assertion
+ * catches it — the exact bug shape the recheck-style fixed-map DOM
+ * cannot see.
+ * @param {number} albumId
+ */
+function installSyncAlbumDom(albumId) {
+  const preNote = { textContent: '', className: '' };
+  const postNote = { textContent: '', className: '' };
+  const toast = { textContent: '', className: '', style: { display: 'none' } };
+  let rerendered = false;
+  const container = {
+    _html: '',
+    get innerHTML() { return this._html; },
+    set innerHTML(value) { this._html = value; rerendered = true; },
+  };
+  globalThis.document = {
+    getElementById(id) {
+      if (id === `retag-album-${albumId}`) return container;
+      if (id === `retag-album-note-${albumId}`) {
+        return rerendered ? postNote : preNote;
+      }
+      if (id === 'toast') return toast;
+      return null;
+    },
+  };
+  globalThis.setTimeout = (fn) => {
+    fn();
+    return 0;
+  };
+  return { container, preNote, postNote, toast, isRerendered: () => rerendered };
+}
+
+const SYNC_DB_ID = '26693e58-02c0-4bb1-b66f-f0f44f8a234d';
+
+console.log('syncRetagDivergenceAlbum() POSTs the compare-and-set body and patches the row on success');
+{
+  const dom = installSyncAlbumDom(16948);
+  const btn = {
+    disabled: false, textContent: 'Write tags',
+    dataset: { expected: SYNC_DB_ID },
+  };
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url), options });
+    return {
+      ok: true,
+      json: async () => ({
+        outcome: 'synced', album_id: 16948, db_mb_albumid: SYNC_DB_ID,
+        error_message: null,
+        album: {
+          album_id: 16948, db_mb_albumid: SYNC_DB_ID,
+          albumartist: 'Terre Thaemlitz / DJ Sprinkles', album: 'RA.1000',
+          album_class: 'agrees', item_count: 1, items: [],
+        },
+      }),
+    };
+  };
+
+  await syncRetagDivergenceAlbum(16948, btn);
+
+  assertEqual(calls.length, 1, 'exactly one fetch issued');
+  assertEqual(calls[0].url, '/api/audit/retag-divergence/album/16948/sync-tags',
+    'the sync POSTs the canonical route path');
+  assertEqual(calls[0].options.method, 'POST', 'the sync uses POST');
+  assertEqual(JSON.parse(calls[0].options.body).expected_mb_albumid, SYNC_DB_ID,
+    'the body carries the compare-and-set identity from data-expected');
+  assert(dom.isRerendered(), 'the row re-renders from the returned album');
+  assertContains(dom.container.innerHTML, 'agrees',
+    'the patched row shows the post-sync classification');
+  assertEqual(btn.disabled, true,
+    'the detached pre-render button is never resurrected on success');
+  assertEqual(dom.toast.className, 'toast', 'a success toast is not an error');
+}
+
+console.log('syncRetagDivergenceAlbum() residual refusal re-renders AND writes the POST-re-render note');
+{
+  const dom = installSyncAlbumDom(16948);
+  const btn = {
+    disabled: false, textContent: 'Write tags',
+    dataset: { expected: SYNC_DB_ID },
+  };
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 409,
+    json: async () => ({
+      outcome: 'residual_divergence', album_id: 16948,
+      db_mb_albumid: SYNC_DB_ID,
+      error_message: 'beet write exited 1, but the re-read file tags still disagree',
+      album: {
+        album_id: 16948, db_mb_albumid: SYNC_DB_ID,
+        album_class: 'diverges', item_count: 1,
+        items: [{
+          item_class: 'diverges', path: '/library/x/01.opus',
+          file_mb_albumid: 'fdc54a6a-27c7-4936-87d7-7ab146812d4e',
+          detail: null,
+        }],
+      },
+    }),
+  });
+
+  await syncRetagDivergenceAlbum(16948, btn);
+
+  assert(dom.isRerendered(), 'a residual refusal still re-renders the fresh scan');
+  assertEqual(btn.disabled, true,
+    'the detached pre-render button is never resurrected on a re-rendered refusal (#1260 review F11)');
+  assertContains(dom.postNote.textContent, 'residual_divergence',
+    'the refusal note lands in the POST-re-render note node');
+  assertContains(dom.postNote.textContent, 're-read file tags still disagree',
+    'the refusal note carries the service detail');
+  assertEqual(dom.preNote.textContent, '',
+    'nothing is written to the destroyed pre-render note node');
+  assertEqual(dom.toast.className, 'toast error', 'a refusal toast is an error');
+}
+
+console.log('syncRetagDivergenceAlbum() album-less refusal re-arms the still-attached button');
+{
+  const dom = installSyncAlbumDom(42);
+  const btn = {
+    disabled: false, textContent: 'Write tags',
+    dataset: { expected: SYNC_DB_ID },
+  };
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 409,
+    json: async () => ({
+      outcome: 'identity_mismatch', album_id: 42,
+      db_mb_albumid: 'fdc54a6a-27c7-4936-87d7-7ab146812d4e',
+      error_message: 'Beets album 42 now names fdc54a6a…; recheck and retry',
+      album: null,
+    }),
+  });
+
+  await syncRetagDivergenceAlbum(42, btn);
+
+  assert(!dom.isRerendered(), 'no album payload, no re-render');
+  assertEqual(btn.disabled, false, 'the still-attached button re-arms');
+  assertEqual(btn.textContent, 'Write tags', 'the button label resets');
+  assertContains(dom.preNote.textContent, 'identity_mismatch',
+    'the note names the refusal outcome');
+  assertEqual(dom.toast.className, 'toast error', 'a refusal toast is an error');
+}
+
+console.log('syncRetagDivergenceAlbum() network-error path re-arms the button with a generic note');
+{
+  const dom = installSyncAlbumDom(16948);
+  const btn = {
+    disabled: true, textContent: 'Writing tags...',
+    dataset: { expected: SYNC_DB_ID },
+  };
+  globalThis.fetch = async () => {
+    throw new TypeError('network down');
+  };
+
+  await syncRetagDivergenceAlbum(16948, btn);
+
+  assertEqual(btn.disabled, false, 'the button re-arms after a network failure');
+  assertEqual(btn.textContent, 'Write tags', 'the button label resets');
+  assertEqual(dom.preNote.textContent, 'Tag-sync request failed',
+    'the note falls back to a generic message');
   assertEqual(dom.toast.className, 'toast error', 'a network failure toast is an error');
 }
 

@@ -120,18 +120,23 @@ Cratedigger has four Beets mutation lanes:
    `album_id:=<album_id>` AND `mb_albumid:=<identity>` — writing file tags
    DB→file for exactly one album, verified by re-reading the files through
    the census's own single-album scan (never the subprocess exit code). It
-   heals Lane 3's accepted `-W` residual: a merge-retagged album whose
-   rejected revalidation left no import to rewrite the installed tags. One
+   heals Lane 3's accepted `-W` residual: a merge-retagged album no
+   accepted import ever rewrote. One
    canonical execution path, three callers: the dashboard census card's
    "Write tags" button (`POST
    /api/audit/retag-divergence/album/<id>/sync-tags`), its
    `pipeline-cli sync-file-tags` HTTP adapter, and the merge seam itself —
-   best-effort and outcome-inert, only after a rekey whose revalidation was
-   rejected. It writes tags only (never moves a file, never chooses an
-   identity — it writes the one the Beets DB already holds), holds the
+   best-effort and outcome-inert after EVERY completed rekey (a valid
+   revalidation can still be quality-rejected downstream, so the seam
+   cannot predict acceptance; when an accepted import does follow, it
+   replaces the files and the write was harmless waste). It writes tags
+   only — never moves a file, never chooses a value; `beet write` syncs
+   every out-of-sync media tag field DB→file for the matched items, not
+   only the identity — holds the
    RELEASE advisory lock non-blocking across write+verify, and refuses
    (typed, files untouched) unless the album's DB identity equals the
-   identity the caller authorized. Operator authority for the lane is
+   identity the caller authorized and at least one readable file actually
+   diverges. Operator authority for the lane is
    quoted in issue #1260.
 
 Lane 3 is deliberately the narrowest of the catalog-mutating lanes — narrower than Lane 1's
@@ -194,7 +199,17 @@ query. Every clause is load-bearing:
   decision routes through `import_no_exist`, silently skipping the
   downgrade guard. `-w` would not close this either — a partial write
   across N files leaves the identical class of drift, just narrower — so
-  `-W` stays; the mitigation is visibility, not a different flag. Every
+  `-W` stays. Since #1260 the mitigation is visibility PLUS a healing
+  lane: the census surfaces the cohort, and Lane 4 (`lib/beets_tag_sync.py`)
+  converges the files — automatically best-effort at the merge seam after
+  every completed rekey, and on demand from the census card's "Write tags"
+  button / `pipeline-cli sync-file-tags`. Lane 4 does NOT itself arm the
+  `beet update` revert described above: `beet write` runs each item
+  through `item.try_sync(True, False)`, which stores the item's DB
+  `mtime` alongside the file write (`beets/ui/commands/write.py`), so the
+  written file reads as current, not modified — measured in the pinned
+  runtime and pinned against the real subprocess in
+  `tests/test_beets_tag_sync.py`. Every
   successful retag records the divergence in its outcome detail
   (`lib/beets_retag.py`) so an operator can find "DB identity moved, file
   tags did not" in the audit trail for that ONE retag rather than never

@@ -50,6 +50,14 @@ review round 3) — a per-file walk of the survivor album over virtiofs to
 compute its fresh content fingerprint (the evidence-lineage witness) — see
 ``cmd_merge_rekey``."""
 
+TIMEOUT_TAG_SYNC_SECONDS = 660.0
+"""sync-file-tags (#1260): the route's worst case is two per-file tag
+scans over virtiofs plus a ``beet write`` bounded at
+``lib.beets_tag_sync.TAG_SYNC_TIMEOUT_SECONDS`` (300s). The client budget
+must strictly exceed that route-side worst case so a slow-but-successful
+write still returns its verdict instead of a client timeout (#1260 review
+F7): 2 × the write bound + 60s of scan/transport slack."""
+
 TIMEOUT_SOURCE_DELETE_SECONDS = 300.0
 """One ``rmtree`` of a full album folder over virtiofs, behind an
 advisory lock that may be held by a concurrent cleanup."""
@@ -510,16 +518,20 @@ def cmd_sync_file_tags(_db: object, args: argparse.Namespace) -> int:
     already matches ``_exit_code``'s default status→exit mapping, so no
     ``exit_overrides`` are needed.
 
-    Uses ``TIMEOUT_MIRROR_SECONDS``, not the 15s enqueue default: the
-    route runs a real ``beet write`` subprocess plus two per-file tag
-    scans over virtiofs before it responds.
+    The client budget must strictly EXCEED the route's own worst case —
+    two per-file tag scans over virtiofs plus a ``beet write`` bounded at
+    ``lib.beets_tag_sync.TAG_SYNC_TIMEOUT_SECONDS`` (300s) — or a slow
+    write loses the client first and the operator gets a timeout for a
+    write that landed, with no verdict (#1260 review F7). Hence a
+    dedicated budget rather than ``TIMEOUT_MIRROR_SECONDS`` (which equals
+    the write bound exactly).
     """
     return _relay(args.api_endpoint, _ApiMutation(
         path=(
             f"/api/audit/retag-divergence/album/{args.album_id}/sync-tags"
         ),
         body={"expected_mb_albumid": args.expected_mb_albumid},
-    ), timeout_seconds=TIMEOUT_MIRROR_SECONDS)
+    ), timeout_seconds=TIMEOUT_TAG_SYNC_SECONDS)
 
 
 def add_api_mutation_subparsers(

@@ -521,7 +521,7 @@ export function renderRetagDivergenceAlbumRowInner(album) {
   const hasDivergence = items.some(item => item.item_class === 'diverges'
     || item.item_class === 'file_tag_present_db_absent');
   const syncButton = hasDivergence && album.db_mb_albumid
-    ? `<button class="p-btn" data-expected="${esc(album.db_mb_albumid)}" onclick="window.syncRetagDivergenceAlbum(${album.album_id}, this)">Write tags</button>`
+    ? `<button class="p-btn" data-expected="${esc(album.db_mb_albumid)}" title="Write this album's file tags from the Beets DB (every out-of-sync field, DB→file)" onclick="window.syncRetagDivergenceAlbum(${album.album_id}, this)">Write tags</button>`
     : '';
   return `
     <div class="metric-row">

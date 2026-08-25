@@ -1272,9 +1272,12 @@ class TestMergeRedirectAtTheValidationSeam(unittest.TestCase):
         self.assertEqual(self.world.stored_release_id(), SURVIVOR)
         self.assertEqual(tag_sync.calls, [SURVIVOR])
 
-    def test_a_rekeyed_acceptance_never_syncs(self) -> None:
-        """#1260 — a valid revalidation proceeds to an import that writes
-        fresh tags itself; the seam's sync would be wasted work."""
+    def test_a_rekeyed_acceptance_also_syncs_best_effort(self) -> None:
+        """#1260 review F1 — validity is a MATCH verdict, not acceptance:
+        a valid revalidation can still be quality-rejected downstream, so
+        the seam fires for EVERY completed rekey. When an accepted import
+        does follow, it replaces the files and this write was harmless
+        waste."""
         beets = FakeBeetsDB()
         beets.set_album_ids_for_release(MERGED, [7])
         beets.set_album_ids_for_release(SURVIVOR, [])
@@ -1288,7 +1291,7 @@ class TestMergeRedirectAtTheValidationSeam(unittest.TestCase):
         )
 
         self.assertEqual(self.world.stored_release_id(), SURVIVOR)
-        self.assertEqual(tag_sync.calls, [])
+        self.assertEqual(tag_sync.calls, [SURVIVOR])
 
     def test_an_unrekeyed_rejection_never_syncs(self) -> None:
         """#1260 — no rekey, no sync: the ordinary rejection path must
@@ -1342,6 +1345,7 @@ class TestMergeRedirectAtTheValidationSeam(unittest.TestCase):
                     world.album_data.mb_release_id,
                     bv_result.valid,
                     bv_result.scenario,
+                    bv_result.detail,
                     row.get("status"),
                     tuple(
                         (log.outcome, log.beets_scenario)

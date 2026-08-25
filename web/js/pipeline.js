@@ -326,18 +326,23 @@ export async function syncRetagDivergenceAlbum(albumId, btn) {
       },
     );
     const data = await r.json();
-    if (data && data.album && container) {
+    const rerendered = Boolean(data && data.album && container);
+    if (rerendered) {
       // Re-render from the post-sync scan — the same classification the
       // census itself would produce. This destroys the old note/button
-      // nodes, so the note lookup below must happen AFTER this.
+      // nodes, so the note lookup below must happen AFTER this, and the
+      // detached `btn` must not be touched (a fresh enabled button is
+      // part of the re-render).
       container.innerHTML = renderRetagDivergenceAlbumRowInner(data.album);
     }
     if (r.ok) {
       toast(`Album #${albumId}: ${data.outcome}`);
       return;
     }
-    btn.disabled = false;
-    btn.textContent = 'Write tags';
+    if (!rerendered) {
+      btn.disabled = false;
+      btn.textContent = 'Write tags';
+    }
     const message = `${data.outcome || 'refused'}: ${data.error_message || data.error || 'tag sync refused'}`;
     const note = document.getElementById(`retag-album-note-${albumId}`);
     if (note) {

@@ -377,6 +377,35 @@ class TestSyncOutcomeBranches(unittest.TestCase):
         self.assertEqual(result.outcome, RESULT_RESIDUAL_DIVERGENCE)
         self.assertEqual(beets.file_tags[TRACK], DB_ID)
 
+    def test_unreadable_only_album_refuses_without_a_write(self) -> None:
+        """#1260 review F6 — a write cannot heal what cannot be read
+        back; an unreadable-only album refuses with files untouched
+        instead of re-launching the subprocess forever."""
+        beets = _FakeSyncBeets()
+        beets.seed_album(ALBUM_ID, DB_ID, (TRACK,), file_tag=OLD_TAG)
+        beets.unreadable.add(TRACK)
+        write = _RecordingWrite(beets)
+
+        result = _sync(beets, write)
+
+        self.assertEqual(result.outcome, RESULT_RESIDUAL_DIVERGENCE)
+        self.assertEqual(write.calls, [])
+        self.assertEqual(beets.file_tags[TRACK], OLD_TAG)
+        assert result.error_message is not None
+        self.assertIn("cannot heal", result.error_message)
+
+    def test_nonzero_exit_whose_effect_landed_is_synced(self) -> None:
+        """S2's third direction (#1260 reader suspect 3) — a nonzero exit
+        code is not evidence either: only the re-read files decide."""
+        beets = _FakeSyncBeets()
+        beets.seed_album(ALBUM_ID, DB_ID, (TRACK,), file_tag=OLD_TAG)
+        write = _RecordingWrite(beets, returncode=2)
+
+        result = _sync(beets, write)
+
+        self.assertEqual(result.outcome, RESULT_SYNCED)
+        self.assertEqual(beets.file_tags[TRACK], DB_ID)
+
     def test_unavailable_beets_authority_is_typed(self) -> None:
         def broken_factory() -> _FakeSyncBeets:
             raise FileNotFoundError("Beets DB not configured")
@@ -611,6 +640,32 @@ class TestRealBeetsWriteTagSync(unittest.TestCase):
             self.assertEqual(
                 decoy_path.stat().st_mtime_ns, decoy_mtime_before,
             )
+            # #1260 review F4 — the load-bearing safety property: `beet
+            # write` runs each item through `item.try_sync(True, False)`,
+            # storing the DB mtime alongside the file write, so this lane
+            # never arms the `beet update` copy-back hazard. The fixture
+            # seeds items with mtime unset (0); after the sync every
+            # written item's DB mtime must match its file's current mtime
+            # (beets stores whole seconds).
+            import sqlite3 as _sqlite3
+
+            with _sqlite3.connect(str(library_db)) as conn:
+                rows = conn.execute(
+                    "SELECT i.path, i.mtime FROM items i WHERE i.album_id = ?",
+                    (album_id,),
+                ).fetchall()
+            self.assertTrue(rows)
+            for raw_path, db_mtime in rows:
+                decoded = (
+                    raw_path.decode() if isinstance(raw_path, bytes)
+                    else str(raw_path)
+                )
+                track = (
+                    Path(decoded) if os.path.isabs(decoded)
+                    else root / decoded
+                )
+                self.assertGreater(db_mtime, 0)
+                self.assertEqual(int(db_mtime), int(track.stat().st_mtime))
 
     def test_a_stale_authorized_identity_matches_nothing_for_real(
         self,

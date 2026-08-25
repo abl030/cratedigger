@@ -64,7 +64,9 @@ THIRD_ID = "9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4"
 #: UUIDs) so the checkers' independent equality logic stays trivial.
 IDENTITIES = (DB_ID, OLD_TAG, THIRD_ID)
 
-WRITE_MODES = ("applies", "noop", "raise", "raise_after_apply")
+WRITE_MODES = (
+    "applies", "applies_nonzero", "noop", "raise", "raise_after_apply",
+)
 
 _REFUSAL_OUTCOMES = frozenset({
     "not_found", "identity_mismatch", "db_identity_absent",
@@ -149,7 +151,9 @@ def run_sync_world(world: SyncWorld) -> SyncRun:
         write_calls.append(query_tokens)
         if world.write_mode == "raise":
             raise RuntimeError("write exploded before touching anything")
-        if world.write_mode in ("applies", "raise_after_apply"):
+        if world.write_mode in (
+            "applies", "applies_nonzero", "raise_after_apply",
+        ):
             album_token, identity_token = query_tokens
             wanted = identity_token.split(":=", 1)[1]
             row = beets.rows.get(int(album_token.split(":=", 1)[1]))
@@ -159,7 +163,11 @@ def run_sync_world(world: SyncWorld) -> SyncRun:
                         beets.file_tags[path] = row.mb_albumid
         if world.write_mode == "raise_after_apply":
             raise RuntimeError("write exploded after the files moved")
-        return TagSyncWriteRun(returncode=0, stdout="", stderr="")
+        # "applies_nonzero" is the exit-code-is-not-evidence world in the
+        # OTHER direction: the write landed AND the subprocess reported
+        # failure (#1260 reader suspect 3).
+        returncode = 2 if world.write_mode == "applies_nonzero" else 0
+        return TagSyncWriteRun(returncode=returncode, stdout="", stderr="")
 
     lock_db = FakePipelineDB()
     lock_db.set_advisory_lock_result(world.lock_granted)
@@ -183,20 +191,24 @@ def run_sync_world(world: SyncWorld) -> SyncRun:
 
 
 def _write_authorized(world: SyncWorld) -> bool:
-    """The one world shape that authorizes a write, independently derived."""
+    """The one world shape that authorizes a write, independently derived.
+
+    Since #1260 review F6 the write additionally requires at least one
+    READABLE file that actually disagrees — an album whose only
+    non-agreeing items are unreadable refuses without launching the
+    subprocess, because a write cannot heal what cannot be read back.
+    """
     if not world.album_present:
         return False
     if world.expected not in IDENTITIES:
         return False
     if world.db_identity == "" or world.db_identity != world.expected:
         return False
-    if not world.files:
-        return False
-    converged = all(
-        not unreadable and tag == world.db_identity
+    has_readable_divergence = any(
+        not unreadable and tag != world.db_identity
         for _path, tag, unreadable in world.files
     )
-    if converged:
+    if not has_readable_divergence:
         return False
     return world.lock_granted
 

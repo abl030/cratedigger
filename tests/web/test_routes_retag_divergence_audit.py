@@ -593,7 +593,11 @@ class TestRetagDivergenceSyncTagsRoute(_FakeDbWebServerCase):
             )
 
         self.assertEqual(status, 503)
-        self.assertIn("error", payload)
+        # The exact copy pins the INTENDED clean-unavailability path — a
+        # deleted None-guard also 503s, but via the generic "Tag sync
+        # failed" except-branch with a spurious traceback (#1260 mutant
+        # runner S2/M6).
+        self.assertEqual(payload["error"], "Beets DB not available")
 
     def test_divergent_album_with_a_failing_write_is_409_residual(
         self,

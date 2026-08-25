@@ -385,15 +385,20 @@ def _sync_file_tags_after_merge_rekey(
 ) -> None:
     """Best-effort file-tag sync after a completed merge rekey (#1260).
 
-    The rekey's ``-W`` retag moved the Beets DB onto the survivor without
-    touching any installed file's tag; when the revalidated download is
-    rejected, no import follows to write them, and the stale tag sits
-    armed until the census flags it (a later ``beet update`` would copy it
-    back over the DB row). This call converges the files immediately —
-    STRICTLY outcome-inert: it runs only after the rekey has durably
-    landed, nothing consumes its result, a failure is one log line, and
-    the census/dashboard button remain the reconciliation loop for
-    whatever it could not fix. It must never raise into the importer.
+    A ``retagged`` rekey moved the Beets DB onto the survivor without
+    touching any installed file's tag; unless an accepted import later
+    replaces the files, the stale tag sits armed until the census flags it
+    (a later ``beet update`` would copy it back over the DB row). This
+    call converges the files immediately — STRICTLY outcome-inert: it runs
+    only after the rekey has durably landed, nothing consumes its result,
+    a failure is one log line, and the census/dashboard button remain the
+    reconciliation loop for whatever it could not fix. It must never raise
+    into the importer; note the blanket except also swallows a
+    cancellation raised inside the sync's own DB-lock I/O, which the
+    caller's immediately-following ``_checkpoint`` re-raises (#1260 review
+    F8). The other two ready rekey worlds need no assertion here: the
+    service re-derives them from Beets (``already_current`` →
+    ``already_synced``/``synced``, ``not_held`` → ``not_found``).
 
     ``sync_fn`` is a definition-time default: tests INJECT a replacement,
     they never patch the module binding (`.claude/rules/code-quality.md`
@@ -1022,20 +1027,32 @@ def _process_beets_validation(
         # The row and the library are both at the survivor now; the in-flight
         # entry follows so dispatch imports the identity that was rekeyed.
         album_data.mb_release_id = validation.merge.survivor
-        if not bv_result.valid:
-            # The rekey's -W retag left the installed files' tags at the
-            # merged-away id, and this rejected revalidation means no
-            # import follows to write them — converge best-effort NOW
-            # (#1260). A valid revalidation skips this: the accepted
-            # import replaces the files and writes fresh tags itself.
-            # Outcome-inert by contract: the helper never raises and
-            # nothing reads its result.
-            _sync_file_tags_after_merge_rekey(
-                ctx.pipeline_db_source._get_db(),
-                ctx.cfg,
-                validation.merge.survivor,
-                sync_fn=tag_sync_fn,
-            )
+        _checkpoint(cancellation_token)
+        # Best-effort file-tag convergence at the survivor (#1260), for
+        # EVERY completed rekey. Deliberately NOT gated on
+        # ``bv_result.valid``: validity is a Beets MATCH verdict, and a
+        # valid revalidation can still be quality-REJECTED downstream
+        # (``full_pipeline_decision_from_evidence`` — the -W cohort is by
+        # construction competing with an installed copy, where rejection
+        # is likely), in which case no import replaces the files. Only an
+        # ACCEPTED import rewrites tags itself, and this seam cannot know
+        # acceptance — so the write is wasted-but-harmless when acceptance
+        # follows, and the heal otherwise (#1260 review F1). The sync
+        # asserts nothing about the file-tag world: an ``already_current``
+        # or ``not_held`` retag resolves inside the service to
+        # ``already_synced``/``not_found`` from Beets itself (review F2).
+        # Outcome-inert by contract: the helper never raises and nothing
+        # reads its result. It swallows even a cancellation raised inside
+        # its DB-lock I/O — benign ONLY because ``_checkpoint`` on the
+        # next line re-raises; keep that pairing if this call ever moves
+        # (review F8). The checkpoint ABOVE keeps an already-cancelled job
+        # from spending the write budget first.
+        _sync_file_tags_after_merge_rekey(
+            ctx.pipeline_db_source._get_db(),
+            ctx.cfg,
+            validation.merge.survivor,
+            sync_fn=tag_sync_fn,
+        )
     _checkpoint(cancellation_token)
     usernames_pre = {f.username for f in album_data.files if f.username}
     bv_result.soulseek_username = (

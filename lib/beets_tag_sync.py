@@ -14,8 +14,32 @@ operator decision is quoted there), with one canonical execution path and
 three callers: the dashboard button's web route, its ``pipeline-cli``
 HTTP adapter, and the merge seam itself (best-effort, after the rekey has
 durably landed — ``lib/download_validation.py``). It writes file TAGS only:
-``beet write`` never moves a file, and the identity it writes is always the
-one the Beets DB already holds — this lane never chooses an identity.
+``beet write`` never moves a file, and this lane never chooses a value —
+it propagates what the Beets DB already holds. Honestly scoped: ``beet
+write`` diffs and writes EVERY out-of-sync media tag field for the matched
+items (``library.Item._media_tag_fields``), not only ``mb_albumid`` — the
+DB is authority on all of them after import/retag, and an operator's
+out-of-band file-tag edit that never reached the DB is overwritten
+(#1260 review F9).
+
+Two measured properties of the pinned beets runtime (#1260 review F4/F5):
+
+* ``beet write`` runs each item through ``item.try_sync(True, False)``,
+  which stores the item's DB ``mtime`` alongside the file write — so a
+  sync performed by this lane does NOT arm the ``beet update`` copy-back
+  hazard the census module documents; the written file reads as current,
+  not modified. Pinned against the real subprocess in
+  ``tests/test_beets_tag_sync.py``.
+* A tag write normally lands inside existing tag padding: measured across
+  flac/opus/mp3 with both a same-length identity swap and eight added
+  fields, file SIZE was byte-identical in all six probes — so evidence
+  fingerprints (``lib/quality_evidence.py``, size-based) are normally
+  unaffected. The residual: a file with no padding headroom forces a
+  container rewrite and a size change, which makes every fingerprint
+  witness (merge-rekey adoption, HAVE staleness, sidecar backfill, world
+  audit) fail CLOSED — an operator-visible refusal, never silent
+  corruption. Recorded in ``lib/merge_rekey_service.py``'s witness
+  docstring, whose lane enumeration this module extends.
 
 Design, deliberately parallel to ``lib/beets_retag.py``:
 
@@ -325,7 +349,7 @@ def sync_album_file_tags(
             album_id=album_id,
             message=f"no Beets album with id {album_id}",
         )
-    db_identity = getattr(row, "mb_albumid", "")
+    db_identity = row.mb_albumid
     if not db_identity:
         return _refusal(
             RESULT_DB_IDENTITY_ABSENT,
@@ -365,7 +389,29 @@ def sync_album_file_tags(
             db_mb_albumid=db_identity,
             album=pre,
         )
+    if not any(item.item_class == "diverges" for item in pre.items):
+        # Every non-agreeing item is unreadable (or a refused path) — a
+        # write cannot heal what cannot be read back, so launching the
+        # subprocess would only re-fail forever (#1260 review F6). The
+        # card's button is gated the same way client-side; this is the
+        # seam's own gate. Files untouched.
+        return _refusal(
+            RESULT_RESIDUAL_DIVERGENCE,
+            album_id=album_id,
+            db_mb_albumid=db_identity,
+            album=pre,
+            message=(
+                "no readable file tag disagrees; the non-agreeing items "
+                "are unreadable or refused, and a write cannot heal them"
+            ),
+        )
 
+    # See docs/advisory-locks.md. RELEASE on the one identity this write
+    # propagates; non-blocking, held across write+verify. Callers under
+    # the importer already hold IMPORT outer (the merge seam's own
+    # RELEASE pair is released before this runs), preserving the
+    # documented IMPORT → RELEASE order; the web route acquires it on the
+    # server's thread-local session with no IMPORT held.
     with lock_db.advisory_lock(
         ADVISORY_LOCK_NAMESPACE_RELEASE,
         release_id_to_lock_key(identity.release_id),
