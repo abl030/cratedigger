@@ -105,3 +105,4 @@
 - [#1226 suite wall clock](project_1226_suite_wall_clock.md) — tests never shared a nixpkgs instance across lib.nixosSystem calls; pole-bound became throughput-bound
 - [#1229 suite residuals CLOSED](project_1229_suite_residuals.md) — `nix develop` hits Nix's eval cache where `nix-shell` cannot; LPT queue ordering; gate 109s→93s
 - [Alert blast radius](feedback_alert_blast_radius.md) — never fix a silent-alert path by paging unconditionally; enumerate cases, fix only the broken one
+- [Poll gates at short intervals](feedback_poll_gates_short_intervals.md) — doc1 gates run ~2 min now; 60-90s polls, never long sleeps
