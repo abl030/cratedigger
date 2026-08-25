@@ -60,30 +60,50 @@ async function flushMicrotasks(times = 30) {
 }
 
 /**
- * DOM stand-in for the merge-rekey drift row (#1089): `pipeline-content`
- * (read by `loadPipelineDashboard`'s loading/failure states), `toast`, and
- * one `drift-note-<id>` element — the exact three ids
- * `mergeRekeyRequest`/`loadPipelineDashboard` look up by id.
+ * Node-REPLACEMENT DOM stand-in for the merge-rekey drift row (#1089,
+ * re-modeled for #1266 item 2): the `drift-note-<id>` element LIVES
+ * inside `#pipeline-content`, and `loadPipelineDashboard()` rewrites
+ * that container's `innerHTML` — so a dashboard reload genuinely
+ * REPLACES the note node. Assigning `pipelineContent.innerHTML` here
+ * swaps which note object `getElementById` returns, exactly like
+ * `installReplacingRetagDom` below, so a handler that reloads the
+ * dashboard and THEN writes a note it captured earlier goes RED (the
+ * #1264 M26 / #1266 M4 stale-node shape). The shipped handler is
+ * correct by write ORDERING — its only reloading path returns without
+ * touching the note — and that ordering is now what these tests pin.
  */
 function installDriftDom(requestId) {
-  const pipelineContent = { innerHTML: '' };
+  const preNote = { textContent: '', className: '' };
+  const postNote = { textContent: '', className: '' };
   const toast = { textContent: '', className: '', style: { display: 'none' } };
-  const note = { textContent: '', className: '' };
-  const elements = new Map([
-    ['pipeline-content', pipelineContent],
-    ['toast', toast],
-    [`drift-note-${requestId}`, note],
-  ]);
+  let reloaded = false;
+  const pipelineContent = {
+    _html: '',
+    get innerHTML() { return this._html; },
+    set innerHTML(value) { this._html = value; reloaded = true; },
+  };
   globalThis.document = {
     getElementById(id) {
-      return elements.has(id) ? elements.get(id) : null;
+      if (id === 'pipeline-content') return pipelineContent;
+      if (id === `drift-note-${requestId}`) {
+        return reloaded ? postNote : preNote;
+      }
+      if (id === 'toast') return toast;
+      return null;
     },
   };
   globalThis.setTimeout = (fn) => {
     fn();
     return 0;
   };
-  return { pipelineContent, toast, note };
+  return {
+    pipelineContent,
+    preNote,
+    postNote,
+    toast,
+    isReloaded: () => reloaded,
+    visibleNote: () => (reloaded ? postNote : preNote),
+  };
 }
 
 console.log('renderPipelineNav() has operational views only');
@@ -391,11 +411,14 @@ console.log('mergeRekeyRequest() success path posts, toasts, and reloads the das
   assertEqual(calls[0].options.body, '{}', 'sends an empty JSON body — no request payload');
   assert(calls.some(c => c.url === '/api/pipeline/dashboard'),
     'success reloads the dashboard so the healed row disappears');
+  assert(dom.isReloaded(),
+    'the reload really rewrote #pipeline-content — the note nodes were replaced');
   assertEqual(dom.toast.textContent,
     'Request #8792 rekeyed to 9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4',
     'toasts the exact survivor id');
   assertEqual(dom.toast.className, 'toast', 'success toast is not an error');
-  assertEqual(dom.note.textContent, '', 'success never writes the refusal note');
+  assertEqual(dom.preNote.textContent, '', 'success never writes the pre-reload note');
+  assertEqual(dom.postNote.textContent, '', 'success never writes the post-reload note');
   assertEqual(btn.textContent, 'Rekeying...',
     'success leaves the disabled mid-flight label — the dashboard reload replaces the row entirely');
 }
@@ -426,11 +449,11 @@ console.log('mergeRekeyRequest() refusal path re-arms the button and writes the 
   assert(!calls.includes('/api/pipeline/dashboard'), 'a refusal never reloads the dashboard');
   assertEqual(btn.disabled, false, 'the button re-arms for a retry');
   assertEqual(btn.textContent, 'Follow MB merge', 'the button label resets');
-  assertEqual(dom.note.textContent,
+  assertEqual(dom.visibleNote().textContent,
     'not_merged: MusicBrainz names no merge survivor for the stored id; '
     + 'this request has not been merged',
-    'the inline note names the exact outcome and message');
-  assertEqual(dom.note.className, 'drift-row-note metric-bad', 'the inline note uses the bad tone');
+    'the VISIBLE inline note names the exact outcome and message');
+  assertEqual(dom.visibleNote().className, 'drift-row-note metric-bad', 'the visible note uses the bad tone');
   assertEqual(dom.toast.className, 'toast error', 'a refusal toast is an error');
 }
 
@@ -446,9 +469,9 @@ console.log('mergeRekeyRequest() network-error path re-arms the button with a ge
 
   assertEqual(btn.disabled, false, 'the button re-arms after a network failure');
   assertEqual(btn.textContent, 'Follow MB merge', 'the button label resets');
-  assertEqual(dom.note.textContent, 'Merge-rekey request failed',
-    'the inline note falls back to a generic message with no response to read');
-  assertEqual(dom.note.className, 'drift-row-note metric-bad', 'the inline note uses the bad tone');
+  assertEqual(dom.visibleNote().textContent, 'Merge-rekey request failed',
+    'the VISIBLE inline note falls back to a generic message with no response to read');
+  assertEqual(dom.visibleNote().className, 'drift-row-note metric-bad', 'the visible note uses the bad tone');
   assertEqual(dom.toast.className, 'toast error', 'a network failure toast is an error');
 }
 
@@ -464,41 +487,64 @@ console.log('mergeRekeyRequest() refusal note falls back to the raw error field 
 
   await mergeRekeyRequest(42, btn);
 
-  assertEqual(dom.note.textContent, 'rekey_refused: route-level error text',
+  assertEqual(dom.visibleNote().textContent, 'rekey_refused: route-level error text',
     'falls back to the route-level "error" field when error_message is absent');
 }
 
 // --- issue #1142: per-album retag-divergence recheck ---
 
 /**
- * DOM stand-in for one retag-divergence album row: the id'd container
- * `recheckRetagDivergenceAlbum` patches in place, its inline note slot,
- * and `toast` — mirrors `installDriftDom` above.
+ * Node-REPLACEMENT DOM stand-in for one retag-divergence album row
+ * (#1266 item 2, generalising #1264's S1 helper): assigning
+ * `container.innerHTML` swaps which note object `getElementById`
+ * returns, so a handler that captures the note BEFORE re-rendering
+ * writes to a detached node and the assertions catch it — the exact bug
+ * shape a fixed-map DOM (one note object forever) can never see.
+ * `visibleNote()` is "whatever note node the page shows NOW"; assert
+ * refusal copy through it so a future re-render-then-stale-write
+ * regression goes RED. Shared by the recheck and sync handler tests;
+ * `mergeRekeyRequest`'s inline drift DOM above stays a fixed map on
+ * purpose — that handler performs no in-place container re-render, so
+ * there is no node replacement to model.
+ * @param {number} albumId
  */
-function installRetagAlbumDom(albumId) {
-  const container = { innerHTML: '' };
+function installReplacingRetagDom(albumId) {
+  const preNote = { textContent: '', className: '' };
+  const postNote = { textContent: '', className: '' };
   const toast = { textContent: '', className: '', style: { display: 'none' } };
-  const note = { textContent: '', className: '' };
-  const elements = new Map([
-    [`retag-album-${albumId}`, container],
-    ['toast', toast],
-    [`retag-album-note-${albumId}`, note],
-  ]);
+  let rerendered = false;
+  const container = {
+    _html: '',
+    get innerHTML() { return this._html; },
+    set innerHTML(value) { this._html = value; rerendered = true; },
+  };
   globalThis.document = {
     getElementById(id) {
-      return elements.has(id) ? elements.get(id) : null;
+      if (id === `retag-album-${albumId}`) return container;
+      if (id === `retag-album-note-${albumId}`) {
+        return rerendered ? postNote : preNote;
+      }
+      if (id === 'toast') return toast;
+      return null;
     },
   };
   globalThis.setTimeout = (fn) => {
     fn();
     return 0;
   };
-  return { container, toast, note };
+  return {
+    container,
+    preNote,
+    postNote,
+    toast,
+    isRerendered: () => rerendered,
+    visibleNote: () => (rerendered ? postNote : preNote),
+  };
 }
 
 console.log('recheckRetagDivergenceAlbum() success path GETs, patches the row in place, and toasts');
 {
-  const dom = installRetagAlbumDom(6612);
+  const dom = installReplacingRetagDom(6612);
   const btn = { disabled: false, textContent: 'Recheck' };
   const calls = [];
   globalThis.fetch = async (url, options) => {
@@ -524,12 +570,13 @@ console.log('recheckRetagDivergenceAlbum() success path GETs, patches the row in
     'patched row keeps its own recheck button wired for a further recheck');
   assertEqual(dom.toast.textContent, 'Album #6612 rechecked: agrees', 'toasts the fresh result');
   assertEqual(dom.toast.className, 'toast', 'success toast is not an error');
-  assertEqual(dom.note.textContent, '', 'success never writes the refusal note');
+  assertEqual(dom.preNote.textContent, '', 'success never writes the pre-render note');
+  assertEqual(dom.postNote.textContent, '', 'success never writes the post-render note');
 }
 
 console.log('recheckRetagDivergenceAlbum() N2 (fresh review) — the patched row shows fresh non-agreeing item detail');
 {
-  const dom = installRetagAlbumDom(6612);
+  const dom = installReplacingRetagDom(6612);
   const btn = { disabled: false, textContent: 'Recheck' };
   globalThis.fetch = async () => ({
     ok: true,
@@ -564,7 +611,7 @@ console.log('recheckRetagDivergenceAlbum() N2 (fresh review) — the patched row
 
 console.log('recheckRetagDivergenceAlbum() never reloads the whole dashboard on success');
 {
-  installRetagAlbumDom(6612);
+  installReplacingRetagDom(6612);
   const btn = { disabled: false, textContent: 'Recheck' };
   const calls = [];
   globalThis.fetch = async (url) => {
@@ -586,7 +633,7 @@ console.log('recheckRetagDivergenceAlbum() never reloads the whole dashboard on 
 
 console.log('recheckRetagDivergenceAlbum() not-found path re-arms the button and writes the inline note');
 {
-  const dom = installRetagAlbumDom(999);
+  const dom = installReplacingRetagDom(999);
   const btn = { disabled: true, textContent: 'Rechecking...' };
   globalThis.fetch = async () => ({
     ok: false,
@@ -598,15 +645,16 @@ console.log('recheckRetagDivergenceAlbum() not-found path re-arms the button and
 
   assertEqual(btn.disabled, false, 'the button re-arms for a retry');
   assertEqual(btn.textContent, 'Recheck', 'the button label resets');
-  assertEqual(dom.note.textContent, 'No Beets album with id 999',
-    'the inline note names the exact error');
-  assertEqual(dom.note.className, 'drift-row-note metric-bad', 'the inline note uses the bad tone');
+  assertEqual(dom.visibleNote().textContent, 'No Beets album with id 999',
+    'the VISIBLE inline note names the exact error');
+  assertEqual(dom.visibleNote().className, 'drift-row-note metric-bad', 'the visible note uses the bad tone');
+  assertEqual(dom.postNote.textContent, '', 'nothing is written to the unrendered post-render note');
   assertEqual(dom.toast.className, 'toast error', 'a refusal toast is an error');
 }
 
 console.log('recheckRetagDivergenceAlbum() network-error path re-arms the button with a generic note');
 {
-  const dom = installRetagAlbumDom(6612);
+  const dom = installReplacingRetagDom(6612);
   const btn = { disabled: true, textContent: 'Rechecking...' };
   globalThis.fetch = async () => {
     throw new TypeError('network down');
@@ -616,52 +664,16 @@ console.log('recheckRetagDivergenceAlbum() network-error path re-arms the button
 
   assertEqual(btn.disabled, false, 'the button re-arms after a network failure');
   assertEqual(btn.textContent, 'Recheck', 'the button label resets');
-  assertEqual(dom.note.textContent, 'Recheck request failed',
-    'the inline note falls back to a generic message with no response to read');
+  assertEqual(dom.visibleNote().textContent, 'Recheck request failed',
+    'the VISIBLE inline note falls back to a generic message with no response to read');
   assertEqual(dom.toast.className, 'toast error', 'a network failure toast is an error');
-}
-
-/**
- * Sync-specific DOM: models node REPLACEMENT on re-render (#1260 review
- * S1/M26). `container.innerHTML = …` swaps which note object
- * `getElementById` returns, so a handler that captures the note BEFORE
- * re-rendering writes to a detached node and the post-render assertion
- * catches it — the exact bug shape the recheck-style fixed-map DOM
- * cannot see.
- * @param {number} albumId
- */
-function installSyncAlbumDom(albumId) {
-  const preNote = { textContent: '', className: '' };
-  const postNote = { textContent: '', className: '' };
-  const toast = { textContent: '', className: '', style: { display: 'none' } };
-  let rerendered = false;
-  const container = {
-    _html: '',
-    get innerHTML() { return this._html; },
-    set innerHTML(value) { this._html = value; rerendered = true; },
-  };
-  globalThis.document = {
-    getElementById(id) {
-      if (id === `retag-album-${albumId}`) return container;
-      if (id === `retag-album-note-${albumId}`) {
-        return rerendered ? postNote : preNote;
-      }
-      if (id === 'toast') return toast;
-      return null;
-    },
-  };
-  globalThis.setTimeout = (fn) => {
-    fn();
-    return 0;
-  };
-  return { container, preNote, postNote, toast, isRerendered: () => rerendered };
 }
 
 const SYNC_DB_ID = '26693e58-02c0-4bb1-b66f-f0f44f8a234d';
 
 console.log('syncRetagDivergenceAlbum() POSTs the compare-and-set body and patches the row on success');
 {
-  const dom = installSyncAlbumDom(16948);
+  const dom = installReplacingRetagDom(16948);
   const btn = {
     disabled: false, textContent: 'Write tags',
     dataset: { expected: SYNC_DB_ID },
@@ -701,7 +713,7 @@ console.log('syncRetagDivergenceAlbum() POSTs the compare-and-set body and patch
 
 console.log('syncRetagDivergenceAlbum() residual refusal re-renders AND writes the POST-re-render note');
 {
-  const dom = installSyncAlbumDom(16948);
+  const dom = installReplacingRetagDom(16948);
   const btn = {
     disabled: false, textContent: 'Write tags',
     dataset: { expected: SYNC_DB_ID },
@@ -741,7 +753,7 @@ console.log('syncRetagDivergenceAlbum() residual refusal re-renders AND writes t
 
 console.log('syncRetagDivergenceAlbum() album-less refusal re-arms the still-attached button');
 {
-  const dom = installSyncAlbumDom(42);
+  const dom = installReplacingRetagDom(42);
   const btn = {
     disabled: false, textContent: 'Write tags',
     dataset: { expected: SYNC_DB_ID },
@@ -762,14 +774,16 @@ console.log('syncRetagDivergenceAlbum() album-less refusal re-arms the still-att
   assert(!dom.isRerendered(), 'no album payload, no re-render');
   assertEqual(btn.disabled, false, 'the still-attached button re-arms');
   assertEqual(btn.textContent, 'Write tags', 'the button label resets');
-  assertContains(dom.preNote.textContent, 'identity_mismatch',
-    'the note names the refusal outcome');
+  assertContains(dom.visibleNote().textContent, 'identity_mismatch',
+    'the visible note names the refusal outcome');
+  assertEqual(dom.postNote.textContent, '',
+    'nothing is written to the unrendered post-render note');
   assertEqual(dom.toast.className, 'toast error', 'a refusal toast is an error');
 }
 
 console.log('syncRetagDivergenceAlbum() network-error path re-arms the button with a generic note');
 {
-  const dom = installSyncAlbumDom(16948);
+  const dom = installReplacingRetagDom(16948);
   const btn = {
     disabled: true, textContent: 'Writing tags...',
     dataset: { expected: SYNC_DB_ID },

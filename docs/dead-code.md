@@ -31,10 +31,15 @@ The whitelist at `tools/vulture/whitelist.py` masks the known aggregate
 false positives on main (msgspec Struct fields, beets ImportSession overrides,
 route handler dispatch, SQL DictRow attribute access). The default command
 regenerates Vulture's raw whitelist at a fixed confidence of 60 and requires
-the committed non-comment lines to match that output exactly. A deleted,
-renamed, moved, or additional candidate therefore makes the baseline stale;
-this also prevents a same-name candidate elsewhere from hiding behind an old
-name-based Vulture exception.
+the committed entries to match that output as a sorted MULTISET over
+identifier + kind + file (duplicate occurrences are counted) — line numbers in the trailing `(path:line)` comments are NOT
+compared (#1266 item 1: an edit above a whitelisted site used to break the
+gate with a pure line-number delta; a within-file move now passes). A
+deleted, renamed, additional, or cross-FILE-moved candidate still makes the
+baseline stale; the retained file attribution is what prevents a same-name
+candidate elsewhere from hiding behind an old name-based Vulture exception.
+The line NUMBERS in those comments are human-facing only and refresh
+whenever the baseline is regenerated.
 `--confidence` changes only the ordinary new-candidate scan; `--baseline`
 deliberately omits both the committed whitelist and this freshness check.
 
@@ -53,7 +58,9 @@ forever. Ruff deliberately has the opposite scope: tests are first-class code
 and must meet the same lint floor. A production field consumed only through
 serialization, framework reflection, or an external client therefore needs a
 narrow entry in
-`tools/vulture/whitelist.py` with its reason on the same line. Intentional
+`tools/vulture/whitelist.py` with its reason on a comment line ABOVE it —
+a same-line reason changes the entry's compared text and breaks the
+freshness comparison. Intentional
 unused imports use an explicit export (`__all__` or a redundant alias) at that
 import, never a whole-file ignore; this keeps every module ratcheted against
 new F401 debt.
@@ -86,8 +93,7 @@ The mechanic is simple but easy to miss: vulture's whitelist contains an entry p
 **Workflow per deletion PR:**
 1. Make the deletion + delete the tests that exercised it.
 2. Regenerate the whitelist with the roots from
-   `tools/production_python_sources.txt` (the command above), then prepend the
-   header from the previous version.
+   `tools/production_python_sources.txt` (the command above).
 3. Diff the whitelist (`git diff tools/vulture/whitelist.py`). New entries are cascading orphans you exposed.
 4. For each new entry, decide:
    - **Fold into this PR** if the orphan is small, contained, and the test cleanup is bounded (~50 LOC). Best when the orphan is structurally tied to the deletion (`strip_short_tokens` was the canonical example — its body matched what only the deleted callers needed).
