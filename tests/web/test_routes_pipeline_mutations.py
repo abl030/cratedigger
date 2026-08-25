@@ -168,6 +168,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         "status", "id", "current_status", "processing_owner",
     }
     UPDATE_REQUIRED_FIELDS: ClassVar = {"status", "id", "new_status"}
+    MARK_INCOMPLETE_REQUIRED_FIELDS: ClassVar = {"status", "id"}
     UPGRADE_REQUIRED_FIELDS: ClassVar = {
         "status", "id", "min_bitrate", "search_filetype_override",
     }
@@ -838,6 +839,76 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.UPDATE_REQUIRED_FIELDS,
                                 "pipeline update response")
+
+    def test_mark_incomplete_contract(self):
+        """POST /api/pipeline/mark-incomplete (issue #1241) — set, clear,
+        idempotent no-ops, and the frontend-consumed field set."""
+        self.db.seed_request(make_request_row(
+            id=700, status="imported", mb_release_id="mark-mbid-700",
+        ))
+
+        status, data = self._post(
+            "/api/pipeline/mark-incomplete", {"id": 700, "marked": True},
+        )
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.MARK_INCOMPLETE_REQUIRED_FIELDS,
+                                "pipeline mark-incomplete response")
+        self.assertEqual(data["status"], "marked")
+        row = self.db.get_request(700)
+        assert row is not None
+        self.assertIsNotNone(row["marked_incomplete_at"])
+
+        status, data = self._post(
+            "/api/pipeline/mark-incomplete", {"id": 700, "marked": True},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "already_marked")
+
+        status, data = self._post(
+            "/api/pipeline/mark-incomplete", {"id": 700, "marked": False},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "cleared")
+        row = self.db.get_request(700)
+        assert row is not None
+        self.assertIsNone(row["marked_incomplete_at"])
+
+        status, data = self._post(
+            "/api/pipeline/mark-incomplete", {"id": 700, "marked": False},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "already_clear")
+
+    def test_mark_incomplete_unknown_request_is_404(self):
+        status, _data = self._post(
+            "/api/pipeline/mark-incomplete", {"id": 999888, "marked": True},
+        )
+        self.assertEqual(status, 404)
+
+    def test_mark_incomplete_replaced_row_is_409(self):
+        self.db.seed_request(make_request_row(
+            id=701, status="replaced", mb_release_id="mark-mbid-701",
+        ))
+        status, _data = self._post(
+            "/api/pipeline/mark-incomplete", {"id": 701, "marked": True},
+        )
+        self.assertEqual(status, 409)
+        row = self.db.get_request(701)
+        assert row is not None
+        self.assertIsNone(row["marked_incomplete_at"])
+
+    def test_mark_incomplete_rejects_non_boolean_marked(self):
+        """``marked`` is strict — a JSON string must not coerce (#1241)."""
+        self.db.seed_request(make_request_row(
+            id=702, status="imported", mb_release_id="mark-mbid-702",
+        ))
+        status, _data = self._post(
+            "/api/pipeline/mark-incomplete", {"id": 702, "marked": "yes"},
+        )
+        self.assertEqual(status, 400)
+        row = self.db.get_request(702)
+        assert row is not None
+        self.assertIsNone(row["marked_incomplete_at"])
 
     def test_pipeline_update_same_status_is_idempotent_for_operator_statuses(self):
         for index, request_status in enumerate(

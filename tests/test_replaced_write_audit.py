@@ -237,19 +237,19 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "values use one typed JSONB record parameter, and any processing owner "
         "causes the guarded update to report a conflict"
     ),
-    ("lib/pipeline_db/requests.py", 1617, "890d0f2e35ffd73c"): (
+    ("lib/pipeline_db/requests.py", 1678, "890d0f2e35ffd73c"): (
         "optional LIMIT is normalized through int before interpolation "
         "and the base wanted query is static"
     ),
-    ("lib/pipeline_db/requests.py", 1647, "bf514491f423d3be"): (
+    ("lib/pipeline_db/requests.py", 1708, "bf514491f423d3be"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder "
         "over the fixed shared presentation projection"
     ),
-    ("lib/pipeline_db/requests.py", 1676, "93f3043b99b3ec7c"): (
+    ("lib/pipeline_db/requests.py", 1737, "93f3043b99b3ec7c"): (
         "request search composes only one fixed optional status predicate over "
         "the fixed presentation projection and value placeholders"
     ),
-    ("lib/pipeline_db/requests.py", 1815, "724128efb25b8439"): (
+    ("lib/pipeline_db/requests.py", 1876, "724128efb25b8439"): (
         "artist request lookup uses the fixed presentation and capture/evidence "
         "projections with a static UUID-aware fallback predicate; the Library "
         "contract no longer selects structured CD proof while the pointed "
@@ -261,7 +261,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "unchanged throughout, so the fingerprint is unaffected by either "
         "change"
     ),
-    ("lib/pipeline_db/requests.py", 1834, "f59ded429883f2ec"): (
+    ("lib/pipeline_db/requests.py", 1895, "f59ded429883f2ec"): (
         "artist-name fallback uses the fixed presentation and capture/evidence "
         "projections with one escaped value placeholder; the Library contract "
         "no longer selects structured CD proof while the pointed current-evidence "
@@ -271,7 +271,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "added ``'local_import'`` to the same list — the interpolation site is "
         "unchanged throughout, so the fingerprint is unaffected by either change"
     ),
-    ("lib/pipeline_db/requests.py", 1865, "fdbd2821ab3cbb5a"): (
+    ("lib/pipeline_db/requests.py", 1926, "fdbd2821ab3cbb5a"): (
         "attempt kind is validated against the fixed retry-counter vocabulary "
         "and every value remains a direct placeholder; an attached processing "
         "owner makes the compare-and-set a zero-write conflict"
@@ -345,28 +345,28 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "operator idempotence uses a no-op CAS against the observed status "
         "and refuses an active processing owner"
     ),
-    ("lib/pipeline_db/requests.py", 1066, "94c8caa29b5f3093"): (
+    ("lib/pipeline_db/requests.py", 1127, "94c8caa29b5f3093"): (
         "ordinary typed transitions CAS the source status selected by the DAG "
         "and refuse an active processing owner"
     ),
-    ("lib/pipeline_db/requests.py", 1165, "cd2c8644115e82f6"): (
+    ("lib/pipeline_db/requests.py", 1226, "cd2c8644115e82f6"): (
         "typed imported transition CASes status with rescue audit atomically "
         "and refuses an active processing owner"
     ),
-    ("lib/pipeline_db/requests.py", 1303, "745b1dc37147f0f5"): (
+    ("lib/pipeline_db/requests.py", 1364, "745b1dc37147f0f5"): (
         "typed reset-to-wanted transition CASes its captured source status; "
         "the Bad Rip priority timestamp is a static CASE update in the same CAS, "
         "and an active processing owner is refused"
     ),
-    ("lib/pipeline_db/requests.py", 1377, "3490139cad98e85e"): (
+    ("lib/pipeline_db/requests.py", 1438, "3490139cad98e85e"): (
         "automatic recovery accepts only downloading as its exact source "
         "without widening processing authority"
     ),
-    ("lib/pipeline_db/requests.py", 1422, "a0853139ff6dd9ad"): (
+    ("lib/pipeline_db/requests.py", 1483, "a0853139ff6dd9ad"): (
         "typed download claim accepts only the explicit wanted source status "
         "and installs one immutable active download state"
     ),
-    ("lib/pipeline_db/requests.py", 1458, "34dd9d8beb763829"): (
+    ("lib/pipeline_db/requests.py", 1519, "34dd9d8beb763829"): (
         "plan-aware download claim uses an exact wanted source predicate "
         "plus exact persisted-plan witnesses"
     ),

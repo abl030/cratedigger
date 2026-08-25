@@ -210,6 +210,42 @@ export async function mergeRekeyRequest(requestId, btn) {
 }
 
 /**
+ * Operator action (#1241): toggle the incomplete mark on a request from
+ * the Library Completeness card. Marked, the quality decider disregards
+ * the installed copy for any candidate beets proves whole; the mark
+ * clears automatically when such a candidate terminally imports.
+ * @param {number} requestId
+ * @param {boolean} marked - true to set the mark, false to clear it
+ * @param {HTMLButtonElement} btn
+ */
+export async function toggleMarkIncomplete(requestId, marked, btn) {
+  btn.disabled = true;
+  btn.textContent = marked ? 'Marking...' : 'Clearing...';
+  try {
+    const r = await fetch(`${API}/api/pipeline/mark-incomplete`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: requestId, marked}),
+    });
+    const data = await r.json();
+    if (r.ok) {
+      toast(marked
+        ? `Request #${requestId} marked incomplete — the next complete candidate replaces it`
+        : `Request #${requestId} incomplete mark cleared`);
+      void loadPipelineDashboard();
+      return;
+    }
+    btn.disabled = false;
+    btn.textContent = marked ? 'Mark incomplete' : 'Clear incomplete mark';
+    toast(`mark-incomplete refused: ${data.error || r.status}`, true);
+  } catch (_e) {
+    btn.disabled = false;
+    btn.textContent = marked ? 'Mark incomplete' : 'Clear incomplete mark';
+    toast('mark-incomplete request failed', true);
+  }
+}
+
+/**
  * Operator action (#1142): a cheap, explicit per-album retag-divergence
  * recheck. Called from the "Beets DB ↔ File Tags Drift" card's
  * "Recheck" button (`pipeline_dashboard.js::renderRetagDivergenceAlbumRowInner`).

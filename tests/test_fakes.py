@@ -339,6 +339,49 @@ class TestFakePipelineDB(unittest.TestCase):
         assert loaded is not None
         self.assertEqual(loaded.mb_release_id, "mb-dl-fk-1")
 
+    def test_set_marked_incomplete_mirrors_real_outcomes(self):
+        """Issue #1241: the fake's outcome vocabulary and idempotence must
+        mirror ``PipelineDB.set_marked_incomplete`` (real-PG round-trip in
+        tests/test_pipeline_db.py::TestSetMarkedIncompleteRoundTrip)."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="imported"))
+        db.seed_request(make_request_row(id=43, status="replaced"))
+
+        self.assertEqual(db.set_marked_incomplete(999, marked=True), "not_found")
+        self.assertEqual(db.set_marked_incomplete(43, marked=True), "replaced")
+
+        self.assertEqual(db.set_marked_incomplete(42, marked=True), "marked")
+        row = db.get_request(42)
+        assert row is not None
+        stamp = row["marked_incomplete_at"]
+        self.assertIsNotNone(stamp)
+        self.assertEqual(
+            db.set_marked_incomplete(42, marked=True), "already_marked"
+        )
+        row = db.get_request(42)
+        assert row is not None
+        self.assertEqual(row["marked_incomplete_at"], stamp)
+
+        self.assertEqual(db.set_marked_incomplete(42, marked=False), "cleared")
+        row = db.get_request(42)
+        assert row is not None
+        self.assertIsNone(row["marked_incomplete_at"])
+        self.assertEqual(
+            db.set_marked_incomplete(42, marked=False), "already_clear"
+        )
+
+    def test_request_marked_incomplete_mirrors_the_narrow_read(self):
+        """Issue #1241: the dispatch decision path's scalar read — a
+        missing row reads as unmarked, never an error."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="imported"))
+        self.assertFalse(db.request_marked_incomplete(42))
+        self.assertFalse(db.request_marked_incomplete(999))
+        db.set_marked_incomplete(42, marked=True)
+        self.assertTrue(db.request_marked_incomplete(42))
+        db.set_marked_incomplete(42, marked=False)
+        self.assertFalse(db.request_marked_incomplete(42))
+
     def test_get_latest_download_log_candidate_evidence_id(self):
         """Issue #813 tooling tier: replaying the request's real last
         candidate needs the newest download_log candidate_evidence_id."""

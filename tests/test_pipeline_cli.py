@@ -2730,6 +2730,125 @@ class TestCmdStatusShowsDownloading(unittest.TestCase):
         self.assertEqual(len(ads["files"]), 1)
 
 
+class TestCmdMarkIncomplete(unittest.TestCase):
+    """Exit-code mapping for cmd_mark_incomplete (issue #1241).
+
+    The service (tests/test_incomplete_mark_service.py) owns branch
+    coverage; this checks only the CLI wrapper's outcome → exit-code map.
+    """
+
+    @patch("builtins.print")
+    def test_mark_and_clear_exit_zero(self, _mock_print):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="imported", artist_name="A", album_title="B",
+        ))
+        self.assertEqual(
+            pipeline_cli.cmd_mark_incomplete(
+                db, MagicMock(id=1, clear=False)),
+            0,
+        )
+        row = db.get_request(1)
+        assert row is not None
+        self.assertIsNotNone(row["marked_incomplete_at"])
+        self.assertEqual(
+            pipeline_cli.cmd_mark_incomplete(
+                db, MagicMock(id=1, clear=True)),
+            0,
+        )
+        row = db.get_request(1)
+        assert row is not None
+        self.assertIsNone(row["marked_incomplete_at"])
+
+    @patch("builtins.print")
+    def test_idempotent_no_ops_exit_zero(self, _mock_print):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="imported"))
+        self.assertEqual(
+            pipeline_cli.cmd_mark_incomplete(
+                db, MagicMock(id=1, clear=True)),
+            0,
+        )
+        pipeline_cli.cmd_mark_incomplete(
+            db, MagicMock(id=1, clear=False))
+        self.assertEqual(
+            pipeline_cli.cmd_mark_incomplete(
+                db, MagicMock(id=1, clear=False)),
+            0,
+        )
+
+    @patch("builtins.print")
+    def test_not_found_exits_two(self, _mock_print):
+        db = FakePipelineDB()
+        self.assertEqual(
+            pipeline_cli.cmd_mark_incomplete(
+                db, MagicMock(id=99, clear=False)),
+            2,
+        )
+
+    @patch("builtins.print")
+    def test_replaced_exits_four(self, _mock_print):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=2, status="replaced"))
+        self.assertEqual(
+            pipeline_cli.cmd_mark_incomplete(
+                db, MagicMock(id=2, clear=False)),
+            4,
+        )
+
+
+class TestQualityReplayShowsTheMark(unittest.TestCase):
+    """#1257 review F7/M20: pipeline-cli quality's live-candidate replay
+    prints a second, beets-whole decision when the request carries the
+    operator's incomplete mark — and only then."""
+
+    def _seed(self) -> FakePipelineDB:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, mb_release_id="mbid-1", status="imported",
+        ))
+        log_id = db.log_download(request_id=1, outcome="rejected")
+        evidence = make_album_quality_evidence(mb_release_id="mbid-1")
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_download_log_candidate_evidence(log_id, persisted.id)
+        return db
+
+    def _replay(self, db: FakePipelineDB, *, marked: bool) -> str:
+        from lib.quality import QualityRankConfig
+        from scripts.pipeline_cli.quality import _print_live_candidate_replay
+
+        with patch("builtins.print") as mock_print:
+            _print_live_candidate_replay(
+                db, 1,
+                expected_release_id="mbid-1",
+                rank_cfg=QualityRankConfig.defaults(),
+                target_format=None,
+                verified_lossless_target=None,
+                runtime_audio_check="normal",
+                q_override=None,
+                gate_unavailable_reason=None,
+                marked_incomplete=marked,
+            )
+        return "\n".join(str(call) for call in mock_print.call_args_list)
+
+    def test_marked_replay_prints_the_beets_whole_decision(self):
+        db = self._seed()
+        out = self._replay(db, marked=True)
+        self.assertIn("beets-whole attempt", out)
+        self.assertIn("#1241 mark disregards", out)
+
+    def test_unmarked_replay_prints_no_second_decision(self):
+        db = self._seed()
+        out = self._replay(db, marked=False)
+        self.assertIn("Candidate evidence", out)
+        self.assertNotIn("beets-whole attempt", out)
+
+
 class TestCmdSetIntent(unittest.TestCase):
     def test_set_intent_rejects_initializing_request(self):
         db = FakePipelineDB()

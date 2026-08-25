@@ -16,7 +16,7 @@ import subprocess as sp
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from lib import transitions
 from lib.dispatch.evidence_gate import (
@@ -93,6 +93,10 @@ from lib.quality import (
 )
 from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
 from lib.terminal_outcomes import PendingImportTerminalOutcome
+from lib.validation_envelope import (
+    decode_validation_envelope,
+    scenario_covers_declared_program,
+)
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -102,6 +106,7 @@ if TYPE_CHECKING:
     )
     from lib.library_delete_notifiers import DeleteNotification
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
+    from lib.pipeline_db.rows import DownloadLogWithEvidenceRow
     from lib.quality import DuplicateRemoveCandidate, SpectralDetail
 
 logger = logging.getLogger("cratedigger")
@@ -555,6 +560,48 @@ def _snapshot_current_album_directories(
         beets_library_db_path, library_root=beets_library_root,
     ) as beets_db:
         return beets_db.get_current_album_directories(mb_release_id)
+
+
+class _DownloadLogEntryReader(Protocol):
+    """The one read ``_attempt_beets_scenario`` needs.
+
+    Narrowed to a single method rather than the whole ``PipelineDB`` so the
+    derivation is directly testable and cannot reach anything else.
+    """
+
+    def get_download_log_entry(
+        self, log_id: int,
+    ) -> DownloadLogWithEvidenceRow | None: ...
+
+
+def _attempt_beets_scenario(
+    db: _DownloadLogEntryReader,
+    *,
+    scenario: str,
+    download_log_id: int | None,
+) -> str | None:
+    """The beets validation scenario THIS import attempt is acting on.
+
+    Issue #1241. Auto-import and local-import reach dispatch only through a
+    valid beets ``strong_match`` — that is what admitted them. A force
+    import acts on a row beets REJECTED (force ignores an invalid verdict,
+    ``docs/rejection-routing.md`` § force import), so its scenario has to be
+    read back off the linked ``download_log`` row. ``None`` means the
+    scenario is unknown: no linked row, or the row is gone.
+
+    Reading it back is what keeps the two lanes that judge the SAME row —
+    the Wrong Matches cleanup reducer and a later force import of that very
+    row — from deriving contradictory facts from it: both feed
+    ``lib.validation_envelope.scenario_covers_declared_program``.
+    """
+    if scenario not in FORCE_IMPORT_SCENARIOS:
+        return "strong_match"
+    if download_log_id is None:
+        return None
+    entry = db.get_download_log_entry(download_log_id)
+    if entry is None:
+        return None
+    return decode_validation_envelope(entry.get("validation_result")).scenario
 
 
 def _capture_album_directory_snapshot(
@@ -1251,6 +1298,20 @@ def dispatch_import_core(
                     reason=reason or "missing",
                     expected_execution_lease=active_execution_lease,
                 )
+            # Issue #1241: read the attempt's beets scenario ONCE — it feeds
+            # the decision's coverage conjunct here AND the terminal
+            # acceptance's mark-clear below. Auto/local import is
+            # strong_match by admission; a force import reads the linked
+            # row's persisted scenario, the same bit the Wrong Matches
+            # cleanup reducer derives from that row.
+            attempt_beets_scenario = _attempt_beets_scenario(
+                db,
+                scenario=scenario,
+                download_log_id=candidate_download_log_id,
+            )
+            attempt_program_covered = scenario_covers_declared_program(
+                attempt_beets_scenario
+            )
             if evidence_gate.candidate is not None:
                 # U11: ``full_pipeline_decision_from_evidence`` is the single
                 # decision function. Folder/audio-integrity facts
@@ -1263,6 +1324,15 @@ def dispatch_import_core(
                 facts = AlbumQualityEvidenceDecisionFacts(
                     verified_lossless_target=verified_lossless_target or None,
                     target_format=target_format,
+                    # Issue #1241 — the operator's mark on the request plus
+                    # beets' own coverage proof for THIS attempt. Both must
+                    # hold for the decider to disregard the installed side.
+                    installed_marked_incomplete=(
+                        db.request_marked_incomplete(request_id)
+                    ),
+                    candidate_covers_declared_program=(
+                        attempt_program_covered
+                    ),
                 )
                 evidence_decision = full_pipeline_decision_from_evidence(
                     evidence_gate.candidate,
@@ -1508,7 +1578,22 @@ def dispatch_import_core(
                         ),
                         attempt_result=attempt_result,
                         import_job_id=candidate_import_job_id,
-                        source_download_log_id=candidate_download_log_id)
+                        source_download_log_id=candidate_download_log_id,
+                        # Issue #1241: a terminal acceptance whose candidate
+                        # beets proved whole satisfies the operator's
+                        # incomplete mark — clear it atomically with the
+                        # imported transition so a stale mark can never
+                        # churn the next complete candidate. Idempotent on
+                        # unmarked rows (writes NULL over NULL). NEVER on
+                        # ``preflight_existing``: that outcome keeps the
+                        # EXISTING import with nothing installed (the same
+                        # no-new-files fact the ``clear_stale_v0_probe``
+                        # carve-out above records), so the still-incomplete
+                        # copy must keep its mark (#1257 review F1).
+                        clear_marked_incomplete=(
+                            attempt_program_covered
+                            and decision != "preflight_existing"
+                        ))
                     if isinstance(pending, PendingImportTerminalOutcome):
                         terminal_outcome = pending
                     try:

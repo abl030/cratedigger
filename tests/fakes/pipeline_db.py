@@ -2913,6 +2913,30 @@ class FakePipelineDB:
             return None
         return cast("AlbumRequestRow", self._request_presentation_copy(row))
 
+    def request_marked_incomplete(self, request_id: int) -> bool:
+        """Mirror ``PipelineDB.request_marked_incomplete`` (issue #1241)."""
+        row = self._requests.get(request_id)
+        return bool(
+            row is not None and row.get("marked_incomplete_at") is not None
+        )
+
+    def set_marked_incomplete(self, request_id: int, *, marked: bool) -> str:
+        """Mirror ``PipelineDB.set_marked_incomplete`` (issue #1241)."""
+        row = self._requests.get(request_id)
+        if row is None:
+            return "not_found"
+        if row.get("status") == "replaced":
+            return "replaced"
+        current = row.get("marked_incomplete_at")
+        if marked and current is not None:
+            return "already_marked"
+        if not marked and current is None:
+            return "already_clear"
+        now = datetime.now(UTC)
+        row["marked_incomplete_at"] = now if marked else None
+        row["updated_at"] = now
+        return "marked" if marked else "cleared"
+
     def _terminal_state_snapshot(self) -> tuple[object, ...]:
         return copy.deepcopy((
             self._requests,
@@ -6175,6 +6199,8 @@ class FakePipelineDB:
             # Migration 028 / U14 — long-tail-rescue audit columns.
             "rescued_at": None,
             "prior_unfindable_category": None,
+            # Migration 082 / issue #1241 — operator incomplete mark.
+            "marked_incomplete_at": None,
             # Migration 021 addressing FK.
             "current_evidence_id": None,
             # Migration 023 — supersede lineage.

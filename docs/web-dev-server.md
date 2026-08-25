@@ -74,8 +74,12 @@ snapshot directory to preview the card's `ok`/divergent states without
 waiting for (or triggering) the real ~200s whole-library scan.
 
 `--library-completeness-runtime-dir` similarly reads the daily
-`library-completeness.json` snapshot for the read-only Library Completeness
-card. It never starts a source, Beets, or filesystem census from the dev server.
+`library-completeness.json` snapshot for the Library Completeness card. It
+never starts a source, Beets, or filesystem census from the dev server. The
+card's census listing stays read-only; its per-album "Mark incomplete"
+button (issue #1241) POSTs `/api/pipeline/mark-incomplete`, which the
+GET-only live-db dev server does not dispatch — the button renders for
+screenshot verification but the action needs the real deployment.
 
 ## Screenshot verification loop
 

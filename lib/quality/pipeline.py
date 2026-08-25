@@ -169,6 +169,14 @@ def full_pipeline_decision(
     candidate_v0_probe_kind: str | None = None,
     supported_lossless_source: bool | None = None,
     current_verified_lossless_proof: bool = False,
+    # issue #1241 — the operator's incomplete mark and its candidate-side
+    # conjunct. When BOTH are true the installed side is disregarded
+    # entirely (every ``existing_*`` input, the spectral override, and the
+    # verified-lossless lock) and the candidate is admitted exactly as it
+    # would be into an empty slot. See
+    # ``AlbumQualityEvidenceDecisionFacts`` for the two facts' provenance.
+    installed_marked_incomplete: bool = False,
+    candidate_covers_declared_program: bool = False,
     # issue #829 Phase 5 PR2b — the codec-resolution context the flat
     # ``spectral_grade``/``spectral_bitrate`` pair cannot carry. One keyword
     # per side; ``SpectralCodecContext.facts()`` recombines it with the flat
@@ -237,10 +245,42 @@ def full_pipeline_decision(
             # source lock), which is a real outcome, not a failure.
             "stage2_import_if_stage1_deferred": str | None,
             "comparison_basis_if_stage1_deferred": dict | None,
+            # AUDIT ONLY (issue #1241): True when the operator's incomplete
+            # mark plus beets' coverage proof made this decision disregard
+            # the installed side entirely. No branch reads it.
+            "installed_incomplete_disregarded": bool,
         }
     """
     if cfg is None:
         cfg = QualityRankConfig.defaults()
+
+    # Issue #1241. The operator has positively marked the installed copy
+    # incomplete AND beets proved this attempt's candidate covers the whole
+    # declared program: the two sides are not the same program, so no
+    # existing-side fact — quality, spectral, probe anchor, or proof lock —
+    # is a sound baseline against this candidate. Disregard the installed
+    # side entirely, up front, and let every stage below run its ordinary
+    # fresh-import admission policy (the absolute candidate-side floors all
+    # still apply, and the post-import gate still keeps the search open for
+    # a below-par import). Monotone by construction: with no existing side,
+    # Stage 1 can never reject, no lock can fire, and no comparison can say
+    # "downgrade" — marking can only ever widen admission, never narrow it.
+    installed_incomplete_disregarded = (
+        installed_marked_incomplete and candidate_covers_declared_program
+    )
+    if installed_incomplete_disregarded:
+        existing_min_bitrate = None
+        existing_avg_bitrate = None
+        existing_spectral_bitrate = None
+        existing_spectral_grade = None
+        override_min_bitrate = None
+        existing_format = None
+        existing_is_cbr = False
+        existing_v0_probe_avg = None
+        existing_v0_probe_kind = None
+        existing_spectral_context = None
+        current_verified_lossless_proof = False
+
     result: dict[str, Any] = {
         "preimport_audio": None,
         "preimport_nested": None,
@@ -277,6 +317,11 @@ def full_pipeline_decision(
         # only by the ``stage1_short_circuits`` branch below; audit-only.
         "stage2_import_if_stage1_deferred": None,
         "comparison_basis_if_stage1_deferred": None,
+        # Issue #1241, audit-only: records that the operator's incomplete
+        # mark plus beets' coverage proof made this decision disregard the
+        # installed side. No branch reads it — the disregard already
+        # happened above, by nulling the existing-side inputs.
+        "installed_incomplete_disregarded": installed_incomplete_disregarded,
     }
 
     # A proof-bearing installed HAVE is the absolute acquisition ceiling
@@ -1062,6 +1107,18 @@ class AlbumQualityEvidenceDecisionFacts(msgspec.Struct, frozen=True):
 
     Beets distance bypass is intentionally outside this quality comparison;
     caller identity is not an input to this Struct.
+
+    ``installed_marked_incomplete`` / ``candidate_covers_declared_program``
+    are issue #1241's two conjuncts. The first is the OPERATOR's mark on the
+    request (``album_requests.marked_incomplete_at``) — never a measured
+    verdict; the census only informs the operator. The second is beets' own
+    proof that this attempt's candidate carried every declared track,
+    derived from the persisted scenario through
+    ``lib.validation_envelope.scenario_covers_declared_program``. When both
+    hold, the decider disregards the installed side entirely and admits the
+    candidate exactly as it would into an empty slot: "incomplete is
+    incomplete and complete always always beats it." Both default False, so
+    an unmarked world decides exactly as before.
     """
 
     audio_check_mode: str = "normal"
@@ -1072,6 +1129,8 @@ class AlbumQualityEvidenceDecisionFacts(msgspec.Struct, frozen=True):
     converted_count: int | None = None
     post_conversion_min_bitrate: int | None = None
     post_conversion_is_cbr: bool | None = None
+    installed_marked_incomplete: bool = False
+    candidate_covers_declared_program: bool = False
 
 
 class QualityEvidenceActionPayload(msgspec.Struct, frozen=True):
@@ -1536,6 +1595,8 @@ def full_pipeline_decision_from_evidence(
             # ``full_pipeline_decision``'s docstring; never a decision input.
             "stage2_import_if_stage1_deferred": str | None,
             "comparison_basis_if_stage1_deferred": dict | None,
+            # AUDIT ONLY — issue #1241's disregard flag; see the flat twin.
+            "installed_incomplete_disregarded": bool,
         }
 
     Folder/audio-integrity facts are read directly off ``candidate`` as
@@ -1565,14 +1626,28 @@ def full_pipeline_decision_from_evidence(
     if current is not None:
         _require_evidence_ready("current", current)
 
+    # Issue #1241 — same predicate as the flat twin computes from its own
+    # kwargs. Needed HERE too because this twin's decision-21 early return
+    # below fires before the flat twin is ever called; the mark must disarm
+    # that lock exactly as it disarms every other existing-side fact.
+    installed_incomplete_disregarded = (
+        facts.installed_marked_incomplete
+        and facts.candidate_covers_declared_program
+    )
+
     # Current proof outranks every candidate fact for every import mode
     # (decision 21): a corrupt, nested, empty, mixed, or known-bad candidate
     # cannot reopen a release at the terminal archival ceiling, and a
     # force-import cannot cross it either — force bypasses only the beets
-    # distance; Replace/re-request is the operator's way back in.
+    # distance; Replace/re-request is the operator's way back in. The ONE
+    # thing that outranks the ceiling is the operator's own incomplete mark
+    # (issue #1241): a locked copy that is missing declared program is not a
+    # terminal archive, and the mark is the operator decision that reopens
+    # it — no lock-side machinery, the disregard simply precedes the lock.
     if (
         current is not None
         and current.verified_lossless_proof is not None
+        and not installed_incomplete_disregarded
     ):
         return _finalize_denylist({
             "preimport_audio": None,
@@ -1592,6 +1667,9 @@ def full_pipeline_decision_from_evidence(
             "comparison_basis": None,
             "stage2_import_if_stage1_deferred": None,
             "comparison_basis_if_stage1_deferred": None,
+            # Reachable only when the #1241 predicate did NOT fire (the
+            # guard above skips this return otherwise).
+            "installed_incomplete_disregarded": False,
         })
 
     # --- U11 folder/audio-integrity early-exit rejects ---
@@ -1636,6 +1714,13 @@ def full_pipeline_decision_from_evidence(
             "comparison_basis": None,
             "stage2_import_if_stage1_deferred": None,
             "comparison_basis_if_stage1_deferred": None,
+            # Issue #1241 parity with the flat twin: the audit flag records
+            # whether the predicate fired, even on a candidate-side early
+            # reject where the installed side never participates — the
+            # absolute admission floors outrank the disregard.
+            "installed_incomplete_disregarded": (
+                installed_incomplete_disregarded
+            ),
         })
 
     preimport_fact = candidate_preimport_reject_fact(candidate)
@@ -1787,6 +1872,13 @@ def full_pipeline_decision_from_evidence(
         ),
         candidate_spectral_context=evidence_spectral_context(candidate),
         existing_spectral_context=evidence_spectral_context(current),
+        # Issue #1241 — the two conjuncts, handed straight across. The flat
+        # twin re-computes the same predicate and performs the actual
+        # existing-side disregard, so the twins cannot diverge on it.
+        installed_marked_incomplete=facts.installed_marked_incomplete,
+        candidate_covers_declared_program=(
+            facts.candidate_covers_declared_program
+        ),
         # The persisted capture, handed straight across (issue #829
         # AAC-lattice leg PR-B). No adapter: the evidence row's column IS
         # the leg's input, so there is nothing to derive and nothing that

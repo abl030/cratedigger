@@ -705,6 +705,107 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
             "albums_shown": 0, "albums_listed_total": 0,
         })
 
+    def test_albums_are_enriched_with_request_and_mark_state(self) -> None:
+        """Issue #1241: each embedded census album carries the resolved
+        pipeline ``request_id`` and its ``marked_incomplete`` state so the
+        card can offer the mark/clear action inline; a census album with no
+        resolvable request carries ``request_id=None``."""
+        import web.server as srv
+
+        self.db.seed_request(make_request_row(
+            id=310, status="imported", mb_release_id="rel-marked",
+        ))
+        self.db.seed_request(make_request_row(
+            id=311, status="imported", mb_release_id="rel-unmarked",
+        ))
+        self.db.set_marked_incomplete(310, marked=True)
+        snapshot = LibraryCompletenessSnapshot(
+            "2026-08-25T00:00:00+00:00", 2.0,
+            CompletenessReport(
+                "incomplete", CompletenessCounts(3, 0, 3, 0, 0), (
+                    CompletenessAlbum(
+                        1, "Artist", "Marked", "rel-marked",
+                        (CompletenessFinding("missing_source_audio", "t"),),
+                        1, 0, 0),
+                    CompletenessAlbum(
+                        2, "Artist", "Unmarked", "rel-unmarked",
+                        (CompletenessFinding("missing_source_audio", "t"),),
+                        1, 0, 0),
+                    CompletenessAlbum(
+                        3, "Artist", "No request", "rel-unknown",
+                        (CompletenessFinding("missing_source_audio", "t"),),
+                        1, 0, 0),
+                ),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = library_completeness_snapshot_path(tmpdir)
+            write_library_completeness_snapshot(path, snapshot)
+            with (
+                _library_completeness_snapshot_path_set(path),
+                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+            ):
+                status, data = self._get("/api/pipeline/dashboard")
+        self.assertEqual(status, 200)
+        albums = data["library_completeness"]["snapshot"]["report"]["albums"]
+        by_release = {album["release_id"]: album for album in albums}
+        self.assertEqual(by_release["rel-marked"]["request_id"], 310)
+        self.assertTrue(by_release["rel-marked"]["marked_incomplete"])
+        self.assertEqual(by_release["rel-unmarked"]["request_id"], 311)
+        self.assertFalse(by_release["rel-unmarked"]["marked_incomplete"])
+        self.assertIsNone(by_release["rel-unknown"]["request_id"])
+        self.assertFalse(by_release["rel-unknown"]["marked_incomplete"])
+
+    def test_one_refused_presentation_row_degrades_one_album_only(self) -> None:
+        """#1257 review F9: the presentation projection refuses a
+        ``processing`` row missing its owner join (RuntimeError). One such
+        row must degrade that one album to actionless — never 500 the
+        whole dashboard route."""
+        import web.server as srv
+
+        self.db.seed_request(make_request_row(
+            id=320, status="imported", mb_release_id="rel-healthy",
+        ))
+        # Real refused shape: processing with no attached automation owner.
+        self.db.seed_request(make_request_row(
+            id=321, status="processing", mb_release_id="rel-broken",
+        ))
+        snapshot = LibraryCompletenessSnapshot(
+            "2026-08-25T00:00:00+00:00", 2.0,
+            CompletenessReport(
+                "incomplete", CompletenessCounts(2, 0, 2, 0, 0), (
+                    CompletenessAlbum(
+                        1, "Artist", "Healthy", "rel-healthy",
+                        (CompletenessFinding("missing_source_audio", "t"),),
+                        1, 0, 0),
+                    CompletenessAlbum(
+                        2, "Artist", "Broken", "rel-broken",
+                        (CompletenessFinding("missing_source_audio", "t"),),
+                        1, 0, 0),
+                ),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = library_completeness_snapshot_path(tmpdir)
+            write_library_completeness_snapshot(path, snapshot)
+            # _beets_db → None skips the Disk Coverage card, whose own
+            # unguarded presentation read would otherwise trip over the
+            # broken row first — this test isolates the completeness
+            # enrichment's per-album guard.
+            with (
+                _library_completeness_snapshot_path_set(path),
+                patch.object(srv, "_beets_db", return_value=None),
+                self.assertLogs(
+                    "web.routes.pipeline_dashboard", level="ERROR"),
+            ):
+                status, data = self._get("/api/pipeline/dashboard")
+        self.assertEqual(status, 200)
+        albums = data["library_completeness"]["snapshot"]["report"]["albums"]
+        by_release = {album["release_id"]: album for album in albums}
+        self.assertEqual(by_release["rel-healthy"]["request_id"], 320)
+        self.assertIsNone(by_release["rel-broken"]["request_id"])
+        self.assertFalse(by_release["rel-broken"]["marked_incomplete"])
+
     def test_unreadable_snapshot_is_in_band_error(self) -> None:
         import web.server as srv
         with tempfile.TemporaryDirectory() as tmpdir:

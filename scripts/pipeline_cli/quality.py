@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Protocol, TypedDict
 
 from lib import transitions
 from lib.json_narrow import json_dict
@@ -28,6 +28,28 @@ if TYPE_CHECKING:
     # what makes this concrete annotation safe to add here.
     from lib.pipeline_db import PipelineDB
     from lib.quality import AlbumQualityEvidence, QualityRankConfig
+
+
+class _LiveReplayDB(Protocol):
+    """The three reads the live-candidate replay performs.
+
+    The #409 narrow-Protocol pattern — unlike the cmd-level functions above
+    (whose concrete ``PipelineDB`` annotation is forced by
+    ``load_quality_gate_state``'s nominal parameter), this helper touches
+    nothing else, so tests drive it with a ``FakePipelineDB`` directly.
+    """
+
+    def get_latest_download_log_candidate_evidence_id(
+        self, request_id: int,
+    ) -> int | None: ...
+
+    def load_album_quality_evidence_by_id(
+        self, evidence_id: int,
+    ) -> AlbumQualityEvidence | None: ...
+
+    def get_request_current_evidence_id(
+        self, request_id: int,
+    ) -> int | None: ...
 
 
 class _ScenarioParams(TypedDict, total=False):
@@ -269,7 +291,7 @@ def _print_proof_gate_verdict(
 
 
 def _print_live_candidate_replay(
-    db: PipelineDB,
+    db: _LiveReplayDB,
     request_id: int,
     *,
     expected_release_id: object | None,
@@ -279,6 +301,7 @@ def _print_live_candidate_replay(
     runtime_audio_check: str,
     q_override: str | None,
     gate_unavailable_reason: str | None,
+    marked_incomplete: bool = False,
 ) -> None:
     """Replay the request's actual last-candidate evidence through the real
     decider (issue #813 tooling tier).
@@ -364,6 +387,27 @@ def _print_live_candidate_replay(
         q_override=q_override,
         gate_unavailable_reason=gate_unavailable_reason,
     )
+    if marked_incomplete:
+        # Issue #1241: the replay above shows the UNPROVEN-attempt shape
+        # (extra_tracks / mbid_not_found / no_choose_match). A beets-whole
+        # attempt on this operator-marked request disregards the installed
+        # side; show that decision too so the mark's effect is visible.
+        import msgspec
+
+        marked_facts = msgspec.structs.replace(
+            facts,
+            installed_marked_incomplete=True,
+            candidate_covers_declared_program=True,
+        )
+        marked_result = full_pipeline_decision_from_evidence(
+            candidate, current, facts=marked_facts, cfg=rank_cfg)
+        _print_decision_outcome(
+            "Same candidate, beets-whole attempt (#1241 mark disregards "
+            "the installed side)",
+            marked_result,
+            q_override=q_override,
+            gate_unavailable_reason=gate_unavailable_reason,
+        )
     _print_proof_gate_verdict("IN", candidate)
     if current is not None:
         _print_proof_gate_verdict("HAVE", current)
@@ -655,6 +699,15 @@ def cmd_quality(db: PipelineDB, args: argparse.Namespace) -> None:
             "has_nested_audio": True}),
     ])
 
+    marked_incomplete = req.get("marked_incomplete_at") is not None
+    if marked_incomplete:
+        print(
+            "\n  ⚠ Operator-marked incomplete (#1241, "
+            f"marked_incomplete_at={req.get('marked_incomplete_at')}): a "
+            "candidate beets proves whole disregards the installed side "
+            "and is admitted as into an empty slot."
+        )
+
     print("\n  What would happen if we downloaded:")
     for name, params in scenarios:
         # Apply runtime audio_check_mode as a default; scenarios that
@@ -688,6 +741,12 @@ def cmd_quality(db: PipelineDB, args: argparse.Namespace) -> None:
             current_verified_lossless_proof=(
                 linked_current_verified_lossless_proof
             ),
+            # Issue #1241: every synthetic scenario already assumes the
+            # download validates whole (that is what "downloaded" means
+            # here), so coverage is a constant True — inert unless the
+            # request is operator-marked incomplete.
+            installed_marked_incomplete=marked_incomplete,
+            candidate_covers_declared_program=True,
             **params_with_runtime)
 
         _print_decision_outcome(
@@ -705,6 +764,7 @@ def cmd_quality(db: PipelineDB, args: argparse.Namespace) -> None:
         runtime_audio_check=runtime_audio_check,
         q_override=q_override,
         gate_unavailable_reason=gate_unavailable_reason,
+        marked_incomplete=marked_incomplete,
     )
 
 

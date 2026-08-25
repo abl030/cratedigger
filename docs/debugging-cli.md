@@ -360,6 +360,11 @@ inside socket authorization, never credentials.
 - `pipeline-cli search-plan show` — Show one request's plan, cursor, items, and provenance.
 - `pipeline-cli set` — Apply a typed request lifecycle transition.
 - `pipeline-cli set-intent` — Set lossless-on-disk intent.
+- `pipeline-cli mark-incomplete` — Set/clear the operator's incomplete mark
+  on a request (`--clear` to unmark). Marked, the quality decider disregards
+  the installed copy for any candidate beets proves whole, so a complete
+  candidate is admitted as into an empty slot; a covered terminal acceptance
+  clears the mark automatically (issue #1241).
 - `pipeline-cli set-quality` — Set request quality through its canonical web route.
 - `pipeline-cli show` — Show a request, attempts, and quality state.
 - `pipeline-cli status` — Show request counts by lifecycle status.

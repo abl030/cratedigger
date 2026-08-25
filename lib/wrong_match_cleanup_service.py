@@ -40,6 +40,7 @@ from lib.util import observe_failed_path
 from lib.validation_envelope import (
     WrongMatchTriageAudit,
     decode_validation_envelope,
+    scenario_covers_declared_program,
 )
 from lib.wrong_matches import (
     WrongMatchSourceDB,
@@ -365,9 +366,8 @@ def _cleanup_wrong_match(
             reason="failed_path_missing_on_disk",
         )
     candidates = _path_candidates(*candidates, resolved_path)
-    source_dirs = tuple(
-        decode_validation_envelope(entry.get("validation_result")).source_dirs
-    )
+    envelope = decode_validation_envelope(entry.get("validation_result"))
+    source_dirs = tuple(envelope.source_dirs)
 
     active_jobs = _matching_active_jobs(
         db,
@@ -444,16 +444,35 @@ def _cleanup_wrong_match(
             current_evidence = current_result.evidence
             current_evidence_status = current_result.provenance.current_status
 
+    # Issue #1241 — the operator's incomplete mark plus the row's OWN
+    # persisted coverage proof. Both lanes that judge this download_log row
+    # (this reducer and a later force import of it) derive the coverage bit
+    # from the same stored scenario through the same shared predicate, so
+    # they cannot disagree about whether beets proved the candidate whole.
+    installed_marked_incomplete = (
+        request.get("marked_incomplete_at") is not None
+    )
+    incomplete_mark_disregards = (
+        installed_marked_incomplete
+        and scenario_covers_declared_program(envelope.scenario)
+    )
+
     # Cleanup-only policy (NOT a quality decision): when the in-Beets parent is
     # verified-lossless AND the evidence was loaded directly from disk (not
     # backfilled, which can preserve a stale verified_lossless_proof against
     # changed audio), any candidate in Wrong Matches against this MBID is
     # guaranteed to lose the upgrade gate. Short-circuit deletion. The reducer
     # is deliberately not called -- see TestVerifiedLosslessShortCircuit.
+    # The ONE thing that outranks the parent proof is the operator's own
+    # incomplete mark (#1241): with the mark set and this row's candidate
+    # proven whole, the decision below disregards the installed side, so the
+    # shortcut's "guaranteed to lose" premise no longer holds and the full
+    # decider must run.
     if (
         current_evidence is not None
         and current_evidence.verified_lossless_proof is not None
         and current_evidence_status == CURRENT_STATUS_LOADED
+        and not incomplete_mark_disregards
     ):
         return _perform_cleanup_deletion(
             db,
@@ -483,6 +502,10 @@ def _cleanup_wrong_match(
                 None,
             ),
             target_format=request.get("target_format"),
+            installed_marked_incomplete=installed_marked_incomplete,
+            candidate_covers_declared_program=(
+                scenario_covers_declared_program(envelope.scenario)
+            ),
         ),
         cfg=getattr(runtime_cfg, "quality_ranks", None),
     )

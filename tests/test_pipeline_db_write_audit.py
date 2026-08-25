@@ -271,6 +271,11 @@ def _find_round_trip_tests_for_method(method_name: str,
     elif method_name.startswith("update_"):
         suffix = method_name[len("update_"):]
         read_candidates.update({f"get_{suffix}", f"list_{suffix}"})
+    elif method_name == "set_marked_incomplete":
+        # Issue #1241: the mark is one column on album_requests; the
+        # round-trip reads it back through the request row and the
+        # dispatch path's narrow scalar read.
+        read_candidates.update({"get_request", "request_marked_incomplete"})
     elif method_name.startswith("set_"):
         suffix = method_name[len("set_"):]
         read_candidates.update({f"get_{suffix}", f"list_{suffix}"})

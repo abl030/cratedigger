@@ -19,7 +19,9 @@ from datetime import UTC
 from lib.json_narrow import json_dict
 from lib.quality import (
     STAGE2_COUNTERFACTUAL_UNAVAILABLE,
+    AlbumQualityEvidenceDecisionFacts,
     CodecFamily,
+    classify_full_pipeline_decision,
     full_pipeline_decision,
 )
 from tests.helpers import (
@@ -795,6 +797,279 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertEqual(basis["new_value_kbps"], 128)
         self.assertEqual(basis["existing_metric"], "avg")
         self.assertEqual(basis["existing_value_kbps"], 256)
+
+    def test_dirt_dress_theme_songs_marked_incomplete_imports_complete_candidate(
+        self,
+    ):
+        """Request 1852, Dirt Dress — *Theme Songs*, Discogs 4738671 (#1241).
+
+        The live incident (download_log 40355, peer iosononessuno). Measured
+        world:
+
+        * Installed: 4 files, 719.4 s, AAC ~128 kbps. Track 04 is 181.4 s
+          where two declared components total 881 s — 700 s of declared
+          program ("Peter and the Wolf", Discogs position 1B) is simply not
+          on disk. 49% of the runtime is missing.
+        * Candidate: 5 files, 1419.9 s, MP3 ~196 kbps, complete.
+
+        The cleanup reducer asked the quality question, got an honest
+        cross-family "equivalent" (aac good 128 vs mp3 good 196), decided
+        ``downgrade``, and DELETED the only copy of the missing 700 s.
+
+        Under #1241 the operator marks the request incomplete. With the mark
+        set and beets' own proof that this candidate covers the declared
+        program, the decider disregards the installed side entirely and the
+        candidate is admitted exactly as it would be into an empty slot —
+        "incomplete is incomplete and complete always always beats it."
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=196,
+            avg_bitrate=196,
+            is_cbr=False,
+            new_format="MP3",
+            existing_format="AAC",
+            existing_min_bitrate=128,
+            existing_avg_bitrate=128,
+            installed_marked_incomplete=True,
+            candidate_covers_declared_program=True,
+        )
+
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["installed_incomplete_disregarded"])
+        # No comparison ran — the installed side was disregarded, honestly:
+        # the basis is absent rather than fabricated.
+        self.assertIsNone(r["comparison_basis"])
+        # A ~196k VBR import is below par, so the ordinary post-import gate
+        # keeps the search open and denylists the peer against re-fetching
+        # the same bytes — exactly the fresh-import policy, not a #1241
+        # branch.
+        self.assertEqual(r["stage3_quality_gate"], "requeue_upgrade")
+        self.assertTrue(r["keep_searching"])
+        verdict, cleanup_eligible, _reason = classify_full_pipeline_decision(r)
+        self.assertEqual(verdict, "would_import")
+        self.assertFalse(
+            cleanup_eligible,
+            "an import-class decision must never authorize folder deletion",
+        )
+        # Fresh-import equivalence — the whole invariant in one assertion:
+        # the marked world's decision is byte-identical to the same candidate
+        # arriving at an empty slot, except for the audit flag that records
+        # the disregard.
+        fresh = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=196,
+            avg_bitrate=196,
+            is_cbr=False,
+            new_format="MP3",
+        )
+        fresh["installed_incomplete_disregarded"] = True
+        self.assertEqual(r, fresh)
+
+    def test_dirt_dress_world_without_a_covered_candidate_still_downgrades(
+        self,
+    ):
+        """Negative twin: an UNPROVEN candidate never rescues itself.
+
+        The same measured world, but the attempt carries no proof that the
+        candidate covers the declared program — the shape the Wrong Matches
+        reducer sees for an ``extra_tracks`` / ``mbid_not_found`` /
+        ``no_choose_match`` row, none of which ever produced a checked
+        candidate summary (``extra_tracks`` proves the OPPOSITE).
+
+        One incomplete copy must never "upgrade" another, so the mark's
+        candidate conjunct is load-bearing, not decorative: today's
+        destructive ``downgrade`` is the correct outcome here, and the
+        decision must be byte-identical to the unmarked world.
+        """
+        baseline = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=196,
+            avg_bitrate=196,
+            is_cbr=False,
+            new_format="MP3",
+            existing_format="AAC",
+            existing_min_bitrate=128,
+            existing_avg_bitrate=128,
+        )
+        self.assertEqual(baseline["stage2_import"], "downgrade")
+        for marked, covered in ((True, False), (False, True)):
+            with self.subTest(marked=marked, covered=covered):
+                r = full_pipeline_decision(
+                    is_flac=False,
+                    min_bitrate=196,
+                    avg_bitrate=196,
+                    is_cbr=False,
+                    new_format="MP3",
+                    existing_format="AAC",
+                    existing_min_bitrate=128,
+                    existing_avg_bitrate=128,
+                    installed_marked_incomplete=marked,
+                    candidate_covers_declared_program=covered,
+                )
+                self.assertEqual(r, baseline)
+                self.assertEqual(r["stage2_import"], "downgrade")
+                self.assertFalse(r["installed_incomplete_disregarded"])
+
+    def test_a_worse_but_complete_candidate_imports_over_a_marked_incomplete(
+        self,
+    ):
+        """Completeness outranks quality at EVERY level, ``worse`` included.
+
+        MP3 96 CBR against an installed MP3 320 is an unambiguous ``worse``
+        verdict — the widest quality gap the mark has to survive. It still
+        imports, because the two sides are not the same program and the
+        operator has said so: a 96 kbps copy that has the whole record beats
+        a 320 kbps copy that does not. Authority: "incomplete is incomplete
+        and complete always always beats it." — operator, issue #1241
+        superseding comment (2026-08-25).
+
+        This does not weaken issue #60's "worse is blocked regardless"
+        acceptance criterion: that criterion governs a comparison between
+        two copies of the SAME program, and the disregarded installed side
+        never enters a comparison at all. Quality convergence resumes
+        immediately — the below-par import keeps the search open, so the
+        next complete candidate is judged by the NORMAL comparison against
+        this now-complete copy.
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=96,
+            avg_bitrate=96,
+            is_cbr=True,
+            new_format="MP3",
+            existing_format="MP3",
+            existing_min_bitrate=320,
+            existing_avg_bitrate=320,
+            existing_is_cbr=True,
+            installed_marked_incomplete=True,
+            candidate_covers_declared_program=True,
+        )
+
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["installed_incomplete_disregarded"])
+        # 96 CBR is far below par: the post-import gate keeps searching, so
+        # the mark buys completeness without ever closing the quality search.
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertTrue(r["keep_searching"])
+
+    def test_a_worse_candidate_against_an_unmarked_install_still_rejects(
+        self,
+    ):
+        """The no-regression twin: without the mark nothing changed.
+
+        Same 96-vs-320 world, no operator mark. This is the pin that stops
+        the disregard from becoming "any complete candidate imports itself
+        over anything".
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=96,
+            avg_bitrate=96,
+            is_cbr=True,
+            new_format="MP3",
+            existing_format="MP3",
+            existing_min_bitrate=320,
+            existing_avg_bitrate=320,
+            existing_is_cbr=True,
+            candidate_covers_declared_program=True,
+        )
+
+        basis = json_dict(r["comparison_basis"])
+        self.assertEqual(basis["verdict"], "worse")
+        self.assertEqual(r["stage2_import"], "downgrade")
+        self.assertFalse(r["imported"])
+        self.assertFalse(r["installed_incomplete_disregarded"])
+
+    def test_verified_lossless_locked_installed_yields_to_the_mark(self):
+        """The mark disarms the proof lock — no lock-side machinery needed.
+
+        Decision 21 makes an installed verified-lossless proof the absolute
+        acquisition ceiling. A proof-LOCKED album that is nonetheless
+        missing declared program (a pre-#1241 force-import of a partial
+        rip, or a proof granted before the operator noticed) would
+        otherwise be permanently closed. The operator's mark reopens it:
+        with both conjuncts set, the locked installed side is disregarded
+        like any other, and the complete candidate imports. The unmarked
+        twin still locks — the ceiling itself is untouched.
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=196,
+            avg_bitrate=196,
+            is_cbr=False,
+            new_format="MP3",
+            existing_format="AAC",
+            existing_min_bitrate=128,
+            existing_avg_bitrate=128,
+            current_verified_lossless_proof=True,
+            installed_marked_incomplete=True,
+            candidate_covers_declared_program=True,
+        )
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["installed_incomplete_disregarded"])
+
+        locked = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=196,
+            avg_bitrate=196,
+            is_cbr=False,
+            new_format="MP3",
+            existing_format="AAC",
+            existing_min_bitrate=128,
+            existing_avg_bitrate=128,
+            current_verified_lossless_proof=True,
+            candidate_covers_declared_program=True,
+        )
+        self.assertEqual(locked["stage2_import"], "verified_lossless_locked")
+        self.assertFalse(locked["imported"])
+        self.assertFalse(locked["installed_incomplete_disregarded"])
+
+    def test_lossless_source_locked_installed_yields_to_the_mark(self):
+        """The third existing-side lock, pinned deterministically (#1257
+        review F5 — a mutant keeping the existing V0 probe under the
+        disregard died only at the fuzz tier before this pin existed).
+
+        An installed provisional-lossless copy's source V0 probe is the
+        truth-of-source anchor that rejects every lossy candidate as
+        ``lossless_source_locked``. Under the operator's mark plus beets'
+        coverage proof, the anchor is disregarded with the rest of the
+        installed side and the complete lossy candidate imports.
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=245,
+            avg_bitrate=245,
+            is_cbr=False,
+            new_format="MP3",
+            existing_format="Opus",
+            existing_min_bitrate=110,
+            existing_avg_bitrate=116,
+            existing_v0_probe_avg=240,
+            installed_marked_incomplete=True,
+            candidate_covers_declared_program=True,
+        )
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["installed_incomplete_disregarded"])
+
+        locked = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=245,
+            avg_bitrate=245,
+            is_cbr=False,
+            new_format="MP3",
+            existing_format="Opus",
+            existing_min_bitrate=110,
+            existing_avg_bitrate=116,
+            existing_v0_probe_avg=240,
+            candidate_covers_declared_program=True,
+        )
+        self.assertEqual(locked["stage2_import"], "lossless_source_locked")
+        self.assertFalse(locked["imported"])
 
 
 class TestWavvesAacCodecBlindSpectral(unittest.TestCase):
@@ -1994,6 +2269,172 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         self.assertEqual(basis["new_value_kbps"], 128)
         self.assertEqual(basis["existing_metric"], "avg")
         self.assertEqual(basis["existing_value_kbps"], 256)
+
+    def test_dirt_dress_marked_incomplete_imports_complete_candidate_via_evidence(
+        self,
+    ):
+        """Parity twin of the request-1852 reproduction (#1241).
+
+        Same measured world (Dirt Dress — *Theme Songs*, Discogs 4738671,
+        download_log 40355), expressed as the rows the production decider
+        actually reads. The operator's mark and beets' coverage proof are
+        ACTION-TIME facts — they ride
+        ``AlbumQualityEvidenceDecisionFacts``, never the evidence rows —
+        so the identical evidence decides differently only when the
+        request carries the mark.
+        """
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=196, avg_bitrate=196, is_cbr=False,
+        )
+        current = self._build_current(
+            min_bitrate=128, avg_bitrate=128, format="AAC", is_cbr=False,
+            mb_release_id="mbid-parity-candidate",
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate,
+            current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                installed_marked_incomplete=True,
+                candidate_covers_declared_program=True,
+            ),
+        )
+
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["installed_incomplete_disregarded"])
+        self.assertIsNone(r["comparison_basis"])
+        # Below par → the ordinary post-import gate keeps searching (and
+        # applies its ordinary denylist policy); see the flat-twin pin.
+        self.assertEqual(r["stage3_quality_gate"], "requeue_upgrade")
+        self.assertTrue(r["keep_searching"])
+        verdict, cleanup_eligible, _reason = classify_full_pipeline_decision(r)
+        self.assertEqual(verdict, "would_import")
+        self.assertFalse(
+            cleanup_eligible,
+            "an import-class decision must never authorize folder deletion",
+        )
+        # Fresh-import equivalence through the evidence twin: identical to
+        # the same candidate with NO current row, modulo the audit flag.
+        fresh = full_pipeline_decision_from_evidence(candidate, None)
+        fresh["installed_incomplete_disregarded"] = True
+        self.assertEqual(r, fresh)
+
+    def test_dirt_dress_without_both_conjuncts_still_downgrades_via_evidence(
+        self,
+    ):
+        """Parity twin of the negative pin — either conjunct alone changes
+        nothing, byte-for-byte."""
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=196, avg_bitrate=196, is_cbr=False,
+        )
+        current = self._build_current(
+            min_bitrate=128, avg_bitrate=128, format="AAC", is_cbr=False,
+            mb_release_id="mbid-parity-candidate",
+        )
+        baseline = full_pipeline_decision_from_evidence(candidate, current)
+        self.assertEqual(baseline["stage2_import"], "downgrade")
+        for marked, covered in ((True, False), (False, True)):
+            with self.subTest(marked=marked, covered=covered):
+                r = full_pipeline_decision_from_evidence(
+                    candidate,
+                    current,
+                    facts=AlbumQualityEvidenceDecisionFacts(
+                        installed_marked_incomplete=marked,
+                        candidate_covers_declared_program=covered,
+                    ),
+                )
+                self.assertEqual(r, baseline)
+                self.assertFalse(r["installed_incomplete_disregarded"])
+
+    def test_verified_lossless_locked_yields_to_the_mark_via_evidence(self):
+        """Parity twin of the proof-lock disarm pin (#1241).
+
+        The evidence twin's own decision-21 early return — which fires
+        before the flat twin is ever called — must honour the mark too,
+        or the two twins would disagree on every locked world.
+        """
+        import msgspec
+
+        from lib.quality import (
+            VerifiedLosslessProof,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=196, avg_bitrate=196, is_cbr=False,
+        )
+        current = self._build_current(
+            min_bitrate=128, avg_bitrate=128, format="AAC", is_cbr=False,
+            mb_release_id="mbid-parity-candidate",
+        )
+        assert current is not None
+        locked_current = msgspec.structs.replace(
+            current,
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured",
+                source="pinned",
+                classifier="pinned",
+            ),
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate,
+            locked_current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                installed_marked_incomplete=True,
+                candidate_covers_declared_program=True,
+            ),
+        )
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["installed_incomplete_disregarded"])
+
+        locked = full_pipeline_decision_from_evidence(
+            candidate,
+            locked_current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                candidate_covers_declared_program=True,
+            ),
+        )
+        self.assertEqual(locked["stage2_import"], "verified_lossless_locked")
+        self.assertFalse(locked["imported"])
+        self.assertFalse(locked["installed_incomplete_disregarded"])
+
+    def test_early_reject_still_records_the_disregard_flag_via_evidence(self):
+        """#1257 review F7/M6: the absolute admission floors outrank the
+        disregard — a corrupt candidate is rejected even under the mark —
+        but the audit flag must still record that the predicate fired,
+        matching the flat twin's dict for the same world."""
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        corrupt = self._build_candidate(
+            is_flac=False, min_bitrate=196, avg_bitrate=196, is_cbr=False,
+            audio_corrupt=True,
+        )
+        current = self._build_current(
+            min_bitrate=128, avg_bitrate=128, format="AAC", is_cbr=False,
+            mb_release_id="mbid-parity-candidate",
+        )
+        r = full_pipeline_decision_from_evidence(
+            corrupt,
+            current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                installed_marked_incomplete=True,
+                candidate_covers_declared_program=True,
+            ),
+        )
+        self.assertEqual(r["preimport_audio"], "reject_corrupt")
+        self.assertFalse(r["imported"])
+        self.assertTrue(r["installed_incomplete_disregarded"])
+
+        unmarked = full_pipeline_decision_from_evidence(corrupt, current)
+        self.assertEqual(unmarked["preimport_audio"], "reject_corrupt")
+        self.assertFalse(unmarked["installed_incomplete_disregarded"])
 
 
 class TestUltrasonicProofGateV3(unittest.TestCase):

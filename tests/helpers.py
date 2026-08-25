@@ -413,6 +413,8 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         # when an unfindable-categorised request finally imports.
         "rescued_at": None,
         "prior_unfindable_category": None,
+        # Migration 082 / issue #1241 — operator-set incomplete mark.
+        "marked_incomplete_at": None,
         # Migration 021 addressing FK.
         "current_evidence_id": None,
         # Migration 023 — supersede lineage.
@@ -615,6 +617,20 @@ def pinned_dispatch_authority(
     token = cancellation_token or CancellationToken()
     with db._pin_owner_session(token) as identity:
         yield token, identity
+
+
+def dispatch_import_with_fake_db(db: Any, **kwargs: Any) -> Any:
+    """``Any``-typed bridge from a ``FakePipelineDB`` fixture into the
+    ``PipelineDB``-typed ``dispatch_import_core`` — the largest single call
+    site of the frozen ``db=… # type: ignore[arg-type]`` cluster (34 of the
+    tests baseline's 71 findings of that shape; issue #1246 /
+    ``.claude/rules/code-quality.md`` § "Typing enforcement"). Same
+    established pattern as ``finalize_claimed_dispatch`` below: one bridge,
+    zero per-call-site escape hatches.
+    """
+    from lib.dispatch import dispatch_import_core
+
+    return dispatch_import_core(db=db, **kwargs)
 
 
 def finalize_claimed_dispatch(db: Any, job: Any, outcome: Any) -> Any:

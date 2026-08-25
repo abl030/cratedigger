@@ -362,6 +362,20 @@ least once) ever carries this block.
 
 - **The cleanup reducer** (`lib/wrong_match_cleanup_service.py`) — keep/
   delete/skip logic and the verified-lossless-parent short circuit. D2/D9.
+  One later refinement (issue #1241): when the request carries the
+  operator's incomplete mark AND the row's persisted scenario proves the
+  candidate whole (`scenario_covers_declared_program`), the shared decider
+  disregards the installed side, the decision is import-class, and the
+  reducer KEEPS the folder (`kept_would_import`, still kept + banned +
+  visible per #1077). Of the delete-eligible four, only `high_distance`
+  is covered — `extra_tracks` proves the opposite, and
+  `mbid_not_found`/`no_choose_match` never produced a checked candidate
+  (`unmapped_audio` is also covered but is not delete-eligible, so it
+  never reaches this reducer's deletion lane).
+  The verified-lossless-parent short circuit yields for exactly those
+  rows — its "guaranteed to lose" premise no longer holds — so the full
+  decider runs instead of deleting. Everything below is otherwise as
+  written.
 - **Quality rejects** (the downgrade family, `spectral_reject`) — ban +
   delete-the-source stays exactly as it was: "library holds better" is the
   redundancy proof by definition, and neither of these ever reaches a

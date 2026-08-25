@@ -19132,5 +19132,103 @@ class TestMergeRekeyUnderOperatorClaim(unittest.TestCase):
         self.assertEqual(self._evidence_release_id(colliding_id), self.SURVIVOR)
 
 
+@requires_postgres
+class TestSetMarkedIncompleteRoundTrip(unittest.TestCase):
+    """Rule A round-trip for set_marked_incomplete (issue #1241).
+
+    Migration 082's ``album_requests.marked_incomplete_at`` must survive the
+    real PG seam in both directions: a mark reads back as a timestamp
+    through ``get_request``, a clear reads back as NULL, and the frozen
+    ``replaced`` audit state refuses the write entirely.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _seed(self, mb_release_id: str = "mark-mbid") -> int:
+        return self.db.add_request(
+            artist_name="Dirt Dress",
+            album_title="Theme Songs",
+            source="request",
+            mb_release_id=mb_release_id,
+            status="imported",
+        )
+
+    def test_mark_round_trip_and_idempotence(self):
+        request_id = self._seed()
+        row = self.db.get_request(request_id)
+        assert row is not None
+        self.assertIsNone(row["marked_incomplete_at"])
+
+        self.assertFalse(self.db.request_marked_incomplete(request_id))
+        before = self.db.get_request(request_id)
+        assert before is not None
+        self.assertEqual(
+            self.db.set_marked_incomplete(request_id, marked=True), "marked"
+        )
+        row = self.db.get_request(request_id)
+        assert row is not None
+        first_stamp = row["marked_incomplete_at"]
+        self.assertIsNotNone(first_stamp)
+        # The write restamps updated_at like every other request mutation.
+        self.assertGreater(row["updated_at"], before["updated_at"])
+        # The dispatch path's narrow scalar read agrees with the row.
+        self.assertTrue(self.db.request_marked_incomplete(request_id))
+        self.assertFalse(self.db.request_marked_incomplete(987654))
+
+        # Re-marking is a distinct no-op outcome and never re-stamps.
+        self.assertEqual(
+            self.db.set_marked_incomplete(request_id, marked=True),
+            "already_marked",
+        )
+        row = self.db.get_request(request_id)
+        assert row is not None
+        self.assertEqual(row["marked_incomplete_at"], first_stamp)
+
+    def test_clear_round_trip_and_idempotence(self):
+        request_id = self._seed("mark-mbid-clear")
+        self.db.set_marked_incomplete(request_id, marked=True)
+        self.assertEqual(
+            self.db.set_marked_incomplete(request_id, marked=False), "cleared"
+        )
+        row = self.db.get_request(request_id)
+        assert row is not None
+        self.assertIsNone(row["marked_incomplete_at"])
+        self.assertEqual(
+            self.db.set_marked_incomplete(request_id, marked=False),
+            "already_clear",
+        )
+
+    def test_not_found(self):
+        self.assertEqual(
+            self.db.set_marked_incomplete(987654, marked=True), "not_found"
+        )
+
+    def test_replaced_row_refuses_the_write(self):
+        old_id = self._seed("mark-mbid-old")
+        self.db.supersede_request_mbid(
+            old_id,
+            new_mb_release_id="mark-mbid-new",
+            new_mb_release_group_id="rg-mark",
+            new_mb_artist_id="art-mark",
+            new_artist_name="Dirt Dress",
+            new_album_title="Theme Songs",
+            new_year=2007,
+            new_country="US",
+            new_tracks=[
+                {"disc_number": 1, "track_number": 1, "title": "Theme"},
+            ],
+        )
+        self.assertEqual(
+            self.db.set_marked_incomplete(old_id, marked=True), "replaced"
+        )
+        row = self.db.get_request(old_id)
+        assert row is not None
+        self.assertIsNone(row["marked_incomplete_at"])
+
+
 if __name__ == "__main__":
     unittest.main()
