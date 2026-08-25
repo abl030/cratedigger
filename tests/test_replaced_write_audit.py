@@ -161,7 +161,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "RecoveryDebrisReport import, above each shifted this line only — "
         "fingerprint unchanged, confirming the SQL itself is untouched)"
     ),
-    ("lib/pipeline_db/misc.py", 186, "12cfdd83a367c90e"): (
+    ("lib/pipeline_db/misc.py", 191, "12cfdd83a367c90e"): (
         "track-count batch IN list contains only psycopg value placeholders"
     ),
     ("lib/beets_db.py", 847, "4b59d19eb8727dff"): (
@@ -172,12 +172,12 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "-- album_requests is not reachable from this connection at all, "
         "and the query is a read-only SELECT"
     ),
-    ("lib/pipeline_db/misc.py", 399, "0a14fd5e6252e398"): (
+    ("lib/pipeline_db/misc.py", 404, "0a14fd5e6252e398"): (
         "bulk VALUES fragment contains only fixed value-placeholder tuples "
         "(issue #784: add_denylist/get_denylisted_users annotated above, "
         "shifting this line; no SQL change)"
     ),
-    ("lib/pipeline_db/misc.py", 580, "07ec7dc8e19f1ee0"): (
+    ("lib/pipeline_db/misc.py", 585, "07ec7dc8e19f1ee0"): (
         "triage joins and predicates are selected from closed service enums "
         "(issue #978 uses a fixed request-local LATERAL convergence function "
         "for the converged cohort; all values remain parameters and "

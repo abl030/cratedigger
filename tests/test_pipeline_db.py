@@ -4291,6 +4291,42 @@ class TestTrackManagement(unittest.TestCase):
                     f"set_tracks field {field!r} was dropped at the PG boundary",
                 )
 
+    def test_tied_track_keys_read_back_in_insertion_order(self):
+        """Rows sharing a (disc, track) key — the unparseable-position
+        (1, 0) sentinel — read back in insertion order via the id
+        tiebreak, and update_track_artists maps positionally onto that
+        same order (issue #1263 item 1)."""
+        tracks = [
+            {"disc_number": 1, "track_number": 0, "title": "First Tied",
+             "length_seconds": 100, "track_artist": None},
+            {"disc_number": 1, "track_number": 0, "title": "Second Tied",
+             "length_seconds": 110, "track_artist": None},
+            {"disc_number": 1, "track_number": 1, "title": "Numbered",
+             "length_seconds": 120, "track_artist": None},
+            {"disc_number": 1, "track_number": 0, "title": "Third Tied",
+             "length_seconds": 130, "track_artist": None},
+        ]
+        self.db.set_tracks(self.req_id, tracks)
+
+        titles = [t["title"] for t in self.db.get_tracks(self.req_id)]
+        self.assertEqual(
+            titles, ["First Tied", "Second Tied", "Third Tied", "Numbered"],
+        )
+
+        self.db.update_track_artists(
+            self.req_id, ["Artist A", "Artist B", "Artist C", "Artist D"],
+        )
+        by_title = {
+            t["title"]: t["track_artist"]
+            for t in self.db.get_tracks(self.req_id)
+        }
+        self.assertEqual(by_title, {
+            "First Tied": "Artist A",
+            "Second Tied": "Artist B",
+            "Third Tied": "Artist C",
+            "Numbered": "Artist D",
+        })
+
     def test_set_tracks_rolls_back_later_constraint_failure(self):
         """A failed replacement leaves the complete prior tracklist intact."""
         old_tracks = [
