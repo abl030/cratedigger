@@ -184,5 +184,153 @@ class TestDiscogsSubtrackCompatibility(unittest.TestCase):
         self.assertEqual(tracks[0]["position"], "A2")
 
 
+class TestDiscogsHeadingRowExclusion(unittest.TestCase):
+    """Heading rows never become candidate tracks (the Tiny Dots shape).
+
+    Live evidence (request 6937 / Discogs 8439330, download_log 40576):
+    two section-label rows survived candidate construction as zero-length
+    tracks, inflating the candidate to 14 tracks for a 12-file rip —
+    `extra_tracks` rejection at distance 0.5669 for a copy whose true
+    mapping is 12↔12. The deployment's beets reads the DISCOGS MIRROR
+    (nix/beets.nix repoints discogs_client), which serves headings
+    RETYPED type_=='track' with empty position/duration — so upstream
+    Beets' own heading handling never fires. The pipeline's manifests
+    drop headings (`lib/discogs_positions.py`, same measured shape
+    rule); the validation-side candidate must agree.
+    """
+
+    def tearDown(self) -> None:
+        configure_discogs_subtracks(preserve_flat=False)
+
+    def _configured_plugin(self) -> DiscogsPlugin:
+        plugin = object.__new__(DiscogsPlugin)
+        plugin.config = config["discogs"]
+        plugin.config.add({
+            "index_tracks": False,
+            "strip_disambiguation": True,
+            "featured_string": "Feat.",
+            "anv": {
+                "artist_credit": True,
+                "artist": False,
+                "album_artist": False,
+            },
+        })
+        return plugin
+
+    def _artist_state(self, plugin: DiscogsPlugin) -> ArtistState:
+        artist: Artist = {
+            "id": "1",
+            "name": "La Dispute",
+            "anv": "",
+            "join": "",
+            "role": "",
+            "tracks": "",
+            "resource_url": "",
+        }
+        return ArtistState.from_config(plugin.config, [artist])
+
+    def _heading(self, title: str) -> Track:
+        return {
+            "type_": "heading",
+            "position": "",
+            "title": title,
+            "duration": "",
+        }
+
+    def test_typed_heading_rows_are_excluded_from_candidates(self) -> None:
+        configure_discogs_subtracks(preserve_flat=False)
+        plugin = self._configured_plugin()
+        tracklist: list[Track] = [
+            self._heading('Selections From "Tiny Dots" Original Score'),
+            _audio("A1", "A", "2:00"),
+            _audio("A2", "B", "2:00"),
+            self._heading("Selections From Live Seated Performance"),
+            _audio("B1", "A Departure (live)", "4:00"),
+            _audio("B2", "For Mayor in Splitsville (live)", "4:00"),
+        ]
+
+        track_infos = plugin.get_tracks(tracklist, self._artist_state(plugin))
+
+        self.assertEqual(len(track_infos), 4)
+        titles = [t.title for t in track_infos]
+        self.assertNotIn(
+            'Selections From "Tiny Dots" Original Score', titles)
+        # The heading must not have split the medium numbering either:
+        # A/B are two sides of ONE vinyl medium (sides_per_medium=2).
+        # Unfiltered, the headings measurably split this to {1, 3}.
+        self.assertEqual({t.medium for t in track_infos}, {1})
+
+    def test_mirror_retyped_heading_rows_are_excluded(self) -> None:
+        # The DECISIVE live shape: the mirror serves section labels as
+        # type_=='track' with empty position and duration (probed on
+        # /releases/8439330). Upstream Beets keeps these as zero-length
+        # tracks that each start a phantom medium — only the compat
+        # filter's shape rule removes them.
+        configure_discogs_subtracks(preserve_flat=False)
+        plugin = self._configured_plugin()
+
+        def mirror_heading(title: str) -> Track:
+            return {
+                "type_": "track",
+                "position": "",
+                "title": title,
+                "duration": "",
+            }
+
+        tracklist: list[Track] = [
+            mirror_heading('Selections From "Tiny Dots" Original Score'),
+            _audio("A1", "A", "6:44"),
+            _audio("A2", "B", "2:32"),
+            mirror_heading("Selections From Live Seated Performance"),
+            _audio("B1", "A Departure", "3:33"),
+            _audio("B2", "For Mayor In Splitsville", "3:29"),
+        ]
+
+        track_infos = plugin.get_tracks(tracklist, self._artist_state(plugin))
+
+        self.assertEqual(len(track_infos), 4)
+        self.assertEqual({t.medium for t in track_infos}, {1})
+
+    def test_all_heading_tracklist_is_left_untouched(self) -> None:
+        # Pathological upstream data: every row a heading. The filter
+        # must never manufacture an empty candidate from non-empty
+        # input — the unfiltered list passes through to Beets.
+        from harness.beets_compat import filter_discogs_heading_rows
+
+        tracklist: list[dict[str, object]] = [
+            dict(self._heading("Section One")),
+            dict(self._heading("Section Two")),
+        ]
+        self.assertEqual(
+            filter_discogs_heading_rows(list(tracklist)), tracklist)
+
+    def test_nested_index_parent_is_never_dropped(self) -> None:
+        # An index parent carries real audio in sub_tracks — kept and
+        # coalesced by Beets' own path, in both subtrack modes.
+        for preserve_flat in (False, True):
+            with self.subTest(preserve_flat=preserve_flat):
+                configure_discogs_subtracks(preserve_flat=preserve_flat)
+                plugin = self._configured_plugin()
+                nested: IndexTrack = {
+                    "type_": "index",
+                    "position": "",
+                    "title": "A Physical Suite",
+                    "duration": "",
+                    "sub_tracks": [
+                        _audio("A2.1", "Part One", "4:00"),
+                        _audio("A2.2", "Part Two", "4:00"),
+                    ],
+                }
+                tracklist: list[Track] = [
+                    _audio("A1", "Opener", "3:00"),
+                    nested,
+                ]
+
+                track_infos = plugin.get_tracks(
+                    tracklist, self._artist_state(plugin))
+
+                self.assertEqual(len(track_infos), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
