@@ -23,7 +23,8 @@ ssh doc2 'pipeline-cli routes --json'
 The installed wrapper has two independent authority shapes:
 
 - `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
-  `merge-rekey`, `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
+  `merge-rekey`, `sync-file-tags`, `resolve-rg`, `wrong-match-delete`,
+  `wrong-match-delete-group`,
   `wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
   `force-import`, `import-local`, `beets-distance`,
   `import-preview --download-log-id`, and `triage quarantine` connect to
@@ -138,7 +139,8 @@ remains after a purge failure.
 ## API-backed mutation commands
 
 `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
-`merge-rekey`, `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
+`merge-rekey`, `sync-file-tags`, `resolve-rg`, `wrong-match-delete`,
+`wrong-match-delete-group`,
 `wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
 `force-import`, `import-local`, `beets-distance`, and
 `import-preview --download-log-id` call the canonical web route over the
@@ -367,6 +369,15 @@ inside socket authorization, never credentials.
   clears the mark automatically (issue #1241).
 - `pipeline-cli set-quality` — Set request quality through its canonical web route.
 - `pipeline-cli show` — Show a request, attempts, and quality state.
+- `pipeline-cli sync-file-tags` — Write one
+  Beets album's file tags from its DB identity through its canonical web
+  route (#1260): the heal for the merge retag's `-W` residual the
+  `audit retag-divergence` census surfaces. Compare-and-set: refuses
+  `identity_mismatch` (409/4) when the album no longer names the expected
+  identity; `already_synced` (200/0) writes nothing; `synced` (200/0) is
+  claimed only after re-reading the files agree; `residual_divergence`
+  (409/4) reports a write whose re-read files still disagree, with per-item
+  detail; `release_locked`/`beets_unavailable` (503/5) are retryable.
 - `pipeline-cli status` — Show request counts by lifecycle status.
 - `pipeline-cli triage list` — List a named triage cohort.
 - `pipeline-cli triage quarantine` — Read-only unreferenced immediate quarantine-folder scan through its canonical web route.

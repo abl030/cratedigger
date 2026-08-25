@@ -560,6 +560,59 @@ console.log('renderRetagDivergenceCensusCard() lists a divergent album with a re
   assertContains(html, 'window.recheckRetagDivergenceAlbum(6612, this)', 'recheck button wired with the album id');
   assertContains(html, 'id="retag-album-note-6612"', 'inline note slot rendered for this album');
 }
+console.log('renderRetagDivergenceAlbumRowInner() #1260 — names first, raw MBIDs demoted, Write-tags wired');
+{
+  const html = __test__.renderRetagDivergenceAlbumRowInner({
+    album_id: 16948,
+    db_mb_albumid: '26693e58-02c0-4bb1-b66f-f0f44f8a234d',
+    albumartist: 'Terre Thaemlitz / DJ Sprinkles',
+    album: 'RA.1000',
+    album_class: 'diverges', item_count: 1,
+    items: [{
+      item_class: 'diverges',
+      path: '/library/Terre Thaemlitz/2025 - RA.1000/01 RA.1000.opus',
+      file_mb_albumid: 'fdc54a6a-27c7-4936-87d7-7ab146812d4e',
+      detail: null,
+    }],
+  });
+  assertContains(html, 'Terre Thaemlitz / DJ Sprinkles — RA.1000', 'human name rendered on the album row');
+  assertExcludes(html, '>26693e58-02c0-4bb1-b66f-f0f44f8a234d<', 'full album MBID never rendered as text');
+  assertContains(html, 'title="26693e58-02c0-4bb1-b66f-f0f44f8a234d"', 'full album MBID one hover away');
+  assertContains(html, '>26693e58…<', 'short album MBID code rendered');
+  assertContains(html, '01 RA.1000.opus', 'item row names the file, not a bare UUID');
+  assertContains(html, 'title="/library/Terre Thaemlitz/2025 - RA.1000/01 RA.1000.opus"', 'full item path one hover away');
+  assertContains(html, 'title="fdc54a6a-27c7-4936-87d7-7ab146812d4e"', 'full file-tag MBID one hover away');
+  assertContains(html, 'window.syncRetagDivergenceAlbum(16948, this)', 'Write-tags button wired with the album id');
+  assertContains(html, 'data-expected="26693e58-02c0-4bb1-b66f-f0f44f8a234d"', 'Write-tags carries the compare-and-set identity');
+}
+console.log('renderRetagDivergenceAlbumRowInner() #1260 — no Write-tags button without a divergent item');
+{
+  const html = __test__.renderRetagDivergenceAlbumRowInner({
+    album_id: 7,
+    db_mb_albumid: '26693e58-02c0-4bb1-b66f-f0f44f8a234d',
+    album_class: 'unreadable', item_count: 1,
+    items: [{
+      item_class: 'unreadable', path: '/library/x/01.mp3',
+      file_mb_albumid: null, detail: 'OSError: EIO',
+    }],
+  });
+  assertExcludes(html, 'window.syncRetagDivergenceAlbum', 'unreadable-only album gets no Write-tags button');
+  assertContains(html, 'window.recheckRetagDivergenceAlbum(7, this)', 'recheck still offered');
+}
+console.log('renderRetagDivergenceAlbumRowInner() #1260 — a pre-#1260 snapshot without names still renders');
+{
+  const html = __test__.renderRetagDivergenceAlbumRowInner({
+    album_id: 9,
+    db_mb_albumid: '26693e58-02c0-4bb1-b66f-f0f44f8a234d',
+    album_class: 'diverges', item_count: 1,
+    items: [{
+      item_class: 'diverges', path: null,
+      file_mb_albumid: 'fdc54a6a-27c7-4936-87d7-7ab146812d4e', detail: null,
+    }],
+  });
+  assertContains(html, 'Album #9 <code', 'no stray separator when names are absent');
+  assertContains(html, '(unknown file)', 'missing item path degrades honestly');
+}
 console.log('renderRetagDivergenceCensusCard() escapes the db_mb_albumid value');
 {
   const html = __test__.renderRetagDivergenceCensusCard({
@@ -649,7 +702,12 @@ console.log('renderRetagDivergenceAlbumRowInner() N2 (fresh review) — shows ea
   assertContains(html, '(none)', 'a null file_mb_albumid renders as (none)');
   assertContains(html, 'OSError: permission denied', 'unreadable item detail rendered');
   assertExcludes(html, '/library/Slipknot/03.flac', 'agreeing item path never rendered — only non-agreeing items are itemized');
-  assertExcludes(html, '/library/Slipknot/01.flac', 'full arbitrary file paths are never rendered, even for non-agreeing items');
+  // #1260 revised the #1142 N2 stance on operator request: the file NAME
+  // is now the row's readable subject, and the FULL path appears only as
+  // a hover title attribute — never as flowing row text.
+  assertContains(html, 'title="/library/Slipknot/01.flac"', 'full non-agreeing item path is one hover away');
+  assertExcludes(html, '>diverges: /library/Slipknot/01.flac', 'full path never rendered as row text');
+  assertContains(html, '01.flac', 'the file name is the readable row subject');
 }
 console.log('renderRetagDivergenceAlbumRowInner() N2 (fresh review) — escapes XSS-looking item identity/detail');
 {

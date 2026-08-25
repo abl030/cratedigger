@@ -143,6 +143,7 @@ class TestApiMutationCli(unittest.TestCase):
             "wrong-match-converge": api_mutations.cmd_wrong_match_converge,
             "resolve-rg": api_mutations.cmd_resolve_rg,
             "merge-rekey": api_mutations.cmd_merge_rekey,
+            "sync-file-tags": api_mutations.cmd_sync_file_tags,
         }
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -172,6 +173,11 @@ class TestApiMutationCli(unittest.TestCase):
             ("merge-rekey", {"api_endpoint": api_mutations.TcpApiEndpoint(
                 "http://api"), "request_id": 316},
              "/api/pipeline/316/merge-rekey", {}),
+            ("sync-file-tags", {"api_endpoint": api_mutations.TcpApiEndpoint(
+                "http://api"), "album_id": 16948,
+             "expected_mb_albumid": "26693e58-02c0-4bb1-b66f-f0f44f8a234d"},
+             "/api/audit/retag-divergence/album/16948/sync-tags",
+             {"expected_mb_albumid": "26693e58-02c0-4bb1-b66f-f0f44f8a234d"}),
         ]
         for command, values, path, body in cases:
             with self.subTest(command=command), patch(
@@ -769,6 +775,35 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
         self.assertEqual(body["outcome"], "rekeyed")
         self.assertEqual(body["new_release_id"], survivor)
         self.assertEqual(self.db.request(316)["mb_release_id"], survivor)
+
+    def test_sync_file_tags_reaches_the_real_route(self) -> None:
+        """The seventh adapter (#1260): a 409 identity_mismatch round trip
+        — the compare-and-set refusal — which needs only a Beets identity
+        seed and never launches the write subprocess."""
+        import web.server as srv
+        from lib.beets_db import BeetsAlbumIdentityRow
+        from tests.fakes import FakeBeetsDB
+
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=42,
+                mb_albumid="26693e58-02c0-4bb1-b66f-f0f44f8a234d",
+                item_paths=(),
+            ),
+        ])
+        with patch.object(srv, "_beets_db", return_value=beets):
+            code, body = self._call(
+                api_mutations.cmd_sync_file_tags,
+                album_id=42,
+                expected_mb_albumid="fdc54a6a-27c7-4936-87d7-7ab146812d4e",
+            )
+
+        self.assertEqual(code, 4)
+        self.assertEqual(body["outcome"], "identity_mismatch")
+        self.assertEqual(
+            body["db_mb_albumid"], "26693e58-02c0-4bb1-b66f-f0f44f8a234d",
+        )
 
     def test_pipeline_delete_round_trip_preserves_processing_owner(self) -> None:
         self._seed(106, "a0000000-0000-0000-0000-000000000006")

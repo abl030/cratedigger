@@ -513,18 +513,40 @@ export function renderRetagDivergenceAlbumRowInner(album) {
       ? 'metric-bad'
       : 'metric-warn';
   const items = Array.isArray(album.items) ? album.items : [];
+  // Human-readable identity first (#1260): artist — title when the
+  // census snapshot carries them (older snapshots predate the fields),
+  // with the raw MBID demoted to a short hover-for-full code.
+  const name = [album.albumartist, album.album]
+    .filter(part => typeof part === 'string' && part).join(' — ');
+  const hasDivergence = items.some(item => item.item_class === 'diverges'
+    || item.item_class === 'file_tag_present_db_absent');
+  const syncButton = hasDivergence && album.db_mb_albumid
+    ? `<button class="p-btn" data-expected="${esc(album.db_mb_albumid)}" onclick="window.syncRetagDivergenceAlbum(${album.album_id}, this)">Write tags</button>`
+    : '';
   return `
     <div class="metric-row">
-      <span>Album #${album.album_id} <code title="${esc(album.db_mb_albumid || '')}">${esc(album.db_mb_albumid || '(none)')}</code></span>
+      <span>Album #${album.album_id}${name ? ` — ${esc(name)}` : ''} ${renderShortMbid(album.db_mb_albumid)}</span>
       <strong class="${classClass}">${esc(album.album_class)}</strong>
     </div>
     <div class="metric-row"><span>Items</span><strong>${formatCount(items.length)}</strong></div>
     ${items.filter(item => item.item_class !== 'agrees').map(renderRetagDivergenceItemRow).join('')}
     <div class="metric-row drift-row-action">
       <button class="p-btn" onclick="window.recheckRetagDivergenceAlbum(${album.album_id}, this)">Recheck</button>
+      ${syncButton}
       <span class="drift-row-note" id="retag-album-note-${album.album_id}"></span>
     </div>
   `;
+}
+
+/**
+ * A raw MBID demoted to a short, hover-for-full code — mere mortals read
+ * names; the UUID stays one hover away (#1260).
+ * @param {any} mbid
+ * @returns {string}
+ */
+function renderShortMbid(mbid) {
+  if (typeof mbid !== 'string' || !mbid) return '<code>(none)</code>';
+  return `<code title="${esc(mbid)}">${esc(mbid.slice(0, 8))}…</code>`;
 }
 
 /**
@@ -541,11 +563,18 @@ export function renderRetagDivergenceAlbumRowInner(album) {
  */
 function renderRetagDivergenceItemRow(item) {
   const tone = item.item_class === 'unreadable' ? 'metric-warn' : 'metric-bad';
-  const identity = item.file_mb_albumid ? esc(item.file_mb_albumid) : '(none)';
+  // The file's NAME is what a human recognises (#1260); the full path
+  // stays one hover away on the row, and the file's own tag is a short
+  // hover-for-full code like the album's.
+  const path = typeof item.path === 'string' ? item.path : '';
+  const fileName = path.split('/').pop() || '(unknown file)';
+  const identity = item.file_mb_albumid
+    ? `file tag ${renderShortMbid(item.file_mb_albumid)}`
+    : 'file tag (none)';
   const detail = item.detail ? ` — ${esc(item.detail)}` : '';
   return `
     <div class="metric-row retag-item-row">
-      <span>${esc(item.item_class)}: ${identity}${detail}</span>
+      <span class="${tone}" title="${esc(path)}">${esc(item.item_class)}: ${esc(fileName)} — ${identity}${detail}</span>
     </div>
   `;
 }

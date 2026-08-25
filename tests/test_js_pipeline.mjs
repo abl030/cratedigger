@@ -554,8 +554,12 @@ console.log('recheckRetagDivergenceAlbum() N2 (fresh review) — the patched row
   assertContains(dom.container.innerHTML, 'diverges', 'patched row shows the fresh album class');
   assertContains(dom.container.innerHTML, 'a6269e96-0000-0000-0000-000000000000',
     'patched row shows the fresh diverging item\'s identity');
-  assertExcludes(dom.container.innerHTML, '/library/Slipknot/01.flac',
-    'patched row never leaks the full item path');
+  // #1260 revised the #1142 N2 stance on operator request: the file NAME
+  // is the readable row subject, the FULL path only a hover title.
+  assertContains(dom.container.innerHTML, 'title="/library/Slipknot/01.flac"',
+    'patched row keeps the full item path one hover away');
+  assertExcludes(dom.container.innerHTML, '>diverges: /library/Slipknot/01.flac',
+    'patched row never renders the full path as row text');
 }
 
 console.log('recheckRetagDivergenceAlbum() never reloads the whole dashboard on success');

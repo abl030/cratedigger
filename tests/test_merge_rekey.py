@@ -106,6 +106,7 @@ from lib.beets_retag import (
     RetagOutcome,
     retag_merged_album,
 )
+from lib.beets_tag_sync import TagSyncResult
 from lib.config import CratediggerConfig
 from lib.download_validation import (
     MERGE_NO_REDIRECT,
@@ -209,6 +210,23 @@ def mbid_not_found_result(
         candidate_count=len(candidates),
         candidates=list(candidates),
     )
+
+
+class RecordingTagSync:
+    """A recording best-effort tag sync (#1260). Never opens Beets."""
+
+    def __init__(self, *, raises: Exception | None = None) -> None:
+        self.raises = raises
+        self.calls: list[str] = []
+
+    def __call__(
+        self, db: object, cfg: object, release_id: str,
+    ) -> TagSyncResult:
+        del db, cfg
+        self.calls.append(release_id)
+        if self.raises is not None:
+            raise self.raises
+        return TagSyncResult(outcome="synced", album_id=7)
 
 
 class RecordingCanonical:
@@ -1122,7 +1140,11 @@ class TestMergeRedirectAtTheValidationSeam(unittest.TestCase):
         *,
         canonical: RecordingCanonical,
         retag: Callable[..., BeetsRetagResult],
+        tag_sync: RecordingTagSync | None = None,
     ) -> None:
+        recorded_sync = (
+            tag_sync if tag_sync is not None else RecordingTagSync()
+        )
         with (
             _silence_logs(),
             patch("lib.beets.beets_validate", return_value=bv_result),
@@ -1134,6 +1156,7 @@ class TestMergeRedirectAtTheValidationSeam(unittest.TestCase):
                 import_job_id=self.world.import_job_id,
                 canonical_release_fn=canonical,
                 retag_fn=retag,
+                tag_sync_fn=recorded_sync,
             )
 
     def test_a_healthy_validation_never_touches_the_mirror(self) -> None:
@@ -1229,6 +1252,103 @@ class TestMergeRedirectAtTheValidationSeam(unittest.TestCase):
         self.assertFalse(bv_result.valid)
         self.assertEqual(bv_result.scenario, "mbid_not_found")
         self.assertEqual(beets.get_all_album_ids_for_release(MERGED), [7])
+
+    def test_a_rekeyed_rejection_syncs_file_tags_best_effort(self) -> None:
+        """#1260 — the -W residual's healing moment: rekeyed, revalidation
+        rejected, so no import will write the files; the seam converges
+        them best-effort, exactly once, at the survivor."""
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(MERGED, [7])
+        beets.set_album_ids_for_release(SURVIVOR, [])
+        tag_sync = RecordingTagSync()
+
+        self._validate(
+            mbid_not_found_result(candidate(SURVIVOR, distance=0.583)),
+            canonical=RecordingCanonical(SURVIVOR),
+            retag=real_retag_over(beets),
+            tag_sync=tag_sync,
+        )
+
+        self.assertEqual(self.world.stored_release_id(), SURVIVOR)
+        self.assertEqual(tag_sync.calls, [SURVIVOR])
+
+    def test_a_rekeyed_acceptance_never_syncs(self) -> None:
+        """#1260 — a valid revalidation proceeds to an import that writes
+        fresh tags itself; the seam's sync would be wasted work."""
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(MERGED, [7])
+        beets.set_album_ids_for_release(SURVIVOR, [])
+        tag_sync = RecordingTagSync()
+
+        self._validate(
+            mbid_not_found_result(candidate(SURVIVOR, distance=0.03)),
+            canonical=RecordingCanonical(SURVIVOR),
+            retag=real_retag_over(beets),
+            tag_sync=tag_sync,
+        )
+
+        self.assertEqual(self.world.stored_release_id(), SURVIVOR)
+        self.assertEqual(tag_sync.calls, [])
+
+    def test_an_unrekeyed_rejection_never_syncs(self) -> None:
+        """#1260 — no rekey, no sync: the ordinary rejection path must
+        never reach for Beets file tags."""
+        tag_sync = RecordingTagSync()
+
+        self._validate(
+            mbid_not_found_result(candidate(SURVIVOR)),
+            canonical=RecordingCanonical(None),
+            retag=RecordingRetag(self.world.db, BeetsRetagResult(
+                outcome="retagged", detail="should never run",
+            )),
+            tag_sync=tag_sync,
+        )
+
+        self.assertEqual(tag_sync.calls, [])
+
+    def test_a_raising_tag_sync_changes_no_outcome(self) -> None:
+        """#1260 outcome-inertness at the widest boundary: the raising
+        sync world and the clean sync world end byte-identical in every
+        durable and in-flight fact the seam produces."""
+        outcomes: list[tuple[object, ...]] = []
+        for raises in (None, RuntimeError("sync exploded")):
+            with contextlib.ExitStack() as stack:
+                world = _MergeWorld(stack)
+                beets = FakeBeetsDB()
+                beets.set_album_ids_for_release(MERGED, [7])
+                beets.set_album_ids_for_release(SURVIVOR, [])
+                bv_result = mbid_not_found_result(
+                    candidate(SURVIVOR, distance=0.583),
+                )
+                tag_sync = RecordingTagSync(raises=raises)
+                with (
+                    _silence_logs(),
+                    patch("lib.beets.beets_validate", return_value=bv_result),
+                ):
+                    _process_beets_validation(
+                        world.album_data,
+                        world.staged_album,
+                        world.ctx,
+                        import_job_id=world.import_job_id,
+                        canonical_release_fn=RecordingCanonical(SURVIVOR),
+                        retag_fn=real_retag_over(beets),
+                        tag_sync_fn=tag_sync,
+                    )
+                self.assertEqual(tag_sync.calls, [SURVIVOR])
+                row = world.db.request(REQUEST_ID)
+                assert row is not None
+                outcomes.append((
+                    world.stored_release_id(),
+                    world.album_data.mb_release_id,
+                    bv_result.valid,
+                    bv_result.scenario,
+                    row.get("status"),
+                    tuple(
+                        (log.outcome, log.beets_scenario)
+                        for log in world.db.download_logs
+                    ),
+                ))
+        self.assertEqual(outcomes[0], outcomes[1])
 
 
 class TestRekeyedRequestKeepsItsEvidence(unittest.TestCase):

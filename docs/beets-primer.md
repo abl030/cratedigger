@@ -84,7 +84,7 @@ is pure attribute assignment across the whole supported range — only when the
 cheap check finds neither attribute. The 19-leg `beetsStableCandidate` matrix
 is what caught this.
 
-Cratedigger has three Beets mutation lanes:
+Cratedigger has four Beets mutation lanes:
 
 1. The serial importer worker drives the JSON harness for admitted imports and
    same-release duplicate replacement.
@@ -115,8 +115,26 @@ Cratedigger has three Beets mutation lanes:
    merges the release but not the underlying recordings) does not preserve —
    so it silently retagged nothing on the common case. `beet modify` sets one
    field by query; it needs no candidate mapping and makes no network call.
+4. The one-album file-tag sync (issue #1260, `lib/beets_tag_sync.py`) runs
+   `beet write` under a compound exact-match ITEM query —
+   `album_id:=<album_id>` AND `mb_albumid:=<identity>` — writing file tags
+   DB→file for exactly one album, verified by re-reading the files through
+   the census's own single-album scan (never the subprocess exit code). It
+   heals Lane 3's accepted `-W` residual: a merge-retagged album whose
+   rejected revalidation left no import to rewrite the installed tags. One
+   canonical execution path, three callers: the dashboard census card's
+   "Write tags" button (`POST
+   /api/audit/retag-divergence/album/<id>/sync-tags`), its
+   `pipeline-cli sync-file-tags` HTTP adapter, and the merge seam itself —
+   best-effort and outcome-inert, only after a rekey whose revalidation was
+   rejected. It writes tags only (never moves a file, never chooses an
+   identity — it writes the one the Beets DB already holds), holds the
+   RELEASE advisory lock non-blocking across write+verify, and refuses
+   (typed, files untouched) unless the album's DB identity equals the
+   identity the caller authorized. Operator authority for the lane is
+   quoted in issue #1260.
 
-Lane 3 is deliberately the narrowest of the three — narrower than Lane 1's
+Lane 3 is deliberately the narrowest of the catalog-mutating lanes — narrower than Lane 1's
 full harness-driven import, and narrower than Lane 2's exact-album delete
 child in EITHER of its two modes (a whole album's files and catalog row in
 the destructive mode, a whole album's catalog row alone in the

@@ -298,6 +298,66 @@ export async function recheckRetagDivergenceAlbum(albumId, btn) {
 }
 
 /**
+ * Operator action (#1260): write one album's file tags from its Beets DB
+ * identity — the "Write tags" button on the "Beets DB ↔ File Tags
+ * Drift" card. The identity the operator SAW is re-sent from the
+ * button's `data-expected` attribute, so the server's compare-and-set
+ * refuses a stale card. Any response carrying the re-scanned album
+ * (success OR residual) patches just this row's DOM in place, exactly
+ * like the Recheck button; refusals re-arm the button with the outcome
+ * in the row's inline note.
+ *
+ * @param {number} albumId
+ * @param {HTMLButtonElement} btn
+ * @returns {Promise<void>}
+ */
+export async function syncRetagDivergenceAlbum(albumId, btn) {
+  const container = document.getElementById(`retag-album-${albumId}`);
+  const expected = btn.dataset.expected || '';
+  btn.disabled = true;
+  btn.textContent = 'Writing tags...';
+  try {
+    const r = await fetch(
+      `${API}/api/audit/retag-divergence/album/${albumId}/sync-tags`,
+      {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({expected_mb_albumid: expected}),
+      },
+    );
+    const data = await r.json();
+    if (data && data.album && container) {
+      // Re-render from the post-sync scan — the same classification the
+      // census itself would produce. This destroys the old note/button
+      // nodes, so the note lookup below must happen AFTER this.
+      container.innerHTML = renderRetagDivergenceAlbumRowInner(data.album);
+    }
+    if (r.ok) {
+      toast(`Album #${albumId}: ${data.outcome}`);
+      return;
+    }
+    btn.disabled = false;
+    btn.textContent = 'Write tags';
+    const message = `${data.outcome || 'refused'}: ${data.error_message || data.error || 'tag sync refused'}`;
+    const note = document.getElementById(`retag-album-note-${albumId}`);
+    if (note) {
+      note.textContent = message;
+      note.className = 'drift-row-note metric-bad';
+    }
+    toast(message, true);
+  } catch (_e) {
+    btn.disabled = false;
+    btn.textContent = 'Write tags';
+    const note = document.getElementById(`retag-album-note-${albumId}`);
+    if (note) {
+      note.textContent = 'Tag-sync request failed';
+      note.className = 'drift-row-note metric-bad';
+    }
+    toast('Tag-sync request failed', true);
+  }
+}
+
+/**
  * Render the pipeline view from cached data.
  *
  * Dispatches on `state.pipelineView`:

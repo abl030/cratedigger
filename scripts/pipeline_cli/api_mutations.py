@@ -499,6 +499,29 @@ def cmd_merge_rekey(_db: object, args: argparse.Namespace) -> int:
     ), timeout_seconds=TIMEOUT_MIRROR_SECONDS)
 
 
+def cmd_sync_file_tags(_db: object, args: argparse.Namespace) -> int:
+    """Thin HTTP adapter for
+    ``POST /api/audit/retag-divergence/album/<id>/sync-tags`` (#1260).
+
+    The route is the one canonical execution path
+    (``lib.beets_tag_sync.sync_album_file_tags_from_borrowed_factory``);
+    every status its outcomes can produce
+    (``lib.beets_tag_sync.TAG_SYNC_HTTP_STATUS`` — 200/404/409/503)
+    already matches ``_exit_code``'s default status→exit mapping, so no
+    ``exit_overrides`` are needed.
+
+    Uses ``TIMEOUT_MIRROR_SECONDS``, not the 15s enqueue default: the
+    route runs a real ``beet write`` subprocess plus two per-file tag
+    scans over virtiofs before it responds.
+    """
+    return _relay(args.api_endpoint, _ApiMutation(
+        path=(
+            f"/api/audit/retag-divergence/album/{args.album_id}/sync-tags"
+        ),
+        body={"expected_mb_albumid": args.expected_mb_albumid},
+    ), timeout_seconds=TIMEOUT_MIRROR_SECONDS)
+
+
 def add_api_mutation_subparsers(
     sub: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
@@ -530,3 +553,18 @@ def add_api_mutation_subparsers(
              "Request-ledger-only; never mutates Beets.",
     )
     merge_rekey.add_argument("request_id", type=int)
+
+    sync_file_tags = sub.add_parser(
+        "sync-file-tags",
+        help="Write one Beets album's file tags from its DB identity "
+             "(the retag -W divergence heal, #1260), via the web API. "
+             "Verified by re-reading the files.",
+    )
+    sync_file_tags.add_argument(
+        "album_id", type=int, help="Beets album id to sync.",
+    )
+    sync_file_tags.add_argument(
+        "expected_mb_albumid",
+        help="The DB mb_albumid you observed (compare-and-set: the sync "
+             "refuses if the album has since moved).",
+    )
