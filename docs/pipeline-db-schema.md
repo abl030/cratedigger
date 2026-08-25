@@ -1121,7 +1121,12 @@ the release positions its other tracks; an empty position WITH a
 duration is ambiguous and survives (the measured mirror rule in
 `lib/library_completeness.py`), an all-unpositioned tracklist keeps
 every row, and a nested `sub_tracks` index parent is never treated as a
-heading. Bare vinyl side letters (`A`/`B`) parse as track 1 of their
+heading. Video-marker positions (`Video`, `Video 1` — enhanced-CD bonus
+rows, request 5936's shape) drop as non-audio unless every non-heading
+row is video-marked: a whole-release video pressing's content is
+rip-real (the Placebo `ignore_video_tracks` precedent,
+`docs/plans/2026-05-12-001-feat-video-track-wrong-matches-plan.md`).
+Bare vinyl side letters (`A`/`B`) parse as track 1 of their
 side, consistent with the existing `A1`/`B1` side-as-disc convention;
 `1A`-style and trailing-dot (`1.`) positions parse instead of falling
 to the track-0 sentinel.
