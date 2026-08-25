@@ -42,9 +42,15 @@ Known limits (deliberate): the placeholder-title alphabet here is the
 exact marker list, so these worlds cannot distinguish production's
 anchored ``SILENCE_TITLE_RE`` from a substring check — the deterministic
 pin ``test_title_containing_silence_is_not_a_placeholder`` owns that
-axis; and sub-parent rows are always emitted immediately before their
+axis; sub-parent rows are always emitted immediately before their
 run, so parent-position independence is owned by the deterministic pin
-``test_parent_after_subs_still_titles_the_group``.
+``test_parent_after_subs_still_titles_the_group``; and video positions
+are drawn from the marker literals only — regex anchoring
+(``test_video_like_positions_are_not_markers``), video sub-positions
+(``test_video_sub_positions_drop_before_grouping``), and the nested
+``sub_tracks`` index-parent vote
+(``test_index_parent_vote_keeps_video_rows_droppable``) are owned by
+deterministic pins.
 """
 
 from __future__ import annotations
@@ -318,6 +324,14 @@ _ALL_VIDEO_PIN = World(
     ),
 )
 
+_HEADING_PLUS_ALL_VIDEO_PIN = World(
+    wire=(
+        ("", Entry("Bonus Section", "", None)),
+        ("Video", Entry("Clip", "4:00", 240)),
+    ),
+    expected=((1, 0, "Clip", 240),),
+)
+
 _HEADING_PIN = World(
     wire=(
         ("", Entry("Alpha", "", None)),
@@ -356,6 +370,7 @@ class TestNormalizeReleaseTracksProperties(unittest.TestCase):
     @example(_PARENT_TOTAL_PIN)
     @example(_VIDEO_MIXED_PIN)
     @example(_ALL_VIDEO_PIN)
+    @example(_HEADING_PLUS_ALL_VIDEO_PIN)
     def test_normalizer_emits_exactly_the_spec_rows(self, world: World):
         self.assertEqual(
             _to_rows(world), _spec_rows(world),

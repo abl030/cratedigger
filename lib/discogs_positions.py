@@ -222,11 +222,17 @@ def normalize_release_tracks(
 
     sub_bases = {base for _, base, sub, _, _, _, _ in parsed if sub is not None}
     any_positioned = any(position for position, _, _, _, _, _, _ in parsed)
-    non_header_bases = [
-        base for _, base, _, _, _, _, is_header in parsed if not is_header
+    # The all-video vote is cast by every row the heading rule does NOT
+    # drop — including a nested sub_tracks index parent (real audio) and
+    # ambiguous empty-position rows — so one surviving non-video row is
+    # enough to make video markers droppable phantoms.
+    voting_bases = [
+        base
+        for _, base, _, _, _, has_children, is_header in parsed
+        if not (is_header and any_positioned and not has_children)
     ]
-    all_video = bool(non_header_bases) and all(
-        VIDEO_POSITION_RE.match(base) for base in non_header_bases
+    all_video = bool(voting_bases) and all(
+        VIDEO_POSITION_RE.match(base) for base in voting_bases
     )
 
     ordered: list[dict[str, object] | _PositionGroup] = []

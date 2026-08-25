@@ -528,6 +528,57 @@ class TestGetReleaseSubPositionTracks(unittest.TestCase):
         ])
         self.assertEqual(len(tracks), 2)
 
+    def test_index_parent_vote_keeps_video_rows_droppable(self):
+        # A nested sub_tracks index parent survives the heading rule as
+        # real audio, so it must VOTE in the all-video decision: this
+        # release has audio, and the phantom video row drops.
+        tracks = self._tracks(910024, [
+            {"position": "", "title": "Medley", "duration": "", "sub_tracks": [
+                {"position": "2.1", "title": "Part One", "duration": "1:00"},
+            ]},
+            {"position": "Video", "title": "Bonus Clip", "duration": "4:00"},
+        ])
+        self.assertEqual(len(tracks), 1)
+        only = tracks[0]
+        assert _is_dict(only)
+        self.assertEqual(only["title"], "Medley")
+
+    def test_heading_plus_all_video_release_keeps_video_rows(self):
+        # A dropped section heading casts no vote: the remaining rows
+        # are all video, so the whole-release guard preserves them
+        # (never an empty manifest).
+        tracks = self._tracks(910025, [
+            {"position": "", "title": "Bonus Section", "duration": ""},
+            {"position": "Video", "title": "Clip", "duration": "4:00"},
+        ])
+        self.assertEqual(len(tracks), 1)
+        only = tracks[0]
+        assert _is_dict(only)
+        self.assertEqual(only["title"], "Clip")
+
+    def test_video_like_positions_are_not_markers(self):
+        # The marker grammar is anchored: positions merely CONTAINING
+        # the word survive (they fall to the (1, 0) sentinel but are
+        # never dropped).
+        tracks = self._tracks(910026, [
+            {"position": "1", "title": "Song", "duration": "3:00"},
+            {"position": "Videos", "title": "Kept One", "duration": "2:00"},
+            {"position": "DVD Video", "title": "Kept Two", "duration": "2:00"},
+            {"position": "Video 1-2", "title": "Kept Three", "duration": "2:00"},
+        ])
+        self.assertEqual(len(tracks), 4)
+
+    def test_video_sub_positions_drop_before_grouping(self):
+        # 'Video.1'/'Video.2' bases match the marker too; on a mixed
+        # release they drop before the grouping pass, leaving no phantom
+        # group behind.
+        tracks = self._tracks(910027, [
+            {"position": "1", "title": "Song", "duration": "3:00"},
+            {"position": "Video.1", "title": "Clip A", "duration": "1:00"},
+            {"position": "Video.2", "title": "Clip B", "duration": "1:00"},
+        ])
+        self.assertEqual(len(tracks), 1)
+
     def test_video_in_title_never_drops_a_row(self):
         # Only the POSITION grammar decides; titles are never consulted.
         tracks = self._tracks(910023, [
