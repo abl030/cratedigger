@@ -619,6 +619,29 @@ def pinned_dispatch_authority(
         yield token, identity
 
 
+def make_database_source_with_fake_db(
+    db: Any,
+    *,
+    musicbrainz_ws2_base: str,
+    discogs_api_base: str,
+) -> Any:
+    """``Any``-typed bridge from a ``FakePipelineDB`` fixture into
+    ``DatabaseSource``'s ``PipelineDB``-typed ``borrowed_db`` kwarg — same
+    established pattern as ``dispatch_import_with_fake_db`` below: one
+    bridge, zero per-call-site escape hatches. Added for issue #1261's
+    fallback-writer pins, which need a stateful DB to assert the persisted
+    manifest rather than a call shape.
+    """
+    from album_source import DatabaseSource
+
+    return DatabaseSource(
+        "unused-dsn",
+        musicbrainz_ws2_base=musicbrainz_ws2_base,
+        discogs_api_base=discogs_api_base,
+        borrowed_db=db,
+    )
+
+
 def dispatch_import_with_fake_db(db: Any, **kwargs: Any) -> Any:
     """``Any``-typed bridge from a ``FakePipelineDB`` fixture into the
     ``PipelineDB``-typed ``dispatch_import_core`` — the largest single call

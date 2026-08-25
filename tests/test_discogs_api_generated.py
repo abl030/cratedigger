@@ -1,30 +1,39 @@
 """Generated properties for Discogs tracklist normalization (issue #1261).
 
 Deterministic pins live in ``tests/test_discogs_api.py``
-(``TestGetReleaseSubPositionTracks``); these properties patrol the world
-space around them through the REAL ``_normalize_release_tracks`` — the
-function ``get_release()`` runs on every mirror payload before the
+(``TestGetReleaseSubPositionTracks``, which drives the real
+``get_release()`` adapter) and ``tests/test_album_source.py`` (the search
+worker's fallback writer); these properties patrol the world space
+around them through ``lib.discogs_positions.normalize_release_tracks`` —
+the one canonical normalizer both production writers run before a
 manifest is persisted into ``album_tracks``.
 
-Invariants, each paired with its pin per ``.claude/rules/code-quality.md``:
+The oracle is STRUCTURAL: every world is drawn as a list of declared
+groups (flat row, duplicated flat row, sub-position run, sub run with a
+flat parent row), and the expected normalized rows — including
+disc/track numbers and summed durations — are recorded AT DRAW TIME from
+the form definitions, never by re-running production parsing. Production
+must recover the declared structure from the position strings alone.
 
-**P1 — one manifest row per physical position.** However Discogs splits a
-position into ``N.M`` sub-entries, the normalized manifest has exactly one
-row per top-level position group, in first-appearance order. This is the
-matcher count gate's precondition: a rip has one file per position.
+**P1 — the normalizer emits exactly the spec rows.** One row per
+physical position in first-appearance order: flat rows pass through
+verbatim (titles, numbers, durations — even placeholder titles), never
+merging with each other (a duplicated flat position stays two rows); a
+sub-position run merges to one row keyed by its literal base (so
+unparseable bases like ``CD1``/``CD2`` stay distinct), titled by its
+first non-placeholder sub-entry (blank counts as placeholder), durations
+summed losslessly; a flat parent row sharing a sub run's base joins that
+run instead of duplicating its position.
 
-**P2 — flat tracklists are untouched.** A tracklist with no sub-position
-notation maps entry-for-entry to the legacy shape (same titles, numbers,
-durations). Normalization must never reshape ordinary releases.
+**P2 — flat tracklists are untouched.** The no-sub-position subset of
+P1, kept as an explicitly named law: normalization must never reshape an
+ordinary release.
 
-**P3 — a merged row's title is the first non-placeholder sub-title.**
-``(silence)``-style placeholders never become the searched/matched track
-title while a real title exists in the group; an all-placeholder group
-falls back to its first title verbatim.
-
-**P4 — durations sum lossy-safely.** A merged row's length is the sum of
-the group's known durations, or None when none are known — never a
-partial silent drop of a known duration.
+Known limit (deliberate): the placeholder-title alphabet here is the
+exact marker list, so these worlds cannot distinguish production's
+anchored ``SILENCE_TITLE_RE`` from a substring check — the deterministic
+pin ``test_title_containing_silence_is_not_a_placeholder`` owns that
+axis.
 """
 
 from __future__ import annotations
@@ -36,173 +45,206 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from web.discogs import (
-    _DiscogsTrackJSON,
-    _normalize_release_tracks,
-    _parse_duration,
-)
+from lib.discogs_positions import normalize_release_tracks
 
 
 @dataclass(frozen=True)
-class SubEntry:
+class Entry:
     title: str
-    duration: str
+    duration_text: str
+    duration_seconds: float | None
 
 
 @dataclass(frozen=True)
-class TrackGroup:
-    """One physical position: flat (single entry) or a sub-position run."""
-
-    base: str
-    entries: tuple[SubEntry, ...]
-    is_sub: bool
+class World:
+    wire: tuple[tuple[str, Entry], ...]
+    expected: tuple[tuple[int, int, str, float | None], ...]
 
 
 _SILENCE_TITLES = ("(silence)", "[silence]", "silence", "(Silence)", " (silence) ")
 
 
 def _is_placeholder(title: str) -> bool:
-    return "silence" in title.lower()
+    return not title.strip() or "silence" in title.lower()
 
 
 _real_titles = st.text(min_size=1, max_size=24).filter(
     lambda t: not _is_placeholder(t)
 )
 
-_durations = st.one_of(
+_titles = st.one_of(
+    _real_titles,
+    st.sampled_from(_SILENCE_TITLES),
     st.just(""),
-    st.builds(
-        lambda m, s: f"{m}:{s:02d}",
-        st.integers(min_value=0, max_value=59),
-        st.integers(min_value=0, max_value=59),
-    ),
+    st.just("   "),
 )
-
-_titles = st.one_of(_real_titles, st.sampled_from(_SILENCE_TITLES))
 
 
 @st.composite
-def track_groups(draw: st.DrawFn) -> list[TrackGroup]:
-    """Worlds of flat tracks and sub-position runs with unique bases.
+def _entries(draw: st.DrawFn) -> Entry:
+    title = draw(_titles)
+    if draw(st.booleans()):
+        minutes = draw(st.integers(min_value=0, max_value=59))
+        seconds = draw(st.integers(min_value=0, max_value=59))
+        return Entry(title, f"{minutes}:{seconds:02d}", minutes * 60 + seconds)
+    return Entry(title, "", None)
 
-    Bases are distinct numeric positions by construction so each group's
-    expected output row is unambiguous; flat groups additionally sample
-    the vinyl (``A1``), disc-track (``1-3``), and bare-letter (``A``)
-    grammars, which never merge.
+
+def _merged_expectation(
+    disc: int, track: int, members: list[Entry],
+) -> tuple[int, int, str, float | None]:
+    titles = [entry.title for entry in members]
+    real = [t for t in titles if not _is_placeholder(t)]
+    title = real[0] if real else titles[0]
+    known = [
+        entry.duration_seconds
+        for entry in members
+        if entry.duration_seconds is not None
+    ]
+    return (disc, track, title, sum(known) if known else None)
+
+
+@st.composite
+def worlds(draw: st.DrawFn) -> World:
+    """Structured worlds with draw-time expectations.
+
+    Flat position forms carry their expected ``(disc, track)`` as
+    literals from ``parse_position``'s documented grammar; sub bases are
+    unique per group by construction (index-derived), covering both
+    parseable numeric bases and unparseable ``CD<n>`` bases that all
+    parse to the ``(1, 0)`` sentinel.
     """
-    count = draw(st.integers(min_value=0, max_value=8))
-    groups: list[TrackGroup] = []
+    count = draw(st.integers(min_value=0, max_value=6))
+    wire: list[tuple[str, Entry]] = []
+    expected: list[tuple[int, int, str, float | None]] = []
     for index in range(count):
         number = index + 1
-        is_sub = draw(st.booleans())
-        if is_sub:
-            entries = tuple(
-                SubEntry(title=draw(_titles), duration=draw(_durations))
-                for _ in range(draw(st.integers(min_value=1, max_value=4)))
-            )
-            groups.append(
-                TrackGroup(base=str(number), entries=entries, is_sub=True))
-        else:
-            base = draw(st.sampled_from((
-                str(number),
-                f"1-{number}",
-                f"A{number}",
-                chr(ord("A") + index),
+        kind = draw(st.sampled_from(("flat", "flat_dup", "sub", "sub_parent")))
+        if kind in ("flat", "flat_dup"):
+            position, disc, track = draw(st.sampled_from((
+                (str(number), 1, number),
+                (f"1-{number}", 1, number),
+                (f"A{number}", 1, number),
+                (chr(ord("A") + index), index + 1, 1),
+                ("", 1, 0),
             )))
-            entries = (SubEntry(title=draw(_titles), duration=draw(_durations)),)
-            groups.append(TrackGroup(base=base, entries=entries, is_sub=False))
-    return groups
+            entry = draw(_entries())
+            wire.append((position, entry))
+            expected.append((disc, track, entry.title, entry.duration_seconds))
+            if kind == "flat_dup":
+                dup = draw(_entries())
+                wire.append((position, dup))
+                expected.append((disc, track, dup.title, dup.duration_seconds))
+        else:
+            base, disc, track = draw(st.sampled_from((
+                (str(number), 1, number),
+                (f"CD{number}", 1, 0),
+            )))
+            members: list[Entry] = []
+            if kind == "sub_parent":
+                parent = draw(_entries())
+                wire.append((base, parent))
+                members.append(parent)
+            sub_count = draw(st.integers(min_value=1, max_value=4))
+            for sub_index in range(1, sub_count + 1):
+                entry = draw(_entries())
+                wire.append((f"{base}.{sub_index}", entry))
+                members.append(entry)
+            expected.append(_merged_expectation(disc, track, members))
+    return World(wire=tuple(wire), expected=tuple(expected))
 
 
-def _to_wire(groups: list[TrackGroup]) -> list[_DiscogsTrackJSON]:
-    tracks: list[_DiscogsTrackJSON] = []
-    for group in groups:
-        for sub_index, entry in enumerate(group.entries, start=1):
-            position = (
-                f"{group.base}.{sub_index}" if group.is_sub else group.base
-            )
-            tracks.append(_DiscogsTrackJSON(
-                position=position,
-                title=entry.title,
-                duration=entry.duration,
-            ))
-    return tracks
+def _to_rows(world: World) -> list[dict[str, object]]:
+    return normalize_release_tracks([
+        {"position": position, "title": entry.title, "duration": entry.duration_text}
+        for position, entry in world.wire
+    ])
 
 
-_HIDDEN_TRACK_PIN = [
-    TrackGroup("9", (SubEntry("Stay Entertained", "3:46"),), False),
-    TrackGroup("10", (
-        SubEntry("Island Lost At Sea", "3:46"),
-        SubEntry("(silence)", "0:20"),
-        SubEntry("Untitled", "3:49"),
-    ), True),
-]
+def _spec_rows(world: World) -> list[dict[str, object]]:
+    return [
+        {
+            "disc_number": disc,
+            "track_number": track,
+            "title": title,
+            "length_seconds": length,
+        }
+        for disc, track, title, length in world.expected
+    ]
 
-_LEADING_SILENCE_PIN = [
-    TrackGroup("1", (
-        SubEntry("(silence)", "0:10"),
-        SubEntry("Hidden Song", "3:00"),
-    ), True),
-]
+
+_HIDDEN_TRACK_PIN = World(
+    wire=(
+        ("9", Entry("Stay Entertained", "3:46", 226)),
+        ("10.1", Entry("Island Lost At Sea", "3:46", 226)),
+        ("10.2", Entry("(silence)", "0:20", 20)),
+        ("10.3", Entry("Untitled", "3:49", 229)),
+    ),
+    expected=(
+        (1, 9, "Stay Entertained", 226),
+        (1, 10, "Island Lost At Sea", 475),
+    ),
+)
+
+_UNPARSEABLE_BASES_PIN = World(
+    wire=(
+        ("CD1.1", Entry("One A", "1:00", 60)),
+        ("CD1.2", Entry("One B", "1:00", 60)),
+        ("CD2.1", Entry("Two A", "1:00", 60)),
+    ),
+    expected=(
+        (1, 0, "One A", 120),
+        (1, 0, "Two A", 60),
+    ),
+)
+
+_FLAT_PARENT_PIN = World(
+    wire=(
+        ("10", Entry("Medley", "", None)),
+        ("10.1", Entry("Part One", "1:00", 60)),
+        ("10.2", Entry("Part Two", "2:00", 120)),
+    ),
+    expected=((1, 10, "Medley", 180),),
+)
+
+_FLAT_DUP_PIN = World(
+    wire=(
+        ("1", Entry("Take One", "1:00", 60)),
+        ("1", Entry("Take Two", "2:00", 120)),
+    ),
+    expected=(
+        (1, 1, "Take One", 60),
+        (1, 1, "Take Two", 120),
+    ),
+)
 
 
 class TestNormalizeReleaseTracksProperties(unittest.TestCase):
-    @given(track_groups())
+    @given(worlds())
     @example(_HIDDEN_TRACK_PIN)
-    @example(_LEADING_SILENCE_PIN)
-    def test_one_row_per_position_group(self, groups: list[TrackGroup]):
-        rows = _normalize_release_tracks(_to_wire(groups))
+    @example(_UNPARSEABLE_BASES_PIN)
+    @example(_FLAT_PARENT_PIN)
+    @example(_FLAT_DUP_PIN)
+    def test_normalizer_emits_exactly_the_spec_rows(self, world: World):
         self.assertEqual(
-            len(rows), len(groups),
-            "P1: normalized manifest must have one row per position group",
+            _to_rows(world), _spec_rows(world),
+            "P1: normalized rows must equal the draw-time spec rows",
         )
 
-    @given(track_groups().filter(lambda gs: not any(g.is_sub for g in gs)))
-    def test_flat_tracklists_are_untouched(self, groups: list[TrackGroup]):
-        rows = _normalize_release_tracks(_to_wire(groups))
-        self.assertEqual(len(rows), len(groups), "P2: flat count preserved")
-        for group, row in zip(groups, rows, strict=True):
-            self.assertEqual(
-                row["title"], group.entries[0].title,
-                "P2: flat titles pass through verbatim",
-            )
-            self.assertEqual(
-                row["length_seconds"],
-                _parse_duration(group.entries[0].duration),
-                "P2: flat durations pass through verbatim",
-            )
-
-    @given(track_groups())
-    @example(_HIDDEN_TRACK_PIN)
-    @example(_LEADING_SILENCE_PIN)
-    def test_merged_title_is_first_non_placeholder(
-        self, groups: list[TrackGroup],
-    ):
-        rows = _normalize_release_tracks(_to_wire(groups))
-        for group, row in zip(groups, rows, strict=True):
-            titles = [entry.title for entry in group.entries]
-            real = [t for t in titles if not _is_placeholder(t)]
-            expected = real[0] if real else titles[0]
-            self.assertEqual(
-                row["title"], expected,
-                "P3: merged title must be the first non-placeholder",
-            )
-
-    @given(track_groups())
-    @example(_HIDDEN_TRACK_PIN)
-    def test_merged_duration_sums_known(self, groups: list[TrackGroup]):
-        rows = _normalize_release_tracks(_to_wire(groups))
-        for group, row in zip(groups, rows, strict=True):
-            known = [
-                seconds
-                for entry in group.entries
-                if (seconds := _parse_duration(entry.duration)) is not None
-            ]
-            expected = sum(known) if known else None
-            self.assertEqual(
-                row["length_seconds"], expected,
-                "P4: merged duration is the sum of known durations",
-            )
+    @given(worlds().filter(
+        lambda w: all("." not in position for position, _ in w.wire)
+    ))
+    @example(_FLAT_DUP_PIN)
+    def test_flat_tracklists_are_untouched(self, world: World):
+        rows = _to_rows(world)
+        self.assertEqual(
+            rows, _spec_rows(world),
+            "P2: a tracklist with no sub-positions passes through verbatim",
+        )
+        self.assertEqual(
+            len(rows), len(world.wire),
+            "P2: flat rows are never merged with each other",
+        )
 
 
 if __name__ == "__main__":

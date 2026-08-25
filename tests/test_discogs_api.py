@@ -38,10 +38,14 @@ def tearDownModule() -> None:
     web.discogs.DISCOGS_API_BASE = None
 
 
+from lib.discogs_positions import (
+    parse_duration as _parse_duration,
+)
+from lib.discogs_positions import (
+    parse_position as _parse_position,
+)
 from web.discogs import (
     LabelEntity,
-    _parse_duration,
-    _parse_position,
     _parse_year,
     _primary_artist_name,
     get_artist_name,
@@ -316,6 +320,61 @@ class TestGetReleaseSubPositionTracks(unittest.TestCase):
             (side_a["disc_number"], side_a["track_number"]), (1, 1))
         self.assertEqual(
             (side_b["disc_number"], side_b["track_number"]), (2, 1))
+
+    def test_unparseable_sub_bases_group_separately(self):
+        # Grouping keys on the literal base string: 'CD1.x' and 'CD2.x'
+        # both parse to the (1, 0) sentinel but are distinct physical
+        # tracks and must stay distinct rows.
+        tracks = self._tracks(910007, [
+            {"position": "CD1.1", "title": "One A", "duration": "1:00"},
+            {"position": "CD1.2", "title": "One B", "duration": "1:00"},
+            {"position": "CD2.1", "title": "Two A", "duration": "1:00"},
+        ])
+        self.assertEqual(len(tracks), 2)
+        first, second = tracks[0], tracks[1]
+        assert _is_dict(first) and _is_dict(second)
+        self.assertEqual(first["title"], "One A")
+        self.assertEqual(first["length_seconds"], 120.0)
+        self.assertEqual(second["title"], "Two A")
+
+    def test_flat_parent_row_joins_its_sub_group(self):
+        # An index-style parent row sharing a sub run's base merges into
+        # that run instead of duplicating its (disc, track).
+        tracks = self._tracks(910008, [
+            {"position": "10", "title": "Medley", "duration": ""},
+            {"position": "10.1", "title": "Part One", "duration": "1:00"},
+            {"position": "10.2", "title": "Part Two", "duration": "2:00"},
+        ])
+        self.assertEqual(len(tracks), 1)
+        only = tracks[0]
+        assert _is_dict(only)
+        self.assertEqual(only["track_number"], 10)
+        self.assertEqual(only["title"], "Medley")
+        self.assertEqual(only["length_seconds"], 180.0)
+
+    def test_blank_sub_title_is_placeholder(self):
+        tracks = self._tracks(910009, [
+            {"position": "1.1", "title": "", "duration": "0:10"},
+            {"position": "1.2", "title": "Real Song", "duration": "3:00"},
+        ])
+        self.assertEqual(len(tracks), 1)
+        only = tracks[0]
+        assert _is_dict(only)
+        self.assertEqual(only["title"], "Real Song")
+        self.assertEqual(only["length_seconds"], 190.0)
+
+    def test_duplicate_flat_positions_stay_separate(self):
+        # Flat rows never merge with each other, even on identical
+        # positions (upstream data errors, heading rows).
+        tracks = self._tracks(910010, [
+            {"position": "1", "title": "Take One", "duration": "1:00"},
+            {"position": "1", "title": "Take Two", "duration": "2:00"},
+        ])
+        self.assertEqual(len(tracks), 2)
+        first, second = tracks[0], tracks[1]
+        assert _is_dict(first) and _is_dict(second)
+        self.assertEqual(first["title"], "Take One")
+        self.assertEqual(second["title"], "Take Two")
 
     def test_flat_tracklists_pass_through_unchanged(self):
         tracks = self._tracks(910005, [

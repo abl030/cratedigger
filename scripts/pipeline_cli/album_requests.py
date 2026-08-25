@@ -556,7 +556,11 @@ def _cmd_add_discogs(
     print(f"  Fetching Discogs release {discogs_id}...")
     try:
         from web import discogs as discogs_api
-        release = discogs_api.get_release(int(discogs_id))
+        # fresh=True for the same reason as the web add path
+        # (web/routes/pipeline_mutations.py): this call persists
+        # artist/title/track metadata into the pipeline DB, so it must
+        # not serve a possibly-stale 24h cache entry.
+        release = discogs_api.get_release(int(discogs_id), fresh=True)
     except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         print(f"  Failed to fetch release from Discogs API: {e}")
         return None
