@@ -1124,6 +1124,57 @@ under `docs/research/`.
 - `--force` flag: skips the distance check (`max_distance=999`) for force-importing rejected albums. Used by `pipeline_cli.py force-import` and `POST /api/pipeline/force-import`.
 - Exit codes: 0=imported, 1=conversion failed, 2=beets failed, 3=path not found, 5=downgrade or suspect-lossless rejection, 6=transcode/provisional path (may or may not have imported as an upgrade).
 
+## Operator incomplete mark (issue #1241)
+
+The ONE operator-owned exception to every existing-side block above.
+`album_requests.marked_incomplete_at` (migration 082) records the operator's
+decision that the installed copy is missing declared program — set/cleared
+via `pipeline-cli mark-incomplete` / `POST /api/pipeline/mark-incomplete` /
+the dashboard's Library Completeness card, and NEVER by measurement (the
+daily census only informs the decision; UNKLE-class ambiguity stays unmarked
+until a human settles it).
+
+- **Predicate.** `installed_marked_incomplete AND
+  candidate_covers_declared_program` — both action-time facts on
+  `AlbumQualityEvidenceDecisionFacts`. When both hold,
+  `full_pipeline_decision` disregards the installed side entirely (every
+  `existing_*` input, the one-sided spectral floor, the lossless-source
+  anchor, and the decision-21 verified-lossless lock) and admits the
+  candidate exactly as into an empty slot. Fresh-import admission IS the
+  policy: the absolute candidate-side floors (corrupt / bad-hash / nested /
+  empty / mixed, and the candidate-side fail-closed provisional rejects)
+  still apply, and a below-par import keeps the search open, so quality
+  convergence resumes against the now-complete copy. Monotone by
+  construction — with no existing side, nothing can newly reject. The
+  decision dict records the disregard in the audit-only
+  `installed_incomplete_disregarded` key; `comparison_basis` stays None
+  because no comparison ran. Authority: "incomplete is incomplete and
+  complete always always beats it." — operator, issue #1241 superseding
+  comment (2026-08-25).
+- **Coverage conjunct.** Derived in exactly one place —
+  `lib/validation_envelope.py::scenario_covers_declared_program` — from the
+  attempt's persisted beets scenario: `strong_match` / `high_distance` /
+  `unmapped_audio` are assigned only after `apply_candidate_scenario`'s
+  `extra_tracks` branch fell through, so reaching one IS beets' proof the
+  candidate carries every declared track. `extra_tracks` proves the
+  opposite (one partial can never "upgrade" another); `mbid_not_found` /
+  `no_choose_match` never produced a checked candidate. Auto/local import
+  is `strong_match` by admission; a force import reads the linked
+  `download_log` row's stored scenario
+  (`lib/dispatch/core.py::_attempt_beets_scenario`), the same bit the
+  Wrong Matches cleanup reducer derives from that row.
+- **Reducer lane.** A marked request's covered Wrong Matches row decides
+  import-class, so the cleanup reducer KEEPS the folder (kept + banned +
+  visible per #1077) instead of deleting it as a "downgrade", and the
+  verified-lossless-parent short circuit yields for the same rows. The
+  operator force-imports with one click; force bypasses only the beets
+  distance, and under the mark the disregard carries the quality side.
+- **Auto-clear.** A terminal acceptance whose candidate was proven whole
+  writes `marked_incomplete_at = NULL` through the imported transition's
+  metadata CAS (`_do_mark_done`), atomic with the status write — a stale
+  mark can never churn the next complete candidate. Rejections and
+  preserve-imported outcomes leave the mark untouched.
+
 ## Comparison basis — the persisted decision explanation
 
 Every `compare_quality()` call returns a `QualityComparisonBasis`
