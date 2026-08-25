@@ -25,6 +25,8 @@ import requests
 if TYPE_CHECKING:
     # Import-time cycle: ``tests.fakes`` does not import this module, but
     # keeping the reference type-only preserves that independence.
+    from album_source import DatabaseSource
+    from lib.dispatch.core import DispatchOutcome
     from tests.fakes import FakePipelineDB
 
 from lib.grab_list import DownloadFile, GrabListEntry
@@ -346,7 +348,7 @@ def hermetic_beets_config_defaults() -> Generator[tuple[str, str]]:
                 )
 
 
-def make_request_row(**overrides: Any) -> dict[str, Any]:
+def make_request_row(**overrides: object) -> dict[str, Any]:
     """Return a complete album_requests row dict with sensible defaults.
 
     Mirrors the shape of PipelineDB.get_request() (SELECT * FROM album_requests).
@@ -624,7 +626,7 @@ def make_database_source_with_fake_db(
     *,
     musicbrainz_ws2_base: str,
     discogs_api_base: str,
-) -> Any:
+) -> DatabaseSource:
     """``Any``-typed bridge from a ``FakePipelineDB`` fixture into
     ``DatabaseSource``'s ``PipelineDB``-typed ``borrowed_db`` kwarg — same
     established pattern as ``dispatch_import_with_fake_db`` below: one
@@ -642,7 +644,7 @@ def make_database_source_with_fake_db(
     )
 
 
-def dispatch_import_with_fake_db(db: Any, **kwargs: Any) -> Any:
+def dispatch_import_with_fake_db(db: Any, **kwargs: Any) -> DispatchOutcome:
     """``Any``-typed bridge from a ``FakePipelineDB`` fixture into the
     ``PipelineDB``-typed ``dispatch_import_core`` — the largest single call
     site of the frozen ``db=… # type: ignore[arg-type]`` cluster (34 of the
@@ -656,7 +658,7 @@ def dispatch_import_with_fake_db(db: Any, **kwargs: Any) -> Any:
     return dispatch_import_core(db=db, **kwargs)
 
 
-def finalize_claimed_dispatch(db: Any, job: Any, outcome: Any) -> Any:
+def finalize_claimed_dispatch(db: Any, job: Any, outcome: Any) -> ImportJob | None:
     """Apply a direct dispatch result through the production queue owner.
 
     ``outcome`` is ordinarily the ``DispatchOutcome`` (or equivalent) the
@@ -1516,7 +1518,7 @@ def make_download_file(
     )
 
 
-def make_transfer_snapshot(**overrides: Any) -> TransferSnapshot:
+def make_transfer_snapshot(**overrides: object) -> TransferSnapshot:
     """Build a TransferSnapshot (DownloadFile.status, issue #468) with a
     sensible default state. Every other field defaults per the Struct
     itself — pass overrides for the fields a scenario cares about."""
@@ -1525,7 +1527,7 @@ def make_transfer_snapshot(**overrides: Any) -> TransferSnapshot:
     return TransferSnapshot(**defaults)
 
 
-def make_download_directory(**overrides: Any) -> DownloadDirectory:
+def make_download_directory(**overrides: object) -> DownloadDirectory:
     """Build a DownloadDirectory — one directory row of the
     get_all_downloads() envelope (issue #507) — with an empty file list
     by default."""
@@ -1534,7 +1536,7 @@ def make_download_directory(**overrides: Any) -> DownloadDirectory:
     return DownloadDirectory(**defaults)
 
 
-def make_download_user(**overrides: Any) -> DownloadUser:
+def make_download_user(**overrides: object) -> DownloadUser:
     """Build a DownloadUser — one user-group row of the
     get_all_downloads() envelope (issue #507) — with an empty directory
     list by default."""
@@ -1619,7 +1621,7 @@ def make_ctx_with_fake_db(
     )
 
 
-def noop_quality_gate(**_kwargs: Any) -> None:
+def noop_quality_gate(**_kwargs: object) -> None:
     """No-op quality-gate stub for ``dispatch_import_core(quality_gate_fn=...)``.
 
     Replaces the legacy module-attribute patch on
@@ -1657,10 +1659,10 @@ class RecordingQualityGate:
     can assert call counts and arguments."""
 
     def __init__(self, *, result: object | None = None) -> None:
-        self.calls: list[dict[str, Any]] = []
+        self.calls: list[dict[str, object]] = []
         self.result = result
 
-    def __call__(self, **kwargs: Any) -> object | None:
+    def __call__(self, **kwargs: object) -> object | None:
         self.calls.append(kwargs)
         return self.result
 
