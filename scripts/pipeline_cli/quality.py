@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Protocol, TypedDict
 
 from lib import transitions
 from lib.json_narrow import json_dict
@@ -28,6 +28,28 @@ if TYPE_CHECKING:
     # what makes this concrete annotation safe to add here.
     from lib.pipeline_db import PipelineDB
     from lib.quality import AlbumQualityEvidence, QualityRankConfig
+
+
+class _LiveReplayDB(Protocol):
+    """The three reads the live-candidate replay performs.
+
+    The #409 narrow-Protocol pattern — unlike the cmd-level functions above
+    (whose concrete ``PipelineDB`` annotation is forced by
+    ``load_quality_gate_state``'s nominal parameter), this helper touches
+    nothing else, so tests drive it with a ``FakePipelineDB`` directly.
+    """
+
+    def get_latest_download_log_candidate_evidence_id(
+        self, request_id: int,
+    ) -> int | None: ...
+
+    def load_album_quality_evidence_by_id(
+        self, evidence_id: int,
+    ) -> AlbumQualityEvidence | None: ...
+
+    def get_request_current_evidence_id(
+        self, request_id: int,
+    ) -> int | None: ...
 
 
 class _ScenarioParams(TypedDict, total=False):
@@ -269,7 +291,7 @@ def _print_proof_gate_verdict(
 
 
 def _print_live_candidate_replay(
-    db: PipelineDB,
+    db: _LiveReplayDB,
     request_id: int,
     *,
     expected_release_id: object | None,

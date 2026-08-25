@@ -2932,9 +2932,9 @@ class FakePipelineDB:
             return "already_marked"
         if not marked and current is None:
             return "already_clear"
-        row["marked_incomplete_at"] = (
-            datetime.now(UTC) if marked else None
-        )
+        now = datetime.now(UTC)
+        row["marked_incomplete_at"] = now if marked else None
+        row["updated_at"] = now
         return "marked" if marked else "cleared"
 
     def _terminal_state_snapshot(self) -> tuple[object, ...]:

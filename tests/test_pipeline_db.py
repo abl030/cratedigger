@@ -19164,6 +19164,8 @@ class TestSetMarkedIncompleteRoundTrip(unittest.TestCase):
         self.assertIsNone(row["marked_incomplete_at"])
 
         self.assertFalse(self.db.request_marked_incomplete(request_id))
+        before = self.db.get_request(request_id)
+        assert before is not None
         self.assertEqual(
             self.db.set_marked_incomplete(request_id, marked=True), "marked"
         )
@@ -19171,6 +19173,8 @@ class TestSetMarkedIncompleteRoundTrip(unittest.TestCase):
         assert row is not None
         first_stamp = row["marked_incomplete_at"]
         self.assertIsNotNone(first_stamp)
+        # The write restamps updated_at like every other request mutation.
+        self.assertGreater(row["updated_at"], before["updated_at"])
         # The dispatch path's narrow scalar read agrees with the row.
         self.assertTrue(self.db.request_marked_incomplete(request_id))
         self.assertFalse(self.db.request_marked_incomplete(987654))

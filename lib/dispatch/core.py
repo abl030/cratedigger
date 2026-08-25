@@ -1584,8 +1584,16 @@ def dispatch_import_core(
                         # incomplete mark — clear it atomically with the
                         # imported transition so a stale mark can never
                         # churn the next complete candidate. Idempotent on
-                        # unmarked rows (writes NULL over NULL).
-                        clear_marked_incomplete=attempt_program_covered)
+                        # unmarked rows (writes NULL over NULL). NEVER on
+                        # ``preflight_existing``: that outcome keeps the
+                        # EXISTING import with nothing installed (the same
+                        # no-new-files fact the ``clear_stale_v0_probe``
+                        # carve-out above records), so the still-incomplete
+                        # copy must keep its mark (#1257 review F1).
+                        clear_marked_incomplete=(
+                            attempt_program_covered
+                            and decision != "preflight_existing"
+                        ))
                     if isinstance(pending, PendingImportTerminalOutcome):
                         terminal_outcome = pending
                     try:

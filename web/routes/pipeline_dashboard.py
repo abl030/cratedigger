@@ -171,9 +171,19 @@ def _dashboard_library_completeness() -> dict[str, object]:
     # mark/clear action inline. Joined only for the capped embed, never for
     # the persisted snapshot. A census album with no resolvable request
     # (release_id absent from the pipeline) carries request_id=None and the
-    # card renders no action for it.
+    # card renders no action for it. Per-album isolation (#1257 review F9):
+    # the presentation projection refuses inconsistent mid-transition rows
+    # (e.g. a processing row missing its owner join), and one refused row
+    # must degrade that ONE album to actionless, never 500 the dashboard.
     for album in report["albums"]:
-        req = s._db().get_request_by_release_id(album.get("release_id"))
+        try:
+            req = s._db().get_request_by_release_id(album.get("release_id"))
+        except Exception:
+            log.exception(
+                "library completeness enrichment failed for release %r",
+                album.get("release_id"),
+            )
+            req = None
         album["request_id"] = req["id"] if req else None
         album["marked_incomplete"] = bool(
             req and req.get("marked_incomplete_at")

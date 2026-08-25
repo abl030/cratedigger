@@ -3248,6 +3248,16 @@ class TestGeneratedParity(unittest.TestCase):
     @example(world=replace(
         _DIRT_DRESS_MARKED_INCOMPLETE_WORLD,
         current_verified_lossless_proof=True))
+    # The lossless-source anchor yields too (#1257 review F5): an installed
+    # provisional copy with a source V0 probe rejects every lossy candidate
+    # as lossless_source_locked, and random worlds reach that lock with the
+    # mark set too rarely to rely on — a mutant keeping the probe under the
+    # disregard died only at the fuzz tier before this pin.
+    @example(world=replace(
+        _DIRT_DRESS_MARKED_INCOMPLETE_WORLD,
+        current_format="OPUS", current_min=110, current_avg=116,
+        current_v0_avg=240,
+        candidate_format="MP3", min_bitrate=245, avg_bitrate=245))
     def test_operator_incomplete_mark_disregards_the_installed_side(
         self, world,
     ):

@@ -1050,6 +1050,7 @@ export const __test__ = {
   renderCoverageCard,
   renderDiskCoverageCard,
   renderLibraryCompletenessCard,
+  renderMarkIncompleteButton,
   renderDriftRow,
   renderHourlyMatchRateChart,
   renderMatchRateChart,

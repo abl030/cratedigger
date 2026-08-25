@@ -367,6 +367,23 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         self.assertEqual(row["status"], "imported")
         self.assertIsNone(row["marked_incomplete_at"])
 
+    def test_preflight_existing_acceptance_preserves_the_incomplete_mark(
+        self,
+    ):
+        """#1257 review F1: ``preflight_existing`` keeps the EXISTING import
+        with nothing installed — the still-incomplete copy on disk is
+        untouched, so the acceptance satisfies nothing and the operator's
+        mark must survive (the same no-new-files fact the
+        ``clear_stale_v0_probe`` carve-out records)."""
+        marked_at = datetime(2026, 8, 20, tzinfo=UTC)
+        r = self._dispatch(
+            ir=make_import_result(decision="preflight_existing"),
+            request_overrides={"marked_incomplete_at": marked_at},
+        )
+        row = r["db"].request(42)
+        self.assertEqual(row["status"], "imported")
+        self.assertEqual(row["marked_incomplete_at"], marked_at)
+
     def test_rejected_attempt_preserves_the_incomplete_mark(self):
         """Issue #1241: a rejection installs nothing, so the mark must
         survive for the next candidate."""
@@ -378,6 +395,129 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         self.assertFalse(r["result"].success)
         row = r["db"].request(42)
         self.assertEqual(row["marked_incomplete_at"], marked_at)
+
+    def test_uncovered_force_acceptance_preserves_the_incomplete_mark(self):
+        """#1257 review F2: a force import of an UNCOVERED row
+        (``extra_tracks`` — beets proved the candidate is missing declared
+        tracks) that terminally imports must PRESERVE the mark, so the
+        system keeps hunting the complete copy. This is the branch an
+        unconditional ``clear_marked_incomplete=True`` mutant disarms; it
+        survived every prior test."""
+        from lib.terminal_outcomes import ImportJobTerminal
+
+        marked_at = datetime(2026, 8, 20, tzinfo=UTC)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            mb_release_id="mbid-123",
+            marked_incomplete_at=marked_at,
+            active_download_state={"files": [], "filetype": "mp3"},
+        ))
+        log_id = db.log_download(
+            request_id=42,
+            outcome="rejected",
+            validation_result={"scenario": "extra_tracks", "distance": 0.05},
+        )
+
+        tmpdir = tempfile.mkdtemp()
+        current_dir = tempfile.mkdtemp()
+        try:
+            with open(f"{tmpdir}/01.mp3", "wb") as handle:
+                handle.write(b"audio")
+            with open(f"{current_dir}/01.mp3", "wb") as handle:
+                handle.write(b"current")
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                payload={"download_log_id": log_id, "failed_path": tmpdir},
+            )
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-123",
+                source_path=tmpdir,
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=196,
+                    avg_bitrate_kbps=196,
+                    median_bitrate_kbps=196,
+                    format="MP3",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="MP3",
+            )
+            # The installed copy is WORSE (128), so the acceptance happens
+            # through the ordinary comparison — the mark's predicate is off
+            # (coverage unproven) and must play no part.
+            _seed_current_for_request(
+                db, 42,
+                mb_release_id="mbid-123",
+                files=snapshot_audio_files(current_dir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=128,
+                    avg_bitrate_kbps=128,
+                    median_bitrate_kbps=128,
+                    format="MP3",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="MP3",
+            )
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            assert claim_next_import_job(
+                db, worker_id="dispatch-test") is not None
+            cfg = CratediggerConfig(
+                beets_harness_path=_HARNESS,
+                pipeline_db_enabled=True,
+            )
+            ir = make_import_result(decision="import", new_min_bitrate=196)
+            with patch_dispatch_externals() as ext, \
+                 patch("lib.dispatch.subprocess_runner.parse_import_result",
+                       return_value=ir), \
+                 _patch_beets_album(current_dir, min_bitrate=128):
+                ext.run.return_value = MagicMock(
+                    returncode=0, stdout="", stderr="")
+                result = dispatch_import_with_fake_db(
+                    db,
+                    path=tmpdir,
+                    mb_release_id="mbid-123",
+                    request_id=42,
+                    label="Operator partial",
+                    force=True,
+                    beets_harness_path=cfg.beets_harness_path,
+                    dl_info=DownloadInfo(username="peer"),
+                    distance=0.05,
+                    scenario="force_import",
+                    files=[MagicMock(username="peer", filename="01.mp3")],
+                    cfg=cfg,
+                    requeue_on_failure=False,
+                    candidate_download_log_id=log_id,
+                    candidate_import_job_id=job.id,
+                    quality_gate_fn=noop_quality_gate,
+                )
+
+            self.assertTrue(result.success)
+            assert result.terminal_outcome is not None
+            db.persist_import_terminal_outcome(
+                result.terminal_outcome.with_job(ImportJobTerminal(
+                    status="completed",
+                    result={"success": True},
+                    message=result.message,
+                    error=None,
+                ))
+            )
+            row = db.request(42)
+            self.assertEqual(row["status"], "imported")
+            # Unproven coverage never satisfies the mark.
+            self.assertEqual(row["marked_incomplete_at"], marked_at)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            shutil.rmtree(current_dir, ignore_errors=True)
 
     def test_audio_corrupt_automation_uses_staged_path_cleanup(self):
         """Bad rips no longer select a quarantine root (issue #1077, D3).
@@ -1881,6 +2021,16 @@ class TestOperatorIncompleteMarkImporterLane(unittest.TestCase):
                 container="mp3",
                 storage_format="MP3",
             )
+            # Claim the job exactly as the flip twin does — otherwise this
+            # control "rejects" at launch authority instead of at the
+            # decision, and its assertions are satisfied by the wrong
+            # mechanism (#1257 review F6's surviving mutant).
+            db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+            )
+            assert claim_next_import_job(
+                db, worker_id="dispatch-test") is not None
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
                 pipeline_db_enabled=True,
@@ -1909,6 +2059,9 @@ class TestOperatorIncompleteMarkImporterLane(unittest.TestCase):
 
             self.assertFalse(result.success)
             ext.run.assert_not_called()
+            # The failure must be the QUALITY decision itself, not a
+            # lifecycle refusal.
+            self.assertEqual(result.code, "quality_pipeline_rejected")
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)

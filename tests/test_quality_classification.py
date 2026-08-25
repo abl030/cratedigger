@@ -1028,6 +1028,49 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertFalse(locked["imported"])
         self.assertFalse(locked["installed_incomplete_disregarded"])
 
+    def test_lossless_source_locked_installed_yields_to_the_mark(self):
+        """The third existing-side lock, pinned deterministically (#1257
+        review F5 — a mutant keeping the existing V0 probe under the
+        disregard died only at the fuzz tier before this pin existed).
+
+        An installed provisional-lossless copy's source V0 probe is the
+        truth-of-source anchor that rejects every lossy candidate as
+        ``lossless_source_locked``. Under the operator's mark plus beets'
+        coverage proof, the anchor is disregarded with the rest of the
+        installed side and the complete lossy candidate imports.
+        """
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=245,
+            avg_bitrate=245,
+            is_cbr=False,
+            new_format="MP3",
+            existing_format="Opus",
+            existing_min_bitrate=110,
+            existing_avg_bitrate=116,
+            existing_v0_probe_avg=240,
+            installed_marked_incomplete=True,
+            candidate_covers_declared_program=True,
+        )
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["installed_incomplete_disregarded"])
+
+        locked = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=245,
+            avg_bitrate=245,
+            is_cbr=False,
+            new_format="MP3",
+            existing_format="Opus",
+            existing_min_bitrate=110,
+            existing_avg_bitrate=116,
+            existing_v0_probe_avg=240,
+            candidate_covers_declared_program=True,
+        )
+        self.assertEqual(locked["stage2_import"], "lossless_source_locked")
+        self.assertFalse(locked["imported"])
+
 
 class TestWavvesAacCodecBlindSpectral(unittest.TestCase):
     """Issue #829's opening defect, as a decision-consequence pin.
@@ -2361,6 +2404,37 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         self.assertEqual(locked["stage2_import"], "verified_lossless_locked")
         self.assertFalse(locked["imported"])
         self.assertFalse(locked["installed_incomplete_disregarded"])
+
+    def test_early_reject_still_records_the_disregard_flag_via_evidence(self):
+        """#1257 review F7/M6: the absolute admission floors outrank the
+        disregard — a corrupt candidate is rejected even under the mark —
+        but the audit flag must still record that the predicate fired,
+        matching the flat twin's dict for the same world."""
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        corrupt = self._build_candidate(
+            is_flac=False, min_bitrate=196, avg_bitrate=196, is_cbr=False,
+            audio_corrupt=True,
+        )
+        current = self._build_current(
+            min_bitrate=128, avg_bitrate=128, format="AAC", is_cbr=False,
+            mb_release_id="mbid-parity-candidate",
+        )
+        r = full_pipeline_decision_from_evidence(
+            corrupt,
+            current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                installed_marked_incomplete=True,
+                candidate_covers_declared_program=True,
+            ),
+        )
+        self.assertEqual(r["preimport_audio"], "reject_corrupt")
+        self.assertFalse(r["imported"])
+        self.assertTrue(r["installed_incomplete_disregarded"])
+
+        unmarked = full_pipeline_decision_from_evidence(corrupt, current)
+        self.assertEqual(unmarked["preimport_audio"], "reject_corrupt")
+        self.assertFalse(unmarked["installed_incomplete_disregarded"])
 
 
 class TestUltrasonicProofGateV3(unittest.TestCase):

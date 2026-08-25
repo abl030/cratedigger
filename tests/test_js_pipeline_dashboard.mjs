@@ -719,5 +719,72 @@ console.log('renderRetagDivergenceCensusCard() N1 — a clean report keeps Album
   assert(listedRowMatch[1] === 'metric-good', 'clean + zero listed still reads good');
 }
 
+console.log('renderMarkIncompleteButton() three-state contract (#1241)');
+{
+  // Marked row → the clear action, sending marked=false.
+  const clearHtml = __test__.renderMarkIncompleteButton(
+    {request_id: 310, marked_incomplete: true});
+  assertContains(clearHtml, '>Clear incomplete mark</button>',
+    'marked row offers the clear action');
+  assertContains(clearHtml, 'window.toggleMarkIncomplete(310, false, this)',
+    'clear action sends marked=false for THIS request');
+  // Unmarked row → the mark action, sending marked=true.
+  const markHtml = __test__.renderMarkIncompleteButton(
+    {request_id: 311, marked_incomplete: false});
+  assertContains(markHtml, '>Mark incomplete</button>',
+    'unmarked row offers the mark action');
+  assertContains(markHtml, 'window.toggleMarkIncomplete(311, true, this)',
+    'mark action sends marked=true for THIS request');
+  // No resolvable request → no button at all.
+  assert(
+    __test__.renderMarkIncompleteButton(
+      {request_id: null, marked_incomplete: false}) === '',
+    'a census album with no resolvable request renders no button');
+  assert(
+    __test__.renderMarkIncompleteButton({}) === '',
+    'a row with request_id absent renders no button');
+}
+
+console.log('renderLibraryCompletenessCard() wires the mark buttons per row (#1241)');
+{
+  const html = __test__.renderLibraryCompletenessCard({
+    state: 'ok',
+    error: null,
+    albums_shown: 3,
+    albums_listed_total: 3,
+    snapshot: {
+      generated_at: new Date().toISOString(),
+      duration_seconds: 196.0,
+      report: {
+        status: 'incomplete',
+        counts: {
+          albums_scanned: 3, audio_complete: 0,
+          missing_source_audio: 3, catalog_drift: 0, unknown: 0,
+        },
+        albums: [
+          {album_id: 1, artist: 'Dirt Dress', title: 'Theme Songs',
+           release_id: 'rel-marked', request_id: 310,
+           marked_incomplete: true,
+           findings: [{kind: 'missing_source_audio', detail: 'Peter'}]},
+          {album_id: 2, artist: 'Stellastarr*', title: 'Harmonies',
+           release_id: 'rel-unmarked', request_id: 311,
+           marked_incomplete: false,
+           findings: [{kind: 'missing_source_audio', detail: 'Hidden'}]},
+          {album_id: 3, artist: 'UNKLE', title: 'Psyence Fiction',
+           release_id: 'rel-none', request_id: null,
+           marked_incomplete: false,
+           findings: [{kind: 'missing_source_audio', detail: 'Breather'}]},
+        ],
+      },
+    },
+  });
+  assertContains(html, 'window.toggleMarkIncomplete(310, false, this)',
+    'card wires the clear action to the marked album');
+  assertContains(html, 'window.toggleMarkIncomplete(311, true, this)',
+    'card wires the mark action to the unmarked album');
+  assertExcludes(html, 'window.toggleMarkIncomplete(null',
+    'card never wires an action to an unresolvable album');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

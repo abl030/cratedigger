@@ -1172,8 +1172,15 @@ until a human settles it).
 - **Auto-clear.** A terminal acceptance whose candidate was proven whole
   writes `marked_incomplete_at = NULL` through the imported transition's
   metadata CAS (`_do_mark_done`), atomic with the status write — a stale
-  mark can never churn the next complete candidate. Rejections and
-  preserve-imported outcomes leave the mark untouched.
+  mark can never churn the next complete candidate. Rejections,
+  preserve-imported outcomes, and `preflight_existing` (which keeps the
+  EXISTING import with nothing installed) leave the mark untouched.
+- **Preview surfaces show the ordinary verdict.** The web import-preview
+  lane deliberately carries no mark threading: an operator previewing a
+  marked request's row sees the unmarked comparison, while the lanes that
+  ACT (importer, reducer, force import) decide under the mark. The
+  mark-aware diagnostic is `pipeline-cli quality <id>`, which prints the
+  disregarded decision beside the ordinary one for marked requests.
 
 ## Comparison basis — the persisted decision explanation
 
