@@ -1034,6 +1034,23 @@ class _RequestsMixin(_PipelineDBBase):
         return cur.rowcount > 0
 
 
+    def request_marked_incomplete(self, request_id: int) -> bool:
+        """Whether the operator's incomplete mark is set (issue #1241).
+
+        A deliberately narrow scalar read for the dispatch decision path —
+        never the presentation projection, which joins the processing owner
+        and refuses inconsistent mid-transition worlds the importer's own
+        fences handle separately. A missing row reads as unmarked.
+        """
+        cur = self._execute(
+            "SELECT marked_incomplete_at FROM album_requests WHERE id = %s",
+            (int(request_id),),
+        )
+        row = cur.fetchone()
+        return bool(
+            row is not None and row["marked_incomplete_at"] is not None
+        )
+
     def set_marked_incomplete(self, request_id: int, *, marked: bool) -> str:
         """Atomically set/clear the operator's incomplete mark (issue #1241).
 
@@ -1066,10 +1083,13 @@ class _RequestsMixin(_PipelineDBBase):
                 self.conn.commit()
                 return "already_clear"
             now = datetime.now(UTC)
+            # The locked SELECT above already proved the row is live; the
+            # WHERE guard restates it so the write itself carries the
+            # not-replaced proof (tests/test_replaced_write_audit.py).
             self._execute(
                 "UPDATE album_requests "
                 "SET marked_incomplete_at = %s, updated_at = %s "
-                "WHERE id = %s",
+                "WHERE id = %s AND status != 'replaced'",
                 (now if marked else None, now, int(request_id)),
             )
             self.conn.commit()

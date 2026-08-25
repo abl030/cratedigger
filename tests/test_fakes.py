@@ -370,6 +370,18 @@ class TestFakePipelineDB(unittest.TestCase):
             db.set_marked_incomplete(42, marked=False), "already_clear"
         )
 
+    def test_request_marked_incomplete_mirrors_the_narrow_read(self):
+        """Issue #1241: the dispatch decision path's scalar read — a
+        missing row reads as unmarked, never an error."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="imported"))
+        self.assertFalse(db.request_marked_incomplete(42))
+        self.assertFalse(db.request_marked_incomplete(999))
+        db.set_marked_incomplete(42, marked=True)
+        self.assertTrue(db.request_marked_incomplete(42))
+        db.set_marked_incomplete(42, marked=False)
+        self.assertFalse(db.request_marked_incomplete(42))
+
     def test_get_latest_download_log_candidate_evidence_id(self):
         """Issue #813 tooling tier: replaying the request's real last
         candidate needs the newest download_log candidate_evidence_id."""

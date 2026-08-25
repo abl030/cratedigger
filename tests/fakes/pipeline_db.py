@@ -2913,6 +2913,13 @@ class FakePipelineDB:
             return None
         return cast("AlbumRequestRow", self._request_presentation_copy(row))
 
+    def request_marked_incomplete(self, request_id: int) -> bool:
+        """Mirror ``PipelineDB.request_marked_incomplete`` (issue #1241)."""
+        row = self._requests.get(request_id)
+        return bool(
+            row is not None and row.get("marked_incomplete_at") is not None
+        )
+
     def set_marked_incomplete(self, request_id: int, *, marked: bool) -> str:
         """Mirror ``PipelineDB.set_marked_incomplete`` (issue #1241)."""
         row = self._requests.get(request_id)

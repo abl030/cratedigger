@@ -255,6 +255,7 @@ def _do_mark_done(
     attempt_result: ImportAttemptResult | None = None,
     import_job_id: int | None = None,
     source_download_log_id: int | None = None,
+    clear_marked_incomplete: bool = False,
 ) -> int | None | PendingImportTerminalOutcome:
     """Mark album as imported — standalone version of DatabaseSource.mark_done.
 
@@ -310,6 +311,14 @@ def _do_mark_done(
             ).as_update_fields()
         )
     update_fields["final_format"] = dl_info.final_format
+    if clear_marked_incomplete:
+        # Issue #1241: this acceptance's candidate was proven whole by
+        # beets (the caller derived the bit from the attempt's own
+        # scenario), so the operator's incomplete mark is satisfied. The
+        # explicit None rides the transition's metadata CAS — cleared in
+        # the SAME terminal transaction as the imported status, and a
+        # harmless NULL-over-NULL on rows that were never marked.
+        update_fields["marked_incomplete_at"] = None
     transition = transitions.RequestTransition.to_imported_fields(
         fields=update_fields
     )

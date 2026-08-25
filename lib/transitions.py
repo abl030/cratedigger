@@ -322,6 +322,11 @@ _IMPORTED_FIELDS = frozenset({
     "final_format",
     "last_download_spectral_bitrate",
     "last_download_spectral_grade",
+    # Issue #1241: an explicit None clears the operator's incomplete mark
+    # atomically with the imported status when the accepted candidate was
+    # proven whole by beets. Only ever written as None; setting the mark is
+    # the operator surfaces' job (set_marked_incomplete).
+    "marked_incomplete_at",
     "min_bitrate",
     "prev_min_bitrate",
     "search_filetype_override",
@@ -467,6 +472,7 @@ class RequestTransition:
         final_format: object = _OMITTED,
         last_download_spectral_bitrate: object = _OMITTED,
         last_download_spectral_grade: object = _OMITTED,
+        marked_incomplete_at: object = _OMITTED,
         min_bitrate: object = _OMITTED,
         prev_min_bitrate: object = _OMITTED,
         search_filetype_override: object = _OMITTED,
@@ -492,6 +498,7 @@ class RequestTransition:
                 final_format=final_format,
                 last_download_spectral_bitrate=last_download_spectral_bitrate,
                 last_download_spectral_grade=last_download_spectral_grade,
+                marked_incomplete_at=marked_incomplete_at,
                 min_bitrate=min_bitrate,
                 prev_min_bitrate=prev_min_bitrate,
                 search_filetype_override=search_filetype_override,
@@ -526,6 +533,8 @@ class RequestTransition:
                 fields, "last_download_spectral_bitrate"),
             last_download_spectral_grade=_field_or_omitted(
                 fields, "last_download_spectral_grade"),
+            marked_incomplete_at=_field_or_omitted(
+                fields, "marked_incomplete_at"),
             min_bitrate=_field_or_omitted(fields, "min_bitrate"),
             prev_min_bitrate=_field_or_omitted(fields, "prev_min_bitrate"),
             search_filetype_override=_field_or_omitted(
