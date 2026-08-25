@@ -2664,11 +2664,33 @@ class TestAcceptanceInstallsNewFiles(unittest.TestCase):
                     acceptance_installs_new_files(decision), expected)
 
     def test_every_mark_done_decision_has_a_stance(self):
-        """A new acceptance decision must be added to CASES explicitly."""
+        """A new acceptance decision must be added to CASES explicitly.
+
+        The accepted vocabulary is the PRODUCTION-owned import-stage set
+        (#1258 review F2: deriving it from this module's own VALID_STAGE2
+        literal made the guard blind to a new dispatch_action arm). A
+        dispatch_action arm added without updating that production set
+        still escapes this test; the production set is the authority the
+        rest of the stage classification already derives from.
+        """
         from lib.quality import dispatch_action
-        accepted = {d for d in VALID_STAGE2 - {None}
-                    if dispatch_action(d).mark_done}
+        from lib.quality.pipeline import (
+            QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
+        )
+        accepted = set(QUALITY_DECISION_IMPORT_STAGE_DECISIONS)
         self.assertEqual(accepted, {decision for decision, _ in self.CASES})
+        for decision in sorted(accepted):
+            self.assertTrue(
+                dispatch_action(decision).mark_done,
+                f"production import-stage decision {decision!r} is not "
+                "mark_done in dispatch_action",
+            )
+        self.assertEqual(
+            {d for d in VALID_STAGE2 - {None} if dispatch_action(d).mark_done},
+            accepted,
+            "dispatch_action's mark_done subset of the known stage-2 "
+            "vocabulary drifted from the production import-stage set",
+        )
 
 
 # ============================================================================

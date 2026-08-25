@@ -504,6 +504,45 @@ class TestRequestTransition(unittest.TestCase):
             },
         )
 
+    def test_transition_field_allowlist_membership_is_pinned(self):
+        """Changing an allowlist is a deliberate act that must touch this pin.
+
+        The round-trip tests below derive their iteration domain FROM the
+        allowlists, so shrinking an allowlist silently shrinks them with it
+        (#1258 mutant-runner finding A2). This pin makes membership itself
+        the contract.
+        """
+        self.assertEqual(
+            _WANTED_FIELDS,
+            {
+                "min_bitrate",
+                "prev_min_bitrate",
+                "priority_started_at",
+                "search_filetype_override",
+            },
+        )
+        self.assertEqual(
+            _IMPORTED_FIELDS,
+            {
+                "beets_distance",
+                "beets_scenario",
+                "current_spectral_bitrate",
+                "current_spectral_grade",
+                "current_lossless_source_v0_probe_avg_bitrate",
+                "current_lossless_source_v0_probe_median_bitrate",
+                "current_lossless_source_v0_probe_min_bitrate",
+                "final_format",
+                "last_download_spectral_bitrate",
+                "last_download_spectral_grade",
+                "marked_incomplete_at",
+                "min_bitrate",
+                "prev_min_bitrate",
+                "search_filetype_override",
+                "verified_lossless",
+            },
+        )
+        self.assertIs(_UNSEARCHABLE_FIELDS, _WANTED_FIELDS)
+
     def test_every_allowlisted_field_round_trips_through_fields_constructors(self):
         """Issue #1258 item 2: no allowlisted-but-dropped field can exist.
 

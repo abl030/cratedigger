@@ -56,17 +56,24 @@ class _AlbumRequestUpdate:
 
 # Every unresolved production SQL builder is an exact, reviewed exception.
 # The key is (path, fingerprint of the exact execute SQL/params AST); the
-# value holds one rationale per matching call site, in ascending source-line
-# order, and the audit requires the live call count to equal the rationale
-# count exactly — so inserting code above a reviewed statement no longer
-# churns every entry below it (#1258 item 4), while adding or removing a
-# same-fingerprint call still fails loudly. Dynamic calls bind the whole
-# enclosing scope. Reviewed lifecycle calls go further: their fingerprint
-# also binds the normalized enclosing method AST, path, and method name, so
-# any same-method control-flow or binding change invalidates review even
-# when the execute call itself is byte-identical. The ratchet does not infer
-# parameter dataflow: transition SQL must use the canonical direct call
-# grammar below.
+# value holds one rationale per matching call site, and the audit requires
+# the live distinct-call-site count to equal the rationale count exactly —
+# so inserting code above a reviewed statement no longer churns every entry
+# below it (#1258 item 4), while adding or removing a same-fingerprint call
+# still fails loudly. Rationales are kept in ascending source-line order as
+# a maintenance convention; the audit checks only the counts, not per-site
+# attribution. Dynamic calls bind the whole enclosing scope. Reviewed
+# lifecycle calls go further: their fingerprint also binds the normalized
+# enclosing method AST, path, and method name, so any same-method
+# control-flow or binding change invalidates review even when the execute
+# call itself is byte-identical. Known residual (#1258 review F6): a STATIC
+# SQL constant outside a lifecycle seam fingerprints SQL+params only, with
+# no scope binding — two such calls in different functions of one file
+# would share a key and become interchangeable to the count check. No
+# registered entry has that shape today (all multi-site keys are dynamic,
+# single-scope); if one ever registers, revisit this key design. The
+# ratchet does not infer parameter dataflow: transition SQL must use the
+# canonical direct call grammar below.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
     ("lib/pipeline_db/_core.py", "472331a54ebaf9a6"): (
         (
@@ -1430,6 +1437,21 @@ def _ignored_guarded_write_results(source: str) -> list[tuple[int, str]]:
     return ignored
 
 
+def _render_sites(sites: set[tuple[str, int, str]]) -> str:
+    """Render distinct call sites grouped per registry key, for diagnostics.
+
+    The registry key dropped the line component (#1258 item 4), so the
+    exact-and-live failure message names the live source lines here instead.
+    """
+    grouped: dict[tuple[str, str], list[int]] = {}
+    for rel, line, fingerprint in sites:
+        grouped.setdefault((rel, fingerprint), []).append(line)
+    return "\n".join(
+        f"  {rel}:{fingerprint}: lines {sorted(lines)}"
+        for (rel, fingerprint), lines in sorted(grouped.items())
+    )
+
+
 class TestReplacedWriteAudit(unittest.TestCase):
     def test_every_album_request_update_has_terminal_or_exact_status_guard(self):
         offending: list[str] = []
@@ -1511,7 +1533,8 @@ class TestReplacedWriteAudit(unittest.TestCase):
                 for key, rationales in _REVIEWED_DYNAMIC_SQL_CALLS.items()
             },
             "Reviewed dynamic-SQL exceptions must remain exact and live: "
-            "one rationale per live call site, in source order",
+            "one rationale per live call site.\nLive call sites:\n"
+            + _render_sites(dynamic_sites),
         )
         self.assertEqual(
             dict(reviewed_status),
@@ -1520,7 +1543,8 @@ class TestReplacedWriteAudit(unittest.TestCase):
                 for key, rationales in _REVIEWED_STATUS_SQL_CALLS.items()
             },
             "Reviewed status-transition SQL calls must remain exact and "
-            "live: one rationale per live call site, in source order",
+            "live: one rationale per live call site.\nLive call sites:\n"
+            + _render_sites(status_sites),
         )
 
     def test_reviewed_dynamic_sql_rationales_are_nonempty(self):
@@ -1904,6 +1928,57 @@ def thaw(cur, request_id, expected_status, target_status):
             (rel, mutated.fingerprint),
             _REVIEWED_STATUS_SQL_CALLS,
         )
+
+    def test_count_clause_trips_on_an_added_same_fingerprint_site(self):
+        """Known-bad self-test for the rationale-count clause (#1258 F4).
+
+        A verbatim duplicate of the whole enclosing method re-spells its
+        execute calls with IDENTICAL fingerprints (same normalized scope
+        AST), so only the distinct-call-site count can notice — the exact
+        world the count clause exists for. Keys are the registry's own
+        multi-rationale _core.py entries, so fingerprint churn updates
+        both together.
+        """
+        rel = "lib/pipeline_db/_core.py"
+        source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+
+        def sites_per_key(src: str) -> dict[tuple[str, str], set[int]]:
+            grouped: dict[tuple[str, str], set[int]] = {}
+            for finding in _unguarded_album_request_update_findings(
+                src,
+                source_path=rel,
+            ):
+                grouped.setdefault(
+                    (rel, finding.fingerprint), set(),
+                ).add(finding.line)
+            return grouped
+
+        method = next(
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_execute_locked"
+        )
+        lines = source.splitlines(keepends=True)
+        block = "".join(lines[method.lineno - 1:method.end_lineno])
+        mutated_source = "".join(
+            lines[:method.end_lineno] + ["\n", block]
+            + lines[method.end_lineno:]
+        )
+
+        keys = [
+            key
+            for key, rationales in _REVIEWED_DYNAMIC_SQL_CALLS.items()
+            if key[0] == rel and len(rationales) > 1
+        ]
+        self.assertTrue(keys, "expected multi-rationale _core.py entries")
+        baseline = sites_per_key(source)
+        added = sites_per_key(mutated_source)
+        for key in keys:
+            with self.subTest(fingerprint=key[1]):
+                registered = len(_REVIEWED_DYNAMIC_SQL_CALLS[key])
+                self.assertEqual(len(baseline[key]), registered)
+                self.assertGreater(len(added[key]), registered)
 
     def test_params_alias_is_noncanonical(self):
         source = """

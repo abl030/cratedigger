@@ -50,6 +50,7 @@ from lib.quality import (
     QualityEvidenceActionPayload,
     QualityEvidenceActionProvenance,
     SpectralMeasurement,
+    acceptance_installs_new_files,
     evidence_decision_name,
 )
 from lib.quality_evidence import (
@@ -463,24 +464,25 @@ def _refresh_current_evidence_after_import(
 
     # Legacy fallback: no candidate evidence on hand. Rebuild from beets +
     # carry-forward verified_lossless_proof from the import_result, matching
-    # pre-U10 behaviour exactly.
-    decision = import_result.decision if import_result is not None else None
+    # pre-U10 behaviour exactly. Proof attribution keys on the no-new-files
+    # fact: only an acceptance that installed the candidate may hand its
+    # proof to the library row.
     verified_lossless_proof = None
-    if decision != "preflight_existing":
-        verified_lossless_proof = (
-            import_result.verified_lossless_proof
-            if import_result is not None
-            else None
-        )
+    preserve_existing_proof = True
+    if import_result is not None:
+        decision = import_result.decision
+        # A None decision predates the vocabulary; it keeps the pre-U10
+        # attribution this fallback exists to preserve.
+        if decision is None or acceptance_installs_new_files(decision):
+            verified_lossless_proof = import_result.verified_lossless_proof
+            preserve_existing_proof = False
     result = backfill_current_evidence_from_album_info(
         db,
         request_id=request_id,
         mb_release_id=mb_release_id,
         album_info=album_info,
         verified_lossless_proof=verified_lossless_proof,
-        preserve_existing_verified_lossless_proof=(
-            import_result is None or decision == "preflight_existing"
-        ),
+        preserve_existing_verified_lossless_proof=preserve_existing_proof,
     )
     return _exact_linked_refresh_result(
         db,
