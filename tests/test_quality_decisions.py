@@ -20,6 +20,8 @@ from lib.quality import (
     DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
     DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
     DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
+    QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
+    QUALITY_DECISION_REJECT_STAGE_DECISIONS,
     AlbumQualityEvidence,
     AlbumQualityEvidenceDecisionFacts,
     AlbumQualityEvidenceFile,
@@ -1039,13 +1041,16 @@ VALID_PREIMPORT_NESTED = {None, "pass", "reject_nested", "skipped_auto"}
 VALID_STAGE0 = {None, "would_run", "skipped_flac",
                 "skipped_uncalibrated_codec"}
 VALID_STAGE1 = {None, "import", "import_upgrade", "import_no_exist", "reject"}
-VALID_STAGE2 = {None, "import", "downgrade", "transcode_upgrade",
-                "transcode_downgrade", "transcode_first",
-                "preflight_existing",
-                DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
-                DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
-                DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
-                DECISION_LOSSLESS_SOURCE_LOCKED}
+# Stage-2 vocabulary derives from the production-owned stage sets (issue
+# #1270 item 1: the previous hand-maintained literal had silently gone
+# stale — it was missing verified_lossless_locked, which the pipeline
+# emits as stage2_import). Membership of the source sets is pinned in
+# TestDispatchActionContract so a set change is a deliberate act.
+VALID_STAGE2_DECISIONS: frozenset[str] = (
+    QUALITY_DECISION_IMPORT_STAGE_DECISIONS
+    | QUALITY_DECISION_REJECT_STAGE_DECISIONS
+)
+VALID_STAGE2 = {None} | VALID_STAGE2_DECISIONS
 VALID_STAGE3 = {None, "accept", "requeue_upgrade", "requeue_lossless"}
 VALID_FINAL_STATUS = {None, "imported", "wanted"}
 
@@ -2635,13 +2640,47 @@ class TestExtractUsernames(unittest.TestCase):
 class TestDispatchActionContract(unittest.TestCase):
     """Verify dispatch_action covers all import_decision outcomes."""
 
-    def test_covers_import_decision_outcomes(self):
+    def test_production_stage_set_membership_is_pinned(self):
+        """VALID_STAGE2 derives from these sets, so their membership IS the
+        contract — changing either is a deliberate act that must touch this
+        pin (issue #1270 item 1; PR #1269's A2 lesson: a derived domain
+        silently shrinks with its source)."""
+        self.assertEqual(
+            QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
+            {
+                "import",
+                "preflight_existing",
+                "transcode_upgrade",
+                "transcode_first",
+                "provisional_lossless_upgrade",
+            },
+        )
+        self.assertEqual(
+            QUALITY_DECISION_REJECT_STAGE_DECISIONS,
+            {
+                "downgrade",
+                "transcode_downgrade",
+                "suspect_lossless_downgrade",
+                "suspect_lossless_probe_missing",
+                "lossless_source_locked",
+                "verified_lossless_locked",
+            },
+        )
+
+    def test_production_stage_sets_agree_with_dispatch_action(self):
+        """Import-stage decisions mark done and never reject; reject-stage
+        decisions reject and never mark done."""
         from lib.quality import dispatch_action
-        for outcome in VALID_STAGE2 - {None}:
-            a = dispatch_action(outcome)
-            self.assertTrue(a.mark_done or a.record_rejection,
-                            f"dispatch_action('{outcome}') must set mark_done or "
-                            "record_rejection")
+        for decision in sorted(QUALITY_DECISION_IMPORT_STAGE_DECISIONS):
+            with self.subTest(stage="import", decision=decision):
+                action = dispatch_action(decision)
+                self.assertTrue(action.mark_done)
+                self.assertFalse(action.record_rejection)
+        for decision in sorted(QUALITY_DECISION_REJECT_STAGE_DECISIONS):
+            with self.subTest(stage="reject", decision=decision):
+                action = dispatch_action(decision)
+                self.assertFalse(action.mark_done)
+                self.assertTrue(action.record_rejection)
 
 
 class TestAcceptanceInstallsNewFiles(unittest.TestCase):
@@ -2686,7 +2725,7 @@ class TestAcceptanceInstallsNewFiles(unittest.TestCase):
                 "mark_done in dispatch_action",
             )
         self.assertEqual(
-            {d for d in VALID_STAGE2 - {None} if dispatch_action(d).mark_done},
+            {d for d in VALID_STAGE2_DECISIONS if dispatch_action(d).mark_done},
             accepted,
             "dispatch_action's mark_done subset of the known stage-2 "
             "vocabulary drifted from the production import-stage set",
