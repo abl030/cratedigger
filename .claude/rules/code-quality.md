@@ -1105,7 +1105,10 @@ rationale; never allowlist a pure decision.
     discipline, not judgment: `PYTHONDONTWRITEBYTECODE=1`, its OWN
     isolated worktree (mutant planting mutates production files — a
     shared tree makes the reader read lies), every edit restored exactly
-    and proven restored (`git status --porcelain` empty), and a final
+    and proven restored (`git status --porcelain` empty; when the file
+    carries uncommitted work, restore by INVERSE EDIT — `git checkout
+    <file>` restores from HEAD and silently wipes that work, #1270),
+    and a final
     table where every row carries the actual command evidence for
     KILLED/SURVIVED — a prose claim of RED without output is the #1209
     confabulation shape and counts as no evidence. A SURVIVOR is a
