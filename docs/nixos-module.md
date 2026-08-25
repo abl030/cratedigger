@@ -823,6 +823,13 @@ See [`examples/cratedigger.nix`](../examples/cratedigger.nix) for the full worke
 - `cratedigger-library-completeness-census.timer` — `OnCalendar=daily`,
   `Persistent=true`, `RandomizedDelaySec=30min`, independent of the five-minute
   pipeline and the retag census.
+- `cratedigger-library-completeness-census.path` — on-demand trigger: starts
+  the same-named oneshot when `library-completeness-census.trigger` exists in
+  `cfg.stateDir`. The web service (same user) writes that file for the
+  dashboard's "Run census now" button and `pipeline-cli
+  library-census-refresh`; the service's `ExecStartPre` removes it, so a
+  request landing mid-run re-triggers one follow-up run. No sudo/polkit
+  surface — stateDir ownership is the authority.
 - `cratedigger-web.socket` — systemd-owned AF_UNIX listener at
   `/run/cratedigger-web/web.sock`, node `root:<web.accessGroup> 0660` beneath a
   separately managed `root:<web.accessGroup> 0750` directory.

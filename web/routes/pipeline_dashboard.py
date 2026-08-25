@@ -6,11 +6,15 @@ Split from web/routes/pipeline.py (#522) — mirrors
 
 import json
 import logging
+import os
 
 import msgspec
 
 from lib.disk_coverage_service import disk_coverage
-from lib.library_completeness_snapshot import read_library_completeness_snapshot
+from lib.library_completeness_snapshot import (
+    read_library_completeness_snapshot,
+    request_library_completeness_census,
+)
 from lib.retag_divergence_census_snapshot import (
     read_retag_divergence_census_snapshot,
 )
@@ -199,11 +203,48 @@ def _empty_library_completeness(state: str) -> dict[str, object]:
             "albums_shown": 0, "albums_listed_total": 0}
 
 
+def post_library_census_refresh(
+    h: RouteHandler, _body: dict[str, object],
+) -> None:
+    """Request an out-of-schedule library-completeness census run.
+
+    Writes the trigger file the module's path unit watches; the census
+    oneshot itself remains the single execution path. The state dir is
+    derived from the configured snapshot path — both live in the
+    module's ``stateDir``.
+    """
+    s = _server()
+    snapshot_path = s.library_completeness_snapshot_path
+    if snapshot_path is None:
+        h._json({
+            "outcome": "unconfigured",
+            "error": "library completeness snapshot path is not configured",
+        }, status=503)
+        return
+    try:
+        result = request_library_completeness_census(
+            os.path.dirname(snapshot_path),
+        )
+    except OSError as exc:
+        log.exception("census trigger write failed")
+        h._json({"outcome": "unavailable", "error": str(exc)}, status=503)
+        return
+    h._json({"outcome": result.outcome, "error": None})
+
+
 ROUTES: list[RouteRegistration] = [
     route(
         "GET", "/api/pipeline/dashboard", get_pipeline_dashboard,
         "Operational metrics for the dashboard subtab (searches, cycles, "
         "redis, read-only library census snapshots).",
+        classified=True,
+    ),
+    route(
+        "POST", "/api/pipeline/dashboard/library-census/refresh",
+        post_library_census_refresh,
+        "Request an out-of-schedule library-completeness census run "
+        "(writes the trigger file the census path unit watches; the "
+        "daily oneshot stays the single execution path).",
         classified=True,
     ),
 ]

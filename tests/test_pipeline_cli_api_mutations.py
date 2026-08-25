@@ -805,6 +805,43 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
             body["db_mb_albumid"], "26693e58-02c0-4bb1-b66f-f0f44f8a234d",
         )
 
+    def test_library_census_refresh_writes_trigger_and_maps_exit_codes(
+        self,
+    ) -> None:
+        """The census force button's relay: 200→0 with the trigger file
+        really written; unconfigured snapshot path relays 503→5."""
+        import tempfile
+
+        import web.server as srv
+        from lib.library_completeness_snapshot import (
+            library_completeness_snapshot_path,
+            library_completeness_trigger_path,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_path = library_completeness_snapshot_path(tmpdir)
+            previous = srv.library_completeness_snapshot_path
+            srv.library_completeness_snapshot_path = snapshot_path
+            try:
+                code, body = self._call(api_mutations.cmd_library_census_refresh)
+                trigger_exists = os.path.exists(
+                    library_completeness_trigger_path(tmpdir),
+                )
+            finally:
+                srv.library_completeness_snapshot_path = previous
+        self.assertEqual(code, 0)
+        self.assertEqual(body["outcome"], "requested")
+        self.assertTrue(trigger_exists)
+
+        previous = srv.library_completeness_snapshot_path
+        srv.library_completeness_snapshot_path = None
+        try:
+            code, body = self._call(api_mutations.cmd_library_census_refresh)
+        finally:
+            srv.library_completeness_snapshot_path = previous
+        self.assertEqual(code, 5)
+        self.assertEqual(body["outcome"], "unconfigured")
+
     def test_pipeline_delete_round_trip_preserves_processing_owner(self) -> None:
         self._seed(106, "a0000000-0000-0000-0000-000000000006")
         owner = handoff_automation_owner(self.db, 106)

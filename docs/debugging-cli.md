@@ -23,8 +23,8 @@ ssh doc2 'pipeline-cli routes --json'
 The installed wrapper has two independent authority shapes:
 
 - `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
-  `merge-rekey`, `sync-file-tags`, `resolve-rg`, `wrong-match-delete`,
-  `wrong-match-delete-group`,
+  `merge-rekey`, `sync-file-tags`, `library-census-refresh`, `resolve-rg`,
+  `wrong-match-delete`, `wrong-match-delete-group`,
   `wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
   `force-import`, `import-local`, `beets-distance`,
   `import-preview --download-log-id`, and `triage quarantine` connect to
@@ -139,8 +139,8 @@ remains after a purge failure.
 ## API-backed mutation commands
 
 `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
-`merge-rekey`, `sync-file-tags`, `resolve-rg`, `wrong-match-delete`,
-`wrong-match-delete-group`,
+`merge-rekey`, `sync-file-tags`, `library-census-refresh`, `resolve-rg`,
+`wrong-match-delete`, `wrong-match-delete-group`,
 `wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
 `force-import`, `import-local`, `beets-distance`, and
 `import-preview --download-log-id` call the canonical web route over the
@@ -367,6 +367,12 @@ inside socket authorization, never credentials.
   the installed copy for any candidate beets proves whole, so a complete
   candidate is admitted as into an empty slot; a covered terminal acceptance
   clears the mark automatically (issue #1241).
+- `pipeline-cli library-census-refresh` — Request an out-of-schedule
+  library-completeness census run through its canonical web route: writes
+  the trigger file the module's census path unit watches (the daily
+  oneshot stays the single execution path). The dashboard card's
+  "Run census now" button is the same route. 200/0 requested; 503/5
+  unconfigured or state dir unwritable.
 - `pipeline-cli set-quality` — Set request quality through its canonical web route.
 - `pipeline-cli show` — Show a request, attempts, and quality state.
 - `pipeline-cli sync-file-tags` — Write one
