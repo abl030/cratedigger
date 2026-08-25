@@ -887,7 +887,13 @@ console.log('main.js binds window.refreshLibraryCensus (the onclick dead-end gua
       return { forEach(/** @type {(t: any) => void} */ fn) { fn(fakeEl); } };
     },
     querySelector() { return fakeEl; },
-    getElementById() { return fakeEl; },
+    getElementById(/** @type {string} */ id) {
+      // main.js wires a listener on #q only when present; the stub has
+      // no addEventListener, so 'q' must be absent (same shape as the
+      // search-plan F12 stub).
+      if (id === 'q') return null;
+      return fakeEl;
+    },
   };
   try {
     await import('../web/js/main.js');
