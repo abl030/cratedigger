@@ -104,7 +104,7 @@ class _MiscMixin(_PipelineDBBase):
             SELECT disc_number, track_number, title, length_seconds, track_artist
             FROM album_tracks
             WHERE request_id = %s
-            ORDER BY disc_number, track_number
+            ORDER BY disc_number, track_number, id
         """, (request_id,))
         return [dict(r) for r in cur.fetchall()]
 
@@ -119,7 +119,10 @@ class _MiscMixin(_PipelineDBBase):
         """Update ``album_tracks.track_artist`` for ``request_id`` row-by-row.
 
         ``track_artists`` aligns with ``get_tracks`` ordering
-        (``disc_number, track_number ASC``). Pass the full list — entries
+        (``disc_number, track_number, id ASC`` — the ``id`` tiebreak
+        pins insertion order for rows sharing a ``(disc, track)`` key,
+        e.g. the unparseable-position ``(1, 0)`` sentinel; issue #1263
+        item 1). Pass the full list — entries
         can be ``None`` for tracks the resolver couldn't extract.
         Length mismatches are tolerated:
 
@@ -133,7 +136,9 @@ class _MiscMixin(_PipelineDBBase):
         artists) and after ``resolve_all`` (which produces the per-track
         results). The ORDER BY here MUST match ``get_tracks`` so the
         resolver's per-track output — sorted by ``(disc_number,
-        track_number)`` via ``_tracks_titles_and_artists`` — lines up.
+        track_number)`` via ``_tracks_titles_and_artists``, whose
+        stable sort preserves ``get_tracks``'s id-tiebroken order for
+        tied keys — lines up.
 
         Returns ``False`` when the parent is missing, frozen as
         ``replaced``, or no longer has ``expected_status``. The parent lock
@@ -160,7 +165,7 @@ class _MiscMixin(_PipelineDBBase):
 
             cur = self._execute(
                 "SELECT id FROM album_tracks WHERE request_id = %s "
-                "ORDER BY disc_number, track_number",
+                "ORDER BY disc_number, track_number, id",
                 (request_id,),
             )
             row_ids = [r["id"] for r in cur.fetchall()]
