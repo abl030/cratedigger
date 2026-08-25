@@ -209,6 +209,62 @@ def _discogs_subtrack_methods(
     )
 
 
+def _is_discogs_heading_row(
+    track: dict[str, object], *, any_positioned: bool,
+) -> bool:
+    if track.get("type_") == "heading":
+        return True
+    return (
+        any_positioned
+        and track.get("position") == ""
+        and track.get("duration") == ""
+        and not track.get("sub_tracks")
+    )
+
+
+def filter_discogs_heading_rows(
+    tracklist: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Drop Discogs section-label rows before candidate construction.
+
+    Two measured producer shapes (issue #1261's validation-side half,
+    request 6937 / Discogs 8439330): the real api.discogs.com marks
+    section labels ``type_ == "heading"`` (dropped unconditionally —
+    Beets' own data says it is not a musical work), but the deployment's
+    beets talks to the DISCOGS MIRROR (``nix/beets.nix`` repoints
+    ``discogs_client._base_url``), whose ``/releases/<id>`` endpoint
+    serves those same rows RETYPED ``type_ == "track"`` with a literal
+    empty position and empty duration — so Beets' own heading handling
+    never fires, on any version, and the labels become zero-length
+    candidate tracks (live: a 12-file rip faced a 14-track candidate —
+    ``extra_tracks`` reject at distance 0.5669 for a copy whose true
+    mapping is 12↔12, with each label starting its own phantom medium).
+
+    The shape branch mirrors ``lib/discogs_positions.py``'s measured
+    header rule exactly, because the two sides must count the same
+    tracks for the same payload: a literal empty position AND empty
+    duration, never a row carrying nested ``sub_tracks`` (an index
+    parent's children are real audio), and only when the release
+    positions at least one other row — a release that positions NOTHING
+    has no heading signal and keeps every row, exactly as the
+    acquisition manifest does. (``lib/library_completeness.py`` shares
+    the empty/empty shape but scopes it differently for the census; the
+    manifest normalizer is the agreement partner here.) A tracklist that
+    is ENTIRELY heading-shaped is returned unchanged: never manufacture
+    an empty candidate from non-empty input.
+    """
+    any_positioned = any(
+        str(track.get("position") or "") for track in tracklist
+    )
+    kept = [
+        track for track in tracklist
+        if not _is_discogs_heading_row(track, any_positioned=any_positioned)
+    ]
+    if not kept:
+        return tracklist
+    return kept
+
+
 def configure_discogs_subtracks(*, preserve_flat: bool) -> None:
     """Install Cratedigger's narrow Discogs physical-track compatibility.
 
@@ -343,6 +399,7 @@ def configure_discogs_subtracks(*, preserve_flat: bool) -> None:
         tracklist: list[dict[str, object]],
         albumartistinfo: object,
     ) -> object:
+        tracklist = filter_discogs_heading_rows(tracklist)
         programs_by_position: dict[str, DiscogsIndexedProgram] = {}
         if not preserve_flat:
             coalesce = getattr(self, "_coalesce_tracks", None)
