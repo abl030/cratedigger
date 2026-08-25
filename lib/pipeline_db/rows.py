@@ -139,6 +139,10 @@ class AlbumRequestRow(TypedDict):
     rescued_at: datetime | None
     prior_unfindable_category: str | None
     catalog_number: str | None
+    # Issue #1241: operator-set mark that the installed copy is incomplete.
+    # NULL = unmarked. Never written by measurement; the census only informs
+    # the operator's decision to set it.
+    marked_incomplete_at: datetime | None
 
 
 class AlbumRequestPresentationRow(AlbumRequestRow):

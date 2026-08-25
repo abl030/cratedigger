@@ -2730,6 +2730,73 @@ class TestCmdStatusShowsDownloading(unittest.TestCase):
         self.assertEqual(len(ads["files"]), 1)
 
 
+class TestCmdMarkIncomplete(unittest.TestCase):
+    """Exit-code mapping for cmd_mark_incomplete (issue #1241).
+
+    The service (tests/test_incomplete_mark_service.py) owns branch
+    coverage; this checks only the CLI wrapper's outcome → exit-code map.
+    """
+
+    @patch("builtins.print")
+    def test_mark_and_clear_exit_zero(self, _mock_print):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="imported", artist_name="A", album_title="B",
+        ))
+        self.assertEqual(
+            pipeline_cli.cmd_mark_incomplete(
+                cast(Any, db), MagicMock(id=1, clear=False)),
+            0,
+        )
+        row = db.get_request(1)
+        assert row is not None
+        self.assertIsNotNone(row["marked_incomplete_at"])
+        self.assertEqual(
+            pipeline_cli.cmd_mark_incomplete(
+                cast(Any, db), MagicMock(id=1, clear=True)),
+            0,
+        )
+        row = db.get_request(1)
+        assert row is not None
+        self.assertIsNone(row["marked_incomplete_at"])
+
+    @patch("builtins.print")
+    def test_idempotent_no_ops_exit_zero(self, _mock_print):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="imported"))
+        self.assertEqual(
+            pipeline_cli.cmd_mark_incomplete(
+                cast(Any, db), MagicMock(id=1, clear=True)),
+            0,
+        )
+        pipeline_cli.cmd_mark_incomplete(
+            cast(Any, db), MagicMock(id=1, clear=False))
+        self.assertEqual(
+            pipeline_cli.cmd_mark_incomplete(
+                cast(Any, db), MagicMock(id=1, clear=False)),
+            0,
+        )
+
+    @patch("builtins.print")
+    def test_not_found_exits_two(self, _mock_print):
+        db = FakePipelineDB()
+        self.assertEqual(
+            pipeline_cli.cmd_mark_incomplete(
+                cast(Any, db), MagicMock(id=99, clear=False)),
+            2,
+        )
+
+    @patch("builtins.print")
+    def test_replaced_exits_four(self, _mock_print):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=2, status="replaced"))
+        self.assertEqual(
+            pipeline_cli.cmd_mark_incomplete(
+                cast(Any, db), MagicMock(id=2, clear=False)),
+            4,
+        )
+
+
 class TestCmdSetIntent(unittest.TestCase):
     def test_set_intent_rejects_initializing_request(self):
         db = FakePipelineDB()

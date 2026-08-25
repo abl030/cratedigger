@@ -97,6 +97,14 @@ class _AlbumRequestsDB(
         self, release_id: object | None,
     ) -> AlbumRequestRow | None: ...
 
+    # --- lib.incomplete_mark_service._IncompleteMarkDB, mirrored (that
+    # module is imported lazily inside cmd_mark_incomplete, matching this
+    # module's lazy-import convention) ---
+
+    def set_marked_incomplete(
+        self, request_id: int, *, marked: bool,
+    ) -> str: ...
+
     # --- lib.search_plan_service.SearchPlanDB, mirrored (see class
     # docstring for why this isn't a base class) ---
 
@@ -642,6 +650,34 @@ def cmd_set(db: _AlbumRequestsDB, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mark_incomplete(db: _AlbumRequestsDB, args: argparse.Namespace) -> int:
+    """Set/clear the operator's incomplete mark on a request (issue #1241).
+
+    Marked: the quality decider disregards the installed copy for any
+    candidate beets proves whole — a complete candidate is admitted as
+    into an empty slot, whatever its quality. Cleared automatically when
+    such a candidate terminally imports.
+    """
+    from lib.incomplete_mark_service import (
+        INCOMPLETE_MARK_EXIT_CODES,
+        set_incomplete_mark,
+    )
+
+    result = set_incomplete_mark(db, args.id, marked=not args.clear)
+    messages = {
+        "marked": f"  [{args.id}] marked incomplete — the next complete "
+                  "candidate replaces the installed copy.",
+        "cleared": f"  [{args.id}] incomplete mark cleared.",
+        "already_marked": f"  [{args.id}] already marked incomplete.",
+        "already_clear": f"  [{args.id}] carries no incomplete mark.",
+        "not_found": f"  Request {args.id} not found.",
+        "replaced": f"  [{args.id}] is a frozen replaced row; superseded "
+                    "requests cannot be marked.",
+    }
+    print(messages[result.outcome])
+    return INCOMPLETE_MARK_EXIT_CODES[result.outcome]
+
+
 def cmd_set_intent(db: _AlbumRequestsDB, args: argparse.Namespace) -> int:
     """Toggle lossless-on-disk intent for a request.
 
@@ -786,3 +822,15 @@ def add_album_requests_subparsers(
     p_intent.add_argument("id", type=int, help="Request ID")
     p_intent.add_argument("intent", choices=["lossless", "default"],
                           help="'lossless' = keep lossless on disk, 'default' = pipeline decides")
+
+    # mark-incomplete (issue #1241)
+    p_mark = sub.add_parser(
+        "mark-incomplete",
+        help="Mark a request's installed copy incomplete so any complete "
+             "candidate replaces it (--clear to unmark)",
+    )
+    p_mark.add_argument("id", type=int, help="Request ID")
+    p_mark.add_argument(
+        "--clear", action="store_true",
+        help="Clear the mark instead of setting it",
+    )

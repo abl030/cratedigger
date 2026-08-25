@@ -378,6 +378,47 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
     })
 
 
+class PipelineMarkIncompleteRequest(BaseModel):
+    id: int = Field(gt=0)
+    marked: bool = Field(strict=True)
+
+
+def post_pipeline_mark_incomplete(
+    h: RouteHandler, body: dict[str, object],
+) -> None:
+    """Set/clear the operator's incomplete mark on a request (issue #1241).
+
+    Marked: the quality decider disregards the installed copy for any
+    candidate beets proves whole, so a complete candidate is admitted as
+    into an empty slot. Cleared automatically when such a candidate
+    terminally imports. Thin adapter over
+    ``lib.incomplete_mark_service.set_incomplete_mark`` — the same service
+    ``pipeline-cli mark-incomplete`` wraps (CLI ⇄ API symmetry).
+    """
+    from lib.incomplete_mark_service import (
+        INCOMPLETE_MARK_HTTP_STATUS,
+        set_incomplete_mark,
+    )
+
+    req_body = parse_body(h, body, PipelineMarkIncompleteRequest)
+    if req_body is None:
+        return
+    s = _server()
+    result = set_incomplete_mark(
+        s._db(), req_body.id, marked=req_body.marked,
+    )
+    status = INCOMPLETE_MARK_HTTP_STATUS[result.outcome]
+    if status != 200:
+        message = (
+            "Not found"
+            if result.outcome == "not_found"
+            else "Request is a frozen replaced row"
+        )
+        h._error(message, status)
+        return
+    h._json({"status": result.outcome, "id": result.request_id})
+
+
 class PipelineUpdateRequest(BaseModel):
     id: int = Field(gt=0)
     status: Literal["wanted", "imported", "unsearchable"]
@@ -1076,6 +1117,13 @@ ROUTES: list[RouteRegistration] = [
     route(
         "POST", "/api/pipeline/set-intent", post_pipeline_set_intent,
         "Toggle lossless-on-disk intent for a request.",
+        classified=True,
+    ),
+    route(
+        "POST", "/api/pipeline/mark-incomplete", post_pipeline_mark_incomplete,
+        "Set/clear the operator's incomplete mark on a request; marked "
+        "requests admit any beets-whole candidate as into an empty slot "
+        "(#1241).",
         classified=True,
     ),
     route(

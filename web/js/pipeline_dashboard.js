@@ -212,6 +212,22 @@ function renderDiskCoverageCard(dc) {
   `;
 }
 
+/**
+ * Mark/clear button for one census album row (#1241). The census only
+ * INFORMS the operator; this button is where the human confirms the
+ * incompleteness once, after which the pipeline upgrades as normal —
+ * a complete candidate replaces the marked copy at any quality. Rendered
+ * only when the dashboard route resolved a pipeline request for the row.
+ * @param {{request_id?: number|null, marked_incomplete?: boolean}} row
+ * @returns {string}
+ */
+function renderMarkIncompleteButton(row) {
+  if (row.request_id == null) return '';
+  return row.marked_incomplete
+    ? `<button class="p-btn" onclick="window.toggleMarkIncomplete(${row.request_id}, false, this)">Clear incomplete mark</button>`
+    : `<button class="p-btn" onclick="window.toggleMarkIncomplete(${row.request_id}, true, this)">Mark incomplete</button>`;
+}
+
 /** Render the persisted read-only source/catalog/files census. */
 function renderLibraryCompletenessCard(census) {
   const c = census || {};
@@ -242,7 +258,7 @@ function renderLibraryCompletenessCard(census) {
     return `<details class="completeness-category">
       <summary><span>${label}</span><strong class="${countTone}">${formatCount(total)}</strong></summary>
       <div class="completeness-category-body">
-        ${categoryRows.map(({row, details}) => `<div class="metric-row completeness-album-row"><span>#${esc(String(row.album_id ?? '?'))} ${esc(row.artist || '?')} — ${esc(row.title || '?')}</span><strong>${esc(details.join('; '))}</strong></div>`).join('')}
+        ${categoryRows.map(({row, details}) => `<div class="metric-row completeness-album-row"><span>#${esc(String(row.album_id ?? '?'))} ${esc(row.artist || '?')} — ${esc(row.title || '?')}</span><strong>${esc(details.join('; '))}</strong>${renderMarkIncompleteButton(row)}</div>`).join('')}
         ${categoryRows.length === 0 ? '<div class="completeness-category-empty">No albums</div>' : ''}
         ${categoryRows.length < total ? `<div class="completeness-category-limit">Showing ${formatCount(categoryRows.length)} of ${formatCount(total)}</div>` : ''}
       </div>

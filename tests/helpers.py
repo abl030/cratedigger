@@ -413,6 +413,8 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         # when an unfindable-categorised request finally imports.
         "rescued_at": None,
         "prior_unfindable_category": None,
+        # Migration 082 / issue #1241 — operator-set incomplete mark.
+        "marked_incomplete_at": None,
         # Migration 021 addressing FK.
         "current_evidence_id": None,
         # Migration 023 — supersede lineage.

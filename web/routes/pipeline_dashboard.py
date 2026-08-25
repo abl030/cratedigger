@@ -166,6 +166,18 @@ def _dashboard_library_completeness() -> dict[str, object]:
     albums = report["albums"]
     total = len(albums)
     report["albums"] = albums[:DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP]
+    # Issue #1241: enrich each embedded album with its pipeline request and
+    # the operator's incomplete-mark state so the card can offer the
+    # mark/clear action inline. Joined only for the capped embed, never for
+    # the persisted snapshot. A census album with no resolvable request
+    # (release_id absent from the pipeline) carries request_id=None and the
+    # card renders no action for it.
+    for album in report["albums"]:
+        req = s._db().get_request_by_release_id(album.get("release_id"))
+        album["request_id"] = req["id"] if req else None
+        album["marked_incomplete"] = bool(
+            req and req.get("marked_incomplete_at")
+        )
     return {
         "state": "ok", "error": None, "snapshot": snapshot_dict,
         "albums_shown": len(report["albums"]), "albums_listed_total": total,

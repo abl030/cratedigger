@@ -2913,6 +2913,23 @@ class FakePipelineDB:
             return None
         return cast("AlbumRequestRow", self._request_presentation_copy(row))
 
+    def set_marked_incomplete(self, request_id: int, *, marked: bool) -> str:
+        """Mirror ``PipelineDB.set_marked_incomplete`` (issue #1241)."""
+        row = self._requests.get(request_id)
+        if row is None:
+            return "not_found"
+        if row.get("status") == "replaced":
+            return "replaced"
+        current = row.get("marked_incomplete_at")
+        if marked and current is not None:
+            return "already_marked"
+        if not marked and current is None:
+            return "already_clear"
+        row["marked_incomplete_at"] = (
+            datetime.now(UTC) if marked else None
+        )
+        return "marked" if marked else "cleared"
+
     def _terminal_state_snapshot(self) -> tuple[object, ...]:
         return copy.deepcopy((
             self._requests,

@@ -1034,6 +1034,47 @@ class _RequestsMixin(_PipelineDBBase):
         return cur.rowcount > 0
 
 
+    def set_marked_incomplete(self, request_id: int, *, marked: bool) -> str:
+        """Atomically set/clear the operator's incomplete mark (issue #1241).
+
+        ``album_requests.marked_incomplete_at`` is operator-owned: NULL means
+        unmarked; a timestamp records when the operator asserted the
+        installed copy is missing declared program. Returns one of
+        ``marked`` / ``cleared`` / ``already_marked`` / ``already_clear`` /
+        ``not_found`` / ``replaced`` — the idempotent no-ops are distinct
+        outcomes so both operator surfaces can echo them honestly.
+        ``replaced`` rows are frozen audit and refuse the write.
+        """
+        with self._atomic():
+            cur = self._execute(
+                "SELECT status, marked_incomplete_at FROM album_requests "
+                "WHERE id = %s FOR UPDATE",
+                (int(request_id),),
+            )
+            row = cur.fetchone()
+            if row is None:
+                self.conn.commit()
+                return "not_found"
+            if row["status"] == "replaced":
+                self.conn.commit()
+                return "replaced"
+            current = row["marked_incomplete_at"]
+            if marked and current is not None:
+                self.conn.commit()
+                return "already_marked"
+            if not marked and current is None:
+                self.conn.commit()
+                return "already_clear"
+            now = datetime.now(UTC)
+            self._execute(
+                "UPDATE album_requests "
+                "SET marked_incomplete_at = %s, updated_at = %s "
+                "WHERE id = %s",
+                (now if marked else None, now, int(request_id)),
+            )
+            self.conn.commit()
+            return "marked" if marked else "cleared"
+
     def update_status(
         self,
         request_id: int,
