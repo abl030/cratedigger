@@ -231,11 +231,14 @@ function renderMarkIncompleteButton(row) {
 /** Render the persisted read-only source/catalog/files census. */
 function renderLibraryCompletenessCard(census) {
   const c = census || {};
+  const runButton = `<button class="p-btn" onclick="window.refreshLibraryCensus(this)">Run census now</button>`;
   if (c.state === 'missing') {
-    return `<div class="dashboard-card dashboard-wide"><div class="dashboard-card-title">Library Completeness</div><div class="metric-list"><div class="metric-row"><span>Status</span><strong class="metric-muted">no census published yet</strong></div></div></div>`;
+    return `<div class="dashboard-card dashboard-wide"><div class="dashboard-card-title">Library Completeness</div><div class="metric-list"><div class="metric-row"><span>Status</span><strong class="metric-muted">no census published yet</strong></div><div class="metric-row"><span>Actions</span>${runButton}</div></div></div>`;
   }
   if (c.state === 'unreadable') {
-    return `<div class="dashboard-card dashboard-wide"><div class="dashboard-card-title">Library Completeness</div><div class="metric-list"><div class="metric-row"><span>Status</span><strong class="metric-bad">snapshot unreadable</strong></div><div class="metric-row"><span>Error</span><strong>${esc(c.error || '')}</strong></div></div></div>`;
+    // A forced run is exactly the repair for an unreadable snapshot —
+    // the census rewrites it atomically.
+    return `<div class="dashboard-card dashboard-wide"><div class="dashboard-card-title">Library Completeness</div><div class="metric-list"><div class="metric-row"><span>Status</span><strong class="metric-bad">snapshot unreadable</strong></div><div class="metric-row"><span>Error</span><strong>${esc(c.error || '')}</strong></div><div class="metric-row"><span>Actions</span>${runButton}</div></div></div>`;
   }
   const snapshot = c.snapshot || {};
   const report = snapshot.report || {};
@@ -271,7 +274,7 @@ function renderLibraryCompletenessCard(census) {
       <div class="dashboard-card-title">Library Completeness</div>
       <div class="metric-list">
         <div class="metric-row"><span>Status</span><strong class="${statusClass}">${esc(stale ? `${report.status || 'unknown'} (stale)` : report.status || 'unknown')}</strong></div>
-        <div class="metric-row"><span>Last run</span><strong>${snapshot.generated_at ? awstDateTime(snapshot.generated_at) : 'n/a'} (${formatDuration(snapshot.duration_seconds)})</strong></div>
+        <div class="metric-row"><span>Last run</span><strong class="metric-value-push">${snapshot.generated_at ? awstDateTime(snapshot.generated_at) : 'n/a'} (${formatDuration(snapshot.duration_seconds)})</strong>${runButton}</div>
         <div class="metric-row"><span>Audio complete</span><strong>${formatCount(counts.audio_complete)} / ${formatCount(counts.albums_scanned)}</strong></div>
         ${categories.map(renderCategory).join('')}
       </div>

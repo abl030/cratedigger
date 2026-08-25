@@ -246,6 +246,38 @@ export async function toggleMarkIncomplete(requestId, marked, btn) {
 }
 
 /**
+ * Operator action: request an out-of-schedule library-completeness
+ * census run. The server writes the trigger file the census path unit
+ * watches; the daily oneshot stays the single execution path, so the
+ * snapshot (and this card) refreshes when that run completes.
+ * @param {HTMLButtonElement} btn
+ */
+export async function refreshLibraryCensus(btn) {
+  btn.disabled = true;
+  btn.textContent = 'Requesting...';
+  try {
+    const r = await fetch(`${API}/api/pipeline/dashboard/library-census/refresh`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    const data = await r.json();
+    if (r.ok) {
+      btn.textContent = 'Census requested';
+      toast('Census run requested — the card refreshes when it completes (minutes on local mirrors)');
+      return;
+    }
+    btn.disabled = false;
+    btn.textContent = 'Run census now';
+    toast(`census refresh refused: ${data.error || r.status}`, true);
+  } catch (_e) {
+    btn.disabled = false;
+    btn.textContent = 'Run census now';
+    toast('census refresh request failed', true);
+  }
+}
+
+/**
  * Operator action (#1142): a cheap, explicit per-album retag-divergence
  * recheck. Called from the "Beets DB ↔ File Tags Drift" card's
  * "Recheck" button (`pipeline_dashboard.js::renderRetagDivergenceAlbumRowInner`).

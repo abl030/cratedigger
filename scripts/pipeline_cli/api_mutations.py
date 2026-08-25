@@ -534,6 +534,28 @@ def cmd_sync_file_tags(_db: object, args: argparse.Namespace) -> int:
     ), timeout_seconds=TIMEOUT_TAG_SYNC_SECONDS)
 
 
+def cmd_library_census_refresh(_db: object, args: argparse.Namespace) -> int:
+    """Thin HTTP adapter for
+    ``POST /api/pipeline/dashboard/library-census/refresh``.
+
+    The route is the one canonical execution path: it writes the trigger
+    file the module's ``cratedigger-library-completeness-census.path``
+    unit watches, and the daily census oneshot itself remains the single
+    census execution path. Relayed rather than written directly because
+    the trigger lives in the web service's state dir
+    (``0755 cratedigger``), which the invoking operator cannot write —
+    the write-side analogue of the CLI-over-HTTP permission relays like
+    ``triage quarantine``.
+
+    Exit codes: 0 — 200 requested; 5 — 503 unconfigured/unwritable, or
+    the API unreachable.
+    """
+    return _relay(args.api_endpoint, _ApiMutation(
+        path="/api/pipeline/dashboard/library-census/refresh",
+        body={},
+    ))
+
+
 def add_api_mutation_subparsers(
     sub: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
@@ -541,6 +563,12 @@ def add_api_mutation_subparsers(
     delete = sub.add_parser("pipeline-delete", help="Delete a pipeline request via the web API")
     delete.add_argument("request_id", type=int)
     delete.add_argument("--confirm", default=None)
+
+    sub.add_parser(
+        "library-census-refresh",
+        help="Request an out-of-schedule library-completeness census run "
+             "via the web API (the daily oneshot stays the execution path)",
+    )
 
     quality = sub.add_parser("set-quality", help="Set request quality via the web API")
     quality.add_argument("release_id")

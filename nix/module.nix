@@ -2746,6 +2746,13 @@ in {
         User = cfg.user;
         Group = cfg.group;
         BindReadOnlyPaths = beetsObserverReadOnlyPaths;
+        # The trigger file is the operator "run census now" request (web
+        # button / `pipeline-cli library-census-refresh`), watched by the
+        # same-named path unit below. Removing it FIRST means a request
+        # arriving DURING a run re-triggers after deactivation, so the
+        # next snapshot reflects post-request state; a completed run
+        # leaves no file and no re-trigger.
+        ExecStartPre = "${pkgs.coreutils}/bin/rm -f ${cfg.stateDir}/library-completeness-census.trigger";
         ExecStart = "${libraryCompletenessCensusPkg}/bin/cratedigger-library-completeness-census";
         WorkingDirectory = cfg.stateDir;
         # Public MusicBrainz remains a supported (1 request/sec) posture:
@@ -2764,6 +2771,18 @@ in {
         OnCalendar = "daily";
         Persistent = true;
         RandomizedDelaySec = "30min";
+      };
+    };
+
+    # Operator-forced census runs: the web service (same user) writes the
+    # trigger file into stateDir; this path unit starts the same-named
+    # oneshot. No sudo/polkit surface — file ownership IS the authority,
+    # and the census service's ExecStart stays the single execution path.
+    systemd.paths.cratedigger-library-completeness-census = {
+      description = "Cratedigger library completeness census on-demand trigger";
+      wantedBy = ["multi-user.target"];
+      pathConfig = {
+        PathExists = "${cfg.stateDir}/library-completeness-census.trigger";
       };
     };
 

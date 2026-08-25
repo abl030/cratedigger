@@ -25,6 +25,7 @@ from lib.library_completeness import (
 from lib.library_completeness_snapshot import (
     LibraryCompletenessSnapshot,
     library_completeness_snapshot_path,
+    library_completeness_trigger_path,
     read_library_completeness_snapshot,
     write_library_completeness_snapshot,
 )
@@ -849,6 +850,73 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
         self.assertEqual(census["state"], "unreadable")
         self.assertIsNone(census["snapshot"])
         self.assertIsNotNone(census["error"])
+
+
+
+
+LIBRARY_CENSUS_REFRESH_FIELDS = {"outcome", "error"}
+
+
+class TestLibraryCensusRefreshContract(_FakeDbWebServerCase):
+    """POST /api/pipeline/dashboard/library-census/refresh — the census
+    force button. Writes the trigger file the module's path unit
+    watches; the daily oneshot stays the single execution path."""
+
+    def test_refresh_writes_trigger_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = library_completeness_snapshot_path(tmpdir)
+            with _library_completeness_snapshot_path_set(path):
+                status, data = self._post(
+                    "/api/pipeline/dashboard/library-census/refresh", {},
+                )
+            trigger = library_completeness_trigger_path(tmpdir)
+            trigger_exists = os.path.exists(trigger)
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, LIBRARY_CENSUS_REFRESH_FIELDS, "census refresh",
+        )
+        self.assertEqual(data["outcome"], "requested")
+        self.assertIsNone(data["error"])
+        self.assertTrue(trigger_exists)
+
+    def test_refresh_is_idempotent_while_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = library_completeness_snapshot_path(tmpdir)
+            with _library_completeness_snapshot_path_set(path):
+                first = self._post(
+                    "/api/pipeline/dashboard/library-census/refresh", {},
+                )
+                second = self._post(
+                    "/api/pipeline/dashboard/library-census/refresh", {},
+                )
+        self.assertEqual(first[0], 200)
+        self.assertEqual(second[0], 200)
+        self.assertEqual(second[1]["outcome"], "requested")
+
+    def test_unconfigured_snapshot_path_returns_503(self) -> None:
+        with _library_completeness_snapshot_path_set(None):
+            status, data = self._post(
+                "/api/pipeline/dashboard/library-census/refresh", {},
+            )
+        self.assertEqual(status, 503)
+        self.assertEqual(data["outcome"], "unconfigured")
+
+    def test_unwritable_state_dir_returns_503(self) -> None:
+        # The real adapter raises OSError on an unwritable dir (Rule B:
+        # the failure-case shape is the real exception, not a stand-in).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chmod(tmpdir, 0o500)
+            try:
+                path = library_completeness_snapshot_path(tmpdir)
+                with _library_completeness_snapshot_path_set(path):
+                    status, data = self._post(
+                        "/api/pipeline/dashboard/library-census/refresh", {},
+                    )
+            finally:
+                os.chmod(tmpdir, 0o700)
+        self.assertEqual(status, 503)
+        self.assertEqual(data["outcome"], "unavailable")
+        self.assertTrue(data["error"])
 
 
 if __name__ == "__main__":

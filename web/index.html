@@ -477,6 +477,10 @@
   .metric-list { display: flex; flex-direction: column; gap: 4px; }
   .metric-row { display: flex; justify-content: space-between; gap: 12px; color: #888; font-size: 0.82em; }
   .metric-row strong { color: #ddd; font-weight: 600; text-align: right; }
+  /* 3-child rows (label / value / action button): space-between would
+     park the value mid-row — push it right so value + button share the
+     card's value column. */
+  .metric-row .metric-value-push { margin-left: auto; }
   .metric-row.metric-clickable { cursor: pointer; border-radius: 3px; padding: 2px 4px; margin: -2px -4px; }
   .metric-row.metric-clickable:hover, .metric-row.metric-open { background: #202820; color: #aaa; }
   .completeness-category { border-top: 1px solid #242424; padding-top: 4px; }

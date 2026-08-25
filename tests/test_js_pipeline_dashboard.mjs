@@ -844,5 +844,72 @@ console.log('renderLibraryCompletenessCard() wires the mark buttons per row (#12
     'card never wires an action to an unresolvable album');
 }
 
+console.log('renderLibraryCompletenessCard() offers Run census now in every branch');
+{
+  const missing = __test__.renderLibraryCompletenessCard({state: 'missing'});
+  assertContains(missing, 'window.refreshLibraryCensus(this)',
+    'missing branch offers the census run action');
+  const unreadable = __test__.renderLibraryCompletenessCard({
+    state: 'unreadable', error: 'boom',
+  });
+  assertContains(unreadable, 'window.refreshLibraryCensus(this)',
+    'unreadable branch offers the repair action');
+  const populated = __test__.renderLibraryCompletenessCard({
+    state: 'ok', error: null, albums_shown: 0, albums_listed_total: 0,
+    snapshot: {
+      generated_at: new Date().toISOString(),
+      duration_seconds: 90.0,
+      report: {
+        status: 'complete',
+        counts: {albums_scanned: 1, audio_complete: 1,
+                 missing_source_audio: 0, catalog_drift: 0, unknown: 0},
+        albums: [],
+      },
+    },
+  });
+  assertContains(populated, 'window.refreshLibraryCensus(this)',
+    'populated branch offers the census run action');
+  assertContains(populated, 'metric-value-push',
+    'Last run value clusters with the button in the value column');
+}
+
+console.log('main.js binds window.refreshLibraryCensus (the onclick dead-end guard, #1110 shape)');
+{
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  /** @type {any} */
+  globalThis.window = { setTimeout: () => 0 };
+  /** @type {any} */
+  const fakeEl = { classList: { add() {}, remove() {} } };
+  /** @type {any} */
+  globalThis.document = {
+    querySelectorAll() {
+      return { forEach(/** @type {(t: any) => void} */ fn) { fn(fakeEl); } };
+    },
+    querySelector() { return fakeEl; },
+    getElementById(/** @type {string} */ id) {
+      // main.js wires a listener on #q only when present; the stub has
+      // no addEventListener, so 'q' must be absent (same shape as the
+      // search-plan F12 stub).
+      if (id === 'q') return null;
+      return fakeEl;
+    },
+  };
+  try {
+    await import('../web/js/main.js');
+    /** @type {any} */
+    const bound = globalThis.window.refreshLibraryCensus;
+    assert(typeof bound === 'function',
+      'main.js wires window.refreshLibraryCensus');
+    /** @type {any} */
+    const mark = globalThis.window.toggleMarkIncomplete;
+    assert(typeof mark === 'function',
+      'main.js wires window.toggleMarkIncomplete (#1241)');
+  } finally {
+    globalThis.window = prevWindow;
+    globalThis.document = prevDocument;
+  }
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
