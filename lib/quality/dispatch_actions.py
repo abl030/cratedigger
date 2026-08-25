@@ -105,6 +105,20 @@ def dispatch_action(decision: str) -> DispatchAction:
         return DispatchAction(record_rejection=True)
 
 
+def acceptance_installs_new_files(decision: str) -> bool:
+    """Whether a ``mark_done`` acceptance installed new files (pure).
+
+    ``preflight_existing`` keeps the EXISTING import with nothing installed;
+    every other acceptance publishes the downloaded candidate. Any terminal
+    acceptance side effect keyed on this fact (stale V0-probe clearing and
+    incomplete-mark clearing per #1257 review F1, current-evidence proof
+    attribution, and whatever comes next) must call this one spelling rather
+    than re-deriving ``decision != "preflight_existing"`` in place.
+    Meaningful only for decisions ``dispatch_action`` marks done.
+    """
+    return decision != "preflight_existing"
+
+
 def decision_denylists(decision: str) -> bool:
     """Whether ``decision`` denylists its source — the ONE production policy.
 

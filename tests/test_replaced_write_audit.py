@@ -6,6 +6,7 @@ import ast
 import hashlib
 import re
 import unittest
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,240 +55,320 @@ class _AlbumRequestUpdate:
 
 
 # Every unresolved production SQL builder is an exact, reviewed exception.
-# The key includes path, source line, and the exact execute SQL/params AST.
-# Dynamic calls bind the whole enclosing scope. Reviewed lifecycle calls go
-# further: their fingerprint also binds the normalized enclosing method AST,
-# path, and method name, so any same-method control-flow or binding change
-# invalidates review even when the execute call itself is byte-identical.
-# The ratchet does not infer parameter dataflow: transition SQL must use the
+# The key is (path, fingerprint of the exact execute SQL/params AST); the
+# value holds one rationale per matching call site, and the audit requires
+# the live distinct-call-site count to equal the rationale count exactly —
+# so inserting code above a reviewed statement no longer churns every entry
+# below it (#1258 item 4), while adding or removing a same-fingerprint call
+# still fails loudly. Rationales are kept in ascending source-line order as
+# a maintenance convention; the audit checks only the counts, not per-site
+# attribution. Dynamic calls bind the whole enclosing scope. Reviewed
+# lifecycle calls go further: their fingerprint also binds the normalized
+# enclosing method AST, path, and method name, so any same-method
+# control-flow or binding change invalidates review even when the execute
+# call itself is byte-identical. Known residual (#1258 review F6): a STATIC
+# SQL constant outside a lifecycle seam fingerprints SQL+params only, with
+# no scope binding — two such calls in different functions of one file
+# would share a key and become interchangeable to the count check. No
+# registered entry has that shape today (all multi-site keys are dynamic,
+# single-scope); if one ever registers, revisit this key design. The
+# ratchet does not infer parameter dataflow: transition SQL must use the
 # canonical direct call grammar below.
-_REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/_core.py", 269, "472331a54ebaf9a6"): (
-        "shared execute wrapper forwards caller-owned SQL with the caller's "
-        "unchanged positional or mapping parameters"
+_REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("lib/pipeline_db/_core.py", "472331a54ebaf9a6"): (
+        (
+            "shared execute wrapper forwards caller-owned SQL with the caller's "
+            "unchanged positional or mapping parameters"
+        ),
+        (
+            "single reconnect retry forwards the same caller-owned SQL and "
+            "unchanged positional or mapping parameters outside atomic scopes"
+        ),
     ),
-    ("lib/pipeline_db/_core.py", 271, "04ca6be85bb75a81"): (
-        "shared execute wrapper forwards parameterless caller-owned SQL"
+    ("lib/pipeline_db/_core.py", "04ca6be85bb75a81"): (
+        (
+            "shared execute wrapper forwards parameterless caller-owned SQL"
+        ),
+        (
+            "single reconnect retry forwards the same parameterless caller-owned "
+            "SQL outside atomic scopes"
+        ),
     ),
-    ("lib/pipeline_db/_core.py", 304, "472331a54ebaf9a6"): (
-        "single reconnect retry forwards the same caller-owned SQL and "
-        "unchanged positional or mapping parameters outside atomic scopes"
+    ("lib/pipeline_db/_core.py", "cc41f306ff6d2fc6"): (
+        (
+            "owner-session liveness probe interpolates only a positive integer "
+            "statement timeout before a fixed SELECT"
+        ),
     ),
-    ("lib/pipeline_db/_core.py", 306, "04ca6be85bb75a81"): (
-        "single reconnect retry forwards the same parameterless caller-owned "
-        "SQL outside atomic scopes"
+    ("scripts/pipeline_cli/query.py", "f1e566c44edc8feb"): (
+        (
+            "deliberate raw-write operator seam, gated by exact "
+            "--write --confirm WRITE rather than a lifecycle-safe typed mutation"
+        ),
+        (
+            "default raw-query seam runs in the transaction-enforced read-only "
+            "scope on the live connection"
+        ),
     ),
-    ("lib/pipeline_db/_core.py", 424, "cc41f306ff6d2fc6"): (
-        "owner-session liveness probe interpolates only a positive integer "
-        "statement timeout before a fixed SELECT"
+    ("lib/pipeline_db/terminal_outcomes.py", "5fa18d2c1737583f"): (
+        (
+            "terminal metadata keys use the existing validated request-field "
+            "vocabulary (issue #784: `dumps=lambda value: msgspec.json.encode("
+            "value).decode()` replaced with the shared `_msgspec_json_dumps` "
+            "helper from `_shared.py` — same encoder, same output, no SQL change)"
+        ),
     ),
-    ("scripts/pipeline_cli/query.py", 241, "f1e566c44edc8feb"): (
-        "deliberate raw-write operator seam, gated by exact "
-        "--write --confirm WRITE rather than a lifecycle-safe typed mutation"
+    ("lib/pipeline_db/terminal_outcomes.py", "cd644e51f3670265"): (
+        (
+            "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
+        ),
     ),
-    ("scripts/pipeline_cli/query.py", 255, "f1e566c44edc8feb"): (
-        "default raw-query seam runs in the transaction-enforced read-only "
-        "scope on the live connection"
+    ("lib/pipeline_db/download_log.py", "cba0d6d56f1878ac"): (
+        (
+            "get_log's three outcome variants were three verbatim copies of one "
+            "SELECT; issue #829 Phase 5 PR4 collapsed them to a single template "
+            "whose two slots are the shared candidate-evidence column block and "
+            "an outcome filter drawn from a closed literal map. Issue #962 adds "
+            "only read-only exact-release identity projections; no slot takes "
+            "caller input or mutates album_requests. Issue #1022 projects a "
+            "shared row's current-only lineage to NULL on this read surface. "
+            "Issue #1176 PR3's ``local_import`` Literal member above shifted "
+            "this line only — fingerprint unchanged, confirming the SQL itself "
+            "is untouched"
+        ),
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 161, "5fa18d2c1737583f"): (
-        "terminal metadata keys use the existing validated request-field "
-        "vocabulary (issue #784: `dumps=lambda value: msgspec.json.encode("
-        "value).decode()` replaced with the shared `_msgspec_json_dumps` "
-        "helper from `_shared.py` — same encoder, same output, no SQL change)"
+    ("lib/pipeline_db/download_log.py", "2d2cba8bbf4b379f"): (
+        (
+            "validation key is selected from a closed server-owned vocabulary "
+            "(#867 intentionally added terminal/evidence projection and moved final "
+            "classification after same-path DISTINCT). Issue #829 PR4/N3 CHANGED "
+            "this statement: two read-only column blocks generated by "
+            "``accusation_evidence_columns`` from a closed (table, prefix) pair, "
+            "plus a LEFT JOIN on the request's own current_evidence_id — no "
+            "caller input reaches the SQL and album_requests is still only read. "
+            "Issue #1077 F2 CHANGED this statement again: dropped the "
+            "``e.audio_corrupt AS candidate_audio_corrupt`` projection — an "
+            "incidental fact about linked evidence used to hide an otherwise-kept, "
+            "visible row, which the removal fixes; still read-only, no new caller "
+            "input. Issue #1176 PR1's ``log_download`` ``source`` parameter and "
+            "PR3's ``local_import`` Literal member above each shifted this line "
+            "only — fingerprint unchanged, confirming the SQL itself is untouched"
+        ),
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 376, "cd644e51f3670265"): (
-        "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
+    ("lib/pipeline_db/download_log.py", "e0154e89026dc8ef"): (
+        (
+            "validation key is selected from a closed server-owned vocabulary "
+            "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
+            "#1077 F2's column removal, issue #1176 PR1's ``log_download`` "
+            "``source`` parameter, and PR3's ``local_import`` Literal member "
+            "above each shifted this line only)"
+        ),
     ),
-    ("lib/pipeline_db/download_log.py", 306, "cba0d6d56f1878ac"): (
-        "get_log's three outcome variants were three verbatim copies of one "
-        "SELECT; issue #829 Phase 5 PR4 collapsed them to a single template "
-        "whose two slots are the shared candidate-evidence column block and "
-        "an outcome filter drawn from a closed literal map. Issue #962 adds "
-        "only read-only exact-release identity projections; no slot takes "
-        "caller input or mutates album_requests. Issue #1022 projects a "
-        "shared row's current-only lineage to NULL on this read surface. "
-        "Issue #1176 PR3's ``local_import`` Literal member above shifted "
-        "this line only — fingerprint unchanged, confirming the SQL itself "
-        "is untouched"
+    ("lib/pipeline_db/download_log.py", "13517e08e7db52f3"): (
+        (
+            "validation key is closed vocabulary and IN list is value placeholders "
+            "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
+            "#1077 F2's column removal, issue #1176 PR1's ``log_download`` "
+            "``source`` parameter, and PR3's ``local_import`` Literal member "
+            "above each shifted this line only)"
+        ),
     ),
-    ("lib/pipeline_db/download_log.py", 815, "2d2cba8bbf4b379f"): (
-        "validation key is selected from a closed server-owned vocabulary "
-        "(#867 intentionally added terminal/evidence projection and moved final "
-        "classification after same-path DISTINCT). Issue #829 PR4/N3 CHANGED "
-        "this statement: two read-only column blocks generated by "
-        "``accusation_evidence_columns`` from a closed (table, prefix) pair, "
-        "plus a LEFT JOIN on the request's own current_evidence_id — no "
-        "caller input reaches the SQL and album_requests is still only read. "
-        "Issue #1077 F2 CHANGED this statement again: dropped the "
-        "``e.audio_corrupt AS candidate_audio_corrupt`` projection — an "
-        "incidental fact about linked evidence used to hide an otherwise-kept, "
-        "visible row, which the removal fixes; still read-only, no new caller "
-        "input. Issue #1176 PR1's ``log_download`` ``source`` parameter and "
-        "PR3's ``local_import`` Literal member above each shifted this line "
-        "only — fingerprint unchanged, confirming the SQL itself is untouched"
+    ("lib/pipeline_db/download_log.py", "d87a36ba1d1768e7"): (
+        (
+            "JSON path key is selected from a closed server-owned vocabulary "
+            "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
+            "#1077 F2's column removal, issue #1176 PR1's ``log_download`` "
+            "``source`` parameter, and PR3's ``local_import`` Literal member "
+            "above each shifted this line only)"
+        ),
     ),
-    ("lib/pipeline_db/download_log.py", 879, "e0154e89026dc8ef"): (
-        "validation key is selected from a closed server-owned vocabulary "
-        "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
-        "#1077 F2's column removal, issue #1176 PR1's ``log_download`` "
-        "``source`` parameter, and PR3's ``local_import`` Literal member "
-        "above each shifted this line only)"
+    ("lib/pipeline_db/import_jobs.py", "ecf3d1844c67f653"): (
+        (
+            "optional job filter is a fixed literal WHERE clause "
+            "(issue #1089's automation_recovery_debris import, review round 2's "
+            "_default_force_action_copy_path helper, and review round 3's "
+            "RecoveryDebrisReport import, above each shifted this line only — "
+            "fingerprint unchanged, confirming the SQL itself is untouched)"
+        ),
     ),
-    ("lib/pipeline_db/download_log.py", 897, "13517e08e7db52f3"): (
-        "validation key is closed vocabulary and IN list is value placeholders "
-        "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
-        "#1077 F2's column removal, issue #1176 PR1's ``log_download`` "
-        "``source`` parameter, and PR3's ``local_import`` Literal member "
-        "above each shifted this line only)"
+    ("lib/pipeline_db/import_jobs.py", "d020bd0235c95c4a"): (
+        (
+            "claim exclusion predicate is assembled from fixed literal clauses "
+            "(issue #1089's automation_recovery_debris import, review round 2's "
+            "_default_force_action_copy_path helper, and review round 3's "
+            "RecoveryDebrisReport import, above each shifted this line only — "
+            "fingerprint unchanged, confirming the SQL itself is untouched)"
+        ),
     ),
-    ("lib/pipeline_db/download_log.py", 914, "d87a36ba1d1768e7"): (
-        "JSON path key is selected from a closed server-owned vocabulary "
-        "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
-        "#1077 F2's column removal, issue #1176 PR1's ``log_download`` "
-        "``source`` parameter, and PR3's ``local_import`` Literal member "
-        "above each shifted this line only)"
+    ("lib/pipeline_db/misc.py", "12cfdd83a367c90e"): (
+        (
+            "track-count batch IN list contains only psycopg value placeholders"
+        ),
     ),
-    ("lib/pipeline_db/import_jobs.py", 590, "ecf3d1844c67f653"): (
-        "optional job filter is a fixed literal WHERE clause "
-        "(issue #1089's automation_recovery_debris import, review round 2's "
-        "_default_force_action_copy_path helper, and review round 3's "
-        "RecoveryDebrisReport import, above each shifted this line only — "
-        "fingerprint unchanged, confirming the SQL itself is untouched)"
+    ("lib/beets_db.py", "4b59d19eb8727dff"): (
+        (
+            "issue #1203 item 2: get_current_album_directories's batch IN list "
+            "contains only sqlite3 '?' value placeholders (album_ids, a list of "
+            "int primary keys already resolved by _matching_album_ids). This is "
+            "the deployment-owned Beets SQLite items table, not the pipeline DB "
+            "-- album_requests is not reachable from this connection at all, "
+            "and the query is a read-only SELECT"
+        ),
     ),
-    ("lib/pipeline_db/import_jobs.py", 650, "d020bd0235c95c4a"): (
-        "claim exclusion predicate is assembled from fixed literal clauses "
-        "(issue #1089's automation_recovery_debris import, review round 2's "
-        "_default_force_action_copy_path helper, and review round 3's "
-        "RecoveryDebrisReport import, above each shifted this line only — "
-        "fingerprint unchanged, confirming the SQL itself is untouched)"
+    ("lib/pipeline_db/misc.py", "0a14fd5e6252e398"): (
+        (
+            "bulk VALUES fragment contains only fixed value-placeholder tuples "
+            "(issue #784: add_denylist/get_denylisted_users annotated above, "
+            "shifting this line; no SQL change)"
+        ),
     ),
-    ("lib/pipeline_db/misc.py", 191, "12cfdd83a367c90e"): (
-        "track-count batch IN list contains only psycopg value placeholders"
+    ("lib/pipeline_db/misc.py", "07ec7dc8e19f1ee0"): (
+        (
+            "triage joins and predicates are selected from closed service enums "
+            "(issue #978 uses a fixed request-local LATERAL convergence function "
+            "for the converged cohort; all values remain parameters and "
+            "album_requests is still only read)"
+        ),
     ),
-    ("lib/beets_db.py", 847, "4b59d19eb8727dff"): (
-        "issue #1203 item 2: get_current_album_directories's batch IN list "
-        "contains only sqlite3 '?' value placeholders (album_ids, a list of "
-        "int primary keys already resolved by _matching_album_ids). This is "
-        "the deployment-owned Beets SQLite items table, not the pipeline DB "
-        "-- album_requests is not reachable from this connection at all, "
-        "and the query is a read-only SELECT"
+    ("lib/pipeline_db/requests.py", "b84b3af3ecbbf089"): (
+        (
+            "INSERT columns derive from the fixed AddRequestInput schema "
+            "and values remain one placeholder per validated schema field"
+        ),
     ),
-    ("lib/pipeline_db/misc.py", 404, "0a14fd5e6252e398"): (
-        "bulk VALUES fragment contains only fixed value-placeholder tuples "
-        "(issue #784: add_denylist/get_denylisted_users annotated above, "
-        "shifting this line; no SQL change)"
+    ("lib/pipeline_db/requests.py", "ead47926ac19037a"): (
+        (
+            "request-by-id uses the fixed shared presentation projection and one "
+            "value placeholder"
+        ),
     ),
-    ("lib/pipeline_db/misc.py", 585, "07ec7dc8e19f1ee0"): (
-        "triage joins and predicates are selected from closed service enums "
-        "(issue #978 uses a fixed request-local LATERAL convergence function "
-        "for the converged cohort; all values remain parameters and "
-        "album_requests is still only read)"
+    ("lib/pipeline_db/requests.py", "5d62850ba552ff76"): (
+        (
+            "cardinality-preserving library candidate lookup composes only the "
+            "fixed presentation and capture/evidence projections with two value "
+            "array parameters, then filters strict identities in Python; the "
+            "Library contract no longer selects structured CD proof while the "
+            "pointed current-evidence release-id gate remains for exact "
+            "verified/provisional facts. Issue #1176 PR1 round 1 retired the "
+            "dead ``job_type = 'manual_import'`` arm from the embedded "
+            "``_CAPTURE_AND_EVIDENCE_SELECT`` predicate (zero live import_jobs "
+            "rows ever carried it; migration 080 also drops it from the "
+            "job_type CHECK); round 2 added ``'local_import'`` to the same list "
+            "(a successful local import is a capture too, decided in review) — "
+            "net line position unchanged from before PR1. Neither edit touches "
+            "the interpolation site itself, so the fingerprint (which "
+            "normalizes the ``{dynamic}`` slot) is unaffected by either change"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 224, "b84b3af3ecbbf089"): (
-        "INSERT columns derive from the fixed AddRequestInput schema "
-        "and values remain one placeholder per validated schema field"
+    ("lib/pipeline_db/requests.py", "fc57192d01989af4"): (
+        (
+            "MusicBrainz request lookup uses the fixed shared presentation "
+            "projection and one value placeholder"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 236, "ead47926ac19037a"): (
-        "request-by-id uses the fixed shared presentation projection and one "
-        "value placeholder"
+    ("lib/pipeline_db/requests.py", "0ad0e7484937cd31"): (
+        (
+            "Discogs request lookup uses the fixed shared presentation projection "
+            "and one value placeholder"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 332, "5d62850ba552ff76"): (
-        "cardinality-preserving library candidate lookup composes only the "
-        "fixed presentation and capture/evidence projections with two value "
-        "array parameters, then filters strict identities in Python; the "
-        "Library contract no longer selects structured CD proof while the "
-        "pointed current-evidence release-id gate remains for exact "
-        "verified/provisional facts. Issue #1176 PR1 round 1 retired the "
-        "dead ``job_type = 'manual_import'`` arm from the embedded "
-        "``_CAPTURE_AND_EVIDENCE_SELECT`` predicate (zero live import_jobs "
-        "rows ever carried it; migration 080 also drops it from the "
-        "job_type CHECK); round 2 added ``'local_import'`` to the same list "
-        "(a successful local import is a capture too, decided in review) — "
-        "net line position unchanged from before PR1. Neither edit touches "
-        "the interpolation site itself, so the fingerprint (which "
-        "normalizes the ``{dynamic}`` slot) is unaffected by either change"
+    ("lib/pipeline_db/requests.py", "327e39bd024d50d3"): (
+        (
+            "replacement-chain lookup uses the fixed shared presentation "
+            "projection and one value placeholder"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 356, "fc57192d01989af4"): (
-        "MusicBrainz request lookup uses the fixed shared presentation "
-        "projection and one value placeholder"
+    ("lib/pipeline_db/requests.py", "1bd5cbde29149322"): (
+        (
+            "release-id lookup selects one of two fixed identity predicates "
+            "and uses the fixed shared presentation projection"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 369, "0ad0e7484937cd31"): (
-        "Discogs request lookup uses the fixed shared presentation projection "
-        "and one value placeholder"
+    ("lib/pipeline_db/requests.py", "d1da142f4a1a30a8"): (
+        (
+            "non-replaced listing uses the fixed shared presentation projection "
+            "with one static lifecycle predicate"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 418, "327e39bd024d50d3"): (
-        "replacement-chain lookup uses the fixed shared presentation "
-        "projection and one value placeholder"
+    ("lib/pipeline_db/requests.py", "bc05e500065af93a"): (
+        (
+            "metadata keys are validated identifiers, lifecycle fields are reserved, "
+            "values use one typed JSONB record parameter, and the exact active "
+            "source plus absent processing owner are guarded"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 490, "1bd5cbde29149322"): (
-        "release-id lookup selects one of two fixed identity predicates "
-        "and uses the fixed shared presentation projection"
+    ("lib/pipeline_db/requests.py", "943205ae40bba7e6"): (
+        (
+            "metadata keys are validated identifiers, lifecycle fields are reserved, "
+            "values use one typed JSONB record parameter, and any processing owner "
+            "causes the guarded update to report a conflict"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 513, "d1da142f4a1a30a8"): (
-        "non-replaced listing uses the fixed shared presentation projection "
-        "with one static lifecycle predicate"
+    ("lib/pipeline_db/requests.py", "890d0f2e35ffd73c"): (
+        (
+            "optional LIMIT is normalized through int before interpolation "
+            "and the base wanted query is static"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 715, "bc05e500065af93a"): (
-        "metadata keys are validated identifiers, lifecycle fields are reserved, "
-        "values use one typed JSONB record parameter, and the exact active "
-        "source plus absent processing owner are guarded"
+    ("lib/pipeline_db/requests.py", "bf514491f423d3be"): (
+        (
+            "ORDER is selected from two literals and LIMIT remains a value placeholder "
+            "over the fixed shared presentation projection"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 734, "943205ae40bba7e6"): (
-        "metadata keys are validated identifiers, lifecycle fields are reserved, "
-        "values use one typed JSONB record parameter, and any processing owner "
-        "causes the guarded update to report a conflict"
+    ("lib/pipeline_db/requests.py", "93f3043b99b3ec7c"): (
+        (
+            "request search composes only one fixed optional status predicate over "
+            "the fixed presentation projection and value placeholders"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 1678, "890d0f2e35ffd73c"): (
-        "optional LIMIT is normalized through int before interpolation "
-        "and the base wanted query is static"
+    ("lib/pipeline_db/requests.py", "724128efb25b8439"): (
+        (
+            "artist request lookup uses the fixed presentation and capture/evidence "
+            "projections with a static UUID-aware fallback predicate; the Library "
+            "contract no longer selects structured CD proof while the pointed "
+            "current-evidence release-id gate remains for exact verified/provisional "
+            "facts. Issue #1176 PR1 round 1 retired the dead "
+            "``job_type = 'manual_import'`` arm from the embedded "
+            "``_CAPTURE_AND_EVIDENCE_SELECT`` predicate; round 2 added "
+            "``'local_import'`` to the same list — the interpolation site is "
+            "unchanged throughout, so the fingerprint is unaffected by either "
+            "change"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 1708, "bf514491f423d3be"): (
-        "ORDER is selected from two literals and LIMIT remains a value placeholder "
-        "over the fixed shared presentation projection"
+    ("lib/pipeline_db/requests.py", "f59ded429883f2ec"): (
+        (
+            "artist-name fallback uses the fixed presentation and capture/evidence "
+            "projections with one escaped value placeholder; the Library contract "
+            "no longer selects structured CD proof while the pointed current-evidence "
+            "release-id gate remains for exact verified/provisional facts. Issue "
+            "#1176 PR1 round 1 retired the dead ``job_type = 'manual_import'`` arm "
+            "from the embedded ``_CAPTURE_AND_EVIDENCE_SELECT`` predicate; round 2 "
+            "added ``'local_import'`` to the same list — the interpolation site is "
+            "unchanged throughout, so the fingerprint is unaffected by either change"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 1737, "93f3043b99b3ec7c"): (
-        "request search composes only one fixed optional status predicate over "
-        "the fixed presentation projection and value placeholders"
+    ("lib/pipeline_db/requests.py", "fdbd2821ab3cbb5a"): (
+        (
+            "attempt kind is validated against the fixed retry-counter vocabulary "
+            "and every value remains a direct placeholder; an attached processing "
+            "owner makes the compare-and-set a zero-write conflict"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 1876, "724128efb25b8439"): (
-        "artist request lookup uses the fixed presentation and capture/evidence "
-        "projections with a static UUID-aware fallback predicate; the Library "
-        "contract no longer selects structured CD proof while the pointed "
-        "current-evidence release-id gate remains for exact verified/provisional "
-        "facts. Issue #1176 PR1 round 1 retired the dead "
-        "``job_type = 'manual_import'`` arm from the embedded "
-        "``_CAPTURE_AND_EVIDENCE_SELECT`` predicate; round 2 added "
-        "``'local_import'`` to the same list — the interpolation site is "
-        "unchanged throughout, so the fingerprint is unaffected by either "
-        "change"
-    ),
-    ("lib/pipeline_db/requests.py", 1895, "f59ded429883f2ec"): (
-        "artist-name fallback uses the fixed presentation and capture/evidence "
-        "projections with one escaped value placeholder; the Library contract "
-        "no longer selects structured CD proof while the pointed current-evidence "
-        "release-id gate remains for exact verified/provisional facts. Issue "
-        "#1176 PR1 round 1 retired the dead ``job_type = 'manual_import'`` arm "
-        "from the embedded ``_CAPTURE_AND_EVIDENCE_SELECT`` predicate; round 2 "
-        "added ``'local_import'`` to the same list — the interpolation site is "
-        "unchanged throughout, so the fingerprint is unaffected by either change"
-    ),
-    ("lib/pipeline_db/requests.py", 1926, "fdbd2821ab3cbb5a"): (
-        "attempt kind is validated against the fixed retry-counter vocabulary "
-        "and every value remains a direct placeholder; an attached processing "
-        "owner makes the compare-and-set a zero-write conflict"
-    ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1142, "ebb50341a8d836f6"): (
-        "processing-terminal metadata keys use the validated request-field "
-        "vocabulary while exact request and owner predicates retain authority; "
-        "the static owner-clearing status CAS remains the final request write "
-        "(review #2: identity moved because the enclosing method now reads "
-        "retry-counter policy from the canonical VALID_TRANSITIONS table "
-        "instead of zeroing counters inline — no SQL-shape change here. Issue "
-        "#1176 PR1 round 2 added a ``WHEN job_type = 'local_import'`` arm to "
-        "``_insert_terminal_download_audit``'s unrelated download_log-facing "
-        "CASE, earlier in this same file — that statement never mentions "
-        "album_requests and is outside this audit's scope, but it shifted "
-        "this line only)"
+    ("lib/pipeline_db/terminal_outcomes.py", "ebb50341a8d836f6"): (
+        (
+            "processing-terminal metadata keys use the validated request-field "
+            "vocabulary while exact request and owner predicates retain authority; "
+            "the static owner-clearing status CAS remains the final request write "
+            "(review #2: identity moved because the enclosing method now reads "
+            "retry-counter policy from the canonical VALID_TRANSITIONS table "
+            "instead of zeroing counters inline — no SQL-shape change here. Issue "
+            "#1176 PR1 round 2 added a ``WHEN job_type = 'local_import'`` arm to "
+            "``_insert_terminal_download_audit``'s unrelated download_log-facing "
+            "CASE, earlier in this same file — that statement never mentions "
+            "album_requests and is outside this audit's scope, but it shifted "
+            "this line only)"
+        ),
     ),
 }
 
@@ -297,78 +378,108 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
 # an exact compare-and-set against the source status.  Exact keys are populated
 # beside the implementation they review; movement or SQL-shape drift fails the
 # ratchet just like the dynamic-SQL exceptions above.
-_REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/convergence.py", 68, "0b7d6e3ed7b568c1"): (
-        "explicit operator stop atomically compares the complete opaque "
-        "request-local signal token and rechecks current-evidence authority "
-        "against the target row version after any lock wait while CASing "
-        "wanted to the reversible unsearchable state"
+_REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("lib/pipeline_db/convergence.py", "0b7d6e3ed7b568c1"): (
+        (
+            "explicit operator stop atomically compares the complete opaque "
+            "request-local signal token and rechecks current-evidence authority "
+            "against the target row version after any lock wait while CASing "
+            "wanted to the reversible unsearchable state"
+        ),
     ),
-    ("lib/pipeline_db/import_jobs.py", 515, "71e0271f65123747"): (
-        "atomic download-to-processing handoff CASes the immutable download "
-        "witness while installing the exact automation owner "
-        "(issue #1089's automation_recovery_debris import, review round 2's "
-        "_default_force_action_copy_path helper, and review round 3's "
-        "RecoveryDebrisReport import, above each shifted this line only — "
-        "fingerprint unchanged, confirming the SQL itself is untouched)"
+    ("lib/pipeline_db/import_jobs.py", "71e0271f65123747"): (
+        (
+            "atomic download-to-processing handoff CASes the immutable download "
+            "witness while installing the exact automation owner "
+            "(issue #1089's automation_recovery_debris import, review round 2's "
+            "_default_force_action_copy_path helper, and review round 3's "
+            "RecoveryDebrisReport import, above each shifted this line only — "
+            "fingerprint unchanged, confirming the SQL itself is untouched)"
+        ),
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 203, "56802c71d0fd3622"): (
-        "atomic terminal transition mirrors typed wanted CAS inside one transaction"
+    ("lib/pipeline_db/terminal_outcomes.py", "56802c71d0fd3622"): (
+        (
+            "atomic terminal transition mirrors typed wanted CAS inside one transaction"
+        ),
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 262, "249bfbdab2b02ac4"): (
-        "atomic preview recovery accepts only downloading as its exact source"
+    ("lib/pipeline_db/terminal_outcomes.py", "249bfbdab2b02ac4"): (
+        (
+            "atomic preview recovery accepts only downloading as its exact source"
+        ),
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 417, "4f0561c784e817e9"): (
-        "atomic terminal import CASes status with rescue audit in the same transaction"
+    ("lib/pipeline_db/terminal_outcomes.py", "4f0561c784e817e9"): (
+        (
+            "atomic terminal import CASes status with rescue audit in the same transaction"
+        ),
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 457, "9b11fb540dfe44e3"): (
-        "atomic terminal typed transition CASes the source status selected by the DAG"
+    ("lib/pipeline_db/terminal_outcomes.py", "9b11fb540dfe44e3"): (
+        (
+            "atomic terminal typed transition CASes the source status selected by the DAG"
+        ),
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1169, "6674811fa5453c86"): (
-        "automation terminalization performs the final exact processing-owner "
-        "CAS and clears the owner in the same static request write "
-        "(review #2: retry counters are now policy-derived placeholders read "
-        "from the canonical VALID_TRANSITIONS table rather than unconditional "
-        "zeros, so `processing -> wanted` retains them and automatic backoff "
-        "keeps growing; the exact `status = 'processing' AND "
-        "active_automation_import_job_id = %s` predicate and the "
-        "owner-clearing final write are unchanged. Issue #1176 PR1 round 2's "
-        "``local_import`` CASE arm in ``_insert_terminal_download_audit``, "
-        "earlier in this file, shifted this line only — that statement is "
-        "download_log-facing and never mentions album_requests)"
+    ("lib/pipeline_db/terminal_outcomes.py", "6674811fa5453c86"): (
+        (
+            "automation terminalization performs the final exact processing-owner "
+            "CAS and clears the owner in the same static request write "
+            "(review #2: retry counters are now policy-derived placeholders read "
+            "from the canonical VALID_TRANSITIONS table rather than unconditional "
+            "zeros, so `processing -> wanted` retains them and automatic backoff "
+            "keeps growing; the exact `status = 'processing' AND "
+            "active_automation_import_job_id = %s` predicate and the "
+            "owner-clearing final write are unchanged. Issue #1176 PR1 round 2's "
+            "``local_import`` CASE arm in ``_insert_terminal_download_audit``, "
+            "earlier in this file, shifted this line only — that statement is "
+            "download_log-facing and never mentions album_requests)"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 530, "a2f3083f8cbe8885"): (
-        "Replace holds the row lock and CASes the captured active source status "
-        "only when no processing owner exists"
+    ("lib/pipeline_db/requests.py", "a2f3083f8cbe8885"): (
+        (
+            "Replace holds the row lock and CASes the captured active source status "
+            "only when no processing owner exists"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 1027, "b74f9eb518948ae5"): (
-        "operator idempotence uses a no-op CAS against the observed status "
-        "and refuses an active processing owner"
+    ("lib/pipeline_db/requests.py", "b74f9eb518948ae5"): (
+        (
+            "operator idempotence uses a no-op CAS against the observed status "
+            "and refuses an active processing owner"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 1127, "94c8caa29b5f3093"): (
-        "ordinary typed transitions CAS the source status selected by the DAG "
-        "and refuse an active processing owner"
+    ("lib/pipeline_db/requests.py", "94c8caa29b5f3093"): (
+        (
+            "ordinary typed transitions CAS the source status selected by the DAG "
+            "and refuse an active processing owner"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 1226, "cd2c8644115e82f6"): (
-        "typed imported transition CASes status with rescue audit atomically "
-        "and refuses an active processing owner"
+    ("lib/pipeline_db/requests.py", "cd2c8644115e82f6"): (
+        (
+            "typed imported transition CASes status with rescue audit atomically "
+            "and refuses an active processing owner"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 1364, "745b1dc37147f0f5"): (
-        "typed reset-to-wanted transition CASes its captured source status; "
-        "the Bad Rip priority timestamp is a static CASE update in the same CAS, "
-        "and an active processing owner is refused"
+    ("lib/pipeline_db/requests.py", "745b1dc37147f0f5"): (
+        (
+            "typed reset-to-wanted transition CASes its captured source status; "
+            "the Bad Rip priority timestamp is a static CASE update in the same CAS, "
+            "and an active processing owner is refused"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 1438, "3490139cad98e85e"): (
-        "automatic recovery accepts only downloading as its exact source "
-        "without widening processing authority"
+    ("lib/pipeline_db/requests.py", "3490139cad98e85e"): (
+        (
+            "automatic recovery accepts only downloading as its exact source "
+            "without widening processing authority"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 1483, "a0853139ff6dd9ad"): (
-        "typed download claim accepts only the explicit wanted source status "
-        "and installs one immutable active download state"
+    ("lib/pipeline_db/requests.py", "a0853139ff6dd9ad"): (
+        (
+            "typed download claim accepts only the explicit wanted source status "
+            "and installs one immutable active download state"
+        ),
     ),
-    ("lib/pipeline_db/requests.py", 1519, "34dd9d8beb763829"): (
-        "plan-aware download claim uses an exact wanted source predicate "
-        "plus exact persisted-plan witnesses"
+    ("lib/pipeline_db/requests.py", "34dd9d8beb763829"): (
+        (
+            "plan-aware download claim uses an exact wanted source predicate "
+            "plus exact persisted-plan witnesses"
+        ),
     ),
 }
 
@@ -1326,11 +1437,32 @@ def _ignored_guarded_write_results(source: str) -> list[tuple[int, str]]:
     return ignored
 
 
+def _render_sites(sites: set[tuple[str, int, str]]) -> str:
+    """Render distinct call sites grouped per registry key, for diagnostics.
+
+    The registry key dropped the line component (#1258 item 4), so the
+    exact-and-live failure message names the live source lines here instead.
+    """
+    grouped: dict[tuple[str, str], list[int]] = {}
+    for rel, line, fingerprint in sites:
+        grouped.setdefault((rel, fingerprint), []).append(line)
+    return "\n".join(
+        f"  {rel}:{fingerprint}: lines {sorted(lines)}"
+        for (rel, fingerprint), lines in sorted(grouped.items())
+    )
+
+
 class TestReplacedWriteAudit(unittest.TestCase):
     def test_every_album_request_update_has_terminal_or_exact_status_guard(self):
         offending: list[str] = []
-        reviewed_dynamic: set[tuple[str, int, str]] = set()
-        reviewed_status: set[tuple[str, int, str]] = set()
+        reviewed_dynamic: Counter[tuple[str, str]] = Counter()
+        reviewed_status: Counter[tuple[str, str]] = Counter()
+        # The finder emits one finding per dynamic slot, so a single call
+        # site can appear several times with one (line, fingerprint). Count
+        # distinct call SITES against the registries — the line identifies a
+        # site within this scan; only the registry key omits it.
+        dynamic_sites: set[tuple[str, int, str]] = set()
+        status_sites: set[tuple[str, int, str]] = set()
         for root_name in PRODUCTION_ROOTS:
             for path in sorted((REPO_ROOT / root_name).rglob("*.py")):
                 rel = path.relative_to(REPO_ROOT).as_posix()
@@ -1338,7 +1470,8 @@ class TestReplacedWriteAudit(unittest.TestCase):
                     path.read_text(encoding="utf-8"),
                     source_path=rel,
                 ):
-                    key = (rel, finding.line, finding.fingerprint)
+                    key = (rel, finding.fingerprint)
+                    site = (rel, finding.line, finding.fingerprint)
                     if finding.category.startswith("status"):
                         if (
                             not finding.exact_source_status_cas
@@ -1358,7 +1491,9 @@ class TestReplacedWriteAudit(unittest.TestCase):
                                 f"{finding.sql}"
                             )
                             continue
-                        reviewed_status.add(key)
+                        if site not in status_sites:
+                            status_sites.add(site)
+                            reviewed_status[key] += 1
                         if finding.category == "status_dynamic":
                             if key not in _REVIEWED_DYNAMIC_SQL_CALLS:
                                 offending.append(
@@ -1367,13 +1502,17 @@ class TestReplacedWriteAudit(unittest.TestCase):
                                     "also lacks dynamic-SQL review"
                                 )
                                 continue
-                            reviewed_dynamic.add(key)
+                            if site not in dynamic_sites:
+                                dynamic_sites.add(site)
+                                reviewed_dynamic[key] += 1
                         continue
                     if key in _REVIEWED_DYNAMIC_SQL_CALLS and (
                         not finding.album_request_update
                         or finding.canonical_params
                     ):
-                        reviewed_dynamic.add(key)
+                        if site not in dynamic_sites:
+                            dynamic_sites.add(site)
+                            reviewed_dynamic[key] += 1
                         continue
                     offending.append(
                         f"{rel}:{finding.line}:{finding.fingerprint}: "
@@ -1388,25 +1527,41 @@ class TestReplacedWriteAudit(unittest.TestCase):
             + "\n".join(offending),
         )
         self.assertEqual(
-            reviewed_dynamic,
-            set(_REVIEWED_DYNAMIC_SQL_CALLS),
-            "Reviewed dynamic-SQL exceptions must remain exact and live",
+            dict(reviewed_dynamic),
+            {
+                key: len(rationales)
+                for key, rationales in _REVIEWED_DYNAMIC_SQL_CALLS.items()
+            },
+            "Reviewed dynamic-SQL exceptions must remain exact and live: "
+            "one rationale per live call site.\nLive call sites:\n"
+            + _render_sites(dynamic_sites),
         )
         self.assertEqual(
-            reviewed_status,
-            set(_REVIEWED_STATUS_SQL_CALLS),
-            "Reviewed status-transition SQL calls must remain exact and live",
+            dict(reviewed_status),
+            {
+                key: len(rationales)
+                for key, rationales in _REVIEWED_STATUS_SQL_CALLS.items()
+            },
+            "Reviewed status-transition SQL calls must remain exact and "
+            "live: one rationale per live call site.\nLive call sites:\n"
+            + _render_sites(status_sites),
         )
 
     def test_reviewed_dynamic_sql_rationales_are_nonempty(self):
         self.assertTrue(_REVIEWED_DYNAMIC_SQL_CALLS)
-        for key, rationale in _REVIEWED_DYNAMIC_SQL_CALLS.items():
-            self.assertTrue(rationale.strip(), f"missing rationale for {key}")
+        for key, rationales in _REVIEWED_DYNAMIC_SQL_CALLS.items():
+            self.assertTrue(rationales, f"empty rationale tuple for {key}")
+            for rationale in rationales:
+                self.assertTrue(
+                    rationale.strip(), f"missing rationale for {key}")
 
     def test_reviewed_status_sql_rationales_are_nonempty(self):
         self.assertTrue(_REVIEWED_STATUS_SQL_CALLS)
-        for key, rationale in _REVIEWED_STATUS_SQL_CALLS.items():
-            self.assertTrue(rationale.strip(), f"missing rationale for {key}")
+        for key, rationales in _REVIEWED_STATUS_SQL_CALLS.items():
+            self.assertTrue(rationales, f"empty rationale tuple for {key}")
+            for rationale in rationales:
+                self.assertTrue(
+                    rationale.strip(), f"missing rationale for {key}")
 
     def test_every_guarded_write_result_is_consumed(self):
         ignored: list[str] = []
@@ -1738,7 +1893,7 @@ def thaw(cur, request_id, expected_status, target_status):
             and finding.category == "status"
         )
         self.assertIn(
-            (rel, baseline.line, baseline.fingerprint),
+            (rel, baseline.fingerprint),
             _REVIEWED_STATUS_SQL_CALLS,
         )
         needle = (
@@ -1770,9 +1925,60 @@ def thaw(cur, request_id, expected_status, target_status):
         self.assertTrue(mutated.direct_static_sql)
         self.assertNotEqual(mutated.fingerprint, baseline.fingerprint)
         self.assertNotIn(
-            (rel, mutated.line, mutated.fingerprint),
+            (rel, mutated.fingerprint),
             _REVIEWED_STATUS_SQL_CALLS,
         )
+
+    def test_count_clause_trips_on_an_added_same_fingerprint_site(self):
+        """Known-bad self-test for the rationale-count clause (#1258 F4).
+
+        A verbatim duplicate of the whole enclosing method re-spells its
+        execute calls with IDENTICAL fingerprints (same normalized scope
+        AST), so only the distinct-call-site count can notice — the exact
+        world the count clause exists for. Keys are the registry's own
+        multi-rationale _core.py entries, so fingerprint churn updates
+        both together.
+        """
+        rel = "lib/pipeline_db/_core.py"
+        source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+
+        def sites_per_key(src: str) -> dict[tuple[str, str], set[int]]:
+            grouped: dict[tuple[str, str], set[int]] = {}
+            for finding in _unguarded_album_request_update_findings(
+                src,
+                source_path=rel,
+            ):
+                grouped.setdefault(
+                    (rel, finding.fingerprint), set(),
+                ).add(finding.line)
+            return grouped
+
+        method = next(
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_execute_locked"
+        )
+        lines = source.splitlines(keepends=True)
+        block = "".join(lines[method.lineno - 1:method.end_lineno])
+        mutated_source = "".join(
+            lines[:method.end_lineno] + ["\n", block]
+            + lines[method.end_lineno:]
+        )
+
+        keys = [
+            key
+            for key, rationales in _REVIEWED_DYNAMIC_SQL_CALLS.items()
+            if key[0] == rel and len(rationales) > 1
+        ]
+        self.assertTrue(keys, "expected multi-rationale _core.py entries")
+        baseline = sites_per_key(source)
+        added = sites_per_key(mutated_source)
+        for key in keys:
+            with self.subTest(fingerprint=key[1]):
+                registered = len(_REVIEWED_DYNAMIC_SQL_CALLS[key])
+                self.assertEqual(len(baseline[key]), registered)
+                self.assertGreater(len(added[key]), registered)
 
     def test_params_alias_is_noncanonical(self):
         source = """

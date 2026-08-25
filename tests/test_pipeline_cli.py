@@ -571,7 +571,7 @@ class TestCmdSet(unittest.TestCase):
                 before = db.get_request(index)
 
                 rc = pipeline_cli.cmd_set(
-                    cast(Any, db),
+                    db,
                     MagicMock(id=index, status=status),
                 )
 
@@ -583,7 +583,7 @@ class TestCmdSet(unittest.TestCase):
         db.seed_request(make_request_row(id=8, status="imported"))
 
         rc = pipeline_cli.cmd_set(
-            cast(Any, db),
+            db,
             MagicMock(id=8, status="unsearchable"),
         )
 
@@ -633,7 +633,7 @@ class TestCmdSet(unittest.TestCase):
         ))
 
         args = MagicMock(id=9, status="imported")
-        pipeline_cli.cmd_set(cast(Any, db), args)
+        pipeline_cli.cmd_set(db, args)
 
         called_db, request_id, transition = mock_finalize.call_args.args
         self.assertIs(called_db, db)
@@ -694,7 +694,7 @@ class TestCmdImportJobRecovery(unittest.TestCase):
         with redirect_stdout(stdout):
             pipeline_cli.cmd_import_jobs(
                 db,
-                cast(Any, SimpleNamespace(status="recovery_required", limit=20)),
+                argparse.Namespace(status="recovery_required", limit=20),
             )
 
         output = stdout.getvalue()
@@ -2897,7 +2897,7 @@ class TestCmdSetIntent(unittest.TestCase):
             id=1, status="wanted", artist_name="A", album_title="B",
         ))
         args = MagicMock(id=1, intent="lossless")
-        pipeline_cli.cmd_set_intent(cast(Any, db), args)
+        pipeline_cli.cmd_set_intent(db, args)
         self.assertEqual(db.update_request_fields_calls, [(1, {"target_format": "lossless"})])
 
     @patch("builtins.print")
@@ -2907,7 +2907,7 @@ class TestCmdSetIntent(unittest.TestCase):
             id=1, status="wanted", artist_name="A", album_title="B",
         ))
         args = MagicMock(id=1, intent="default")
-        pipeline_cli.cmd_set_intent(cast(Any, db), args)
+        pipeline_cli.cmd_set_intent(db, args)
         self.assertEqual(db.update_request_fields_calls, [(1, {"target_format": None})])
 
     @patch("builtins.print")
@@ -2922,7 +2922,7 @@ class TestCmdSetIntent(unittest.TestCase):
         mock_finalize.side_effect = (
             pipeline_cli_album_requests.transitions.finalize_request
         )
-        result = pipeline_cli.cmd_set_intent(cast(Any, db), args)
+        result = pipeline_cli.cmd_set_intent(db, args)
         self.assertEqual(result, 0)
         called_db, request_id, transition = mock_finalize.call_args.args
         self.assertIs(called_db, db)
@@ -2975,7 +2975,7 @@ class TestCmdSetIntent(unittest.TestCase):
         ))
 
         result = pipeline_cli.cmd_set_intent(
-            cast(Any, db),
+            db,
             MagicMock(id=7, intent="lossless"),
         )
 
@@ -2996,7 +2996,7 @@ class TestCmdSetIntent(unittest.TestCase):
             target_format="lossless", search_filetype_override="lossless",
         ))
         args = MagicMock(id=4, intent="default")
-        pipeline_cli.cmd_set_intent(cast(Any, db), args)
+        pipeline_cli.cmd_set_intent(db, args)
         self.assertEqual(db.update_request_fields_calls, [(
             4, {"target_format": None, "search_filetype_override": None})])
 
@@ -3007,7 +3007,7 @@ class TestCmdSetIntent(unittest.TestCase):
             id=3, status="downloading", artist_name="A", album_title="B",
         ))
         args = MagicMock(id=3, intent="lossless")
-        pipeline_cli.cmd_set_intent(cast(Any, db), args)
+        pipeline_cli.cmd_set_intent(db, args)
         self.assertEqual(db.update_request_fields_calls, [])
 
     @patch("builtins.print")
@@ -3015,7 +3015,7 @@ class TestCmdSetIntent(unittest.TestCase):
         db = FakePipelineDB()
         # no rows seeded → get_request returns None
         args = MagicMock(id=99, intent="lossless")
-        pipeline_cli.cmd_set_intent(cast(Any, db), args)
+        pipeline_cli.cmd_set_intent(db, args)
         self.assertEqual(db.update_request_fields_calls, [])
 
 
@@ -4238,7 +4238,7 @@ class TestCmdShowSearchForensics(unittest.TestCase):
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             pipeline_cli.cmd_show(
-                cast(Any, db),
+                db,
                 argparse.Namespace(
                     id=request_id, beets_db=None, beets_directory=None,
                 ),
@@ -6772,7 +6772,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
             rc = pipeline_cli.cmd_long_tail(
-                cast(Any, db), args, band_fn=band_fn)
+                db, args, band_fn=band_fn)
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def test_band_missing_filter_returns_only_missing_rows(self):

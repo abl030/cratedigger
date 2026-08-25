@@ -82,6 +82,7 @@ from lib.quality import (
     TargetQualityContract,
     V0ProbeEvidence,
     ValidationResult,
+    acceptance_installs_new_files,
     comparison_basis_from_decision,
     dispatch_action,
     evidence_decision_name,
@@ -1573,8 +1574,8 @@ def dispatch_import_core(
                         db, request_id, dl_info,
                         distance=distance, scenario=mark_scenario,
                         dest_path=path, outcome_label=outcome_label,
-                        clear_stale_v0_probe=(
-                            decision != "preflight_existing"
+                        clear_stale_v0_probe=acceptance_installs_new_files(
+                            decision
                         ),
                         attempt_result=attempt_result,
                         import_job_id=candidate_import_job_id,
@@ -1584,15 +1585,13 @@ def dispatch_import_core(
                         # incomplete mark — clear it atomically with the
                         # imported transition so a stale mark can never
                         # churn the next complete candidate. Idempotent on
-                        # unmarked rows (writes NULL over NULL). NEVER on
-                        # ``preflight_existing``: that outcome keeps the
-                        # EXISTING import with nothing installed (the same
-                        # no-new-files fact the ``clear_stale_v0_probe``
-                        # carve-out above records), so the still-incomplete
-                        # copy must keep its mark (#1257 review F1).
+                        # unmarked rows (writes NULL over NULL). Never on an
+                        # acceptance that installed nothing: the
+                        # still-incomplete existing copy must keep its mark
+                        # (#1257 review F1).
                         clear_marked_incomplete=(
                             attempt_program_covered
-                            and decision != "preflight_existing"
+                            and acceptance_installs_new_files(decision)
                         ))
                     if isinstance(pending, PendingImportTerminalOutcome):
                         terminal_outcome = pending

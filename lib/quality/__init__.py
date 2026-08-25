@@ -85,6 +85,7 @@ from lib.quality.decisions import (
 from lib.quality.dispatch_actions import (
     DispatchAction,
     RejectionSearchOverrideResolution,
+    acceptance_installs_new_files,
     compute_effective_override_bitrate,
     decision_denylists,
     dispatch_action,
@@ -534,6 +535,7 @@ __all__ = [
     "_transcode_candidate_real_rank_regresses",
     "aac_content_floor_kbps",
     "aac_lattice_proof_leg",
+    "acceptance_installs_new_files",
     "album_proof_verdict",
     "album_ultrasonic_proof_leg",
     "audio_file_matches",

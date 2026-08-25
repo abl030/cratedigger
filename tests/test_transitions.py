@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from lib.transitions import (
+    _IMPORTED_FIELDS,
+    _UNSEARCHABLE_FIELDS,
+    _WANTED_FIELDS,
     VALID_TRANSITIONS,
     RequestTransition,
     TransitionApplied,
@@ -500,6 +503,98 @@ class TestRequestTransition(unittest.TestCase):
                 "min_bitrate": 245,
             },
         )
+
+    def test_transition_field_allowlist_membership_is_pinned(self):
+        """Changing an allowlist is a deliberate act that must touch this pin.
+
+        The round-trip tests below derive their iteration domain FROM the
+        allowlists, so shrinking an allowlist silently shrinks them with it
+        (#1258 mutant-runner finding A2). This pin makes membership itself
+        the contract.
+        """
+        self.assertEqual(
+            _WANTED_FIELDS,
+            {
+                "min_bitrate",
+                "prev_min_bitrate",
+                "priority_started_at",
+                "search_filetype_override",
+            },
+        )
+        self.assertEqual(
+            _IMPORTED_FIELDS,
+            {
+                "beets_distance",
+                "beets_scenario",
+                "current_spectral_bitrate",
+                "current_spectral_grade",
+                "current_lossless_source_v0_probe_avg_bitrate",
+                "current_lossless_source_v0_probe_median_bitrate",
+                "current_lossless_source_v0_probe_min_bitrate",
+                "final_format",
+                "last_download_spectral_bitrate",
+                "last_download_spectral_grade",
+                "marked_incomplete_at",
+                "min_bitrate",
+                "prev_min_bitrate",
+                "search_filetype_override",
+                "verified_lossless",
+            },
+        )
+        self.assertIs(_UNSEARCHABLE_FIELDS, _WANTED_FIELDS)
+
+    def test_every_allowlisted_field_round_trips_through_fields_constructors(self):
+        """Issue #1258 item 2: no allowlisted-but-dropped field can exist.
+
+        The old ``to_*_fields`` shape forwarded each field explicitly, so a
+        field added to the allowlist but not to the forwarding was silently
+        dropped (bit the #1241 series on ``marked_incomplete_at``). Every
+        member of every allowlist must survive its dict constructor verbatim.
+        """
+        cases = [
+            ("imported", _IMPORTED_FIELDS,
+             lambda fields: RequestTransition.to_imported_fields(fields=fields)),
+            ("wanted", _WANTED_FIELDS,
+             lambda fields: RequestTransition.to_wanted_fields(fields=fields)),
+            ("unsearchable", _UNSEARCHABLE_FIELDS,
+             lambda fields: RequestTransition.to_unsearchable_fields(
+                 fields=fields)),
+        ]
+        for target, allowed, construct in cases:
+            self.assertTrue(allowed, f"{target} allowlist unexpectedly empty")
+            sentinel_by_field = {name: object() for name in sorted(allowed)}
+            for field_name, sentinel in sentinel_by_field.items():
+                with self.subTest(target=target, field=field_name):
+                    transition = construct({field_name: sentinel})
+                    self.assertEqual(
+                        dict(transition.fields), {field_name: sentinel})
+            with self.subTest(target=target, field="<all-at-once>"):
+                transition = construct(dict(sentinel_by_field))
+                self.assertEqual(dict(transition.fields), sentinel_by_field)
+
+    def test_every_allowlisted_field_round_trips_through_typed_constructors(self):
+        """The kwarg veneers must accept and carry every allowlisted field.
+
+        A frozenset member with no matching kwarg raises TypeError here; a
+        kwarg accepted but not threaded into the fields dict fails the
+        equality — either way the drop is loud, never silent.
+        """
+        cases = [
+            ("imported", _IMPORTED_FIELDS,
+             lambda kwargs: RequestTransition.to_imported(**kwargs)),
+            ("wanted", _WANTED_FIELDS,
+             lambda kwargs: RequestTransition.to_wanted(**kwargs)),
+        ]
+        for target, allowed, construct in cases:
+            sentinel_by_field = {name: object() for name in sorted(allowed)}
+            for field_name, sentinel in sentinel_by_field.items():
+                with self.subTest(target=target, field=field_name):
+                    transition = construct({field_name: sentinel})
+                    self.assertEqual(
+                        dict(transition.fields), {field_name: sentinel})
+            with self.subTest(target=target, field="<all-at-once>"):
+                transition = construct(dict(sentinel_by_field))
+                self.assertEqual(dict(transition.fields), sentinel_by_field)
 
     def test_transition_rejects_removed_imported_path_parameter(self):
         with self.assertRaises(TypeError):

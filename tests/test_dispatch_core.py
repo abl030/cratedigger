@@ -373,8 +373,8 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         """#1257 review F1: ``preflight_existing`` keeps the EXISTING import
         with nothing installed — the still-incomplete copy on disk is
         untouched, so the acceptance satisfies nothing and the operator's
-        mark must survive (the same no-new-files fact the
-        ``clear_stale_v0_probe`` carve-out records)."""
+        mark must survive (the no-new-files fact
+        ``acceptance_installs_new_files`` spells for both carve-outs)."""
         marked_at = datetime(2026, 8, 20, tzinfo=UTC)
         r = self._dispatch(
             ir=make_import_result(decision="preflight_existing"),
@@ -1138,6 +1138,62 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         loaded = db.load_album_quality_evidence_by_id(refreshed_id)
         assert loaded is not None
         self.assertIsNone(loaded.verified_lossless_proof)
+
+    def test_legacy_preflight_existing_refresh_preserves_current_proof(self):
+        """#1258 review F1: the legacy evidence fallback keys proof
+        attribution on the no-new-files fact — a ``preflight_existing``
+        acceptance installed nothing, so the library row's existing
+        verified-lossless proof must survive the refresh."""
+        from lib.dispatch import _refresh_current_evidence_after_import
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-123",
+            status="imported",
+            verified_lossless=True,
+        ))
+        proof = VerifiedLosslessProof(
+            provenance="measured",
+            source="flac",
+            classifier="spectral_verified_lossless",
+            detail="genuine",
+        )
+        _seed_current_for_request(
+            db, 42,
+            mb_release_id="mbid-123",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=900,
+                avg_bitrate_kbps=950,
+                median_bitrate_kbps=940,
+                format="FLAC",
+            ),
+            verified_lossless_proof=proof,
+            storage_format="FLAC",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(f"{tmpdir}/01.flac", "wb") as handle:
+                handle.write(b"audio")
+            with _patch_beets_album(tmpdir, min_bitrate=900):
+                _refresh_current_evidence_after_import(
+                    db,
+                    request_id=42,
+                    mb_release_id="mbid-123",
+                    quality_ranks=None,
+                    source_candidate=None,
+                    import_result=ImportResult(
+                        decision="preflight_existing",
+                    ),
+                )
+
+        refreshed_id = db.get_request_current_evidence_id(42)
+        self.assertIsNotNone(refreshed_id)
+        loaded = db.load_album_quality_evidence_by_id(refreshed_id)
+        assert loaded is not None
+        restored = loaded.verified_lossless_proof
+        assert restored is not None
+        self.assertEqual(restored.source, "flac")
+        self.assertEqual(restored.classifier, "spectral_verified_lossless")
 
     def test_persisted_candidate_evidence_imports_when_no_current_album(self):
 
