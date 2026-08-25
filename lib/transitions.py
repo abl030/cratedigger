@@ -338,12 +338,6 @@ _UNSEARCHABLE_FIELDS = _WANTED_FIELDS
 _RESERVED_FIELDS = frozenset({"from_status", "attempt_type"})
 
 
-def _field_or_omitted(fields: Mapping[str, object], key: str) -> object:
-    if key in fields:
-        return fields[key]
-    return _OMITTED
-
-
 def _reject_unknown_fields(
     target_status: str,
     fields: Mapping[str, object],
@@ -412,8 +406,7 @@ class RequestTransition:
         prev_min_bitrate: object = _OMITTED,
         priority_started_at: object = _OMITTED,
     ) -> RequestTransition:
-        return cls(
-            target_status="wanted",
+        return cls.to_wanted_fields(
             from_status=from_status,
             attempt_type=attempt_type,
             fields=_explicit_fields(
@@ -433,15 +426,11 @@ class RequestTransition:
         fields: Mapping[str, object],
     ) -> RequestTransition:
         _reject_unknown_fields("wanted", fields, _WANTED_FIELDS)
-        return cls.to_wanted(
+        return cls(
+            target_status="wanted",
             from_status=from_status,
             attempt_type=attempt_type,
-            search_filetype_override=_field_or_omitted(
-                fields, "search_filetype_override"),
-            min_bitrate=_field_or_omitted(fields, "min_bitrate"),
-            prev_min_bitrate=_field_or_omitted(fields, "prev_min_bitrate"),
-            priority_started_at=_field_or_omitted(
-                fields, "priority_started_at"),
+            fields=fields,
         )
 
     @classmethod
@@ -478,8 +467,7 @@ class RequestTransition:
         search_filetype_override: object = _OMITTED,
         verified_lossless: object = _OMITTED,
     ) -> RequestTransition:
-        return cls(
-            target_status="imported",
+        return cls.to_imported_fields(
             from_status=from_status,
             fields=_explicit_fields(
                 beets_distance=beets_distance,
@@ -514,32 +502,10 @@ class RequestTransition:
         fields: Mapping[str, object],
     ) -> RequestTransition:
         _reject_unknown_fields("imported", fields, _IMPORTED_FIELDS)
-        return cls.to_imported(
+        return cls(
+            target_status="imported",
             from_status=from_status,
-            beets_distance=_field_or_omitted(fields, "beets_distance"),
-            beets_scenario=_field_or_omitted(fields, "beets_scenario"),
-            current_spectral_bitrate=_field_or_omitted(
-                fields, "current_spectral_bitrate"),
-            current_spectral_grade=_field_or_omitted(
-                fields, "current_spectral_grade"),
-            current_lossless_source_v0_probe_avg_bitrate=_field_or_omitted(
-                fields, "current_lossless_source_v0_probe_avg_bitrate"),
-            current_lossless_source_v0_probe_median_bitrate=_field_or_omitted(
-                fields, "current_lossless_source_v0_probe_median_bitrate"),
-            current_lossless_source_v0_probe_min_bitrate=_field_or_omitted(
-                fields, "current_lossless_source_v0_probe_min_bitrate"),
-            final_format=_field_or_omitted(fields, "final_format"),
-            last_download_spectral_bitrate=_field_or_omitted(
-                fields, "last_download_spectral_bitrate"),
-            last_download_spectral_grade=_field_or_omitted(
-                fields, "last_download_spectral_grade"),
-            marked_incomplete_at=_field_or_omitted(
-                fields, "marked_incomplete_at"),
-            min_bitrate=_field_or_omitted(fields, "min_bitrate"),
-            prev_min_bitrate=_field_or_omitted(fields, "prev_min_bitrate"),
-            search_filetype_override=_field_or_omitted(
-                fields, "search_filetype_override"),
-            verified_lossless=_field_or_omitted(fields, "verified_lossless"),
+            fields=fields,
         )
 
     @classmethod
