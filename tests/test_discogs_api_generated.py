@@ -30,7 +30,9 @@ run instead of duplicating its position, with its title authoritative
 and its duration, when present, replacing the children's sum;
 empty-position-AND-empty-duration heading rows are dropped exactly when
 some other row is positioned (an all-unpositioned tracklist keeps every
-row, and an empty position with a duration survives).
+row, and an empty position with a duration survives); video-marker
+positions drop as non-audio unless every non-heading row is
+video-marked (a whole-release video pressing keeps all rows).
 
 **P2 — flat tracklists are untouched.** The no-sub-position subset of
 P1, kept as an explicitly named law: normalization must never reshape an
@@ -76,6 +78,7 @@ class _FlatSlot:
     disc: int
     track: int
     entry: Entry
+    is_video: bool = False
 
 
 @dataclass(frozen=True)
@@ -148,7 +151,17 @@ def worlds(draw: st.DrawFn) -> World:
     wire: list[tuple[str, Entry]] = []
     for index in range(count):
         number = index + 1
-        kind = draw(st.sampled_from(("flat", "flat_dup", "sub", "sub_parent")))
+        kind = draw(st.sampled_from(
+            ("flat", "flat_dup", "sub", "sub_parent", "video"),
+        ))
+        if kind == "video":
+            position = draw(st.sampled_from(
+                ("Video", f"Video {number}", f"Video{number}"),
+            ))
+            entry = draw(_entries())
+            wire.append((position, entry))
+            slots.append(_FlatSlot(position, 1, 0, entry, is_video=True))
+            continue
         if kind in ("flat", "flat_dup"):
             position, disc, track = draw(st.sampled_from((
                 (str(number), 1, number),
@@ -185,17 +198,28 @@ def worlds(draw: st.DrawFn) -> World:
             )
 
     any_positioned = any(position for position, _ in wire)
+
+    def _is_heading(slot: _FlatSlot) -> bool:
+        return not slot.position and not slot.entry.duration_text
+
+    non_heading_flats = [
+        s for s in slots if isinstance(s, _FlatSlot) and not _is_heading(s)
+    ]
+    all_video = (
+        bool(non_heading_flats)
+        and not any(isinstance(s, _MergedSlot) for s in slots)
+        and all(s.is_video for s in non_heading_flats)
+    )
+
     expected: list[tuple[int, int, str, float | None]] = []
     for slot in slots:
         if isinstance(slot, _MergedSlot):
             expected.append(slot.row)
             continue
-        if (
-            not slot.position
-            and not slot.entry.duration_text
-            and any_positioned
-        ):
+        if _is_heading(slot) and any_positioned:
             continue  # heading row — dropped
+        if slot.is_video and not all_video:
+            continue  # enhanced-CD bonus video row — dropped
         expected.append(
             (slot.disc, slot.track, slot.entry.title, slot.entry.duration_seconds),
         )
@@ -275,6 +299,25 @@ _PARENT_TOTAL_PIN = World(
     expected=((1, 10, "Suite", 480),),
 )
 
+_VIDEO_MIXED_PIN = World(
+    wire=(
+        ("1", Entry("Opener", "3:00", 180)),
+        ("Video", Entry("Bonus Clip", "4:00", 240)),
+    ),
+    expected=((1, 1, "Opener", 180),),
+)
+
+_ALL_VIDEO_PIN = World(
+    wire=(
+        ("Video 1", Entry("Part One", "20:00", 1200)),
+        ("Video 2", Entry("Part Two", "20:00", 1200)),
+    ),
+    expected=(
+        (1, 0, "Part One", 1200),
+        (1, 0, "Part Two", 1200),
+    ),
+)
+
 _HEADING_PIN = World(
     wire=(
         ("", Entry("Alpha", "", None)),
@@ -311,6 +354,8 @@ class TestNormalizeReleaseTracksProperties(unittest.TestCase):
     @example(_HEADING_PIN)
     @example(_ALL_UNPOSITIONED_PIN)
     @example(_PARENT_TOTAL_PIN)
+    @example(_VIDEO_MIXED_PIN)
+    @example(_ALL_VIDEO_PIN)
     def test_normalizer_emits_exactly_the_spec_rows(self, world: World):
         self.assertEqual(
             _to_rows(world), _spec_rows(world),

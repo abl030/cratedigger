@@ -32,6 +32,10 @@ SUB_POSITION_RE = re.compile(r"^(.+)\.(\d+)$")
 # Discogs hidden-track placeholder titles: "(silence)", "[silence]",
 # bare "silence". These never name an audio file in a rip.
 SILENCE_TITLE_RE = re.compile(r"^[\[(]?\s*silence\s*[\])]?$", re.IGNORECASE)
+# Enhanced-CD bonus-video POSITION markers ("Video", "Video 1", "Video2",
+# request 5936's live shape): non-audio rows no rip has an audio file
+# for. Positions only — titles are never consulted.
+VIDEO_POSITION_RE = re.compile(r"^video\s*\d*$", re.IGNORECASE)
 
 
 def parse_duration(duration_str: str) -> float | None:
@@ -176,12 +180,22 @@ def normalize_release_tracks(
     key values and matches the measured mirror rule in
     ``lib/library_completeness.py`` exactly: an empty position whose
     duration is present OR whose duration/position key is ABSENT is
-    ambiguous and is kept; a release that
-    positions NOTHING has no heading signal and keeps every row, and a
-    row carrying nested ``sub_tracks`` is an index parent, never a
-    heading (the deployed mirror has not been observed emitting nested
-    ``sub_tracks`` — that carve-out is fail-closed legislation, as in
-    the sibling census module). Positions whose base parses to no known
+    ambiguous and is kept; a release that positions NOTHING has no
+    heading signal and keeps every row; and a row carrying nested
+    ``sub_tracks`` is an index parent, never a heading (the deployed
+    mirror has not been observed emitting nested ``sub_tracks`` — that
+    carve-out is fail-closed legislation, as in the sibling census
+    module).
+
+    Video-marker positions (``Video``, ``Video 1``) are enhanced-CD
+    bonus rows — non-audio, dropped like headings — UNLESS every
+    non-heading row on the release is video-marked: a whole-release
+    video pressing's content IS what rips contain (the Placebo
+    ``ignore_video_tracks`` precedent,
+    ``docs/plans/2026-05-12-001-feat-video-track-wrong-matches-plan.md``),
+    so an all-video tracklist keeps every row.
+
+    Positions whose base parses to no known
     grammar share the ``(1, 0)`` sentinel; their rows survive with
     correct COUNT, but their relative order under ``album_tracks``'s
     ``(disc_number, track_number)`` read ordering is not defined. Raw
@@ -208,12 +222,20 @@ def normalize_release_tracks(
 
     sub_bases = {base for _, base, sub, _, _, _, _ in parsed if sub is not None}
     any_positioned = any(position for position, _, _, _, _, _, _ in parsed)
+    non_header_bases = [
+        base for _, base, _, _, _, _, is_header in parsed if not is_header
+    ]
+    all_video = bool(non_header_bases) and all(
+        VIDEO_POSITION_RE.match(base) for base in non_header_bases
+    )
 
     ordered: list[dict[str, object] | _PositionGroup] = []
     groups: dict[str, _PositionGroup] = {}
     for position, base, sub, title, duration, has_children, is_header in parsed:
         length = parse_duration(duration)
         if is_header and any_positioned and not has_children:
+            continue
+        if not all_video and VIDEO_POSITION_RE.match(base):
             continue
         member_base = base if sub is not None else position
         if member_base in sub_bases:
