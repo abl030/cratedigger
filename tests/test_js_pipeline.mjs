@@ -60,30 +60,50 @@ async function flushMicrotasks(times = 30) {
 }
 
 /**
- * DOM stand-in for the merge-rekey drift row (#1089): `pipeline-content`
- * (read by `loadPipelineDashboard`'s loading/failure states), `toast`, and
- * one `drift-note-<id>` element — the exact three ids
- * `mergeRekeyRequest`/`loadPipelineDashboard` look up by id.
+ * Node-REPLACEMENT DOM stand-in for the merge-rekey drift row (#1089,
+ * re-modeled for #1266 item 2): the `drift-note-<id>` element LIVES
+ * inside `#pipeline-content`, and `loadPipelineDashboard()` rewrites
+ * that container's `innerHTML` — so a dashboard reload genuinely
+ * REPLACES the note node. Assigning `pipelineContent.innerHTML` here
+ * swaps which note object `getElementById` returns, exactly like
+ * `installReplacingRetagDom` below, so a handler that reloads the
+ * dashboard and THEN writes a note it captured earlier goes RED (the
+ * #1264 M26 / #1266 M4 stale-node shape). The shipped handler is
+ * correct by write ORDERING — its only reloading path returns without
+ * touching the note — and that ordering is now what these tests pin.
  */
 function installDriftDom(requestId) {
-  const pipelineContent = { innerHTML: '' };
+  const preNote = { textContent: '', className: '' };
+  const postNote = { textContent: '', className: '' };
   const toast = { textContent: '', className: '', style: { display: 'none' } };
-  const note = { textContent: '', className: '' };
-  const elements = new Map([
-    ['pipeline-content', pipelineContent],
-    ['toast', toast],
-    [`drift-note-${requestId}`, note],
-  ]);
+  let reloaded = false;
+  const pipelineContent = {
+    _html: '',
+    get innerHTML() { return this._html; },
+    set innerHTML(value) { this._html = value; reloaded = true; },
+  };
   globalThis.document = {
     getElementById(id) {
-      return elements.has(id) ? elements.get(id) : null;
+      if (id === 'pipeline-content') return pipelineContent;
+      if (id === `drift-note-${requestId}`) {
+        return reloaded ? postNote : preNote;
+      }
+      if (id === 'toast') return toast;
+      return null;
     },
   };
   globalThis.setTimeout = (fn) => {
     fn();
     return 0;
   };
-  return { pipelineContent, toast, note };
+  return {
+    pipelineContent,
+    preNote,
+    postNote,
+    toast,
+    isReloaded: () => reloaded,
+    visibleNote: () => (reloaded ? postNote : preNote),
+  };
 }
 
 console.log('renderPipelineNav() has operational views only');
@@ -395,7 +415,8 @@ console.log('mergeRekeyRequest() success path posts, toasts, and reloads the das
     'Request #8792 rekeyed to 9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4',
     'toasts the exact survivor id');
   assertEqual(dom.toast.className, 'toast', 'success toast is not an error');
-  assertEqual(dom.note.textContent, '', 'success never writes the refusal note');
+  assertEqual(dom.preNote.textContent, '', 'success never writes the pre-reload note');
+  assertEqual(dom.postNote.textContent, '', 'success never writes the post-reload note');
   assertEqual(btn.textContent, 'Rekeying...',
     'success leaves the disabled mid-flight label — the dashboard reload replaces the row entirely');
 }
@@ -426,11 +447,11 @@ console.log('mergeRekeyRequest() refusal path re-arms the button and writes the 
   assert(!calls.includes('/api/pipeline/dashboard'), 'a refusal never reloads the dashboard');
   assertEqual(btn.disabled, false, 'the button re-arms for a retry');
   assertEqual(btn.textContent, 'Follow MB merge', 'the button label resets');
-  assertEqual(dom.note.textContent,
+  assertEqual(dom.visibleNote().textContent,
     'not_merged: MusicBrainz names no merge survivor for the stored id; '
     + 'this request has not been merged',
-    'the inline note names the exact outcome and message');
-  assertEqual(dom.note.className, 'drift-row-note metric-bad', 'the inline note uses the bad tone');
+    'the VISIBLE inline note names the exact outcome and message');
+  assertEqual(dom.visibleNote().className, 'drift-row-note metric-bad', 'the visible note uses the bad tone');
   assertEqual(dom.toast.className, 'toast error', 'a refusal toast is an error');
 }
 
@@ -446,9 +467,9 @@ console.log('mergeRekeyRequest() network-error path re-arms the button with a ge
 
   assertEqual(btn.disabled, false, 'the button re-arms after a network failure');
   assertEqual(btn.textContent, 'Follow MB merge', 'the button label resets');
-  assertEqual(dom.note.textContent, 'Merge-rekey request failed',
-    'the inline note falls back to a generic message with no response to read');
-  assertEqual(dom.note.className, 'drift-row-note metric-bad', 'the inline note uses the bad tone');
+  assertEqual(dom.visibleNote().textContent, 'Merge-rekey request failed',
+    'the VISIBLE inline note falls back to a generic message with no response to read');
+  assertEqual(dom.visibleNote().className, 'drift-row-note metric-bad', 'the visible note uses the bad tone');
   assertEqual(dom.toast.className, 'toast error', 'a network failure toast is an error');
 }
 
@@ -464,7 +485,7 @@ console.log('mergeRekeyRequest() refusal note falls back to the raw error field 
 
   await mergeRekeyRequest(42, btn);
 
-  assertEqual(dom.note.textContent, 'rekey_refused: route-level error text',
+  assertEqual(dom.visibleNote().textContent, 'rekey_refused: route-level error text',
     'falls back to the route-level "error" field when error_message is absent');
 }
 
@@ -625,6 +646,7 @@ console.log('recheckRetagDivergenceAlbum() not-found path re-arms the button and
   assertEqual(dom.visibleNote().textContent, 'No Beets album with id 999',
     'the VISIBLE inline note names the exact error');
   assertEqual(dom.visibleNote().className, 'drift-row-note metric-bad', 'the visible note uses the bad tone');
+  assertEqual(dom.postNote.textContent, '', 'nothing is written to the unrendered post-render note');
   assertEqual(dom.toast.className, 'toast error', 'a refusal toast is an error');
 }
 
@@ -750,8 +772,10 @@ console.log('syncRetagDivergenceAlbum() album-less refusal re-arms the still-att
   assert(!dom.isRerendered(), 'no album payload, no re-render');
   assertEqual(btn.disabled, false, 'the still-attached button re-arms');
   assertEqual(btn.textContent, 'Write tags', 'the button label resets');
-  assertContains(dom.preNote.textContent, 'identity_mismatch',
-    'the note names the refusal outcome');
+  assertContains(dom.visibleNote().textContent, 'identity_mismatch',
+    'the visible note names the refusal outcome');
+  assertEqual(dom.postNote.textContent, '',
+    'nothing is written to the unrendered post-render note');
   assertEqual(dom.toast.className, 'toast error', 'a refusal toast is an error');
 }
 

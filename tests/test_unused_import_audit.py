@@ -610,11 +610,20 @@ class TestUnusedImportAudit(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(leftovers, ())
 
-    def test_deleted_or_renamed_candidate_fails_freshness(self) -> None:
+    def test_deleted_renamed_or_file_moved_candidate_fails_freshness(self) -> None:
+        """The ``cross_file_moved`` case is the one the RETURN CODE owes to
+        file attribution (#1266 review finding 3): the same identifier at
+        the same cardinality, in a different FILE, must still fail — a
+        comparison that dropped the trailing comment entirely would pass
+        it on identifier count alone."""
         baseline = {"lib/orphan.py": "def orphan():\n    return 1\n"}
         cases = {
             "deleted": {"lib/orphan.py": "VALUE = 1\nprint(VALUE)\n"},
             "renamed": {"lib/orphan.py": "def replacement():\n    return 1\n"},
+            "cross_file_moved": {
+                "lib/orphan.py": "VALUE = 1\nprint(VALUE)\n",
+                "lib/other.py": "def orphan():\n    return 1\n",
+            },
         }
 
         for label, current in cases.items():

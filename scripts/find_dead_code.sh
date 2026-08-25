@@ -61,7 +61,15 @@ mapfile -t SOURCES < <(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$SOURCE_LIST"
 # entry). Sorting makes the comparison a set comparison, so two entries
 # in one file swapping relative order under line drift cannot break it
 # either. The committed file keeps its human-facing line comments; they
-# refresh whenever the whitelist is regenerated.
+# refresh whenever the whitelist is regenerated. Two accepted precision
+# losses (#1266 review findings 4/5): full-line-comment stripping now
+# applies to the GENERATED stream too, so a "# unreachable code ..."
+# comment vulture emits is invisible to freshness (the main run still
+# reports it at confidence 100 and exits 3); and within one normalized
+# group (same identifier + kind + FILE, e.g. web/server.py's ten
+# _.close_connection occurrences) entries are counted, not located —
+# deleting one site and adding another in the same file is invisible,
+# while a changed COUNT still fails.
 normalize_vulture_whitelist() {
   sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d; s/:[0-9]\{1,\})[[:space:]]*$/)/' "$1" \
     | LC_ALL=C sort

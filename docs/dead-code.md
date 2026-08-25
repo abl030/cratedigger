@@ -31,10 +31,15 @@ The whitelist at `tools/vulture/whitelist.py` masks the known aggregate
 false positives on main (msgspec Struct fields, beets ImportSession overrides,
 route handler dispatch, SQL DictRow attribute access). The default command
 regenerates Vulture's raw whitelist at a fixed confidence of 60 and requires
-the committed non-comment lines to match that output exactly. A deleted,
-renamed, moved, or additional candidate therefore makes the baseline stale;
-this also prevents a same-name candidate elsewhere from hiding behind an old
-name-based Vulture exception.
+the committed entries to match that output as a SORTED SET over identifier +
+kind + file — line numbers in the trailing `(path:line)` comments are NOT
+compared (#1266 item 1: an edit above a whitelisted site used to break the
+gate with a pure line-number delta; a within-file move now passes). A
+deleted, renamed, additional, or cross-FILE-moved candidate still makes the
+baseline stale; the retained file attribution is what prevents a same-name
+candidate elsewhere from hiding behind an old name-based Vulture exception.
+The committed line comments are human-facing only and refresh whenever the
+baseline is regenerated.
 `--confidence` changes only the ordinary new-candidate scan; `--baseline`
 deliberately omits both the committed whitelist and this freshness check.
 
