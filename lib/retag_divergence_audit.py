@@ -316,13 +316,21 @@ def _has_divergent_item(items: Sequence[RetagDivergenceItem]) -> bool:
 
 
 class RetagDivergenceAlbum(msgspec.Struct, frozen=True):
-    """One non-agreeing album — listed with every item's classification."""
+    """One non-agreeing album — listed with every item's classification.
+
+    ``albumartist``/``album`` are display strings for the census card
+    (#1260) — a raw MBID is not operator-readable. Defaulted so a snapshot
+    persisted before they existed still decodes; the next daily census run
+    populates them.
+    """
 
     album_id: int
     db_mb_albumid: str
     album_class: RetagDivergenceAlbumClass
     item_count: int
     items: tuple[RetagDivergenceItem, ...]
+    albumartist: str = ""
+    album: str = ""
 
 
 class RetagDivergenceCounts(msgspec.Struct, frozen=True):
@@ -410,6 +418,8 @@ def _build_album(
         album_class=album_class_from_items(items),
         item_count=len(items),
         items=items,
+        albumartist=row.albumartist,
+        album=row.album,
     )
 
 

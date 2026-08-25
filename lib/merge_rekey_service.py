@@ -346,13 +346,18 @@ class MergeRekeyService:
         here rather than silently comparing against the empty-fileset
         digest.
 
-        **Known limitation:** an out-of-band retag that WRITES tags (not
-        the sanctioned import-time retag, which is ``-W`` no-write and so
-        never trips this) changes file sizes and will fail this witness
-        closed. That refusal is operator-visible (``evidence_fingerprint_
-        mismatch``, an honest "verify me" message), not silent corruption;
-        the escape is manual operator reconciliation, same as any other
-        witness mismatch.
+        **Known limitation:** a retag that WRITES tags CAN change file
+        sizes and would then fail this witness closed. The sanctioned
+        import-time retag is ``-W`` no-write and never trips this; the
+        #1260 tag-sync lane (``lib/beets_tag_sync.py``) DOES write tags,
+        but a write normally lands inside existing tag padding — measured
+        across flac/opus/mp3 (identity swap and eight added fields), file
+        size was byte-identical in all six probes — so only a file with
+        no padding headroom (a forced container rewrite) reaches this
+        refusal. Either way it is operator-visible
+        (``evidence_fingerprint_mismatch``, an honest "verify me"
+        message), not silent corruption; the escape is manual operator
+        reconciliation, same as any other witness mismatch.
 
         Returns ``None`` when the survivor's freshly computed fingerprint
         equals the linked evidence row's ``snapshot_fingerprint`` — the

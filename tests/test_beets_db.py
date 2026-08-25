@@ -2044,6 +2044,49 @@ class TestListAlbumMbIdentities(unittest.TestCase):
         for row in rows:
             self.assertEqual(row.refused_paths, ())
 
+    def test_projects_display_names_with_null_degrading_to_empty(self) -> None:
+        """#1260 — the census card renders artist/title; a NULL name column
+        (a raw-SQL writer, or a pre-name-era row) degrades to "" and the
+        card falls back to the short MBID. Both projections agree."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            library_root = os.path.join(tmpdir, "library")
+            _create_test_db(db_path)
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "INSERT INTO albums "
+                "(id, mb_albumid, discogs_albumid, albumartist, album) "
+                "VALUES (1, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 0, "
+                "'Terre Thaemlitz / DJ Sprinkles', 'RA.1000')"
+            )
+            conn.execute(
+                "INSERT INTO albums "
+                "(id, mb_albumid, discogs_albumid, albumartist, album) "
+                "VALUES (2, 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 0, "
+                "NULL, NULL)"
+            )
+            conn.commit()
+            conn.close()
+
+            with BeetsDB(db_path, library_root=library_root) as db:
+                rows = db.list_album_mb_identities()
+                single = db.get_album_mb_identity(1)
+                single_null = db.get_album_mb_identity(2)
+
+        self.assertEqual(
+            (rows[0].albumartist, rows[0].album),
+            ("Terre Thaemlitz / DJ Sprinkles", "RA.1000"),
+        )
+        self.assertEqual((rows[1].albumartist, rows[1].album), ("", ""))
+        assert single is not None and single_null is not None
+        self.assertEqual(
+            (single.albumartist, single.album),
+            ("Terre Thaemlitz / DJ Sprinkles", "RA.1000"),
+        )
+        self.assertEqual(
+            (single_null.albumartist, single_null.album), ("", ""),
+        )
+
     def test_paths_outside_library_root_are_refused_not_opened(self) -> None:
         """#1093 review finding 7 — containment applies to BOTH an
         already-absolute stored path (the live shape: album 19823's 51

@@ -10,7 +10,7 @@ in :mod:`lib.download_rejection`.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal, Protocol
@@ -23,6 +23,7 @@ from lib.beets_retag import (
     MergeRetagFn,
     retag_merged_album,
 )
+from lib.beets_tag_sync import TagSyncLockDB, TagSyncResult
 from lib.dispatch import (
     DispatchCoreFn,
     DispatchOutcome,
@@ -350,6 +351,73 @@ def _retag_merged_album_with_beets(
                 "Beets library could not be opened for the merge retag: "
                 f"{type(exc).__name__}: {exc}"
             ),
+        )
+
+
+#: The seam's injected best-effort tag sync — ``(db, cfg, survivor)``.
+type MergeTagSyncFn = Callable[
+    [TagSyncLockDB, "CratediggerConfig", str], TagSyncResult,
+]
+
+
+def _sync_release_tags_with_beets(
+    db: TagSyncLockDB,
+    cfg: CratediggerConfig,
+    release_id: str,
+) -> TagSyncResult:
+    """Open the deployment-owned Beets library and sync the one album at
+    ``release_id`` — the production ``sync_fn`` behind
+    :func:`_sync_file_tags_after_merge_rekey`."""
+    from lib.beets_db import open_beets_db
+    from lib.beets_tag_sync import sync_release_file_tags_from_factory
+
+    return sync_release_file_tags_from_factory(
+        lambda: open_beets_db(cfg), db, release_id=release_id,
+    )
+
+
+def _sync_file_tags_after_merge_rekey(
+    db: TagSyncLockDB,
+    cfg: CratediggerConfig,
+    release_id: str,
+    *,
+    sync_fn: MergeTagSyncFn = _sync_release_tags_with_beets,
+) -> None:
+    """Best-effort file-tag sync after a completed merge rekey (#1260).
+
+    A ``retagged`` rekey moved the Beets DB onto the survivor without
+    touching any installed file's tag; unless an accepted import later
+    replaces the files, the stale tag sits armed until the census flags it
+    (a later ``beet update`` would copy it back over the DB row). This
+    call converges the files immediately — STRICTLY outcome-inert: it runs
+    only after the rekey has durably landed, nothing consumes its result,
+    a failure is one log line, and the census/dashboard button remain the
+    reconciliation loop for whatever it could not fix. It must never raise
+    into the importer; note the blanket except also swallows a
+    cancellation raised inside the sync's own DB-lock I/O, which the
+    caller's immediately-following ``_checkpoint`` re-raises (#1260 review
+    F8). The other two ready rekey worlds need no assertion here: the
+    service re-derives them from Beets — ``not_held`` resolves to
+    ``not_found``; ``already_current`` typically to
+    ``already_synced``/``synced``, though any of the service's typed
+    outcomes can follow from what the re-read actually shows (#1260
+    re-review C2).
+
+    ``sync_fn`` is a definition-time default: tests INJECT a replacement,
+    they never patch the module binding (`.claude/rules/code-quality.md`
+    § mocks, strategy 2).
+    """
+    try:
+        result = sync_fn(db, cfg, release_id)
+        detail = f" — {result.error_message}" if result.error_message else ""
+        logger.info(
+            "MERGE TAG SYNC: %s at %s (album %s)%s",
+            result.outcome, release_id, result.album_id, detail,
+        )
+    except Exception:
+        logger.warning(
+            "MERGE TAG SYNC: best-effort file-tag sync at %s failed",
+            release_id, exc_info=True,
         )
 
 
@@ -900,16 +968,18 @@ def _process_beets_validation(
     owner_session_identity: OwnerSessionIdentity | None = None,
     canonical_release_fn: CanonicalReleaseFn = _PRODUCTION_CANONICAL_RELEASE_FN,
     retag_fn: MergeRetagFn = _retag_merged_album_with_beets,
+    tag_sync_fn: MergeTagSyncFn = _sync_release_tags_with_beets,
 ) -> DispatchOutcome | None:
     """Validate one exact release and route its canonical result.
 
     Candidate evidence must already have been produced by preview. Missing
     evidence requeues the job to preview; the importer never measures inline.
 
-    ``canonical_release_fn`` and ``retag_fn`` are definition-time defaults for
-    the MusicBrainz merge seam below: tests INJECT replacements, they never
-    patch the module binding, because patching does not replace a captured
-    default (``.claude/rules/code-quality.md`` § mocks, strategy 2).
+    ``canonical_release_fn``, ``retag_fn``, and ``tag_sync_fn`` are
+    definition-time defaults for the MusicBrainz merge seam below: tests
+    INJECT replacements, they never patch the module binding, because
+    patching does not replace a captured default
+    (``.claude/rules/code-quality.md`` § mocks, strategy 2).
     """
     current_path = staged_album.current_path
     manifest_ok, manifest_detail = _check_staged_audio_manifest(
@@ -960,6 +1030,33 @@ def _process_beets_validation(
         # The row and the library are both at the survivor now; the in-flight
         # entry follows so dispatch imports the identity that was rekeyed.
         album_data.mb_release_id = validation.merge.survivor
+        _checkpoint(cancellation_token)
+        # Best-effort file-tag convergence at the survivor (#1260), for
+        # EVERY completed rekey. Deliberately NOT gated on
+        # ``bv_result.valid``: validity is a Beets MATCH verdict, and a
+        # valid revalidation can still be quality-REJECTED downstream
+        # (``full_pipeline_decision_from_evidence`` — the -W cohort is by
+        # construction competing with an installed copy, where rejection
+        # is likely), in which case no import replaces the files. Only an
+        # ACCEPTED import rewrites tags itself, and this seam cannot know
+        # acceptance — so the write is wasted-but-harmless when acceptance
+        # follows, and the heal otherwise (#1260 review F1). The sync
+        # asserts nothing about the file-tag world: an ``already_current``
+        # or ``not_held`` retag re-derives inside the service from Beets
+        # itself, to whichever typed outcome the re-read shows (review
+        # F2, re-review C2).
+        # Outcome-inert by contract: the helper never raises and nothing
+        # reads its result. It swallows even a cancellation raised inside
+        # its DB-lock I/O — benign ONLY because ``_checkpoint`` on the
+        # next line re-raises; keep that pairing if this call ever moves
+        # (review F8). The checkpoint ABOVE keeps an already-cancelled job
+        # from spending the write budget first.
+        _sync_file_tags_after_merge_rekey(
+            ctx.pipeline_db_source._get_db(),
+            ctx.cfg,
+            validation.merge.survivor,
+            sync_fn=tag_sync_fn,
+        )
     _checkpoint(cancellation_token)
     usernames_pre = {f.username for f in album_data.files if f.username}
     bv_result.soulseek_username = (

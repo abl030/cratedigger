@@ -1403,19 +1403,23 @@ class BeetsDB:
         silently dropping them (#1093 review finding 7).
         """
         rows = self._conn.execute(
-            "SELECT a.id, a.mb_albumid, i.path "
+            "SELECT a.id, a.mb_albumid, a.albumartist, a.album, i.path "
             "FROM albums a "
             "LEFT JOIN items i ON i.album_id = a.id "
             "ORDER BY a.id ASC, i.id ASC"
         ).fetchall()
         mb_albumid_by_album: dict[int, object] = {}
+        names_by_album: dict[int, tuple[str, str]] = {}
         paths_by_album: dict[int, list[str]] = {}
         refused_by_album: dict[int, list[str]] = {}
         order: list[int] = []
-        for raw_album_id, raw_mb_albumid, raw_path in rows:
+        for raw_album_id, raw_mb_albumid, raw_artist, raw_album, raw_path in rows:
             album_id = int(raw_album_id)
             if album_id not in mb_albumid_by_album:
                 mb_albumid_by_album[album_id] = raw_mb_albumid
+                names_by_album[album_id] = (
+                    str(raw_artist or ""), str(raw_album or ""),
+                )
                 paths_by_album[album_id] = []
                 refused_by_album[album_id] = []
                 order.append(album_id)
@@ -1433,6 +1437,8 @@ class BeetsDB:
                 mb_albumid=normalize_release_id(mb_albumid_by_album[album_id]),
                 item_paths=tuple(paths_by_album[album_id]),
                 refused_paths=tuple(refused_by_album[album_id]),
+                albumartist=names_by_album[album_id][0],
+                album=names_by_album[album_id][1],
             )
             for album_id in order
         ]
@@ -1525,7 +1531,7 @@ class BeetsDB:
         id exists (unlike a zero-item album row, which is real and returns
         an empty ``item_paths`` tuple, not ``None``)."""
         rows = self._conn.execute(
-            "SELECT a.id, a.mb_albumid, i.path "
+            "SELECT a.id, a.mb_albumid, a.albumartist, a.album, i.path "
             "FROM albums a "
             "LEFT JOIN items i ON i.album_id = a.id "
             "WHERE a.id = ? "
@@ -1535,9 +1541,12 @@ class BeetsDB:
         if not rows:
             return None
         raw_mb_albumid = rows[0][1]
+        raw_albumartist = rows[0][2]
+        raw_album = rows[0][3]
         item_paths: list[str] = []
         refused_paths: list[str] = []
-        for _raw_album_id, _raw_mb_albumid, raw_path in rows:
+        for row in rows:
+            raw_path = row[4]
             if raw_path is None:
                 continue
             resolved, refused = self._contained_or_refused(raw_path)
@@ -1550,6 +1559,8 @@ class BeetsDB:
             mb_albumid=normalize_release_id(raw_mb_albumid),
             item_paths=tuple(item_paths),
             refused_paths=tuple(refused_paths),
+            albumartist=str(raw_albumartist or ""),
+            album=str(raw_album or ""),
         )
 
     @staticmethod
@@ -1607,9 +1618,16 @@ class BeetsAlbumIdentityRow:
     ``library_root``; ``refused_paths`` holds every stored path that failed
     that containment check (or could not be resolved at all) — never opened,
     reported as unreadable without a read attempt (#1093 review finding 7).
+
+    ``albumartist``/``album`` are the album row's display strings (#1260):
+    the census card renders a human-readable name instead of a raw MBID.
+    Defaulted so a snapshot persisted before they existed still decodes;
+    the next daily census run populates them.
     """
 
     album_id: int
     mb_albumid: str
     item_paths: tuple[str, ...]
     refused_paths: tuple[str, ...] = ()
+    albumartist: str = ""
+    album: str = ""

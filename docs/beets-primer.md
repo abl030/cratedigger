@@ -84,7 +84,7 @@ is pure attribute assignment across the whole supported range — only when the
 cheap check finds neither attribute. The 19-leg `beetsStableCandidate` matrix
 is what caught this.
 
-Cratedigger has three Beets mutation lanes:
+Cratedigger has four Beets mutation lanes:
 
 1. The serial importer worker drives the JSON harness for admitted imports and
    same-release duplicate replacement.
@@ -115,8 +115,31 @@ Cratedigger has three Beets mutation lanes:
    merges the release but not the underlying recordings) does not preserve —
    so it silently retagged nothing on the common case. `beet modify` sets one
    field by query; it needs no candidate mapping and makes no network call.
+4. The one-album file-tag sync (issue #1260, `lib/beets_tag_sync.py`) runs
+   `beet write` under a compound exact-match ITEM query —
+   `album_id:=<album_id>` AND `mb_albumid:=<identity>` — writing file tags
+   DB→file for exactly one album, verified by re-reading the files through
+   the census's own single-album scan (never the subprocess exit code). It
+   heals Lane 3's accepted `-W` residual: a merge-retagged album no
+   accepted import ever rewrote. One
+   canonical execution path, three callers: the dashboard census card's
+   "Write tags" button (`POST
+   /api/audit/retag-divergence/album/<id>/sync-tags`), its
+   `pipeline-cli sync-file-tags` HTTP adapter, and the merge seam itself —
+   best-effort and outcome-inert after EVERY completed rekey (a valid
+   revalidation can still be quality-rejected downstream, so the seam
+   cannot predict acceptance; when an accepted import does follow, it
+   replaces the files and the write was harmless waste). It writes tags
+   only — never moves a file, never chooses a value; `beet write` syncs
+   every out-of-sync media tag field DB→file for the matched items, not
+   only the identity — holds the
+   RELEASE advisory lock non-blocking across write+verify, and refuses
+   (typed, files untouched) unless the album's DB identity equals the
+   identity the caller authorized and at least one readable file actually
+   diverges. Operator authority for the lane is
+   quoted in issue #1260.
 
-Lane 3 is deliberately the narrowest of the three — narrower than Lane 1's
+Lane 3 is deliberately the narrowest of the catalog-mutating lanes — narrower than Lane 1's
 full harness-driven import, and narrower than Lane 2's exact-album delete
 child in EITHER of its two modes (a whole album's files and catalog row in
 the destructive mode, a whole album's catalog row alone in the
@@ -176,7 +199,21 @@ query. Every clause is load-bearing:
   decision routes through `import_no_exist`, silently skipping the
   downgrade guard. `-w` would not close this either — a partial write
   across N files leaves the identical class of drift, just narrower — so
-  `-W` stays; the mitigation is visibility, not a different flag. Every
+  `-W` stays. Since #1260 the mitigation is visibility PLUS a healing
+  lane: the census surfaces the cohort, and Lane 4 (`lib/beets_tag_sync.py`)
+  converges the files — automatically best-effort at the merge seam after
+  every completed rekey, and on demand from the census card's "Write tags"
+  button / `pipeline-cli sync-file-tags`. For every SUCCESSFULLY written
+  item, Lane 4 does NOT arm the
+  `beet update` revert described above: `beet write` runs each item
+  through `item.try_sync(True, False)`, which stores the item's DB
+  `mtime` alongside the file write (`beets/ui/commands/write.py`), so the
+  written file reads as current, not modified — measured in the pinned
+  runtime and pinned against the real subprocess in
+  `tests/test_beets_tag_sync.py`. A write that FAILS mid-save after
+  mutagen touched the file leaves the armed state (file mtime advanced,
+  DB mtime stale) exactly like a failed manual `beet write` would; the
+  census re-flags it. Every
   successful retag records the divergence in its outcome detail
   (`lib/beets_retag.py`) so an operator can find "DB identity moved, file
   tags did not" in the audit trail for that ONE retag rather than never

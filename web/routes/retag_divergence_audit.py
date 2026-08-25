@@ -1,17 +1,26 @@
-"""Read-only retag ``-W`` divergence cohort audit API (#1093 item 1)."""
+"""Retag ``-W`` divergence cohort audit API (#1093 item 1) and its one
+mutation: the per-album file-tag sync (#1260 — the census card's "Write
+tags" button)."""
 
 from __future__ import annotations
 
 import logging
 
 import msgspec
+from pydantic import BaseModel, Field
 
+from lib.beets_db import beets_authority_availability_category
+from lib.beets_tag_sync import (
+    TAG_SYNC_HTTP_STATUS,
+    sync_album_file_tags_from_borrowed_factory,
+)
 from lib.retag_divergence_audit import (
     is_valid_album_id,
     parse_after_album_id_cursor,
     scan_retag_divergence_from_borrowed_factory,
     scan_retag_divergence_single_album_from_borrowed_factory,
 )
+from web.routes._pydantic import parse_body
 from web.routes._registry import (
     RouteHandler,
     RouteRegistration,
@@ -210,6 +219,87 @@ def get_retag_divergence_audit_album(
     )
 
 
+class TagSyncBody(BaseModel):
+    """Body of ``POST .../album/<id>/sync-tags`` — the identity the
+    operator saw on the card, re-pinned server-side (compare-and-set)."""
+
+    expected_mb_albumid: str = Field(min_length=1)
+
+
+def post_retag_divergence_sync_tags(
+    h: RouteHandler, body: dict[str, object], album_id_str: str,
+) -> None:
+    """``POST /api/audit/retag-divergence/album/<id>/sync-tags`` (#1260).
+
+    The census card's "Write tags" button: one guarded ``beet write``
+    scoped to exactly this album, DB→file, verified by re-reading the
+    files through the census's own single-album scan
+    (``lib.beets_tag_sync``). The one canonical execution path shared
+    with ``pipeline-cli sync-file-tags`` (a thin HTTP adapter to this
+    route) and the merge seam's best-effort call.
+
+    Status-code mapping (``lib.beets_tag_sync.TAG_SYNC_HTTP_STATUS``):
+      * 200 — ``synced`` (files re-read as agreeing) or
+              ``already_synced`` (they already did; no write ran)
+      * 400 — invalid body (Pydantic), or an album id past SQLite's
+              signed-64-bit range / Python's int-parse limits (mirroring
+              the recheck route's own boundary)
+      * 404 — ``not_found`` (no Beets album with this id)
+      * 409 — ``identity_mismatch`` (the DB no longer names the
+              authorized identity — recheck and retry),
+              ``db_identity_absent`` (nothing to write), or
+              ``residual_divergence`` (the write ran but the re-read
+              files still disagree — the payload's ``album`` carries the
+              per-item detail)
+      * 503 — ``release_locked`` (another process holds the RELEASE
+              lock; retry) or ``beets_unavailable``, plus the same
+              route-level bare 503 shapes as the recheck route when the
+              Beets handle itself cannot be opened
+    """
+    try:
+        album_id = int(album_id_str)
+    except ValueError:
+        h._error(f"album id {album_id_str!r} is out of range")
+        return
+    if not is_valid_album_id(album_id):
+        h._error(f"album id {album_id} is out of range")
+        return
+    payload = parse_body(h, body, TagSyncBody)
+    if payload is None:
+        return
+    server = _server()
+    try:
+        beets = server._beets_db()
+    except Exception as exc:
+        category = beets_authority_availability_category(exc)
+        if category is None and not isinstance(exc, OSError):
+            raise
+        log.exception(
+            "Beets DB could not be opened for the tag sync (%s)",
+            category or type(exc).__name__,
+        )
+        h._json({"error": "Beets DB not available"}, status=503)
+        return
+    if beets is None:
+        h._json({"error": "Beets DB not available"}, status=503)
+        return
+    try:
+        result = sync_album_file_tags_from_borrowed_factory(
+            lambda: beets,
+            server._db(),
+            album_id=album_id,
+            expected_mb_albumid=payload.expected_mb_albumid,
+        )
+    except Exception:
+        log.exception("per-album tag sync failed unexpectedly")
+        h._json({"error": "Tag sync failed"}, status=503)
+        return
+    h._json(
+        msgspec.to_builtins(result),
+        status=TAG_SYNC_HTTP_STATUS.get(result.outcome, 500),
+    )
+
+
 ROUTES: list[RouteRegistration] = [
     route(
         "GET",
@@ -227,6 +317,15 @@ ROUTES: list[RouteRegistration] = [
         "Cheap, explicit per-album retag-divergence recheck — the same "
         "classifier as the whole-library census, over one album's own "
         "files only.",
+        classified=True,
+    ),
+    pattern_route(
+        "POST",
+        r"^/api/audit/retag-divergence/album/(\d+)/sync-tags$",
+        post_retag_divergence_sync_tags,
+        "Write one album's file tags from its Beets DB identity (the "
+        "census card's Write-tags action) — guarded beet write, verified "
+        "by re-reading the files.",
         classified=True,
     ),
 ]

@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 from mediafile import MediaFile
@@ -13,7 +14,7 @@ from mediafile import MediaFile
 from lib.beets_db import BeetsAlbumIdentityRow
 from tests.fakes import FakeBeetsDB
 from tests.test_beets_retag import MERGED, SURVIVOR, _make_real_mp3
-from tests.web._harness import _FakeDbWebServerCase
+from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
 
 class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
@@ -476,6 +477,181 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(beets.close_calls, 0)
+
+
+class TestRetagDivergenceSyncTagsRoute(_FakeDbWebServerCase):
+    """``POST /api/audit/retag-divergence/album/<id>/sync-tags`` (#1260) —
+    the census card's Write-tags action. These tests never let a real
+    ``beet write`` subprocess launch: every scenario either refuses
+    before the write, or fails the write's environment resolution
+    deterministically (a nonexistent ``CRATEDIGGER_RUNTIME_CONFIG``) so
+    the verdict provably comes from the re-read files."""
+
+    REQUIRED_FIELDS: ClassVar[set[str]] = {
+        "outcome", "album_id", "db_mb_albumid", "album", "error_message",
+    }
+
+    def _post_sync(
+        self, album_id: object, body: dict[str, object],
+    ) -> tuple[int, dict]:
+        return self._post(
+            f"/api/audit/retag-divergence/album/{album_id}/sync-tags",
+            body,
+        )
+
+    def test_agreeing_album_is_200_already_synced(self) -> None:
+        from web import server
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            track_path = Path(tmpdir) / "01.mp3"
+            _make_real_mp3(track_path)
+            media = MediaFile(track_path)
+            media.mb_albumid = SURVIVOR
+            media.save()
+
+            beets = FakeBeetsDB()
+            beets.set_album_mb_identities([
+                BeetsAlbumIdentityRow(
+                    album_id=1, mb_albumid=SURVIVOR,
+                    item_paths=(str(track_path),),
+                    albumartist="Terre Thaemlitz / DJ Sprinkles",
+                    album="RA.1000",
+                ),
+            ])
+            with patch.object(server, "_beets_db", return_value=beets):
+                status, payload = self._post_sync(
+                    1, {"expected_mb_albumid": SURVIVOR},
+                )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["outcome"], "already_synced")
+        _assert_required_fields(
+            self, payload, self.REQUIRED_FIELDS, "sync-tags",
+        )
+        self.assertEqual(payload["album"]["album_class"], "agrees")
+        self.assertEqual(
+            payload["album"]["albumartist"], "Terre Thaemlitz / DJ Sprinkles",
+        )
+        self.assertEqual(beets.close_calls, 0)
+
+    def test_stale_authorized_identity_is_409(self) -> None:
+        from web import server
+
+        beets = FakeBeetsDB()
+        beets.set_album_mb_identities([
+            BeetsAlbumIdentityRow(
+                album_id=1, mb_albumid=SURVIVOR, item_paths=(),
+            ),
+        ])
+        with patch.object(server, "_beets_db", return_value=beets):
+            status, payload = self._post_sync(
+                1, {"expected_mb_albumid": MERGED},
+            )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["outcome"], "identity_mismatch")
+        self.assertEqual(payload["db_mb_albumid"], SURVIVOR)
+
+    def test_unknown_album_is_404(self) -> None:
+        from web import server
+
+        beets = FakeBeetsDB()
+        with patch.object(server, "_beets_db", return_value=beets):
+            status, payload = self._post_sync(
+                999, {"expected_mb_albumid": SURVIVOR},
+            )
+
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["outcome"], "not_found")
+
+    def test_missing_body_field_is_400(self) -> None:
+        from web import server
+
+        beets = FakeBeetsDB()
+        with patch.object(server, "_beets_db", return_value=beets):
+            status, _payload = self._post_sync(1, {})
+
+        self.assertEqual(status, 400)
+
+    def test_out_of_range_album_id_is_400(self) -> None:
+        from web import server
+
+        beets = FakeBeetsDB()
+        with patch.object(server, "_beets_db", return_value=beets):
+            status, _payload = self._post_sync(
+                "9223372036854775808", {"expected_mb_albumid": SURVIVOR},
+            )
+
+        self.assertEqual(status, 400)
+
+    def test_missing_beets_is_503(self) -> None:
+        from web import server
+
+        with patch.object(server, "_beets_db", return_value=None):
+            status, payload = self._post_sync(
+                1, {"expected_mb_albumid": SURVIVOR},
+            )
+
+        self.assertEqual(status, 503)
+        # The exact copy pins the INTENDED clean-unavailability path — a
+        # deleted None-guard also 503s, but via the generic "Tag sync
+        # failed" except-branch with a spurious traceback (#1260 mutant
+        # runner S2/M6).
+        self.assertEqual(payload["error"], "Beets DB not available")
+
+    def test_divergent_album_with_a_failing_write_is_409_residual(
+        self,
+    ) -> None:
+        """The verdict provably comes from the re-read files: the write's
+        environment resolution fails deterministically, the file still
+        carries the merged-away tag, and the route reports the residual
+        with the per-item detail."""
+        import os
+
+        from web import server
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            track_path = Path(tmpdir) / "01.mp3"
+            _make_real_mp3(track_path)
+            media = MediaFile(track_path)
+            media.mb_albumid = MERGED
+            media.save()
+
+            beets = FakeBeetsDB()
+            beets.set_album_mb_identities([
+                BeetsAlbumIdentityRow(
+                    album_id=7, mb_albumid=SURVIVOR,
+                    item_paths=(str(track_path),),
+                ),
+            ])
+            # Hermetic write environment: the runtime config resolves
+            # nowhere and BEETSDIR points INSIDE this test's tmpdir, so
+            # the real subprocess (if it launches at all) opens an empty
+            # scratch library, matches nothing, and touches no ambient
+            # state — never the invoking user's ~/.config/beets.
+            scratch_beetsdir = Path(tmpdir) / "scratch-beetsdir"
+            scratch_beetsdir.mkdir()
+            with patch.object(server, "_beets_db", return_value=beets), \
+                    patch.dict(os.environ, {
+                        "CRATEDIGGER_RUNTIME_CONFIG":
+                            str(Path(tmpdir) / "nonexistent-config.ini"),
+                        "BEETSDIR": str(scratch_beetsdir),
+                    }, clear=False):
+                status, payload = self._post_sync(
+                    7, {"expected_mb_albumid": SURVIVOR},
+                )
+
+            # The file on disk is untouched — still the merged-away tag.
+            self.assertEqual(str(MediaFile(track_path).mb_albumid), MERGED)
+
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["outcome"], "residual_divergence")
+        _assert_required_fields(
+            self, payload, self.REQUIRED_FIELDS, "sync-tags residual",
+        )
+        self.assertEqual(payload["album"]["album_class"], "diverges")
+        items = payload["album"]["items"]
+        self.assertEqual(items[0]["file_mb_albumid"], MERGED)
 
 
 if __name__ == "__main__":
