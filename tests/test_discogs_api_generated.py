@@ -18,7 +18,10 @@ must recover the declared structure from the position strings alone.
 **P1 — the normalizer emits exactly the spec rows.** One row per
 physical position in first-appearance order: flat rows pass through
 verbatim (titles, numbers, durations — even placeholder titles), never
-merging with each other (a duplicated flat position stays two rows); a
+merging with each other (a duplicated flat position stays two rows —
+with one declared carve-out: when the duplicated position is also a sub
+run's base, both flat rows join that group, the first as its parent and
+the second as an ordinary member); a
 sub-position run merges to one row keyed by its literal base (so
 unparseable bases like ``CD1``/``CD2`` stay distinct), titled by its
 first non-placeholder sub-entry (blank counts as placeholder), durations
@@ -117,7 +120,7 @@ def _merged_expectation(
     ]
     real = [t for t in titles if not _is_placeholder(t)]
     title = real[0] if real else titles[0]
-    if parent is not None and parent.duration_seconds is not None:
+    if parent is not None and parent.duration_seconds:
         return (disc, track, title, parent.duration_seconds)
     known = [
         entry.duration_seconds
@@ -152,6 +155,7 @@ def worlds(draw: st.DrawFn) -> World:
                 (f"1-{number}", 1, number),
                 (f"A{number}", 1, number),
                 (f"{number}A", 1, number),
+                (f"{number}B", 2, number),
                 (f"{number}.", 1, number),
                 (chr(ord("A") + index), index + 1, 1),
                 ("", 1, 0),

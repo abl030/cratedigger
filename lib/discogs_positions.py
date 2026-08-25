@@ -141,7 +141,9 @@ class _PositionGroup:
             candidates.insert(0, self.parent_title)
         real = [t for t in candidates if not _is_placeholder_title(t)]
         title = real[0] if real else (candidates[0] if candidates else "")
-        if self.parent_duration is not None:
+        if self.parent_duration:
+            # Truthiness, not an is-not-None check: a 0:00 parent is
+            # upstream nonsense and must not zero out real children.
             length: float | None = self.parent_duration
         else:
             known = [d for d in self.durations if d is not None]
@@ -167,12 +169,14 @@ def normalize_release_tracks(
     '10.1'/'10.2') joins that group as its authoritative parent (see
     ``_PositionGroup``) rather than duplicating its ``(disc, track)``.
 
-    Heading rows — a literal empty position AND empty duration on a
-    release that positions its other tracks — are Discogs' flattened
-    side/disc/bonus section labels, not tracks: no rip has a file for
-    them, so they are dropped. The predicate matches the measured mirror
-    rule in ``lib/library_completeness.py`` (empty position alone, with
-    a duration present, is ambiguous and is kept); a release that
+    Heading rows — a literal empty-string position AND empty-string
+    duration on a release that positions its other tracks — are Discogs'
+    flattened side/disc/bonus section labels, not tracks: no rip has a
+    file for them, so they are dropped. The predicate compares the raw
+    key values and matches the measured mirror rule in
+    ``lib/library_completeness.py`` exactly: an empty position whose
+    duration is present OR whose duration/position key is ABSENT is
+    ambiguous and is kept; a release that
     positions NOTHING has no heading signal and keeps every row, and a
     row carrying nested ``sub_tracks`` is an index parent, never a
     heading (the deployed mirror has not been observed emitting nested
@@ -184,23 +188,32 @@ def normalize_release_tracks(
     consumers keep literal positions via
     ``web/discogs.py::get_release_raw``.
     """
-    parsed: list[tuple[str, str, int | None, str, str, bool]] = []
+    parsed: list[tuple[str, str, int | None, str, str, bool, bool]] = []
     for track in raw_tracks:
         position = str(track.get("position", "") or "")
         title = str(track.get("title", "") or "")
         duration = str(track.get("duration", "") or "")
         has_children = bool(track.get("sub_tracks"))
+        # Heading detection compares the RAW values, exactly as
+        # lib/library_completeness.py does: a literal empty string for
+        # BOTH keys is the flattened-header shape; an ABSENT key is
+        # ambiguous and must not be silently discarded.
+        is_header_shape = (
+            track.get("position") == "" and track.get("duration") == ""
+        )
         base, sub = split_sub_position(position)
-        parsed.append((position, base, sub, title, duration, has_children))
+        parsed.append(
+            (position, base, sub, title, duration, has_children, is_header_shape),
+        )
 
-    sub_bases = {base for _, base, sub, _, _, _ in parsed if sub is not None}
-    any_positioned = any(position for position, _, _, _, _, _ in parsed)
+    sub_bases = {base for _, base, sub, _, _, _, _ in parsed if sub is not None}
+    any_positioned = any(position for position, _, _, _, _, _, _ in parsed)
 
     ordered: list[dict[str, object] | _PositionGroup] = []
     groups: dict[str, _PositionGroup] = {}
-    for position, base, sub, title, duration, has_children in parsed:
+    for position, base, sub, title, duration, has_children, is_header in parsed:
         length = parse_duration(duration)
-        if not position and not duration and any_positioned and not has_children:
+        if is_header and any_positioned and not has_children:
             continue
         member_base = base if sub is not None else position
         if member_base in sub_bases:

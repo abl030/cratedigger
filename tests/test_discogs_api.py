@@ -366,6 +366,30 @@ class TestGetReleaseSubPositionTracks(unittest.TestCase):
         assert _is_dict(only)
         self.assertEqual(only["length_seconds"], 480.0)
 
+    def test_zero_duration_parent_does_not_zero_the_group(self):
+        # A 0:00 parent is upstream nonsense, not an authoritative
+        # total — the children's sum stands.
+        tracks = self._tracks(910018, [
+            {"position": "10", "title": "Medley", "duration": "0:00"},
+            {"position": "10.1", "title": "Part One", "duration": "3:00"},
+        ])
+        self.assertEqual(len(tracks), 1)
+        only = tracks[0]
+        assert _is_dict(only)
+        self.assertEqual(only["length_seconds"], 180.0)
+
+    def test_absent_duration_key_heading_shape_is_kept(self):
+        # library_completeness's exact rule: only a literal empty-string
+        # duration marks a heading; an ABSENT key is ambiguous.
+        tracks = self._tracks(910019, [
+            {"position": "1", "title": "One", "duration": "3:00"},
+            {"position": "", "title": "Mystery"},
+        ])
+        self.assertEqual(len(tracks), 2)
+        kept = tracks[1]
+        assert _is_dict(kept)
+        self.assertEqual(kept["title"], "Mystery")
+
     def test_parent_after_subs_still_titles_the_group(self):
         # The parent's title is authoritative wherever the row sits.
         tracks = self._tracks(910016, [
