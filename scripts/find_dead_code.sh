@@ -51,6 +51,22 @@ if [[ "$SOURCE_LIST" != /* ]]; then
 fi
 mapfile -t SOURCES < <(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$SOURCE_LIST")
 
+# Normalize one whitelist stream for comparison (#1266 item 1): drop
+# full-line comments and blanks, strip the LINE NUMBER from each entry's
+# trailing "(path:line)" location comment, and sort. The identifier, its
+# kind ("unused attribute"/...), and its FILE all stay in the compared
+# text — only the line number is comparison-irrelevant, because any edit
+# above a whitelisted site shifts it without changing what is
+# whitelisted (this broke the gate four times across #1260/#1264 for one
+# entry). Sorting makes the comparison a set comparison, so two entries
+# in one file swapping relative order under line drift cannot break it
+# either. The committed file keeps its human-facing line comments; they
+# refresh whenever the whitelist is regenerated.
+normalize_vulture_whitelist() {
+  sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d; s/:[0-9]\{1,\})[[:space:]]*$/)/' "$1" \
+    | LC_ALL=C sort
+}
+
 check_vulture_whitelist_freshness() {
   VULTURE_FRESHNESS_TMP=$(mktemp "${TMPDIR:-/tmp}/cratedigger-vulture-whitelist.XXXXXX")
   set +e
@@ -68,9 +84,9 @@ check_vulture_whitelist_freshness() {
   if ! diff -u \
     --label committed-vulture-whitelist \
     --label generated-vulture-whitelist \
-    <(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$VULTURE_WHITELIST_FILE") \
-    "$VULTURE_FRESHNESS_TMP" >&2; then
-    echo "Vulture whitelist is not the exact confidence-60 candidate baseline" >&2
+    <(normalize_vulture_whitelist "$VULTURE_WHITELIST_FILE") \
+    <(normalize_vulture_whitelist "$VULTURE_FRESHNESS_TMP") >&2; then
+    echo "Vulture whitelist does not match the confidence-60 candidate baseline (identifier/kind/file set; line numbers are not compared)" >&2
     return 3
   fi
 }

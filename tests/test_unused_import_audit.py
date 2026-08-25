@@ -570,19 +570,44 @@ class TestUnusedImportAudit(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(leftovers, ())
 
-    def test_same_symbol_moved_location_names_stale_exact_entry(self) -> None:
+    def test_same_symbol_moved_location_passes_line_insensitively(self) -> None:
+        """#1266 item 1 — the founding scenario: an edit above a
+        whitelisted site shifts only its line comment. The freshness
+        comparison is a set over identifier + kind + file; pure line
+        drift must never break the gate (it broke four times for one
+        entry across #1260/#1264 under the old byte-diff)."""
         baseline = {"lib/orphan.py": "def orphan():\n    return 1\n"}
         current = {"lib/orphan.py": "\n\ndef orphan():\n    return 1\n"}
 
         result, leftovers = run_vulture_freshness_world(baseline, current)
 
-        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-        self.assertIn(
-            "not the exact confidence-60 candidate baseline",
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn(
+            "does not match the confidence-60 candidate baseline",
             result.stderr,
         )
-        self.assertIn("orphan", result.stderr)
-        self.assertIn("orphan.py:1", result.stderr)
+        self.assertEqual(leftovers, ())
+
+    def test_reordered_same_file_entries_under_drift_pass(self) -> None:
+        """#1266 item 1, sort clause: line drift that also swaps two
+        entries' relative order in the generated whitelist must not
+        break a set comparison."""
+        baseline = {
+            "lib/orphan.py": (
+                "def orphan_alpha():\n    return 1\n\n\n"
+                "def orphan_beta():\n    return 2\n"
+            ),
+        }
+        current = {
+            "lib/orphan.py": (
+                "def orphan_beta():\n    return 2\n\n\n"
+                "def orphan_alpha():\n    return 1\n"
+            ),
+        }
+
+        result, leftovers = run_vulture_freshness_world(baseline, current)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(leftovers, ())
 
     def test_deleted_or_renamed_candidate_fails_freshness(self) -> None:
@@ -598,7 +623,7 @@ class TestUnusedImportAudit(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
                 self.assertIn(
-                    "not the exact confidence-60 candidate baseline",
+                    "does not match the confidence-60 candidate baseline",
                     result.stderr,
                 )
                 self.assertIn("orphan", result.stderr)
@@ -614,10 +639,13 @@ class TestUnusedImportAudit(unittest.TestCase):
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertIn(
-            "not the exact confidence-60 candidate baseline",
+            "does not match the confidence-60 candidate baseline",
             result.stderr,
         )
-        self.assertIn("lib/other.py:1", result.stderr)
+        # Line numbers are no longer compared (#1266 item 1); the FILE
+        # attribution is, and it is what stops a same-name candidate in
+        # another file hiding behind the baseline entry.
+        self.assertIn("lib/other.py", result.stderr)
         self.assertEqual(leftovers, ())
 
     def test_baseline_mode_deliberately_bypasses_freshness(self) -> None:
@@ -632,7 +660,7 @@ class TestUnusedImportAudit(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn(
-            "not the exact confidence-60 candidate baseline",
+            "does not match the confidence-60 candidate baseline",
             result.stderr,
         )
         self.assertEqual(leftovers, ())
@@ -648,7 +676,7 @@ class TestUnusedImportAudit(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-        self.assertIn("exact confidence-60 candidate baseline", result.stderr)
+        self.assertIn("confidence-60 candidate baseline", result.stderr)
 
     def test_freshness_wiring_mutant_is_killed(self) -> None:
         runner_source = Path("scripts/find_dead_code.sh").read_text(encoding="utf-8")
@@ -679,7 +707,7 @@ class TestUnusedImportAudit(unittest.TestCase):
 
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertIn(
-            "not the exact confidence-60 candidate baseline",
+            "does not match the confidence-60 candidate baseline",
             result.stderr,
         )
         self.assertIn("orphan", result.stderr)
