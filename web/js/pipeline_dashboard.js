@@ -236,7 +236,9 @@ function renderLibraryCompletenessCard(census) {
     return `<div class="dashboard-card dashboard-wide"><div class="dashboard-card-title">Library Completeness</div><div class="metric-list"><div class="metric-row"><span>Status</span><strong class="metric-muted">no census published yet</strong></div><div class="metric-row"><span>Actions</span>${runButton}</div></div></div>`;
   }
   if (c.state === 'unreadable') {
-    return `<div class="dashboard-card dashboard-wide"><div class="dashboard-card-title">Library Completeness</div><div class="metric-list"><div class="metric-row"><span>Status</span><strong class="metric-bad">snapshot unreadable</strong></div><div class="metric-row"><span>Error</span><strong>${esc(c.error || '')}</strong></div></div></div>`;
+    // A forced run is exactly the repair for an unreadable snapshot —
+    // the census rewrites it atomically.
+    return `<div class="dashboard-card dashboard-wide"><div class="dashboard-card-title">Library Completeness</div><div class="metric-list"><div class="metric-row"><span>Status</span><strong class="metric-bad">snapshot unreadable</strong></div><div class="metric-row"><span>Error</span><strong>${esc(c.error || '')}</strong></div><div class="metric-row"><span>Actions</span>${runButton}</div></div></div>`;
   }
   const snapshot = c.snapshot || {};
   const report = snapshot.report || {};

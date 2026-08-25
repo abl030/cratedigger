@@ -852,8 +852,6 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
         self.assertIsNotNone(census["error"])
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 LIBRARY_CENSUS_REFRESH_FIELDS = {"outcome", "error"}
@@ -919,3 +917,7 @@ class TestLibraryCensusRefreshContract(_FakeDbWebServerCase):
         self.assertEqual(status, 503)
         self.assertEqual(data["outcome"], "unavailable")
         self.assertTrue(data["error"])
+
+
+if __name__ == "__main__":
+    unittest.main()

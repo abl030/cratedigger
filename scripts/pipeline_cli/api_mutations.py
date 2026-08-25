@@ -542,8 +542,10 @@ def cmd_library_census_refresh(_db: object, args: argparse.Namespace) -> int:
     file the module's ``cratedigger-library-completeness-census.path``
     unit watches, and the daily census oneshot itself remains the single
     census execution path. Relayed rather than written directly because
-    the trigger lives in the web service's state dir, which the invoking
-    operator cannot write (same #1122 F1 shape as ``triage quarantine``).
+    the trigger lives in the web service's state dir
+    (``0755 cratedigger``), which the invoking operator cannot write —
+    the write-side analogue of the CLI-over-HTTP permission relays like
+    ``triage quarantine``.
 
     Exit codes: 0 — 200 requested; 5 — 503 unconfigured/unwritable, or
     the API unreachable.
