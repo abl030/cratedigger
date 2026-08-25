@@ -25,11 +25,15 @@ out-of-band file-tag edit that never reached the DB is overwritten
 Two measured properties of the pinned beets runtime (#1260 review F4/F5):
 
 * ``beet write`` runs each item through ``item.try_sync(True, False)``,
-  which stores the item's DB ``mtime`` alongside the file write — so a
-  sync performed by this lane does NOT arm the ``beet update`` copy-back
-  hazard the census module documents; the written file reads as current,
-  not modified. Pinned against the real subprocess in
-  ``tests/test_beets_tag_sync.py``.
+  which stores the item's DB ``mtime`` alongside the file write — so
+  every SUCCESSFULLY written item does NOT arm the ``beet update``
+  copy-back hazard the census module documents; the written file reads
+  as current, not modified. Pinned against the real subprocess in
+  ``tests/test_beets_tag_sync.py``. The write-FAILURE path is the one
+  that can still arm it: ``try_write`` catches a save that raised after
+  mutagen already touched the file and ``try_sync`` then stores the
+  STALE mtime (#1260 re-review C1) — the census re-flags that album, and
+  the button retries.
 * A tag write normally lands inside existing tag padding: measured across
   flac/opus/mp3 with both a same-length identity swap and eight added
   fields, file SIZE was byte-identical in all six probes — so evidence
@@ -394,7 +398,14 @@ def sync_album_file_tags(
         # write cannot heal what cannot be read back, so launching the
         # subprocess would only re-fail forever (#1260 review F6). The
         # card's button is gated the same way client-side; this is the
-        # seam's own gate. Files untouched.
+        # seam's own gate. Files untouched. Known residual (#1260
+        # re-review C3): a MIXED album — a readable diverging item beside
+        # a permanently unreadable one — passes this gate, heals the
+        # readable siblings on the first pass, and then reports
+        # ``residual_divergence`` on every later trigger (the re-run
+        # write is a no-op; wasted subprocess work, never repeated
+        # mutation), because ``unreadable`` outranks ``diverges`` in the
+        # album display class.
         return _refusal(
             RESULT_RESIDUAL_DIVERGENCE,
             album_id=album_id,

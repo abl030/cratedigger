@@ -203,13 +203,17 @@ query. Every clause is load-bearing:
   lane: the census surfaces the cohort, and Lane 4 (`lib/beets_tag_sync.py`)
   converges the files — automatically best-effort at the merge seam after
   every completed rekey, and on demand from the census card's "Write tags"
-  button / `pipeline-cli sync-file-tags`. Lane 4 does NOT itself arm the
+  button / `pipeline-cli sync-file-tags`. For every SUCCESSFULLY written
+  item, Lane 4 does NOT arm the
   `beet update` revert described above: `beet write` runs each item
   through `item.try_sync(True, False)`, which stores the item's DB
   `mtime` alongside the file write (`beets/ui/commands/write.py`), so the
   written file reads as current, not modified — measured in the pinned
   runtime and pinned against the real subprocess in
-  `tests/test_beets_tag_sync.py`. Every
+  `tests/test_beets_tag_sync.py`. A write that FAILS mid-save after
+  mutagen touched the file leaves the armed state (file mtime advanced,
+  DB mtime stale) exactly like a failed manual `beet write` would; the
+  census re-flags it. Every
   successful retag records the divergence in its outcome detail
   (`lib/beets_retag.py`) so an operator can find "DB identity moved, file
   tags did not" in the audit trail for that ONE retag rather than never

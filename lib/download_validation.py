@@ -397,8 +397,11 @@ def _sync_file_tags_after_merge_rekey(
     cancellation raised inside the sync's own DB-lock I/O, which the
     caller's immediately-following ``_checkpoint`` re-raises (#1260 review
     F8). The other two ready rekey worlds need no assertion here: the
-    service re-derives them from Beets (``already_current`` →
-    ``already_synced``/``synced``, ``not_held`` → ``not_found``).
+    service re-derives them from Beets — ``not_held`` resolves to
+    ``not_found``; ``already_current`` typically to
+    ``already_synced``/``synced``, though any of the service's typed
+    outcomes can follow from what the re-read actually shows (#1260
+    re-review C2).
 
     ``sync_fn`` is a definition-time default: tests INJECT a replacement,
     they never patch the module binding (`.claude/rules/code-quality.md`
@@ -1039,8 +1042,9 @@ def _process_beets_validation(
         # acceptance — so the write is wasted-but-harmless when acceptance
         # follows, and the heal otherwise (#1260 review F1). The sync
         # asserts nothing about the file-tag world: an ``already_current``
-        # or ``not_held`` retag resolves inside the service to
-        # ``already_synced``/``not_found`` from Beets itself (review F2).
+        # or ``not_held`` retag re-derives inside the service from Beets
+        # itself, to whichever typed outcome the re-read shows (review
+        # F2, re-review C2).
         # Outcome-inert by contract: the helper never raises and nothing
         # reads its result. It swallows even a cancellation raised inside
         # its DB-lock I/O — benign ONLY because ``_checkpoint`` on the
