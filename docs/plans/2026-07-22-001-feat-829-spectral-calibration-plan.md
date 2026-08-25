@@ -138,10 +138,33 @@ shared `/mnt/virtio` files.
   lo-fi/shoegaze/ambient, dense metal, full-spectrum electronic, classical,
   loudness-war pop). Acceptance bar per album: verified-lossless proof. YouTube
   rescue is excluded (not a lossless source).
-- **Shared-slskd safety**: #571 good-citizen ownership makes two instances on one
-  slskd safe by construction — each instance's ledgers scope its own searches,
-  transfers, purges, and disk reaping; foreign keys and unledgered state are never
+- **Shared-slskd safety**: #571 good-citizen ownership scopes each instance's
+  searches, transfers, purges, and disk reaping to its own ledgers, so a key
+  neither instance ledgered — a human's transfer, pre-ledger debris — is never
   touched, in either direction.
+
+  **Corrected 2026-08-25 (issue #1254): this is NOT safety "by construction",
+  and the original wording claiming it was is false.** #571 protects a
+  *foreign* key precisely because it never appears in your ledger. It says
+  nothing about a key BOTH instances legitimately hold: transfer identity is
+  `(Soulseek username, remote filename)`, slskd names the download path
+  itself, and two instances that pick the same peer file ledger the same key
+  and each considers it its own to cancel, purge, or reap. Overlapping corpora
+  make this routine rather than exotic — this plan's own teardown measured
+  **40 dual-claimed paths** (see the Phase 5 plan's teardown record), which the
+  hand-written sweep had to exclude explicitly.
+
+  Accepted as a known limitation, not fixed. Every consequence is bounded
+  self-healing waste: a cancelled or reaped file returns its request to
+  `wanted` and re-downloads, and `purge_completed_transfers` cannot strand
+  bytes because removing a transfer-history row leaves the completion event
+  intact. Nothing can reach the Beets library, the private `processingDir`
+  tree, or acquisition-request authority. Two residuals worth knowing when
+  running a temporary instance: `measurement_failed` source protection is a
+  local-DB lookup, so a foreign reaper will not honour it (the evidence row
+  survives, the audio does not), and `get_abandoned_owned_local_paths` has no
+  age gate, so reap/re-download can thrash until the 90-day ledger prune drops
+  the stale claim.
 
 ### Phase 2 — Encode matrix (doc1)
 

@@ -795,6 +795,17 @@ dropped — 42.76 GiB, excluding 40 paths prod also claimed and touching no
 protected quarantine tree. That ordering was the load-bearing part and it
 held.
 
+**Those 40 dual-claimed paths are the evidence for issue #1254.** They are not
+an artifact of the sweep being careful; they are two independent pipeline
+databases each holding a genuinely accepted ledger claim on the same
+`(username, filename)` queue key, because slskd names the download path and
+both instances picked the same peer file. #571's good-citizen model does not
+arbitrate that case — it protects keys NOBODY ledgered. The exclusion here was
+hand-written, i.e. this teardown implemented by hand the cross-instance check
+the product does not have. #1254 records the limitation as accepted: every
+consequence is bounded self-healing waste. Any future temporary instance with
+a corpus overlapping prod's will hit it again.
+
 **The mistake:** deleting the ground-truth FLACs. It was proposed on the
 reasoning that the manifest's exact MBIDs make the corpus reacquirable, which
 is true but incomplete — it forecloses closing §1.5c, and any future
