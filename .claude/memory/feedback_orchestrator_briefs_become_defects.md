@@ -45,6 +45,24 @@ failure of it:
 - Told an implementer to write "the other seven sites reference it by name".
   The real count was five. The implementer grepped, caught it, and said so.
 
+Recurred again 2026-08-23 in #1250 (PR #1252), and this instance names the
+exact mechanism most cleanly: I relayed a REVIEWER's measured counter
+(`{None: 17, pid1: 3}` over 20 records) into a correction brief without
+re-deriving it. The implementer wrote it into a `docs/solutions/` file and a
+docstring as measured fact. The next reviewer could not reproduce it -- 21 and
+49 records gave a materially different distribution -- and it contradicted a
+measurement four lines above it in the same file, which was my OWN original
+and did reproduce. A reviewer's number is exactly as unverified as anyone
+else's; "an independent review measured it" is provenance, not verification.
+
+The fix that worked, and is worth reusing verbatim: **state each measurement
+exactly once**, at the durable artifact (here the solutions doc), with enough
+method to re-run it; have every other site carry the qualitative fact and
+point at it; pin no run-to-run count anywhere as if it were a constant.
+Copying numbers BETWEEN prose sites was the actual defect generator. On the
+next round the implementer re-measured the claim itself instead of taking the
+brief on trust, and confirmed it independently -- the mitigation working.
+
 The generalisation worth keeping: **a brief is an unreviewed claim surface.**
 Every other artifact in the pipeline gets an independent read; the brief never
 does, and the implementer treats it as settled fact. Filed as item 3 of #1246.
