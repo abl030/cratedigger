@@ -414,6 +414,10 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
         self.assertIn("out of range", payload.get("error", ""))
 
     def test_missing_beets_is_503(self) -> None:
+        """#1266 item 3 — the exact copy pins the INTENDED classified
+        path: a bare 503 + "error"-key assertion also passes when a
+        deleted guard routes through the generic unexpected-failure
+        except with a spurious traceback (#1264 mutant runner S2)."""
         from web import server
 
         with patch.object(server, "_beets_db", return_value=None):
@@ -422,9 +426,14 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
             )
 
         self.assertEqual(status, 503)
-        self.assertIn("error", payload)
+        self.assertEqual(
+            payload["error"],
+            "current Beets authority unavailable (FileNotFoundError)",
+        )
 
     def test_expected_open_failure_is_503(self) -> None:
+        """#1266 item 3 — same exact-copy pin for the classified SQLite
+        lane (BUSY is primary code 5)."""
         from web import server
 
         failure = sqlite3.OperationalError("database is locked")
@@ -435,7 +444,10 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
             )
 
         self.assertEqual(status, 503)
-        self.assertIn("error", payload)
+        self.assertEqual(
+            payload["error"],
+            "current Beets authority unavailable (sqlite_5)",
+        )
 
     def test_unexpected_failure_is_logged_and_returns_503(self) -> None:
         from web import server

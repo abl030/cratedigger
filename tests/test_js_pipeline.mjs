@@ -471,34 +471,57 @@ console.log('mergeRekeyRequest() refusal note falls back to the raw error field 
 // --- issue #1142: per-album retag-divergence recheck ---
 
 /**
- * DOM stand-in for one retag-divergence album row: the id'd container
- * `recheckRetagDivergenceAlbum` patches in place, its inline note slot,
- * and `toast` — mirrors `installDriftDom` above.
+ * Node-REPLACEMENT DOM stand-in for one retag-divergence album row
+ * (#1266 item 2, generalising #1264's S1 helper): assigning
+ * `container.innerHTML` swaps which note object `getElementById`
+ * returns, so a handler that captures the note BEFORE re-rendering
+ * writes to a detached node and the assertions catch it — the exact bug
+ * shape a fixed-map DOM (one note object forever) can never see.
+ * `visibleNote()` is "whatever note node the page shows NOW"; assert
+ * refusal copy through it so a future re-render-then-stale-write
+ * regression goes RED. Shared by the recheck and sync handler tests;
+ * `mergeRekeyRequest`'s inline drift DOM above stays a fixed map on
+ * purpose — that handler performs no in-place container re-render, so
+ * there is no node replacement to model.
+ * @param {number} albumId
  */
-function installRetagAlbumDom(albumId) {
-  const container = { innerHTML: '' };
+function installReplacingRetagDom(albumId) {
+  const preNote = { textContent: '', className: '' };
+  const postNote = { textContent: '', className: '' };
   const toast = { textContent: '', className: '', style: { display: 'none' } };
-  const note = { textContent: '', className: '' };
-  const elements = new Map([
-    [`retag-album-${albumId}`, container],
-    ['toast', toast],
-    [`retag-album-note-${albumId}`, note],
-  ]);
+  let rerendered = false;
+  const container = {
+    _html: '',
+    get innerHTML() { return this._html; },
+    set innerHTML(value) { this._html = value; rerendered = true; },
+  };
   globalThis.document = {
     getElementById(id) {
-      return elements.has(id) ? elements.get(id) : null;
+      if (id === `retag-album-${albumId}`) return container;
+      if (id === `retag-album-note-${albumId}`) {
+        return rerendered ? postNote : preNote;
+      }
+      if (id === 'toast') return toast;
+      return null;
     },
   };
   globalThis.setTimeout = (fn) => {
     fn();
     return 0;
   };
-  return { container, toast, note };
+  return {
+    container,
+    preNote,
+    postNote,
+    toast,
+    isRerendered: () => rerendered,
+    visibleNote: () => (rerendered ? postNote : preNote),
+  };
 }
 
 console.log('recheckRetagDivergenceAlbum() success path GETs, patches the row in place, and toasts');
 {
-  const dom = installRetagAlbumDom(6612);
+  const dom = installReplacingRetagDom(6612);
   const btn = { disabled: false, textContent: 'Recheck' };
   const calls = [];
   globalThis.fetch = async (url, options) => {
@@ -524,12 +547,13 @@ console.log('recheckRetagDivergenceAlbum() success path GETs, patches the row in
     'patched row keeps its own recheck button wired for a further recheck');
   assertEqual(dom.toast.textContent, 'Album #6612 rechecked: agrees', 'toasts the fresh result');
   assertEqual(dom.toast.className, 'toast', 'success toast is not an error');
-  assertEqual(dom.note.textContent, '', 'success never writes the refusal note');
+  assertEqual(dom.preNote.textContent, '', 'success never writes the pre-render note');
+  assertEqual(dom.postNote.textContent, '', 'success never writes the post-render note');
 }
 
 console.log('recheckRetagDivergenceAlbum() N2 (fresh review) — the patched row shows fresh non-agreeing item detail');
 {
-  const dom = installRetagAlbumDom(6612);
+  const dom = installReplacingRetagDom(6612);
   const btn = { disabled: false, textContent: 'Recheck' };
   globalThis.fetch = async () => ({
     ok: true,
@@ -564,7 +588,7 @@ console.log('recheckRetagDivergenceAlbum() N2 (fresh review) — the patched row
 
 console.log('recheckRetagDivergenceAlbum() never reloads the whole dashboard on success');
 {
-  installRetagAlbumDom(6612);
+  installReplacingRetagDom(6612);
   const btn = { disabled: false, textContent: 'Recheck' };
   const calls = [];
   globalThis.fetch = async (url) => {
@@ -586,7 +610,7 @@ console.log('recheckRetagDivergenceAlbum() never reloads the whole dashboard on 
 
 console.log('recheckRetagDivergenceAlbum() not-found path re-arms the button and writes the inline note');
 {
-  const dom = installRetagAlbumDom(999);
+  const dom = installReplacingRetagDom(999);
   const btn = { disabled: true, textContent: 'Rechecking...' };
   globalThis.fetch = async () => ({
     ok: false,
@@ -598,15 +622,15 @@ console.log('recheckRetagDivergenceAlbum() not-found path re-arms the button and
 
   assertEqual(btn.disabled, false, 'the button re-arms for a retry');
   assertEqual(btn.textContent, 'Recheck', 'the button label resets');
-  assertEqual(dom.note.textContent, 'No Beets album with id 999',
-    'the inline note names the exact error');
-  assertEqual(dom.note.className, 'drift-row-note metric-bad', 'the inline note uses the bad tone');
+  assertEqual(dom.visibleNote().textContent, 'No Beets album with id 999',
+    'the VISIBLE inline note names the exact error');
+  assertEqual(dom.visibleNote().className, 'drift-row-note metric-bad', 'the visible note uses the bad tone');
   assertEqual(dom.toast.className, 'toast error', 'a refusal toast is an error');
 }
 
 console.log('recheckRetagDivergenceAlbum() network-error path re-arms the button with a generic note');
 {
-  const dom = installRetagAlbumDom(6612);
+  const dom = installReplacingRetagDom(6612);
   const btn = { disabled: true, textContent: 'Rechecking...' };
   globalThis.fetch = async () => {
     throw new TypeError('network down');
@@ -616,52 +640,16 @@ console.log('recheckRetagDivergenceAlbum() network-error path re-arms the button
 
   assertEqual(btn.disabled, false, 'the button re-arms after a network failure');
   assertEqual(btn.textContent, 'Recheck', 'the button label resets');
-  assertEqual(dom.note.textContent, 'Recheck request failed',
-    'the inline note falls back to a generic message with no response to read');
+  assertEqual(dom.visibleNote().textContent, 'Recheck request failed',
+    'the VISIBLE inline note falls back to a generic message with no response to read');
   assertEqual(dom.toast.className, 'toast error', 'a network failure toast is an error');
-}
-
-/**
- * Sync-specific DOM: models node REPLACEMENT on re-render (#1260 review
- * S1/M26). `container.innerHTML = …` swaps which note object
- * `getElementById` returns, so a handler that captures the note BEFORE
- * re-rendering writes to a detached node and the post-render assertion
- * catches it — the exact bug shape the recheck-style fixed-map DOM
- * cannot see.
- * @param {number} albumId
- */
-function installSyncAlbumDom(albumId) {
-  const preNote = { textContent: '', className: '' };
-  const postNote = { textContent: '', className: '' };
-  const toast = { textContent: '', className: '', style: { display: 'none' } };
-  let rerendered = false;
-  const container = {
-    _html: '',
-    get innerHTML() { return this._html; },
-    set innerHTML(value) { this._html = value; rerendered = true; },
-  };
-  globalThis.document = {
-    getElementById(id) {
-      if (id === `retag-album-${albumId}`) return container;
-      if (id === `retag-album-note-${albumId}`) {
-        return rerendered ? postNote : preNote;
-      }
-      if (id === 'toast') return toast;
-      return null;
-    },
-  };
-  globalThis.setTimeout = (fn) => {
-    fn();
-    return 0;
-  };
-  return { container, preNote, postNote, toast, isRerendered: () => rerendered };
 }
 
 const SYNC_DB_ID = '26693e58-02c0-4bb1-b66f-f0f44f8a234d';
 
 console.log('syncRetagDivergenceAlbum() POSTs the compare-and-set body and patches the row on success');
 {
-  const dom = installSyncAlbumDom(16948);
+  const dom = installReplacingRetagDom(16948);
   const btn = {
     disabled: false, textContent: 'Write tags',
     dataset: { expected: SYNC_DB_ID },
@@ -701,7 +689,7 @@ console.log('syncRetagDivergenceAlbum() POSTs the compare-and-set body and patch
 
 console.log('syncRetagDivergenceAlbum() residual refusal re-renders AND writes the POST-re-render note');
 {
-  const dom = installSyncAlbumDom(16948);
+  const dom = installReplacingRetagDom(16948);
   const btn = {
     disabled: false, textContent: 'Write tags',
     dataset: { expected: SYNC_DB_ID },
@@ -741,7 +729,7 @@ console.log('syncRetagDivergenceAlbum() residual refusal re-renders AND writes t
 
 console.log('syncRetagDivergenceAlbum() album-less refusal re-arms the still-attached button');
 {
-  const dom = installSyncAlbumDom(42);
+  const dom = installReplacingRetagDom(42);
   const btn = {
     disabled: false, textContent: 'Write tags',
     dataset: { expected: SYNC_DB_ID },
@@ -769,7 +757,7 @@ console.log('syncRetagDivergenceAlbum() album-less refusal re-arms the still-att
 
 console.log('syncRetagDivergenceAlbum() network-error path re-arms the button with a generic note');
 {
-  const dom = installSyncAlbumDom(16948);
+  const dom = installReplacingRetagDom(16948);
   const btn = {
     disabled: true, textContent: 'Writing tags...',
     dataset: { expected: SYNC_DB_ID },
