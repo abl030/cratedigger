@@ -57,7 +57,18 @@ def assert_completion_orchestrator_responsibilities(source: str) -> None:
 
 class TestDispatchImportCoreCallBoundary(unittest.TestCase):
     def test_production_calls_use_explicit_typed_keywords(self) -> None:
-        """Production must not hide dispatch arguments behind ``Any`` splats."""
+        """Production must not hide dispatch arguments behind ``Any`` splats.
+
+        Since issue #1277 the description of the import is one positional
+        ``DispatchRequest``, so the explicit-keyword requirement moved with
+        it: neither the dispatch call nor the request construction may use a
+        ``**`` splat, and the request must still name ``path`` and
+        ``prevalidated_candidate_result`` outright. ``lib/download_validation``
+        builds the request into a local first (one construction feeding both
+        the injected seam and the direct call), so the audit accepts a
+        request built at the call site OR a same-file
+        ``<name> = DispatchRequest(...)`` assignment naming that local.
+        """
         for relative_path in (
             "lib/dispatch/entry_points.py",
             "lib/download_validation.py",
@@ -67,19 +78,51 @@ class TestDispatchImportCoreCallBoundary(unittest.TestCase):
             self.assertNotIn("core_kwargs", source, relative_path)
             if relative_path == "lib/download_validation.py":
                 self.assertIn("dispatch_fn: DispatchCoreFn | None", source)
+            requests_by_local: dict[str, ast.Call] = {}
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id == "DispatchRequest"
+                ):
+                    requests_by_local[node.targets[0].id] = node.value
             calls = [
                 node for node in ast.walk(tree)
                 if isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
-                and node.func.id == "dispatch_import_core"
+                and node.func.id in {"dispatch_import_core", "dispatch"}
             ]
             self.assertTrue(calls, relative_path)
             for call in calls:
-                self.assertTrue(all(keyword.arg is not None for keyword in call.keywords))
-                self.assertIn("path", {keyword.arg for keyword in call.keywords})
-                self.assertIn("prevalidated_candidate_result", {
-                    keyword.arg for keyword in call.keywords
-                })
+                self.assertTrue(
+                    all(keyword.arg is not None for keyword in call.keywords),
+                    relative_path,
+                )
+                self.assertEqual(len(call.args), 2, relative_path)
+                request_arg = call.args[0]
+                if isinstance(request_arg, ast.Name):
+                    request = requests_by_local.get(request_arg.id)
+                    self.assertIsNotNone(request, relative_path)
+                    assert request is not None
+                else:
+                    self.assertIsInstance(request_arg, ast.Call, relative_path)
+                    assert isinstance(request_arg, ast.Call)
+                    self.assertIsInstance(request_arg.func, ast.Name)
+                    assert isinstance(request_arg.func, ast.Name)
+                    self.assertEqual(
+                        request_arg.func.id, "DispatchRequest", relative_path,
+                    )
+                    request = request_arg
+                self.assertFalse(request.args, relative_path)
+                named = {keyword.arg for keyword in request.keywords}
+                self.assertNotIn(None, named, relative_path)
+                self.assertIn("path", named, relative_path)
+                self.assertIn(
+                    "prevalidated_candidate_result", named, relative_path,
+                )
 
     def test_production_callable_has_a_pyright_conformance_binding(self) -> None:
         source = pinned_source(Path("lib/dispatch/__init__.py"))

@@ -889,6 +889,7 @@ def _run_dispatch_finalization_world(
     from tests.helpers import (
         finalize_claimed_dispatch,
         make_album_quality_evidence,
+        make_dispatch_request,
         make_import_result,
         make_request_row,
         noop_quality_gate,
@@ -1001,7 +1002,7 @@ def _run_dispatch_finalization_world(
             assert claimed is not None and claimed.id == job.id
             with _silence_logs():
                 outcome = dispatch_import_from_db(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=42,
                     failed_path=source,
                     import_job_id=job.id,
@@ -1072,25 +1073,25 @@ def _run_dispatch_finalization_world(
                      cancellation_token=cancellation_token,
                  ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
-                    path=source,
-                    mb_release_id="generated-mbid",
-                    request_id=42,
-                    label="Generated Artist - Generated Album",
-                    beets_harness_path=cfg.beets_harness_path,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=DownloadInfo(
-                        username="generated-user", filetype="mp3"
+                    make_dispatch_request(
+                        path=source,
+                        mb_release_id='generated-mbid',
+                        request_id=42,
+                        label='Generated Artist - Generated Album',
+                        beets_harness_path=cfg.beets_harness_path,
+                        dl_info=DownloadInfo(username='generated-user', filetype='mp3'),
+                        attempt_spectral_audit=audit,
+                        candidate_import_job_id=claimed.id,
+                        beets_library_db_path=str(beets.library_db),
+                        beets_library_root=str(beets.library_root),
+                        execution_lease=importer_lease,
+                        owner_session_identity=owner_session_identity,
                     ),
+                    db,
                     cfg=cfg,
-                    attempt_spectral_audit=audit,
                     run_import_fn=run_import,
                     quality_gate_fn=quality_gate,
-                    candidate_import_job_id=claimed.id,
-                    beets_library_db_path=str(beets.library_db),
-                    beets_library_root=str(beets.library_root),
-                    execution_lease=importer_lease,
                     cancellation_token=cancellation_token,
-                    owner_session_identity=owner_session_identity,
                 )
             finalize_claimed_dispatch(db, claimed, outcome)
 
@@ -2184,6 +2185,7 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
         from tests.helpers import (
             handoff_automation_owner,
             make_album_quality_evidence,
+            make_dispatch_request,
         )
 
         db = make_db()
@@ -2505,22 +2507,21 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
                 **_kwargs: object,
             ) -> CompletionDispatched:
                 return CompletionDispatched(dispatch_import_core(
-                    path=candidate,
-                    mb_release_id=mbid,
-                    request_id=request_id,
-                    label="Iron & Wine - The Creek Drank the Cradle",
-                    beets_harness_path=cfg.beets_harness_path,
-                    db=db,
-                    dl_info=DownloadInfo(
-                        username="rexasaurus",
-                        filetype="flac",
+                    make_dispatch_request(
+                        path=candidate,
+                        mb_release_id=mbid,
+                        request_id=request_id,
+                        label='Iron & Wine - The Creek Drank the Cradle',
+                        beets_harness_path=cfg.beets_harness_path,
+                        dl_info=DownloadInfo(username='rexasaurus', filetype='flac'),
+                        distance=0.05,
+                        candidate_import_job_id=import_job_id,
+                        execution_lease=execution_lease,
+                        owner_session_identity=owner_session_identity,
                     ),
-                    distance=0.05,
+                    db,
                     cfg=cfg,
-                    candidate_import_job_id=import_job_id,
-                    execution_lease=execution_lease,
                     cancellation_token=cancellation_token,
-                    owner_session_identity=owner_session_identity,
                 ))
 
             with (

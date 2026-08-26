@@ -26,7 +26,10 @@ if TYPE_CHECKING:
     # Import-time cycle: ``tests.fakes`` does not import this module, but
     # keeping the reference type-only preserves that independence.
     from album_source import DatabaseSource
-    from lib.dispatch.core import DispatchOutcome
+    from lib.dispatch.types import DispatchRequest, ImportAttemptResult
+    from lib.import_evidence import CandidateEvidenceActionResult
+    from lib.pipeline_db import DownloadLogOutcome
+    from lib.quality import SpectralDetail
     from tests.fakes import FakePipelineDB
 
 from lib.grab_list import DownloadFile, GrabListEntry
@@ -629,7 +632,7 @@ def make_database_source_with_fake_db(
 ) -> DatabaseSource:
     """``Any``-accepting bridge from a ``FakePipelineDB`` fixture into
     ``DatabaseSource``'s ``PipelineDB``-typed ``borrowed_db`` kwarg — same
-    established pattern as ``dispatch_import_with_fake_db`` below: one
+    established pattern as ``finalize_claimed_dispatch`` below: one
     bridge, zero per-call-site escape hatches. Added for issue #1261's
     fallback-writer pins, which need a stateful DB to assert the persisted
     manifest rather than a call shape.
@@ -644,18 +647,82 @@ def make_database_source_with_fake_db(
     )
 
 
-def dispatch_import_with_fake_db(db: Any, **kwargs: Any) -> DispatchOutcome:
-    """``Any``-accepting bridge from a ``FakePipelineDB`` fixture into the
-    ``PipelineDB``-typed ``dispatch_import_core`` — the largest single call
-    site of the frozen ``db=… # type: ignore[arg-type]`` cluster (34 of the
-    tests baseline's 71 findings of that shape; issue #1246 /
-    ``.claude/rules/code-quality.md`` § "Typing enforcement"). Same
-    established pattern as ``finalize_claimed_dispatch`` below: one bridge,
-    zero per-call-site escape hatches.
-    """
-    from lib.dispatch import dispatch_import_core
+def make_dispatch_request(
+    *,
+    path: str = "/tmp/dispatch-album",
+    mb_release_id: str = "mb-release-1",
+    request_id: int = 1,
+    label: str = "Test Artist - Test Album",
+    beets_harness_path: str = "/opt/cratedigger/harness/beets_harness.py",
+    dl_info: DownloadInfo | None = None,
+    force: bool = False,
+    scenario: str = "auto_import",
+    outcome_label: DownloadLogOutcome = "success",
+    requeue_on_failure: bool = True,
+    distance: float | None = None,
+    override_min_bitrate: int | None = None,
+    target_format: str | None = None,
+    verified_lossless_target: str = "",
+    files: Sequence[DownloadFile] | None = None,
+    cooled_down_users: set[str] | None = None,
+    source_dirs: list[str] | None = None,
+    candidate_import_job_id: int | None = None,
+    candidate_download_log_id: int | None = None,
+    attempt_spectral_audit: SpectralDetail | None = None,
+    attempt_result: ImportAttemptResult | None = None,
+    prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
+    beets_library_db_path: str | None = None,
+    beets_library_root: str | None = None,
+    launch_authority_path: str | None = None,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+    owner_session_identity: OwnerSessionIdentity | None = None,
+) -> DispatchRequest:
+    """Build a complete ``DispatchRequest`` with sensible defaults (#1277).
 
-    return dispatch_import_core(db=db, **kwargs)
+    House idiom, same as ``make_request_row`` / ``make_download_file``: a
+    test names only the fields its scenario needs. Every optional parameter
+    repeats ``DispatchRequest``'s own default, and
+    ``TestMakeDispatchRequestBuilder`` pins that equality field-by-field so
+    the two cannot drift.
+
+    This replaced ``dispatch_import_with_fake_db``, the ``Any``-accepting
+    bridge that used to erase type-checking for all 36 dispatch kwargs at
+    every call site (issue #1246 / ``.claude/rules/code-quality.md``
+    § "Typing enforcement"). ``dispatch_import_core`` now takes a narrow
+    ``DispatchDB`` port that ``FakePipelineDB`` satisfies structurally, so
+    tests call it directly with no bridge at all.
+    """
+    from lib.dispatch.types import DispatchRequest
+
+    return DispatchRequest(
+        path=path,
+        mb_release_id=mb_release_id,
+        request_id=request_id,
+        label=label,
+        beets_harness_path=beets_harness_path,
+        dl_info=dl_info if dl_info is not None else DownloadInfo(),
+        force=force,
+        scenario=scenario,
+        outcome_label=outcome_label,
+        requeue_on_failure=requeue_on_failure,
+        distance=distance,
+        override_min_bitrate=override_min_bitrate,
+        target_format=target_format,
+        verified_lossless_target=verified_lossless_target,
+        files=files,
+        cooled_down_users=cooled_down_users,
+        source_dirs=source_dirs,
+        candidate_import_job_id=candidate_import_job_id,
+        candidate_download_log_id=candidate_download_log_id,
+        attempt_spectral_audit=attempt_spectral_audit,
+        attempt_result=attempt_result,
+        prevalidated_candidate_result=prevalidated_candidate_result,
+        beets_library_db_path=beets_library_db_path,
+        beets_library_root=beets_library_root,
+        launch_authority_path=launch_authority_path,
+        execution_lease=execution_lease,
+        owner_session_identity=owner_session_identity,
+    )
 
 
 def finalize_claimed_dispatch(db: Any, job: Any, outcome: Any) -> ImportJob | None:

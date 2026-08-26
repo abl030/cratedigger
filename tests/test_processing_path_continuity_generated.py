@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from collections.abc import Callable
+from dataclasses import replace
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -16,6 +17,7 @@ from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.dispatch import DispatchCoreFn, DispatchOutcome
 from lib.dispatch import core as dispatch_core
+from lib.dispatch.types import DispatchDB, DispatchRequest
 from lib.grab_list import GrabListEntry
 from lib.processing_paths import stage_to_ai_path
 from lib.quality import ValidationResult
@@ -51,6 +53,47 @@ def _known_bad_relocate_before_dispatch(
         staged_album,
         ctx,
         dispatch_fn=dispatch_fn,
+    )
+
+
+def _known_bad_swap_identity_before_dispatch(
+    album_data: GrabListEntry,
+    bv_result: ValidationResult,
+    staged_album: StagedAlbum,
+    ctx: CratediggerContext,
+    *,
+    dispatch_fn: DispatchCoreFn | None = None,
+) -> DispatchOutcome | None:
+    """Mutant: hands dispatch the operator label as the release identity.
+
+    Models an argument inversion at the auto lane's single
+    ``DispatchRequest`` construction (issue #1277) — the exact shape a
+    review mutant used, and the one that would send Beets at the wrong
+    release under the wrong RELEASE lock.
+    """
+
+    def swapping(
+        request: DispatchRequest,
+        db: DispatchDB,
+        **kwargs: object,
+    ) -> DispatchOutcome:
+        assert dispatch_fn is not None
+        return dispatch_fn(
+            replace(
+                request,
+                mb_release_id=request.label,
+                label=request.mb_release_id,
+            ),
+            db,
+            **kwargs,  # pyright: ignore[reportArgumentType]
+        )
+
+    return download_validation._handle_valid_result(
+        album_data,
+        bv_result,
+        staged_album,
+        ctx,
+        dispatch_fn=swapping,
     )
 
 
@@ -137,13 +180,32 @@ def assert_processing_owner_keeps_one_path(
         if outcome is None or not outcome.success:
             raise AssertionError("processing owner did not reach import dispatch")
         durable_path = db.request(42)["active_download_state"]["current_path"]
-        dispatched_paths = [call.path for call in dispatch.calls]
+        dispatched_paths = [call.request.path for call in dispatch.calls]
         if durable_path != processing_path:
             raise AssertionError("processing mutated its immutable path provenance")
         if staged_album.current_path != processing_path:
             raise AssertionError("live folder diverged from its durable owner path")
         if dispatched_paths != [processing_path]:
             raise AssertionError("Beets was dispatched against a relocated path")
+        # The request dispatch is handed must describe the album that was
+        # just validated — one construction, so a swapped or dropped value
+        # is invisible to a path-only check (issue #1277).
+        dispatched_identity = tuple(
+            (call.request.mb_release_id, call.request.label,
+             call.request.request_id, call.request.distance)
+            for call in dispatch.calls
+        )
+        expected_identity = ((
+            _MBID,
+            f"{album_data.artist} - {album_data.title}",
+            42,
+            0.05,
+        ),)
+        if dispatched_identity != expected_identity:
+            raise AssertionError(
+                "dispatch was handed a different album than the one "
+                f"validated: {dispatched_identity!r} != {expected_identity!r}"
+            )
         if not os.path.isdir(processing_path):
             raise AssertionError("canonical processing folder was relocated")
         if set(os.listdir(processing_path)) != expected_files:
@@ -223,6 +285,18 @@ class TestProcessingPathContinuityGenerated(unittest.TestCase):
                 processing_depth=1,
                 staging_depth=2,
                 handle_fn=_known_bad_relocate_before_dispatch,
+            )
+
+    def test_checker_rejects_swapped_identity_known_bad_mutant(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            "different album than the one validated",
+        ):
+            assert_processing_owner_keeps_one_path(
+                file_count=1,
+                processing_depth=1,
+                staging_depth=2,
+                handle_fn=_known_bad_swap_identity_before_dispatch,
             )
 
     @given(

@@ -47,6 +47,7 @@ from tests.helpers import (
     claim_next_import_preview_job,
     handoff_automation_owner,
     make_album_quality_evidence,
+    make_dispatch_request,
     make_import_result,
     make_request_row,
     noop_quality_gate,
@@ -599,37 +600,28 @@ def _exercise_world(
     ):
         del ctx
         return dispatch_import_core(
-            path=launch_source,
-            mb_release_id=launch_release,
-            request_id=request_id,
-            label="Generated fence world",
-            force=world.job_type == IMPORT_JOB_FORCE,
-            beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
-            db=db_arg,
-            dl_info=DownloadInfo(username="generated-peer"),
-            distance=0.05,
-            scenario=(
-                "force_import"
-                if world.job_type == IMPORT_JOB_FORCE
-                else "strong_match"
+            make_dispatch_request(
+                path=launch_source,
+                mb_release_id=launch_release,
+                request_id=request_id,
+                label='Generated fence world',
+                force=world.job_type == IMPORT_JOB_FORCE,
+                beets_harness_path='/nix/store/fake/harness/run_beets_harness.sh',
+                dl_info=DownloadInfo(username='generated-peer'),
+                distance=0.05,
+                scenario='force_import' if world.job_type == IMPORT_JOB_FORCE else 'strong_match',
+                candidate_import_job_id=job_arg.id,
+                beets_library_db_path=str(beets.library_db),
+                beets_library_root=str(beets.library_root),
+                execution_lease=execution_lease,
+                owner_session_identity=owner_session_identity,
             ),
-            cfg=CratediggerConfig(
-                beets_harness_path=(
-                    "/nix/store/fake/harness/run_beets_harness.sh"
-                ),
-                pipeline_db_enabled=True,
-            ),
-            candidate_import_job_id=job_arg.id,
+            db_arg,
+            cfg=CratediggerConfig(beets_harness_path='/nix/store/fake/harness/run_beets_harness.sh', pipeline_db_enabled=True),
             quality_gate_fn=noop_quality_gate,
-            evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
-                candidate=persisted,
-            ),
+            evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(candidate=persisted),
             run_import_fn=record_beets_invocation,
-            beets_library_db_path=str(beets.library_db),
-            beets_library_root=str(beets.library_root),
-            execution_lease=execution_lease,
             cancellation_token=cancellation_token,
-            owner_session_identity=owner_session_identity,
         )
 
     if world.authority != "not_executed":

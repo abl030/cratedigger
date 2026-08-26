@@ -28,6 +28,7 @@ from lib.dispatch.types import (
     DISPATCH_CODE_BAD_REQUEST,
     DISPATCH_CODE_PROCESSING_LOCKED,
     DispatchOutcome,
+    DispatchRequest,
     ImportAttemptResult,
 )
 from lib.import_evidence import ensure_candidate_evidence_for_action
@@ -37,16 +38,16 @@ from lib.terminal_outcomes import ImportJobTerminal
 if TYPE_CHECKING:
     from lib.beets_retag import MergeRetagFn
     from lib.config import CratediggerConfig
-    from lib.dispatch.types import ImportOneRunner, QualityGateFn
+    from lib.dispatch.types import DispatchDB, ImportOneRunner, QualityGateFn
     from lib.import_execution import CancellationToken, OwnerSessionIdentity
     from lib.mb_canonical import CanonicalReleaseFn
-    from lib.pipeline_db import DownloadLogOutcome, PipelineDB
+    from lib.pipeline_db import DownloadLogOutcome
 
 logger = logging.getLogger("cratedigger")
 
 
 def dispatch_import_from_db(
-    db: PipelineDB,
+    db: DispatchDB,
     request_id: int,
     failed_path: str,
     *,
@@ -246,7 +247,7 @@ def _assert_local_import_relocation_containment(
 
 
 def _dispatch_import_from_db_locked(
-    db: PipelineDB,
+    db: DispatchDB,
     request_id: int,
     failed_path: str,
     *,
@@ -550,59 +551,61 @@ def _dispatch_import_from_db_locked(
         quality_gate_fn if quality_gate_fn is not None else _check_quality_gate_core
     )
     outcome = dispatch_import_core(
-        path=failed_path,
-        mb_release_id=mbid,
-        request_id=request_id,
-        label=label,
-        force=True,
-        override_min_bitrate=None,
-        target_format=req.get("target_format"),
-        verified_lossless_target=resolved_cfg.verified_lossless_target,
-        beets_harness_path=resolved_cfg.beets_harness_path,
-        db=db,
-        dl_info=dl_info,
-        # Since #1080 a measurement DOES exist for both lanes — the
-        # exact-release validation above always runs first. Force
-        # deliberately overrides that verdict rather than lacking one (it
-        # imports despite the result, per Authority: "D19 — Force-import
-        # overrides the beets distance and nothing else." —
-        # https://github.com/abl030/cratedigger/issues/711#issuecomment-4999204451),
-        # so recording it here would misrepresent an overridden decision
-        # as a passing measurement: force keeps auditing NULL (#550
-        # defect #4). Keyed on ``distance_threshold is not None`` — the
-        # SAME condition the strict-validation guard above (this
-        # function, ~line 429) tests before this call is ever reached —
-        # rather than on the ``scenario`` label a caller happens to pass:
-        # only that guard's caller (local-import) sets an explicit
-        # threshold, and only after PASSING validation AT it (the guard
-        # rejects and returns early otherwise, per CLAUDE.md's decision 3
-        # for #1176), so by construction, reaching this line with
-        # ``distance_threshold is not None`` means the recorded distance
-        # is a genuine accepted measurement (issue #1211). Tying the
-        # audit write to the guard that earns it, rather than to a
-        # same-caller label that merely happens to agree with it today,
-        # keeps the two from drifting apart under a future caller.
-        distance=(
-            validation.result.distance
-            if distance_threshold is not None else None
+        DispatchRequest(
+            path=failed_path,
+            mb_release_id=mbid,
+            request_id=request_id,
+            label=label,
+            force=True,
+            override_min_bitrate=None,
+            target_format=req.get("target_format"),
+            verified_lossless_target=resolved_cfg.verified_lossless_target,
+            beets_harness_path=resolved_cfg.beets_harness_path,
+            dl_info=dl_info,
+            # Since #1080 a measurement DOES exist for both lanes — the
+            # exact-release validation above always runs first. Force
+            # deliberately overrides that verdict rather than lacking one (it
+            # imports despite the result, per Authority: "D19 — Force-import
+            # overrides the beets distance and nothing else." —
+            # https://github.com/abl030/cratedigger/issues/711#issuecomment-4999204451),
+            # so recording it here would misrepresent an overridden decision
+            # as a passing measurement: force keeps auditing NULL (#550
+            # defect #4). Keyed on ``distance_threshold is not None`` — the
+            # SAME condition the strict-validation guard above (this
+            # function, ~line 429) tests before this call is ever reached —
+            # rather than on the ``scenario`` label a caller happens to pass:
+            # only that guard's caller (local-import) sets an explicit
+            # threshold, and only after PASSING validation AT it (the guard
+            # rejects and returns early otherwise, per CLAUDE.md's decision 3
+            # for #1176), so by construction, reaching this line with
+            # ``distance_threshold is not None`` means the recorded distance
+            # is a genuine accepted measurement (issue #1211). Tying the
+            # audit write to the guard that earns it, rather than to a
+            # same-caller label that merely happens to agree with it today,
+            # keeps the two from drifting apart under a future caller.
+            distance=(
+                validation.result.distance
+                if distance_threshold is not None else None
+            ),
+            scenario=scenario,
+            files=files,
+            outcome_label=scenario,
+            requeue_on_failure=False,
+            source_dirs=source_dirs,
+            candidate_import_job_id=import_job_id,
+            attempt_result=attempt_result,
+            candidate_download_log_id=download_log_id,
+            launch_authority_path=launch_authority_path,
+            prevalidated_candidate_result=candidate_result,
+            beets_library_db_path=beets_library_db_path,
+            beets_library_root=beets_library_root,
+            owner_session_identity=owner_session_identity,
         ),
-        scenario=scenario,
-        files=files,
+        db,
         cfg=resolved_cfg,
-        outcome_label=scenario,
-        requeue_on_failure=False,
-        source_dirs=source_dirs,
-        candidate_import_job_id=import_job_id,
-        attempt_result=attempt_result,
-        candidate_download_log_id=download_log_id,
-        launch_authority_path=launch_authority_path,
-        prevalidated_candidate_result=candidate_result,
         quality_gate_fn=resolved_quality_gate_fn,
         run_import_fn=run_import_fn,
-        beets_library_db_path=beets_library_db_path,
-        beets_library_root=beets_library_root,
         cancellation_token=cancellation_token,
-        owner_session_identity=owner_session_identity,
     )
     return _persist_terminal_dispatch_outcome(
         db,
@@ -611,7 +614,7 @@ def _dispatch_import_from_db_locked(
     )
 
 
-def _job_is_running(db: PipelineDB, import_job_id: int | None) -> bool:
+def _job_is_running(db: DispatchDB, import_job_id: int | None) -> bool:
     if import_job_id is None:
         return False
     job = db.get_import_job(import_job_id)
@@ -619,7 +622,7 @@ def _job_is_running(db: PipelineDB, import_job_id: int | None) -> bool:
 
 
 def _persist_terminal_dispatch_outcome(
-    db: PipelineDB,
+    db: DispatchDB,
     outcome: DispatchOutcome,
     *,
     defer: bool,

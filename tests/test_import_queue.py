@@ -4435,12 +4435,13 @@ class TestAutomationImporterOwnership(unittest.TestCase):
                 )
 
         assert outcome is not None
+        # The live token stays a dispatch kwarg; the #898 owner bundle now
+        # rides the ``DispatchRequest`` positional (issue #1277). What is
+        # asserted is unchanged: neither half may be dropped on the way in.
         self.assertIs(dispatch.call_args.kwargs["cancellation_token"], token)
-        self.assertEqual(dispatch.call_args.kwargs["execution_lease"], lease)
-        self.assertEqual(
-            dispatch.call_args.kwargs["owner_session_identity"],
-            identity,
-        )
+        dispatch_request = dispatch.call_args.args[0]
+        self.assertEqual(dispatch_request.execution_lease, lease)
+        self.assertEqual(dispatch_request.owner_session_identity, identity)
 
 
 class TestImportPreviewWorker(unittest.TestCase):
@@ -10069,7 +10070,7 @@ class TestAutomationWorldFailureNeverParks(unittest.TestCase):
         row["attempts"] = 2454
         row["preview_attempts"] = 2463
         outcome = _requeue_import_job_to_preview(
-            db,  # pyright: ignore[reportArgumentType]
+            db,
             import_job_id=claimed.id,
             reason="candidate evidence missing",
             expected_execution_lease=lease,
@@ -10392,7 +10393,7 @@ def _real_ambiguous_completion_outcome(
     from lib.dispatch.core import _capture_automation_completion
 
     outcome = _capture_automation_completion(
-        db,  # pyright: ignore[reportArgumentType]
+        db,
         import_job_id=job.id,
         request_id=42,
         release_id=_TERMINAL_STAGE_RELEASE,
@@ -11089,7 +11090,7 @@ class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):
         db = RequeueFailureDB()
         claimed = self._force_job(db)
         outcome = _requeue_import_job_to_preview(
-            db,  # pyright: ignore[reportArgumentType]
+            db,
             import_job_id=claimed.id,
             reason="candidate evidence changed",
         )

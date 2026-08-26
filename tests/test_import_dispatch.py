@@ -18,6 +18,7 @@ import threading
 import unittest
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+from dataclasses import replace
 from datetime import UTC
 from typing import ClassVar, Never
 from unittest.mock import MagicMock, patch
@@ -26,6 +27,7 @@ import msgspec
 
 from lib.config import CratediggerConfig
 from lib.dispatch import core as dispatch_core_module
+from lib.dispatch.types import DispatchDB, DispatchOutcome, DispatchRequest
 from lib.import_execution import (
     CancellationToken,
     ExecutionCancelled,
@@ -66,6 +68,7 @@ from tests.helpers import (
     hermetic_beets_config_defaults,
     make_album_quality_evidence,
     make_ctx_with_fake_db,
+    make_dispatch_request,
     make_download_file,
     make_import_result,
     make_request_row,
@@ -403,23 +406,25 @@ class TestAutomationDispatchExecutionFence(unittest.TestCase):
             assert pinned_token is token
             assert owner_session_identity is not None
             return dispatch_import_core(
-                path=root,
-                mb_release_id="test-mbid",
-                request_id=42,
-                label="Test Artist - Test Album",
-                beets_harness_path=_HARNESS,
-                db=db,  # type: ignore[arg-type]
-                dl_info=DownloadInfo(filetype="mp3"),
-                distance=0.05,
-                scenario="strong_match",
-                files=[],
+                make_dispatch_request(
+                    path=root,
+                    mb_release_id="test-mbid",
+                    request_id=42,
+                    label="Test Artist - Test Album",
+                    beets_harness_path=_HARNESS,
+                    dl_info=DownloadInfo(filetype="mp3"),
+                    distance=0.05,
+                    scenario="strong_match",
+                    files=[],
+                    candidate_import_job_id=claimed.id,
+                    prevalidated_candidate_result=candidate,
+                    execution_lease=execution_lease,
+                    owner_session_identity=owner_session_identity,
+                ),
+                db,
                 cfg=_full_dispatch_config(),
                 quality_gate_fn=noop_quality_gate,
-                candidate_import_job_id=claimed.id,
-                prevalidated_candidate_result=candidate,
-                execution_lease=execution_lease,
                 cancellation_token=pinned_token,
-                owner_session_identity=owner_session_identity,
                 run_import_fn=runner,
                 **kwargs,
             )
@@ -728,27 +733,41 @@ def _dispatch_valid_result_cmd(
              patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
             from lib.dispatch import dispatch_import_core
 
-            def dispatch_with_job(**kwargs):
-                db = ctx.pipeline_db_source._get_db()
+            def dispatch_with_job(
+                request: DispatchRequest,
+                db: DispatchDB,
+                **_kwargs: object,
+            ) -> DispatchOutcome:
+                # ``db`` is the handle ``_handle_valid_result`` resolved;
+                # this seam re-reads the same fake through the ctx so it can
+                # claim the job with the fake's own typed API.
+                fake_db = ctx.pipeline_db_source._get_db()
                 claimed, candidate, execution_lease = _claim_dispatch_job(
-                    db,
-                    path=kwargs["path"],
-                    release_id=kwargs["mb_release_id"],
+                    fake_db,
+                    path=request.path,
+                    release_id=request.mb_release_id,
                 )
-                kwargs["candidate_import_job_id"] = claimed.id
-                kwargs["prevalidated_candidate_result"] = candidate
-                kwargs["current_evidence_loader"] = no_current_evidence
-                kwargs["execution_lease"] = execution_lease
-                kwargs["run_import_fn"] = _owned_test_runner
                 cancellation_token = CancellationToken()
                 with pinned_dispatch_authority(
-                    db,
+                    fake_db,
                     execution_lease,
                     cancellation_token=cancellation_token,
                 ) as (cancellation_token, owner_session_identity):
-                    kwargs["cancellation_token"] = cancellation_token
-                    kwargs["owner_session_identity"] = owner_session_identity
-                    return dispatch_import_core(**kwargs)
+                    return dispatch_import_core(
+                        replace(
+                            request,
+                            candidate_import_job_id=claimed.id,
+                            prevalidated_candidate_result=candidate,
+                            execution_lease=execution_lease,
+                            owner_session_identity=owner_session_identity,
+                        ),
+                        fake_db,
+                        cfg=ctx.cfg,
+                        quality_gate_fn=noop_quality_gate,
+                        current_evidence_loader=no_current_evidence,
+                        run_import_fn=_owned_test_runner,
+                        cancellation_token=cancellation_token,
+                    )
 
             outcome = _handle_valid_result(
                 album_data,
@@ -1130,22 +1149,22 @@ class TestAudioCorruptBanAndDelete(unittest.TestCase):
             attempt = ImportAttemptResult(None)
             attempt.merge(import_result)
             outcome = _reject_import_from_evidence_decision(
-                db=db,  # pyright: ignore[reportArgumentType]
-                request_id=835,
-                dl_info=DownloadInfo(filetype="flac", username="bad-peer"),
+                make_dispatch_request(
+                    request_id=835,
+                    dl_info=DownloadInfo(filetype='flac', username='bad-peer'),
+                    distance=0.0,
+                    requeue_on_failure=False,
+                    path=action_copy,
+                    scenario='force_import',
+                    files=[],
+                    cooled_down_users=None,
+                    candidate_import_job_id=claimed.id,
+                    candidate_download_log_id=original_log_id,
+                ),
+                db,
                 attempt_result=attempt,
-                distance=0.0,
-                decision="audio_corrupt",
-                detail="decoder rejected source",
-                requeue_on_failure=False,
-                validation_result=None,
-                staged_path=action_copy,
-                scenario="force_import",
-                files=[],
-                source_path_cleanup_scenario="force_import",
-                cooled_down_users=None,
-                import_job_id=claimed.id,
-                source_download_log_id=original_log_id,
+                decision='audio_corrupt',
+                detail='decoder rejected source',
             )
             self.assertEqual(
                 outcome.post_commit_wrong_match_scenario,
@@ -1229,7 +1248,7 @@ class TestAutomationWrongMatchPostCommitTriage(unittest.TestCase):
                 soulseek_username="Strudel",
             )
             pending = _record_rejection_and_maybe_requeue(
-                db,  # pyright: ignore[reportArgumentType]
+                db,
                 42,
                 DownloadInfo(filetype="mp3", username="Strudel"),
                 detail=validation.detail,
@@ -1297,7 +1316,7 @@ class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
         db.seed_request(make_request_row(id=42, status="unsearchable"))
 
         _record_rejection_and_maybe_requeue(
-            db,  # type: ignore[arg-type]
+            db,
             42,
             DownloadInfo(username="user1"),
             detail="too low",
@@ -1324,7 +1343,7 @@ class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
         db.seed_request(make_request_row(id=42, status="downloading"))
 
         _record_rejection_and_maybe_requeue(
-            db,  # type: ignore[arg-type]
+            db,
             42,
             DownloadInfo(username="user1"),
             detail="too low",
@@ -1404,20 +1423,20 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
 
         with patch_dispatch_externals():
             _reject_import_from_evidence_decision(
-                db=db,  # type: ignore[arg-type]
-                request_id=42,
-                dl_info=dl_info,
+                make_dispatch_request(
+                    request_id=42,
+                    dl_info=dl_info,
+                    distance=0.1279,
+                    requeue_on_failure=True,
+                    path='/tmp/cratedigger-evidence-reject-test',
+                    scenario='downgrade',
+                    files=None,
+                    cooled_down_users=None,
+                ),
+                db,
                 attempt_result=attempt_result,
-                distance=0.1279,
-                decision="downgrade",
-                detail="import-time persisted evidence rejected candidate",
-                requeue_on_failure=True,
-                validation_result=None,
-                staged_path="/tmp/cratedigger-evidence-reject-test",
-                scenario="downgrade",
-                files=None,
-                source_path_cleanup_scenario="downgrade",
-                cooled_down_users=None,
+                decision='downgrade',
+                detail='import-time persisted evidence rejected candidate',
             )
 
         self.assertEqual(len(db.download_logs), 1)
@@ -1491,20 +1510,20 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
 
         with patch_dispatch_externals():
             _reject_import_from_evidence_decision(
-                db=db,  # type: ignore[arg-type]
-                request_id=42,
-                dl_info=DownloadInfo(filetype="mp3", username="qreature"),
+                make_dispatch_request(
+                    request_id=42,
+                    dl_info=DownloadInfo(filetype='mp3', username='qreature'),
+                    distance=0.0,
+                    requeue_on_failure=True,
+                    path='/tmp/lemonade',
+                    scenario='quality_downgrade',
+                    files=None,
+                    cooled_down_users=None,
+                ),
+                db,
                 attempt_result=attempt_result,
-                distance=0.0,
-                decision="downgrade",
-                detail="import-time persisted evidence rejected candidate",
-                requeue_on_failure=True,
-                validation_result=None,
-                staged_path="/tmp/lemonade",
-                scenario="quality_downgrade",
-                files=None,
-                source_path_cleanup_scenario="quality_downgrade",
-                cooled_down_users=None,
+                decision='downgrade',
+                detail='import-time persisted evidence rejected candidate',
                 quality_ranks=QualityRankConfig.defaults(),
             )
 
@@ -1541,7 +1560,7 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
         )
         with patch.object(db, "get_import_job", return_value=malformed_job):
             attempt_result = ImportAttemptResult.from_import_job(
-                db,  # type: ignore[arg-type]
+                db,
                 9001,
             )
         self.assertIsNone(attempt_result.audit)
@@ -1568,24 +1587,20 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
 
         with patch_dispatch_externals():
             _reject_import_from_evidence_decision(
-                db=db,  # type: ignore[arg-type]
-                request_id=43,
-                dl_info=DownloadInfo(
-                    filetype="mp3",
-                    username="qreature",
-                    is_vbr=True,
+                make_dispatch_request(
+                    request_id=43,
+                    dl_info=DownloadInfo(filetype='mp3', username='qreature', is_vbr=True),
+                    distance=0.0,
+                    requeue_on_failure=True,
+                    path='/tmp/missing-have-audit',
+                    scenario='quality_downgrade',
+                    files=None,
+                    cooled_down_users=None,
                 ),
+                db,
                 attempt_result=attempt_result,
-                distance=0.0,
-                decision="downgrade",
-                detail="preview audit decode failed before rejection",
-                requeue_on_failure=True,
-                validation_result=None,
-                staged_path="/tmp/missing-have-audit",
-                scenario="quality_downgrade",
-                files=None,
-                source_path_cleanup_scenario="quality_downgrade",
-                cooled_down_users=None,
+                decision='downgrade',
+                detail='preview audit decode failed before rejection',
                 quality_ranks=QualityRankConfig.defaults(),
             )
 
@@ -1596,6 +1611,109 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
             "lossless,mp3 320,aac,opus,ogg",
         )
         self.assertIsNone(row["target_format"])
+
+    def test_every_contributing_peer_is_denylisted(self) -> None:
+        """A rejected album denylists EVERY peer that contributed to it.
+
+        ``request.files`` is the only peer attribution dispatch has, and
+        ``extract_usernames`` is the only thing it reads off them. Every
+        pre-existing fixture passed one file or none, so the collection was
+        interchangeable with an empty list — a review mutant replacing it
+        with ``[]`` survived, and a multi-peer album would have banned only
+        the ``dl_info`` username while the other source kept serving the
+        same bad rip.
+        """
+        from lib.dispatch import _reject_import_from_evidence_decision
+        from lib.dispatch.types import ImportAttemptResult
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        attempt_result = ImportAttemptResult(None)
+        attempt_result.merge(make_import_result(
+            decision="downgrade", new_min_bitrate=128, prev_min_bitrate=320))
+
+        with patch_dispatch_externals():
+            _reject_import_from_evidence_decision(
+                make_dispatch_request(
+                    request_id=42,
+                    dl_info=DownloadInfo(filetype="mp3", username="seeder-a"),
+                    path="/tmp/cratedigger-multi-peer-reject",
+                    scenario="strong_match",
+                    files=[
+                        make_download_file(
+                            username="seeder-b", filename="01.mp3"),
+                        make_download_file(
+                            username="seeder-c", filename="02.mp3"),
+                    ],
+                ),
+                db,
+                attempt_result=attempt_result,
+                decision="downgrade",
+                detail="import-time persisted evidence rejected candidate",
+            )
+
+        self.assertEqual(
+            sorted(entry.username for entry in db.denylist),
+            ["seeder-a", "seeder-b", "seeder-c"],
+        )
+
+    def _reject_and_report_cleanup(self, *, scenario: str):
+        """Drive one reject through the helper and report its cleanup plan."""
+        from lib.dispatch import _reject_import_from_evidence_decision
+        from lib.dispatch.types import ImportAttemptResult
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        attempt_result = ImportAttemptResult(None)
+        attempt_result.merge(make_import_result(
+            decision="downgrade", new_min_bitrate=128, prev_min_bitrate=320))
+
+        with patch_dispatch_externals() as ext:
+            outcome = _reject_import_from_evidence_decision(
+                make_dispatch_request(
+                    request_id=42,
+                    dl_info=DownloadInfo(filetype="mp3", username="user1"),
+                    path="/tmp/cratedigger-cleanup-gate-source",
+                    scenario=scenario,
+                    requeue_on_failure=scenario != "force_import",
+                ),
+                db,
+                attempt_result=attempt_result,
+                decision="downgrade",
+                detail="import-time persisted evidence rejected candidate",
+            )
+        return outcome, ext.cleanup
+
+    def test_force_reject_never_deletes_the_operators_only_copy(self) -> None:
+        """Issue #89's guard, keyed on the SCENARIO, not the decision.
+
+        A force import's ``path`` is the operator's own folder. On a
+        ``downgrade`` verdict beets moved nothing, so deleting it is data
+        loss — ``_should_cleanup_path`` refuses cleanup for a force scenario
+        unless the decision actually imported.
+
+        The gate reads ``request.scenario``. A review mutant that passed the
+        DECISION instead survived 413 tests: no decision name is ever in
+        ``FORCE_IMPORT_SCENARIOS``, so the guard degraded to "always clean"
+        and this exact data loss became unguarded.
+        """
+        outcome, cleanup = self._reject_and_report_cleanup(
+            scenario="force_import")
+
+        self.assertIsNone(outcome.post_commit_cleanup)
+        cleanup.assert_not_called()
+
+    def test_auto_reject_still_disposes_of_its_processing_source(self) -> None:
+        """Must-still-work twin: the auto lane's source IS disposable, so
+        the same decision on a non-force scenario must still clean up."""
+        _outcome, cleanup = self._reject_and_report_cleanup(
+            scenario="strong_match")
+
+        cleanup.assert_called_once()
+        self.assertEqual(
+            cleanup.call_args.args[0],
+            "/tmp/cratedigger-cleanup-gate-source",
+        )
 
 
 class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
@@ -1671,21 +1789,21 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
             ).id
         with patch_dispatch_externals() as ext:
             outcome = _reject_import_from_evidence_decision(
-                db=db,  # type: ignore[arg-type]
-                request_id=42,
-                dl_info=dl_info,
+                make_dispatch_request(
+                    request_id=42,
+                    dl_info=dl_info,
+                    distance=0.0,
+                    requeue_on_failure=requeue_on_failure,
+                    path='/tmp/cratedigger-caller-lifecycle-test',
+                    scenario=decision,
+                    files=None,
+                    cooled_down_users=None,
+                    candidate_import_job_id=import_job_id,
+                ),
+                db,
                 attempt_result=attempt_result,
-                distance=0.0,
                 decision=decision,
-                detail=f"test {decision}",
-                requeue_on_failure=requeue_on_failure,
-                validation_result=None,
-                staged_path="/tmp/cratedigger-caller-lifecycle-test",
-                scenario=decision,
-                files=None,
-                source_path_cleanup_scenario=decision,
-                cooled_down_users=None,
-                import_job_id=import_job_id,
+                detail=f'test {decision}',
                 protected_roots=protected_roots,
             )
             if capture_cleanup_call is not None and ext.cleanup.call_args is not None:
@@ -1953,30 +2071,27 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                 cancellation_token=cancellation_token,
             ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="test-mbid",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    force=force,
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=DownloadInfo(filetype="flac", username="bad-peer"),
-                    scenario="force_import" if force else "strong_match",
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='test-mbid',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        force=force,
+                        beets_harness_path=_HARNESS,
+                        dl_info=DownloadInfo(filetype='flac', username='bad-peer'),
+                        scenario='force_import' if force else 'strong_match',
+                        requeue_on_failure=not force,
+                        candidate_import_job_id=claimed.id,
+                        prevalidated_candidate_result=candidate_result,
+                        execution_lease=execution_lease,
+                        owner_session_identity=owner_session_identity,
+                    ),
+                    db,
                     cfg=_full_dispatch_config(),
-                    requeue_on_failure=not force,
-                    candidate_import_job_id=claimed.id,
-                    prevalidated_candidate_result=candidate_result,
                     quality_gate_fn=noop_quality_gate,
-                    current_evidence_loader=(
-                        lambda *_args, **_kwargs: current_result
-                    ),
-                    execution_lease=execution_lease,
+                    current_evidence_loader=lambda *_args, **_kwargs: current_result,
                     cancellation_token=cancellation_token,
-                    owner_session_identity=owner_session_identity,
-                    run_import_fn=(
-                        _owned_test_runner
-                        if execution_lease is not None else None
-                    ),
+                    run_import_fn=_owned_test_runner if execution_lease is not None else None,
                 )
         return db, claimed, outcome, ext
 
@@ -2253,30 +2368,28 @@ class TestDispatchImport(unittest.TestCase):
                      cancellation_token=cancellation_token,
                  ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="test-mbid",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=dl_info,
-                    distance=0.05,
-                    scenario=scenario,
-                    files=[MagicMock(username="user1",
-                                     filename="01 - Track.mp3")],
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='test-mbid',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=_HARNESS,
+                        dl_info=dl_info,
+                        distance=0.05,
+                        scenario=scenario,
+                        files=[make_download_file(username='user1', filename='01 - Track.mp3')],
+                        force=force,
+                        requeue_on_failure=not force,
+                        candidate_import_job_id=import_job_id,
+                        prevalidated_candidate_result=candidate_result,
+                        execution_lease=execution_lease,
+                        owner_session_identity=owner_session_identity,
+                    ),
+                    db,
                     cfg=cfg,
                     quality_gate_fn=mock_gate,
-                    force=force,
-                    requeue_on_failure=not force,
-                    candidate_import_job_id=import_job_id,
-                    prevalidated_candidate_result=candidate_result,
-                    execution_lease=execution_lease,
                     cancellation_token=cancellation_token,
-                    owner_session_identity=owner_session_identity,
-                    run_import_fn=(
-                        _owned_test_runner
-                        if execution_lease is not None else None
-                    ),
+                    run_import_fn=_owned_test_runner if execution_lease is not None else None,
                 )
             if not skip_finalize:
                 from tests.helpers import finalize_claimed_dispatch
@@ -2841,24 +2954,26 @@ class TestDispatchImport(unittest.TestCase):
                      cancellation_token=cancellation_token,
                  ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
-                    path=source,
-                    mb_release_id="test-mbid",
-                    request_id=42,
-                    label="Artist - Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=DownloadInfo(filetype="mp3", username="user1"),
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[],
+                    make_dispatch_request(
+                        path=source,
+                        mb_release_id='test-mbid',
+                        request_id=42,
+                        label='Artist - Album',
+                        beets_harness_path=_HARNESS,
+                        dl_info=DownloadInfo(filetype='mp3', username='user1'),
+                        distance=0.05,
+                        scenario='strong_match',
+                        files=[],
+                        requeue_on_failure=True,
+                        attempt_spectral_audit=audit,
+                        candidate_import_job_id=claimed.id,
+                        prevalidated_candidate_result=candidate,
+                        execution_lease=execution_lease,
+                        owner_session_identity=owner_session_identity,
+                    ),
+                    db,
                     cfg=cfg,
-                    requeue_on_failure=True,
-                    attempt_spectral_audit=audit,
-                    candidate_import_job_id=claimed.id,
-                    prevalidated_candidate_result=candidate,
-                    execution_lease=execution_lease,
                     cancellation_token=cancellation_token,
-                    owner_session_identity=owner_session_identity,
                     run_import_fn=_owned_test_runner,
                 )
                 assert outcome.terminal_outcome is not None
@@ -2976,16 +3091,20 @@ class TestDispatchImport(unittest.TestCase):
             assert cancellation_token is not None
             assert owner_session_identity is not None
             return dispatch_import_core(
-                path="/tmp/dest", mb_release_id="test-mbid",
-                request_id=42, label="Test",
-                beets_harness_path=_HARNESS,
-                db=db_arg,
-                dl_info=DownloadInfo(filetype="mp3"),
-                candidate_import_job_id=claimed.id,
-                prevalidated_candidate_result=candidate,
-                execution_lease=execution_lease,
+                make_dispatch_request(
+                    path='/tmp/dest',
+                    mb_release_id='test-mbid',
+                    request_id=42,
+                    label='Test',
+                    beets_harness_path=_HARNESS,
+                    dl_info=DownloadInfo(filetype='mp3'),
+                    candidate_import_job_id=claimed.id,
+                    prevalidated_candidate_result=candidate,
+                    execution_lease=execution_lease,
+                    owner_session_identity=owner_session_identity,
+                ),
+                db_arg,
                 cancellation_token=cancellation_token,
-                owner_session_identity=owner_session_identity,
                 run_import_fn=_owned_test_runner,
             )
 
@@ -3043,16 +3162,20 @@ class TestDispatchImport(unittest.TestCase):
             assert cancellation_token is not None
             assert owner_session_identity is not None
             return dispatch_import_core(
-                path="/tmp/dest", mb_release_id="test-mbid",
-                request_id=42, label="Test",
-                beets_harness_path=_HARNESS,
-                db=db_arg,
-                dl_info=DownloadInfo(filetype="mp3"),
-                candidate_import_job_id=claimed.id,
-                prevalidated_candidate_result=candidate,
-                execution_lease=execution_lease,
+                make_dispatch_request(
+                    path='/tmp/dest',
+                    mb_release_id='test-mbid',
+                    request_id=42,
+                    label='Test',
+                    beets_harness_path=_HARNESS,
+                    dl_info=DownloadInfo(filetype='mp3'),
+                    candidate_import_job_id=claimed.id,
+                    prevalidated_candidate_result=candidate,
+                    execution_lease=execution_lease,
+                    owner_session_identity=owner_session_identity,
+                ),
+                db_arg,
                 cancellation_token=cancellation_token,
-                owner_session_identity=owner_session_identity,
                 run_import_fn=_owned_test_runner,
             )
 
@@ -3149,24 +3272,25 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
                      cancellation_token=cancellation_token,
                  ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="test-mbid",
-                    request_id=42,
-                    label="Rescue Artist - Album",
-                    beets_harness_path=self._HARNESS_PATH,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=DownloadInfo(filetype="mp3"),
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[MagicMock(username="u1",
-                                     filename="01 - T.mp3")],
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='test-mbid',
+                        request_id=42,
+                        label='Rescue Artist - Album',
+                        beets_harness_path=self._HARNESS_PATH,
+                        dl_info=DownloadInfo(filetype='mp3'),
+                        distance=0.05,
+                        scenario='strong_match',
+                        files=[make_download_file(username='u1', filename='01 - T.mp3')],
+                        candidate_import_job_id=claimed.id,
+                        prevalidated_candidate_result=candidate,
+                        execution_lease=execution_lease,
+                        owner_session_identity=owner_session_identity,
+                    ),
+                    db,
                     cfg=cfg,
                     quality_gate_fn=noop_quality_gate,
-                    candidate_import_job_id=claimed.id,
-                    prevalidated_candidate_result=candidate,
-                    execution_lease=execution_lease,
                     cancellation_token=cancellation_token,
-                    owner_session_identity=owner_session_identity,
                     run_import_fn=_owned_test_runner,
                 )
                 assert outcome.terminal_outcome is not None
@@ -3332,19 +3456,23 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
                  cancellation_token=cancellation_token,
              ) as (cancellation_token, owner_session_identity):
             dispatch_import_core(
-                path="/tmp/dest", mb_release_id="mbid-1",
-                request_id=42, label="Test Artist - Test Album",
-                beets_harness_path=_HARNESS,
+                make_dispatch_request(
+                    path='/tmp/dest',
+                    mb_release_id='mbid-1',
+                    request_id=42,
+                    label='Test Artist - Test Album',
+                    beets_harness_path=_HARNESS,
+                    dl_info=DownloadInfo(filetype='mp3'),
+                    files=[make_download_file(username='user1', filename='01.mp3')],
+                    candidate_import_job_id=claimed.id,
+                    prevalidated_candidate_result=candidate,
+                    execution_lease=execution_lease,
+                    owner_session_identity=owner_session_identity,
+                ),
+                db,
                 cfg=cfg_obj,
-                db=db,  # type: ignore[arg-type]
-                dl_info=DownloadInfo(filetype="mp3"),
-                files=[MagicMock(username="user1", filename="01.mp3")],
                 quality_gate_fn=noop_quality_gate,
-                candidate_import_job_id=claimed.id,
-                prevalidated_candidate_result=candidate,
-                execution_lease=execution_lease,
                 cancellation_token=cancellation_token,
-                owner_session_identity=owner_session_identity,
                 run_import_fn=_owned_test_runner,
             )
             return ext.run.call_args[0][0]
@@ -3467,26 +3595,23 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
             cancellation_token=cancellation_token,
         ) as (cancellation_token, owner_session_identity):
             dispatch_import_core(
-                path="/tmp/dest",
-                mb_release_id="test-mbid",
-                request_id=42,
-                label="Test Artist - Test Album",
-                beets_harness_path=_HARNESS,
-                cfg=_full_dispatch_config(),
-                db=db,  # type: ignore[arg-type]
-                dl_info=DownloadInfo(filetype="mp3"),
-                files=[make_download_file(username="user1", filename="01.mp3")],
-                quality_gate_fn=noop_quality_gate,
-                candidate_import_job_id=claimed.id,
-                evidence_gate_fn=(
-                    lambda *_args, **_kwargs: EvidenceImportGate(
-                        candidate=candidate_result.evidence,
-                        current=current,
-                    )
+                make_dispatch_request(
+                    path='/tmp/dest',
+                    mb_release_id='test-mbid',
+                    request_id=42,
+                    label='Test Artist - Test Album',
+                    beets_harness_path=_HARNESS,
+                    dl_info=DownloadInfo(filetype='mp3'),
+                    files=[make_download_file(username='user1', filename='01.mp3')],
+                    candidate_import_job_id=claimed.id,
+                    execution_lease=execution_lease,
+                    owner_session_identity=owner_session_identity,
                 ),
-                execution_lease=execution_lease,
+                db,
+                cfg=_full_dispatch_config(),
+                quality_gate_fn=noop_quality_gate,
+                evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(candidate=candidate_result.evidence, current=current),
                 cancellation_token=cancellation_token,
-                owner_session_identity=owner_session_identity,
                 run_import_fn=_owned_test_runner,
             )
             cmd = ext.run.call_args[0][0]
@@ -3534,22 +3659,19 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
 
         with patch_dispatch_externals() as ext:
             dispatch_import_core(
-                path="/tmp/badlands",
-                mb_release_id="test-mbid",
-                request_id=42,
-                label="Dirty Beaches - Badlands",
-                beets_harness_path=_HARNESS,
-                cfg=_full_dispatch_config(),
-                db=db,  # type: ignore[arg-type]
-                dl_info=DownloadInfo(filetype="flac", username="peer"),
-                files=[make_download_file(
-                    username="peer", filename="01.flac")],
-                quality_gate_fn=noop_quality_gate,
-                evidence_gate_fn=(
-                    lambda *_args, **_kwargs: EvidenceImportGate(
-                        candidate=candidate
-                    )
+                make_dispatch_request(
+                    path='/tmp/badlands',
+                    mb_release_id='test-mbid',
+                    request_id=42,
+                    label='Dirty Beaches - Badlands',
+                    beets_harness_path=_HARNESS,
+                    dl_info=DownloadInfo(filetype='flac', username='peer'),
+                    files=[make_download_file(username='peer', filename='01.flac')],
                 ),
+                db,
+                cfg=_full_dispatch_config(),
+                quality_gate_fn=noop_quality_gate,
+                evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(candidate=candidate),
             )
 
         ext.run.assert_not_called()
@@ -3786,7 +3908,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             mb_id="test-mbid", label="Test Artist - Test Album",
             request_id=42,
             files=[make_download_file(username="user1", filename="01.mp3")],
-            db=db,  # type: ignore[arg-type]
+            db=db,
         )
 
         return db
@@ -3827,7 +3949,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         db.seed_request(make_request_row(id=42, status="imported"))
         _check_quality_gate_core(
             mb_id="", label="Test", request_id=42, files=[],
-            db=db)  # type: ignore[arg-type]
+            db=db)
         # Status unchanged — gate returned early
         self.assertEqual(db.request(42)["status"], "imported")
 
@@ -3849,7 +3971,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             label="Missing Evidence",
             request_id=42,
             files=[make_download_file(username="winner", filename="01.mp3")],
-            db=db,  # type: ignore[arg-type]
+            db=db,
         )
 
         self.assertIsNotNone(plan)
@@ -3878,7 +4000,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             label="Failed Evidence",
             request_id=42,
             files=[make_download_file(username="winner", filename="01.mp3")],
-            db=db,  # type: ignore[arg-type]
+            db=db,
             state_loader=unavailable_state,
         )
 
@@ -3928,7 +4050,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             label="Decision Failure",
             request_id=42,
             files=[make_download_file(username="winner", filename="01.flac")],
-            db=db,  # type: ignore[arg-type]
+            db=db,
             state_loader=lambda **_kwargs: state,
             quality_decision_fn=exploding_decision,
         )
@@ -3991,7 +4113,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             label="Terminal Acceptance",
             request_id=42,
             files=[],
-            db=db,  # type: ignore[arg-type]
+            db=db,
             apply=False,
             state_loader=lambda **_kwargs: state,
         )
@@ -4166,18 +4288,22 @@ class TestQualityGateUsesIntent(unittest.TestCase):
                  cancellation_token=cancellation_token,
              ) as (cancellation_token, owner_session_identity):
             outcome = dispatch_import_core(
-                path="/tmp/dest", mb_release_id="test-mbid",
-                request_id=42, label="Test",
-                beets_harness_path=_HARNESS,
-                db=db,  # type: ignore[arg-type]
-                dl_info=DownloadInfo(filetype="mp3"),
-                files=[MagicMock(username="user1", filename="01.mp3")],
+                make_dispatch_request(
+                    path='/tmp/dest',
+                    mb_release_id='test-mbid',
+                    request_id=42,
+                    label='Test',
+                    beets_harness_path=_HARNESS,
+                    dl_info=DownloadInfo(filetype='mp3'),
+                    files=[make_download_file(username='user1', filename='01.mp3')],
+                    candidate_import_job_id=claimed.id,
+                    prevalidated_candidate_result=candidate,
+                    execution_lease=execution_lease,
+                    owner_session_identity=owner_session_identity,
+                ),
+                db,
                 quality_gate_fn=noop_quality_gate,
-                candidate_import_job_id=claimed.id,
-                prevalidated_candidate_result=candidate,
-                execution_lease=execution_lease,
                 cancellation_token=cancellation_token,
-                owner_session_identity=owner_session_identity,
                 run_import_fn=_owned_test_runner,
             )
         assert outcome.terminal_outcome is not None
@@ -4248,7 +4374,7 @@ class TestQualityGatePreservesTargetFormat(unittest.TestCase):
             _check_quality_gate_core(
                 mb_id="test-mbid", label="Test Artist - Test Album",
                 request_id=42, files=[],
-                db=db)  # type: ignore[arg-type]
+                db=db)
 
         return db
 
@@ -4409,26 +4535,27 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
                      cancellation_token=cancellation_token,
                  ) as (cancellation_token, owner_session_identity):
                 dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="test-mbid",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # pyright: ignore[reportArgumentType]
-                    dl_info=DownloadInfo(filetype="mp3"),
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[MagicMock(username="user1",
-                                     filename="01 - Track.mp3")],
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='test-mbid',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=_HARNESS,
+                        dl_info=DownloadInfo(filetype='mp3'),
+                        distance=0.05,
+                        scenario='strong_match',
+                        files=[make_download_file(username='user1', filename='01 - Track.mp3')],
+                        candidate_import_job_id=claimed.id,
+                        prevalidated_candidate_result=candidate,
+                        beets_library_db_path=beets_library_db,
+                        beets_library_root=beets_library_root,
+                        execution_lease=execution_lease,
+                        owner_session_identity=owner_session_identity,
+                    ),
+                    db,
                     cfg=cfg,
                     quality_gate_fn=noop_quality_gate,
-                    candidate_import_job_id=claimed.id,
-                    prevalidated_candidate_result=candidate,
-                    beets_library_db_path=beets_library_db,
-                    beets_library_root=beets_library_root,
-                    execution_lease=execution_lease,
                     cancellation_token=cancellation_token,
-                    owner_session_identity=owner_session_identity,
                     run_import_fn=_owned_test_runner,
                     # This test is about the pin capture, not the vanished-
                     # path reconciler (issue #1203 item 2's own coverage is
@@ -4438,8 +4565,7 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
                     # notify_library_delete against this test's real
                     # jellyfin_url — stub it out directly via the kwarg-DI
                     # seam rather than a module patch.
-                    media_server_notify_fn=MagicMock(
-                        return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES),
+                    media_server_notify_fn=MagicMock(return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES),
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -4543,37 +4669,43 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
                     return MagicMock(returncode=0, stdout="", stderr="")
                 ext.run.side_effect = _move
                 dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id=release_id,
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # pyright: ignore[reportArgumentType]
-                    dl_info=DownloadInfo(filetype="mp3"),
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[MagicMock(username="user1",
-                                     filename="01 - Track.mp3")],
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id=release_id,
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=_HARNESS,
+                        dl_info=DownloadInfo(filetype='mp3'),
+                        distance=0.05,
+                        scenario='strong_match',
+                        files=[make_download_file(username='user1', filename='01 - Track.mp3')],
+                        candidate_import_job_id=claimed.id,
+                        prevalidated_candidate_result=candidate,
+                        beets_library_db_path=beets_library_db,
+                        beets_library_root=beets_library_root,
+                        execution_lease=execution_lease,
+                        owner_session_identity=owner_session_identity,
+                    ),
+                    db,
                     cfg=cfg,
                     quality_gate_fn=noop_quality_gate,
-                    candidate_import_job_id=claimed.id,
-                    prevalidated_candidate_result=candidate,
                     # A real Beets row now exists for this release, so the
                     # REAL evidence gate would try to spectrally measure it
                     # (not real audio) -- bypass, matching
                     # TestVanishedPathReconciliation's own pattern. This
                     # test is about the pin capture, not evidence gating.
-                    evidence_gate_fn=(
-                        lambda *_a, **_kw: EvidenceImportGate(
-                            candidate=candidate.evidence)),
-                    beets_library_db_path=beets_library_db,
-                    beets_library_root=beets_library_root,
-                    execution_lease=execution_lease,
+                    evidence_gate_fn=lambda *_a, **_kw: EvidenceImportGate(candidate=candidate.evidence),
                     cancellation_token=cancellation_token,
-                    owner_session_identity=owner_session_identity,
                     run_import_fn=_owned_test_runner,
-                    media_server_notify_fn=MagicMock(
-                        return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES),
+                    # This test is about the pin capture, not the vanished-
+                    # path reconciler (issue #1203 item 2's own coverage is
+                    # tests.test_import_dispatch.TestVanishedPathReconciliation).
+                    # replaced_albums's old path differs from imported_path
+                    # here, which would otherwise reach a REAL
+                    # notify_library_delete against this test's real
+                    # jellyfin_url — stub it out directly via the kwarg-DI
+                    # seam rather than a module patch.
+                    media_server_notify_fn=MagicMock(return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES),
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -4677,32 +4809,43 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
                     return MagicMock(returncode=0, stdout="", stderr="")
                 ext.run.side_effect = _create_new_album
                 dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id=release_id,
-                    request_id=42,
-                    label="Test Artist - New Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # pyright: ignore[reportArgumentType]
-                    dl_info=DownloadInfo(filetype="mp3"),
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[MagicMock(username="user1",
-                                     filename="01 - Track.mp3")],
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id=release_id,
+                        request_id=42,
+                        label='Test Artist - New Album',
+                        beets_harness_path=_HARNESS,
+                        dl_info=DownloadInfo(filetype='mp3'),
+                        distance=0.05,
+                        scenario='strong_match',
+                        files=[make_download_file(username='user1', filename='01 - Track.mp3')],
+                        candidate_import_job_id=claimed.id,
+                        prevalidated_candidate_result=candidate,
+                        beets_library_db_path=beets_library_db,
+                        beets_library_root=beets_library_root,
+                        execution_lease=execution_lease,
+                        owner_session_identity=owner_session_identity,
+                    ),
+                    db,
                     cfg=cfg,
                     quality_gate_fn=noop_quality_gate,
-                    candidate_import_job_id=claimed.id,
-                    prevalidated_candidate_result=candidate,
-                    evidence_gate_fn=(
-                        lambda *_a, **_kw: EvidenceImportGate(
-                            candidate=candidate.evidence)),
-                    beets_library_db_path=beets_library_db,
-                    beets_library_root=beets_library_root,
-                    execution_lease=execution_lease,
+                    # A real Beets row now exists for this release, so the
+                    # REAL evidence gate would try to spectrally measure it
+                    # (not real audio) -- bypass, matching
+                    # TestVanishedPathReconciliation's own pattern. This
+                    # test is about the pin capture, not evidence gating.
+                    evidence_gate_fn=lambda *_a, **_kw: EvidenceImportGate(candidate=candidate.evidence),
                     cancellation_token=cancellation_token,
-                    owner_session_identity=owner_session_identity,
                     run_import_fn=_owned_test_runner,
-                    media_server_notify_fn=MagicMock(
-                        return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES),
+                    # This test is about the pin capture, not the vanished-
+                    # path reconciler (issue #1203 item 2's own coverage is
+                    # tests.test_import_dispatch.TestVanishedPathReconciliation).
+                    # replaced_albums's old path differs from imported_path
+                    # here, which would otherwise reach a REAL
+                    # notify_library_delete against this test's real
+                    # jellyfin_url — stub it out directly via the kwarg-DI
+                    # seam rather than a module patch.
+                    media_server_notify_fn=MagicMock(return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES),
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -4914,24 +5057,26 @@ class TestVanishedPathReconciliation(unittest.TestCase):
                         lambda *_args, **_kwargs: EvidenceImportGate(
                             candidate=candidate_result.evidence))
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id=release_id,
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # pyright: ignore[reportArgumentType]
-                    dl_info=DownloadInfo(filetype="mp3"),
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[MagicMock(username="user1",
-                                     filename="01 - Track.mp3")],
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id=release_id,
+                        request_id=42,
+                        label="Test Artist - Test Album",
+                        beets_harness_path=_HARNESS,
+                        dl_info=DownloadInfo(filetype="mp3"),
+                        distance=0.05,
+                        scenario="strong_match",
+                        files=[make_download_file(
+                            username="user1", filename="01 - Track.mp3")],
+                        candidate_import_job_id=claimed.id,
+                        prevalidated_candidate_result=candidate_result,
+                        execution_lease=execution_lease,
+                        owner_session_identity=owner_session_identity,
+                    ),
+                    db,
                     cfg=cfg,
                     quality_gate_fn=noop_quality_gate,
-                    candidate_import_job_id=claimed.id,
-                    prevalidated_candidate_result=candidate_result,
-                    execution_lease=execution_lease,
                     cancellation_token=cancellation_token,
-                    owner_session_identity=owner_session_identity,
                     run_import_fn=_owned_test_runner,
                     media_server_notify_fn=media_server_notify_fn,
                     album_directory_snapshot_fn=(

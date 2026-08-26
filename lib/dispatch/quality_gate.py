@@ -8,7 +8,7 @@ lossless. ``finalize_request`` is the module-local DI seam.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -67,8 +67,10 @@ def _evidence_unavailable_plan() -> QualityGatePlan:
 
 
 if TYPE_CHECKING:
-    from lib.pipeline_db import PipelineDB
+    from lib.dispatch.types import DispatchDB
+    from lib.pipeline_db.rows import AlbumRequestRow
     from lib.quality import (
+        AlbumQualityEvidence,
         AudioQualityMeasurement,
         QualityRankConfig,
         TargetQualityContract,
@@ -91,10 +93,33 @@ class _QualityGateDecisionFn(Protocol):
 logger = logging.getLogger("cratedigger")
 
 
+class QualityGateStateDB(Protocol):
+    """The three linked-evidence reads the gate-state loader performs.
+
+    Declared separately from ``DispatchDB`` (which satisfies it) because
+    this loader is also the entry point ``pipeline-cli quality`` and
+    ``pipeline-cli repair-spectral`` reach it through, and neither of those
+    holds anything like dispatch's surface. Annotating it with the whole
+    dispatch port would force those commands to claim a surface they do not
+    have — the #409 narrow-port pattern, applied to the one function two
+    very different callers share.
+    """
+
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
+
+    def get_request_current_evidence_id(
+        self, request_id: int,
+    ) -> int | None: ...
+
+    def load_album_quality_evidence_by_id(
+        self, evidence_id: int | None,
+    ) -> AlbumQualityEvidence | None: ...
+
+
 def load_quality_gate_state(
     *,
     request_id: int,
-    db: PipelineDB,
+    db: QualityGateStateDB,
     mb_id: str | None = None,
     expected_current_evidence_id: int | None = None,
 ) -> QualityGateState | None:
@@ -176,16 +201,36 @@ def load_quality_gate_state(
     )
 
 
+class _QualityGateStateLoader(Protocol):
+    """Exact contract for the injected gate-state loader seam.
+
+    Spelled out rather than left as ``Callable[..., QualityGateState |
+    None]`` so the ``db=`` argument below is actually checked. That check is
+    what proves ``DispatchDB`` satisfies ``QualityGateStateDB`` — the claim
+    that port's docstring makes, and which nothing verified while this seam
+    erased its own argument types.
+    """
+
+    def __call__(
+        self,
+        *,
+        request_id: int,
+        db: QualityGateStateDB,
+        mb_id: str | None = ...,
+        expected_current_evidence_id: int | None = ...,
+    ) -> QualityGateState | None: ...
+
+
 def _check_quality_gate_core(
     mb_id: str,
     label: str,
     request_id: int,
     files: Sequence[object],
-    db: PipelineDB,
+    db: DispatchDB,
     quality_ranks: QualityRankConfig | None = None,
     expected_current_evidence_id: int | None = None,
     apply: bool = True,
-    state_loader: Callable[..., QualityGateState | None] = load_quality_gate_state,
+    state_loader: _QualityGateStateLoader = load_quality_gate_state,
     quality_decision_fn: _QualityGateDecisionFn = quality_gate_decision,
 ) -> QualityGatePlan | None:
     """Apply the post-import policy to linked current evidence."""

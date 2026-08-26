@@ -24,7 +24,7 @@ class TestDoMarkDone(unittest.TestCase):
         if dl_info is None:
             dl_info = DownloadInfo(username="testuser", filetype="mp3")
         _do_mark_done(
-            db=db,  # type: ignore[arg-type]
+            db=db,
             request_id=42,
             dl_info=dl_info,
             distance=0.05,
@@ -90,7 +90,7 @@ class TestRecordRejectionAndMaybeRequeue(unittest.TestCase):
                 detail="new 128kbps <= existing 320kbps",
             ).to_json()
         _record_rejection_and_maybe_requeue(
-            db=db,  # type: ignore[arg-type]
+            db=db,
             request_id=42,
             dl_info=dl_info,
             detail="new 128kbps <= existing 320kbps",
