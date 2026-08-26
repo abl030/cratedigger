@@ -15,7 +15,6 @@ from lib.util import (
     PlexAlbumRef,
     jellyfin_find_album_by_path,
     plex_find_album_by_path,
-    request_jellyfin_refresh,
     request_plex_scan,
 )
 
@@ -32,9 +31,6 @@ class DeleteNotification(msgspec.Struct, frozen=True):
 PlexFindFn = Callable[[CratediggerConfig, str], PlexAlbumRef | None]
 PlexScanFn = Callable[[CratediggerConfig, str], tuple[int, str] | None]
 JellyfinFindFn = Callable[[CratediggerConfig, str], JellyfinAlbumRef | None]
-JellyfinRefreshFn = Callable[
-    [CratediggerConfig, str | None], tuple[int, str] | None,
-]
 
 
 def _nearest_existing_ancestor(path: str, root: str) -> str | None:
@@ -68,41 +64,39 @@ def notify_library_delete(
     plex_find_fn: PlexFindFn = plex_find_album_by_path,
     plex_scan_fn: PlexScanFn = request_plex_scan,
     jellyfin_find_fn: JellyfinFindFn = jellyfin_find_album_by_path,
-    jellyfin_refresh_fn: JellyfinRefreshFn = request_jellyfin_refresh,
 ) -> tuple[DeleteNotification, ...]:
-    """Tell Plex/Jellyfin after the destructive advisory locks are released.
+    """Tell Plex/Jellyfin after an album's directory is gone.
 
-    ``allow_escalation`` (default ``True``) preserves that operator-authorized
-    destructive-delete behavior: Plex may scan the configured root itself when
-    no narrower existing ancestor survives, and Jellyfin may fall back to
-    ``cfg.jellyfin_library_id`` when the item isn't found by its former path.
+    Two callers share this boundary: the operator-authorized destructive
+    delete (Bad Rip / Replace / library-delete, after the destructive
+    advisory locks are released) and the routine post-import reconciliation
+    of a path-changing upgrade's vanished old path (issue #1203 item 2).
+    ``allow_escalation`` (default ``True``, the destructive caller) governs
+    ONLY the Plex leg: whether the nearest-existing-ancestor scan may
+    escalate to the configured library root itself when no narrower
+    ancestor survives. Refusing that escalation still records a
+    ``skipped`` ``DeleteNotification`` naming why — it never silently
+    no-ops.
 
-    Pass ``allow_escalation=False`` for a routine, non-destructive caller
-    (issue #1203 item 2: post-import reconciliation of a path-changing
-    upgrade's vanished old album path) — a collection-wide Jellyfin refresh or
-    a Plex library-root scan would be a product violation there, matching the
-    "no collection refresh and no broad fallback" contract
-    ``trigger_jellyfin_scan`` already documents for post-import notification.
-    Refusing an escalation still records a ``skipped``/``warning``
-    ``DeleteNotification`` naming why — it never silently no-ops.
-
-    Jellyfin's leg is asymmetric by design, not merely by an escalation
-    guard: with ``allow_escalation=False`` this function never calls
-    ``jellyfin_refresh_fn`` AT ALL — no ``/Items/{id}/Refresh``, no
-    ``/Library/Refresh``. A source-level read of Jellyfin 10.11
+    The Jellyfin leg is detect-and-report for EVERY caller and calls no
+    refresh endpoint at all (issue #1221 item 1). A source-level read of
+    Jellyfin 10.11
     (``MediaBrowser.Controller/Entities/Folder.cs::ValidateChildrenInternal2``)
     found that deletion of a vanished item is computed as the PARENT
     folder's own disk-vs-DB child-set diff — an item is never deleted by
     refreshing itself, so a targeted refresh is structurally incapable of
     reaping the album this function is called about. Worse: the album's
     directory is already gone, so enumerating it during that refresh raises
-    ``DirectoryNotFoundException``; the same method's ``IOException`` handler
-    logs and swallows it rather than returning, so the refresh proceeds
-    with an EMPTY observed disk and deletes every one of the album's child
-    ``Audio`` rows (files untouched, their Jellyfin metadata/user-data is
-    not). A routine post-import notification must never trigger that. It
-    finds the item by its former path and reports what it found — reaping
-    is an operator decision, tracked separately.
+    ``DirectoryNotFoundException``; the same method's ``IOException``
+    handler logs and swallows it rather than returning, so the refresh
+    proceeds with an EMPTY observed disk and deletes every one of the
+    album's child ``Audio`` rows (files untouched, their Jellyfin
+    metadata/user-data is not). Jellyfin's own machinery reaps the vanished
+    item without our help: its scheduled library scan's parent validation,
+    and often sooner — measured during issue #1221 verification, a
+    post-import ``/Library/Media/Updated`` report on the new sibling path
+    reaped the old item within hours. So this function only finds the item
+    by its former path and reports what it found.
     """
     outcomes: list[DeleteNotification] = []
 
@@ -150,78 +144,31 @@ def notify_library_delete(
             "plex", "skipped", "Plex is not configured"))
 
     if cfg.jellyfin_url and cfg.resolved_jellyfin_token():
-        ref = None
-        find_warning = ""
         try:
             ref = jellyfin_find_fn(cfg, former_album_path)
-        except Exception as exc:  # noqa: BLE001 -- refresh can still run
-            find_warning = f"; identity lookup failed: {type(exc).__name__}: {exc}"
+        except Exception as exc:  # noqa: BLE001 -- visible warning
             log.warning("JELLYFIN DELETE: identity lookup failed: %s", exc)
-        if not allow_escalation:
-            # Detect and report ONLY — never call jellyfin_refresh_fn. See
-            # this function's own docstring: a targeted refresh cannot
-            # reap a vanished item (Jellyfin computes deletion from the
-            # PARENT folder's own child-set diff) and instead empties the
-            # item's child rows when its directory is already gone.
+            outcomes.append(DeleteNotification(
+                "jellyfin", "warning",
+                f"identity lookup failed: {type(exc).__name__}: {exc} — "
+                "cannot determine whether a Jellyfin item remains at the "
+                "former path"))
+        else:
             if ref is not None:
+                # This detail is also the web delete-toast text — keep it
+                # short; the full rationale lives in this function's
+                # docstring and docs/jellyfin-primer.md.
                 outcomes.append(DeleteNotification(
                     "jellyfin", "warning",
                     f"exact album item {ref.item_id} found at former path "
-                    f"{former_album_path!r} but NOT refreshed — Jellyfin "
-                    "cannot reap an item whose directory vanished via a "
-                    "targeted refresh, and attempting one would delete its "
-                    "child rows instead; this requires an operator action"
-                    + find_warning,
+                    f"{former_album_path!r} but NOT refreshed — a targeted "
+                    "refresh cannot reap a vanished item; Jellyfin's own "
+                    "next library validation reaps it",
                     ref.item_id))
             else:
                 outcomes.append(DeleteNotification(
                     "jellyfin", "skipped",
-                    "no Jellyfin item found by former path" + find_warning))
-        else:
-            try:
-                item_id = ref.item_id if ref else cfg.jellyfin_library_id
-                submitted = jellyfin_refresh_fn(cfg, item_id)
-                if submitted is None:
-                    outcomes.append(DeleteNotification(
-                        "jellyfin", "skipped", "Jellyfin is not fully configured"))
-                else:
-                    status, target = submitted
-                    observed_absent = False
-                    post_warning = ""
-                    if ref is not None:
-                        try:
-                            observed_absent = (
-                                jellyfin_find_fn(cfg, former_album_path) is None
-                            )
-                        except Exception as exc:  # noqa: BLE001 -- visible warning
-                            post_warning = (
-                                "; post-refresh observation failed: "
-                                f"{type(exc).__name__}: {exc}"
-                            )
-                    if ref is None:
-                        detail = (
-                            f"HTTP {status}; album item was not observable by former "
-                            "path, so refresh submission is not reconciliation proof"
-                        ) + find_warning
-                        outcome_status: Literal["submitted", "warning"] = "warning"
-                    elif observed_absent:
-                        detail = (
-                            f"HTTP {status}; exact album item {ref.item_id} is now "
-                            "absent by former path"
-                        )
-                        outcome_status = "submitted"
-                    else:
-                        detail = (
-                            f"HTTP {status}; exact album item {ref.item_id} remains "
-                            "observable after refresh submission"
-                        ) + post_warning
-                        outcome_status = "warning"
-                    outcomes.append(DeleteNotification(
-                        "jellyfin", outcome_status, detail, target))
-            except Exception as exc:  # noqa: BLE001 -- best effort
-                log.warning("JELLYFIN DELETE: refresh failed: %s", exc)
-                outcomes.append(DeleteNotification(
-                    "jellyfin", "warning", f"{type(exc).__name__}: {exc}"))
+                    "no Jellyfin item found by former path"))
     else:
         outcomes.append(DeleteNotification(
             "jellyfin", "skipped", "Jellyfin is not configured"))

@@ -761,10 +761,6 @@ pkgs.testers.nixosTest {
       # never invokes yt-dlp (empty queue), so this is exercised only at
       # the wrapper-render seam: we assert the flag lands in the ExecStart.
       youtubeIngest.sourceAddress = "10.0.2.15";
-      # Exercise the configured branch of Jellyfin's targeted refresh option.
-      # The Python config/notifier tests separately pin the null -> full-library
-      # fallback.
-      notifiers.jellyfin.libraryId = "music-library-item-id";
       # Render the real NixOS-managed timer while keeping it far from firing.
       # The deploy-hold VM regression below needs the actual /etc unit path.
       timer = {
@@ -2265,7 +2261,7 @@ pkgs.testers.nixosTest {
     machine.succeed(f"grep -q '\\[Peer Cache\\]' {runtime_config}")
     machine.succeed(f"grep -q 'redis_host = 127.0.0.1' {runtime_config}")
     machine.succeed(f"grep -q 'ttl_seconds = 604800' {runtime_config}")
-    machine.succeed(f"grep -q '^library_id = music-library-item-id$' {runtime_config}")
+    machine.fail(f"grep -q 'library_id' {runtime_config}")
     machine.succeed("${pkgs.redis}/bin/redis-cli -p 6379 CONFIG GET maxmemory-policy | grep -q allkeys-lru")
     machine.succeed("systemctl show -p After cratedigger.service | grep -q redis-cratedigger.service")
     machine.succeed("systemctl show -p Wants cratedigger.service | grep -q redis-cratedigger.service")

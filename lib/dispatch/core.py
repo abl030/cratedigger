@@ -725,8 +725,9 @@ def _reconcile_vanished_replaced_album_paths(
 
     Reuses ``notify_library_delete`` with ``allow_escalation=False``: a
     routine post-import notification must never fall back to a Plex
-    library-root scan, and on Jellyfin must never call the refresh endpoint
-    at all — Jellyfin's own deletion model (a source-level finding, see
+    library-root scan. The Jellyfin leg never calls a refresh endpoint from
+    ANY caller (issue #1221 item 1) — Jellyfin's own deletion model (a
+    source-level finding, see
     ``lib/library_delete_notifiers.py::notify_library_delete``'s own
     docstring) makes a targeted refresh both incapable of reaping the
     vanished item and liable to delete its child rows instead. Plex still

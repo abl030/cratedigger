@@ -55,36 +55,26 @@ metadata and cover art land, an existing curated album remains unchanged, and
 a separate library is not scanned.
 
 For library deletion, Cratedigger locates the exact `MusicAlbum` by the former
-mapped Beets path and refreshes that item after destructive locks are released.
-This is a separate deletion-observation contract and retains its bare targeted
-refresh request (without the post-import metadata-mode query).
-If no exact item is found it uses the configured library item. A 404 from any
-targeted `/Items/{id}/Refresh` immediately falls back to
-`POST /Library/Refresh`. A 2xx response is only submission evidence:
-Cratedigger checks the former path again, reports observed absence when it can,
-and emits a warning when the item was never observable or remains present.
-Failures are surfaced as warnings on the already completed delete rather than
-rolling library state back.
+mapped Beets path after destructive locks are released and REPORTS what it
+found — since issue #1221 item 1 it never refreshes anything, the same
+detect-and-report contract the post-import reconciler below uses. A targeted
+`/Items/{id}/Refresh` cannot reap the item it targets — Jellyfin computes
+deletion one level up, from the PARENT folder's own disk-vs-DB child-set
+diff, never from the item refreshing itself — and with the directory already
+gone that refresh instead deletes the album's own child `Audio` rows (the
+source-level finding detailed under the reconciler below). Cratedigger has no
+refresh machinery left to call: `request_jellyfin_refresh` and the
+`cfg.jellyfin_library_id` collection-wide fallback were deleted with it.
 
-**When the item IS found by its former path, this lane's TARGETED refresh
-does not converge, by the same source-level finding the post-import
-reconciler below exists to route around.** A targeted `/Items/{id}/Refresh`
-cannot reap the item it targets — Jellyfin computes deletion one level up,
-from the PARENT folder's own disk-vs-DB child-set diff, never from the item
-refreshing itself — so after an exact-album library delete the album's
-`MusicAlbum` item is expected to remain a childless orphan (its `Audio`
-children are the ones actually removed, and only as an incidental side
-effect of the very refresh this lane submits) until a scan reaches the
-parent by some other route (a later sibling import's own notifier, or an
-operator-triggered library scan). The
-`"exact album item … remains observable after refresh submission"` `warning`
-this lane emits for that case is therefore an EXPECTED outcome, not a
-transient condition awaiting convergence. This is narrower than it may look:
-when NO item is found by the former path, this lane instead refreshes
-`cfg.jellyfin_library_id` — a library-SCOPE refresh, which recursively
-re-validates the whole tree and does reach the orphan's parent, so that path
-genuinely can converge. This code path is unchanged by issue #1203 item 2;
-only its documentation is corrected here.
+The orphaned item is not permanent: Jellyfin's own machinery reaps it —
+its scheduled library scan's parent validation, and often much sooner
+(measured during issue #1221 verification: the post-import
+`/Library/Media/Updated` report on a new sibling path reaped the vanished
+old item within hours, with no scheduled scan in between; the historical
+childless orphans left by the retired probe refreshes were all gone by the
+next scans after the 2026-08-20 mount fix). Failures are surfaced as
+warnings on the already completed delete rather than rolling library state
+back.
 
 ### Post-import vanished-path reconciliation (issue #1203 item 2)
 
@@ -121,9 +111,9 @@ vanished path from either source, Cratedigger calls
 `allow_escalation=False`.
 
 **On Jellyfin this call never refreshes anything — it only finds the item by
-its former path and reports what it found.** That is not merely "the
-collection-wide fallback is refused"; it is a different action from the
-destructive-delete caller's find → refresh → re-observe flow entirely. The
+its former path and reports what it found.** Since issue #1221 item 1 this is
+the ONE Jellyfin contract for both callers — the destructive-delete lane
+shares it, and no refresh machinery exists in the codebase at all. The
 reason is a source-level finding against Jellyfin 10.11
 (`MediaBrowser.Controller/Entities/Folder.cs::ValidateChildrenInternal2`):
 deletion of a vanished item is computed as the PARENT folder's own disk-vs-DB
@@ -141,13 +131,15 @@ against one of the live orphans this issue describes deleted 17 `Audio` rows
 outright, while the album item itself persisted throughout — consistent with
 deletion being computed one level up, at the parent.
 
-So the reconciler's Jellyfin outcome is one of two shapes, and both are
-final — neither is a "try again later":
+So the reconciler's Jellyfin outcome is one of three shapes, and all are
+final — none is a "try again later":
 
 - The item is found by its former path: a `warning` `DeleteNotification`
   naming the exact item id and former path, stating it was found but NOT
-  refreshed and that reaping it is an operator action.
+  refreshed and that Jellyfin's own next library validation reaps it.
 - No item is found by its former path: a `skipped` `DeleteNotification`.
+- (A failed identity lookup is its own `warning` naming the failure — the
+  leg cannot claim "no item found" when it does not know.)
 
 Both shapes are logged, one line per outcome (`lib/dispatch/core.py::_reconcile_vanished_replaced_album_paths`,
 one line per provider — always Plex and Jellyfin both, even when only one
@@ -159,12 +151,13 @@ find these in the journal:
 journalctl -u cratedigger-importer | grep 'MEDIA SERVER RECONCILE:'
 ```
 
-Whether Cratedigger should ever be authorized to delete a Jellyfin item
-directly, or to refresh the parent artist (risking every sibling album on a
-broken/slow mount, since Jellyfin gives that scope no fail-safe), are both
-operator decisions tracked separately — this reconciler does neither, on
-purpose. **Contrast with Plex**, whose equivalent leg genuinely self-heals —
-see `docs/plex-primer.md`.
+Issue #1221 settled the convergence question: Cratedigger neither deletes a
+Jellyfin item directly nor refreshes the parent artist (risking every
+sibling album on a broken/slow mount, since Jellyfin gives that scope no
+fail-safe). Neither is needed — Jellyfin's own scan machinery reaps
+vanished items (measured, see the deletion section above), so both lanes
+detect and report, on purpose. **Contrast with Plex**, whose equivalent leg
+genuinely self-heals — see `docs/plex-primer.md`.
 
 This snapshot-diff-and-reconcile call MUST run after the Jellyfin pin capture
 below, never before: `capture_jellyfin_date_created_pin` reads
@@ -274,17 +267,14 @@ deployments may choose another immutable path.
 [Jellyfin]
 url = https://jelly.ablz.au
 token_file = /run/cratedigger-secrets/JELLYFIN_TOKEN
-library_id = <music-library-item-id>
 path_map = /mnt/virtio/Music/Beets:/mnt/fuse/Media/Music/Beets
 ```
 
 `path_map` composes with `[Beets] directory` exactly like the Plex one
 (absolutize relative `imported_path`, then prefix-swap — see
 `docs/plex-primer.md` § "How paths get to Plex"). It drives both the path
-notification and the pin's exact album lookup. `library_id` is independent
-and is used only as the fallback target for the separate library-deletion
-observer. Via the Nix module these are
-`services.cratedigger.notifiers.jellyfin.libraryId` and `.pathMap`.
+notification and the pin's exact album lookup. Via the Nix module this is
+`services.cratedigger.notifiers.jellyfin.pathMap`.
 
 ## API Access
 

@@ -8,10 +8,13 @@ authoritative source — a Beets before/after directory-set diff), UNIONED
 with every replaced album path (``postflight.replaced_albums``, a secondary
 source) whose normalized form differs from the imported path, is reconciled
 with both media servers EXACTLY ONCE, and never by escalating to a Plex
-library-root scan or calling the Jellyfin refresh endpoint AT ALL (a
-source-level finding against Jellyfin 10.11: a targeted refresh cannot reap
-a vanished item and would instead delete its child rows — the reconciler
-only ever finds and reports on Jellyfin, never refreshes).
+library-root scan. The retired sibling clause — "never by calling the
+Jellyfin refresh endpoint" — is now impossible by construction and was
+deleted with its recorder (issue #1221 item 1): ``notify_library_delete``
+has no refresh parameter and the codebase has no Jellyfin refresh machinery
+at all, so no world this property can build could observe such a call. The
+Jellyfin detect-and-report contract itself is patrolled by
+``tests/test_library_delete_notifiers_generated.py``'s report law.
 
 This composes THREE REAL production stages, not just the gate: the pre/post
 SET-DIFF itself (``lib.dispatch.core._vanished_album_directories``, driven
@@ -55,8 +58,6 @@ from lib.dispatch.core import (
 from lib.library_delete_notifiers import notify_library_delete
 from lib.quality import DuplicateRemoveCandidate
 from lib.util import JellyfinAlbumRef
-
-_JELLYFIN_LIBRARY_ID = "COLLECTION-WIDE-SENTINEL"
 
 
 def _norm(path: str) -> str:
@@ -123,8 +124,6 @@ def _reconciliation_law_violations(
     reconciled_paths: list[str],
     plex_root: str,
     plex_scan_targets: list[str],
-    jellyfin_library_id: str | None,
-    jellyfin_refresh_item_ids: list[str | None],
 ) -> list[str]:
     """Every way an observed reconciliation run breaks the law. Accumulating
     — every clause is evaluated regardless of earlier results, so ordering
@@ -165,18 +164,6 @@ def _reconciliation_law_violations(
         violations.append(
             "reconciliation escalated to a Plex library-root scan")
 
-    # allow_escalation=False means the Jellyfin refresh endpoint is never
-    # called at all -- not a targeted refresh, not the collection-wide
-    # cfg.jellyfin_library_id fallback. jellyfin_library_id is retained as a
-    # parameter (and a distinguishing sentinel) so a regression that DOES
-    # call it, in either shape, is still nameable in the failure message.
-    if jellyfin_refresh_item_ids:
-        escalated = jellyfin_library_id in jellyfin_refresh_item_ids
-        violations.append(
-            "reconciliation called the Jellyfin refresh endpoint at all "
-            f"(escalated to the collection-wide fallback: {escalated}): "
-            f"{jellyfin_refresh_item_ids}")
-
     return violations
 
 
@@ -193,7 +180,6 @@ def _cfg(root: str) -> CratediggerConfig:
         "Jellyfin": {
             "url": "http://jellyfin",
             "token": "jellyfin-token",
-            "library_id": _JELLYFIN_LIBRARY_ID,
             "path_map": f"{root}:/jellyfin-music",
         },
     })
@@ -324,14 +310,12 @@ class TestVanishedPathReconciliationGeneratedLaw(unittest.TestCase):
 
             reconciled_paths: list[str] = []
             plex_scan_targets: list[str] = []
-            jellyfin_refresh_item_ids: list[str | None] = []
 
             def _jellyfin_find(_c, _p):
                 # Widened per #1203 item 2 review: a generated world must
                 # sometimes exercise the FOUND-item detect-and-report branch
-                # (never a refresh call, either way -- see
-                # notify_library_delete's own docstring), not only the "no
-                # item found at all" branch.
+                # (see notify_library_delete's own docstring), not only the
+                # "no item found at all" branch.
                 if jellyfin_item_found:
                     return JellyfinAlbumRef("found-item", "date")
                 return None
@@ -344,11 +328,6 @@ class TestVanishedPathReconciliationGeneratedLaw(unittest.TestCase):
                     plex_scan_fn=lambda _c, p: (
                         plex_scan_targets.append(p) or (200, p)),
                     jellyfin_find_fn=_jellyfin_find,
-                    jellyfin_refresh_fn=(
-                        lambda _c, item_id=None: (
-                            jellyfin_refresh_item_ids.append(item_id) or (
-                                204,
-                                f"/Items/{item_id or 'library'}/Refresh"))),
                 )
 
             _reconcile_vanished_replaced_album_paths(
@@ -369,8 +348,6 @@ class TestVanishedPathReconciliationGeneratedLaw(unittest.TestCase):
                 reconciled_paths=reconciled_paths,
                 plex_root=str(root),
                 plex_scan_targets=plex_scan_targets,
-                jellyfin_library_id=cfg.jellyfin_library_id,
-                jellyfin_refresh_item_ids=jellyfin_refresh_item_ids,
             )
             if violations:
                 raise AssertionError(
@@ -393,8 +370,6 @@ class TestReconciliationLawCheckerKnownBad(unittest.TestCase):
             reconciled_paths=[],
             plex_root="/root",
             plex_scan_targets=[],
-            jellyfin_library_id="lib-id",
-            jellyfin_refresh_item_ids=[],
         )
         self.assertTrue(
             any("should have been reconciled were skipped" in v
@@ -408,8 +383,6 @@ class TestReconciliationLawCheckerKnownBad(unittest.TestCase):
             reconciled_paths=["/root/Artist/Old"],
             plex_root="/root",
             plex_scan_targets=[],
-            jellyfin_library_id="lib-id",
-            jellyfin_refresh_item_ids=[],
         )
         self.assertTrue(
             any("should NOT have been reconciled were sent" in v
@@ -428,8 +401,6 @@ class TestReconciliationLawCheckerKnownBad(unittest.TestCase):
             reconciled_paths=["/root/Artist/Old", "/root/Artist/Old/"],
             plex_root="/root",
             plex_scan_targets=[],
-            jellyfin_library_id="lib-id",
-            jellyfin_refresh_item_ids=[],
         )
         self.assertTrue(
             any("more than once" in v for v in violations), violations,
@@ -441,46 +412,9 @@ class TestReconciliationLawCheckerKnownBad(unittest.TestCase):
             reconciled_paths=["/root/Artist/Old"],
             plex_root="/root",
             plex_scan_targets=["/root"],
-            jellyfin_library_id="lib-id",
-            jellyfin_refresh_item_ids=[],
         )
         self.assertTrue(
             any("Plex library-root scan" in v for v in violations), violations,
-        )
-
-    def test_jellyfin_any_refresh_call_clause_trips(self) -> None:
-        """A targeted refresh call is JUST as much a violation as the
-        collection-wide fallback (issue #1203 item 2 review: Jellyfin
-        cannot reap a vanished item via ANY refresh call, targeted or not,
-        and a targeted one would empty the item's own child rows)."""
-        violations = _reconciliation_law_violations(
-            expected_paths=["/root/Artist/Old"],
-            reconciled_paths=["/root/Artist/Old"],
-            plex_root="/root",
-            plex_scan_targets=[],
-            jellyfin_library_id="lib-id",
-            jellyfin_refresh_item_ids=["exact-album"],
-        )
-        self.assertTrue(
-            any("called the Jellyfin refresh endpoint" in v
-                for v in violations),
-            violations,
-        )
-
-    def test_jellyfin_collection_wide_refresh_call_clause_trips(self) -> None:
-        violations = _reconciliation_law_violations(
-            expected_paths=["/root/Artist/Old"],
-            reconciled_paths=["/root/Artist/Old"],
-            plex_root="/root",
-            plex_scan_targets=[],
-            jellyfin_library_id="lib-id",
-            jellyfin_refresh_item_ids=["lib-id"],
-        )
-        self.assertTrue(
-            any("called the Jellyfin refresh endpoint" in v
-                and "escalated to the collection-wide fallback: True" in v
-                for v in violations),
-            violations,
         )
 
     def test_clean_world_produces_no_violations(self) -> None:
@@ -489,8 +423,6 @@ class TestReconciliationLawCheckerKnownBad(unittest.TestCase):
             reconciled_paths=["/root/Artist/Old"],
             plex_root="/root",
             plex_scan_targets=["/root/Artist"],
-            jellyfin_library_id="lib-id",
-            jellyfin_refresh_item_ids=[],
         )
         self.assertEqual(violations, [])
 

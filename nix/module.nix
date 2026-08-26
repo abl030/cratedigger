@@ -1131,7 +1131,6 @@
     [Jellyfin]
     url = ${cfg.notifiers.jellyfin.url}
     token_file = ${toString cfg.notifiers.jellyfin.tokenFile}
-    ${optionalString (cfg.notifiers.jellyfin.libraryId != null) "library_id = ${cfg.notifiers.jellyfin.libraryId}"}
     path_map = ${cfg.notifiers.jellyfin.pathMap}
 
     [Logging]
@@ -1833,16 +1832,6 @@ in {
         tokenFile = mkOption {
           type = types.nullOr types.path;
           default = null;
-        };
-        libraryId = mkOption {
-          type = types.nullOr types.nonEmptyStr;
-          default = null;
-          example = "music-library-item-id";
-          description = ''
-            Jellyfin music library item ID used only as the fallback target
-            when observing an album deletion. Post-import notifications use
-            the final album path and never refresh this collection item.
-          '';
         };
         pathMap = mkOption {
           type = types.str;

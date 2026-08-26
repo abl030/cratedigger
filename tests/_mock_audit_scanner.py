@@ -133,10 +133,10 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"lib\.util\.trigger_(plex|jellyfin)_scan$"),
     # NOTE: lib.library_delete_notifiers.notify_library_delete is
     # deliberately NOT allowlisted here (issue #1203 item 2 review). It grew
-    # real escalation-decision logic (Plex ancestor walk, Jellyfin identity
-    # lookup + allow_escalation-gated refresh-vs-report branching), well
-    # past code-quality.md's "thin wrapper... at most ten lines" leaf-seam
-    # allowlist bound.
+    # real escalation-decision logic (Plex ancestor walk with
+    # allow_escalation-gated root-scan refusal, Jellyfin identity lookup +
+    # report shaping), well past code-quality.md's "thin wrapper... at most
+    # ten lines" leaf-seam allowlist bound.
     # dispatch-level tests inject a recorder through
     # ``dispatch_import_core(media_server_notify_fn=...)`` instead — a
     # kwarg-DI seam, not a module patch — so this scanner never needs to see
