@@ -75,9 +75,20 @@ def positively_owned_files[FileT: CanonicalFolderFile](
     anything genuinely ours; guessing the other way deletes a stranger's
     album. Production always wires ``ctx.download_ownership``
     (``cratedigger.py`` builds it into the module context), so the
-    absent-writer arm is the same legacy/test shape
-    ``_write_ahead_transfer_ledger`` already skips — a context that never
-    ledgered an enqueue owns nothing to begin with.
+    absent-writer arm is unreachable there.
+
+    That arm still matters, as the complement of the write-ahead skip:
+    ``_write_ahead_transfer_ledger`` writes no row when the writer is
+    absent OR ``request_id`` is None OR there are no files, and every
+    one of those cases arrives here as an empty owned set anyway. A
+    context that never ledgered an enqueue owns nothing to destroy, so
+    the two halves agree without either testing the other's conditions.
+
+    One fresh DB handle per call, the same worker-safe shape
+    ``record_transfer_enqueue`` and ``confirm_transfer_enqueues`` already
+    use on these paths -- a deliberate cost, since a cancel is rare
+    relative to a poll and the alternative is threading the owner
+    thread's connection into worker threads that cannot hold it.
     """
     if not files:
         return []

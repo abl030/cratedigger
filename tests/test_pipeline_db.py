@@ -16864,9 +16864,14 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                     db.get_owned_transfer_keys() & set(asked),
                 )
 
-    def test_owned_transfer_keys_for_deduplicates_retried_rows(self):
+    def test_owned_transfer_keys_for_answers_membership_not_row_count(self):
         """One queue key retried across attempts holds many accepted
-        rows; the membership answer is still one key, not one per row."""
+        rows; the answer is a membership set, not one entry per row.
+
+        Pins the set-shaped contract callers rely on (they test `in`),
+        not the SQL's `DISTINCT` -- which is a wire-size optimisation the
+        set comprehension would make redundant either way.
+        """
         rid = self._seed_request()
         row = TransferLedgerRow(
             request_id=rid, username="p0", filename="a.flac")

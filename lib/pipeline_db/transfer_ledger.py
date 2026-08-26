@@ -180,6 +180,11 @@ class _TransferLedgerMixin(_PipelineDBBase):
         ``unnest(...)``, the same fixed-shape static SQL
         ``get_conflicting_transfer_request_ids`` uses -- never an
         f-string-assembled WHERE clause that grows with the input.
+
+        ``DISTINCT`` is a wire-size optimisation, not a correctness
+        requirement: one queue key retried across attempts holds many
+        accepted rows, and the set comprehension below would collapse
+        them regardless. Removing it changes no answer.
         """
         if not keys:
             return set()
