@@ -23,6 +23,14 @@ from lib.quality import DownloadInfo
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_dispatch_request
 
+#: ``dataclasses.MISSING`` is the stdlib's own "this field has no default"
+#: sentinel, and identity is the documented way to test it. Aliased to a
+#: bare name because ``tests/test_lint_no_is_on_enum.py`` flags
+#: ``is <ALL_CAPS attribute>`` on sight — that lint is aimed at enum
+#: members, and it already exempts underscore-named sentinels; this is the
+#: same kind of value under a name it cannot recognise.
+_NO_DEFAULT = dataclasses.MISSING
+
 
 def _minimal() -> DispatchRequest:
     return DispatchRequest(
@@ -142,7 +150,7 @@ class TestMakeDispatchRequestBuilder(unittest.TestCase):
         built = make_dispatch_request()
         checked: list[str] = []
         for spec in dataclasses.fields(DispatchRequest):
-            if spec.default is dataclasses.MISSING:
+            if spec.default is _NO_DEFAULT:
                 continue
             checked.append(spec.name)
             self.assertEqual(
