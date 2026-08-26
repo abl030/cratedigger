@@ -709,7 +709,6 @@ def beets_validate(harness_path: str, album_path: str, mb_release_id: str,
 
 # === Media server integrations ===
 
-import urllib.error
 import urllib.request
 
 # === Plex integration ===
@@ -1046,37 +1045,6 @@ def trigger_jellyfin_scan(
         logger.info("JELLYFIN: reported changed album %s", container_path)
     except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         logger.warning(f"JELLYFIN: media update failed: {e}")
-
-
-def request_jellyfin_refresh(
-    cfg: CratediggerConfig,
-    item_id: str | None,
-) -> tuple[int, str] | None:
-    """Submit a targeted Jellyfin refresh, with full refresh on target 404."""
-    if not cfg.jellyfin_url:
-        return None
-    token = cfg.resolved_jellyfin_token()
-    if not token:
-        return None
-
-    def _post(path: str) -> int:
-        req = urllib.request.Request(
-            f"{cfg.jellyfin_url}{path}",
-            method="POST",
-            headers={"X-Emby-Token": token},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
-            return resp.status
-
-    target = f"/Items/{item_id}/Refresh" if item_id else "/Library/Refresh"
-    try:
-        return _post(target), target
-    except urllib.error.HTTPError as exc:
-        if exc.code != 404 or target == "/Library/Refresh":
-            raise
-        fallback = "/Library/Refresh"
-        return _post(fallback), fallback
 
 
 # === Jellyfin DateCreated pin (read + edit) ===

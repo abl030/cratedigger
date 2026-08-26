@@ -761,10 +761,6 @@ pkgs.testers.nixosTest {
       # never invokes yt-dlp (empty queue), so this is exercised only at
       # the wrapper-render seam: we assert the flag lands in the ExecStart.
       youtubeIngest.sourceAddress = "10.0.2.15";
-      # Exercise the configured branch of Jellyfin's targeted refresh option.
-      # The Python config/notifier tests separately pin the null -> full-library
-      # fallback.
-      notifiers.jellyfin.libraryId = "music-library-item-id";
       # Render the real NixOS-managed timer while keeping it far from firing.
       # The deploy-hold VM regression below needs the actual /etc unit path.
       timer = {

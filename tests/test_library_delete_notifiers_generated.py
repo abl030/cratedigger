@@ -1,4 +1,4 @@
-"""Generated targeting and observation laws for library-delete notifiers."""
+"""Generated targeting and report laws for library-delete notifiers."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.config import CratediggerConfig
-from lib.library_delete_notifiers import notify_library_delete
+from lib.library_delete_notifiers import DeleteNotification, notify_library_delete
 from lib.util import JellyfinAlbumRef, PlexAlbumRef
 
 
@@ -35,7 +35,6 @@ def _notifier_config(
         "Jellyfin": {
             "url": "http://jellyfin" if jellyfin else "",
             "token": "jellyfin-token" if jellyfin else "",
-            "library_id": "library-root",
             "path_map": f"{root}:/jellyfin-music",
         },
     })
@@ -79,32 +78,51 @@ def assert_plex_delete_target_law(
         raise AssertionError("Plex target was not the nearest existing ancestor")
 
 
-def assert_jellyfin_delete_observation_law(
+def jellyfin_report_law_violations(
     *,
     initial_exact: bool,
-    observed_absent: bool,
     lookup_failed: bool,
-    refresh_failed: bool,
     outcome_status: str,
-    refresh_target: str | None,
+    outcome_target: str,
+    outcome_detail: str,
     raised: bool,
-) -> None:
-    """Exact targeting and observed absence are required for completion proof."""
+) -> list[str]:
+    """Every way an observed Jellyfin report outcome breaks the law (issue
+    #1221 item 1: the Jellyfin leg is detect-and-report for EVERY caller).
+    Accumulating — every clause is evaluated regardless of earlier results,
+    so ordering cannot mask one clause behind another (code-quality.md "New
+    checkers prefer an accumulating list[str]"). The retired law's
+    refresh-target and observed-absence clauses are gone because their
+    worlds are impossible by construction: the refresh machinery no longer
+    exists to record against."""
+    violations: list[str] = []
+
     if raised:
-        raise AssertionError("notifier failure escaped the best-effort boundary")
-    expected_target = "exact-album" if initial_exact else "library-root"
-    if refresh_target != expected_target:
-        raise AssertionError("Jellyfin refresh used the wrong target")
-    should_submit = (
-        initial_exact
-        and observed_absent
-        and not lookup_failed
-        and not refresh_failed
-    )
-    if (outcome_status == "submitted") != should_submit:
-        raise AssertionError("Jellyfin status did not match observed absence")
-    if (lookup_failed or refresh_failed) and outcome_status != "warning":
-        raise AssertionError("Jellyfin failure was not surfaced as a warning")
+        violations.append("notifier failure escaped the best-effort boundary")
+    if outcome_status == "submitted":
+        violations.append("the Jellyfin leg claimed a submission")
+    if lookup_failed:
+        if outcome_status != "warning":
+            violations.append("a lookup failure was not surfaced as a warning")
+        if "identity lookup failed" not in outcome_detail:
+            violations.append("a lookup failure was not named in the detail")
+        if "no Jellyfin item found" in outcome_detail:
+            violations.append(
+                "a lookup failure claimed a not-found it cannot know")
+    elif initial_exact:
+        if outcome_status != "warning":
+            violations.append(
+                "a found item was not reported as a not-refreshed warning")
+        if outcome_target != "exact-album":
+            violations.append("the found item's id was not the outcome target")
+        if "NOT refreshed" not in outcome_detail:
+            violations.append(
+                "the found item's detail did not state it was not refreshed")
+    else:
+        if outcome_status != "skipped":
+            violations.append("a clean not-found was not reported as skipped")
+
+    return violations
 
 
 SAFE_COMPONENTS = st.text(
@@ -177,108 +195,73 @@ class TestGeneratedDeleteNotifierLaws(unittest.TestCase):
                 self.assertEqual(submitted_target, expected)
                 self.assertEqual(plex.status, "submitted")
 
-    @example(mode="exact_then_absent", http_status=204)
-    @example(mode="exact_stale", http_status=200)
-    @example(mode="initial_lookup_error", http_status=202)
-    @example(mode="exact_refresh_error", http_status=204)
+    @example(mode="exact_found")
+    @example(mode="initial_absent")
+    @example(mode="initial_lookup_error")
     @given(
         mode=st.sampled_from((
             "initial_absent",
-            "exact_then_absent",
-            "exact_stale",
+            "exact_found",
             "initial_lookup_error",
-            "post_lookup_error",
-            "exact_refresh_error",
-            "fallback_refresh_error",
         )),
-        http_status=st.integers(min_value=200, max_value=299),
     )
-    def test_jellyfin_requires_observed_absence_and_contains_failures(
+    def test_jellyfin_report_law_holds_and_is_lane_independent(
         self,
         mode: str,
-        http_status: int,
     ) -> None:
+        """The report law holds for every world, and the Jellyfin outcome is
+        IDENTICAL across the two calling lanes (``allow_escalation``
+        True/False) — the flag governs only the Plex escalation (issue
+        #1221 item 1)."""
         with tempfile.TemporaryDirectory() as raw:
             former = Path(raw) / "Artist" / "Deleted Album"
             exact = JellyfinAlbumRef("exact-album", "date")
-            lookup_count = 0
-            refreshes: list[str | None] = []
 
             def find(_cfg: CratediggerConfig, _path: str):
-                nonlocal lookup_count
-                lookup_count += 1
                 if mode == "initial_lookup_error":
                     raise RuntimeError("generated initial lookup failure")
-                if mode == "initial_absent" or mode == "fallback_refresh_error":
-                    return None
-                if lookup_count == 1:
-                    return exact
-                if mode == "exact_then_absent":
-                    return None
-                if mode == "post_lookup_error":
-                    raise RuntimeError("generated post-refresh lookup failure")
-                return exact
+                return exact if mode == "exact_found" else None
 
-            def refresh(_cfg: CratediggerConfig, item_id: str | None):
-                refreshes.append(item_id)
-                if mode in {"exact_refresh_error", "fallback_refresh_error"}:
-                    raise RuntimeError("generated refresh failure")
-                return http_status, f"/Items/{item_id or 'library'}/Refresh"
-
+            per_lane: list[DeleteNotification] = []
             previous_disable = logging.root.manager.disable
             try:
                 logging.disable(logging.CRITICAL)
-                outcomes = notify_library_delete(
-                    _notifier_config(raw, plex=False, jellyfin=True),
-                    str(former),
-                    jellyfin_find_fn=find,
-                    jellyfin_refresh_fn=refresh,
-                )
-            except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-                assert_jellyfin_delete_observation_law(
-                    initial_exact=mode not in {
-                        "initial_absent", "initial_lookup_error",
-                        "fallback_refresh_error",
-                    },
-                    observed_absent=mode == "exact_then_absent",
-                    lookup_failed=mode in {
-                        "initial_lookup_error", "post_lookup_error",
-                    },
-                    refresh_failed=mode in {
-                        "exact_refresh_error", "fallback_refresh_error",
-                    },
-                    outcome_status="raised",
-                    refresh_target=refreshes[0] if refreshes else None,
-                    raised=True,
-                )
-                raise AssertionError("unreachable")
+                for allow_escalation in (True, False):
+                    outcomes = notify_library_delete(
+                        _notifier_config(raw, plex=False, jellyfin=True),
+                        str(former),
+                        allow_escalation=allow_escalation,
+                        jellyfin_find_fn=find,
+                    )
+                    per_lane.append(next(
+                        item for item in outcomes
+                        if item.provider == "jellyfin"
+                    ))
+            except Exception as exc:
+                raise AssertionError(
+                    "notifier failure escaped the best-effort boundary: "
+                    f"{type(exc).__name__}: {exc}") from exc
             finally:
                 logging.disable(previous_disable)
 
-            jellyfin = next(
-                item for item in outcomes if item.provider == "jellyfin"
-            )
-            initial_exact = mode not in {
-                "initial_absent", "initial_lookup_error",
-                "fallback_refresh_error",
-            }
-            lookup_failed = mode in {
-                "initial_lookup_error", "post_lookup_error",
-            }
-            refresh_failed = mode in {
-                "exact_refresh_error", "fallback_refresh_error",
-            }
-            assert_jellyfin_delete_observation_law(
-                initial_exact=initial_exact,
-                observed_absent=mode == "exact_then_absent",
-                lookup_failed=lookup_failed,
-                refresh_failed=refresh_failed,
-                outcome_status=jellyfin.status,
-                refresh_target=refreshes[0] if refreshes else None,
-                raised=False,
-            )
-            if lookup_failed or refresh_failed:
-                self.assertIn("RuntimeError", jellyfin.detail)
+            violations: list[str] = []
+            for jellyfin in per_lane:
+                violations.extend(jellyfin_report_law_violations(
+                    initial_exact=mode == "exact_found",
+                    lookup_failed=mode == "initial_lookup_error",
+                    outcome_status=jellyfin.status,
+                    outcome_target=jellyfin.target,
+                    outcome_detail=jellyfin.detail,
+                    raised=False,
+                ))
+            if per_lane[0] != per_lane[1]:
+                violations.append(
+                    "the Jellyfin outcome depended on allow_escalation: "
+                    f"{per_lane[0]!r} != {per_lane[1]!r}")
+            if violations:
+                raise AssertionError(f"{'; '.join(violations)} (mode={mode})")
+            if mode == "initial_lookup_error":
+                self.assertIn("RuntimeError", per_lane[0].detail)
 
 
 class TestDeleteNotifierCheckerKnownBad(unittest.TestCase):
@@ -303,52 +286,107 @@ class TestDeleteNotifierCheckerKnownBad(unittest.TestCase):
                         submitted_target=target,
                     )
 
-    def test_jellyfin_checker_rejects_target_status_and_boundary_mutants(
+    def test_jellyfin_checker_trips_each_clause_on_its_minimal_world(
         self,
     ) -> None:
-        mutants = {
-            "wrong_exact_target": {
-                "initial_exact": True, "observed_absent": True,
-                "lookup_failed": False, "refresh_failed": False,
-                "outcome_status": "submitted", "refresh_target": "library-root",
+        """Per-clause proof Q1 (code-quality.md): each clause trips on the
+        minimal world that makes ITS condition true while every other
+        clause stays clean, and the asserted message is that clause's own."""
+        clean_found = {
+            "initial_exact": True, "lookup_failed": False,
+            "outcome_status": "warning", "outcome_target": "exact-album",
+            "outcome_detail": "exact album item exact-album ... NOT refreshed",
+            "raised": False,
+        }
+        clause_worlds = {
+            "notifier failure escaped the best-effort boundary": {
+                **clean_found, "raised": True,
+            },
+            "the Jellyfin leg claimed a submission": {
+                **clean_found, "outcome_status": "submitted",
+            },
+            "a lookup failure was not surfaced as a warning": {
+                "initial_exact": False, "lookup_failed": True,
+                "outcome_status": "skipped", "outcome_target": "",
+                "outcome_detail": "identity lookup failed: RuntimeError: x",
                 "raised": False,
             },
-            "stale_2xx_submitted": {
-                "initial_exact": True, "observed_absent": False,
-                "lookup_failed": False, "refresh_failed": False,
-                "outcome_status": "submitted", "refresh_target": "exact-album",
+            "a lookup failure was not named in the detail": {
+                "initial_exact": False, "lookup_failed": True,
+                "outcome_status": "warning", "outcome_target": "",
+                "outcome_detail": "something else entirely",
                 "raised": False,
             },
-            "lookup_failure_hidden": {
-                "initial_exact": False, "observed_absent": False,
-                "lookup_failed": True, "refresh_failed": False,
-                "outcome_status": "submitted", "refresh_target": "library-root",
+            "a lookup failure claimed a not-found it cannot know": {
+                "initial_exact": False, "lookup_failed": True,
+                "outcome_status": "warning", "outcome_target": "",
+                "outcome_detail": (
+                    "no Jellyfin item found by former path; "
+                    "identity lookup failed: RuntimeError: x"),
                 "raised": False,
             },
-            "refresh_failure_hidden": {
-                "initial_exact": True, "observed_absent": False,
-                "lookup_failed": False, "refresh_failed": True,
-                "outcome_status": "submitted", "refresh_target": "exact-album",
-                "raised": False,
+            "a found item was not reported as a not-refreshed warning": {
+                **clean_found, "outcome_status": "skipped",
             },
-            "exception_escaped": {
-                "initial_exact": True, "observed_absent": False,
-                "lookup_failed": False, "refresh_failed": True,
-                "outcome_status": "raised", "refresh_target": "exact-album",
-                "raised": True,
+            "the found item's id was not the outcome target": {
+                **clean_found, "outcome_target": "library-root",
+            },
+            "the found item's detail did not state it was not refreshed": {
+                **clean_found,
+                "outcome_detail": "exact album item exact-album refreshed",
+            },
+            "a clean not-found was not reported as skipped": {
+                "initial_exact": False, "lookup_failed": False,
+                "outcome_status": "warning", "outcome_target": "",
+                "outcome_detail": "no Jellyfin item found by former path",
+                "raised": False,
             },
         }
-        for name, world in mutants.items():
-            with self.subTest(mutant=name), self.assertRaises(AssertionError):
-                assert_jellyfin_delete_observation_law(
+        for message, world in clause_worlds.items():
+            with self.subTest(clause=message):
+                violations = jellyfin_report_law_violations(
                     initial_exact=bool(world["initial_exact"]),
-                    observed_absent=bool(world["observed_absent"]),
                     lookup_failed=bool(world["lookup_failed"]),
-                    refresh_failed=bool(world["refresh_failed"]),
                     outcome_status=str(world["outcome_status"]),
-                    refresh_target=str(world["refresh_target"]),
+                    outcome_target=str(world["outcome_target"]),
+                    outcome_detail=str(world["outcome_detail"]),
                     raised=bool(world["raised"]),
                 )
+                self.assertTrue(
+                    any(message in v for v in violations), violations)
+
+    def test_jellyfin_checker_accepts_clean_worlds(self) -> None:
+        for name, world in {
+            "found": {
+                "initial_exact": True, "lookup_failed": False,
+                "outcome_status": "warning", "outcome_target": "exact-album",
+                "outcome_detail": "item exact-album ... NOT refreshed",
+                "raised": False,
+            },
+            "absent": {
+                "initial_exact": False, "lookup_failed": False,
+                "outcome_status": "skipped", "outcome_target": "",
+                "outcome_detail": "no Jellyfin item found by former path",
+                "raised": False,
+            },
+            "lookup_failed": {
+                "initial_exact": False, "lookup_failed": True,
+                "outcome_status": "warning", "outcome_target": "",
+                "outcome_detail": "identity lookup failed: RuntimeError: x",
+                "raised": False,
+            },
+        }.items():
+            with self.subTest(world=name):
+                self.assertEqual(
+                    jellyfin_report_law_violations(
+                        initial_exact=bool(world["initial_exact"]),
+                        lookup_failed=bool(world["lookup_failed"]),
+                        outcome_status=str(world["outcome_status"]),
+                        outcome_target=str(world["outcome_target"]),
+                        outcome_detail=str(world["outcome_detail"]),
+                        raised=bool(world["raised"]),
+                    ),
+                    [])
 
 
 if __name__ == "__main__":

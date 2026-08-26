@@ -2695,16 +2695,13 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
 
 
 class TestJellyfinNotifierConfigContract(unittest.TestCase):
-    def test_library_id_is_nullable_and_only_rendered_when_configured(self) -> None:
+    def test_library_id_option_stays_deleted(self) -> None:
+        """Issue #1221 item 1: the refresh machinery is gone, and
+        ``libraryId`` (its collection-wide fallback target, the option's
+        only consumer) went with it."""
         text = _nix_source(MODULE_NIX)
-        jellyfin_options = text[text.index("jellyfin = {"):]
-        self.assertIn("libraryId = mkOption {", jellyfin_options)
-        self.assertIn("type = types.nullOr types.nonEmptyStr;", jellyfin_options)
-        self.assertIn("default = null;", jellyfin_options)
-        self.assertIn(
-            '${optionalString (cfg.notifiers.jellyfin.libraryId != null) "library_id = ${cfg.notifiers.jellyfin.libraryId}"}',
-            text,
-        )
+        self.assertNotIn("libraryId", text)
+        self.assertNotIn("library_id", text)
 
 
 class TestCreateLocallyContract(unittest.TestCase):
