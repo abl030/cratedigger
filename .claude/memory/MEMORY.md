@@ -33,7 +33,7 @@
 - [Issue #430 FakePipelineDB migration done](project_430_fakedb_migration_done.md) — 2026-06-12; reuse the ratchet-first + real-PG parity-gate patterns
 - [Issue #445 beets-mock migration done](project_445_beets_mock_migration_done.md) — 2026-06-12; ratchet empty, named DB methods deployed, fakes package
 - [Issue #445 COMPLETE — dual-load killed](project_445_complete_dual_load_killed.md) — gdb live-probe technique, AST audit > regex ratchet, script-mode sys.path[0] hazard
-- [discogs-api deploy + DB access](project_discogs_api_deploy_and_db_access.md) — deploys via Forgejo/fleet-update; nspawn DB at 10.20.0.13, pw in /run/secrets/discogs-pgpass
+- [discogs-api deploy + DB access](project_discogs_api_deploy_and_db_access.md) — runs on discogs LXC 192.168.1.44; deploy = push-deploy from doc1 (no fleet-update); DB at 10.20.0.13
 - [Pipeline DB raw SQL writes](project_pipeline_db_direct_psql_writes.md) — query is read-only by default; raw writes need `--write --confirm WRITE -` on doc2
 - [#184 sidecar producer](project_184_sidecar_producer.md) — 2026-06-18: verified-lossless sidecar producer+backfill shipped; consumer half deferred
 - [#146 slskd events rollout](project_146_slskd_events_rollout.md) — 2026-07-02 COMPLETE: event stamp is the only file-location source; msgspec DecodeError-vs-ValidationError trap
