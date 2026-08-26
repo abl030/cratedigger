@@ -131,8 +131,8 @@ against one of the live orphans this issue describes deleted 17 `Audio` rows
 outright, while the album item itself persisted throughout — consistent with
 deletion being computed one level up, at the parent.
 
-So the reconciler's Jellyfin outcome is one of two shapes, and both are
-final — neither is a "try again later":
+So the reconciler's Jellyfin outcome is one of three shapes, and all are
+final — none is a "try again later":
 
 - The item is found by its former path: a `warning` `DeleteNotification`
   naming the exact item id and former path, stating it was found but NOT

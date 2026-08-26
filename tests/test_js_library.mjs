@@ -145,7 +145,11 @@ console.log('delete result UI never presents incomplete cleanup as success');
     notifications: [{
       provider: 'jellyfin',
       status: 'warning',
-      detail: 'exact album item jf-7 remains observable after refresh submission',
+      // The producible detail shape since #1221 item 1 (see
+      // lib/library_delete_notifiers.py's found-item branch) — the old
+      // 'remains observable after refresh submission' trigger has no
+      // producer any more.
+      detail: "exact album item jf-7 found at former path '/music/A/B' but NOT refreshed — a targeted refresh cannot reap a vanished item; Jellyfin's own next library validation reaps it",
     }],
   });
   assertEqual(partial.completed, true, 'PG partial acknowledges album is already gone');
@@ -153,7 +157,7 @@ console.log('delete result UI never presents incomplete cleanup as success');
   assertContains(partial.message, 'pipeline request #42 remains', 'PG residual is actionable');
   assertContains(partial.message, '1 unknown path preserved', 'PG partial keeps preserved-path warning visible');
   assertContains(partial.message, '1 media notification warning', 'PG partial keeps media warning count visible');
-  assertContains(partial.message, 'jellyfin: exact album item jf-7 remains observable', 'PG partial keeps media warning detail visible');
+  assertContains(partial.message, 'jellyfin: exact album item jf-7 found at former path', 'PG partial keeps media warning detail visible');
 }
 
 console.log('delete result UI surfaces unknown content and notifier warnings');
@@ -164,14 +168,16 @@ console.log('delete result UI surfaces unknown content and notifier warnings');
     preserved_paths: ['/music/A/B/booklet.pdf'],
     notifications: [{
       provider: 'jellyfin', status: 'warning',
-      detail: 'exact album item jf-7 remains observable',
+      // Producible shape since #1221 item 1 (found-item branch of
+      // lib/library_delete_notifiers.py).
+      detail: "exact album item jf-7 found at former path '/music/A/B' but NOT refreshed — a targeted refresh cannot reap a vanished item; Jellyfin's own next library validation reaps it",
     }],
   });
   assertEqual(warning.completed, true, 'verified delete still completes');
   assertEqual(warning.error, true, 'warning result gets warning styling');
   assertContains(warning.message, '1 unknown path preserved', 'unknown content count visible');
   assertContains(warning.message, '1 media notification warning', 'notifier warning count visible');
-  assertContains(warning.message, 'jellyfin: exact album item jf-7 remains observable', 'notifier warning detail visible');
+  assertContains(warning.message, 'jellyfin: exact album item jf-7 found at former path', 'notifier warning detail visible');
 }
 
 console.log('Bad Rip cleanup partial is never described as success');

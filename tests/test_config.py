@@ -814,6 +814,7 @@ class TestSecretFileFields(unittest.TestCase):
         self.assertEqual(cfg.plex_token_file, "")
         self.assertEqual(cfg.jellyfin_token_file, "")
 
+
 class TestResolvedSecrets(unittest.TestCase):
     """Resolver methods prefer *_file path over the legacy plaintext field.
 

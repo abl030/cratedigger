@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import configparser
+import io
 import logging
 import tempfile
 import unittest
+import urllib.error
+from collections.abc import Callable
+from email.message import Message
 from pathlib import Path
+from typing import NamedTuple
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -15,6 +20,65 @@ import tests._hypothesis_profiles  # noqa: F401
 from lib.config import CratediggerConfig
 from lib.library_delete_notifiers import DeleteNotification, notify_library_delete
 from lib.util import JellyfinAlbumRef, PlexAlbumRef
+from tests.finite_domain import finite_generated_domain
+
+
+class ReportWorld(NamedTuple):
+    """One world of the Jellyfin report law's proved-finite domain."""
+
+    mode: str
+    lookup_failure: str | None
+    plex_configured: bool
+
+
+_REPORT_MODES = ("initial_absent", "exact_found", "initial_lookup_error")
+
+# test-fidelity.md Rule B: the real adapter (``jellyfin_find_album_by_path``
+# via ``_jellyfin_get_json``) propagates ``urllib.error`` shapes on the
+# documented failure modes; a synthetic RuntimeError alone would hide a
+# divergence keyed on exception type.
+_LOOKUP_FAILURES: dict[str, Callable[[], Exception]] = {
+    "runtime": lambda: RuntimeError("generated initial lookup failure"),
+    "http_404": lambda: urllib.error.HTTPError(
+        "http://jellyfin/Items", 404, "Not Found", Message(), io.BytesIO()),
+    "url_transport": lambda: urllib.error.URLError("connection refused"),
+}
+_LOOKUP_FAILURE_TYPE_NAMES = {
+    key: type(make()).__name__ for key, make in _LOOKUP_FAILURES.items()
+}
+
+REPORT_WORLDS: tuple[ReportWorld, ...] = tuple(
+    ReportWorld(mode, failure, plex_configured)
+    for mode in _REPORT_MODES
+    for failure in (
+        tuple(_LOOKUP_FAILURES) if mode == "initial_lookup_error" else (None,)
+    )
+    for plex_configured in (False, True)
+)
+REPORT_WORLD_COUNT = 10
+
+
+def verify_report_world_domain() -> None:
+    """Independent proof of the report domain's cardinality and canonicity:
+    2 non-failure modes × 2 plex axes + 1 failure mode × 3 exception kinds
+    × 2 plex axes = 10 distinct canonical worlds."""
+    expected = (2 * 2) + (1 * len(_LOOKUP_FAILURES) * 2)
+    if expected != REPORT_WORLD_COUNT:
+        raise AssertionError(
+            f"report-world cardinality drifted: {expected} != "
+            f"{REPORT_WORLD_COUNT}")
+    if len(REPORT_WORLDS) != REPORT_WORLD_COUNT:
+        raise AssertionError(
+            f"enumerated report worlds ({len(REPORT_WORLDS)}) != declared "
+            f"cardinality ({REPORT_WORLD_COUNT})")
+    if len(set(REPORT_WORLDS)) != len(REPORT_WORLDS):
+        raise AssertionError("report worlds are not canonically unique")
+    for world in REPORT_WORLDS:
+        if (world.lookup_failure is not None) != (
+            world.mode == "initial_lookup_error"
+        ):
+            raise AssertionError(
+                f"non-canonical world (failure kind vs mode): {world!r}")
 
 
 def _notifier_config(
@@ -195,56 +259,82 @@ class TestGeneratedDeleteNotifierLaws(unittest.TestCase):
                 self.assertEqual(submitted_target, expected)
                 self.assertEqual(plex.status, "submitted")
 
-    @example(mode="exact_found")
-    @example(mode="initial_absent")
-    @example(mode="initial_lookup_error")
-    @given(
-        mode=st.sampled_from((
-            "initial_absent",
-            "exact_found",
-            "initial_lookup_error",
-        )),
+    @finite_generated_domain(
+        cardinality=REPORT_WORLD_COUNT,
+        verify=verify_report_world_domain,
     )
+    @given(world=st.sampled_from(REPORT_WORLDS))
+    @example(world=ReportWorld("exact_found", None, False))
+    @example(world=ReportWorld("initial_absent", None, True))
+    @example(world=ReportWorld("initial_lookup_error", "runtime", False))
+    @example(world=ReportWorld("initial_lookup_error", "http_404", True))
     def test_jellyfin_report_law_holds_and_is_lane_independent(
         self,
-        mode: str,
+        world: ReportWorld,
     ) -> None:
         """The report law holds for every world, and the Jellyfin outcome is
         IDENTICAL across the two calling lanes (``allow_escalation``
         True/False) — the flag governs only the Plex escalation (issue
-        #1221 item 1)."""
+        #1221 item 1). ``plex_configured`` worlds run the real Plex leg
+        alongside (fake HTTP leaves) so cross-leg contamination of the
+        Jellyfin outcome is observable; lookup failures cover the real
+        adapter's exception contract (test-fidelity.md Rule B:
+        ``jellyfin_find_album_by_path`` propagates ``urllib.error``
+        shapes), not only a synthetic ``RuntimeError``."""
+        mode = world.mode
         with tempfile.TemporaryDirectory() as raw:
             former = Path(raw) / "Artist" / "Deleted Album"
             exact = JellyfinAlbumRef("exact-album", "date")
 
             def find(_cfg: CratediggerConfig, _path: str):
                 if mode == "initial_lookup_error":
-                    raise RuntimeError("generated initial lookup failure")
+                    assert world.lookup_failure is not None
+                    raise _LOOKUP_FAILURES[world.lookup_failure]()
                 return exact if mode == "exact_found" else None
 
+            def run_lane(allow_escalation: bool) -> tuple[DeleteNotification, ...]:
+                cfg = _notifier_config(
+                    raw, plex=world.plex_configured, jellyfin=True)
+                if world.plex_configured:
+                    return notify_library_delete(
+                        cfg, str(former),
+                        allow_escalation=allow_escalation,
+                        jellyfin_find_fn=find,
+                        plex_find_fn=lambda _cfg, _path: None,
+                        plex_scan_fn=lambda _cfg, path: (200, path))
+                return notify_library_delete(
+                    cfg, str(former),
+                    allow_escalation=allow_escalation,
+                    jellyfin_find_fn=find)
+
             per_lane: list[DeleteNotification] = []
+            violations: list[str] = []
             previous_disable = logging.root.manager.disable
             try:
                 logging.disable(logging.CRITICAL)
                 for allow_escalation in (True, False):
-                    outcomes = notify_library_delete(
-                        _notifier_config(raw, plex=False, jellyfin=True),
-                        str(former),
-                        allow_escalation=allow_escalation,
-                        jellyfin_find_fn=find,
-                    )
+                    outcomes = run_lane(allow_escalation)
                     per_lane.append(next(
                         item for item in outcomes
                         if item.provider == "jellyfin"
                     ))
             except Exception as exc:
+                # The raised clause is REACHABLE here: a mutant letting the
+                # lookup exception escape the best-effort boundary lands in
+                # this arm and must be named by the checker itself.
+                violations = jellyfin_report_law_violations(
+                    initial_exact=mode == "exact_found",
+                    lookup_failed=mode == "initial_lookup_error",
+                    outcome_status="raised",
+                    outcome_target="",
+                    outcome_detail=f"{type(exc).__name__}: {exc}",
+                    raised=True,
+                )
                 raise AssertionError(
-                    "notifier failure escaped the best-effort boundary: "
-                    f"{type(exc).__name__}: {exc}") from exc
+                    f"{'; '.join(violations)} (world={world!r})") from exc
             finally:
                 logging.disable(previous_disable)
 
-            violations: list[str] = []
             for jellyfin in per_lane:
                 violations.extend(jellyfin_report_law_violations(
                     initial_exact=mode == "exact_found",
@@ -259,9 +349,12 @@ class TestGeneratedDeleteNotifierLaws(unittest.TestCase):
                     "the Jellyfin outcome depended on allow_escalation: "
                     f"{per_lane[0]!r} != {per_lane[1]!r}")
             if violations:
-                raise AssertionError(f"{'; '.join(violations)} (mode={mode})")
+                raise AssertionError(f"{'; '.join(violations)} (world={world!r})")
             if mode == "initial_lookup_error":
-                self.assertIn("RuntimeError", per_lane[0].detail)
+                assert world.lookup_failure is not None
+                self.assertIn(
+                    _LOOKUP_FAILURE_TYPE_NAMES[world.lookup_failure],
+                    per_lane[0].detail)
 
 
 class TestDeleteNotifierCheckerKnownBad(unittest.TestCase):

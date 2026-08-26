@@ -4813,12 +4813,12 @@ class TestVanishedPathReconciliation(unittest.TestCase):
     triggers notifiers, every album directory Beets previously held for
     that request's release identity, and no longer holds, is reconciled
     with both media servers exactly once — never before the Jellyfin pin
-    capture has read those paths, never by escalating to a Plex
-    library-root scan, and never by calling the Jellyfin refresh endpoint
-    at all (a source-level finding against Jellyfin 10.11: a targeted
-    refresh cannot reap a vanished item and would instead delete its child
-    rows — see ``lib.library_delete_notifiers.notify_library_delete``'s own
-    docstring).
+    capture has read those paths, and never by escalating to a Plex
+    library-root scan. ("Never by calling the Jellyfin refresh endpoint"
+    is impossible by construction since issue #1221 item 1 deleted the
+    refresh machinery entirely — see
+    ``lib.library_delete_notifiers.notify_library_delete``'s own
+    docstring.)
 
     The Beets before/after directory-set diff
     (``lib.beets_db.BeetsDB.get_current_album_directories``, composed via

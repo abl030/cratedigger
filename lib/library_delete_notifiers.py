@@ -155,14 +155,15 @@ def notify_library_delete(
                 "former path"))
         else:
             if ref is not None:
+                # This detail is also the web delete-toast text — keep it
+                # short; the full rationale lives in this function's
+                # docstring and docs/jellyfin-primer.md.
                 outcomes.append(DeleteNotification(
                     "jellyfin", "warning",
                     f"exact album item {ref.item_id} found at former path "
-                    f"{former_album_path!r} but NOT refreshed — Jellyfin "
-                    "cannot reap an item whose directory vanished via a "
-                    "targeted refresh, and attempting one would delete its "
-                    "child rows instead; Jellyfin's own next library "
-                    "validation reaps it",
+                    f"{former_album_path!r} but NOT refreshed — a targeted "
+                    "refresh cannot reap a vanished item; Jellyfin's own "
+                    "next library validation reaps it",
                     ref.item_id))
             else:
                 outcomes.append(DeleteNotification(

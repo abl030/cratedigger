@@ -60,11 +60,13 @@ class TestDeleteNotifierTargeting(unittest.TestCase):
         """Regression pin for issue #1221 item 1: the destructive-delete
         caller (``allow_escalation=True``, the default) reports a found
         Jellyfin item exactly like the post-import lane — it never
-        refreshes it. The retired find → refresh → re-observe behavior
-        reported ``submitted`` after observing absence; this pin fails on
-        that defect (a ``submitted`` status, absence-observation copy) and
-        passes on the fix (a ``warning`` naming the item as NOT
-        refreshed)."""
+        refreshes it. The retired find → refresh → re-observe behavior can
+        never produce this report shape: it refreshed and reported
+        ``submitted``/``warning`` keyed on absence observation or the
+        refresh outcome, so under it this pin goes RED (verified against
+        the pre-change code: with no refresh fake supplied, the default
+        refresh attempt fails and yields a warning with an empty target,
+        so the exact-item target assertion fails first)."""
         with tempfile.TemporaryDirectory() as raw:
             former = Path(raw) / "Artist" / "Deleted Album"
             cfg = _cfg(raw)
