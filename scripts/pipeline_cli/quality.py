@@ -16,27 +16,17 @@ from lib.json_narrow import json_dict
 from scripts.pipeline_cli._format import _fmt_br
 
 if TYPE_CHECKING:
-    # Both ``cmd_quality`` and ``cmd_repair_spectral`` call
-    # ``lib.dispatch.load_quality_gate_state(db=...)``, which is typed
-    # against the concrete ``PipelineDB`` class (not a Protocol) --
-    # unlike the narrow-Protocol pattern used elsewhere in this package
-    # (issue #784, #409), a Protocol here would NOT satisfy that
-    # downstream nominal-class parameter. ``FakePipelineDB`` does not
-    # subclass ``PipelineDB``, so every test call site already wraps its
-    # fake with ``cast(Any, db)`` (see ``tests/test_pipeline_cli.py``'s
-    # ``TestCmdQuality``/``TestCmdRepairSpectral``), which is exactly
-    # what makes this concrete annotation safe to add here.
-    from lib.pipeline_db import PipelineDB
+    from contextlib import AbstractContextManager
+
     from lib.quality import AlbumQualityEvidence, QualityRankConfig
 
 
 class _LiveReplayDB(Protocol):
     """The three reads the live-candidate replay performs.
 
-    The #409 narrow-Protocol pattern — unlike the cmd-level functions above
-    (whose concrete ``PipelineDB`` annotation is forced by
-    ``load_quality_gate_state``'s nominal parameter), this helper touches
-    nothing else, so tests drive it with a ``FakePipelineDB`` directly.
+    The #409 narrow-Protocol pattern: this helper touches nothing beyond
+    these three reads, and saying so is worth more than reusing the wider
+    command-level port below that happens to cover them.
     """
 
     def get_latest_download_log_candidate_evidence_id(
@@ -50,6 +40,56 @@ class _LiveReplayDB(Protocol):
     def get_request_current_evidence_id(
         self, request_id: int,
     ) -> int | None: ...
+
+
+class _RepairCursor(Protocol):
+    """The one read ``repair-spectral`` performs on a raw-SQL cursor."""
+
+    def fetchall(self) -> list[dict[str, object]]: ...
+
+
+class _QualityCommandDB(transitions.TransitionsDB, Protocol):
+    """The exact pipeline-DB surface these two commands use.
+
+    Both were annotated with the concrete ``PipelineDB`` before issue
+    #1277, on the stated grounds that ``load_quality_gate_state`` took a
+    nominal class a Protocol could not satisfy. That reason is gone — that
+    loader now takes its own three-read ``QualityGateStateDB`` port — so
+    these commands state their real surface instead: the transition engine
+    (``finalize_request``), those linked-evidence reads, the IMPORT
+    advisory lock ``repair-spectral`` serialises on, and the two raw
+    request writes it performs. ``PipelineDB`` and ``FakePipelineDB`` both
+    satisfy it structurally, so tests drive these commands with a fake and
+    no ``cast``.
+
+    ``_execute`` is declared underscore-and-all — cross-module private use
+    is the house convention (PR #775), and ``repair-spectral``'s DELETE
+    genuinely has no typed writer to go through.
+    """
+
+    def get_latest_download_log_candidate_evidence_id(
+        self, request_id: int,
+    ) -> int | None: ...
+
+    def load_album_quality_evidence_by_id(
+        self, evidence_id: int | None,
+    ) -> AlbumQualityEvidence | None: ...
+
+    def get_request_current_evidence_id(
+        self, request_id: int,
+    ) -> int | None: ...
+
+    def advisory_lock(
+        self, namespace: int, key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def update_request_fields(
+        self, request_id: int, **extra: object,
+    ) -> bool: ...
+
+    def _execute(
+        self, sql: str, params: tuple[object, ...] = (),
+    ) -> _RepairCursor: ...
 
 
 class _ScenarioParams(TypedDict, total=False):
@@ -413,7 +453,7 @@ def _print_live_candidate_replay(
         _print_proof_gate_verdict("HAVE", current)
 
 
-def cmd_quality(db: PipelineDB, args: argparse.Namespace) -> None:
+def cmd_quality(db: _QualityCommandDB, args: argparse.Namespace) -> None:
     """Show quality state and simulate decisions for common download scenarios."""
     from lib.dispatch import load_quality_gate_state
     from lib.quality import (
@@ -769,7 +809,7 @@ def cmd_quality(db: PipelineDB, args: argparse.Namespace) -> None:
 
 
 def cmd_repair_spectral(
-    db: PipelineDB, args: argparse.Namespace,
+    db: _QualityCommandDB, args: argparse.Namespace,
 ) -> int | None:
     """Find and repair albums stuck by stale current_spectral_bitrate.
 
@@ -806,6 +846,11 @@ def cmd_repair_spectral(
     repaired = 0
     for req in candidates:
         rid = req["id"]
+        # Raw-SQL boundary: the cursor hands back untyped column values, and
+        # every lock/transition/write below keys on this id being the int
+        # the column really is. Assert it here rather than widening the
+        # cursor's row type back to ``Any``.
+        assert isinstance(rid, int), f"album_requests.id is not an int: {rid!r}"
         with db.advisory_lock(
             ADVISORY_LOCK_NAMESPACE_IMPORT,
             rid,

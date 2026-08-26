@@ -293,7 +293,7 @@ class _AutomationDispatchSeam:
 
 
 @contextmanager
-def _automation_dispatch_kwargs(
+def _automation_dispatch_seam(
     db: FakePipelineDB,
     execution_lease: ExecutionLeaseSnapshot | None,
     *,
@@ -839,7 +839,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
             )
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
-                 _automation_dispatch_kwargs(
+                 _automation_dispatch_seam(
                      db,
                      execution_lease,
                  ) as automation_seam:
@@ -1799,7 +1799,7 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
             )
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(None)), \
-                 _automation_dispatch_kwargs(
+                 _automation_dispatch_seam(
                      db,
                      execution_lease,
                  ) as automation_seam:
@@ -1951,7 +1951,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                 mb_release_id="mbid-123",
                 source_path=tmpdir,
             )
-            with patch_dispatch_externals(), _automation_dispatch_kwargs(
+            with patch_dispatch_externals(), _automation_dispatch_seam(
                 db,
                 execution_lease,
                 run_import_fn=parsed_import,
@@ -2029,7 +2029,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
             )
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(None)), \
-                 _automation_dispatch_kwargs(
+                 _automation_dispatch_seam(
                      db,
                      execution_lease,
                  ) as automation_seam:
@@ -2102,7 +2102,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
             with patch(
                 "lib.beets_db.BeetsDB",
                 _mock_beets_db(None),
-            ), _automation_dispatch_kwargs(
+            ), _automation_dispatch_seam(
                 db,
                 execution_lease,
                 run_import_fn=timeout_import,
@@ -2171,7 +2171,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
             with patch(
                 "lib.beets_db.BeetsDB",
                 _mock_beets_db(None),
-            ), _automation_dispatch_kwargs(
+            ), _automation_dispatch_seam(
                 db,
                 execution_lease,
                 run_import_fn=failed_import,
@@ -2272,7 +2272,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
             with patch(
                 "lib.beets_db.BeetsDB",
                 _mock_beets_db(None),
-            ), _automation_dispatch_kwargs(
+            ), _automation_dispatch_seam(
                 db,
                 execution_lease,
                 run_import_fn=parsed_import,
@@ -3502,7 +3502,7 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
             )
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
-                 _automation_dispatch_kwargs(
+                 _automation_dispatch_seam(
                      db,
                      execution_lease,
                  ) as automation_seam:
@@ -4000,7 +4000,7 @@ class TestReleaseLockContention(unittest.TestCase):
             )
             with patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
-                 _automation_dispatch_kwargs(
+                 _automation_dispatch_seam(
                      db,
                      execution_lease,
                  ) as automation_seam:

@@ -1054,10 +1054,21 @@ class _EvidenceStage:
 
     ``outcome`` non-``None`` means the stage is terminal for this dispatch
     and the caller must return it unchanged. Every other field is only
-    meaningful when ``outcome`` is ``None`` — EXCEPT
-    ``quality_evidence_action_file``, which the caller must record either
-    way: the two launch-authority refusals happen after the sidecar is
-    already written, and dispatch's ``finally`` owns removing it.
+    meaningful when ``outcome`` is ``None``.
+
+    ``quality_evidence_action_file`` is the exception the caller has to
+    handle deliberately. What makes it load-bearing is NOT this stage's own
+    early return: all four ``_EvidenceStage(outcome=...)`` sites are
+    reached before the sidecar is written, so they always carry ``None``
+    and returning early on ``outcome`` first would be equivalent today.
+    What is load-bearing is the pair of launch-authority refusals AFTER
+    this stage — no active import job, and a stale or superseded job — both
+    of which return with the sidecar already on disk. The caller therefore
+    records this field before either refusal can fire, so its ``finally``
+    (``_should_cleanup_action_file``) still finds the path to remove.
+    Recording it before the ``outcome`` check too is fail-closed
+    legislation for a future terminal outcome site that DOES write one
+    first, not a description of today's control flow.
     """
 
     outcome: DispatchOutcome | None = None
@@ -2030,9 +2041,13 @@ def dispatch_import_core(
                 evidence_gate_fn=evidence_gate_fn,
                 current_evidence_loader=current_evidence_loader,
             )
-            # Recorded BEFORE the early return: the two launch-authority
-            # refusals below happen with the sidecar already on disk, and
-            # this function's ``finally`` owns removing it.
+            # Recorded before the two launch-authority refusals below: both
+            # return with the sidecar already on disk, and this function's
+            # ``finally`` owns removing it. Placing it before the
+            # ``outcome`` check as well is fail-closed legislation, not a
+            # live requirement — every terminal outcome the evidence stage
+            # produces today is reached before the sidecar is written, so
+            # it always carries ``None`` there.
             quality_evidence_action_file = evidence.quality_evidence_action_file
             if evidence.outcome is not None:
                 return evidence.outcome

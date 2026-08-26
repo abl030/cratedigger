@@ -119,17 +119,31 @@ class DispatchDB(
     The bases are the ports of the collaborators dispatch FORWARDS its
     handle into — the sidecar writer, the transition engine, the #898 owner
     checkpoint, and the two media-server pin services — so this one port
-    stays honest without restating their members. The methods declared
-    below are the ones dispatch calls directly.
+    stays honest without restating their members.
 
-    ``_probe_owner_session`` is declared underscore-and-all: cross-module
-    private use is the house convention (PR #775), and re-spelling it
-    publicly here would only hide which method production actually calls.
-    Optional parameters the real ``PipelineDB`` accepts but dispatch never
-    passes (``check_and_apply_cooldown``'s ``config``,
-    ``_probe_owner_session``'s ``deadline_seconds``) are deliberately absent
-    — the port declares what dispatch needs, not everything an
-    implementation may offer.
+    ``lib/dispatch/`` calls 19 distinct DB methods. Five of them arrive
+    through those bases and are NOT declared below: ``get_request``,
+    ``get_import_job``, ``get_request_current_evidence_id`` and
+    ``load_album_quality_evidence_by_id`` (``QualityEvidenceDB``, via
+    ``SidecarDB``), and ``_probe_owner_session``
+    (``AutomationOwnerCheckpointDB``, which is also where its
+    ``deadline_seconds`` parameter is deliberately omitted — that
+    narrowing is that port's, not this one's). The remaining fourteen are
+    declared in the body, plus two — ``merge_rekey_collision`` and
+    ``update_request_release_for_merge`` — that dispatch never calls at
+    all: they are restated only so this port satisfies
+    ``lib.download_validation.MergeRekeyDB``, which cannot be a base class
+    because that module imports ``lib.dispatch``.
+
+    Where a declaration below narrows what the real ``PipelineDB`` offers,
+    that is deliberate — the port declares what dispatch needs, not
+    everything an implementation may provide. ``check_and_apply_cooldown``
+    omits ``config`` for exactly that reason.
+
+    ``_probe_owner_session`` reaches this port underscore-and-all because
+    cross-module private use is the house convention (PR #775); re-spelling
+    it publicly anywhere in the chain would only hide which method
+    production actually calls.
     """
 
     def advisory_lock(
@@ -335,7 +349,7 @@ class DispatchOutcome:
 class DispatchRequest:
     """Everything one import dispatch is DESCRIBED by (#1277).
 
-    Flat and frozen on purpose. Flat because the 26 values are already the
+    Flat and frozen on purpose. Flat because these values are already the
     vocabulary every caller and every stage speaks — re-grouping them into
     sub-objects would only add a translation layer between the DB row and
     the decision. Frozen because a stage function must not be able to
@@ -382,7 +396,9 @@ class DispatchRequest:
     #: (``extract_usernames``). Both production callers pass real
     #: ``DownloadFile`` rows: the auto lane forwards ``album_data.files``,
     #: the force lane synthesises a single-element list from the operator's
-    #: recorded source username.
+    #: recorded source username when one was recorded — it passes an empty
+    #: list when ``source_username`` is falsy, so a force reject can
+    #: legitimately have no peer to attribute.
     files: Sequence[DownloadFile] | None = None
     cooled_down_users: set[str] | None = None
     source_dirs: list[str] | None = None

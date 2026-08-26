@@ -7,6 +7,9 @@ Patch targets moved to concrete submodules; see docstrings there.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
 from lib.dispatch.core import (
     dispatch_import_core,
 )
@@ -57,6 +60,27 @@ from lib.dispatch.types import (
 # Pyright-visible proof that the production callable continues to satisfy the
 # exact test-injection protocol when either signature changes.
 _dispatch_core_conformance: DispatchCoreFn = dispatch_import_core
+
+if TYPE_CHECKING:
+    from lib.pipeline_db import PipelineDB
+
+    # Pyright-visible proof that the PRODUCTION adapter satisfies the narrow
+    # port (#1277) — the static half of the conformance
+    # ``tests/test_dispatch_request.py`` checks at runtime for
+    # ``FakePipelineDB``. This is the direction that matters most: every
+    # production caller hands ``dispatch_import_core`` a real
+    # ``PipelineDB``, so a signature drift on the concrete class (a renamed
+    # keyword, a narrowed return, a dropped method) has to fail HERE rather
+    # than at whichever call site happens to be re-checked next. The port
+    # itself is structural, so nothing but an assignment like this can
+    # check its SHAPE — the runtime ``isinstance`` guard only compares
+    # member names. Declaration-only: this branch never executes.
+    def _pipeline_db_satisfies_dispatch_db(db: PipelineDB) -> DispatchDB:
+        return db
+
+    _pipeline_db_conformance: Callable[[PipelineDB], DispatchDB] = (
+        _pipeline_db_satisfies_dispatch_db
+    )
 
 __all__ = [
     "DISPATCH_CODE_BAD_REQUEST",

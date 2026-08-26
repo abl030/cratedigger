@@ -68,7 +68,9 @@ def _evidence_unavailable_plan() -> QualityGatePlan:
 
 if TYPE_CHECKING:
     from lib.dispatch.types import DispatchDB
+    from lib.pipeline_db.rows import AlbumRequestRow
     from lib.quality import (
+        AlbumQualityEvidence,
         AudioQualityMeasurement,
         QualityRankConfig,
         TargetQualityContract,
@@ -91,10 +93,33 @@ class _QualityGateDecisionFn(Protocol):
 logger = logging.getLogger("cratedigger")
 
 
+class QualityGateStateDB(Protocol):
+    """The three linked-evidence reads the gate-state loader performs.
+
+    Declared separately from ``DispatchDB`` (which satisfies it) because
+    this loader is also the entry point ``pipeline-cli quality`` and
+    ``pipeline-cli repair-spectral`` reach it through, and neither of those
+    holds anything like dispatch's surface. Annotating it with the whole
+    dispatch port would force those commands to claim a surface they do not
+    have — the #409 narrow-port pattern, applied to the one function two
+    very different callers share.
+    """
+
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
+
+    def get_request_current_evidence_id(
+        self, request_id: int,
+    ) -> int | None: ...
+
+    def load_album_quality_evidence_by_id(
+        self, evidence_id: int | None,
+    ) -> AlbumQualityEvidence | None: ...
+
+
 def load_quality_gate_state(
     *,
     request_id: int,
-    db: DispatchDB,
+    db: QualityGateStateDB,
     mb_id: str | None = None,
     expected_current_evidence_id: int | None = None,
 ) -> QualityGateState | None:

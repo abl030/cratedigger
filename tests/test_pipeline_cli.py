@@ -3093,7 +3093,7 @@ class TestCmdRepairSpectral(unittest.TestCase):
             stdout = io.StringIO()
             with patch.dict(os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": cfg_path}), \
                  redirect_stdout(stdout):
-                pipeline_cli.cmd_repair_spectral(cast(Any, db), args)
+                pipeline_cli.cmd_repair_spectral(db, args)
 
             output = stdout.getvalue()
             self.assertIn("quality_gate_decision → accept", output)
@@ -3148,7 +3148,7 @@ class TestCmdRepairSpectral(unittest.TestCase):
             return_value=MagicMock(),
         ), redirect_stdout(stdout):
             result = pipeline_cli.cmd_repair_spectral(
-                db,  # pyright: ignore[reportArgumentType]
+                db,
                 MagicMock(dry_run=False),
             )
 
@@ -3183,7 +3183,7 @@ def _invoke_cmd_quality(
          patch("scripts.pipeline_cli.quality._load_runtime_verified_lossless_target",
                return_value=runtime_target or ""), \
          redirect_stdout(stdout):
-        pipeline_cli.cmd_quality(cast(Any, db), MagicMock(id=request_id))
+        pipeline_cli.cmd_quality(db, MagicMock(id=request_id))
     return stdout.getvalue()
 
 

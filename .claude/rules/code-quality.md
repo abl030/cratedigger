@@ -1000,6 +1000,7 @@ Always use these instead of inventing parallel scaffolding:
 - `make_validation_result(**overrides)` — `ValidationResult` dataclass
 - `make_download_info(...)` — `DownloadInfo` dataclass
 - `make_download_file(...)` — real `DownloadFile` (not MagicMock)
+- `make_dispatch_request(**overrides)` — the `DispatchRequest` every `dispatch_import_core` / `_reject_import_from_evidence_decision` test constructs through (#1277). Its optional defaults ARE the dataclass's own, pinned field-by-field by `tests/test_dispatch_request.py`.
 - `make_grab_list_entry(...)` — real `GrabListEntry`
 - `make_ctx_with_fake_db(fake_db)` — `CratediggerContext` wired to a fake
 - `patch_dispatch_externals()` — context manager for the 6 dispatch external patches
