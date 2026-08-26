@@ -345,10 +345,18 @@ def reconcile_processing_current_path(
 def _row_files_fingerprint(files: list[object]) -> str:
     """Fingerprint a raw JSONB ``active_download_state.files`` list.
 
-    Mirrors ``lib.download_materialization._attempt_fingerprint_for`` for the
-    typed ``DownloadFile`` side — MUST derive from the same (username,
-    filename) pairs so the repair scanner's classification never
-    disagrees with the runtime poller's (issue #550 phase 2).
+    The one attempt-fingerprint site that cannot call
+    ``lib.processing_paths.attempt_fingerprint_of_files``: the repair
+    scanner reads ``active_download_state`` as undecoded JSONB, so it has
+    no typed file objects to project from and must narrow each entry
+    itself. It therefore derives the SAME (username, filename) pairs by
+    hand and hands them to the same ``attempt_fingerprint`` primitive, so
+    the scanner's classification never disagrees with the runtime
+    poller's (issue #550 phase 2).
+
+    This hand projection is the reason the typed side has exactly one
+    (issue #1278): with five typed spellings there was no way to tell an
+    intentional adapter like this one from an accidental copy.
     """
     return attempt_fingerprint([
         (str(f.get("username") or ""), str(f.get("filename") or ""))

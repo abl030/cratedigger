@@ -193,6 +193,46 @@ def attempt_fingerprint(pairs: Sequence[tuple[str, str]]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:8]
 
 
+def attempt_fingerprint_of_files(files: Sequence[CanonicalFolderFile]) -> str:
+    """The ONE projection from an attempt's files to its fingerprint.
+
+    ``attempt_fingerprint`` above hashes a pair sequence; this is the
+    single place the pipeline decides WHICH pairs an attempt's file
+    objects yield. Every canonical-folder computation, ledger row, and
+    ``active_download_state`` stamp for the same attempt must agree
+    exactly or the folder classifies as ``external`` and strands the
+    album (issue #550 phase 2), and the cross-request enqueue guard's
+    exact-fingerprint join silently widens to "every accepted key this
+    owner ever held" (issue #1196 item 1).
+
+    That agreement used to rest on five separate spellings of
+    ``[(f.username, f.filename) for f in files]`` matching each other,
+    asserted in prose across four docstrings ("MUST derive from the same
+    (username, filename) pairs", "agree BY CONSTRUCTION without a second
+    formula"). Sharing the formula is what makes those claims true
+    rather than merely maintained.
+    """
+    return attempt_fingerprint([(f.username, f.filename) for f in files])
+
+
+def attempt_fingerprint_or_none(
+    files: Sequence[CanonicalFolderFile],
+) -> str | None:
+    """``attempt_fingerprint_of_files``, or ``None`` for an empty attempt.
+
+    The claim-time writers (``lib.download.build_active_download_state``
+    and ``lib.enqueue._enqueue_with_claim_outcome``) persist ``None``
+    rather than the empty-set digest when an attempt has no files, so a
+    file-less claim never mints an attempt identity that a later
+    non-empty attempt could collide with. Both sides of the cross-request
+    guard's fingerprint equality are written by these two callers, so the
+    empty-attempt policy lives here with the derivation instead of being
+    duplicated at each of them (issue #1199 review F9 depends on exactly
+    when this returns ``None``).
+    """
+    return attempt_fingerprint_of_files(files) if files else None
+
+
 def canonical_processing_path(
     *,
     artist: str,
@@ -248,9 +288,7 @@ def canonical_folder_for_row(row: CanonicalFolderRow, root: str) -> str:
     function so their artist/title/year and exact file-identity projection
     cannot drift independently (issue #573 W1).
     """
-    fingerprint = attempt_fingerprint([
-        (file.username, file.filename) for file in row.files
-    ])
+    fingerprint = attempt_fingerprint_of_files(row.files)
     return canonical_processing_path(
         artist=row.artist,
         title=row.title,

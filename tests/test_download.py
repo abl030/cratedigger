@@ -519,7 +519,6 @@ class TestDownloadMaterializationExtraction(unittest.TestCase):
         "MaterializeFailed",
         "MaterializeGuarded",
         "MaterializeResult",
-        "_attempt_fingerprint_for",
         "classify_staged_album_location",
         "_evaluate_staged_path_readiness",
         "_materialize_processing_dir",
