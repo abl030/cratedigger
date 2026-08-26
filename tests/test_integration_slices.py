@@ -4238,6 +4238,62 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         namespaces_used = {ns for ns, _key in db.advisory_lock_calls}
         self.assertNotIn(ADVISORY_LOCK_NAMESPACE_RELEASE, namespaces_used)
 
+    def test_dispatch_receives_the_validated_albums_identity(self):
+        """The auto lane builds ONE ``DispatchRequest`` from the validated
+        album; every identity value on it must be the one it came from.
+
+        Issue #1277 collapsed two verbatim 25-kwarg calls into a single
+        construction. Nothing pinned the VALUES that construction assigns —
+        a review mutant that swapped ``mb_release_id`` and ``label`` at that
+        site survived 827 tests, because every other test either recorded
+        the path alone or supplied a fixture whose fields were
+        interchangeable. Wrong ``mb_release_id`` means dispatch takes the
+        wrong RELEASE lock and launches Beets at the wrong release.
+        """
+        from lib import download_validation as validation_mod
+        from lib.grab_list import GrabListEntry
+        from lib.quality import ValidationResult
+        from tests.fakes import RecordingDispatchCore
+        from tests.helpers import make_ctx_with_fake_db
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, mb_release_id=self.MBID, status="downloading"))
+        ctx = make_ctx_with_fake_db(db, cfg=CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+            beets_distance_threshold=0.15,
+        ))
+        entry = GrabListEntry(
+            album_id=42, artist="Slint", title="Spiderland",
+            year="1991", files=[], filetype="flac",
+            mb_release_id=self.MBID,
+            db_source="request", db_request_id=42)
+
+        dispatch = RecordingDispatchCore()
+        with patch.object(StagedAlbum, "move_to", return_value="/tmp/staged"):
+            validation_mod._handle_valid_result(
+                entry,
+                ValidationResult(
+                    valid=True, distance=0.0731, scenario="strong_match"),
+                StagedAlbum(current_path="/tmp/import", request_id=42),
+                ctx,
+                dispatch_fn=dispatch,
+            )
+
+        self.assertEqual(len(dispatch.calls), 1)
+        request = dispatch.calls[0].request
+        self.assertEqual(request.mb_release_id, self.MBID)
+        self.assertEqual(request.label, "Slint - Spiderland")
+        self.assertEqual(request.request_id, 42)
+        self.assertEqual(request.distance, 0.0731)
+        self.assertEqual(request.scenario, "strong_match")
+        # The owner path reaches dispatch unmoved (``move_to`` is patched
+        # only so an accidental real relocation would be visible).
+        self.assertEqual(request.path, "/tmp/import")
+        self.assertIs(request.force, False)
+        self.assertIs(request.requeue_on_failure, True)
+
     def test_processing_owner_imports_from_its_canonical_path(self):
         from lib import download_validation as validation_mod
         from lib.quality import ValidationResult

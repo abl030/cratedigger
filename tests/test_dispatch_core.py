@@ -2142,5 +2142,350 @@ class TestOperatorIncompleteMarkImporterLane(unittest.TestCase):
             shutil.rmtree(current_dir, ignore_errors=True)
 
 
+class TestForceLaunchAuthorityPathDivergence(unittest.TestCase):
+    """The force lane launches on the JOB's durable path, not its work copy.
+
+    ``scripts/importer.py`` hands dispatch two different paths on this lane:
+    ``path`` is the deterministic private action copy the operator's files
+    were copied into, and ``launch_authority_path`` is the job payload's
+    ``failed_path`` — the durable source that recovery and the launch
+    handshake are keyed on. ``authorize_import_job_launch`` fences the force
+    branch on ``payload.failed_path == source_path``, so passing the action
+    copy there refuses every real force import.
+
+    Every other dispatch fixture seeds the two equal, which makes the
+    ``launch_authority_path or path`` fallback untestable — a review mutant
+    that dropped the fallback's left operand survived. This test is the
+    production-shaped divergence.
+    """
+
+    def _run(self, *, use_divergent_paths: bool):
+        observed: list[str] = []
+
+        class RecordingLaunchDB(FakePipelineDB):
+            def authorize_import_job_launch(self, job_id, **kwargs):
+                observed.append(kwargs["source_path"])
+                return super().authorize_import_job_launch(job_id, **kwargs)
+
+        db = RecordingLaunchDB()
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+        with tempfile.TemporaryDirectory() as root:
+            durable_source = os.path.join(root, "wrong_matches", "album")
+            action_copy = os.path.join(root, "albums", "force-action-7")
+            os.makedirs(durable_source)
+            os.makedirs(action_copy)
+            db.seed_request(make_request_row(
+                id=42, status="wanted", mb_release_id="mbid-123",
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                payload={
+                    "download_log_id": 1,
+                    "failed_path": durable_source,
+                },
+            )
+            candidate = _seed_candidate_for_import_job(
+                db, job.id, mb_release_id="mbid-123", source_path=action_copy,
+            )
+            db.mark_import_job_preview_importable(
+                job.id, preview_result={"ready": True},
+            )
+            assert claim_next_import_job(db, worker_id="force-path") is not None
+
+            runner = MagicMock(return_value=ImportOneRun(
+                command=(), returncode=0, stdout="", stderr="",
+                import_result=make_import_result(
+                    decision="downgrade",
+                    new_min_bitrate=128,
+                    prev_min_bitrate=320,
+                ),
+            ))
+            with patch_dispatch_externals():
+                outcome = dispatch_import_core(
+                    make_dispatch_request(
+                        path=action_copy,
+                        mb_release_id="mbid-123",
+                        request_id=42,
+                        label="Test Artist - Test Album",
+                        force=True,
+                        beets_harness_path=cfg.beets_harness_path,
+                        dl_info=DownloadInfo(username="user1"),
+                        scenario="force_import",
+                        outcome_label="force_import",
+                        requeue_on_failure=False,
+                        candidate_import_job_id=job.id,
+                        launch_authority_path=(
+                            durable_source if use_divergent_paths else None
+                        ),
+                    ),
+                    db,
+                    cfg=cfg,
+                    quality_gate_fn=noop_quality_gate,
+                    evidence_gate_fn=(
+                        lambda *_a, **_kw: EvidenceImportGate(
+                            candidate=candidate)
+                    ),
+                    run_import_fn=runner,
+                )
+            return {
+                "outcome": outcome,
+                "observed": observed,
+                "runner": runner,
+                "durable_source": durable_source,
+                "action_copy": action_copy,
+            }
+
+    def test_launch_is_authorized_on_the_jobs_durable_path(self) -> None:
+        result = self._run(use_divergent_paths=True)
+
+        self.assertNotEqual(result["durable_source"], result["action_copy"])
+        # The handshake saw the durable payload path, not the work copy.
+        self.assertEqual(result["observed"], [result["durable_source"]])
+        # …and therefore passed: Beets was actually launched.
+        self.assertNotEqual(
+            result["outcome"].code, "launch_authority_conflict")
+        result["runner"].assert_called_once()
+
+    def test_action_copy_alone_cannot_authorize_the_launch(self) -> None:
+        """Must-still-work control: with no ``launch_authority_path`` the
+        fallback uses ``path``, and the job's own fence refuses it — proving
+        the passing case above is the fallback's left operand doing the
+        work, not the fence being permissive."""
+        result = self._run(use_divergent_paths=False)
+
+        self.assertEqual(result["observed"], [result["action_copy"]])
+        self.assertEqual(
+            result["outcome"].code, "launch_authority_conflict")
+        result["runner"].assert_not_called()
+
+
+class TestEvidenceActionSidecarIsRemovedOnLaunchRefusal(unittest.TestCase):
+    """A refused launch must not leave its evidence sidecar on disk.
+
+    ``_write_quality_evidence_action_file`` runs BEFORE the two
+    launch-authority refusals, so both return with a real tempfile already
+    written. ``dispatch_import_core``'s ``finally`` is what removes it, and
+    it can only do that because the path was recorded before the refusal
+    returned (issue #1277). Nothing asserted the file's fate: a review
+    mutant that moved the recording after ``beets_launch_authorized = True``
+    leaked one sidecar per refusal and survived.
+
+    Observed through the real writer via ``tempfile.tempdir`` — no patch of
+    our own code — so the assertion is about the file production actually
+    creates.
+    """
+
+    def _dispatch_with_refusal(self, *, stale_authority: bool):
+        seen_during_refusal: list[list[str]] = []
+        sidecar_root = tempfile.mkdtemp(prefix="cratedigger-sidecar-probe-")
+
+        class RefusingDB(FakePipelineDB):
+            def authorize_import_job_launch(self, job_id, **kwargs):
+                seen_during_refusal.append(os.listdir(sidecar_root))
+                if stale_authority:
+                    return None
+                return super().authorize_import_job_launch(job_id, **kwargs)
+
+        db = RefusingDB()
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                db.seed_request(make_request_row(
+                    id=42, status="wanted", mb_release_id="mbid-123",
+                ))
+                job = db.enqueue_import_job(
+                    IMPORT_JOB_FORCE,
+                    request_id=42,
+                    payload={"download_log_id": 1, "failed_path": tmpdir},
+                )
+                candidate = _seed_candidate_for_import_job(
+                    db, job.id, mb_release_id="mbid-123", source_path=tmpdir,
+                )
+                db.mark_import_job_preview_importable(
+                    job.id, preview_result={"ready": True},
+                )
+                claimed = claim_next_import_job(db, worker_id="sidecar-test")
+                assert claimed is not None
+                if not stale_authority:
+                    # The job was prepared under wanted; a later transition
+                    # cannot become its own expectation at the launch
+                    # boundary — the second of the two refusals.
+                    db.request(42)["status"] = "imported"
+
+                runner = MagicMock()
+                with patch.object(tempfile, "tempdir", sidecar_root):
+                    outcome = dispatch_import_core(
+                        make_dispatch_request(
+                            path=tmpdir,
+                            mb_release_id="mbid-123",
+                            request_id=42,
+                            label="Test Artist - Test Album",
+                            force=True,
+                            beets_harness_path=cfg.beets_harness_path,
+                            dl_info=DownloadInfo(username="user1"),
+                            scenario="force_import",
+                            candidate_import_job_id=job.id,
+                        ),
+                        db,
+                        cfg=cfg,
+                        quality_gate_fn=noop_quality_gate,
+                        evidence_gate_fn=(
+                            lambda *_a, **_kw: EvidenceImportGate(
+                                candidate=candidate)
+                        ),
+                        run_import_fn=runner,
+                    )
+            leftover = os.listdir(sidecar_root)
+        finally:
+            import shutil
+            shutil.rmtree(sidecar_root, ignore_errors=True)
+        return {
+            "outcome": outcome,
+            "runner": runner,
+            "written": seen_during_refusal,
+            "leftover": leftover,
+        }
+
+    def _assert_sidecar_written_then_removed(self, result) -> None:
+        self.assertEqual(result["outcome"].code, "launch_authority_conflict")
+        result["runner"].assert_not_called()
+        # A sidecar really existed at the moment the launch was refused …
+        self.assertEqual(len(result["written"]), 1)
+        written = result["written"][0]
+        self.assertEqual(len(written), 1, written)
+        self.assertTrue(
+            written[0].startswith("cratedigger-quality-evidence-action-"),
+            written,
+        )
+        # … and dispatch removed it before returning.
+        self.assertEqual(result["leftover"], [])
+
+    def test_stale_launch_authority_removes_its_sidecar(self) -> None:
+        self._assert_sidecar_written_then_removed(
+            self._dispatch_with_refusal(stale_authority=True))
+
+    def test_owner_change_refusal_removes_its_sidecar(self) -> None:
+        self._assert_sidecar_written_then_removed(
+            self._dispatch_with_refusal(stale_authority=False))
+
+
+class TestPreLaunchFailureIsAuditedAndRunnable(unittest.TestCase):
+    """A crash before Beets launch is an ordinary rejection audit.
+
+    Invariant 11: a broken world surfaces and restarts. An exception raised
+    inside the lock region but before ``beets_launch_authorized`` — a DB
+    blip at the launch handshake, say — must write a ``failed``
+    download-log row and honour the caller's lifecycle authority, never
+    strand the request.
+
+    Nothing entered this handler before. Measured: a mutant returning a
+    success-shaped settlement from ``_settle_dispatch_failure`` survived all
+    11,460 tests of the Python phase — the only failures it caused are the
+    two tests below. Note the sibling
+    ``sp.TimeoutExpired`` arm is unreachable from the runner (authorization
+    precedes the launch, so ``beets_launch_authorized`` is already True by
+    then and that handler returns its ambiguous-acknowledgement outcome
+    instead); both arms share this same guard, and this covers the reachable
+    one.
+    """
+
+    def _dispatch_with_crashing_authority(self, *, requeue_on_failure: bool):
+        class CrashingDB(FakePipelineDB):
+            def authorize_import_job_launch(self, job_id, **kwargs):
+                raise RuntimeError("pipeline DB went away mid-handshake")
+
+        db = CrashingDB()
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            pipeline_db_enabled=True,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db.seed_request(make_request_row(
+                id=42, status="wanted", mb_release_id="mbid-123",
+            ))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                payload={"download_log_id": 1, "failed_path": tmpdir},
+            )
+            candidate = _seed_candidate_for_import_job(
+                db, job.id, mb_release_id="mbid-123", source_path=tmpdir,
+            )
+            db.mark_import_job_preview_importable(
+                job.id, preview_result={"ready": True},
+            )
+            claimed = claim_next_import_job(db, worker_id="crash-test")
+            assert claimed is not None
+
+            runner = MagicMock()
+            with patch_dispatch_externals():
+                outcome = dispatch_import_core(
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id="mbid-123",
+                        request_id=42,
+                        label="Test Artist - Test Album",
+                        force=True,
+                        beets_harness_path=cfg.beets_harness_path,
+                        dl_info=DownloadInfo(username="user1"),
+                        distance=0.05,
+                        scenario="force_import",
+                        requeue_on_failure=requeue_on_failure,
+                        candidate_import_job_id=job.id,
+                    ),
+                    db,
+                    cfg=cfg,
+                    quality_gate_fn=noop_quality_gate,
+                    evidence_gate_fn=(
+                        lambda *_a, **_kw: EvidenceImportGate(
+                            candidate=candidate)
+                    ),
+                    run_import_fn=runner,
+                )
+            finalize_claimed_dispatch(db, claimed, outcome)
+        return {"outcome": outcome, "db": db, "runner": runner}
+
+    def test_pre_launch_crash_writes_a_failed_audit_row(self) -> None:
+        result = self._dispatch_with_crashing_authority(
+            requeue_on_failure=False)
+        outcome = result["outcome"]
+        db = result["db"]
+
+        self.assertFalse(outcome.success)
+        self.assertEqual(outcome.message, "Unhandled exception")
+        # Not the post-launch ambiguity code: Beets never ran.
+        self.assertIsNone(outcome.code)
+        result["runner"].assert_not_called()
+
+        self.assertEqual(len(db.download_logs), 1)
+        log = db.download_logs[0]
+        self.assertEqual(log.outcome, "failed")
+        envelope = msgspec.json.decode(
+            (log.validation_result or "").encode(), type=dict)
+        self.assertEqual(envelope["scenario"], "exception")
+        self.assertEqual(envelope["error"], "exception")
+        # Force lifecycle authority is preserved.
+        self.assertEqual(db.request(42)["status"], "wanted")
+
+    def test_self_healing_caller_returns_the_request_to_wanted(self) -> None:
+        result = self._dispatch_with_crashing_authority(
+            requeue_on_failure=True)
+
+        self.assertFalse(result["outcome"].success)
+        self.assertEqual(result["db"].download_logs[0].outcome, "failed")
+        self.assertEqual(result["db"].request(42)["status"], "wanted")
+        # The self-healing caller records the attempt; the operator-owned
+        # one above does not.
+        self.assertEqual(
+            result["db"].request(42)["validation_attempts"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

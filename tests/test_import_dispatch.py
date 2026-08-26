@@ -1612,6 +1612,109 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
         )
         self.assertIsNone(row["target_format"])
 
+    def test_every_contributing_peer_is_denylisted(self) -> None:
+        """A rejected album denylists EVERY peer that contributed to it.
+
+        ``request.files`` is the only peer attribution dispatch has, and
+        ``extract_usernames`` is the only thing it reads off them. Every
+        pre-existing fixture passed one file or none, so the collection was
+        interchangeable with an empty list — a review mutant replacing it
+        with ``[]`` survived, and a multi-peer album would have banned only
+        the ``dl_info`` username while the other source kept serving the
+        same bad rip.
+        """
+        from lib.dispatch import _reject_import_from_evidence_decision
+        from lib.dispatch.types import ImportAttemptResult
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        attempt_result = ImportAttemptResult(None)
+        attempt_result.merge(make_import_result(
+            decision="downgrade", new_min_bitrate=128, prev_min_bitrate=320))
+
+        with patch_dispatch_externals():
+            _reject_import_from_evidence_decision(
+                make_dispatch_request(
+                    request_id=42,
+                    dl_info=DownloadInfo(filetype="mp3", username="seeder-a"),
+                    path="/tmp/cratedigger-multi-peer-reject",
+                    scenario="strong_match",
+                    files=[
+                        make_download_file(
+                            username="seeder-b", filename="01.mp3"),
+                        make_download_file(
+                            username="seeder-c", filename="02.mp3"),
+                    ],
+                ),
+                db,
+                attempt_result=attempt_result,
+                decision="downgrade",
+                detail="import-time persisted evidence rejected candidate",
+            )
+
+        self.assertEqual(
+            sorted(entry.username for entry in db.denylist),
+            ["seeder-a", "seeder-b", "seeder-c"],
+        )
+
+    def _reject_and_report_cleanup(self, *, scenario: str):
+        """Drive one reject through the helper and report its cleanup plan."""
+        from lib.dispatch import _reject_import_from_evidence_decision
+        from lib.dispatch.types import ImportAttemptResult
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        attempt_result = ImportAttemptResult(None)
+        attempt_result.merge(make_import_result(
+            decision="downgrade", new_min_bitrate=128, prev_min_bitrate=320))
+
+        with patch_dispatch_externals() as ext:
+            outcome = _reject_import_from_evidence_decision(
+                make_dispatch_request(
+                    request_id=42,
+                    dl_info=DownloadInfo(filetype="mp3", username="user1"),
+                    path="/tmp/cratedigger-cleanup-gate-source",
+                    scenario=scenario,
+                    requeue_on_failure=scenario != "force_import",
+                ),
+                db,
+                attempt_result=attempt_result,
+                decision="downgrade",
+                detail="import-time persisted evidence rejected candidate",
+            )
+        return outcome, ext.cleanup
+
+    def test_force_reject_never_deletes_the_operators_only_copy(self) -> None:
+        """Issue #89's guard, keyed on the SCENARIO, not the decision.
+
+        A force import's ``path`` is the operator's own folder. On a
+        ``downgrade`` verdict beets moved nothing, so deleting it is data
+        loss — ``_should_cleanup_path`` refuses cleanup for a force scenario
+        unless the decision actually imported.
+
+        The gate reads ``request.scenario``. A review mutant that passed the
+        DECISION instead survived 413 tests: no decision name is ever in
+        ``FORCE_IMPORT_SCENARIOS``, so the guard degraded to "always clean"
+        and this exact data loss became unguarded.
+        """
+        outcome, cleanup = self._reject_and_report_cleanup(
+            scenario="force_import")
+
+        self.assertIsNone(outcome.post_commit_cleanup)
+        cleanup.assert_not_called()
+
+    def test_auto_reject_still_disposes_of_its_processing_source(self) -> None:
+        """Must-still-work twin: the auto lane's source IS disposable, so
+        the same decision on a non-force scenario must still clean up."""
+        _outcome, cleanup = self._reject_and_report_cleanup(
+            scenario="strong_match")
+
+        cleanup.assert_called_once()
+        self.assertEqual(
+            cleanup.call_args.args[0],
+            "/tmp/cratedigger-cleanup-gate-source",
+        )
+
 
 class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
     """Every rejection honors the lifecycle authority chosen by its caller.
