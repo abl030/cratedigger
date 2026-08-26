@@ -73,16 +73,28 @@ def positively_owned_files[FileT: CanonicalFolderFile](
     and therefore no authority. Skipping destruction can only leave a
     file on disk, where ``reap_disk_orphans`` remains the backstop for
     anything genuinely ours; guessing the other way deletes a stranger's
-    album. Production always wires ``ctx.download_ownership``
-    (``cratedigger.py`` builds it into the module context), so the
-    absent-writer arm is unreachable there.
+    album. Every production context wires ``ctx.download_ownership``:
+    ``cratedigger.py`` builds it into the cycle's owner context and
+    ``build_phase1_context`` forwards it to the polling thread. Phase 1
+    did NOT forward it until issue #1278's review caught that, which
+    made this arm the only one the download-timeout path ever took —
+    every timeout cleanup a logged no-op. Do not treat the arm as
+    decorative because it is unreachable today; it was reachable, in
+    production, for the length of one review round.
 
-    That arm still matters, as the complement of the write-ahead skip:
-    ``_write_ahead_transfer_ledger`` writes no row when the writer is
-    absent OR ``request_id`` is None OR there are no files, and every
-    one of those cases arrives here as an empty owned set anyway. A
-    context that never ledgered an enqueue owns nothing to destroy, so
-    the two halves agree without either testing the other's conditions.
+    Two of the three ways to reach an empty result mirror the
+    write-ahead skip exactly (``_write_ahead_transfer_ledger`` writes no
+    row with no writer, or with no files), so a context that never
+    ledgered an enqueue owns nothing to destroy. Its third condition,
+    ``request_id is None``, does NOT mirror: that skips the INSERT while
+    ``slskd_enqueue_with_outcome`` still calls
+    ``confirm_transfer_enqueues``, and ``confirm_transfer_enqueue``
+    matches the newest pending row for a ``(username, filename)`` across
+    the whole table without scoping to a request -- so it could promote
+    ANOTHER request's pending row and make the key look owned here. No
+    production caller reaches it (every enqueue carries an
+    ``album_requests`` id), which is the only reason that is not a live
+    cross-request promotion bug.
 
     One fresh DB handle per call, the same worker-safe shape
     ``record_transfer_enqueue`` and ``confirm_transfer_enqueues`` already
@@ -122,12 +134,21 @@ def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> bool:
     behind a ``(username, filename)`` key. Both halves of this function
     used to trust the caller's file list instead. That is unsound on a
     shared slskd for the same reason ``converge_slskd_orphans`` already
-    refuses to trust it: ``match_transfer_id`` resolves IDs against the
-    instance-wide download list, and ``recent_completion_paths`` resolves
-    payload paths against the instance-wide events feed, so a foreign
-    client's transfer at the same key supplies both an ID we would cancel
-    and a path we would unlink — under the same download root, which is
-    why ``path_is_within_root`` cannot tell the two apart.
+    refuses to trust it: BOTH fields this function destroys by were
+    resolved from INSTANCE-WIDE slskd state keyed on
+    ``(username, filename)``, neither of them here. ``file.id`` was
+    matched upstream against the whole download snapshot
+    (``slskd_enqueue_with_outcome``'s post-POST reconciliation, or
+    ``rederive_transfer_ids`` -> ``match_transfer_for_attempt``, which
+    excludes only TERMINAL pre-boundary records — a LIVE foreign
+    transfer at the same key can still win). ``file.local_path`` was
+    either stamped by ``lib.slskd_events._stamp_local_paths``, which
+    matches on that same key with no ownership check at all, or is
+    resolved below from ``recent_completion_paths``, one page of the
+    same instance-wide events feed. So a foreign client at the same key
+    supplies both an ID we would cancel and a path we would unlink —
+    under the same download root, which is why ``path_is_within_root``
+    cannot tell the two apart.
 
     Deletion targets come from slskd's own answers only (issue #146
     phase 3): the ingested ``local_path`` stamp, topped up by a fresh
@@ -139,20 +160,24 @@ def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> bool:
 
     Returns whether every requested transfer had an ID and cancel call
     completed. A file skipped as unowned counts as not-completed, the
-    same as one whose transfer vanished: the callers that read this
-    result use it to conclude "verified no acceptance"
-    (``lib.enqueue._handle_claimed_partial_failure``), and a key we
-    never had authority to cancel is no evidence for that conclusion.
-    Callers that only need best-effort cleanup can ignore it.
+    same as one whose transfer vanished: the one caller that reads this
+    result (``lib.enqueue._handle_claimed_partial_failure``) uses it to
+    conclude "verified no acceptance", and a key we never had authority
+    to cancel is no evidence for that conclusion. Every other caller
+    discards it and only needs best-effort cleanup.
     """
     owned = positively_owned_files(files, ctx)
     skipped = len(files) - len(owned)
     ok = skipped == 0
     if skipped:
+        # Deliberately does NOT assert the skipped keys are foreign: the
+        # two "could not ask" arms of positively_owned_files reach here
+        # too, and there the files are probably ours. Each of those arms
+        # logs its own cause immediately above this line.
         logger.warning(
             "SLSKD OWNERSHIP: skipping %s of %s slskd file(s) that are not "
-            "ledger-owned — foreign or never-accepted keys are neither "
-            "cancelled nor deleted", skipped, len(files))
+            "ledger-owned; neither cancelled nor deleted",
+            skipped, len(files))
     for file in owned:
         if not file.id:
             ok = False

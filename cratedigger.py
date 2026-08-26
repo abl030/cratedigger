@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
     from album_source import AlbumRecord, DatabaseSource
     from lib.config import CratediggerConfig
-    from lib.context import CratediggerContext
+    from lib.context import CratediggerContext, PipelineDBSource
     from lib.grab_list import DownloadFile, GrabListEntry
     from lib.pipeline_db import ActiveSearchPlan
     from lib.quality import AudioFileSpec, CandidateScore
@@ -1382,6 +1382,44 @@ else:
     from lib.download import grab_most_wanted as _grab_most_wanted_impl
 
 
+def build_phase1_context(
+    *,
+    cfg: CratediggerConfig,
+    slskd: object,
+    pipeline_db_source: PipelineDBSource,
+    owner_ctx: CratediggerContext,
+) -> CratediggerContext:
+    """Build Phase 1's own polling context from the cycle's owner context.
+
+    Phase 1 runs on a background thread with its own DB connection, so it
+    cannot share the owner thread's cached source — but everything else
+    it needs is a per-cycle collaborator the owner context already holds,
+    and every one of those must be forwarded explicitly or Phase 1
+    silently degrades.
+
+    ``download_ownership`` is the one that bites (issue #1278). Phase 1
+    reaches ``lib.download._timeout_album`` -> ``cancel_and_delete``,
+    which is gated on positively proven ledger ownership; a Phase-1
+    context without the collaborator fails that gate CLOSED and turns
+    every timeout cleanup into a logged no-op. Forwarding the owner
+    context's writer is safe by construction — it opens a fresh DB handle
+    per operation precisely so worker threads can share one instance.
+
+    This is a named function rather than an inline constructor so the
+    forwarding is a behaviour a test can call, instead of a line inside a
+    closure that the next collaborator gets forgotten from.
+    """
+    from lib.context import CratediggerContext
+
+    return CratediggerContext(
+        cfg=cfg,
+        slskd=slskd,
+        pipeline_db_source=pipeline_db_source,
+        cooled_down_users=owner_ctx.cooled_down_users,
+        download_ownership=owner_ctx.download_ownership,
+    )
+
+
 def _make_ctx():
     """Return the module-level CratediggerContext (created in main())."""
     return _module_ctx
@@ -1600,11 +1638,11 @@ def main() -> int:
                 musicbrainz_ws2_base=mb_ws2_base(main_cfg.musicbrainz_api_base),
                 discogs_api_base=main_cfg.discogs_api_base,
             )
-            phase1_ctx = CratediggerContext(
+            phase1_ctx = build_phase1_context(
                 cfg=main_cfg,
                 slskd=main_slskd,
                 pipeline_db_source=phase1_source,
-                cooled_down_users=_module_ctx.cooled_down_users,
+                owner_ctx=_module_ctx,
             )
             try:
                 _poll_impl(phase1_ctx)

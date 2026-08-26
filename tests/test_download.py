@@ -802,6 +802,60 @@ class TestCancelAndDelete(unittest.TestCase):
         self.assertTrue(os.path.exists(local_path))
         self.assertEqual(slskd.transfers.cancel_download_calls, [])
 
+    def test_no_ownership_collaborator_destroys_nothing(self):
+        """The fail-closed arm the docstring calls load-bearing.
+
+        Independent review (#1278) found this arm had zero coverage AND
+        was reachable in production at the same time: `cratedigger.py`'s
+        Phase-1 poll context did not forward `download_ownership`, so
+        every download-timeout cleanup took exactly this path. A mutant
+        flipping it to `return list(files)` — destroy everything when we
+        cannot ask — survived the entire suite.
+        """
+        from lib.slskd_transfers import cancel_and_delete
+        ctx, slskd, tmpdir = self._ctx()
+        local_path = os.path.join(tmpdir, "01 - Track.mp3")
+        with open(local_path, "w") as fp:
+            fp.write("x")
+        f = make_download_file()
+        f.local_path = local_path
+        self._own(f)  # owned — but with no collaborator we cannot know it
+        ctx.download_ownership = None
+
+        with self.assertLogs("cratedigger", level="WARNING") as logs:
+            ok = cancel_and_delete([f], ctx)
+
+        self.assertTrue(os.path.exists(local_path))
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+        self.assertFalse(ok)
+        self.assertIn(
+            "no ownership collaborator wired", "\n".join(logs.output))
+
+    def test_empty_file_list_asks_nothing_and_says_nothing(self):
+        """An empty batch is not an ownership failure.
+
+        Without the early exit, a caller with nothing to clean up would
+        emit the no-collaborator or skipped-keys warning about zero
+        files, training the operator to ignore both.
+        """
+        from lib.slskd_transfers import cancel_and_delete
+        ctx, slskd, _ = self._ctx()
+        asked: list[object] = []
+
+        def _record(keys):
+            asked.append(keys)
+            return set()
+
+        ctx.download_ownership.owned_transfer_keys = _record
+
+        with patch.object(logging.getLogger("cratedigger"), "warning") as warn:
+            ok = cancel_and_delete([], ctx)
+
+        self.assertTrue(ok)
+        self.assertEqual(asked, [])
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+        warn.assert_not_called()
+
     def test_owned_and_foreign_files_are_partitioned_in_one_call(self):
         """A mixed batch destroys exactly its owned half — the foreign
         half is neither cancelled nor unlinked."""
@@ -5917,6 +5971,65 @@ class TestPollActiveDownloads(unittest.TestCase):
         fake_db.assert_log(self, 0, outcome="timeout")
         self.assertEqual(fake_db.request(1)["status"], "wanted")
         self.assertEqual(fake_db.recorded_attempts, [(1, "download")])
+
+    def test_poll_active_timeout_really_destroys_its_owned_payload(self):
+        """#1278 composition: the timeout path drives the REAL
+        ``cancel_and_delete``, not a patched stand-in.
+
+        Every other timeout test above patches it away, so the ownership
+        gate was correct at module scope, ``_timeout_album`` was correct
+        at module scope, and nothing exercised the two together — the
+        #853/#859 shape, where the defect lives in the composition. This
+        test runs the real helper over a real payload with the queue key
+        ledger-owned, which is the world a genuine timeout is in: the
+        request is ``downloading`` on our own accepted attempt.
+        """
+        from lib.download import poll_active_downloads
+        from lib.download_ownership import DownloadOwnershipWriter
+        from lib.pipeline_db import TransferLedgerRow
+
+        stale = "2020-01-01T00:00:00+00:00"
+        state_dict = {
+            "filetype": "flac",
+            "enqueued_at": stale,
+            "last_progress_at": stale,
+            "files": [
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 30000000,
+                 "bytes_transferred": 12345, "last_state": "InProgress"},
+            ],
+        }
+        row = self._make_downloading_row(state_dict=state_dict)
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "user1",
+            "directories": [{"directory": "user1\\Music", "files": [{
+                "filename": "user1\\Music\\01.flac",
+                "id": "tid-1",
+                "state": "InProgress",
+                "bytesTransferred": 12345,
+            }]}],
+        }])
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row], slskd=slskd)
+        payload = fake_db.request(1)[
+            "active_download_state"]["files"][0]["local_path"]
+        self.assertTrue(os.path.exists(payload))
+        fake_db.record_transfer_enqueue([TransferLedgerRow(
+            request_id=1, username="user1",
+            filename="user1\\Music\\01.flac")])
+        fake_db.confirm_transfer_enqueue("user1", "user1\\Music\\01.flac")
+        ctx.download_ownership = DownloadOwnershipWriter(
+            db_factory=lambda: fake_db, close_after_use=False)
+
+        poll_active_downloads(ctx)
+
+        fake_db.assert_log(self, 0, outcome="timeout")
+        self.assertEqual(
+            [(call.username, call.id)
+             for call in slskd.transfers.cancel_download_calls],
+            [("user1", "tid-1")],
+        )
+        self.assertFalse(os.path.exists(payload))
 
     def test_poll_active_old_album_with_progress_does_not_timeout(self):
         """Fresh byte progress should refresh stall timer even for an old album."""

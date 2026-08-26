@@ -38,15 +38,18 @@ from lib.context import CratediggerContext
 from lib.download_ownership import DownloadOwnershipWriter
 from lib.enqueue import (
     ClaimedQueueKeysRegistry,
+    DownloadOwnershipClaim,
+    _enqueue_with_claim_outcome,
     _WorkerPipelineDBSource,
     get_album_tracks,
     prepare_find_download_context,
     try_enqueue,
     try_multi_enqueue,
 )
-from lib.grab_list import DownloadFile
+from lib.grab_list import DownloadFile, GrabListEntry
 from lib.matching import MatchResult
 from lib.pipeline_db import TransferLedgerRow
+from lib.processing_paths import attempt_fingerprint_of_files
 from lib.quality import ActiveDownloadState
 from lib.slskd_transfers import SlskdEnqueueOutcome
 from tests.fakes import (
@@ -165,34 +168,118 @@ def _ctx_with_download_ownership(
     return ctx
 
 
-def _ledger_accepted_enqueue(
+def _ledger_enqueue_attempt(
     db: FakePipelineDB,
     username: str,
     files: list[dict[str, object]],
     *,
+    accepted: bool,
+    attempt_fp: str | None = None,
     request_id: int = 1,
 ) -> None:
     """Mirror the ledger half of the real ``slskd_enqueue_with_outcome``.
 
-    A fake standing in for that function must write what it writes: the
-    write-ahead row before the POST, and the acceptance confirmation
-    after slskd agrees. Skipping it manufactures a world production
-    cannot produce — an ACCEPTED enqueue whose queue key nothing owns —
-    and the destructive paths that gate on positive ownership (#1278)
-    then correctly refuse to cancel or delete for it, which reads as a
-    test failure rather than as the fixture gap it is.
+    A fake standing in for that function must write what it writes, in
+    both directions (Rule B, `.claude/rules/test-fidelity.md`):
+
+    * the write-ahead row goes in BEFORE the POST, so it is written
+      whatever the POST then returns -- a rejected enqueue still leaves
+      pending intent behind (`_write_ahead_transfer_ledger` is called
+      unconditionally at the top of the real function);
+    * only an accepted POST is then confirmed, which is what turns that
+      intent into destructive authority.
+
+    Writing only the accepted half manufactures a world production
+    cannot produce, in both directions: an ACCEPTED enqueue whose queue
+    key nothing owns (which the #1278 ownership gate correctly refuses
+    to act on, reading as a test failure rather than the fixture gap it
+    is), and a REJECTED enqueue that leaves no pending row for the
+    retention/promotion paths to find.
+
+    ``attempt_fp`` exists because the real function stamps it onto every
+    row and the cross-request enqueue guard joins on exactly that
+    column. Today's four callers all leave it ``None``: their enqueue
+    fakes never receive the real ``attempt_fp`` kwarg by name, and no
+    assertion in them reads the column. A guard test written into this
+    class later MUST pass it rather than inherit a fake that cannot
+    reproduce the join.
     """
     rows = [
         TransferLedgerRow(
             request_id=request_id,
             username=username,
             filename=str(file["filename"]),
+            attempt_fingerprint=attempt_fp,
         )
         for file in files
     ]
     db.record_transfer_enqueue(rows)
+    if not accepted:
+        return
     for row in rows:
         db.confirm_transfer_enqueue(row.username, row.filename)
+
+
+class TestEnqueueAttemptFingerprintPolicy(unittest.TestCase):
+    """The ledger-side half of the empty-attempt `None` policy.
+
+    `attempt_fingerprint_or_none`'s docstring says both sides of the
+    cross-request guard's fingerprint equality are written by two
+    callers: `lib.download.build_active_download_state` and this one.
+    Only the first had a pin — a mutant swapping THIS site to the
+    always-`str` variant survived the whole suite (#1278 review). An
+    empty-files attempt that minted the empty-set digest here would
+    equal any other empty attempt's state fingerprint, so the guard's
+    exact-equality join would treat two unrelated file-less claims as
+    the same attempt.
+    """
+
+    def _claim(self, files: list[DownloadFile]) -> DownloadOwnershipClaim:
+        entry = GrabListEntry(
+            album_id=1,
+            files=files,
+            filetype="flac",
+            title="Album",
+            artist="Artist",
+            year="2020",
+            mb_release_id="release-id",
+            db_request_id=1,
+        )
+        return DownloadOwnershipClaim(
+            entry=entry, request_id=1, attempted=True, claimed=True,
+            enqueued_at="2026-08-26T00:00:00+00:00")
+
+    def _attempt_fp_written(self, files: list[DownloadFile]) -> object:
+        captured: dict[str, object] = {}
+
+        def fake_enqueue(*, attempt_fp, **_kwargs):
+            captured["attempt_fp"] = attempt_fp
+            return SlskdEnqueueOutcome(status="rejected")
+
+        with patch(
+            "lib.enqueue.slskd_enqueue_with_outcome", side_effect=fake_enqueue,
+        ):
+            _enqueue_with_claim_outcome(
+                claim=self._claim(files),
+                username="u00",
+                files=[{"filename": "a.flac", "size": 1}],
+                file_dir="Music\\Album",
+                ctx=_make_ctx(_make_cfg()),
+            )
+        return captured["attempt_fp"]
+
+    def test_file_less_attempt_writes_no_fingerprint(self):
+        self.assertIsNone(self._attempt_fp_written([]))
+
+    def test_attempt_with_files_writes_the_shared_derivation(self):
+        files = [DownloadFile(
+            filename="Music\\a.flac", id="", file_dir="Music",
+            username="u00", size=1)]
+
+        self.assertEqual(
+            self._attempt_fp_written(files),
+            attempt_fingerprint_of_files(files),
+        )
 
 
 def _request_active_state(db: FakePipelineDB) -> ActiveDownloadState:
@@ -1816,6 +1903,9 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
             nonlocal enqueue_calls
             enqueue_calls += 1
             if enqueue_calls == 2:
+                # The write-ahead row precedes the POST, so a rejection
+                # still leaves pending intent behind.
+                _ledger_enqueue_attempt(db, username, files, accepted=False)
                 return SlskdEnqueueOutcome(status="rejected")
             filename, size = _enqueue_file_identity(files)
             slskd.add_transfer(
@@ -1824,7 +1914,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
                 filename=filename,
                 id="attempt-a-transfer-1",
             )
-            _ledger_accepted_enqueue(db, username, files)
+            _ledger_enqueue_attempt(db, username, files, accepted=True)
             return SlskdEnqueueOutcome(
                 status="accepted",
                 downloads=[DownloadFile(
@@ -1890,6 +1980,9 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
             nonlocal enqueue_calls
             enqueue_calls += 1
             if enqueue_calls == 2:
+                # The write-ahead row precedes the POST, so a rejection
+                # still leaves pending intent behind.
+                _ledger_enqueue_attempt(db, username, files, accepted=False)
                 return SlskdEnqueueOutcome(status="rejected")
             filename, size = _enqueue_file_identity(files)
             slskd.add_transfer(
@@ -1898,7 +1991,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
                 filename=filename,
                 id="attempt-a-transfer-1",
             )
-            _ledger_accepted_enqueue(db, username, files)
+            _ledger_enqueue_attempt(db, username, files, accepted=True)
             return SlskdEnqueueOutcome(
                 status="accepted",
                 downloads=[DownloadFile(
@@ -2009,6 +2102,9 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
             nonlocal enqueue_calls
             enqueue_calls += 1
             if enqueue_calls == 2:
+                # The write-ahead row precedes the POST, so a rejection
+                # still leaves pending intent behind.
+                _ledger_enqueue_attempt(db, username, files, accepted=False)
                 return SlskdEnqueueOutcome(status="rejected")
             slskd.add_transfer(
                 username=username,
@@ -2016,7 +2112,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
                 filename=files[0]["filename"],
                 id="transfer-1",
             )
-            _ledger_accepted_enqueue(db, username, files)
+            _ledger_enqueue_attempt(db, username, files, accepted=True)
             return SlskdEnqueueOutcome(status="accepted", downloads=[
                 DownloadFile(
                     filename=files[0]["filename"],
@@ -2153,6 +2249,9 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
             nonlocal enqueue_calls
             enqueue_calls += 1
             if enqueue_calls == 2:
+                # The write-ahead row precedes the POST, so a rejection
+                # still leaves pending intent behind.
+                _ledger_enqueue_attempt(db, username, files, accepted=False)
                 return SlskdEnqueueOutcome(status="rejected")
             slskd.add_transfer(
                 username=username,
@@ -2160,7 +2259,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
                 filename=files[0]["filename"],
                 id="transfer-1",
             )
-            _ledger_accepted_enqueue(db, username, files)
+            _ledger_enqueue_attempt(db, username, files, accepted=True)
             return SlskdEnqueueOutcome(status="accepted", downloads=[
                 DownloadFile(
                     filename=files[0]["filename"],
