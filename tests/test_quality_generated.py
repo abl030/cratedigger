@@ -48,7 +48,11 @@ import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 # than lazily because checker F2 compares it against the decider's own
 # answer, and the two must be read side by side to mean anything.
 from harness.import_one import conversion_target
-from lib.dispatch.quality_gate import QualityGatePlan, _check_quality_gate_core
+from lib.dispatch.quality_gate import (
+    QualityGatePlan,
+    _check_quality_gate_core,
+    _QualityGateStateLoader,
+)
 from lib.dispatch.types import QualityGateState
 from lib.quality import (
     AAC_LATTICE_PROOF_DENY_MAX_Z,
@@ -440,6 +444,21 @@ def assert_existing_override_noop_under_shared_clamp(
             f"under a shared spectral clamp: {a.get('verdict')!r} (override) "
             f"vs {b.get('verdict')!r} (none)"
         )
+
+
+def _fixed_gate_state(state: QualityGateState) -> _QualityGateStateLoader:
+    """A ``state_loader`` seam that always yields ``state``.
+
+    A named factory rather than an inline lambda: the loader seam is a
+    typed Protocol now (issue #1277 review), and binding the loop's state
+    through a parameter both satisfies ruff's late-binding rule and keeps
+    pyright's inference on ``QualityGateState``.
+    """
+
+    def _load(**_kwargs: object) -> QualityGateState:
+        return state
+
+    return _load
 
 
 @dataclass(frozen=True)
@@ -2156,7 +2175,7 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
                         },
                     ),  # type: ignore[arg-type]
                     apply=False,
-                    state_loader=lambda state=state, **_kwargs: state,
+                    state_loader=_fixed_gate_state(state),
                 )
                 self.assertIsNotNone(plan)
                 assert plan is not None

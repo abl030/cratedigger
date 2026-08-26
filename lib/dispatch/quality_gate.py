@@ -8,7 +8,7 @@ lossless. ``finalize_request`` is the module-local DI seam.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -201,6 +201,26 @@ def load_quality_gate_state(
     )
 
 
+class _QualityGateStateLoader(Protocol):
+    """Exact contract for the injected gate-state loader seam.
+
+    Spelled out rather than left as ``Callable[..., QualityGateState |
+    None]`` so the ``db=`` argument below is actually checked. That check is
+    what proves ``DispatchDB`` satisfies ``QualityGateStateDB`` — the claim
+    that port's docstring makes, and which nothing verified while this seam
+    erased its own argument types.
+    """
+
+    def __call__(
+        self,
+        *,
+        request_id: int,
+        db: QualityGateStateDB,
+        mb_id: str | None = ...,
+        expected_current_evidence_id: int | None = ...,
+    ) -> QualityGateState | None: ...
+
+
 def _check_quality_gate_core(
     mb_id: str,
     label: str,
@@ -210,7 +230,7 @@ def _check_quality_gate_core(
     quality_ranks: QualityRankConfig | None = None,
     expected_current_evidence_id: int | None = None,
     apply: bool = True,
-    state_loader: Callable[..., QualityGateState | None] = load_quality_gate_state,
+    state_loader: _QualityGateStateLoader = load_quality_gate_state,
     quality_decision_fn: _QualityGateDecisionFn = quality_gate_decision,
 ) -> QualityGatePlan | None:
     """Apply the post-import policy to linked current evidence."""
