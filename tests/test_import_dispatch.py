@@ -4454,6 +4454,14 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
                     quality_gate_fn=noop_quality_gate,
                     cancellation_token=cancellation_token,
                     run_import_fn=_owned_test_runner,
+                    # This test is about the pin capture, not the vanished-
+                    # path reconciler (issue #1203 item 2's own coverage is
+                    # tests.test_import_dispatch.TestVanishedPathReconciliation).
+                    # replaced_albums's old path differs from imported_path
+                    # here, which would otherwise reach a REAL
+                    # notify_library_delete against this test's real
+                    # jellyfin_url — stub it out directly via the kwarg-DI
+                    # seam rather than a module patch.
                     media_server_notify_fn=MagicMock(return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES),
                 )
         finally:
@@ -4578,9 +4586,22 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
                     db,
                     cfg=cfg,
                     quality_gate_fn=noop_quality_gate,
+                    # A real Beets row now exists for this release, so the
+                    # REAL evidence gate would try to spectrally measure it
+                    # (not real audio) -- bypass, matching
+                    # TestVanishedPathReconciliation's own pattern. This
+                    # test is about the pin capture, not evidence gating.
                     evidence_gate_fn=lambda *_a, **_kw: EvidenceImportGate(candidate=candidate.evidence),
                     cancellation_token=cancellation_token,
                     run_import_fn=_owned_test_runner,
+                    # This test is about the pin capture, not the vanished-
+                    # path reconciler (issue #1203 item 2's own coverage is
+                    # tests.test_import_dispatch.TestVanishedPathReconciliation).
+                    # replaced_albums's old path differs from imported_path
+                    # here, which would otherwise reach a REAL
+                    # notify_library_delete against this test's real
+                    # jellyfin_url — stub it out directly via the kwarg-DI
+                    # seam rather than a module patch.
                     media_server_notify_fn=MagicMock(return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES),
                 )
         finally:
@@ -4705,9 +4726,22 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
                     db,
                     cfg=cfg,
                     quality_gate_fn=noop_quality_gate,
+                    # A real Beets row now exists for this release, so the
+                    # REAL evidence gate would try to spectrally measure it
+                    # (not real audio) -- bypass, matching
+                    # TestVanishedPathReconciliation's own pattern. This
+                    # test is about the pin capture, not evidence gating.
                     evidence_gate_fn=lambda *_a, **_kw: EvidenceImportGate(candidate=candidate.evidence),
                     cancellation_token=cancellation_token,
                     run_import_fn=_owned_test_runner,
+                    # This test is about the pin capture, not the vanished-
+                    # path reconciler (issue #1203 item 2's own coverage is
+                    # tests.test_import_dispatch.TestVanishedPathReconciliation).
+                    # replaced_albums's old path differs from imported_path
+                    # here, which would otherwise reach a REAL
+                    # notify_library_delete against this test's real
+                    # jellyfin_url — stub it out directly via the kwarg-DI
+                    # seam rather than a module patch.
                     media_server_notify_fn=MagicMock(return_value=_PRODUCTION_SHAPED_NOT_CONFIGURED_OUTCOMES),
                 )
         finally:

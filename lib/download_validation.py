@@ -1313,10 +1313,13 @@ def _handle_valid_result(
                 if quality_gate_fn is not None
                 else _check_quality_gate_core
             )
+            _checkpoint(cancellation_token)
             # One construction, two possible callees. Before issue #1277 this
             # same 25-kwarg call was spelled twice, verbatim, differing only
             # in which callable it named — the widest drift surface in the
-            # file.
+            # file. The checkpoint above still precedes every argument
+            # evaluation, exactly as it did when the arguments were the call's
+            # own kwargs.
             dispatch_request = DispatchRequest(
                 path=dest,
                 mb_release_id=album_data.mb_release_id or "",
@@ -1341,8 +1344,10 @@ def _handle_valid_result(
                 execution_lease=execution_lease,
                 owner_session_identity=owner_session_identity,
             )
-            _checkpoint(cancellation_token)
-            dispatch = dispatch_fn or dispatch_import_core
+            dispatch = (
+                dispatch_fn if dispatch_fn is not None
+                else dispatch_import_core
+            )
             return dispatch(
                 dispatch_request,
                 pdb,
