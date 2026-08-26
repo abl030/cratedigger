@@ -553,6 +553,9 @@ class TestCancelAndDelete(unittest.TestCase):
     """Verify cancel_and_delete works with DownloadFile instances."""
 
     def test_cancels_download_files(self):
+        from lib.download_ownership import DownloadOwnershipWriter
+        from lib.pipeline_db import TransferLedgerRow
+
         slskd = FakeSlskdAPI()
         ctx = _make_ctx(
             cfg=_make_matching_cfg(slskd_download_dir=tempfile.mkdtemp()),
@@ -565,6 +568,15 @@ class TestCancelAndDelete(unittest.TestCase):
             username="user1",
             size=100,
         )]
+        # Destruction is ledger-gated (#1278): prove ownership of this
+        # exact queue key before expecting the cancel.
+        ledger_db = FakePipelineDB()
+        ledger_db.record_transfer_enqueue([TransferLedgerRow(
+            request_id=1, username="user1", filename="track.flac")])
+        ledger_db.confirm_transfer_enqueue("user1", "track.flac")
+        ctx.download_ownership = DownloadOwnershipWriter(
+            db_factory=lambda: ledger_db, close_after_use=False)
+
         cancel_and_delete(files, ctx)
         self.assertEqual(slskd.transfers.cancel_download_calls[0].username, "user1")
         self.assertEqual(slskd.transfers.cancel_download_calls[0].id, "xfer-1")

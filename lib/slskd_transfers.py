@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.processing_paths import (
+    CanonicalFolderFile,
     normalize_processing_path,
     path_is_within_root,
 )
@@ -53,8 +54,69 @@ class SlskdEnqueueOutcome:
     downloads: list[DownloadFile] | None = None
     reason: str | None = None
 
+def positively_owned_files[FileT: CanonicalFolderFile](
+    files: Sequence[FileT], ctx: CratediggerContext,
+) -> list[FileT]:
+    """The subset of ``files`` the ledger proves cratedigger created.
+
+    The good-citizen doctrine (#571) is that cratedigger may destroy only
+    what it can positively prove it created, and
+    ``converge_slskd_orphans`` states the rule for transfers exactly: "A
+    transfer absent from the confirmed ownership set is foreign — on a
+    shared slskd instance that may be a human's — and is NEVER cancelled,
+    whatever its state or age." This is that same set, asked about one
+    attempt's files, so the destructive path in ``cancel_and_delete``
+    answers to the same authority its sibling already does.
+
+    Fails CLOSED, and deliberately never raises: with no ownership
+    collaborator wired, or with the ledger unreachable, there is no proof
+    and therefore no authority. Skipping destruction can only leave a
+    file on disk, where ``reap_disk_orphans`` remains the backstop for
+    anything genuinely ours; guessing the other way deletes a stranger's
+    album. Production always wires ``ctx.download_ownership``
+    (``cratedigger.py`` builds it into the module context), so the
+    absent-writer arm is the same legacy/test shape
+    ``_write_ahead_transfer_ledger`` already skips — a context that never
+    ledgered an enqueue owns nothing to begin with.
+    """
+    if not files:
+        return []
+    writer = getattr(ctx, "download_ownership", None)
+    if writer is None:
+        logger.warning(
+            "SLSKD OWNERSHIP: no ownership collaborator wired; refusing to "
+            "cancel or delete %s slskd file(s) that are not ledger-owned",
+            len(files))
+        return []
+    keys = sorted({(file.username, file.filename) for file in files})
+    try:
+        owned = writer.owned_transfer_keys(keys)
+    except Exception:
+        logger.warning(
+            "SLSKD OWNERSHIP: ownership lookup failed for %s slskd file(s); "
+            "destroying nothing this pass — the disk reaper remains the "
+            "backstop", len(files), exc_info=True)
+        return []
+    return [
+        file for file in files
+        if (file.username, file.filename) in owned
+    ]
+
+
 def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> bool:
     """Cancel downloads and delete their completed payloads.
+
+    Scoped to positively owned queue keys first (issue #1278): only an
+    accepted-POST ledger row proves cratedigger created the transfer
+    behind a ``(username, filename)`` key. Both halves of this function
+    used to trust the caller's file list instead. That is unsound on a
+    shared slskd for the same reason ``converge_slskd_orphans`` already
+    refuses to trust it: ``match_transfer_id`` resolves IDs against the
+    instance-wide download list, and ``recent_completion_paths`` resolves
+    payload paths against the instance-wide events feed, so a foreign
+    client's transfer at the same key supplies both an ID we would cancel
+    and a path we would unlink — under the same download root, which is
+    why ``path_is_within_root`` cannot tell the two apart.
 
     Deletion targets come from slskd's own answers only (issue #146
     phase 3): the ingested ``local_path`` stamp, topped up by a fresh
@@ -65,10 +127,22 @@ def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> bool:
     (the ``CD1/`` hazard). In-flight partials are slskd's to clean up.
 
     Returns whether every requested transfer had an ID and cancel call
-    completed. Callers that only need best-effort cleanup can ignore it.
+    completed. A file skipped as unowned counts as not-completed, the
+    same as one whose transfer vanished: the callers that read this
+    result use it to conclude "verified no acceptance"
+    (``lib.enqueue._handle_claimed_partial_failure``), and a key we
+    never had authority to cancel is no evidence for that conclusion.
+    Callers that only need best-effort cleanup can ignore it.
     """
-    ok = True
-    for file in files:
+    owned = positively_owned_files(files, ctx)
+    skipped = len(files) - len(owned)
+    ok = skipped == 0
+    if skipped:
+        logger.warning(
+            "SLSKD OWNERSHIP: skipping %s of %s slskd file(s) that are not "
+            "ledger-owned — foreign or never-accepted keys are neither "
+            "cancelled nor deleted", skipped, len(files))
+    for file in owned:
         if not file.id:
             ok = False
             continue  # Transfer vanished or never assigned — skip cancel
@@ -82,7 +156,7 @@ def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> bool:
             ok = False
             logger.warning(f"Failed to cancel download {file.filename} for {file.username}",
                            exc_info=True)
-    _delete_completed_payloads(files, ctx)
+    _delete_completed_payloads(owned, ctx)
     return ok
 
 
@@ -90,7 +164,14 @@ def _delete_completed_payloads(
     files: list[Any],
     ctx: CratediggerContext,
 ) -> None:
-    """Remove completed files at their authoritative local paths."""
+    """Remove completed files at their authoritative local paths.
+
+    Callers pass an already ownership-scoped list
+    (``positively_owned_files``): the fresh events lookup below is
+    instance-wide, so an unowned key here would resolve to whatever
+    client last completed it. ``path_is_within_root`` stays as the
+    containment check it always was — necessary, never sufficient.
+    """
     from lib.slskd_events import recent_completion_paths
 
     root = ctx.cfg.slskd_download_dir

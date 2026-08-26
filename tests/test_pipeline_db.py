@@ -16817,6 +16817,68 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.assertEqual(
             self.db.get_owned_local_paths(), {"/downloads/a.flac"})
 
+    def test_owned_transfer_keys_for_answers_the_same_question_as_the_fake(self):
+        """The keyed ownership read (#1278) is the whole-ledger read
+        restricted to the asked keys, and both adapters agree.
+
+        Driven through real PG and the fake over identical state: the
+        destructive paths in lib/slskd_transfers.py consult this on
+        worker threads, and a fake that answered more generously than
+        PG would make every ownership-gating test a fiction.
+        """
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        rid = self._seed_request()
+        fake.seed_request({
+            "id": rid,
+            "status": "wanted",
+            "artist_name": "Artist",
+            "album_title": "Album",
+        })
+        rows = [
+            TransferLedgerRow(
+                request_id=rid, username="p0", filename="a.flac"),
+            TransferLedgerRow(
+                request_id=rid, username="p1", filename="b.flac"),
+        ]
+        for db in (self.db, fake):
+            db.record_transfer_enqueue(rows)
+            db.confirm_transfer_enqueue("p0", "a.flac")
+            # p1 stays pending intent: asked, never accepted.
+
+        asked = [
+            ("p0", "a.flac"),
+            ("p1", "b.flac"),
+            ("stranger", "a.flac"),
+        ]
+        for db in (self.db, fake):
+            with self.subTest(db=type(db).__name__):
+                self.assertEqual(
+                    db.get_owned_transfer_keys_for(asked),
+                    {("p0", "a.flac")},
+                )
+                self.assertEqual(db.get_owned_transfer_keys_for([]), set())
+                self.assertEqual(
+                    db.get_owned_transfer_keys_for(asked),
+                    db.get_owned_transfer_keys() & set(asked),
+                )
+
+    def test_owned_transfer_keys_for_deduplicates_retried_rows(self):
+        """One queue key retried across attempts holds many accepted
+        rows; the membership answer is still one key, not one per row."""
+        rid = self._seed_request()
+        row = TransferLedgerRow(
+            request_id=rid, username="p0", filename="a.flac")
+        for _ in range(3):
+            self.db.record_transfer_enqueue([row])
+            self.db.confirm_transfer_enqueue("p0", "a.flac")
+
+        self.assertEqual(
+            self.db.get_owned_transfer_keys_for([("p0", "a.flac")]),
+            {("p0", "a.flac")},
+        )
+
     def test_path_evidence_without_acceptance_is_rejected_by_the_schema(self):
         """Migration 083: ``local_path IS NOT NULL`` IMPLIES accepted.
 

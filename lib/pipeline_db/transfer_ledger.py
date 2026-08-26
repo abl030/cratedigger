@@ -163,6 +163,40 @@ class _TransferLedgerMixin(_PipelineDBBase):
         )
         return {(r["username"], r["filename"]) for r in cur.fetchall()}
 
+    def get_owned_transfer_keys_for(
+        self, keys: Sequence[tuple[str, str]],
+    ) -> set[tuple[str, str]]:
+        """``get_owned_transfer_keys`` restricted to ``keys``.
+
+        Same ownership question, same ``accepted_at IS NOT NULL``
+        answer -- asked about a handful of specific queue keys instead of
+        the whole ledger. ``converge_slskd_orphans`` legitimately wants
+        the whole set once per cycle; the destructive paths in
+        ``lib/slskd_transfers.py`` ask about one attempt's files and run
+        on find_download worker threads, where pulling all 33k accepted
+        keys per call to answer a five-key question is the wrong shape.
+
+        Keys are passed as two parallel arrays zipped server-side by
+        ``unnest(...)``, the same fixed-shape static SQL
+        ``get_conflicting_transfer_request_ids`` uses -- never an
+        f-string-assembled WHERE clause that grows with the input.
+        """
+        if not keys:
+            return set()
+        usernames = [key[0] for key in keys]
+        filenames = [key[1] for key in keys]
+        cur = self._execute(
+            """
+            SELECT DISTINCT l.username, l.filename
+            FROM slskd_transfer_ledger l
+            JOIN unnest(%s::text[], %s::text[]) AS k(username, filename)
+              ON l.username = k.username AND l.filename = k.filename
+            WHERE l.accepted_at IS NOT NULL
+            """,
+            (usernames, filenames),
+        )
+        return {(r["username"], r["filename"]) for r in cur.fetchall()}
+
     def get_owned_local_paths(self) -> set[str]:
         """Every event-stamped ``local_path`` in the ledger -- the
         disk-reaper flip's (issue #571) "is this file mine?" set. Rows

@@ -8632,6 +8632,39 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
 
         self.assertEqual(db.get_abandoned_owned_local_paths(), set())
 
+    def test_get_owned_transfer_keys_for_intersects_with_the_asked_keys(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+            TransferLedgerRow(request_id=1, username="p1", filename="b.flac"),
+        ])
+        db.confirm_transfer_enqueue("p0", "a.flac")
+        db.confirm_transfer_enqueue("p1", "b.flac")
+
+        self.assertEqual(
+            db.get_owned_transfer_keys_for([("p0", "a.flac")]),
+            {("p0", "a.flac")},
+        )
+        self.assertEqual(
+            db.get_owned_transfer_keys_for([("stranger", "a.flac")]), set())
+        self.assertEqual(db.get_owned_transfer_keys_for([]), set())
+
+    def test_get_owned_transfer_keys_for_excludes_pending_intent(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+
+        self.assertEqual(
+            db.get_owned_transfer_keys_for([("p0", "a.flac")]), set())
+
+        db.confirm_transfer_enqueue("p0", "a.flac")
+
+        self.assertEqual(
+            db.get_owned_transfer_keys_for([("p0", "a.flac")]),
+            {("p0", "a.flac")},
+        )
+
     def test_get_owned_transfer_keys_empty_before_any_record(self):
         self.assertEqual(FakePipelineDB().get_owned_transfer_keys(), set())
 
