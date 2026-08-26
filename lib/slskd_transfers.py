@@ -73,19 +73,28 @@ def positively_owned_files[FileT: CanonicalFolderFile](
     and therefore no authority. Skipping destruction can only leave a
     file on disk, where ``reap_disk_orphans`` remains the backstop for
     anything genuinely ours; guessing the other way deletes a stranger's
-    album. Every production context wires ``ctx.download_ownership``:
-    ``cratedigger.py`` builds it into the cycle's owner context and
-    ``build_phase1_context`` forwards it to the polling thread. Phase 1
-    did NOT forward it until issue #1278's review caught that, which
-    made this arm the only one the download-timeout path ever took —
-    every timeout cleanup a logged no-op. Do not treat the arm as
-    decorative because it is unreachable today; it was reachable, in
+    album. Every context that REACHES this function wires
+    ``ctx.download_ownership``: the cycle owner (``cratedigger.py``),
+    the Phase-1 poller (``build_phase1_context``), and every
+    find-download worker (``lib.enqueue.prepare_find_download_context``,
+    which supplies five of the six ``cancel_and_delete`` call sites).
+    Two production contexts do NOT wire it —
+    ``scripts/importer.py::_build_runtime_context`` and
+    ``scripts/import_preview_worker.py::_materialize_automation_authority``
+    — and neither has any path to a destructive slskd call, which is the
+    real reason this arm is unreachable today rather than any universal
+    about how contexts are built.
+
+    Phase 1 did NOT forward it until issue #1278's review caught that,
+    which made this arm the only one the download-timeout path ever
+    took — every timeout cleanup a logged no-op. Do not treat the arm as
+    decorative because it is unreachable; it was reachable, in
     production, for the length of one review round.
 
-    Two of the three ways to reach an empty result mirror the
-    write-ahead skip exactly (``_write_ahead_transfer_ledger`` writes no
-    row with no writer, or with no files), so a context that never
-    ledgered an enqueue owns nothing to destroy. Its third condition,
+    Two of ``_write_ahead_transfer_ledger``'s three skip conditions
+    mirror an empty result here exactly (it writes no row with no
+    writer, or with no files), so a context that never ledgered an
+    enqueue owns nothing to destroy. Its third condition,
     ``request_id is None``, does NOT mirror: that skips the INSERT while
     ``slskd_enqueue_with_outcome`` still calls
     ``confirm_transfer_enqueues``, and ``confirm_transfer_enqueue``

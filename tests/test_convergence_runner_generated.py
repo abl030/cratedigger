@@ -251,6 +251,45 @@ class TestMainContextWiring(unittest.TestCase):
         )
 
 
+class TestPhase1ContextCallSite(unittest.TestCase):
+    """#1278 review: the SAME bounded-AST technique, pinning the site the
+    defect actually shipped at.
+
+    `build_phase1_context` forwards `download_ownership` and
+    `tests/test_cycle_summary.py::TestPhase1ContextForwarding` pins that
+    it does. Neither constrains `main()` to CALL it — and the shipped
+    defect was exactly that: an inline `CratediggerContext(...)` in
+    `_run_phase1` missing the kwarg, which made every download-timeout
+    cleanup a no-op under the ownership gate. Reverting that one line
+    reproduces the production bug with the whole suite green.
+    """
+
+    def test_phase1_ctx_is_built_by_the_forwarding_helper(self):
+        tree = ast.parse(inspect.getsource(cratedigger.main))
+        assignments = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "phase1_ctx"
+        ]
+
+        self.assertEqual(
+            len(assignments), 1,
+            "expected exactly one phase1_ctx = ... assignment in main()",
+        )
+        value = assignments[0].value
+        self.assertTrue(
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "build_phase1_context",
+            "phase1_ctx must be built by build_phase1_context(...), never "
+            "by an inline CratediggerContext(...) — an inline construction "
+            "silently drops whatever collaborator the next author forgets, "
+            f"got {ast.dump(value)}",
+        )
+
+
 class TestGeneratedConvergenceIsolation(unittest.TestCase):
     @given(raises=st.lists(st.booleans(), min_size=0, max_size=12))
     def test_arbitrary_raising_steps_never_abort_the_registry(self, raises):

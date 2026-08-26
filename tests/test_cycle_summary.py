@@ -107,7 +107,14 @@ class TestPhase1ContextForwarding(unittest.TestCase):
             owner_ctx=owner,
         )
 
-        self.assertEqual(phase1.cooled_down_users, {"grumpy-peer"})
+        # assertIs, not assertEqual: sharing the SET OBJECT is what lets
+        # Phase 1's `ctx.cooled_down_users.add(...)` (lib/download.py)
+        # reach the owner context and, through it, Phase 2's worker
+        # contexts. Copying the set instead would satisfy equality and
+        # silently strand every cooldown Phase 1 discovers — a mutant
+        # replacing the forward with `set(owner_ctx.cooled_down_users)`
+        # survived the equality version of this assertion (#1278 review).
+        self.assertIs(phase1.cooled_down_users, owner.cooled_down_users)
         self.assertIs(phase1.pipeline_db_source, phase1_source)
         self.assertIsNot(phase1.pipeline_db_source, owner.pipeline_db_source)
 

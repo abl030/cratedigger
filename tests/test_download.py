@@ -831,12 +831,11 @@ class TestCancelAndDelete(unittest.TestCase):
         self.assertIn(
             "no ownership collaborator wired", "\n".join(logs.output))
 
-    def test_empty_file_list_asks_nothing_and_says_nothing(self):
-        """An empty batch is not an ownership failure.
+    def test_empty_file_list_asks_the_ledger_nothing(self):
+        """An empty batch is not an ownership question.
 
-        Without the early exit, a caller with nothing to clean up would
-        emit the no-collaborator or skipped-keys warning about zero
-        files, training the operator to ignore both.
+        The early exit is what keeps a caller with nothing to clean up
+        from opening a DB handle to ask about zero keys.
         """
         from lib.slskd_transfers import cancel_and_delete
         ctx, slskd, _ = self._ctx()
@@ -848,12 +847,30 @@ class TestCancelAndDelete(unittest.TestCase):
 
         ctx.download_ownership.owned_transfer_keys = _record
 
-        with patch.object(logging.getLogger("cratedigger"), "warning") as warn:
-            ok = cancel_and_delete([], ctx)
+        ok = cancel_and_delete([], ctx)
 
         self.assertTrue(ok)
         self.assertEqual(asked, [])
         self.assertEqual(slskd.transfers.cancel_download_calls, [])
+
+    def test_empty_file_list_with_no_collaborator_stays_silent(self):
+        """...and from accusing the operator about zero files.
+
+        The skipped-keys warning cannot fire on an empty batch in any
+        world (`skipped` is `0 - 0`), so only this scenario — no
+        collaborator AND nothing to do — makes the "stays silent" half
+        of the early exit falsifiable. Asserted separately because a
+        single test claiming both was inert on the warning half
+        (#1278 review).
+        """
+        from lib.slskd_transfers import cancel_and_delete
+        ctx, _, _ = self._ctx()
+        ctx.download_ownership = None
+
+        with patch.object(logging.getLogger("cratedigger"), "warning") as warn:
+            ok = cancel_and_delete([], ctx)
+
+        self.assertTrue(ok)
         warn.assert_not_called()
 
     def test_owned_and_foreign_files_are_partitioned_in_one_call(self):

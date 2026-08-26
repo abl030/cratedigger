@@ -198,11 +198,12 @@ def _ledger_enqueue_attempt(
 
     ``attempt_fp`` exists because the real function stamps it onto every
     row and the cross-request enqueue guard joins on exactly that
-    column. Today's four callers all leave it ``None``: their enqueue
-    fakes never receive the real ``attempt_fp`` kwarg by name, and no
-    assertion in them reads the column. A guard test written into this
-    class later MUST pass it rather than inherit a fake that cannot
-    reproduce the join.
+    column. Every call site today leaves it ``None``: production does
+    pass ``attempt_fp`` by name, but these fakes swallow it in
+    ``**kwargs`` and never forward it into the row, and no assertion in
+    them reads the column. A guard test written into this class later
+    MUST pass it rather than inherit a fixture that cannot reproduce the
+    join.
     """
     rows = [
         TransferLedgerRow(
@@ -251,9 +252,16 @@ class TestEnqueueAttemptFingerprintPolicy(unittest.TestCase):
 
     def _attempt_fp_written(self, files: list[DownloadFile]) -> object:
         captured: dict[str, object] = {}
+        db = FakePipelineDB()
 
-        def fake_enqueue(*, attempt_fp, **_kwargs):
+        def fake_enqueue(*, username, files, attempt_fp, **_kwargs):
             captured["attempt_fp"] = attempt_fp
+            # Rule B: the write-ahead row precedes the POST, so even this
+            # rejecting fake writes the pending intent the real function
+            # would have written — the contract `_ledger_enqueue_attempt`
+            # above declares.
+            _ledger_enqueue_attempt(
+                db, username, files, accepted=False, attempt_fp=attempt_fp)
             return SlskdEnqueueOutcome(status="rejected")
 
         with patch(

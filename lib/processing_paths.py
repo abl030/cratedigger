@@ -207,14 +207,16 @@ def attempt_fingerprint_of_files(files: Sequence[CanonicalFolderFile]) -> str:
 
     That agreement used to rest on five separate spellings of
     ``[(f.username, f.filename) for f in files]`` matching each other,
-    asserted in prose: four docstrings claim it in those words
-    (``lib/download.py``, ``lib/download_materialization.py``,
-    ``lib/download_recovery.py``,
-    ``lib/pipeline_db/transfer_ledger.py`` -- "MUST derive from the same
-    (username, filename) pairs", "agree BY CONSTRUCTION without a second
-    formula"), and ``canonical_folder_for_row`` below makes the same
-    non-drift claim in different words. Sharing the formula is what
-    makes all five true rather than merely maintained.
+    asserted only in prose. Exactly two docstrings said so in those
+    words -- ``lib/download.py`` ("agree BY CONSTRUCTION without a
+    second formula") and ``lib/download_recovery.py`` ("MUST derive
+    from the same (username, filename) pairs") -- while
+    ``lib/pipeline_db/transfer_ledger.py``, ``canonical_folder_for_row``
+    below, and the since-deleted
+    ``lib/download_materialization.py::_attempt_fingerprint_for`` each
+    made the same non-drift claim in their own words. Sharing the
+    formula is what makes those claims true rather than merely
+    maintained.
     """
     return attempt_fingerprint([(f.username, f.filename) for f in files])
 

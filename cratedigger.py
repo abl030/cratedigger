@@ -1391,11 +1391,20 @@ def build_phase1_context(
 ) -> CratediggerContext:
     """Build Phase 1's own polling context from the cycle's owner context.
 
-    Phase 1 runs on a background thread with its own DB connection, so it
-    cannot share the owner thread's cached source — but everything else
-    it needs is a per-cycle collaborator the owner context already holds,
-    and every one of those must be forwarded explicitly or Phase 1
-    silently degrades.
+    Phase 1 runs on a background thread with its own DB connection, so
+    it cannot share the owner thread's cached source. The two per-cycle
+    collaborators it does reach through the owner context —
+    ``cooled_down_users`` (forwarded BY REFERENCE, so a cooldown Phase 1
+    discovers reaches Phase 2's workers) and ``download_ownership`` —
+    must be forwarded explicitly or Phase 1 silently degrades.
+
+    Deliberately NOT forwarded: ``evidence_enrichment_budget``, which
+    Phase 1 is the only production consumer of (it decrements the field
+    in ``lib.download._timeout_album``), so its own per-context default
+    IS the cycle's budget and forwarding would share a counter nothing
+    else spends. Everything else on the owner context — the registry,
+    peer cache, browse coordinator, and the per-cycle caches and
+    accumulators — is unread by every module Phase 1 reaches.
 
     ``download_ownership`` is the one that bites (issue #1278). Phase 1
     reaches ``lib.download._timeout_album`` -> ``cancel_and_delete``,
