@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from lib.library_delete_notifiers import (
     _nearest_existing_ancestor,
@@ -112,6 +112,42 @@ class TestDeleteNotifierTargeting(unittest.TestCase):
                 ]
                 with self.subTest(found=found):
                     self.assertEqual(per_lane[0], per_lane[1])
+
+    def test_no_network_io_leaves_the_notifier_with_all_seams_injected(
+        self,
+    ) -> None:
+        """Guard for the deleted refresh machinery (#1221 item 1, mutant
+        runner survivor M22): with every collaborator injected, NOTHING in
+        ``notify_library_delete`` may open a network connection — a
+        re-added Jellyfin refresh call is invisible to the outcome
+        assertions (its result can be swallowed), so this pins the network
+        leaf itself. The socket patch RECORDS rather than raises: the
+        surviving mutant wrapped its call in ``except Exception: pass``,
+        which would swallow a poisoned socket's raise but cannot erase the
+        recorded call. ``getaddrinfo`` is patched too: name resolution
+        precedes socket creation, so a refresh attempt against an
+        unresolvable host would otherwise die (and be swallowed) before
+        ever touching ``socket.socket``."""
+        with tempfile.TemporaryDirectory() as raw:
+            former = Path(raw) / "Artist" / "Deleted Album"
+            for found in (True, False):
+                ref = JellyfinAlbumRef("exact-album", "date") if found else None
+                for allow_escalation in (True, False):
+                    with self.subTest(
+                        found=found, allow_escalation=allow_escalation,
+                    ), patch("socket.socket") as sock, \
+                            patch("socket.getaddrinfo") as resolve:
+                        notify_library_delete(
+                            _cfg(raw),
+                            str(former),
+                            allow_escalation=allow_escalation,
+                            plex_find_fn=lambda _cfg, _path: None,
+                            plex_scan_fn=lambda _cfg, path: (200, path),
+                            jellyfin_find_fn=(
+                                lambda _cfg, _path, _ref=ref: _ref),
+                        )
+                        sock.assert_not_called()
+                        resolve.assert_not_called()
 
     def test_nearest_ancestor_rejects_out_of_root_path(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
