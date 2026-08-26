@@ -165,6 +165,36 @@ def _ctx_with_download_ownership(
     return ctx
 
 
+def _ledger_accepted_enqueue(
+    db: FakePipelineDB,
+    username: str,
+    files: list[dict[str, object]],
+    *,
+    request_id: int = 1,
+) -> None:
+    """Mirror the ledger half of the real ``slskd_enqueue_with_outcome``.
+
+    A fake standing in for that function must write what it writes: the
+    write-ahead row before the POST, and the acceptance confirmation
+    after slskd agrees. Skipping it manufactures a world production
+    cannot produce — an ACCEPTED enqueue whose queue key nothing owns —
+    and the destructive paths that gate on positive ownership (#1278)
+    then correctly refuse to cancel or delete for it, which reads as a
+    test failure rather than as the fixture gap it is.
+    """
+    rows = [
+        TransferLedgerRow(
+            request_id=request_id,
+            username=username,
+            filename=str(file["filename"]),
+        )
+        for file in files
+    ]
+    db.record_transfer_enqueue(rows)
+    for row in rows:
+        db.confirm_transfer_enqueue(row.username, row.filename)
+
+
 def _request_active_state(db: FakePipelineDB) -> ActiveDownloadState:
     raw = db.request(1)["active_download_state"]
     if isinstance(raw, str):
@@ -1794,6 +1824,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
                 filename=filename,
                 id="attempt-a-transfer-1",
             )
+            _ledger_accepted_enqueue(db, username, files)
             return SlskdEnqueueOutcome(
                 status="accepted",
                 downloads=[DownloadFile(
@@ -1867,6 +1898,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
                 filename=filename,
                 id="attempt-a-transfer-1",
             )
+            _ledger_accepted_enqueue(db, username, files)
             return SlskdEnqueueOutcome(
                 status="accepted",
                 downloads=[DownloadFile(
@@ -1984,6 +2016,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
                 filename=files[0]["filename"],
                 id="transfer-1",
             )
+            _ledger_accepted_enqueue(db, username, files)
             return SlskdEnqueueOutcome(status="accepted", downloads=[
                 DownloadFile(
                     filename=files[0]["filename"],
@@ -2127,6 +2160,7 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
                 filename=files[0]["filename"],
                 id="transfer-1",
             )
+            _ledger_accepted_enqueue(db, username, files)
             return SlskdEnqueueOutcome(status="accepted", downloads=[
                 DownloadFile(
                     filename=files[0]["filename"],
