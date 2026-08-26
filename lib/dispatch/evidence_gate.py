@@ -62,8 +62,8 @@ from lib.quality_evidence import (
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
+    from lib.dispatch.types import DispatchDB
     from lib.import_execution import ExecutionLeaseSnapshot
-    from lib.pipeline_db import PipelineDB
     from lib.quality import (
         AlbumQualityEvidence,
         ImportResult,
@@ -77,7 +77,7 @@ logger = logging.getLogger("cratedigger")
 
 
 def _requeue_import_job_to_preview(
-    db: PipelineDB,
+    db: DispatchDB,
     *,
     import_job_id: int | None,
     reason: str,
@@ -258,7 +258,7 @@ def _remove_quality_evidence_action_file(path: str | None) -> None:
 
 
 def _load_evidence_import_gate(
-    db: PipelineDB,
+    db: DispatchDB,
     *,
     request_id: int,
     mb_release_id: str,

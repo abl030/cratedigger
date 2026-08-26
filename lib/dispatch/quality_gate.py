@@ -67,7 +67,7 @@ def _evidence_unavailable_plan() -> QualityGatePlan:
 
 
 if TYPE_CHECKING:
-    from lib.pipeline_db import PipelineDB
+    from lib.dispatch.types import DispatchDB
     from lib.quality import (
         AudioQualityMeasurement,
         QualityRankConfig,
@@ -94,7 +94,7 @@ logger = logging.getLogger("cratedigger")
 def load_quality_gate_state(
     *,
     request_id: int,
-    db: PipelineDB,
+    db: DispatchDB,
     mb_id: str | None = None,
     expected_current_evidence_id: int | None = None,
 ) -> QualityGateState | None:
@@ -181,7 +181,7 @@ def _check_quality_gate_core(
     label: str,
     request_id: int,
     files: Sequence[object],
-    db: PipelineDB,
+    db: DispatchDB,
     quality_ranks: QualityRankConfig | None = None,
     expected_current_evidence_id: int | None = None,
     apply: bool = True,

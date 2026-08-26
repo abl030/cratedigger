@@ -9,7 +9,6 @@ evidence reject helper. ``finalize_request`` is the module-local DI seam
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -56,34 +55,40 @@ from lib.terminal_outcomes import (
 )
 
 if TYPE_CHECKING:
-    from lib.pipeline_db import DownloadLogOutcome, PipelineDB
+    from lib.dispatch.types import DispatchDB, DispatchRequest
+    from lib.pipeline_db import DownloadLogOutcome
     from lib.quality import ImportResult, MeasurementFailure
 
 logger = logging.getLogger("cratedigger")
 
 
 def _reject_import_from_evidence_decision(
+    request: DispatchRequest,
+    db: DispatchDB,
     *,
-    db: PipelineDB,
-    request_id: int,
-    dl_info: DownloadInfo,
     attempt_result: ImportAttemptResult,
-    distance: float | None,
     decision: str,
     detail: str,
-    requeue_on_failure: bool,
-    validation_result: str | None,
-    staged_path: str,
-    scenario: str,
-    files: Sequence[object] | None,
-    source_path_cleanup_scenario: str,
-    cooled_down_users: set[str] | None,
-    import_job_id: int | None = None,
-    source_download_log_id: int | None = None,
     quality_ranks: QualityRankConfig | None = None,
     protected_roots: frozenset[str] | None = None,
 ) -> DispatchOutcome:
     """Record a persisted-evidence rejection before beets can mutate files.
+
+    Takes the whole ``DispatchRequest`` (issue #1277). Its one caller is
+    ``dispatch_import_core``, and everything this helper used to take as a
+    loose parameter — the request id, the download info, the distance, the
+    lifecycle authority, the staged path, the scenario, the peer files, the
+    cooldown set, the job/log ids — was already a verbatim field of that
+    caller's own request. What is NOT on the request stays explicit: the
+    attempt accumulator, the decision and its detail (both derived inside
+    the caller from the evidence pipeline), and the two config-derived
+    policy values.
+
+    The scenario is used twice — as the fallback rejection envelope's own
+    label and as the source-path cleanup gate — and both readings are
+    ``request.scenario``. They were separate parameters before #1277, but
+    the single production call site always passed the same value to both,
+    so a divergence between them was never reachable.
 
     Unified rejection helper for every ``full_pipeline_decision_from_evidence``
     reject outcome — quality-side (downgrade / suspect_lossless / etc.) AND
@@ -107,23 +112,25 @@ def _reject_import_from_evidence_decision(
     status is operator-owned and a candidate fact must not clear it.
     """
 
+    dl_info = request.dl_info
     import_result = attempt_result.result
     if import_result is None:
         raise RuntimeError("persisted-evidence rejection requires an import result")
     _populate_dl_info_from_import_result(dl_info, import_result)
     action = dispatch_action(decision)
-    rejection_validation = validation_result or ValidationResult(
-        distance=distance,
-        scenario=decision or scenario,
+    rejection_validation = dl_info.validation_result or ValidationResult(
+        distance=request.distance,
+        scenario=decision or request.scenario,
         detail=detail,
     ).to_json()
     search_filetype_override = None
     if decision in ("downgrade", "transcode_downgrade"):
         current_override = None
         try:
-            request = db.get_request(request_id)
+            request_row = db.get_request(request.request_id)
             current_override = (
-                request.get("search_filetype_override") if request else None
+                request_row.get("search_filetype_override")
+                if request_row else None
             )
         except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             logger.debug(
@@ -140,22 +147,22 @@ def _reject_import_from_evidence_decision(
         ).override
     terminal_outcome = _record_rejection_and_maybe_requeue(
         db,
-        request_id,
+        request.request_id,
         dl_info,
         detail=detail,
         error=detail if decision == "audio_corrupt" else None,
-        requeue=requeue_on_failure and not action.preserve_imported,
+        requeue=request.requeue_on_failure and not action.preserve_imported,
         outcome_label="rejected",
         search_filetype_override=search_filetype_override,
         validation_result=rejection_validation,
-        staged_path=staged_path,
+        staged_path=request.path,
         attempt_result=attempt_result,
-        import_job_id=import_job_id,
-        source_download_log_id=source_download_log_id,
+        import_job_id=request.candidate_import_job_id,
+        source_download_log_id=request.candidate_download_log_id,
         preserve_imported=action.preserve_imported,
     )
     if action.denylist:
-        usernames = extract_usernames(files or [])
+        usernames = extract_usernames(request.files or [])
         if dl_info.username:
             usernames.add(dl_info.username)
         # Unified denylist policy. Quality-side and four-fact reject reasons
@@ -185,12 +192,12 @@ def _reject_import_from_evidence_decision(
             ))
         else:
             for username in usernames:
-                db.add_denylist(request_id, username, reason)
+                db.add_denylist(request.request_id, username, reason)
                 if (
-                    cooled_down_users is not None
+                    request.cooled_down_users is not None
                     and db.check_and_apply_cooldown(username)
                 ):
-                    cooled_down_users.add(username)
+                    request.cooled_down_users.add(username)
     cleanup_plan: PostCommitCleanup | None = None
     # Bad rips are ban + delete, never quarantined (issue #1077, D3): a
     # corrupt candidate has no salvage value for operator review, so
@@ -204,7 +211,7 @@ def _reject_import_from_evidence_decision(
     # source is a distinct path this helper never sees, deleted by
     # ``_cleanup_failed_force_import`` after the terminal commit.
     if action.cleanup and _should_cleanup_path(
-        source_path_cleanup_scenario,
+        request.scenario,
         action,
     ):
         # Issue #1077, R3-3 (widened issue #1122, review round 2): this
@@ -221,13 +228,15 @@ def _reject_import_from_evidence_decision(
         # same way; the deferred branch has no other way to carry the guard
         # across the boundary to
         # ``scripts/importer.py::_run_post_commit_cleanup``.
-        if import_job_id is not None:
+        if request.candidate_import_job_id is not None:
             cleanup_plan = PostCommitCleanup(
-                staged_path=staged_path,
+                staged_path=request.path,
                 staged_path_protected_parents=protected_roots,
             )
         else:
-            _cleanup_staged_dir(staged_path, protected_parents=protected_roots)
+            _cleanup_staged_dir(
+                request.path, protected_parents=protected_roots,
+            )
     return DispatchOutcome(
         success=False,
         message=f"Rejected by persisted quality evidence: {decision}",
@@ -243,7 +252,7 @@ def _reject_import_from_evidence_decision(
 
 
 def _do_mark_done(
-    db: PipelineDB,
+    db: DispatchDB,
     request_id: int,
     dl_info: DownloadInfo,
     distance: float | None,
@@ -418,7 +427,7 @@ def _do_mark_done(
 
 
 def _finalize_request_and_log_rejection(
-    db: PipelineDB,
+    db: DispatchDB,
     request_id: int | None,
     log_download_kwargs: dict[str, Any],
     *,
@@ -519,7 +528,7 @@ def _finalize_request_and_log_rejection(
 
 
 def _record_rejection_and_maybe_requeue(
-    db: PipelineDB,
+    db: DispatchDB,
     request_id: int,
     dl_info: DownloadInfo,
     detail: str | None,
@@ -612,7 +621,7 @@ def _record_rejection_and_maybe_requeue(
 
 
 def _record_preview_measurement_failed(
-    db: PipelineDB,
+    db: DispatchDB,
     *,
     request_id: int | None,
     import_job_id: int,
@@ -699,21 +708,28 @@ def _record_preview_measurement_failed(
 
 
 def _record_have_analysis_error(
-    db: PipelineDB,
+    request: DispatchRequest,
+    db: DispatchDB,
     *,
-    request_id: int,
-    dl_info: DownloadInfo,
     raw_error: str,
     installed_path: str | None,
-    candidate_reference: str | None,
     snapshot_guard: str | None,
-    import_job_id: int | None,
-    source_download_log_id: int | None = None,
-    cooled_down_users: set[str] | None = None,
-    requeue_to_wanted: bool = True,
 ) -> int | PendingImportTerminalOutcome:
-    """Persist a non-quality abort while honoring caller lifecycle authority."""
+    """Persist a non-quality abort while honoring caller lifecycle authority.
 
+    Takes the whole ``DispatchRequest`` (issue #1277): its one caller is
+    ``dispatch_import_core``, and the request id, download info, candidate
+    reference (the candidate path), job/log ids, cooldown set and lifecycle
+    authority were all verbatim fields of that caller's request. What stays
+    explicit is what the evidence gate produced for THIS abort — the raw
+    error, the installed path it failed on, and the snapshot guard that
+    classifies it.
+    """
+
+    dl_info = request.dl_info
+    import_job_id = request.candidate_import_job_id
+    requeue_to_wanted = request.requeue_on_failure
+    candidate_reference = request.path
     failure = HaveAnalysisFailure(
         failure_category=classify_have_analysis_failure(
             raw_error,
@@ -739,7 +755,7 @@ def _record_have_analysis_error(
         staged_path=candidate_reference,
         error_message=raw_error,
         validation_result=validation_json,
-        source_download_log_id=source_download_log_id,
+        source_download_log_id=request.candidate_download_log_id,
     )
     transition = (
         transitions.RequestTransition.to_wanted_fields(
@@ -756,7 +772,7 @@ def _record_have_analysis_error(
     )
     if import_job_id is not None:
         return PendingImportTerminalOutcome(
-            request_id=request_id,
+            request_id=request.request_id,
             import_job_id=import_job_id,
             initial_transition=transition,
             audit=audit,
@@ -765,7 +781,7 @@ def _record_have_analysis_error(
 
     download_log_id = _finalize_request_and_log_rejection(
         db,
-        request_id,
+        request.request_id,
         audit.as_log_kwargs(),
         requeue_to_wanted=requeue_to_wanted,
         record_validation_attempt=requeue_to_wanted,
@@ -773,9 +789,9 @@ def _record_have_analysis_error(
     if (
         dl_info.username
         and db.check_and_apply_cooldown(dl_info.username)
-        and cooled_down_users is not None
+        and request.cooled_down_users is not None
     ):
-        cooled_down_users.add(dl_info.username)
+        request.cooled_down_users.add(dl_info.username)
     return download_log_id
 
 

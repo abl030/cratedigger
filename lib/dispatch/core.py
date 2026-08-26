@@ -53,6 +53,7 @@ from lib.dispatch.subprocess_runner import run_import_one
 from lib.dispatch.types import (
     FORCE_IMPORT_SCENARIOS,
     DispatchOutcome,
+    DispatchRequest,
     EvidenceImportGate,
     ImportAttemptResult,
     ImportOneRunner,
@@ -101,14 +102,13 @@ from lib.validation_envelope import (
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
+    from lib.dispatch.types import DispatchDB
     from lib.import_evidence import (
-        CandidateEvidenceActionResult,
         CurrentEvidenceActionResult,
     )
     from lib.library_delete_notifiers import DeleteNotification
-    from lib.pipeline_db import DownloadLogOutcome, PipelineDB
     from lib.pipeline_db.rows import DownloadLogWithEvidenceRow
-    from lib.quality import DuplicateRemoveCandidate, SpectralDetail
+    from lib.quality import DuplicateRemoveCandidate
 
 logger = logging.getLogger("cratedigger")
 
@@ -277,7 +277,7 @@ def _describe_rejection(
 
 
 def _resolve_rejection_override(
-    db: PipelineDB,
+    db: DispatchDB,
     *,
     request_id: int,
     decision: str,
@@ -341,7 +341,7 @@ def _denylist_reason(decision: str, new_bitrate: int | None) -> str:
 
 
 def _checkpoint_import_owner(
-    db: PipelineDB,
+    db: DispatchDB,
     *,
     import_job_id: int | None,
     execution_lease: ExecutionLeaseSnapshot | None,
@@ -378,7 +378,7 @@ def _checkpoint_import_owner(
 
 
 def _validate_automation_dispatch_authority(
-    db: PipelineDB,
+    db: DispatchDB,
     *,
     force: bool,
     import_job_id: int | None,
@@ -415,7 +415,7 @@ def _validate_automation_dispatch_authority(
 
 
 def _import_runner_hooks(
-    db: PipelineDB,
+    db: DispatchDB,
     *,
     import_job_id: int | None,
     execution_lease_holder: list[ExecutionLeaseSnapshot | None],
@@ -475,7 +475,7 @@ def _import_runner_hooks(
 
 
 def _capture_automation_completion(
-    db: PipelineDB,
+    db: DispatchDB,
     *,
     import_job_id: int | None,
     request_id: int,
@@ -767,7 +767,7 @@ def _reconcile_vanished_replaced_album_paths(
 
 def _trigger_post_import_notifiers(
     cfg: CratediggerConfig,
-    db: PipelineDB,
+    db: DispatchDB,
     *,
     import_result: ImportResult,
     request_id: int,
@@ -966,71 +966,57 @@ def _evidence_reject_import_result(
 
 
 def dispatch_import_core(
+    request: DispatchRequest,
+    db: DispatchDB,
     *,
-    path: str,
-    mb_release_id: str,
-    request_id: int,
-    label: str,
-    force: bool = False,
-    override_min_bitrate: int | None = None,
-    target_format: str | None = None,
-    verified_lossless_target: str = "",
-    beets_harness_path: str,
-    db: PipelineDB,
-    dl_info: DownloadInfo,
-    distance: float | None = None,
-    scenario: str = "auto_import",
-    files: Sequence[object] | None = None,
     cfg: CratediggerConfig | None = None,
-    outcome_label: DownloadLogOutcome = "success",
-    requeue_on_failure: bool = True,
-    cooled_down_users: set[str] | None = None,
-    source_dirs: list[str] | None = None,
-    candidate_import_job_id: int | None = None,
-    attempt_spectral_audit: SpectralDetail | None = None,
-    attempt_result: ImportAttemptResult | None = None,
-    candidate_download_log_id: int | None = None,
-    launch_authority_path: str | None = None,
-    prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
     quality_gate_fn: QualityGateFn = _check_quality_gate_core,
     run_import_fn: ImportOneRunner | None = None,
     evidence_gate_fn: Callable[..., EvidenceImportGate] = _load_evidence_import_gate,
     current_evidence_loader: Callable[
         ..., CurrentEvidenceActionResult | None
     ] | None = None,
-    beets_library_db_path: str | None = None,
-    beets_library_root: str | None = None,
-    execution_lease: ExecutionLeaseSnapshot | None = None,
-    cancellation_token: CancellationToken | None = None,
-    owner_session_identity: OwnerSessionIdentity | None = None,
     album_directory_snapshot_fn: Callable[
         ..., dict[int, str]
     ] = _snapshot_current_album_directories,
     media_server_notify_fn: (
         Callable[..., tuple[DeleteNotification, ...]] | None
     ) = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> DispatchOutcome:
-    """Core import dispatch — takes plain params + PipelineDB directly.
+    """Core import dispatch — one typed ``DispatchRequest`` + a narrow DB port.
 
     Runs import_one.py, parses result, dispatches on decision (mark_done/failed,
     denylist, quality gate, media server notifiers, cleanup). Returns DispatchOutcome.
 
-    ``beets_library_db_path`` / ``beets_library_root`` are an inseparable
-    explicit storage authority for isolated real-Beets worlds. Production
-    leaves both unset and derives the complete pair from runtime config.
+    Everything that DESCRIBES the import lives on ``request`` (issue #1277).
+    What stays here is what is not a description: the DB handle, the runtime
+    ``cfg``, the live ``cancellation_token``, and the injected callables —
+    the kwarg-DI seam (``.claude/rules/code-quality.md`` § "Mocks"), whose
+    production defaults are the real implementations.
+
+    ``request.beets_library_db_path`` / ``request.beets_library_root`` are an
+    inseparable explicit storage authority for isolated real-Beets worlds.
+    Production leaves both unset and derives the complete pair from runtime
+    config.
 
     Used by the auto-import flow in ``lib.download`` and by
     ``dispatch_import_from_db()`` (force-import).
     """
-    source_dirs = normalize_source_dirs(source_dirs or [])
+    # The three values dispatch re-derives from the request. They are locals,
+    # not fields, because the request is frozen: normalization, the
+    # evidence-resolved override, and the recovered preview audit all belong
+    # to THIS execution, not to the caller's description of it.
+    source_dirs = normalize_source_dirs(request.source_dirs or [])
+    override_min_bitrate = request.override_min_bitrate
     from lib.config import read_runtime_config
 
     beets_cfg = cfg or read_runtime_config()
     effective_beets_library_db_path, effective_beets_library_root = (
         _resolve_dispatch_beets_paths(
             beets_cfg,
-            db_path=beets_library_db_path,
-            library_root=beets_library_root,
+            db_path=request.beets_library_db_path,
+            library_root=request.beets_library_root,
         )
     )
 
@@ -1048,22 +1034,23 @@ def dispatch_import_core(
         album_directory_snapshot_fn,
         beets_library_db_path=effective_beets_library_db_path,
         beets_library_root=effective_beets_library_root,
-        mb_release_id=mb_release_id,
+        mb_release_id=request.mb_release_id,
         when="pre-import",
     )
 
     # Operation identity is distinct from the eventual download-log outcome:
     # an automatic attempt can still reject or fail after this start message.
-    mode = "FORCE-IMPORT" if force else "AUTO-IMPORT"
-    dist_label = f"{distance:.4f}" if distance is not None else "unmeasured"
-    logger.info(f"{mode}: {label} "
+    mode = "FORCE-IMPORT" if request.force else "AUTO-IMPORT"
+    dist_label = f"{request.distance:.4f}" if request.distance is not None else "unmeasured"
+    logger.info(f"{mode}: {request.label} "
                 f"(source=request, dist={dist_label})")
 
+    attempt_result = request.attempt_result
     if attempt_result is None:
         attempt_result = ImportAttemptResult.from_import_job(
             db,
-            candidate_import_job_id,
-            attempt_spectral_audit,
+            request.candidate_import_job_id,
+            request.attempt_spectral_audit,
         )
 
     outcome_success = False
@@ -1074,16 +1061,16 @@ def dispatch_import_core(
     post_commit_duplicate_guard_staging_dir: str | None = None
     beets_launch_authorized = False
     automation_completion_captured = False
-    active_execution_lease = execution_lease
-    execution_lease_holder = [execution_lease]
+    active_execution_lease = request.execution_lease
+    execution_lease_holder = [request.execution_lease]
 
     _validate_automation_dispatch_authority(
         db,
-        force=force,
-        import_job_id=candidate_import_job_id,
+        force=request.force,
+        import_job_id=request.candidate_import_job_id,
         execution_lease=active_execution_lease,
         cancellation_token=cancellation_token,
-        owner_session_identity=owner_session_identity,
+        owner_session_identity=request.owner_session_identity,
     )
 
     # Acquire the RELEASE (per-MBID) advisory lock for the duration of
@@ -1102,8 +1089,8 @@ def dispatch_import_core(
     # ordering rules, and the call-site index.
     from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_RELEASE, release_id_to_lock_key
     release_lock_key: int | None
-    if mb_release_id:
-        release_lock_key = release_id_to_lock_key(mb_release_id)
+    if request.mb_release_id:
+        release_lock_key = release_id_to_lock_key(request.mb_release_id)
     else:
         # Defensive: ``dispatch_import_from_db`` already rejects empty
         # mbids before reaching here; the auto-import flow passes
@@ -1127,8 +1114,8 @@ def dispatch_import_core(
     with lock_ctx as got_release_lock:
         if not got_release_lock:
             logger.warning(
-                f"{mode} SKIPPED: {label} — release lock held by "
-                f"another process (mbid={mb_release_id})")
+                f"{mode} SKIPPED: {request.label} — release lock held by "
+                f"another process (mbid={request.mb_release_id})")
             # Contention == deferred retry. The entire function now
             # returns ``DispatchOutcome(deferred=True)`` without
             # mutating ANY state:
@@ -1155,17 +1142,17 @@ def dispatch_import_core(
             # ``dispatch_import_from_db``; no state change needed
             # because the request wasn't ``downloading`` to begin
             # with.
-            if execution_lease is not None:
+            if request.execution_lease is not None:
                 return _requeue_import_job_to_preview(
                     db,
-                    import_job_id=candidate_import_job_id,
+                    import_job_id=request.candidate_import_job_id,
                     reason="release lock contention",
                     expected_execution_lease=active_execution_lease,
                 )
             return DispatchOutcome(
                 success=False,
                 message=("Another import is already in progress for "
-                         f"this release ({mb_release_id})"),
+                         f"this release ({request.mb_release_id})"),
                 deferred=True,
             )
 
@@ -1184,13 +1171,13 @@ def dispatch_import_core(
                 )
             evidence_gate = evidence_gate_fn(
                 db,
-                request_id=request_id,
-                mb_release_id=mb_release_id,
-                path=path,
+                request_id=request.request_id,
+                mb_release_id=request.mb_release_id,
+                path=request.path,
                 quality_ranks=cfg.quality_ranks if cfg is not None else None,
-                candidate_import_job_id=candidate_import_job_id,
-                candidate_download_log_id=candidate_download_log_id,
-                prevalidated_candidate_result=prevalidated_candidate_result,
+                candidate_import_job_id=request.candidate_import_job_id,
+                candidate_download_log_id=request.candidate_download_log_id,
+                prevalidated_candidate_result=request.prevalidated_candidate_result,
                 attempt_existing_spectral=(
                     attempt_result.audit.existing
                     if attempt_result.audit is not None
@@ -1201,7 +1188,7 @@ def dispatch_import_core(
                 beets_library_root=effective_beets_library_root,
                 **evidence_gate_kwargs,
             )
-            if prevalidated_candidate_result is not None:
+            if request.prevalidated_candidate_result is not None:
                 # Re-check the queue-owned action copy before *any* evidence
                 # decision can become terminal. A late content change is a
                 # typed preview retry, never a false quality rejection.
@@ -1209,8 +1196,8 @@ def dispatch_import_core(
 
                 fresh_candidate = ensure_candidate_evidence_for_action(
                     db,
-                    source_path=path,
-                    import_job_id=candidate_import_job_id,
+                    source_path=request.path,
+                    import_job_id=request.candidate_import_job_id,
                 )
                 if (
                     not fresh_candidate.available
@@ -1227,7 +1214,7 @@ def dispatch_import_core(
                     )
                     return _requeue_import_job_to_preview(
                         db,
-                        import_job_id=candidate_import_job_id,
+                        import_job_id=request.candidate_import_job_id,
                         reason=reason,
                         expected_execution_lease=active_execution_lease,
                     )
@@ -1240,17 +1227,11 @@ def dispatch_import_core(
                     or "installed HAVE analysis failed without diagnostics"
                 )
                 pending = _record_have_analysis_error(
+                    request,
                     db,
-                    request_id=request_id,
-                    dl_info=dl_info,
                     raw_error=reason,
                     installed_path=evidence_gate.current_path,
-                    candidate_reference=path,
                     snapshot_guard=evidence_gate.current_snapshot_guard,
-                    import_job_id=candidate_import_job_id,
-                    source_download_log_id=candidate_download_log_id,
-                    cooled_down_users=cooled_down_users,
-                    requeue_to_wanted=requeue_on_failure,
                 )
                 return DispatchOutcome(
                     success=False,
@@ -1258,7 +1239,7 @@ def dispatch_import_core(
                         "Installed HAVE analysis failed; "
                         + (
                             "request returned to wanted for a future retry"
-                            if requeue_on_failure
+                            if request.requeue_on_failure
                             else "request lifecycle was preserved"
                         )
                     ),
@@ -1280,8 +1261,8 @@ def dispatch_import_core(
             if evidence_override is not None:
                 override_min_bitrate = evidence_override
             if (
-                (candidate_import_job_id is not None
-                 or candidate_download_log_id is not None)
+                (request.candidate_import_job_id is not None
+                 or request.candidate_download_log_id is not None)
                 and evidence_gate.candidate is None
             ):
                 # U4: outer callers (``_dispatch_import_from_db_locked`` and
@@ -1296,7 +1277,7 @@ def dispatch_import_core(
                 reason = evidence_gate.candidate_reason or evidence_gate.candidate_status
                 return _requeue_import_job_to_preview(
                     db,
-                    import_job_id=candidate_import_job_id,
+                    import_job_id=request.candidate_import_job_id,
                     reason=reason or "missing",
                     expected_execution_lease=active_execution_lease,
                 )
@@ -1308,8 +1289,8 @@ def dispatch_import_core(
             # cleanup reducer derives from that row.
             attempt_beets_scenario = _attempt_beets_scenario(
                 db,
-                scenario=scenario,
-                download_log_id=candidate_download_log_id,
+                scenario=request.scenario,
+                download_log_id=request.candidate_download_log_id,
             )
             attempt_program_covered = scenario_covers_declared_program(
                 attempt_beets_scenario
@@ -1324,13 +1305,13 @@ def dispatch_import_core(
                 # automation self-heals; force imports preserve operator
                 # status.
                 facts = AlbumQualityEvidenceDecisionFacts(
-                    verified_lossless_target=verified_lossless_target or None,
-                    target_format=target_format,
+                    verified_lossless_target=request.verified_lossless_target or None,
+                    target_format=request.target_format,
                     # Issue #1241 — the operator's mark on the request plus
                     # beets' own coverage proof for THIS attempt. Both must
                     # hold for the decider to disregard the installed side.
                     installed_marked_incomplete=(
-                        db.request_marked_incomplete(request_id)
+                        db.request_marked_incomplete(request.request_id)
                     ),
                     candidate_covers_declared_program=(
                         attempt_program_covered
@@ -1363,22 +1344,11 @@ def dispatch_import_core(
                         existing_v0_probe=existing_v0_probe,
                     ))
                     return _reject_import_from_evidence_decision(
-                        db=db,
-                        request_id=request_id,
-                        dl_info=dl_info,
+                        request,
+                        db,
                         attempt_result=attempt_result,
-                        distance=distance,
                         decision=decision,
                         detail=detail,
-                        requeue_on_failure=requeue_on_failure,
-                        validation_result=dl_info.validation_result,
-                        staged_path=path,
-                        scenario=scenario,
-                        files=files,
-                        source_path_cleanup_scenario=scenario,
-                        cooled_down_users=cooled_down_users,
-                        import_job_id=candidate_import_job_id,
-                        source_download_log_id=candidate_download_log_id,
                         quality_ranks=(
                             cfg.quality_ranks if cfg is not None else None
                         ),
@@ -1394,11 +1364,11 @@ def dispatch_import_core(
                     candidate=evidence_gate.candidate,
                     current=evidence_gate.current,
                     decision=evidence_decision,
-                    target_format=target_format,
-                    verified_lossless_target=verified_lossless_target,
+                    target_format=request.target_format,
+                    verified_lossless_target=request.verified_lossless_target,
                     gate=evidence_gate,
                 )
-            if candidate_import_job_id is None:
+            if request.candidate_import_job_id is None:
                 return DispatchOutcome(
                     success=False,
                     message=(
@@ -1412,10 +1382,10 @@ def dispatch_import_core(
             # authority.  The action copy is separately bound by the
             # candidate-evidence snapshot above.
             authorized_job = db.authorize_import_job_launch(
-                candidate_import_job_id,
-                request_id=request_id,
-                release_id=mb_release_id,
-                source_path=launch_authority_path or path,
+                request.candidate_import_job_id,
+                request_id=request.request_id,
+                release_id=request.mb_release_id,
+                source_path=request.launch_authority_path or request.path,
                 expected_execution_lease=active_execution_lease,
             )
             if authorized_job is None:
@@ -1445,20 +1415,20 @@ def dispatch_import_core(
                 runner_owner_session_probe,
             ) = _import_runner_hooks(
                 db,
-                import_job_id=candidate_import_job_id,
+                import_job_id=request.candidate_import_job_id,
                 execution_lease_holder=execution_lease_holder,
                 cancellation_token=cancellation_token,
-                owner_session_identity=owner_session_identity,
+                owner_session_identity=request.owner_session_identity,
             )
             if run_import_fn is None:
                 run = run_import_one(
-                    path=path, mb_release_id=mb_release_id,
-                    request_id=request_id, force=force,
-                    preserve_source=scenario in FORCE_IMPORT_SCENARIOS,
+                    path=request.path, mb_release_id=request.mb_release_id,
+                    request_id=request.request_id, force=request.force,
+                    preserve_source=request.scenario in FORCE_IMPORT_SCENARIOS,
                     override_min_bitrate=override_min_bitrate,
-                    target_format=target_format,
-                    verified_lossless_target=verified_lossless_target,
-                    beets_harness_path=beets_harness_path,
+                    target_format=request.target_format,
+                    verified_lossless_target=request.verified_lossless_target,
+                    beets_harness_path=request.beets_harness_path,
                     quality_rank_config_json=quality_rank_config_json,
                     existing_v0_probe=existing_v0_probe,
                     quality_evidence_action_file=quality_evidence_action_file,
@@ -1472,13 +1442,13 @@ def dispatch_import_core(
                 )
             else:
                 run = run_import_fn(
-                    path=path, mb_release_id=mb_release_id,
-                    request_id=request_id, force=force,
-                    preserve_source=scenario in FORCE_IMPORT_SCENARIOS,
+                    path=request.path, mb_release_id=request.mb_release_id,
+                    request_id=request.request_id, force=request.force,
+                    preserve_source=request.scenario in FORCE_IMPORT_SCENARIOS,
                     override_min_bitrate=override_min_bitrate,
-                    target_format=target_format,
-                    verified_lossless_target=verified_lossless_target,
-                    beets_harness_path=beets_harness_path,
+                    target_format=request.target_format,
+                    verified_lossless_target=request.verified_lossless_target,
+                    beets_harness_path=request.beets_harness_path,
                     quality_rank_config_json=quality_rank_config_json,
                     existing_v0_probe=existing_v0_probe,
                     quality_evidence_action_file=quality_evidence_action_file,
@@ -1493,17 +1463,17 @@ def dispatch_import_core(
             active_execution_lease = execution_lease_holder[0]
             _checkpoint_import_owner(
                 db,
-                import_job_id=candidate_import_job_id,
+                import_job_id=request.candidate_import_job_id,
                 execution_lease=active_execution_lease,
                 cancellation_token=cancellation_token,
-                owner_session_identity=owner_session_identity,
+                owner_session_identity=request.owner_session_identity,
             )
             completion_conflict = _capture_automation_completion(
                 db,
-                import_job_id=candidate_import_job_id,
-                request_id=request_id,
-                release_id=mb_release_id,
-                canonical_path=launch_authority_path or path,
+                import_job_id=request.candidate_import_job_id,
+                request_id=request.request_id,
+                release_id=request.mb_release_id,
+                canonical_path=request.launch_authority_path or request.path,
                 returncode=run.returncode,
                 execution_lease=active_execution_lease,
             )
@@ -1522,7 +1492,7 @@ def dispatch_import_core(
             if ir is None:
                 logger.error(
                     f"{mode} ACKNOWLEDGEMENT AMBIGUOUS "
-                    f"(no JSON, rc={run.returncode}): {label}")
+                    f"(no JSON, rc={run.returncode}): {request.label}")
                 for line in run.stdout.strip().split("\n"):
                     logger.error(f"  {line}")
                 return DispatchOutcome(
@@ -1533,12 +1503,12 @@ def dispatch_import_core(
                     code="beets_acknowledgement_ambiguous",
                 )
             else:
-                _populate_dl_info_from_import_result(dl_info, ir)
+                _populate_dl_info_from_import_result(request.dl_info, ir)
                 _log_postflight_bad_extensions(
                     ir=ir,
                     mode=mode,
-                    request_id=request_id,
-                    label=label,
+                    request_id=request.request_id,
+                    label=request.label,
                 )
                 decision = ir.decision or "unknown"
                 action = dispatch_action(decision)
@@ -1549,8 +1519,8 @@ def dispatch_import_core(
                     file_list,
                 ) = _resolve_post_import_search_policy(
                     decision=decision,
-                    files=files,
-                    fallback_username=dl_info.username,
+                    files=request.files,
+                    fallback_username=request.dl_info.username,
                 )
                 narrowed_override = None
                 current_override = None
@@ -1565,22 +1535,22 @@ def dispatch_import_core(
 
                 # --- Mark done or failed with decision-specific details ---
                 if action.mark_done:
-                    logger.info(f"{mode} OK: {label} (decision={decision})")
+                    logger.info(f"{mode} OK: {request.label} (decision={decision})")
                     mark_scenario = (
                         decision
                         if decision == "provisional_lossless_upgrade"
-                        else scenario
+                        else request.scenario
                     )
                     pending = _do_mark_done(
-                        db, request_id, dl_info,
-                        distance=distance, scenario=mark_scenario,
-                        dest_path=path, outcome_label=outcome_label,
+                        db, request.request_id, request.dl_info,
+                        distance=request.distance, scenario=mark_scenario,
+                        dest_path=request.path, outcome_label=request.outcome_label,
                         clear_stale_v0_probe=acceptance_installs_new_files(
                             decision
                         ),
                         attempt_result=attempt_result,
-                        import_job_id=candidate_import_job_id,
-                        source_download_log_id=candidate_download_log_id,
+                        import_job_id=request.candidate_import_job_id,
+                        source_download_log_id=request.candidate_download_log_id,
                         # Issue #1241: a terminal acceptance whose candidate
                         # beets proved whole satisfies the operator's
                         # incomplete mark — clear it atomically with the
@@ -1599,15 +1569,15 @@ def dispatch_import_core(
                     try:
                         _checkpoint_import_owner(
                             db,
-                            import_job_id=candidate_import_job_id,
+                            import_job_id=request.candidate_import_job_id,
                             execution_lease=active_execution_lease,
                             cancellation_token=cancellation_token,
-                            owner_session_identity=owner_session_identity,
+                            owner_session_identity=request.owner_session_identity,
                         )
                         post_import_evidence = _refresh_current_evidence_after_import(
                             db,
-                            request_id=request_id,
-                            mb_release_id=mb_release_id,
+                            request_id=request.request_id,
+                            mb_release_id=request.mb_release_id,
                             quality_ranks=(
                                 cfg.quality_ranks if cfg is not None else None
                             ),
@@ -1622,7 +1592,7 @@ def dispatch_import_core(
                         logger.exception(
                             "Failed to refresh current quality evidence "
                             "after import for request %s",
-                            request_id,
+                            request.request_id,
                         )
                         post_import_evidence = EvidenceBuildResult(
                             None,
@@ -1632,15 +1602,15 @@ def dispatch_import_core(
                     try:
                         _checkpoint_import_owner(
                             db,
-                            import_job_id=candidate_import_job_id,
+                            import_job_id=request.candidate_import_job_id,
                             execution_lease=active_execution_lease,
                             cancellation_token=cancellation_token,
-                            owner_session_identity=owner_session_identity,
+                            owner_session_identity=request.owner_session_identity,
                         )
                         _write_album_sidecar_after_import(
                             db,
-                            request_id=request_id,
-                            mb_release_id=mb_release_id,
+                            request_id=request.request_id,
+                            mb_release_id=request.mb_release_id,
                             cfg=cfg,
                             beets_library_db_path=effective_beets_library_db_path,
                             beets_library_root=effective_beets_library_root,
@@ -1651,7 +1621,7 @@ def dispatch_import_core(
                         logger.exception(
                             "Failed to write verified-lossless sidecar "
                             "after import for request %s",
-                            request_id,
+                            request.request_id,
                         )
                     if (
                         decision in ("import", "preflight_existing")
@@ -1665,7 +1635,7 @@ def dispatch_import_core(
                             )
                             terminal_outcome = _apply_or_stage_transition(
                                 db,
-                                request_id,
+                                request.request_id,
                                 terminal_outcome,
                                 delta_transition,
                             )
@@ -1677,10 +1647,10 @@ def dispatch_import_core(
                     rejection = _describe_rejection(
                         decision=decision,
                         import_result=ir,
-                        label=label,
+                        label=request.label,
                         mode=mode,
-                        path=path,
-                        request_id=request_id,
+                        path=request.path,
+                        request_id=request.request_id,
                         cfg=cfg,
                         new_bitrate=new_br,
                         previous_bitrate=prev_br,
@@ -1698,33 +1668,33 @@ def dispatch_import_core(
                     current_override, narrowed_override = (
                         _resolve_rejection_override(
                             db,
-                            request_id=request_id,
+                            request_id=request.request_id,
                             decision=decision,
-                            dl_info=dl_info,
+                            dl_info=request.dl_info,
                             import_result=ir,
                             cfg=cfg,
                         )
                     )
 
                     pending = _record_rejection_and_maybe_requeue(
-                        db, request_id, dl_info,
+                        db, request.request_id, request.dl_info,
                         detail=fail_detail,
                         error=fail_error,
-                        requeue=requeue_on_failure,
+                        requeue=request.requeue_on_failure,
                         outcome_label="rejected",
                         search_filetype_override=narrowed_override,
-                        validation_result=(dl_info.validation_result
+                        validation_result=(request.dl_info.validation_result
                                            or ValidationResult(
-                                               distance=distance,
+                                               distance=request.distance,
                                                scenario=fail_scenario,
                                                detail=fail_detail,
                                                error=fail_error,
                                                source_dirs=source_dirs,
                                            ).to_json()),
-                        staged_path=path,
+                        staged_path=request.path,
                         attempt_result=attempt_result,
-                        import_job_id=candidate_import_job_id,
-                        source_download_log_id=candidate_download_log_id)
+                        import_job_id=request.candidate_import_job_id,
+                        source_download_log_id=request.candidate_download_log_id)
                     if isinstance(pending, PendingImportTerminalOutcome):
                         terminal_outcome = pending
                     if narrowed_override is not None:
@@ -1742,17 +1712,17 @@ def dispatch_import_core(
                         logger.error(
                             "DUPLICATE REMOVE GUARD: no source username "
                             "available to denylist for request %s",
-                            request_id,
+                            request.request_id,
                         )
                     terminal_outcome = _apply_or_stage_denylists(
                         db,
-                        request_id,
+                        request.request_id,
                         terminal_outcome,
                         usernames,
                         reason,
-                        cooled_down_users,
+                        request.cooled_down_users,
                     )
-                    logger.info(f"  Denylisted {usernames} for request {request_id}")
+                    logger.info(f"  Denylisted {usernames} for request {request.request_id}")
 
                 # Rejected auto-imports are already requeued by
                 # _record_rejection_and_maybe_requeue(), which preserves retry
@@ -1761,7 +1731,7 @@ def dispatch_import_core(
                 # back to wanted to keep searching for a better source.
                 terminal_outcome = _apply_post_import_search_action(
                     db,
-                    request_id=request_id,
+                    request_id=request.request_id,
                     pending=terminal_outcome,
                     decision=decision,
                     search_action=search_action,
@@ -1783,9 +1753,9 @@ def dispatch_import_core(
                     terminal_outcome = _run_or_stage_quality_gate(
                         quality_gate_fn,
                         terminal_outcome,
-                        mb_id=mb_release_id,
-                        label=label,
-                        request_id=request_id,
+                        mb_id=request.mb_release_id,
+                        label=request.label,
+                        request_id=request.request_id,
                         files=list(file_list),
                         db=db,
                         quality_ranks=cfg.quality_ranks if cfg is not None else None,
@@ -1802,19 +1772,19 @@ def dispatch_import_core(
                         cfg,
                         db,
                         import_result=ir,
-                        request_id=request_id,
-                        mb_release_id=mb_release_id,
-                        import_job_id=candidate_import_job_id,
+                        request_id=request.request_id,
+                        mb_release_id=request.mb_release_id,
+                        import_job_id=request.candidate_import_job_id,
                         execution_lease=active_execution_lease,
                         cancellation_token=cancellation_token,
-                        owner_session_identity=owner_session_identity,
+                        owner_session_identity=request.owner_session_identity,
                         beets_library_db_path=effective_beets_library_db_path,
                         beets_library_root=effective_beets_library_root,
                         pre_import_album_directories=pre_import_album_directories,
                         album_directory_snapshot_fn=album_directory_snapshot_fn,
                         media_server_notify_fn=media_server_notify_fn,
                     )
-                if action.cleanup and _should_cleanup_path(scenario, action):
+                if action.cleanup and _should_cleanup_path(request.scenario, action):
                     # Issue #89: force-import passes the user's
                     # ``failed_imports/…`` folder as ``path`` — cleanup is
                     # data loss on a ``downgrade`` / ``transcode_downgrade``
@@ -1827,11 +1797,11 @@ def dispatch_import_core(
                     # already-imported album. Auto-import scenarios always
                     # clean — their exact-owner processing source is
                     # disposable by design.
-                    post_commit_staged_path = path
+                    post_commit_staged_path = request.path
         except ExecutionCancelled:
             raise
         except sp.TimeoutExpired:
-            logger.error(f"{mode} TIMEOUT: {label}")
+            logger.error(f"{mode} TIMEOUT: {request.label}")
             if beets_launch_authorized:
                 return DispatchOutcome(
                     success=False,
@@ -1842,25 +1812,25 @@ def dispatch_import_core(
                     code="beets_acknowledgement_ambiguous",
                 )
             pending = _record_rejection_and_maybe_requeue(
-                db, request_id, dl_info,
+                db, request.request_id, request.dl_info,
                 detail="import_one.py timed out", error="timeout",
-                requeue=requeue_on_failure, outcome_label="failed",
+                requeue=request.requeue_on_failure, outcome_label="failed",
                 validation_result=ValidationResult(
-                    distance=distance,
+                    distance=request.distance,
                     scenario="timeout",
                     detail="import_one.py timed out",
                     error="timeout",
                     source_dirs=source_dirs,
                 ).to_json(),
-                staged_path=path,
+                staged_path=request.path,
                 attempt_result=attempt_result,
-                import_job_id=candidate_import_job_id,
-                source_download_log_id=candidate_download_log_id)
+                import_job_id=request.candidate_import_job_id,
+                source_download_log_id=request.candidate_download_log_id)
             if isinstance(pending, PendingImportTerminalOutcome):
                 terminal_outcome = pending
             outcome_message = "Import timed out"
         except Exception:
-            logger.exception(f"{mode} ERROR: {label}")
+            logger.exception(f"{mode} ERROR: {request.label}")
             if beets_launch_authorized:
                 return DispatchOutcome(
                     success=False,
@@ -1871,20 +1841,20 @@ def dispatch_import_core(
                     code="beets_acknowledgement_ambiguous",
                 )
             pending = _record_rejection_and_maybe_requeue(
-                db, request_id, dl_info,
+                db, request.request_id, request.dl_info,
                 detail="unhandled exception in auto-import", error="exception",
-                requeue=requeue_on_failure, outcome_label="failed",
+                requeue=request.requeue_on_failure, outcome_label="failed",
                 validation_result=ValidationResult(
-                    distance=distance,
+                    distance=request.distance,
                     scenario="exception",
                     detail="unhandled exception in auto-import",
                     error="exception",
                     source_dirs=source_dirs,
                 ).to_json(),
-                staged_path=path,
+                staged_path=request.path,
                 attempt_result=attempt_result,
-                import_job_id=candidate_import_job_id,
-                source_download_log_id=candidate_download_log_id)
+                import_job_id=request.candidate_import_job_id,
+                source_download_log_id=request.candidate_download_log_id)
             if isinstance(pending, PendingImportTerminalOutcome):
                 terminal_outcome = pending
             outcome_message = "Unhandled exception"
@@ -1898,10 +1868,10 @@ def dispatch_import_core(
             if cleanup_action_file:
                 _checkpoint_import_owner(
                     db,
-                    import_job_id=candidate_import_job_id,
+                    import_job_id=request.candidate_import_job_id,
                     execution_lease=active_execution_lease,
                     cancellation_token=cancellation_token,
-                    owner_session_identity=owner_session_identity,
+                    owner_session_identity=request.owner_session_identity,
                 )
                 _remove_quality_evidence_action_file(
                     quality_evidence_action_file
@@ -1909,10 +1879,10 @@ def dispatch_import_core(
 
     _checkpoint_import_owner(
         db,
-        import_job_id=candidate_import_job_id,
+        import_job_id=request.candidate_import_job_id,
         execution_lease=active_execution_lease,
         cancellation_token=cancellation_token,
-        owner_session_identity=owner_session_identity,
+        owner_session_identity=request.owner_session_identity,
     )
     return DispatchOutcome(
         success=outcome_success,
@@ -1957,7 +1927,7 @@ def dispatch_import_core(
                     post_commit_duplicate_guard_staging_dir
                 ),
                 duplicate_guard_request_id=(
-                    request_id
+                    request.request_id
                     if post_commit_duplicate_guard_path is not None
                     else None
                 ),

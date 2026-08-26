@@ -26,13 +26,13 @@ from lib.terminal_outcomes import PendingImportTerminalOutcome
 from lib.validation_envelope import decode_validation_envelope
 
 if TYPE_CHECKING:
-    from lib.pipeline_db import PipelineDB
+    from lib.dispatch.types import DispatchDB
 
 logger = logging.getLogger("cratedigger")
 
 
 def _origin_manifest_for_download_log(
-    db: PipelineDB,
+    db: DispatchDB,
     *,
     download_log_id: int | None,
     failed_path: str,
@@ -48,7 +48,7 @@ def _origin_manifest_for_download_log(
     return tracked_audio_paths_from_validation_items(vr.items, root=failed_path)
 
 
-def _expected_request_track_count(db: PipelineDB, request_id: int) -> int | None:
+def _expected_request_track_count(db: DispatchDB, request_id: int) -> int | None:
     try:
         tracks = db.get_tracks(request_id)
     except Exception:
@@ -58,7 +58,7 @@ def _expected_request_track_count(db: PipelineDB, request_id: int) -> int | None
 
 
 def _guard_reject(
-    db: PipelineDB,
+    db: DispatchDB,
     *,
     request_id: int,
     failed_path: str,
@@ -138,7 +138,7 @@ def _guard_reject(
 
 
 def _guard_force_import_audio_manifest(
-    db: PipelineDB,
+    db: DispatchDB,
     *,
     request_id: int,
     failed_path: str,

@@ -11,23 +11,34 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import msgspec
 
+from lib.import_execution import AutomationOwnerCheckpointDB
+from lib.jellyfin_pin_service import _PinDBProto as _JellyfinPinDB
+from lib.plex_pin_service import _PinDBProto as _PlexPinDB
+from lib.sidecar_service import SidecarDB
+from lib.transitions import TransitionsDB
 from lib.wrong_match_policy import PREIMPORT_FACT_REJECTION_SCENARIOS
 
 logger = logging.getLogger("cratedigger")
 
 if TYPE_CHECKING:
+    from contextlib import AbstractContextManager
+
     from lib.config import CratediggerConfig
+    from lib.grab_list import DownloadFile
     from lib.import_evidence import CandidateEvidenceActionResult
     from lib.import_execution import (
         CancellationToken,
         ExecutionLeaseSnapshot,
         OwnerSessionIdentity,
     )
-    from lib.pipeline_db import DownloadLogOutcome, PipelineDB
+    from lib.pipeline_db import DownloadLogOutcome
+    from lib.pipeline_db._shared import MergeRekeyCollision
+    from lib.pipeline_db.import_jobs import ImportJob
+    from lib.pipeline_db.rows import DownloadLogWithEvidenceRow
     from lib.quality import (
         AlbumQualityEvidence,
         AudioQualityMeasurement,
@@ -37,7 +48,13 @@ if TYPE_CHECKING:
         SpectralDetail,
         V0ProbeEvidence,
     )
-    from lib.terminal_outcomes import PendingImportTerminalOutcome
+    from lib.terminal_outcomes import (
+        ImportTerminalOutcome,
+        PendingImportTerminalOutcome,
+        PreviewTerminalOutcome,
+        TerminalOutcomeResult,
+    )
+    from lib.validation_envelope import ValidationProjectionUnset
 
 
 # U2: when the importer claim arrives without valid candidate evidence
@@ -79,6 +96,179 @@ DISPATCH_CODE_IMPORT_MANIFEST_REJECTED = "import_manifest_rejected"
 # appears here — its exact-owner processing source is always safe to remove
 # (see issue #89).
 FORCE_IMPORT_SCENARIOS: frozenset[str] = frozenset({"force_import"})
+
+
+@runtime_checkable
+class DispatchDB(
+    SidecarDB,
+    TransitionsDB,
+    AutomationOwnerCheckpointDB,
+    _PlexPinDB,
+    _JellyfinPinDB,
+    Protocol,
+):
+    """The exact pipeline-DB surface ``lib/dispatch/`` uses (#1277).
+
+    ``dispatch_import_core`` used to take the concrete ``PipelineDB`` (200+
+    public methods) while reaching for a couple of dozen of them. The
+    concrete annotation is what forced every test to bridge its
+    ``FakePipelineDB`` through ``Any``; a narrow port lets the fake satisfy
+    the contract structurally instead, the same way ``ImportPreviewDB`` /
+    ``ForceImportDB`` / ``QualityEvidenceDB`` already do elsewhere.
+
+    The bases are the ports of the collaborators dispatch FORWARDS its
+    handle into — the sidecar writer, the transition engine, the #898 owner
+    checkpoint, and the two media-server pin services — so this one port
+    stays honest without restating their members. The methods declared
+    below are the ones dispatch calls directly.
+
+    ``_probe_owner_session`` is declared underscore-and-all: cross-module
+    private use is the house convention (PR #775), and re-spelling it
+    publicly here would only hide which method production actually calls.
+    Optional parameters the real ``PipelineDB`` accepts but dispatch never
+    passes (``check_and_apply_cooldown``'s ``config``,
+    ``_probe_owner_session``'s ``deadline_seconds``) are deliberately absent
+    — the port declares what dispatch needs, not everything an
+    implementation may offer.
+    """
+
+    def advisory_lock(
+        self, namespace: int, key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def add_denylist(
+        self, request_id: int, username: str, reason: str | None = None,
+    ) -> None: ...
+
+    def check_and_apply_cooldown(self, username: str) -> bool: ...
+
+    def get_tracks(self, request_id: int) -> list[dict[str, object]]: ...
+
+    def request_marked_incomplete(self, request_id: int) -> bool: ...
+
+    def get_download_log_entry(
+        self, log_id: int,
+    ) -> DownloadLogWithEvidenceRow | None: ...
+
+    def authorize_import_job_launch(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        release_id: str,
+        source_path: str,
+        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> ImportJob | None: ...
+
+    def record_import_job_beets_child(
+        self,
+        job_id: int,
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot,
+        beets_pid: int,
+        beets_start_ticks: int,
+    ) -> ImportJob | None: ...
+
+    def mark_import_job_failed(
+        self,
+        job_id: int,
+        *,
+        error: str,
+        result: dict[str, object] | None = None,
+        message: str | None = None,
+    ) -> ImportJob | None: ...
+
+    def requeue_import_job_for_preview(
+        self,
+        job_id: int,
+        *,
+        reason: str,
+        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> ImportJob | None: ...
+
+    def capture_automation_import_completion(
+        self,
+        job_id: int,
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot,
+        receipt: object,
+    ) -> ImportJob | None: ...
+
+    # The force lane's merge-redirect seam
+    # (``lib.download_validation.validate_release_with_merge_redirect``,
+    # #1080/#1089). Its ``MergeRekeyDB`` port is not a base class here for
+    # one mechanical reason: ``lib.download_validation`` imports
+    # ``lib.dispatch``, so importing it back would be a cycle. Everything
+    # else that port needs (``get_request``, ``get_import_job``,
+    # ``advisory_lock``, ``log_download``) is already declared above or
+    # inherited, so only these two are restated.
+    def merge_rekey_collision(
+        self,
+        request_id: int,
+        *,
+        old_release_id: str,
+        new_release_id: str,
+    ) -> MergeRekeyCollision: ...
+
+    def update_request_release_for_merge(
+        self,
+        request_id: int,
+        *,
+        old_release_id: str,
+        new_release_id: str,
+        expected_import_job_id: int,
+    ) -> bool: ...
+
+    def persist_import_terminal_outcome(
+        self, command: ImportTerminalOutcome,
+    ) -> TerminalOutcomeResult: ...
+
+    def persist_preview_terminal_outcome(
+        self, command: PreviewTerminalOutcome,
+    ) -> TerminalOutcomeResult: ...
+
+    def log_download(
+        self,
+        request_id: int,
+        soulseek_username: str | None = None,
+        contributor_usernames: Sequence[str] | None = None,
+        filetype: str | None = None,
+        download_path: str | None = None,
+        beets_distance: float | None | ValidationProjectionUnset = ...,
+        beets_scenario: str | None | ValidationProjectionUnset = ...,
+        beets_detail: str | None = None,
+        valid: bool | None = None,
+        outcome: DownloadLogOutcome | None = None,
+        staged_path: str | None = None,
+        error_message: str | None = None,
+        bitrate: int | None = None,
+        sample_rate: int | None = None,
+        bit_depth: int | None = None,
+        is_vbr: bool | None = None,
+        was_converted: bool | None = None,
+        original_filetype: str | None = None,
+        slskd_filetype: str | None = None,
+        actual_filetype: str | None = None,
+        actual_min_bitrate: int | None = None,
+        spectral_grade: str | None = None,
+        spectral_bitrate: int | None = None,
+        existing_min_bitrate: int | None = None,
+        existing_spectral_bitrate: int | None = None,
+        import_result: object = None,
+        validation_result: object = None,
+        final_format: str | None = None,
+        v0_probe_kind: str | None = None,
+        v0_probe_min_bitrate: int | None = None,
+        v0_probe_avg_bitrate: int | None = None,
+        v0_probe_median_bitrate: int | None = None,
+        existing_v0_probe_kind: str | None = None,
+        existing_v0_probe_min_bitrate: int | None = None,
+        existing_v0_probe_avg_bitrate: int | None = None,
+        existing_v0_probe_median_bitrate: int | None = None,
+        transfer_detail: object = None,
+        source_download_log_id: int | None = None,
+        source: str = "slskd",
+    ) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -141,6 +331,81 @@ class DispatchOutcome:
     post_commit_cleanup: PostCommitCleanup | None = None
 
 
+@dataclass(frozen=True)
+class DispatchRequest:
+    """Everything one import dispatch is DESCRIBED by (#1277).
+
+    Flat and frozen on purpose. Flat because the 26 values are already the
+    vocabulary every caller and every stage speaks — re-grouping them into
+    sub-objects would only add a translation layer between the DB row and
+    the decision. Frozen because a stage function must not be able to
+    rewrite the description of the import it was handed; the three values
+    dispatch legitimately re-derives (the normalized ``source_dirs``, the
+    evidence-resolved ``override_min_bitrate``, and the recovered
+    ``attempt_result``) are resolved once at the top of the core and passed
+    forward explicitly.
+
+    Deliberately NOT here: ``db`` and the six injected callables (the
+    kwarg-DI seam — ``.claude/rules/code-quality.md`` § "Mocks"), ``cfg``
+    (runtime configuration, not a description of this import), and
+    ``cancellation_token`` (live control flow). Those stay keyword
+    arguments on ``dispatch_import_core`` itself.
+
+    A plain ``@dataclass``, not a ``msgspec.Struct``: this value never
+    crosses JSON — it is built from typed Python by two production callers
+    and consumed in-process.
+    """
+
+    # --- identity ---------------------------------------------------
+    path: str
+    mb_release_id: str
+    request_id: int
+    label: str
+    beets_harness_path: str
+    dl_info: DownloadInfo
+
+    # --- mode / routing ---------------------------------------------
+    force: bool = False
+    scenario: str = "auto_import"
+    outcome_label: DownloadLogOutcome = "success"
+    requeue_on_failure: bool = True
+    distance: float | None = None
+
+    # --- quality contract -------------------------------------------
+    override_min_bitrate: int | None = None
+    target_format: str | None = None
+    verified_lossless_target: str = ""
+
+    # --- peer attribution -------------------------------------------
+    #: The downloaded files this candidate came from. Dispatch reads exactly
+    #: one thing off them — ``username``, for denylist attribution
+    #: (``extract_usernames``). Both production callers pass real
+    #: ``DownloadFile`` rows: the auto lane forwards ``album_data.files``,
+    #: the force lane synthesises a single-element list from the operator's
+    #: recorded source username.
+    files: Sequence[DownloadFile] | None = None
+    cooled_down_users: set[str] | None = None
+    source_dirs: list[str] | None = None
+
+    # --- evidence / attempt -----------------------------------------
+    candidate_import_job_id: int | None = None
+    candidate_download_log_id: int | None = None
+    attempt_spectral_audit: SpectralDetail | None = None
+    attempt_result: ImportAttemptResult | None = None
+    prevalidated_candidate_result: CandidateEvidenceActionResult | None = None
+
+    # --- storage authority ------------------------------------------
+    #: An inseparable pair for isolated real-Beets worlds. Production leaves
+    #: both unset and derives the complete pair from runtime config.
+    beets_library_db_path: str | None = None
+    beets_library_root: str | None = None
+    launch_authority_path: str | None = None
+
+    # --- #898 ownership / fencing -----------------------------------
+    execution_lease: ExecutionLeaseSnapshot | None = None
+    owner_session_identity: OwnerSessionIdentity | None = None
+
+
 class DispatchCoreFn(Protocol):
     """Exact callable contract for the test-injected core dispatch seam.
 
@@ -151,33 +416,12 @@ class DispatchCoreFn(Protocol):
 
     def __call__(
         self,
+        request: DispatchRequest,
+        db: DispatchDB,
         *,
-        path: str,
-        mb_release_id: str,
-        request_id: int,
-        label: str,
-        force: bool = False,
-        override_min_bitrate: int | None = None,
-        target_format: str | None = None,
-        verified_lossless_target: str = "",
-        beets_harness_path: str,
-        db: PipelineDB,
-        dl_info: DownloadInfo,
-        distance: float | None = None,
-        scenario: str = "auto_import",
-        files: Sequence[object] | None = None,
         cfg: CratediggerConfig | None = None,
-        outcome_label: DownloadLogOutcome = "success",
-        requeue_on_failure: bool = True,
-        cooled_down_users: set[str] | None = None,
-        source_dirs: list[str] | None = None,
-        candidate_import_job_id: int | None = None,
-        candidate_download_log_id: int | None = None,
-        prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
         quality_gate_fn: QualityGateFn = ...,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
         cancellation_token: CancellationToken | None = None,
-        owner_session_identity: OwnerSessionIdentity | None = None,
     ) -> DispatchOutcome: ...
 
 
@@ -248,7 +492,7 @@ class ImportAttemptResult:
     @classmethod
     def from_import_job(
         cls,
-        db: PipelineDB,
+        db: DispatchDB,
         import_job_id: int | None,
         audit: SpectralDetail | None = None,
     ) -> ImportAttemptResult:

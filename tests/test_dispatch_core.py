@@ -17,6 +17,7 @@ import msgspec
 
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
+from lib.dispatch import dispatch_import_core
 from lib.dispatch.types import DispatchOutcome, EvidenceImportGate, ImportOneRun
 from lib.import_execution import (
     CancellationToken,
@@ -40,10 +41,11 @@ from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
-    dispatch_import_with_fake_db,
     finalize_claimed_dispatch,
     handoff_automation_owner,
     make_album_quality_evidence,
+    make_dispatch_request,
+    make_download_file,
     make_import_result,
     make_request_row,
     noop_quality_gate,
@@ -120,7 +122,7 @@ class TestDispatchExecutionAuthority(unittest.TestCase):
                 identity=identity is not None,
             ), self.assertRaisesRegex(ValueError, "must be paired"):
                 _validate_automation_dispatch_authority(
-                    db,  # pyright: ignore[reportArgumentType]
+                    db,
                     force=True,
                     import_job_id=7,
                     execution_lease=None,
@@ -287,37 +289,33 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                      execution_lease,
                      cancellation_token=cancellation_token,
                  ) as (cancellation_token, owner_session_identity):
-                result = dispatch_import_with_fake_db(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    force=force,
-                    override_min_bitrate=override_min_bitrate,
-                    target_format=target_format,
-                    verified_lossless_target=verified_lossless_target,
-                    beets_harness_path=cfg.beets_harness_path,
-                    db=db,
-                    dl_info=dl_info,
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[MagicMock(username=source_username or "user1",
-                                     filename="01 - Track.mp3")],
+                result = dispatch_import_core(
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        force=force,
+                        override_min_bitrate=override_min_bitrate,
+                        target_format=target_format,
+                        verified_lossless_target=verified_lossless_target,
+                        beets_harness_path=cfg.beets_harness_path,
+                        dl_info=dl_info,
+                        distance=0.05,
+                        scenario='strong_match',
+                        files=[make_download_file(username=source_username or 'user1', filename='01 - Track.mp3')],
+                        outcome_label=outcome_label,
+                        requeue_on_failure=requeue_on_failure,
+                        candidate_import_job_id=job.id,
+                        execution_lease=execution_lease,
+                        owner_session_identity=owner_session_identity,
+                    ),
+                    db,
                     cfg=cfg,
-                    outcome_label=outcome_label,
-                    requeue_on_failure=requeue_on_failure,
-                    candidate_import_job_id=job.id,
                     quality_gate_fn=noop_quality_gate,
-                    evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
-                        candidate=candidate,
-                    ),
-                    execution_lease=execution_lease,
+                    evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(candidate=candidate),
                     cancellation_token=cancellation_token,
-                    owner_session_identity=owner_session_identity,
-                    run_import_fn=(
-                        _owned_test_runner
-                        if execution_lease is not None else None
-                    ),
+                    run_import_fn=_owned_test_runner if execution_lease is not None else None,
                 )
                 if post_dispatch_fn is not None:
                     post_dispatch_fn(result, db, tmpdir)
@@ -481,22 +479,24 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                  _patch_beets_album(current_dir, min_bitrate=128):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout="", stderr="")
-                result = dispatch_import_with_fake_db(
+                result = dispatch_import_core(
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Operator partial',
+                        force=True,
+                        beets_harness_path=cfg.beets_harness_path,
+                        dl_info=DownloadInfo(username='peer'),
+                        distance=0.05,
+                        scenario='force_import',
+                        files=[make_download_file(username='peer', filename='01.mp3')],
+                        requeue_on_failure=False,
+                        candidate_download_log_id=log_id,
+                        candidate_import_job_id=job.id,
+                    ),
                     db,
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Operator partial",
-                    force=True,
-                    beets_harness_path=cfg.beets_harness_path,
-                    dl_info=DownloadInfo(username="peer"),
-                    distance=0.05,
-                    scenario="force_import",
-                    files=[MagicMock(username="peer", filename="01.mp3")],
                     cfg=cfg,
-                    requeue_on_failure=False,
-                    candidate_download_log_id=log_id,
-                    candidate_import_job_id=job.id,
                     quality_gate_fn=noop_quality_gate,
                 )
 
@@ -712,30 +712,30 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                      execution_lease,
                      cancellation_token=cancellation_token,
                  ) as (cancellation_token, owner_session_identity):
-                outcome = dispatch_import_with_fake_db(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    force=False,
-                    override_min_bitrate=None,
-                    target_format=None,
-                    verified_lossless_target="",
-                    beets_harness_path=cfg.beets_harness_path,
-                    db=db,
-                    dl_info=DownloadInfo(username="user1"),
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[MagicMock(username="user1", filename="01.mp3")],
-                    cfg=cfg,
-                    candidate_import_job_id=job.id,
-                    quality_gate_fn=noop_quality_gate,
-                    evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
-                        candidate=candidate,
+                outcome = dispatch_import_core(
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        force=False,
+                        override_min_bitrate=None,
+                        target_format=None,
+                        verified_lossless_target='',
+                        beets_harness_path=cfg.beets_harness_path,
+                        dl_info=DownloadInfo(username='user1'),
+                        distance=0.05,
+                        scenario='strong_match',
+                        files=[make_download_file(username='user1', filename='01.mp3')],
+                        candidate_import_job_id=job.id,
+                        execution_lease=execution_lease,
+                        owner_session_identity=owner_session_identity,
                     ),
-                    execution_lease=execution_lease,
+                    db,
+                    cfg=cfg,
+                    quality_gate_fn=noop_quality_gate,
+                    evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(candidate=candidate),
                     cancellation_token=cancellation_token,
-                    owner_session_identity=owner_session_identity,
                     run_import_fn=_owned_test_runner,
                 )
 
@@ -781,23 +781,23 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             # cannot become its own expectation at the launch boundary.
             db.request(42)["status"] = "imported"
             recorder = MagicMock()
-            outcome = dispatch_import_with_fake_db(
-                path=tmpdir,
-                mb_release_id="mbid-123",
-                request_id=42,
-                label="Test Artist - Test Album",
-                force=True,
-                beets_harness_path=cfg.beets_harness_path,
-                db=db,
-                dl_info=DownloadInfo(username="user1"),
-                distance=0.05,
-                scenario="force_import",
-                cfg=cfg,
-                candidate_import_job_id=job.id,
-                quality_gate_fn=noop_quality_gate,
-                evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
-                    candidate=candidate,
+            outcome = dispatch_import_core(
+                make_dispatch_request(
+                    path=tmpdir,
+                    mb_release_id='mbid-123',
+                    request_id=42,
+                    label='Test Artist - Test Album',
+                    force=True,
+                    beets_harness_path=cfg.beets_harness_path,
+                    dl_info=DownloadInfo(username='user1'),
+                    distance=0.05,
+                    scenario='force_import',
+                    candidate_import_job_id=job.id,
                 ),
+                db,
+                cfg=cfg,
+                quality_gate_fn=noop_quality_gate,
+                evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(candidate=candidate),
                 run_import_fn=recorder,
             )
 
@@ -933,24 +933,26 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     "importer measurement/probe mutant executed"
                 )
                 with _patch_beets_album(current_dir, min_bitrate=116):
-                    result = dispatch_import_with_fake_db(
-                        path=tmpdir,
-                        mb_release_id="mbid-123",
-                        request_id=42,
-                        label="Test Artist - Test Album",
-                        force=True,
-                        target_format="opus 128",
-                        verified_lossless_target="opus 128",
-                        beets_harness_path=cfg.beets_harness_path,
-                        db=db,
-                        dl_info=DownloadInfo(username="baduser"),
-                        distance=0.99,
-                        scenario="force_import",
-                        files=[MagicMock(username="baduser", filename="01.flac")],
+                    result = dispatch_import_core(
+                        make_dispatch_request(
+                            path=tmpdir,
+                            mb_release_id='mbid-123',
+                            request_id=42,
+                            label='Test Artist - Test Album',
+                            force=True,
+                            target_format='opus 128',
+                            verified_lossless_target='opus 128',
+                            beets_harness_path=cfg.beets_harness_path,
+                            dl_info=DownloadInfo(username='baduser'),
+                            distance=0.99,
+                            scenario='force_import',
+                            files=[make_download_file(username='baduser', filename='01.flac')],
+                            requeue_on_failure=False,
+                            candidate_download_log_id=log_id,
+                            candidate_import_job_id=job.id,
+                        ),
+                        db,
                         cfg=cfg,
-                        requeue_on_failure=False,
-                        candidate_download_log_id=log_id,
-                        candidate_import_job_id=job.id,
                     )
 
             self.assertFalse(result.success)
@@ -1050,19 +1052,21 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     return MagicMock(returncode=0, stdout="", stderr="")
 
                 ext.run.side_effect = run_side_effect
-                result = dispatch_import_with_fake_db(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=cfg.beets_harness_path,
-                    db=db,
-                    dl_info=DownloadInfo(username="user1"),
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[MagicMock(username="user1", filename="01.mp3")],
+                result = dispatch_import_core(
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=cfg.beets_harness_path,
+                        dl_info=DownloadInfo(username='user1'),
+                        distance=0.05,
+                        scenario='strong_match',
+                        files=[make_download_file(username='user1', filename='01.mp3')],
+                        candidate_import_job_id=import_job_id,
+                    ),
+                    db,
                     cfg=cfg,
-                    candidate_import_job_id=import_job_id,
                     quality_gate_fn=noop_quality_gate,
                 )
 
@@ -1254,19 +1258,21 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     return MagicMock(returncode=0, stdout="", stderr="")
 
                 ext.run.side_effect = run_side_effect
-                result = dispatch_import_with_fake_db(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=cfg.beets_harness_path,
-                    db=db,
-                    dl_info=DownloadInfo(username="user1"),
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[MagicMock(username="user1", filename="01.mp3")],
+                result = dispatch_import_core(
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=cfg.beets_harness_path,
+                        dl_info=DownloadInfo(username='user1'),
+                        distance=0.05,
+                        scenario='strong_match',
+                        files=[make_download_file(username='user1', filename='01.mp3')],
+                        candidate_import_job_id=job.id,
+                    ),
+                    db,
                     cfg=cfg,
-                    candidate_import_job_id=job.id,
                     quality_gate_fn=noop_quality_gate,
                 )
 
@@ -1337,20 +1343,22 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 ext.run.side_effect = AssertionError(
                     "importer measurement/probe mutant executed"
                 )
-                result = dispatch_import_with_fake_db(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=cfg.beets_harness_path,
-                    db=db,
-                    dl_info=DownloadInfo(username="user1"),
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[MagicMock(username="user1", filename="01.mp3")],
+                result = dispatch_import_core(
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=cfg.beets_harness_path,
+                        dl_info=DownloadInfo(username='user1'),
+                        distance=0.05,
+                        scenario='strong_match',
+                        files=[make_download_file(username='user1', filename='01.mp3')],
+                        requeue_on_failure=False,
+                        candidate_import_job_id=job.id,
+                    ),
+                    db,
                     cfg=cfg,
-                    requeue_on_failure=False,
-                    candidate_import_job_id=job.id,
                 )
 
             self.assertFalse(result.success)
@@ -1405,20 +1413,22 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             )
             with patch_dispatch_externals() as ext, \
                  _patch_beets_album(current_dir, min_bitrate=320):
-                result = dispatch_import_with_fake_db(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=cfg.beets_harness_path,
-                    db=db,
-                    dl_info=DownloadInfo(username="user1"),
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[MagicMock(username="user1", filename="01.mp3")],
+                result = dispatch_import_core(
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=cfg.beets_harness_path,
+                        dl_info=DownloadInfo(username='user1'),
+                        distance=0.05,
+                        scenario='strong_match',
+                        files=[make_download_file(username='user1', filename='01.mp3')],
+                        requeue_on_failure=False,
+                        candidate_import_job_id=job.id,
+                    ),
+                    db,
                     cfg=cfg,
-                    requeue_on_failure=False,
-                    candidate_import_job_id=job.id,
                 )
 
             self.assertFalse(result.success)
@@ -1468,19 +1478,21 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                      "lib.import_evidence.ensure_current_evidence_for_action",
                      side_effect=RuntimeError("beets unavailable"),
                  ):
-                result = dispatch_import_with_fake_db(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=cfg.beets_harness_path,
-                    db=db,
-                    dl_info=DownloadInfo(username="user1"),
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[MagicMock(username="user1", filename="01.mp3")],
+                result = dispatch_import_core(
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=cfg.beets_harness_path,
+                        dl_info=DownloadInfo(username='user1'),
+                        distance=0.05,
+                        scenario='strong_match',
+                        files=[make_download_file(username='user1', filename='01.mp3')],
+                        candidate_import_job_id=job.id,
+                    ),
+                    db,
                     cfg=cfg,
-                    candidate_import_job_id=job.id,
                 )
 
             self.assertFalse(result.success)
@@ -1671,28 +1683,32 @@ class TestDispatchCoreSeams(unittest.TestCase):
                      execution_lease,
                      cancellation_token=cancellation_token,
                  ) as (cancellation_token, owner_session_identity):
+                run_import_fn = None
                 if runner_hook is not None:
-                    kwargs["run_import_fn"] = runner_hook
+                    run_import_fn = runner_hook
                 elif execution_lease is not None:
-                    kwargs["run_import_fn"] = _owned_test_runner
-                dispatch_import_with_fake_db(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test",
-                    beets_harness_path=_HARNESS,
-                    db=db,
-                    dl_info=DownloadInfo(),
+                    run_import_fn = _owned_test_runner
+                dispatch_import_core(
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id="mbid-123",
+                        request_id=42,
+                        label="Test",
+                        beets_harness_path=_HARNESS,
+                        dl_info=DownloadInfo(),
+                        candidate_import_job_id=job.id,
+                        execution_lease=execution_lease,
+                        owner_session_identity=owner_session_identity,
+                        **kwargs,
+                    ),
+                    db,
                     cfg=cfg,
-                    candidate_import_job_id=job.id,
                     quality_gate_fn=noop_quality_gate,
                     evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
                         candidate=candidate,
                     ),
-                    execution_lease=execution_lease,
                     cancellation_token=cancellation_token,
-                    owner_session_identity=owner_session_identity,
-                    **kwargs,
+                    run_import_fn=run_import_fn,
                 )
                 return ext.run.call_args[0][0] if ext.run.call_args else []
         finally:
@@ -1973,23 +1989,24 @@ class TestOperatorIncompleteMarkImporterLane(unittest.TestCase):
                  _patch_beets_album(current_dir, min_bitrate=320):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout="", stderr="")
-                result = dispatch_import_with_fake_db(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Dirt Dress - Theme Songs",
-                    force=True,
-                    beets_harness_path=cfg.beets_harness_path,
-                    db=db,
-                    dl_info=DownloadInfo(username="iosononessuno"),
-                    distance=0.17,
-                    scenario="force_import",
-                    files=[MagicMock(
-                        username="iosononessuno", filename="01.mp3")],
+                result = dispatch_import_core(
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Dirt Dress - Theme Songs',
+                        force=True,
+                        beets_harness_path=cfg.beets_harness_path,
+                        dl_info=DownloadInfo(username='iosononessuno'),
+                        distance=0.17,
+                        scenario='force_import',
+                        files=[make_download_file(username='iosononessuno', filename='01.mp3')],
+                        requeue_on_failure=False,
+                        candidate_download_log_id=log_id,
+                        candidate_import_job_id=job.id,
+                    ),
+                    db,
                     cfg=cfg,
-                    requeue_on_failure=False,
-                    candidate_download_log_id=log_id,
-                    candidate_import_job_id=job.id,
                     quality_gate_fn=noop_quality_gate,
                 )
 
@@ -2093,23 +2110,24 @@ class TestOperatorIncompleteMarkImporterLane(unittest.TestCase):
             )
             with patch_dispatch_externals() as ext, \
                  _patch_beets_album(current_dir, min_bitrate=320):
-                result = dispatch_import_with_fake_db(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Dirt Dress - Theme Songs",
-                    force=True,
-                    beets_harness_path=cfg.beets_harness_path,
-                    db=db,
-                    dl_info=DownloadInfo(username="iosononessuno"),
-                    distance=0.17,
-                    scenario="force_import",
-                    files=[MagicMock(
-                        username="iosononessuno", filename="01.mp3")],
+                result = dispatch_import_core(
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Dirt Dress - Theme Songs',
+                        force=True,
+                        beets_harness_path=cfg.beets_harness_path,
+                        dl_info=DownloadInfo(username='iosononessuno'),
+                        distance=0.17,
+                        scenario='force_import',
+                        files=[make_download_file(username='iosononessuno', filename='01.mp3')],
+                        requeue_on_failure=False,
+                        candidate_download_log_id=log_id,
+                        candidate_import_job_id=job.id,
+                    ),
+                    db,
                     cfg=cfg,
-                    requeue_on_failure=False,
-                    candidate_download_log_id=log_id,
-                    candidate_import_job_id=job.id,
                     quality_gate_fn=noop_quality_gate,
                 )
 

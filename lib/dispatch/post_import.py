@@ -30,11 +30,11 @@ from lib.quality.dispatch_actions import decision_denylists
 from lib.terminal_outcomes import PendingImportTerminalOutcome, TerminalDenylist
 
 if TYPE_CHECKING:
-    from lib.pipeline_db import PipelineDB
+    from lib.dispatch.types import DispatchDB
 
 
 def _apply_or_stage_transition(
-    db: PipelineDB,
+    db: DispatchDB,
     request_id: int,
     pending: PendingImportTerminalOutcome | None,
     transition: transitions.RequestTransition,
@@ -48,7 +48,7 @@ def _apply_or_stage_transition(
 
 
 def _apply_or_stage_denylists(
-    db: PipelineDB,
+    db: DispatchDB,
     request_id: int,
     pending: PendingImportTerminalOutcome | None,
     usernames: set[str],
@@ -71,7 +71,7 @@ def _run_or_stage_quality_gate(
     quality_gate_fn: QualityGateFn,
     pending: PendingImportTerminalOutcome | None,
     *,
-    db: PipelineDB,
+    db: DispatchDB,
     request_id: int,
     **kwargs: object,
 ) -> PendingImportTerminalOutcome | None:
@@ -117,7 +117,7 @@ def _resolve_post_import_search_policy(
 
 
 def _apply_post_import_search_action(
-    db: PipelineDB,
+    db: DispatchDB,
     *,
     request_id: int,
     pending: PendingImportTerminalOutcome | None,

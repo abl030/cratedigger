@@ -399,7 +399,7 @@ def force_dispatch(
         patch("lib.config.read_runtime_config", return_value=world.cfg),
     ):
         outcome = dispatch_import_from_db(
-            world.db,  # pyright: ignore[reportArgumentType]
+            world.db,
             request_id=REQUEST_ID,
             failed_path=world.path,
             import_job_id=world.job_id,

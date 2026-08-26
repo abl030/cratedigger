@@ -16,6 +16,7 @@ import tempfile
 import unittest
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
+from dataclasses import dataclass
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, Never, Self, cast
@@ -26,6 +27,7 @@ import psycopg2
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
+from lib.dispatch.types import ImportOneRunner
 from lib.grab_list import GrabListEntry
 from lib.import_execution import (
     CancellationToken,
@@ -70,6 +72,7 @@ from tests.helpers import (
     make_album_quality_evidence,
     make_audio_corrupt_validation_report,
     make_ctx_with_fake_db,
+    make_dispatch_request,
     make_download_file,
     make_grab_list_entry,
     make_import_result,
@@ -272,15 +275,32 @@ def _run_as_owned_test_child(
     return run_import_fn(**kwargs)
 
 
+@dataclass(frozen=True)
+class _AutomationDispatchSeam:
+    """The #898 owner bundle a dispatch slice runs under.
+
+    Split across the two halves of the post-#1277 dispatch interface: the
+    lease and the pinned session DESCRIBE the import (``DispatchRequest``
+    fields), while the token and the owned runner are live control flow /
+    injected callables (``dispatch_import_core`` kwargs). One typed value
+    instead of the ``dict[str, Any]`` splat that used to straddle both.
+    """
+
+    execution_lease: ExecutionLeaseSnapshot | None = None
+    owner_session_identity: OwnerSessionIdentity | None = None
+    cancellation_token: CancellationToken | None = None
+    run_import_fn: ImportOneRunner | None = None
+
+
 @contextmanager
 def _automation_dispatch_kwargs(
     db: FakePipelineDB,
     execution_lease: ExecutionLeaseSnapshot | None,
     *,
     run_import_fn: Callable[..., Any] | None = None,
-) -> Iterator[dict[str, Any]]:
+) -> Iterator[_AutomationDispatchSeam]:
     if execution_lease is None:
-        yield {}
+        yield _AutomationDispatchSeam()
         return
     owned_runner = _owned_test_runner
     if run_import_fn is not None:
@@ -288,12 +308,12 @@ def _automation_dispatch_kwargs(
             return _run_as_owned_test_child(run_import_fn, kwargs)
     token = CancellationToken()
     with db._pin_owner_session(token) as owner_session_identity:
-        yield {
-            "execution_lease": execution_lease,
-            "cancellation_token": token,
-            "owner_session_identity": owner_session_identity,
-            "run_import_fn": owned_runner,
-        }
+        yield _AutomationDispatchSeam(
+            execution_lease=execution_lease,
+            owner_session_identity=owner_session_identity,
+            cancellation_token=token,
+            run_import_fn=owned_runner,
+        )
 
 
 def _download_ownership_cfg() -> CratediggerConfig:
@@ -822,35 +842,31 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
                  _automation_dispatch_kwargs(
                      db,
                      execution_lease,
-                 ) as automation_kwargs:
+                 ) as automation_seam:
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=dl_info,
-                    force=force,
-                    distance=distance,
-                    scenario=scenario,
-                    files=[MagicMock(username="user1",
-                                     filename="01 - Track.mp3")],
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=_HARNESS,
+                        dl_info=dl_info,
+                        force=force,
+                        distance=distance,
+                        scenario=scenario,
+                        files=[make_download_file(username='user1', filename='01 - Track.mp3')],
+                        candidate_import_job_id=claimed.id,
+                        execution_lease=automation_seam.execution_lease,
+                        owner_session_identity=automation_seam.owner_session_identity,
+                    ),
+                    db,
                     cfg=cfg,
-                    candidate_import_job_id=claimed.id,
-                    quality_gate_fn=(
-                        quality_gate_fn
-                        if quality_gate_fn is not None
-                        else _check_quality_gate_core
-                    ),
-                    evidence_gate_fn=(
-                        lambda *_args, **_kwargs: EvidenceImportGate(
-                            candidate=candidate
-                        )
-                    ),
-                    **automation_kwargs,
+                    quality_gate_fn=quality_gate_fn if quality_gate_fn is not None else _check_quality_gate_core,
+                    evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(candidate=candidate),
+                    cancellation_token=automation_seam.cancellation_token,
+                    run_import_fn=automation_seam.run_import_fn,
                 )
             finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -1278,8 +1294,8 @@ class TestQualityGateVerifiedLosslessBypass(unittest.TestCase):
                 mb_id="mbid-123",
                 label="Lo-Fi Album",
                 request_id=42,
-                files=[MagicMock(username="user1")],
-                db=db,  # type: ignore[arg-type]
+                files=[make_download_file(username="user1")],
+                db=db,
             )
 
         row = db.request(42)
@@ -1317,7 +1333,7 @@ class TestQualityGateVerifiedLosslessBypass(unittest.TestCase):
             label="Old proof must not win",
             request_id=42,
             files=[make_download_file(username="user1")],
-            db=db,  # type: ignore[arg-type]
+            db=db,
             expected_current_evidence_id=0,
         )
 
@@ -1353,8 +1369,8 @@ class TestQualityGateSpectralOverride(unittest.TestCase):
                 mb_id="mbid-123",
                 label="Fake 320 Album",
                 request_id=42,
-                files=[MagicMock(username="user1")],
-                db=db,  # type: ignore[arg-type]
+                files=[make_download_file(username="user1")],
+                db=db,
             )
 
         row = db.request(42)
@@ -1786,24 +1802,28 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
                  _automation_dispatch_kwargs(
                      db,
                      execution_lease,
-                 ) as automation_kwargs:
+                 ) as automation_seam:
                 ext.run.return_value = MagicMock(
                     returncode=5, stdout=_make_stdout(ir), stderr="")
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=DownloadInfo(username="user1"),
-                    distance=0.131,
-                    scenario="strong_match",
-                    files=[MagicMock(username="user1",
-                                     filename="01 - Track.mp3")],
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=_HARNESS,
+                        dl_info=DownloadInfo(username='user1'),
+                        distance=0.131,
+                        scenario='strong_match',
+                        files=[make_download_file(username='user1', filename='01 - Track.mp3')],
+                        candidate_import_job_id=claimed.id,
+                        execution_lease=automation_seam.execution_lease,
+                        owner_session_identity=automation_seam.owner_session_identity,
+                    ),
+                    db,
                     cfg=cfg,
-                    candidate_import_job_id=claimed.id,
-                    **automation_kwargs,
+                    cancellation_token=automation_seam.cancellation_token,
+                    run_import_fn=automation_seam.run_import_fn,
                 )
             finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -1935,20 +1955,25 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                 db,
                 execution_lease,
                 run_import_fn=parsed_import,
-            ) as automation_kwargs:
+            ) as automation_seam:
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=DownloadInfo(username="user1"),
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=_HARNESS,
+                        dl_info=DownloadInfo(username='user1'),
+                        attempt_spectral_audit=audit,
+                        candidate_import_job_id=claimed.id,
+                        execution_lease=automation_seam.execution_lease,
+                        owner_session_identity=automation_seam.owner_session_identity,
+                    ),
+                    db,
                     cfg=cfg,
-                    attempt_spectral_audit=audit,
                     quality_gate_fn=lambda **kwargs: None,
-                    candidate_import_job_id=claimed.id,
-                    **automation_kwargs,
+                    cancellation_token=automation_seam.cancellation_token,
+                    run_import_fn=automation_seam.run_import_fn,
                 )
             finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -2007,21 +2032,26 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                  _automation_dispatch_kwargs(
                      db,
                      execution_lease,
-                 ) as automation_kwargs:
+                 ) as automation_seam:
                 ext.run.return_value = MagicMock(
                     returncode=1, stdout="some error\n", stderr="")
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=DownloadInfo(username="user1"),
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=_HARNESS,
+                        dl_info=DownloadInfo(username='user1'),
+                        attempt_spectral_audit=audit,
+                        candidate_import_job_id=claimed.id,
+                        execution_lease=automation_seam.execution_lease,
+                        owner_session_identity=automation_seam.owner_session_identity,
+                    ),
+                    db,
                     cfg=cfg,
-                    attempt_spectral_audit=audit,
-                    candidate_import_job_id=claimed.id,
-                    **automation_kwargs,
+                    cancellation_token=automation_seam.cancellation_token,
+                    run_import_fn=automation_seam.run_import_fn,
                 )
             finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -2076,19 +2106,24 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                 db,
                 execution_lease,
                 run_import_fn=timeout_import,
-            ) as automation_kwargs:
+            ) as automation_seam:
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=DownloadInfo(username="user1"),
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=_HARNESS,
+                        dl_info=DownloadInfo(username='user1'),
+                        attempt_spectral_audit=audit,
+                        candidate_import_job_id=claimed.id,
+                        execution_lease=automation_seam.execution_lease,
+                        owner_session_identity=automation_seam.owner_session_identity,
+                    ),
+                    db,
                     cfg=cfg,
-                    attempt_spectral_audit=audit,
-                    candidate_import_job_id=claimed.id,
-                    **automation_kwargs,
+                    cancellation_token=automation_seam.cancellation_token,
+                    run_import_fn=automation_seam.run_import_fn,
                 )
             finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -2140,19 +2175,24 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                 db,
                 execution_lease,
                 run_import_fn=failed_import,
-            ) as automation_kwargs:
+            ) as automation_seam:
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=DownloadInfo(username="user1"),
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=_HARNESS,
+                        dl_info=DownloadInfo(username='user1'),
+                        attempt_spectral_audit=audit,
+                        candidate_import_job_id=claimed.id,
+                        execution_lease=automation_seam.execution_lease,
+                        owner_session_identity=automation_seam.owner_session_identity,
+                    ),
+                    db,
                     cfg=cfg,
-                    attempt_spectral_audit=audit,
-                    candidate_import_job_id=claimed.id,
-                    **automation_kwargs,
+                    cancellation_token=automation_seam.cancellation_token,
+                    run_import_fn=automation_seam.run_import_fn,
                 )
             finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -2236,20 +2276,25 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                 db,
                 execution_lease,
                 run_import_fn=parsed_import,
-            ) as automation_kwargs:
+            ) as automation_seam:
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=DownloadInfo(username="user1"),
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-123',
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=_HARNESS,
+                        dl_info=DownloadInfo(username='user1'),
+                        attempt_spectral_audit=audit,
+                        candidate_import_job_id=claimed.id,
+                        execution_lease=automation_seam.execution_lease,
+                        owner_session_identity=automation_seam.owner_session_identity,
+                    ),
+                    db,
                     cfg=cfg,
-                    attempt_spectral_audit=audit,
                     quality_gate_fn=failed_quality_gate,
-                    candidate_import_job_id=claimed.id,
-                    **automation_kwargs,
+                    cancellation_token=automation_seam.cancellation_token,
+                    run_import_fn=automation_seam.run_import_fn,
                 )
             finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -2346,7 +2391,7 @@ class TestForceImportSlice(unittest.TestCase):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
                 result = dispatch_import_from_db(
-                    db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
+                    db, request_id=42, failed_path=tmpdir,
                     source_username="user1",
                     import_job_id=claimed.id,
                 )
@@ -2469,7 +2514,7 @@ class TestForceImportSlice(unittest.TestCase):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
                 result = dispatch_import_from_db(
-                    db, request_id=91, failed_path=tmpdir,  # pyright: ignore[reportArgumentType]
+                    db, request_id=91, failed_path=tmpdir,
                     source_username="user1",
                     import_job_id=claimed.id,
                 )
@@ -2558,7 +2603,7 @@ class TestForceImportSlice(unittest.TestCase):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
                 result = dispatch_import_from_db(
-                    db, request_id=833, failed_path=tmpdir,  # type: ignore[arg-type]
+                    db, request_id=833, failed_path=tmpdir,
                     source_username="ttttsv",
                     import_job_id=claimed.id,
                 )
@@ -2824,7 +2869,7 @@ class TestLocalImportSlice(unittest.TestCase):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
                 result = dispatch_import_from_db(
-                    db, request_id=61, failed_path=tmpdir,  # type: ignore[arg-type]
+                    db, request_id=61, failed_path=tmpdir,
                     source_reference_path=None,
                     import_job_id=claimed.id,
                     distance_threshold=cfg.beets_distance_threshold,
@@ -3123,7 +3168,7 @@ class TestLocalImportSlice(unittest.TestCase):
                  ),
              ):
             result = dispatch_import_from_db(
-                db, request_id=62, failed_path=action_path,  # type: ignore[arg-type]
+                db, request_id=62, failed_path=action_path,
                 source_reference_path=None,
                 import_job_id=claimed.id,
                 distance_threshold=cfg.beets_distance_threshold,
@@ -3460,28 +3505,29 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
                  _automation_dispatch_kwargs(
                      db,
                      execution_lease,
-                 ) as automation_kwargs:
+                 ) as automation_seam:
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="mbid-biscay",
-                    request_id=42,
-                    label="Velella Velella - The Bay of Biscay",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=dl_info,
-                    distance=0.08,
-                    scenario="strong_match",
-                    files=[MagicMock(username="user1",
-                                     filename="01 - Do Not Fold.mp3")],
-                    cfg=cfg,
-                    candidate_import_job_id=claimed.id,
-                    evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
-                        candidate=candidate,
-                        current=current,
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='mbid-biscay',
+                        request_id=42,
+                        label='Velella Velella - The Bay of Biscay',
+                        beets_harness_path=_HARNESS,
+                        dl_info=dl_info,
+                        distance=0.08,
+                        scenario='strong_match',
+                        files=[make_download_file(username='user1', filename='01 - Do Not Fold.mp3')],
+                        candidate_import_job_id=claimed.id,
+                        execution_lease=automation_seam.execution_lease,
+                        owner_session_identity=automation_seam.owner_session_identity,
                     ),
-                    **automation_kwargs,
+                    db,
+                    cfg=cfg,
+                    evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(candidate=candidate, current=current),
+                    cancellation_token=automation_seam.cancellation_token,
+                    run_import_fn=automation_seam.run_import_fn,
                 )
             finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -3792,17 +3838,18 @@ class TestReleaseLockContention(unittest.TestCase):
         try:
             with patch_dispatch_externals() as ext:
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id=self.MBID,
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=dl_info,
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[MagicMock(username="user1",
-                                     filename="01 - Track.mp3")],
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id=self.MBID,
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=_HARNESS,
+                        dl_info=dl_info,
+                        distance=0.05,
+                        scenario='strong_match',
+                        files=[make_download_file(username='user1', filename='01 - Track.mp3')],
+                    ),
+                    db,
                     cfg=self._make_cfg(),
                 )
         finally:
@@ -3868,17 +3915,19 @@ class TestReleaseLockContention(unittest.TestCase):
         try:
             with patch_dispatch_externals() as ext:
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id=self.MBID,
-                    request_id=42,
-                    label="Test Artist - Force Import",
-                    force=True,
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=dl_info,
-                    distance=0.05,
-                    scenario="force_import",
-                    files=[],
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id=self.MBID,
+                        request_id=42,
+                        label='Test Artist - Force Import',
+                        force=True,
+                        beets_harness_path=_HARNESS,
+                        dl_info=dl_info,
+                        distance=0.05,
+                        scenario='force_import',
+                        files=[],
+                    ),
+                    db,
                     cfg=self._make_cfg(),
                 )
         finally:
@@ -3954,29 +4003,29 @@ class TestReleaseLockContention(unittest.TestCase):
                  _automation_dispatch_kwargs(
                      db,
                      execution_lease,
-                 ) as automation_kwargs:
+                 ) as automation_seam:
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=_make_stdout(ir), stderr="")
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id=self.MBID,
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=dl_info,
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[MagicMock(username="user1",
-                                     filename="01 - Track.mp3")],
-                    cfg=self._make_cfg(),
-                    candidate_import_job_id=claimed.id,
-                    evidence_gate_fn=(
-                        lambda *_args, **_kwargs: EvidenceImportGate(
-                            candidate=candidate
-                        )
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id=self.MBID,
+                        request_id=42,
+                        label='Test Artist - Test Album',
+                        beets_harness_path=_HARNESS,
+                        dl_info=dl_info,
+                        distance=0.05,
+                        scenario='strong_match',
+                        files=[make_download_file(username='user1', filename='01 - Track.mp3')],
+                        candidate_import_job_id=claimed.id,
+                        execution_lease=automation_seam.execution_lease,
+                        owner_session_identity=automation_seam.owner_session_identity,
                     ),
-                    **automation_kwargs,
+                    db,
+                    cfg=self._make_cfg(),
+                    evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(candidate=candidate),
+                    cancellation_token=automation_seam.cancellation_token,
+                    run_import_fn=automation_seam.run_import_fn,
                 )
             finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -4033,17 +4082,18 @@ class TestReleaseLockContention(unittest.TestCase):
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=_make_stdout(ir), stderr="")
                 outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="",
-                    request_id=43,
-                    label="Test Artist - No MBID",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=dl_info,
-                    distance=0.05,
-                    scenario="strong_match",
-                    files=[MagicMock(username="user1",
-                                     filename="01 - Track.mp3")],
+                    make_dispatch_request(
+                        path=tmpdir,
+                        mb_release_id='',
+                        request_id=43,
+                        label='Test Artist - No MBID',
+                        beets_harness_path=_HARNESS,
+                        dl_info=dl_info,
+                        distance=0.05,
+                        scenario='strong_match',
+                        files=[make_download_file(username='user1', filename='01 - Track.mp3')],
+                    ),
+                    db,
                     cfg=self._make_cfg(),
                 )
         finally:
@@ -4265,7 +4315,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 processing_dir,
             )
             self.assertEqual(len(dispatch.calls), 1)
-            self.assertEqual(dispatch.calls[0].path, processing_dir)
+            self.assertEqual(dispatch.calls[0].request.path, processing_dir)
 
     def test_auto_path_not_blocked_when_processing_dir_is_under_staging_root(self):
         """The duplicate-import guard must not quarantine the source processing dir."""
@@ -9389,7 +9439,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                               pipeline_db_enabled=True,
                           )):
                 result = dispatch_import_from_db(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=42,
                     failed_path=source,
                     source_username="alice",
@@ -9592,7 +9642,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                               pipeline_db_enabled=True,
                           )):
                 result = dispatch_import_from_db(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=44,
                     failed_path=source,
                     source_username="alice",

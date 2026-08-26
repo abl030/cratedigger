@@ -123,6 +123,7 @@ from tests.helpers import (
     finalize_claimed_dispatch,
     handoff_automation_owner,
     make_album_quality_evidence,
+    make_dispatch_request,
     make_import_result,
 )
 from tests.test_pipeline_db import TEST_DSN, make_db
@@ -1257,32 +1258,26 @@ class LifecycleWorld:
                     "world importer could not acquire IMPORT authority",
                 )
             outcome = dispatch_import_core(
-                path=str(staged_path),
-                mb_release_id=release.release_id,
-                request_id=request_id,
-                label=f"{release.artist} - {release.album}",
-                beets_harness_path=(
-                    self._beets_harness_path
-                    if self._import_engine == "mirror-harness"
-                    else "in-process-beets-world"
+                make_dispatch_request(
+                    path=str(staged_path),
+                    mb_release_id=release.release_id,
+                    request_id=request_id,
+                    label=f'{release.artist} - {release.album}',
+                    beets_harness_path=self._beets_harness_path if self._import_engine == 'mirror-harness' else 'in-process-beets-world',
+                    dl_info=DownloadInfo(filetype=attempt.codec),
+                    scenario='auto_import',
+                    force=False,
+                    candidate_import_job_id=claimed_job.id,
+                    candidate_download_log_id=origin_download_log_id,
+                    requeue_on_failure=True,
+                    beets_library_db_path=str(self.beets.library_db),
+                    beets_library_root=str(self.beets.library_root),
+                    execution_lease=importer_lease,
+                    owner_session_identity=owner_session_identity,
                 ),
-                db=self.db,
-                dl_info=DownloadInfo(filetype=attempt.codec),
-                scenario="auto_import",
-                force=False,
-                run_import_fn=(
-                    self._run_beets_subprocess
-                    if self._import_engine == "mirror-harness"
-                    else run_real_beets_import
-                ),
-                candidate_import_job_id=claimed_job.id,
-                candidate_download_log_id=origin_download_log_id,
-                requeue_on_failure=True,
-                beets_library_db_path=str(self.beets.library_db),
-                beets_library_root=str(self.beets.library_root),
-                execution_lease=importer_lease,
+                self.db,
+                run_import_fn=self._run_beets_subprocess if self._import_engine == 'mirror-harness' else run_real_beets_import,
                 cancellation_token=cancellation_token,
-                owner_session_identity=owner_session_identity,
             )
             from scripts.importer import process_claimed_job
 

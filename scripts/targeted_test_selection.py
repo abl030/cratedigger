@@ -431,6 +431,18 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # local-import's caller ever passes a non-None threshold, and only
     # after its own strict-validation guard already passed) — not a
     # substitute for the dynamic-execution coverage above.
+    # lib/dispatch/types.py holds the dispatch interface itself — the
+    # ``DispatchRequest`` description, the ``DispatchDB`` port, and the
+    # ``DispatchCoreFn`` seam (issue #1277). ``_direct_test_candidates``
+    # derives ``tests.test_types`` from the basename, which does not exist;
+    # its own dedicated module is tests.test_dispatch_request, and the two
+    # dispatch behaviour suites are what prove a change to those types did
+    # not move an outcome.
+    "lib/dispatch/types.py": (
+        "tests.test_dispatch_request",
+        "tests.test_dispatch_core",
+        "tests.test_dispatch_outcomes_generated",
+    ),
     "lib/dispatch/entry_points.py": (
         "tests.test_dispatch_from_db",
         "tests.test_force_import_merge_redirect",
@@ -917,11 +929,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "measured 2026-08-19: zero neighbours -- basename-derived "
         "tests.test_subprocess_runner does not exist and no EXACT_PATH_"
         "NEIGHBOURS/prefix rule covers it (issue #1199)"
-    ),
-    "lib/dispatch/types.py": (
-        "measured 2026-08-19: zero neighbours -- basename-derived "
-        "tests.test_types does not exist and no EXACT_PATH_NEIGHBOURS/"
-        "prefix rule covers it (issue #1199)"
     ),
     "lib/download_materialization.py": (
         "measured 2026-08-19: zero neighbours -- "

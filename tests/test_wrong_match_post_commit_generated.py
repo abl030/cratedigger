@@ -185,7 +185,7 @@ def _run_automation_rejection(
             failed_path=failed_path,
         )
         pending = _record_rejection_and_maybe_requeue(
-            db,  # pyright: ignore[reportArgumentType]
+            db,
             _REQUEST_ID,
             DownloadInfo(filetype="mp3", username="generated-peer"),
             detail=validation.detail,

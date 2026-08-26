@@ -260,7 +260,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                            pipeline_db_enabled=True,
                        )):
                 result = dispatch_import_from_db(
-                    db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
+                    db, request_id=42, failed_path=tmpdir,
                     source_username=source_username,
                     import_job_id=import_job_id,
                     download_log_id=source_download_log_id,
@@ -502,7 +502,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                            pipeline_db_enabled=True,
                        )):
                 result = dispatch_import_from_db(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=42,
                     failed_path=tmpdir,
                     source_username="alice",
@@ -581,7 +581,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                            pipeline_db_enabled=True,
                        )):
                 result = dispatch_import_from_db(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=42,
                     failed_path=tmpdir,
                     source_username="alice",
@@ -645,7 +645,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                            pipeline_db_enabled=True,
                        )):
                 result = dispatch_import_from_db(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=42,
                     failed_path=tmpdir,
                     source_username="alice",
@@ -714,7 +714,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                            pipeline_db_enabled=True,
                        )):
                 result = dispatch_import_from_db(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=42,
                     failed_path=tmpdir,
                     source_username="alice",
@@ -782,7 +782,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 ),
             ):
                 result = dispatch_import_from_db(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=42,
                     failed_path=tmpdir,
                     source_username="alice",
@@ -886,7 +886,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
                            pipeline_db_enabled=True,
                        )):
                 result = dispatch_import_from_db(
-                    db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
+                    db, request_id=42, failed_path=tmpdir,
                     import_job_id=job.id,
                     quality_gate_fn=noop_quality_gate,
                 )
@@ -946,7 +946,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
                            pipeline_db_enabled=True,
                        )):
                 result = dispatch_import_from_db(
-                    db, request_id=42, failed_path=tmpdir,  # type: ignore[arg-type]
+                    db, request_id=42, failed_path=tmpdir,
                     import_job_id=job.id,
                 )
             self.assertFalse(result.success)
@@ -974,7 +974,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
             side_effect=AssertionError("evidence lookup reached"),
         ):
             result = dispatch_import_from_db(
-                db,  # pyright: ignore[reportArgumentType]
+                db,
                 request_id=42,
                 failed_path="/not-opened",
                 import_job_id=force_job.id,
@@ -1038,7 +1038,7 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
                  patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
                  patch("lib.config.read_runtime_config", return_value=cfg) as mock_read:
                 dispatch_import_from_db(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=42,
                     failed_path=tmpdir,
                     import_job_id=job.id,
@@ -1182,7 +1182,7 @@ class TestDispatchFromDbPrecondition(unittest.TestCase):
                            pipeline_db_enabled=True,
                        )):
                 result = dispatch_import_from_db(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=42,
                     failed_path=tmpdir,
                     # NOTE: deliberately omit import_job_id and download_log_id.
@@ -1224,7 +1224,7 @@ class TestLoadEvidenceImportGateDelegation(unittest.TestCase):
         candidate_result = self._candidate_result()
         mock_helper = MagicMock(return_value=None)
         gate = _load_evidence_import_gate(
-            db,  # type: ignore[arg-type]
+            db,
             request_id=42,
             mb_release_id="mbid-123",
             path="/tmp/stage",
@@ -1259,7 +1259,7 @@ class TestLoadEvidenceImportGateDelegation(unittest.TestCase):
             evidence=None, provenance=fail_provenance
         )
         gate = _load_evidence_import_gate(
-            db,  # type: ignore[arg-type]
+            db,
             request_id=42,
             mb_release_id="mbid-123",
             path="/tmp/stage",

@@ -27,6 +27,7 @@ from lib.beets_tag_sync import TagSyncLockDB, TagSyncResult
 from lib.dispatch import (
     DispatchCoreFn,
     DispatchOutcome,
+    DispatchRequest,
     QualityGateFn,
     _build_download_info,
     _check_quality_gate_core,
@@ -1312,38 +1313,11 @@ def _handle_valid_result(
                 if quality_gate_fn is not None
                 else _check_quality_gate_core
             )
-            if dispatch_fn is not None:
-                _checkpoint(cancellation_token)
-                return dispatch_fn(
-                    path=dest,
-                    mb_release_id=album_data.mb_release_id or "",
-                    request_id=request_id,
-                    label=f"{album_data.artist} - {album_data.title}",
-                    force=False,
-                    override_min_bitrate=override_min_bitrate,
-                    target_format=album_data.db_target_format,
-                    verified_lossless_target=ctx.cfg.verified_lossless_target,
-                    beets_harness_path=ctx.cfg.beets_harness_path,
-                    db=pdb,
-                    dl_info=dl_info,
-                    distance=bv_result.distance,
-                    scenario=dispatch_scenario,
-                    files=album_data.files,
-                    cfg=ctx.cfg,
-                    outcome_label="success",
-                    requeue_on_failure=True,
-                    cooled_down_users=ctx.cooled_down_users,
-                    source_dirs=source_dirs_for_album(album_data),
-                    candidate_import_job_id=import_job_id,
-                    candidate_download_log_id=None,
-                    prevalidated_candidate_result=prevalidated_candidate_result,
-                    quality_gate_fn=resolved_quality_gate_fn,
-                    execution_lease=execution_lease,
-                    cancellation_token=cancellation_token,
-                    owner_session_identity=owner_session_identity,
-                )
-            _checkpoint(cancellation_token)
-            return dispatch_import_core(
+            # One construction, two possible callees. Before issue #1277 this
+            # same 25-kwarg call was spelled twice, verbatim, differing only
+            # in which callable it named — the widest drift surface in the
+            # file.
+            dispatch_request = DispatchRequest(
                 path=dest,
                 mb_release_id=album_data.mb_release_id or "",
                 request_id=request_id,
@@ -1353,12 +1327,10 @@ def _handle_valid_result(
                 target_format=album_data.db_target_format,
                 verified_lossless_target=ctx.cfg.verified_lossless_target,
                 beets_harness_path=ctx.cfg.beets_harness_path,
-                db=pdb,
                 dl_info=dl_info,
                 distance=bv_result.distance,
                 scenario=dispatch_scenario,
                 files=album_data.files,
-                cfg=ctx.cfg,
                 outcome_label="success",
                 requeue_on_failure=True,
                 cooled_down_users=ctx.cooled_down_users,
@@ -1366,10 +1338,17 @@ def _handle_valid_result(
                 candidate_import_job_id=import_job_id,
                 candidate_download_log_id=None,
                 prevalidated_candidate_result=prevalidated_candidate_result,
-                quality_gate_fn=resolved_quality_gate_fn,
                 execution_lease=execution_lease,
-                cancellation_token=cancellation_token,
                 owner_session_identity=owner_session_identity,
+            )
+            _checkpoint(cancellation_token)
+            dispatch = dispatch_fn or dispatch_import_core
+            return dispatch(
+                dispatch_request,
+                pdb,
+                cfg=ctx.cfg,
+                quality_gate_fn=resolved_quality_gate_fn,
+                cancellation_token=cancellation_token,
             )
         _checkpoint(cancellation_token)
         pending = ctx.pipeline_db_source.mark_done(

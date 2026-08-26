@@ -116,25 +116,35 @@ configured tool enforces the same syntax.
 
 Before adding a new escape hatch in tests, or before widening the tests
 baseline to admit one, check `tests/helpers.py`'s existing typed bridges
-first. The largest single cluster of frozen tests-side `type_ignore` debt is the
-`db=<FakePipelineDB>` kwarg gap: 71 of the tests baseline's 198
-`type_ignore` findings share that shape, clustered mostly at three call
-sites — `dispatch_import_core` (34), `measure_preimport_state` (14), and
-`_check_quality_gate_core` (11) — with the rest spread across five other
-functions. `tests/helpers.py` already provides typed bridges for two
-DIFFERENT call shapes in the same family —
-`tests/helpers.py::finalize_claimed_dispatch` (an `Any`-typed bridge from a
+first. The `db=<FakePipelineDB>` kwarg gap used to be the largest single
+cluster of frozen tests-side `type_ignore` debt; issue #1277 removed most of
+it by narrowing the production annotation instead of bridging the call site.
+Measured 2026-08-26, after that change: **18** of the tests baseline's 123
+`type_ignore` findings still share that shape, and only 15 of those are a
+genuine fake-vs-concrete gap — `measure_preimport_state` (14) and
+`_persist_spectral_state` (1), both still annotated `db: PipelineDB`. The
+other three are deliberate wrong-type injections a narrow port would not
+fix (`_refresh_current_evidence_after_import(db=None)` ×2,
+`_check_quality_gate_core(db=SimpleNamespace())` ×1). The whole
+`dispatch_import_core` cluster (34 findings, reached through an
+`Any`-accepting `dispatch_import_with_fake_db` bridge) is gone: dispatch
+now takes `lib/dispatch/types.py::DispatchDB`, a Protocol covering exactly
+the methods `lib/dispatch/` calls, and `FakePipelineDB` satisfies it
+structurally — so the bridge was deleted rather than reused.
+
+**Narrowing the annotation is the preferred remedy; a bridge is the
+fallback.** `tests/helpers.py` provides typed bridges for two call shapes
+in this family — `finalize_claimed_dispatch` (an `Any`-typed bridge from a
 `FakePipelineDB` fixture into the `PipelineDB`-typed `process_claimed_job`)
 and `make_ctx_with_fake_db` (wraps a fake in `FakePipelineDBSource` so
 production code hits a typed `CratediggerContext`, not a `PipelineDB`) —
-but NEITHER covers the three call sites above: zero of the 71 findings sit
-at `process_claimed_job`, and `make_ctx_with_fake_db` doesn't return a
-`PipelineDB` at all. The first remedy for a new hatch of this shape is
-still to check `tests/helpers.py` first: reuse an existing bridge where
-the call site actually matches one, or EXTEND the bridge set with a new
-one for the call site you need — never a bare `# type: ignore`, and never
-a baseline sweep. The aim for a NEW test file is zero escape hatches
-reached via a bridge, not a fresh baseline entry.
+and neither covers the two remaining clusters above. So for a new hatch of
+this shape: first ask whether the production function actually needs the
+concrete `PipelineDB` (usually it does not — ~40 narrow DB Protocols
+already exist); if it genuinely does, reuse an existing bridge where the
+call site matches one, or EXTEND the bridge set with a new one — never a
+bare `# type: ignore`, and never a baseline sweep. The aim for a NEW test
+file is zero escape hatches, not a fresh baseline entry.
 
 When either typing ratchet trips, do not stop at making it green. For every
 affected file and finding kind, finish with the committed count at least ten

@@ -48,7 +48,9 @@ from lib.dispatch.types import (
     DISPATCH_CODE_REQUEUE_FAILED,
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
     DispatchCoreFn,
+    DispatchDB,
     DispatchOutcome,
+    DispatchRequest,
     QualityGateFn,
 )
 
@@ -65,7 +67,9 @@ __all__ = [
     "DISPATCH_CODE_REQUEUE_EXHAUSTED",
     "DISPATCH_CODE_REQUEUE_FAILED",
     "DispatchCoreFn",
+    "DispatchDB",
     "DispatchOutcome",
+    "DispatchRequest",
     "QualityGateFn",
     "_build_download_info",
     "_check_quality_gate_core",

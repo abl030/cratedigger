@@ -100,6 +100,7 @@ from tests.helpers import (
     finalize_claimed_dispatch,
     handoff_automation_owner,
     make_album_quality_evidence,
+    make_dispatch_request,
     make_download_file,
     make_grab_list_entry,
     make_import_result,
@@ -405,33 +406,30 @@ def _run_dispatch(
                  cancellation_token=cancellation_token,
              ) as (cancellation_token, owner_session_identity):
             result = dispatch_import_core(
-                path=tmpdir,
-                mb_release_id="mbid-generated",
-                request_id=42,
-                label="Generated Artist - Generated Album",
-                beets_harness_path=cfg.beets_harness_path,
-                db=db,  # type: ignore[arg-type]
-                dl_info=dl_info,
-                distance=0.05,
-                scenario="force_import" if force else "strong_match",
-                force=force,
-                files=[MagicMock(username=world.source_username or "user1",
-                                 filename="01 - Track.mp3")],
-                cfg=cfg,
-                requeue_on_failure=world.requeue_on_failure,
-                quality_gate_fn=noop_quality_gate,
-                candidate_import_job_id=import_job_id,
-                prevalidated_candidate_result=candidate_result,
-                beets_library_db_path=str(beets.library_db),
-                beets_library_root=str(beets.library_root),
-                execution_lease=execution_lease,
-                cancellation_token=cancellation_token,
-                owner_session_identity=owner_session_identity,
-                run_import_fn=(
-                    _owned_test_runner
-                    if execution_lease is not None
-                    else None
+                make_dispatch_request(
+                    path=tmpdir,
+                    mb_release_id='mbid-generated',
+                    request_id=42,
+                    label='Generated Artist - Generated Album',
+                    beets_harness_path=cfg.beets_harness_path,
+                    dl_info=dl_info,
+                    distance=0.05,
+                    scenario='force_import' if force else 'strong_match',
+                    force=force,
+                    files=[make_download_file(username=world.source_username or 'user1', filename='01 - Track.mp3')],
+                    requeue_on_failure=world.requeue_on_failure,
+                    candidate_import_job_id=import_job_id,
+                    prevalidated_candidate_result=candidate_result,
+                    beets_library_db_path=str(beets.library_db),
+                    beets_library_root=str(beets.library_root),
+                    execution_lease=execution_lease,
+                    owner_session_identity=owner_session_identity,
                 ),
+                db,
+                cfg=cfg,
+                quality_gate_fn=noop_quality_gate,
+                cancellation_token=cancellation_token,
+                run_import_fn=_owned_test_runner if execution_lease is not None else None,
             )
         if terminalize == "park":
             # Planted violation, not a production path: the owner job rests in
@@ -571,7 +569,7 @@ def _run_dispatch_from_db(
              )), \
              patch("lib.config.read_runtime_config", return_value=cfg):
             result = dispatch_import_from_db(
-                db, request_id=42, failed_path=tmpdir,  # pyright: ignore[reportArgumentType]
+                db, request_id=42, failed_path=tmpdir,
                 import_job_id=claimed.id,
                 distance_threshold=distance_threshold,
                 scenario=scenario,
@@ -654,20 +652,20 @@ def _reject_via_evidence_decision(
     attempt_result.merge(ir)
     with patch_dispatch_externals():
         _reject_import_from_evidence_decision(
-            db=db,  # type: ignore[arg-type]
-            request_id=42,
-            dl_info=dl_info,
+            make_dispatch_request(
+                request_id=42,
+                dl_info=dl_info,
+                distance=distance,
+                requeue_on_failure=requeue_on_failure,
+                path='/tmp/cratedigger-generated-reject-test',
+                scenario=decision,
+                files=None,
+                cooled_down_users=None,
+            ),
+            db,
             attempt_result=attempt_result,
-            distance=distance,
             decision=decision,
-            detail=f"generated {decision}",
-            requeue_on_failure=requeue_on_failure,
-            validation_result=None,
-            staged_path="/tmp/cratedigger-generated-reject-test",
-            scenario=decision,
-            files=None,
-            source_path_cleanup_scenario=decision,
-            cooled_down_users=None,
+            detail=f'generated {decision}',
         )
     return db
 
@@ -714,20 +712,26 @@ def _run_rejection_writer(
 
         with patch_dispatch_externals():
             _reject_import_from_evidence_decision(
-                db=db,  # type: ignore[arg-type]
-                request_id=42,
-                dl_info=DownloadInfo(username="generated-user"),
+                make_dispatch_request(
+                    request_id=42,
+                    # The envelope rides ``dl_info`` — exactly how production
+                    # carries an already-decided validation result into the
+                    # reject helper (issue #1277).
+                    dl_info=DownloadInfo(
+                        username="generated-user",
+                        validation_result=validation_result.to_json(),
+                    ),
+                    distance=distance,
+                    requeue_on_failure=True,
+                    path="/tmp/generated-staged",
+                    scenario=scenario or "generated_reject",
+                    files=None,
+                    cooled_down_users=None,
+                ),
+                db,
                 attempt_result=attempt_result,
-                distance=distance,
                 decision="downgrade",
                 detail="generated reject",
-                requeue_on_failure=True,
-                validation_result=validation_result.to_json(),
-                staged_path="/tmp/generated-staged",
-                scenario=scenario or "generated_reject",
-                files=None,
-                source_path_cleanup_scenario="downgrade",
-                cooled_down_users=None,
             )
         return db
 
@@ -735,7 +739,7 @@ def _run_rejection_writer(
         from lib.dispatch import _record_rejection_and_maybe_requeue
 
         _record_rejection_and_maybe_requeue(
-            db=db,  # type: ignore[arg-type]
+            db=db,
             request_id=42,
             dl_info=DownloadInfo(username="generated-user"),
             detail=validation_result.detail,
@@ -981,30 +985,26 @@ def _run_have_analysis_abort(
             cancellation_token=cancellation_token,
         ) as (cancellation_token, owner_session_identity):
             outcome = dispatch_import_core(
-                path=tmpdir,
-                mb_release_id="generated-have-analysis-mbid",
-                request_id=42,
-                label="Generated Artist - Generated Album",
-                force=mode == "force",
-                beets_harness_path=_HARNESS,
-                db=db,  # type: ignore[arg-type]
-                dl_info=DownloadInfo(filetype="flac", username=username),
-                scenario=scenario,
-                cfg=CratediggerConfig(
+                make_dispatch_request(
+                    path=tmpdir,
+                    mb_release_id='generated-have-analysis-mbid',
+                    request_id=42,
+                    label='Generated Artist - Generated Album',
+                    force=mode == 'force',
                     beets_harness_path=_HARNESS,
-                    pipeline_db_enabled=True,
-                    processing_dir=processing_dir,
+                    dl_info=DownloadInfo(filetype='flac', username=username),
+                    scenario=scenario,
+                    requeue_on_failure=mode == 'auto',
+                    candidate_import_job_id=job.id if attach_import_job else None,
+                    prevalidated_candidate_result=candidate_result,
+                    execution_lease=execution_lease,
+                    owner_session_identity=owner_session_identity,
                 ),
-                requeue_on_failure=mode == "auto",
-                candidate_import_job_id=job.id if attach_import_job else None,
-                prevalidated_candidate_result=candidate_result,
+                db,
+                cfg=CratediggerConfig(beets_harness_path=_HARNESS, pipeline_db_enabled=True, processing_dir=processing_dir),
                 quality_gate_fn=noop_quality_gate,
-                current_evidence_loader=(
-                    lambda *_args, **_kwargs: current_result
-                ),
-                execution_lease=execution_lease,
+                current_evidence_loader=lambda *_args, **_kwargs: current_result,
                 cancellation_token=cancellation_token,
-                owner_session_identity=owner_session_identity,
             )
     if outcome.terminal_outcome is None:
         raise AssertionError("HAVE-analysis abort did not build a terminal outcome")

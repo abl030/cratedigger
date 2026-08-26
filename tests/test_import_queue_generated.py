@@ -121,7 +121,7 @@ class TestGeneratedImportPreviewRequeue(unittest.TestCase):
             row["attempts"] = attempts
             row["preview_attempts"] = preview_attempts
             outcome = _requeue_import_job_to_preview(
-                db,  # pyright: ignore[reportArgumentType]
+                db,
                 import_job_id=claimed.id,
                 reason=reason,
                 expected_execution_lease=lease,
@@ -213,7 +213,7 @@ class TestGeneratedImportPreviewRequeue(unittest.TestCase):
             row["attempts"] = attempts
             row["preview_attempts"] = preview_attempts
             outcome = _requeue_import_job_to_preview(
-                db,  # pyright: ignore[reportArgumentType]
+                db,
                 import_job_id=claimed.id,
                 reason=reason,
             )

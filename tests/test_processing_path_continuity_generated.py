@@ -137,7 +137,7 @@ def assert_processing_owner_keeps_one_path(
         if outcome is None or not outcome.success:
             raise AssertionError("processing owner did not reach import dispatch")
         durable_path = db.request(42)["active_download_state"]["current_path"]
-        dispatched_paths = [call.path for call in dispatch.calls]
+        dispatched_paths = [call.request.path for call in dispatch.calls]
         if durable_path != processing_path:
             raise AssertionError("processing mutated its immutable path provenance")
         if staged_album.current_path != processing_path:
