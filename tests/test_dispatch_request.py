@@ -14,6 +14,7 @@ Two contracts live here:
 from __future__ import annotations
 
 import dataclasses
+import typing
 import unittest
 
 from lib.dispatch.types import DispatchDB, DispatchRequest
@@ -166,11 +167,38 @@ class TestDispatchDBPort(unittest.TestCase):
         conforming: DispatchDB = fake
         self.assertIs(conforming, fake)
 
-    def test_port_declares_the_private_owner_session_probe(self) -> None:
+    def test_port_declares_the_owner_fencing_methods(self) -> None:
         """``_probe_owner_session`` is the #898 ownership re-verification
-        every checkpoint runs. It is declared underscore-and-all, so a fake
-        missing it fails the port rather than being silently accepted."""
-        self.assertTrue(hasattr(FakePipelineDB(), "_probe_owner_session"))
+        every dispatch checkpoint runs, and the two heartbeats are what
+        ``checkpoint_automation_owner`` needs. The port must declare all
+        three — underscore and all, per the cross-module private-use
+        convention (PR #775) — so a DB stand-in missing any of them fails
+        the port instead of being silently accepted."""
+        members = typing.get_protocol_members(DispatchDB)
+        for name in (
+            "_probe_owner_session",
+            "heartbeat_import_job",
+            "heartbeat_import_job_preview",
+        ):
+            self.assertIn(name, members)
+
+    def test_port_declares_the_methods_dispatch_calls_directly(self) -> None:
+        """A spot-check across the port's own declarations: the advisory
+        lock it serialises on, the denylist and audit writers, the launch
+        authority handshake, and the exact-completion capture. Dropping any
+        of them from the port would let a DB stand-in that cannot serve
+        dispatch pass as one."""
+        members = typing.get_protocol_members(DispatchDB)
+        for name in (
+            "advisory_lock",
+            "add_denylist",
+            "log_download",
+            "authorize_import_job_launch",
+            "capture_automation_import_completion",
+            "persist_import_terminal_outcome",
+            "request_marked_incomplete",
+        ):
+            self.assertIn(name, members)
 
 
 if __name__ == "__main__":
