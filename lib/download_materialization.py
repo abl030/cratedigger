@@ -37,11 +37,11 @@ from lib.fs_authority import (
     same_open_directory,
     unlink_if_same,
 )
-from lib.grab_list import DownloadFile, GrabListEntry
+from lib.grab_list import GrabListEntry
 from lib.import_execution import CancellationToken
 from lib.import_manifest import audio_relative_paths, manifest_trace_summary
 from lib.processing_paths import (
-    attempt_fingerprint,
+    attempt_fingerprint_of_files,
     canonical_folder_for_row,
     processing_albums_dir,
 )
@@ -436,17 +436,6 @@ def _canonical_manifest_complete(
 # poll cycle (issue #146). There is no on-disk path inference: a
 # completed file without a stamp is a hard failure.
 
-def _attempt_fingerprint_for(files: list[DownloadFile]) -> str:
-    """Fingerprint this attempt's exact (username, filename) file set.
-
-    Every canonical-folder computation for the same album must derive
-    from this SAME persisted file set — at materialize, at resume
-    classification, and at recovery — or a mismatch classifies the
-    folder as ``external`` and strands it (issue #550 phase 2).
-    """
-    return attempt_fingerprint([(f.username, f.filename) for f in files])
-
-
 def classify_staged_album_location(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
@@ -461,7 +450,7 @@ def classify_staged_album_location(
         request_id=album_data.db_request_id or 0,
         staging_dir=ctx.cfg.beets_staging_dir,
         canonical_root=processing_albums_dir(ctx.cfg.processing_dir),
-        attempt_fingerprint=_attempt_fingerprint_for(album_data.files),
+        attempt_fingerprint=attempt_fingerprint_of_files(album_data.files),
     )
 
 

@@ -519,7 +519,6 @@ class TestDownloadMaterializationExtraction(unittest.TestCase):
         "MaterializeFailed",
         "MaterializeGuarded",
         "MaterializeResult",
-        "_attempt_fingerprint_for",
         "classify_staged_album_location",
         "_evaluate_staged_path_readiness",
         "_materialize_processing_dir",
@@ -575,12 +574,33 @@ class TestCancelAndDelete(unittest.TestCase):
     (issue #146 phase 3; kills the shared-``CD1/`` rmtree hazard)."""
 
     def _ctx(self, slskd=None):
+        from lib.download_ownership import DownloadOwnershipWriter
+
         slskd = slskd or FakeSlskdAPI()
         ctx = _make_ctx(slskd=slskd)
         tmpdir = tempfile.mkdtemp(prefix="cratedigger-cancel-test-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         cast(Any, ctx.cfg).slskd_download_dir = tmpdir
+        # Destruction is ledger-gated (#1278), so these tests carry the
+        # real ownership collaborator over a fake DB rather than a ctx
+        # with no ownership wired at all — production always has one.
+        self.ledger_db = FakePipelineDB()
+        ctx.download_ownership = DownloadOwnershipWriter(
+            db_factory=lambda: self.ledger_db, close_after_use=False)
         return ctx, slskd, tmpdir
+
+    def _own(self, *files) -> None:
+        """Ledger these files as ours: write-ahead intent, then the
+        accepted-POST confirmation that makes it destructive authority."""
+        from lib.pipeline_db import TransferLedgerRow
+
+        self.ledger_db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=1, username=f.username, filename=f.filename)
+            for f in files
+        ])
+        for f in files:
+            self.ledger_db.confirm_transfer_enqueue(f.username, f.filename)
 
     def _file_event(self, slskd, *, id, username, filename, local_filename):
         import json as _json
@@ -619,6 +639,7 @@ class TestCancelAndDelete(unittest.TestCase):
             fp.write("x")
         f = make_download_file(file_dir="someuser\\Album Folder")
         f.local_path = local_path
+        self._own(f)
 
         ok = cancel_and_delete([f], ctx)
 
@@ -645,6 +666,7 @@ class TestCancelAndDelete(unittest.TestCase):
                 fp.write("x")
         f = make_download_file(file_dir="someuser\\CD1")
         f.local_path = mine
+        self._own(f)
 
         cancel_and_delete([f], ctx)
 
@@ -668,6 +690,7 @@ class TestCancelAndDelete(unittest.TestCase):
         slskd.events.set_events([self._file_event(
             slskd, id="ev-1", username=f.username, filename=f.filename,
             local_filename=local_path)])
+        self._own(f)
 
         cancel_and_delete([f], ctx)
 
@@ -685,6 +708,7 @@ class TestCancelAndDelete(unittest.TestCase):
         slskd.events.set_events([self._dir_event(
             slskd, id="ev-1", username=f.username,
             remote_dir=f.file_dir, local_dir=local_dir)])
+        self._own(f)
 
         cancel_and_delete([f], ctx)
 
@@ -700,6 +724,7 @@ class TestCancelAndDelete(unittest.TestCase):
             fp.write("x")
         f = make_download_file()
         f.local_path = stray
+        self._own(f)  # owned, so root containment is the check under test
 
         cancel_and_delete([f], ctx)
 
@@ -712,6 +737,7 @@ class TestCancelAndDelete(unittest.TestCase):
         slskd.transfers.cancel_download_error = Exception("network error")
         ctx, slskd, _ = self._ctx(slskd)
         f = make_download_file()
+        self._own(f)
         with self.assertLogs("cratedigger", level="WARNING") as logs:
             ok = cancel_and_delete([f], ctx)  # should not raise
         self.assertFalse(ok)
@@ -722,12 +748,191 @@ class TestCancelAndDelete(unittest.TestCase):
             [("user1", "file-id-1")],
         )
 
+    def test_foreign_completion_at_the_same_key_is_never_destroyed(self):
+        """#1278: the payload behind an UNOWNED queue key belongs to
+        someone else on a shared slskd, and root containment cannot say
+        so — a foreign client's download lands under the same root.
+
+        ``recent_completion_paths`` reads the instance-wide events feed
+        keyed on ``(username, filename)``, so when our POST for that key
+        was rejected and a human's succeeded, the fresh lookup hands us
+        THEIR local path. Before this gate, cleanup deleted it.
+        """
+        from lib.slskd_transfers import cancel_and_delete
+        ctx, slskd, tmpdir = self._ctx()
+        local_dir = os.path.join(tmpdir, "Album Folder")
+        os.makedirs(local_dir)
+        theirs = os.path.join(local_dir, "01 - Track.mp3")
+        with open(theirs, "w") as fp:
+            fp.write("x")
+        f = make_download_file(
+            filename="someuser\\Music\\Album Folder\\01 - Track.mp3",
+            file_dir="someuser\\Music\\Album Folder")
+        slskd.events.set_events([self._file_event(
+            slskd, id="ev-1", username=f.username, filename=f.filename,
+            local_filename=theirs)])
+        # Deliberately NOT ledgered as ours: our POST never got accepted.
+
+        with self.assertLogs("cratedigger", level="WARNING") as logs:
+            ok = cancel_and_delete([f], ctx)
+
+        self.assertTrue(os.path.exists(theirs))
+        self.assertTrue(os.path.isdir(local_dir))
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+        self.assertFalse(ok)
+        self.assertIn("not ledger-owned", "\n".join(logs.output))
+
+    def test_pending_intent_alone_is_not_destructive_authority(self):
+        """A write-ahead row records that we ASKED, never that slskd
+        agreed. Only ``confirm_transfer_enqueue`` grants authority —
+        the same boundary ``stamp_transfer_completion`` enforces."""
+        from lib.pipeline_db import TransferLedgerRow
+        from lib.slskd_transfers import cancel_and_delete
+        ctx, slskd, tmpdir = self._ctx()
+        local_path = os.path.join(tmpdir, "01 - Track.mp3")
+        with open(local_path, "w") as fp:
+            fp.write("x")
+        f = make_download_file()
+        f.local_path = local_path
+        self.ledger_db.record_transfer_enqueue([TransferLedgerRow(
+            request_id=1, username=f.username, filename=f.filename)])
+
+        cancel_and_delete([f], ctx)
+
+        self.assertTrue(os.path.exists(local_path))
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+
+    def test_no_ownership_collaborator_destroys_nothing(self):
+        """The fail-closed arm the docstring calls load-bearing.
+
+        Independent review (#1278) found this arm had zero coverage AND
+        was reachable in production at the same time: `cratedigger.py`'s
+        Phase-1 poll context did not forward `download_ownership`, so
+        every download-timeout cleanup took exactly this path. A mutant
+        flipping it to `return list(files)` — destroy everything when we
+        cannot ask — survived the entire suite.
+        """
+        from lib.slskd_transfers import cancel_and_delete
+        ctx, slskd, tmpdir = self._ctx()
+        local_path = os.path.join(tmpdir, "01 - Track.mp3")
+        with open(local_path, "w") as fp:
+            fp.write("x")
+        f = make_download_file()
+        f.local_path = local_path
+        self._own(f)  # owned — but with no collaborator we cannot know it
+        ctx.download_ownership = None
+
+        with self.assertLogs("cratedigger", level="WARNING") as logs:
+            ok = cancel_and_delete([f], ctx)
+
+        self.assertTrue(os.path.exists(local_path))
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+        self.assertFalse(ok)
+        self.assertIn(
+            "no ownership collaborator wired", "\n".join(logs.output))
+
+    def test_empty_file_list_asks_the_ledger_nothing(self):
+        """An empty batch is not an ownership question.
+
+        The early exit is what keeps a caller with nothing to clean up
+        from opening a DB handle to ask about zero keys.
+        """
+        from lib.slskd_transfers import cancel_and_delete
+        ctx, slskd, _ = self._ctx()
+        asked: list[object] = []
+
+        def _record(keys):
+            asked.append(keys)
+            return set()
+
+        ctx.download_ownership.owned_transfer_keys = _record
+
+        ok = cancel_and_delete([], ctx)
+
+        self.assertTrue(ok)
+        self.assertEqual(asked, [])
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+
+    def test_empty_file_list_with_no_collaborator_stays_silent(self):
+        """...and from accusing the operator about zero files.
+
+        The skipped-keys warning cannot fire on an empty batch in any
+        world (`skipped` is `0 - 0`), so only this scenario — no
+        collaborator AND nothing to do — makes the "stays silent" half
+        of the early exit falsifiable. Asserted separately because a
+        single test claiming both was inert on the warning half
+        (#1278 review).
+        """
+        from lib.slskd_transfers import cancel_and_delete
+        ctx, _, _ = self._ctx()
+        ctx.download_ownership = None
+
+        with patch.object(logging.getLogger("cratedigger"), "warning") as warn:
+            ok = cancel_and_delete([], ctx)
+
+        self.assertTrue(ok)
+        warn.assert_not_called()
+
+    def test_owned_and_foreign_files_are_partitioned_in_one_call(self):
+        """A mixed batch destroys exactly its owned half — the foreign
+        half is neither cancelled nor unlinked."""
+        from lib.slskd_transfers import cancel_and_delete
+        ctx, slskd, tmpdir = self._ctx()
+        mine_path = os.path.join(tmpdir, "01 - Mine.mp3")
+        theirs_path = os.path.join(tmpdir, "01 - Theirs.mp3")
+        for path in (mine_path, theirs_path):
+            with open(path, "w") as fp:
+                fp.write("x")
+        mine = make_download_file(
+            filename="someuser\\Mine.mp3", id="mine-id")
+        mine.local_path = mine_path
+        theirs = make_download_file(
+            filename="someuser\\Theirs.mp3", id="theirs-id")
+        theirs.local_path = theirs_path
+        self._own(mine)
+
+        cancel_and_delete([mine, theirs], ctx)
+
+        self.assertFalse(os.path.exists(mine_path))
+        self.assertTrue(os.path.exists(theirs_path))
+        self.assertEqual(
+            [call.id for call in slskd.transfers.cancel_download_calls],
+            ["mine-id"],
+        )
+
+    def test_ownership_lookup_failure_destroys_nothing(self):
+        """Fail closed: an unavailable ledger is not evidence of
+        ownership, so a DB failure skips destruction (the reaper remains
+        the backstop) instead of falling back to root containment."""
+        from lib.slskd_transfers import cancel_and_delete
+        ctx, slskd, tmpdir = self._ctx()
+        local_path = os.path.join(tmpdir, "01 - Track.mp3")
+        with open(local_path, "w") as fp:
+            fp.write("x")
+        f = make_download_file()
+        f.local_path = local_path
+        self._own(f)
+
+        def _boom(_keys):
+            raise RuntimeError("ledger unavailable")
+
+        ctx.download_ownership.owned_transfer_keys = _boom
+
+        with self.assertLogs("cratedigger", level="WARNING") as logs:
+            ok = cancel_and_delete([f], ctx)
+
+        self.assertTrue(os.path.exists(local_path))
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+        self.assertFalse(ok)
+        self.assertIn("ownership lookup failed", "\n".join(logs.output))
+
     def test_events_lookup_failure_never_blocks_cancel(self):
         from lib.slskd_transfers import cancel_and_delete
         slskd = FakeSlskdAPI()
         slskd.events.list_error = RuntimeError("events down")
         ctx, slskd, _ = self._ctx(slskd)
         f = make_download_file()  # unstamped → triggers the events lookup
+        self._own(f)
 
         ok = cancel_and_delete([f], ctx)  # must not raise
 
@@ -5783,6 +5988,65 @@ class TestPollActiveDownloads(unittest.TestCase):
         fake_db.assert_log(self, 0, outcome="timeout")
         self.assertEqual(fake_db.request(1)["status"], "wanted")
         self.assertEqual(fake_db.recorded_attempts, [(1, "download")])
+
+    def test_poll_active_timeout_really_destroys_its_owned_payload(self):
+        """#1278 composition: the timeout path drives the REAL
+        ``cancel_and_delete``, not a patched stand-in.
+
+        Every other timeout test above patches it away, so the ownership
+        gate was correct at module scope, ``_timeout_album`` was correct
+        at module scope, and nothing exercised the two together — the
+        #853/#859 shape, where the defect lives in the composition. This
+        test runs the real helper over a real payload with the queue key
+        ledger-owned, which is the world a genuine timeout is in: the
+        request is ``downloading`` on our own accepted attempt.
+        """
+        from lib.download import poll_active_downloads
+        from lib.download_ownership import DownloadOwnershipWriter
+        from lib.pipeline_db import TransferLedgerRow
+
+        stale = "2020-01-01T00:00:00+00:00"
+        state_dict = {
+            "filetype": "flac",
+            "enqueued_at": stale,
+            "last_progress_at": stale,
+            "files": [
+                {"username": "user1", "filename": "user1\\Music\\01.flac",
+                 "file_dir": "user1\\Music", "size": 30000000,
+                 "bytes_transferred": 12345, "last_state": "InProgress"},
+            ],
+        }
+        row = self._make_downloading_row(state_dict=state_dict)
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "user1",
+            "directories": [{"directory": "user1\\Music", "files": [{
+                "filename": "user1\\Music\\01.flac",
+                "id": "tid-1",
+                "state": "InProgress",
+                "bytesTransferred": 12345,
+            }]}],
+        }])
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row], slskd=slskd)
+        payload = fake_db.request(1)[
+            "active_download_state"]["files"][0]["local_path"]
+        self.assertTrue(os.path.exists(payload))
+        fake_db.record_transfer_enqueue([TransferLedgerRow(
+            request_id=1, username="user1",
+            filename="user1\\Music\\01.flac")])
+        fake_db.confirm_transfer_enqueue("user1", "user1\\Music\\01.flac")
+        ctx.download_ownership = DownloadOwnershipWriter(
+            db_factory=lambda: fake_db, close_after_use=False)
+
+        poll_active_downloads(ctx)
+
+        fake_db.assert_log(self, 0, outcome="timeout")
+        self.assertEqual(
+            [(call.username, call.id)
+             for call in slskd.transfers.cancel_download_calls],
+            [("user1", "tid-1")],
+        )
+        self.assertFalse(os.path.exists(payload))
 
     def test_poll_active_old_album_with_progress_does_not_timeout(self):
         """Fresh byte progress should refresh stall timer even for an old album."""

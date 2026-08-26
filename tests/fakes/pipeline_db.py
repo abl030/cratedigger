@@ -8683,6 +8683,15 @@ class FakePipelineDB:
             if r.accepted_at is not None
         }
 
+    def get_owned_transfer_keys_for(
+        self, keys: Sequence[tuple[str, str]],
+    ) -> set[tuple[str, str]]:
+        """Mirror the keyed ownership read: the same accepted-only set
+        ``get_owned_transfer_keys`` returns, intersected with ``keys``."""
+        if not keys:
+            return set()
+        return self.get_owned_transfer_keys() & set(keys)
+
     def get_owned_local_paths(self) -> set[str]:
         return {
             r.local_path for r in self._transfer_ledger.values()

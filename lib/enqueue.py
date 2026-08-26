@@ -15,7 +15,7 @@ from lib.browse import _fanout_browse_users, download_filter, get_browse_coordin
 from lib.download import build_active_download_state
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.matching import MatchResult, check_for_match, get_album_by_id
-from lib.processing_paths import attempt_fingerprint
+from lib.processing_paths import attempt_fingerprint_or_none
 from lib.quality import CandidateScore
 from lib.slskd_transfers import (
     SlskdEnqueueOutcome,
@@ -1125,11 +1125,7 @@ def _enqueue_with_claim_outcome(
     # every ledger row from every disc's enqueue call carries the same
     # fingerprint, matching what canonical_processing_path derives later
     # from the same full manifest (issue #550 phase 2).
-    attempt_fp = (
-        attempt_fingerprint(
-            [(f.username, f.filename) for f in claim.entry.files])
-        if claim.entry.files else None
-    )
+    attempt_fp = attempt_fingerprint_or_none(claim.entry.files)
     # not_before (issue #822 item 3): claim.enqueued_at is captured strictly
     # before this POST (_claim_initial_download_ownership stamps it via
     # build_active_download_state before writer.claim_downloading runs),

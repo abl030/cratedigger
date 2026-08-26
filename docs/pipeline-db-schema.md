@@ -709,6 +709,26 @@ the completion event feed stamps it, and disk deletion still requires that
 event-stamped path or another positive ownership signal. Terminal transfer
 cleanup does not infer a filesystem path from the queue key.
 
+Migration 083 states the implication between those two columns as a CHECK:
+`local_path IS NULL OR accepted_at IS NOT NULL`. `get_owned_local_paths` --
+the disk reaper's ownership set -- selects on `local_path IS NOT NULL`
+alone, which was safe only because `stamp_transfer_completion` (today's
+only writer of that column) requires acceptance in a different statement.
+With the constraint the reaper's query is an accepted-ownership query by
+construction, against every writer rather than the audited one. The
+violating cohort was empty when it shipped (45,203 rows, 30,511 with a
+path, 0 without acceptance), since migration 051's backfill already
+covered every historical row.
+
+**Keyed ownership reads.** `get_owned_transfer_keys` answers "every key we
+own" for once-per-cycle convergence; `get_owned_transfer_keys_for(keys)`
+answers the same question about specific keys, for the destructive paths in
+`lib/slskd_transfers.py` that run on find_download worker threads and ask
+about one attempt's files. Both spell the same `accepted_at IS NOT NULL`
+gate; the keyed form zips its input server-side through `unnest(...)` rather
+than growing the SQL text, the same fixed-shape pattern
+`get_conflicting_transfer_request_ids` uses.
+
 Retention is a strict 90-day cutoff on `enqueued_at`: a row exactly at the
 cutoff survives. Older pending rows (`accepted_at IS NULL`) are deleted even
 when their request remains `wanted` or `downloading`, because enqueue intent

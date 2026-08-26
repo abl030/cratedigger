@@ -7,6 +7,8 @@ import unittest
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.processing_paths import (
     attempt_fingerprint,
+    attempt_fingerprint_of_files,
+    attempt_fingerprint_or_none,
     canonical_folder_for_row,
     canonical_processing_path,
     processing_albums_dir,
@@ -26,6 +28,76 @@ def _row(*, files: list[DownloadFile]) -> GrabListEntry:
         year="2020",
         mb_release_id="release-id",
     )
+
+
+class TestAttemptFingerprintOfFiles(unittest.TestCase):
+    """Issue #1278: one projection from files to an attempt fingerprint."""
+
+    def test_projects_exactly_the_identity_pair(self):
+        files = [
+            DownloadFile(
+                filename="Music/01.flac", id="t1", file_dir="Music",
+                username="user1", size=111),
+            DownloadFile(
+                filename="Music/02.flac", id="t2", file_dir="Music",
+                username="user2", size=222),
+        ]
+
+        self.assertEqual(
+            attempt_fingerprint_of_files(files),
+            attempt_fingerprint([
+                ("user1", "Music/01.flac"),
+                ("user2", "Music/02.flac"),
+            ]),
+        )
+
+    def test_non_identity_fields_never_reach_the_digest(self):
+        """slskd re-issues transfer IDs and revises sizes/retries while
+        one durable queue key is still in flight, so widening the
+        projection to any of them would make an attempt's fingerprint
+        change under it — stranding its own canonical folder."""
+        before = [DownloadFile(
+            filename="Music/01.flac", id="t1", file_dir="Music",
+            username="user1", size=111)]
+        after = [DownloadFile(
+            filename="Music/01.flac", id="REISSUED", file_dir="Music",
+            username="user1", size=999, retry=3,
+            bytes_transferred=4096, last_state="InProgress")]
+
+        self.assertEqual(
+            attempt_fingerprint_of_files(before),
+            attempt_fingerprint_of_files(after),
+        )
+
+    def test_empty_attempt_has_no_identity(self):
+        """``None``, not the empty-set digest: a file-less claim must not
+        mint an identity a later non-empty attempt could match against
+        (the cross-request guard joins on exact equality)."""
+        self.assertIsNone(attempt_fingerprint_or_none([]))
+
+    def test_non_empty_attempt_uses_the_shared_derivation(self):
+        files = [DownloadFile(
+            filename="Music/01.flac", id="t1", file_dir="Music",
+            username="user1", size=111)]
+
+        self.assertEqual(
+            attempt_fingerprint_or_none(files),
+            attempt_fingerprint_of_files(files),
+        )
+
+    def test_canonical_folder_uses_the_shared_derivation(self):
+        """The folder name carries the same identity the ledger row and
+        the persisted download state carry."""
+        files = [DownloadFile(
+            filename="Music/01.flac", id="t1", file_dir="Music",
+            username="user1", size=111)]
+
+        folder = canonical_folder_for_row(_row(files=files), "/root")
+
+        self.assertTrue(
+            folder.endswith(f" [{attempt_fingerprint_of_files(files)}]"),
+            folder,
+        )
 
 
 class TestAttemptFingerprint(unittest.TestCase):

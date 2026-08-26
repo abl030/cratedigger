@@ -48,7 +48,8 @@ from lib.import_queue import (
 )
 from lib.pipeline_db._shared import ADVISORY_LOCK_NAMESPACE_IMPORT
 from lib.processing_paths import (
-    attempt_fingerprint,
+    attempt_fingerprint_of_files,
+    attempt_fingerprint_or_none,
     canonical_folder_for_row,
     processing_albums_dir,
 )
@@ -168,18 +169,20 @@ def build_active_download_state(
     path are added only by the atomic handoff command.
 
     ``attempt_fingerprint`` (issue #1196 item 1) is computed here from
-    ``entry.files`` with the exact same
-    ``lib.processing_paths.attempt_fingerprint`` derivation
-    ``lib.enqueue._enqueue_with_claim_outcome`` uses to compute the
-    ``attempt_fp`` written onto every ``slskd_transfer_ledger`` row this
-    attempt writes -- there computed from ``claim.entry.files``. Every
-    production caller passes either that SAME ``entry`` (the initial
-    claim, ``lib.enqueue._claim_initial_download_ownership``) or one
-    whose ``.files`` is content-identical to it (a reconstructed entry
-    built from an accepted-downloads subset that, by construction, is
-    only ever persisted once every planned file across every disc was
-    accepted -- ``lib.enqueue._persist_claimed_download_state``), so the
-    two fingerprints agree BY CONSTRUCTION without a second formula.
+    ``entry.files`` through
+    ``lib.processing_paths.attempt_fingerprint_or_none`` -- literally the
+    same function ``lib.enqueue._enqueue_with_claim_outcome`` calls to
+    compute the ``attempt_fp`` written onto every
+    ``slskd_transfer_ledger`` row this attempt writes, there from
+    ``claim.entry.files``. Every production caller passes either that
+    SAME ``entry`` (the initial claim,
+    ``lib.enqueue._claim_initial_download_ownership``) or one whose
+    ``.files`` is content-identical to it (a reconstructed entry built
+    from an accepted-downloads subset that, by construction, is only
+    ever persisted once every planned file across every disc was
+    accepted -- ``lib.enqueue._persist_claimed_download_state``). Equal
+    inputs through one shared formula is what makes the two fingerprints
+    agree; before issue #1278 the formula itself was written out twice.
     """
     enqueued_at_value = enqueued_at or datetime.now(UTC).isoformat()
     files = [
@@ -205,11 +208,7 @@ def build_active_download_state(
         files=files,
         processing_started_at=None,
         current_path=None,
-        attempt_fingerprint=(
-            attempt_fingerprint(
-                [(f.username, f.filename) for f in entry.files])
-            if entry.files else None
-        ),
+        attempt_fingerprint=attempt_fingerprint_or_none(entry.files),
     )
 
 
@@ -1007,10 +1006,8 @@ def _poll_one_active_download(
                             file.file_dir,
                             ctx,
                             request_id=request_id,
-                            attempt_fp=attempt_fingerprint([
-                                (item.username, item.filename)
-                                for item in entry.files
-                            ]),
+                            attempt_fp=attempt_fingerprint_of_files(
+                                entry.files),
                             # A retry is still part of this exact attempt.
                             not_before=state.enqueued_at,
                         )

@@ -16817,6 +16817,132 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.assertEqual(
             self.db.get_owned_local_paths(), {"/downloads/a.flac"})
 
+    def test_owned_transfer_keys_for_answers_the_same_question_as_the_fake(self):
+        """The keyed ownership read (#1278) is the whole-ledger read
+        restricted to the asked keys, and both adapters agree.
+
+        Driven through real PG and the fake over identical state: the
+        destructive paths in lib/slskd_transfers.py consult this on
+        worker threads, and a fake that answered more generously than
+        PG would make every ownership-gating test a fiction.
+        """
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        rid = self._seed_request()
+        fake.seed_request({
+            "id": rid,
+            "status": "wanted",
+            "artist_name": "Artist",
+            "album_title": "Album",
+        })
+        rows = [
+            TransferLedgerRow(
+                request_id=rid, username="p0", filename="a.flac"),
+            TransferLedgerRow(
+                request_id=rid, username="p1", filename="b.flac"),
+        ]
+        for db in (self.db, fake):
+            db.record_transfer_enqueue(rows)
+            db.confirm_transfer_enqueue("p0", "a.flac")
+            # p1 stays pending intent: asked, never accepted.
+
+        asked = [
+            ("p0", "a.flac"),
+            ("p1", "b.flac"),
+            ("stranger", "a.flac"),
+        ]
+        for db in (self.db, fake):
+            with self.subTest(db=type(db).__name__):
+                self.assertEqual(
+                    db.get_owned_transfer_keys_for(asked),
+                    {("p0", "a.flac")},
+                )
+                self.assertEqual(db.get_owned_transfer_keys_for([]), set())
+                self.assertEqual(
+                    db.get_owned_transfer_keys_for(asked),
+                    db.get_owned_transfer_keys() & set(asked),
+                )
+
+    def test_owned_transfer_keys_for_answers_membership_not_row_count(self):
+        """One queue key retried across attempts holds many accepted
+        rows; the answer is a membership set, not one entry per row.
+
+        Pins the set-shaped contract callers rely on (they test `in`),
+        not the SQL's `DISTINCT` -- which is a wire-size optimisation the
+        set comprehension would make redundant either way.
+        """
+        rid = self._seed_request()
+        row = TransferLedgerRow(
+            request_id=rid, username="p0", filename="a.flac")
+        for _ in range(3):
+            self.db.record_transfer_enqueue([row])
+            self.db.confirm_transfer_enqueue("p0", "a.flac")
+
+        self.assertEqual(
+            self.db.get_owned_transfer_keys_for([("p0", "a.flac")]),
+            {("p0", "a.flac")},
+        )
+
+    def test_path_evidence_without_acceptance_is_rejected_by_the_schema(self):
+        """Migration 083: ``local_path IS NOT NULL`` IMPLIES accepted.
+
+        ``get_owned_local_paths`` is documented as the sole positive disk
+        ownership signal yet selects on ``local_path IS NOT NULL`` alone.
+        Before this constraint that query was safe only because of an
+        argument about a different method's UPDATE; the constraint makes
+        it safe against every writer, so the omission is provably
+        equivalent rather than prose-equivalent.
+        """
+        import psycopg2.errors
+
+        rid = self._seed_request()
+
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self.db._execute(
+                "INSERT INTO slskd_transfer_ledger "
+                "(request_id, username, filename, local_path) "
+                "VALUES (%s, %s, %s, %s)",
+                (rid, "p0", "a.flac", "/downloads/a.flac"),
+            )
+
+        # The two legal shapes still write: pending intent with no path,
+        # and accepted ownership carrying one.
+        self.db._execute(
+            "INSERT INTO slskd_transfer_ledger "
+            "(request_id, username, filename) VALUES (%s, %s, %s)",
+            (rid, "p0", "pending.flac"),
+        )
+        self.db._execute(
+            "INSERT INTO slskd_transfer_ledger "
+            "(request_id, username, filename, accepted_at, local_path) "
+            "VALUES (%s, %s, %s, NOW(), %s)",
+            (rid, "p0", "accepted.flac", "/downloads/accepted.flac"),
+        )
+        self.assertEqual(
+            self.db.get_owned_local_paths(), {"/downloads/accepted.flac"})
+
+    def test_stamping_cannot_be_undone_into_a_pathful_pending_row(self):
+        """The constraint also holds against an UPDATE that would strip
+        acceptance off a row already carrying path evidence -- the
+        direction a repair one-shot or operator fix would take."""
+        import psycopg2.errors
+
+        rid = self._seed_request()
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=rid, username="p0", filename="a.flac"),
+        ])
+        self.db.confirm_transfer_enqueue("p0", "a.flac")
+        self.db.stamp_transfer_completion("p0", "a.flac", "/downloads/a.flac")
+
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self.db._execute(
+                "UPDATE slskd_transfer_ledger SET accepted_at = NULL "
+                "WHERE request_id = %s",
+                (rid,),
+            )
+
     def test_transfer_reads_match_fake(self):
         from tests.fakes import FakePipelineDB
 

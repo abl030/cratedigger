@@ -61,6 +61,64 @@ def _file(filename: str) -> SlskdFile:
     return cast(SlskdFile, {"filename": filename})
 
 
+class TestPhase1ContextForwarding(unittest.TestCase):
+    """Phase 1 polls on its own thread with its own DB connection, but
+    every OTHER per-cycle collaborator must be forwarded from the owner
+    context or Phase 1 silently degrades (issue #1278).
+
+    ``download_ownership`` is the one with teeth: Phase 1 reaches
+    ``lib.download._timeout_album`` -> ``cancel_and_delete``, which is
+    gated on positively proven ledger ownership and fails CLOSED without
+    the collaborator — turning every download-timeout cleanup into a
+    logged no-op while the code, CLAUDE.md and the PR all claim it is
+    ownership-scoped.
+    """
+
+    def _owner_ctx(self) -> CratediggerContext:
+        ctx = _make_ctx()
+        ctx.download_ownership = object()
+        ctx.cooled_down_users = {"grumpy-peer"}
+        return ctx
+
+    def test_forwards_the_ownership_collaborator(self):
+        from cratedigger import build_phase1_context
+
+        owner = self._owner_ctx()
+
+        phase1 = build_phase1_context(
+            cfg=owner.cfg,
+            slskd=owner.slskd,
+            pipeline_db_source=FakePipelineDBSource(),
+            owner_ctx=owner,
+        )
+
+        self.assertIs(phase1.download_ownership, owner.download_ownership)
+
+    def test_forwards_cooldowns_and_keeps_its_own_db_source(self):
+        from cratedigger import build_phase1_context
+
+        owner = self._owner_ctx()
+        phase1_source = FakePipelineDBSource()
+
+        phase1 = build_phase1_context(
+            cfg=owner.cfg,
+            slskd=owner.slskd,
+            pipeline_db_source=phase1_source,
+            owner_ctx=owner,
+        )
+
+        # assertIs, not assertEqual: sharing the SET OBJECT is what lets
+        # Phase 1's `ctx.cooled_down_users.add(...)` (lib/download.py)
+        # reach the owner context and, through it, Phase 2's worker
+        # contexts. Copying the set instead would satisfy equality and
+        # silently strand every cooldown Phase 1 discovers — a mutant
+        # replacing the forward with `set(owner_ctx.cooled_down_users)`
+        # survived the equality version of this assertion (#1278 review).
+        self.assertIs(phase1.cooled_down_users, owner.cooled_down_users)
+        self.assertIs(phase1.pipeline_db_source, phase1_source)
+        self.assertIsNot(phase1.pipeline_db_source, owner.pipeline_db_source)
+
+
 class TestContextAccumulators(unittest.TestCase):
     """The new per-cycle accumulator fields exist on CratediggerContext and
     default to zero, so any consumer can reference them safely."""

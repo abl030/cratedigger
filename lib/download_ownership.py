@@ -55,6 +55,11 @@ class DownloadOwnershipDB(transitions.TransitionsDB, Protocol):
         exclude_request_id: int,
     ) -> set[int]: ...
 
+    def get_owned_transfer_keys_for(
+        self,
+        keys: Sequence[tuple[str, str]],
+    ) -> set[tuple[str, str]]: ...
+
     def close(self) -> None: ...
 
 
@@ -214,6 +219,31 @@ class DownloadOwnershipWriter:
                 db.confirm_transfer_enqueue(username, filename)
                 for filename in filenames
             )
+        finally:
+            self._close_db(db)
+
+    def owned_transfer_keys(
+        self, keys: Sequence[tuple[str, str]],
+    ) -> set[tuple[str, str]]:
+        """Which of these slskd queue keys the ledger proves are ours.
+
+        The read half of the write-ahead ownership ledger, exposed on the
+        same worker-safe collaborator that writes it: the destructive
+        paths in ``lib/slskd_transfers.py`` run on find_download worker
+        threads, which cannot reach the owner thread's cached
+        ``pipeline_db_source`` connection
+        (``lib.enqueue._WorkerPipelineDBSource`` raises on access).
+
+        Only an accepted POST enters the returned set. A pending
+        write-ahead intent is deliberately absent: it records that we
+        ASKED, never that slskd agreed, so it is not authority to destroy
+        anything.
+        """
+        if not keys:
+            return set()
+        db = self._open_db()
+        try:
+            return db.get_owned_transfer_keys_for(keys)
         finally:
             self._close_db(db)
 
