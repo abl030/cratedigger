@@ -965,6 +965,908 @@ def _evidence_reject_import_result(
     )
 
 
+@dataclass(frozen=True)
+class _DispatchPreamble:
+    """Everything one dispatch resolves BEFORE the RELEASE lock is taken.
+
+    Issue #1277's internal decomposition: the prologue used to be seven
+    mutable locals threaded through a 1,000-line body. It is a pure
+    derivation from ``(request, cfg)`` plus one best-effort Beets read, so
+    it is computed once and passed forward as a value.
+    """
+
+    beets_cfg: CratediggerConfig
+    beets_library_db_path: str
+    beets_library_root: str
+    pre_import_album_directories: dict[int, str]
+    mode: str
+    source_dirs: list[str]
+    attempt_result: ImportAttemptResult
+
+
+def _prepare_dispatch(
+    request: DispatchRequest,
+    db: DispatchDB,
+    *,
+    cfg: CratediggerConfig | None,
+    album_directory_snapshot_fn: Callable[..., dict[int, str]],
+) -> _DispatchPreamble:
+    """Resolve storage authority, the pre-import snapshot, and the attempt.
+
+    Runs before any lock is held. The album-directory snapshot is fenced on
+    the automation lane (its caller already holds RELEASE) but not on the
+    force/local lane, exactly as it was when this code sat inline — see
+    ``_capture_album_directory_snapshot``.
+    """
+    from lib.config import read_runtime_config
+
+    beets_cfg = cfg or read_runtime_config()
+    beets_library_db_path, beets_library_root = _resolve_dispatch_beets_paths(
+        beets_cfg,
+        db_path=request.beets_library_db_path,
+        library_root=request.beets_library_root,
+    )
+
+    # Snapshot every album directory Beets currently holds for this release,
+    # before THIS dispatch's own beets-mutating subprocess launches
+    # (issue #1203 item 2) — the authoritative "before" half of the
+    # post-import reconciler's diff.
+    pre_import_album_directories = _capture_album_directory_snapshot(
+        album_directory_snapshot_fn,
+        beets_library_db_path=beets_library_db_path,
+        beets_library_root=beets_library_root,
+        mb_release_id=request.mb_release_id,
+        when="pre-import",
+    )
+
+    # Operation identity is distinct from the eventual download-log outcome:
+    # an automatic attempt can still reject or fail after this start message.
+    mode = "FORCE-IMPORT" if request.force else "AUTO-IMPORT"
+    dist_label = (
+        f"{request.distance:.4f}" if request.distance is not None
+        else "unmeasured"
+    )
+    logger.info(f"{mode}: {request.label} "
+                f"(source=request, dist={dist_label})")
+
+    attempt_result = request.attempt_result
+    if attempt_result is None:
+        attempt_result = ImportAttemptResult.from_import_job(
+            db,
+            request.candidate_import_job_id,
+            request.attempt_spectral_audit,
+        )
+
+    return _DispatchPreamble(
+        beets_cfg=beets_cfg,
+        beets_library_db_path=beets_library_db_path,
+        beets_library_root=beets_library_root,
+        pre_import_album_directories=pre_import_album_directories,
+        mode=mode,
+        source_dirs=normalize_source_dirs(request.source_dirs or []),
+        attempt_result=attempt_result,
+    )
+
+
+@dataclass(frozen=True)
+class _EvidenceStage:
+    """What the action-time evidence gate settled, or the outcome it forced.
+
+    ``outcome`` non-``None`` means the stage is terminal for this dispatch
+    and the caller must return it unchanged. Every other field is only
+    meaningful when ``outcome`` is ``None`` — EXCEPT
+    ``quality_evidence_action_file``, which the caller must record either
+    way: the two launch-authority refusals happen after the sidecar is
+    already written, and dispatch's ``finally`` owns removing it.
+    """
+
+    outcome: DispatchOutcome | None = None
+    gate: EvidenceImportGate | None = None
+    existing_v0_probe: V0ProbeEvidence | None = None
+    override_min_bitrate: int | None = None
+    attempt_program_covered: bool = False
+    quality_evidence_action_file: str | None = None
+
+
+def _run_evidence_gate(
+    request: DispatchRequest,
+    db: DispatchDB,
+    *,
+    cfg: CratediggerConfig | None,
+    preamble: _DispatchPreamble,
+    attempt_result: ImportAttemptResult,
+    active_execution_lease: ExecutionLeaseSnapshot | None,
+    evidence_gate_fn: Callable[..., EvidenceImportGate],
+    current_evidence_loader: (
+        Callable[..., CurrentEvidenceActionResult | None] | None
+    ),
+) -> _EvidenceStage:
+    """Load, reauthorize, and decide on action-time quality evidence.
+
+    Bounded consistency boundary, not cross-system atomicity: PostgreSQL
+    evidence, Beets SQLite authority, and the candidate / library
+    filesystems cannot share one transaction. Reauthorize both sides
+    against the world observed immediately before the unified decision and
+    fail closed before Beets launch. Any later world failure is audited and
+    returned to the runnable lifecycle.
+
+    Runs under whatever lock the caller holds; it takes none of its own and
+    changes no ordering. It stops at the evidence action sidecar — the
+    launch-authority handshake and everything after it stay inline in
+    ``dispatch_import_core``, where the #898 fencing sequence is read in one
+    piece.
+    """
+    evidence_gate_kwargs: dict[str, object] = {}
+    if current_evidence_loader is not None:
+        evidence_gate_kwargs["current_evidence_loader"] = (
+            current_evidence_loader
+        )
+    evidence_gate = evidence_gate_fn(
+        db,
+        request_id=request.request_id,
+        mb_release_id=request.mb_release_id,
+        path=request.path,
+        quality_ranks=cfg.quality_ranks if cfg is not None else None,
+        candidate_import_job_id=request.candidate_import_job_id,
+        candidate_download_log_id=request.candidate_download_log_id,
+        prevalidated_candidate_result=request.prevalidated_candidate_result,
+        attempt_existing_spectral=(
+            attempt_result.audit.existing
+            if attempt_result.audit is not None
+            else None
+        ),
+        attempt_have_audit_available=attempt_result.audit is not None,
+        beets_library_db_path=preamble.beets_library_db_path,
+        beets_library_root=preamble.beets_library_root,
+        **evidence_gate_kwargs,
+    )
+    if request.prevalidated_candidate_result is not None:
+        # Re-check the queue-owned action copy before *any* evidence
+        # decision can become terminal. A late content change is a
+        # typed preview retry, never a false quality rejection.
+        from lib.import_evidence import ensure_candidate_evidence_for_action
+
+        fresh_candidate = ensure_candidate_evidence_for_action(
+            db,
+            source_path=request.path,
+            import_job_id=request.candidate_import_job_id,
+        )
+        if (
+            not fresh_candidate.available
+            or fresh_candidate.evidence is None
+            or evidence_gate.candidate is None
+            or fresh_candidate.evidence.id != evidence_gate.candidate.id
+            or fresh_candidate.evidence.snapshot_fingerprint
+                != evidence_gate.candidate.snapshot_fingerprint
+        ):
+            reason = (
+                fresh_candidate.provenance.fallback_reason
+                or fresh_candidate.provenance.candidate_status
+                or "candidate evidence changed before dispatch"
+            )
+            return _EvidenceStage(outcome=_requeue_import_job_to_preview(
+                db,
+                import_job_id=request.candidate_import_job_id,
+                reason=reason,
+                expected_execution_lease=active_execution_lease,
+            ))
+    if (
+        evidence_gate.candidate is not None
+        and _current_evidence_analysis_failed(evidence_gate)
+    ):
+        reason = (
+            evidence_gate.current_reason
+            or "installed HAVE analysis failed without diagnostics"
+        )
+        pending = _record_have_analysis_error(
+            request,
+            db,
+            raw_error=reason,
+            installed_path=evidence_gate.current_path,
+            snapshot_guard=evidence_gate.current_snapshot_guard,
+        )
+        return _EvidenceStage(outcome=DispatchOutcome(
+            success=False,
+            message=(
+                "Installed HAVE analysis failed; "
+                + (
+                    "request returned to wanted for a future retry"
+                    if request.requeue_on_failure
+                    else "request lifecycle was preserved"
+                )
+            ),
+            code="have_analysis_error",
+            terminal_outcome=(
+                pending
+                if isinstance(pending, PendingImportTerminalOutcome)
+                else None
+            ),
+        ))
+    existing_v0_probe = audit_v0_probe_from_metric(
+        evidence_gate.current.v0_metric
+        if evidence_gate.current is not None
+        else None
+    )
+    override_min_bitrate = request.override_min_bitrate
+    evidence_override = override_bitrate_from_current_evidence(
+        evidence_gate.current
+    )
+    if evidence_override is not None:
+        override_min_bitrate = evidence_override
+    if (
+        (request.candidate_import_job_id is not None
+         or request.candidate_download_log_id is not None)
+        and evidence_gate.candidate is None
+    ):
+        # U4: outer callers (``_dispatch_import_from_db_locked`` and
+        # ``lib/download_validation.py::_process_beets_validation``) already
+        # call ``ensure_candidate_evidence_for_action`` and requeue
+        # via ``_requeue_import_job_to_preview`` when evidence is
+        # missing. Reaching this inner site means a caller bypassed
+        # the outer gate (test seam or future misuse). Behave
+        # consistently with the outer invariant — requeue rather
+        # than hard-fail — so the importer never measures and
+        # never writes a terminal failure on missing evidence.
+        reason = evidence_gate.candidate_reason or evidence_gate.candidate_status
+        return _EvidenceStage(outcome=_requeue_import_job_to_preview(
+            db,
+            import_job_id=request.candidate_import_job_id,
+            reason=reason or "missing",
+            expected_execution_lease=active_execution_lease,
+        ))
+    # Issue #1241: read the attempt's beets scenario ONCE — it feeds
+    # the decision's coverage conjunct here AND the terminal
+    # acceptance's mark-clear below. Auto/local import is
+    # strong_match by admission; a force import reads the linked
+    # row's persisted scenario, the same bit the Wrong Matches
+    # cleanup reducer derives from that row.
+    attempt_beets_scenario = _attempt_beets_scenario(
+        db,
+        scenario=request.scenario,
+        download_log_id=request.candidate_download_log_id,
+    )
+    attempt_program_covered = scenario_covers_declared_program(
+        attempt_beets_scenario
+    )
+    settled = _EvidenceStage(
+        gate=evidence_gate,
+        existing_v0_probe=existing_v0_probe,
+        override_min_bitrate=override_min_bitrate,
+        attempt_program_covered=attempt_program_covered,
+    )
+    if evidence_gate.candidate is None:
+        return settled
+    # U11: ``full_pipeline_decision_from_evidence`` is the single
+    # decision function. Folder/audio-integrity facts
+    # (audio_corrupt / bad_audio_hash / nested_layout /
+    # empty_fileset / mixed_source) are early-exit rejects at the
+    # top of that function. They still use the unified reject
+    # helper below, which honours caller lifecycle authority:
+    # automation self-heals; force imports preserve operator
+    # status.
+    facts = AlbumQualityEvidenceDecisionFacts(
+        verified_lossless_target=request.verified_lossless_target or None,
+        target_format=request.target_format,
+        # Issue #1241 — the operator's mark on the request plus
+        # beets' own coverage proof for THIS attempt. Both must
+        # hold for the decider to disregard the installed side.
+        installed_marked_incomplete=(
+            db.request_marked_incomplete(request.request_id)
+        ),
+        candidate_covers_declared_program=attempt_program_covered,
+    )
+    evidence_decision = full_pipeline_decision_from_evidence(
+        evidence_gate.candidate,
+        evidence_gate.current,
+        facts=facts,
+        cfg=cfg.quality_ranks if cfg is not None else None,
+    )
+    if not _import_allowed_by_evidence_pipeline(evidence_decision):
+        decision = evidence_decision_name(evidence_decision)
+        detail = (
+            evidence_gate.candidate.audio_error
+            if (
+                decision == "audio_corrupt"
+                and evidence_gate.candidate.audio_error
+            )
+            else (
+                "import-time persisted evidence rejected candidate "
+                f"(decision={decision})"
+            )
+        )
+        attempt_result.merge(_evidence_reject_import_result(
+            decision=decision,
+            candidate=evidence_gate.candidate,
+            current=evidence_gate.current,
+            evidence_decision=evidence_decision,
+            existing_v0_probe=existing_v0_probe,
+        ))
+        return _EvidenceStage(outcome=_reject_import_from_evidence_decision(
+            request,
+            db,
+            attempt_result=attempt_result,
+            decision=decision,
+            detail=detail,
+            quality_ranks=(
+                cfg.quality_ranks if cfg is not None else None
+            ),
+            protected_roots=(
+                protected_staging_roots(
+                    processing_dir=cfg.processing_dir,
+                    beets_staging_dir=cfg.beets_staging_dir,
+                )
+                if cfg is not None else None
+            ),
+        ))
+    return replace(
+        settled,
+        quality_evidence_action_file=_write_quality_evidence_action_file(
+            candidate=evidence_gate.candidate,
+            current=evidence_gate.current,
+            decision=evidence_decision,
+            target_format=request.target_format,
+            verified_lossless_target=request.verified_lossless_target,
+            gate=evidence_gate,
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class _DispatchSettlement:
+    """The non-early-return result the terminal ``DispatchOutcome`` is built
+    from (issue #1277).
+
+    Replaces six mutable accumulators that used to be written from four
+    different depths of the lock block. Defaults are the values dispatch
+    carried when neither the accept nor the reject branch ran.
+    """
+
+    success: bool = False
+    message: str = ""
+    terminal_outcome: PendingImportTerminalOutcome | None = None
+    staged_path: str | None = None
+    duplicate_guard_path: str | None = None
+    duplicate_guard_staging_dir: str | None = None
+
+
+@dataclass(frozen=True)
+class _AcceptedImport:
+    """What a mark-done acceptance settled."""
+
+    terminal_outcome: PendingImportTerminalOutcome | None
+    post_import_evidence: EvidenceBuildResult
+
+
+@dataclass(frozen=True)
+class _RejectedImport:
+    """What a post-import rejection settled."""
+
+    terminal_outcome: PendingImportTerminalOutcome | None
+    message: str
+    duplicate_guard_path: str | None
+    duplicate_guard_staging_dir: str | None
+
+
+def _settle_accepted_import(
+    request: DispatchRequest,
+    db: DispatchDB,
+    *,
+    cfg: CratediggerConfig | None,
+    preamble: _DispatchPreamble,
+    import_result: ImportResult,
+    decision: str,
+    attempt_result: ImportAttemptResult,
+    attempt_program_covered: bool,
+    evidence_gate: EvidenceImportGate,
+    active_execution_lease: ExecutionLeaseSnapshot | None,
+    cancellation_token: CancellationToken | None,
+    new_bitrate: int | None,
+    previous_bitrate: int | None,
+) -> _AcceptedImport:
+    """Mark the request imported, refresh evidence, write the sidecar.
+
+    Statement order is preserved verbatim from the inline branch this
+    replaced: mark-done first (it owns the terminal transition), then the
+    checkpointed evidence refresh, then the checkpointed sidecar write,
+    then the upgrade-delta transition. Both best-effort blocks re-raise
+    ``ExecutionCancelled`` so a lost owner still stops the world.
+    """
+    logger.info(f"{preamble.mode} OK: {request.label} (decision={decision})")
+    mark_scenario = (
+        decision
+        if decision == "provisional_lossless_upgrade"
+        else request.scenario
+    )
+    pending = _do_mark_done(
+        db, request.request_id, request.dl_info,
+        distance=request.distance, scenario=mark_scenario,
+        dest_path=request.path, outcome_label=request.outcome_label,
+        clear_stale_v0_probe=acceptance_installs_new_files(decision),
+        attempt_result=attempt_result,
+        import_job_id=request.candidate_import_job_id,
+        source_download_log_id=request.candidate_download_log_id,
+        # Issue #1241: a terminal acceptance whose candidate
+        # beets proved whole satisfies the operator's
+        # incomplete mark — clear it atomically with the
+        # imported transition so a stale mark can never
+        # churn the next complete candidate. Idempotent on
+        # unmarked rows (writes NULL over NULL). Never on an
+        # acceptance that installed nothing: the
+        # still-incomplete existing copy must keep its mark
+        # (#1257 review F1).
+        clear_marked_incomplete=(
+            attempt_program_covered
+            and acceptance_installs_new_files(decision)
+        ))
+    terminal_outcome: PendingImportTerminalOutcome | None = None
+    if isinstance(pending, PendingImportTerminalOutcome):
+        terminal_outcome = pending
+    post_import_evidence = EvidenceBuildResult(
+        None,
+        "failed",
+        "post-import evidence refresh did not run",
+    )
+    try:
+        _checkpoint_import_owner(
+            db,
+            import_job_id=request.candidate_import_job_id,
+            execution_lease=active_execution_lease,
+            cancellation_token=cancellation_token,
+            owner_session_identity=request.owner_session_identity,
+        )
+        post_import_evidence = _refresh_current_evidence_after_import(
+            db,
+            request_id=request.request_id,
+            mb_release_id=request.mb_release_id,
+            quality_ranks=(
+                cfg.quality_ranks if cfg is not None else None
+            ),
+            source_candidate=evidence_gate.candidate,
+            import_result=import_result,
+            beets_library_db_path=preamble.beets_library_db_path,
+            beets_library_root=preamble.beets_library_root,
+        )
+    except ExecutionCancelled:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Failed to refresh current quality evidence "
+            "after import for request %s",
+            request.request_id,
+        )
+        post_import_evidence = EvidenceBuildResult(
+            None,
+            "failed",
+            f"{type(exc).__name__}: {exc}",
+        )
+    try:
+        _checkpoint_import_owner(
+            db,
+            import_job_id=request.candidate_import_job_id,
+            execution_lease=active_execution_lease,
+            cancellation_token=cancellation_token,
+            owner_session_identity=request.owner_session_identity,
+        )
+        _write_album_sidecar_after_import(
+            db,
+            request_id=request.request_id,
+            mb_release_id=request.mb_release_id,
+            cfg=cfg,
+            beets_library_db_path=preamble.beets_library_db_path,
+            beets_library_root=preamble.beets_library_root,
+        )
+    except ExecutionCancelled:
+        raise
+    except Exception:
+        logger.exception(
+            "Failed to write verified-lossless sidecar "
+            "after import for request %s",
+            request.request_id,
+        )
+    if (
+        decision in ("import", "preflight_existing")
+        and (previous_bitrate is not None or new_bitrate is not None)
+    ):
+        try:
+            delta_transition = transitions.RequestTransition.to_imported(
+                from_status="imported",
+                prev_min_bitrate=previous_bitrate,
+                min_bitrate=new_bitrate,
+            )
+            terminal_outcome = _apply_or_stage_transition(
+                db,
+                request.request_id,
+                terminal_outcome,
+                delta_transition,
+            )
+        except Exception:
+            logger.exception("Failed to update upgrade delta")
+    return _AcceptedImport(
+        terminal_outcome=terminal_outcome,
+        post_import_evidence=post_import_evidence,
+    )
+
+
+def _settle_rejected_import(
+    request: DispatchRequest,
+    db: DispatchDB,
+    *,
+    cfg: CratediggerConfig | None,
+    preamble: _DispatchPreamble,
+    import_result: ImportResult,
+    decision: str,
+    attempt_result: ImportAttemptResult,
+    new_bitrate: int | None,
+    previous_bitrate: int | None,
+) -> _RejectedImport:
+    """Describe, narrow, and persist a post-import rejection."""
+    rejection = _describe_rejection(
+        decision=decision,
+        import_result=import_result,
+        label=request.label,
+        mode=preamble.mode,
+        path=request.path,
+        request_id=request.request_id,
+        cfg=cfg,
+        new_bitrate=new_bitrate,
+        previous_bitrate=previous_bitrate,
+    )
+    current_override, narrowed_override = _resolve_rejection_override(
+        db,
+        request_id=request.request_id,
+        decision=decision,
+        dl_info=request.dl_info,
+        import_result=import_result,
+        cfg=cfg,
+    )
+    pending = _record_rejection_and_maybe_requeue(
+        db, request.request_id, request.dl_info,
+        detail=rejection.detail,
+        error=rejection.error,
+        requeue=request.requeue_on_failure,
+        outcome_label="rejected",
+        search_filetype_override=narrowed_override,
+        validation_result=(request.dl_info.validation_result
+                           or ValidationResult(
+                               distance=request.distance,
+                               scenario=rejection.scenario,
+                               detail=rejection.detail,
+                               error=rejection.error,
+                               source_dirs=preamble.source_dirs,
+                           ).to_json()),
+        staged_path=request.path,
+        attempt_result=attempt_result,
+        import_job_id=request.candidate_import_job_id,
+        source_download_log_id=request.candidate_download_log_id)
+    if narrowed_override is not None:
+        logger.info(
+            f"  Narrowed search_filetype_override '{current_override}'"
+            f" -> '{narrowed_override}' after downgrade")
+    return _RejectedImport(
+        terminal_outcome=(
+            pending if isinstance(pending, PendingImportTerminalOutcome)
+            else None
+        ),
+        message=f"Rejected: {rejection.scenario} — {rejection.detail}",
+        duplicate_guard_path=rejection.duplicate_guard_path,
+        duplicate_guard_staging_dir=rejection.duplicate_guard_staging_dir,
+    )
+
+
+def _settle_import_result(
+    request: DispatchRequest,
+    db: DispatchDB,
+    import_result: ImportResult,
+    *,
+    cfg: CratediggerConfig | None,
+    preamble: _DispatchPreamble,
+    attempt_result: ImportAttemptResult,
+    attempt_program_covered: bool,
+    evidence_gate: EvidenceImportGate,
+    active_execution_lease: ExecutionLeaseSnapshot | None,
+    cancellation_token: CancellationToken | None,
+    quality_gate_fn: QualityGateFn,
+    album_directory_snapshot_fn: Callable[..., dict[int, str]],
+    media_server_notify_fn: (
+        Callable[..., tuple[DeleteNotification, ...]] | None
+    ),
+) -> _DispatchSettlement:
+    """Dispatch on the harness verdict and settle every post-import effect.
+
+    One branch per ``dispatch_action`` verdict, then the four shared tails
+    every verdict runs through in order: denylist, post-import search
+    policy, quality gate, media-server notifiers, source cleanup. The order
+    is preserved verbatim from the inline block — in particular the
+    notifiers still run before the cleanup plan is recorded, and
+    ``_trigger_post_import_notifiers`` still owns the internal ordering its
+    own docstring legislates.
+    """
+    _populate_dl_info_from_import_result(request.dl_info, import_result)
+    _log_postflight_bad_extensions(
+        ir=import_result,
+        mode=preamble.mode,
+        request_id=request.request_id,
+        label=request.label,
+    )
+    decision = import_result.decision or "unknown"
+    action = dispatch_action(decision)
+    (
+        search_action,
+        should_denylist,
+        usernames,
+        file_list,
+    ) = _resolve_post_import_search_policy(
+        decision=decision,
+        files=request.files,
+        fallback_username=request.dl_info.username,
+    )
+    new_br = (
+        import_result.source_measurement.min_bitrate_kbps
+        if import_result.source_measurement else None
+    )
+    prev_br = (
+        import_result.current_measurement.min_bitrate_kbps
+        if import_result.current_measurement else None
+    )
+
+    settlement = _DispatchSettlement()
+    post_import_evidence = EvidenceBuildResult(
+        None,
+        "failed",
+        "post-import evidence refresh did not run",
+    )
+    # --- Mark done or failed with decision-specific details ---
+    if action.mark_done:
+        accepted = _settle_accepted_import(
+            request,
+            db,
+            cfg=cfg,
+            preamble=preamble,
+            import_result=import_result,
+            decision=decision,
+            attempt_result=attempt_result,
+            attempt_program_covered=attempt_program_covered,
+            evidence_gate=evidence_gate,
+            active_execution_lease=active_execution_lease,
+            cancellation_token=cancellation_token,
+            new_bitrate=new_br,
+            previous_bitrate=prev_br,
+        )
+        post_import_evidence = accepted.post_import_evidence
+        settlement = replace(
+            settlement,
+            success=True,
+            message="Import successful",
+            terminal_outcome=accepted.terminal_outcome,
+        )
+    elif action.record_rejection:
+        rejected = _settle_rejected_import(
+            request,
+            db,
+            cfg=cfg,
+            preamble=preamble,
+            import_result=import_result,
+            decision=decision,
+            attempt_result=attempt_result,
+            new_bitrate=new_br,
+            previous_bitrate=prev_br,
+        )
+        settlement = replace(
+            settlement,
+            message=rejected.message,
+            terminal_outcome=rejected.terminal_outcome,
+            duplicate_guard_path=rejected.duplicate_guard_path,
+            duplicate_guard_staging_dir=rejected.duplicate_guard_staging_dir,
+        )
+
+    terminal_outcome = settlement.terminal_outcome
+    # Rejections use dispatch_action; retained imports use the
+    # canonical post-import reducer for the same denylist write.
+    if should_denylist:
+        reason = _denylist_reason(decision, new_br)
+        if decision == "duplicate_remove_guard_failed" and not usernames:
+            logger.error(
+                "DUPLICATE REMOVE GUARD: no source username "
+                "available to denylist for request %s",
+                request.request_id,
+            )
+        terminal_outcome = _apply_or_stage_denylists(
+            db,
+            request.request_id,
+            terminal_outcome,
+            usernames,
+            reason,
+            request.cooled_down_users,
+        )
+        logger.info(
+            f"  Denylisted {usernames} for request {request.request_id}")
+
+    # Rejected auto-imports are already requeued by
+    # _record_rejection_and_maybe_requeue(), which preserves retry
+    # counters and records the validation attempt. This second
+    # requeue is only for successful imports that intentionally go
+    # back to wanted to keep searching for a better source.
+    terminal_outcome = _apply_post_import_search_action(
+        db,
+        request_id=request.request_id,
+        pending=terminal_outcome,
+        decision=decision,
+        search_action=search_action,
+        mark_done=action.mark_done,
+        new_bitrate=new_br,
+    )
+
+    # Authority: "D19 — Force-import overrides the beets distance
+    # and nothing else."
+    # https://github.com/abl030/cratedigger/issues/711#issuecomment-4999204451
+    # Authority: "The verified-lossless proof lock is absolute
+    # for every import mode."
+    # https://github.com/abl030/cratedigger/issues/711#issuecomment-5000425284
+    # Operator imports run the identical quality/search policy.
+    # The quality-gate plan explicitly distinguishes successful
+    # terminal acceptance from every non-accepting outcome; the
+    # terminal DB transaction owns search-stop arbitration.
+    if action.run_quality_gate:
+        terminal_outcome = _run_or_stage_quality_gate(
+            quality_gate_fn,
+            terminal_outcome,
+            mb_id=request.mb_release_id,
+            label=request.label,
+            request_id=request.request_id,
+            files=list(file_list),
+            db=db,
+            quality_ranks=cfg.quality_ranks if cfg is not None else None,
+            expected_current_evidence_id=(
+                post_import_evidence.evidence.id
+                if post_import_evidence.status == "ready"
+                and post_import_evidence.evidence is not None
+                and post_import_evidence.evidence.id is not None
+                else 0
+            ),
+        )
+    settlement = replace(settlement, terminal_outcome=terminal_outcome)
+    if action.trigger_notifiers and cfg is not None:
+        _trigger_post_import_notifiers(
+            cfg,
+            db,
+            import_result=import_result,
+            request_id=request.request_id,
+            mb_release_id=request.mb_release_id,
+            import_job_id=request.candidate_import_job_id,
+            execution_lease=active_execution_lease,
+            cancellation_token=cancellation_token,
+            owner_session_identity=request.owner_session_identity,
+            beets_library_db_path=preamble.beets_library_db_path,
+            beets_library_root=preamble.beets_library_root,
+            pre_import_album_directories=preamble.pre_import_album_directories,
+            album_directory_snapshot_fn=album_directory_snapshot_fn,
+            media_server_notify_fn=media_server_notify_fn,
+        )
+    if action.cleanup and _should_cleanup_path(request.scenario, action):
+        # Issue #89: force-import passes the user's
+        # ``failed_imports/…`` folder as ``path`` — cleanup is
+        # data loss on a ``downgrade`` / ``transcode_downgrade``
+        # decision where beets never moved the files.
+        # ``_should_cleanup_path`` only allows cleanup on force
+        # when the decision actually imported (mark_done=
+        # True, i.e. beets has moved the files and the source
+        # directory is now empty), which keeps the wrong-matches
+        # tab honest and prevents duplicate re-imports of an
+        # already-imported album. Auto-import scenarios always
+        # clean — their exact-owner processing source is
+        # disposable by design.
+        settlement = replace(settlement, staged_path=request.path)
+    return settlement
+
+
+def _settle_dispatch_failure(
+    request: DispatchRequest,
+    db: DispatchDB,
+    *,
+    attempt_result: ImportAttemptResult,
+    source_dirs: list[str],
+    scenario: str,
+    detail: str,
+    error: str,
+    message: str,
+) -> _DispatchSettlement:
+    """Record a pre-launch timeout / crash as an ordinary rejection audit.
+
+    Reachable only while ``beets_launch_authorized`` is False: both handlers
+    return early on an authorized launch, because a Beets child that may
+    already have mutated the library is an ambiguous acknowledgement, not a
+    rejection. That is why this builds a fresh settlement rather than
+    folding into a previous one — no earlier branch can have settled
+    anything by the time it runs.
+    """
+    pending = _record_rejection_and_maybe_requeue(
+        db, request.request_id, request.dl_info,
+        detail=detail, error=error,
+        requeue=request.requeue_on_failure, outcome_label="failed",
+        validation_result=ValidationResult(
+            distance=request.distance,
+            scenario=scenario,
+            detail=detail,
+            error=error,
+            source_dirs=source_dirs,
+        ).to_json(),
+        staged_path=request.path,
+        attempt_result=attempt_result,
+        import_job_id=request.candidate_import_job_id,
+        source_download_log_id=request.candidate_download_log_id)
+    return _DispatchSettlement(
+        message=message,
+        terminal_outcome=(
+            pending if isinstance(pending, PendingImportTerminalOutcome)
+            else None
+        ),
+    )
+
+
+def _dispatch_outcome_from_settlement(
+    request: DispatchRequest,
+    settlement: _DispatchSettlement,
+    *,
+    cfg: CratediggerConfig | None,
+) -> DispatchOutcome:
+    """Assemble the terminal outcome plus its post-commit cleanup plan."""
+    return DispatchOutcome(
+        success=settlement.success,
+        message=settlement.message,
+        terminal_outcome=settlement.terminal_outcome,
+        post_commit_cleanup=(
+            PostCommitCleanup(
+                staged_path=settlement.staged_path,
+                # Issue #1077, R4-1 (round-4 review); widened issue #1122
+                # F2 (review round 2): ``staged_path`` above is set for
+                # EVERY successful cleanup-eligible lane — force
+                # (``<processing_dir>/albums/force-action-<id>``),
+                # automation (a direct child of the shared albums root), AND
+                # a YouTube rescue (a direct child of the shared auto-import
+                # staging root, since it imports in place and is never
+                # materialized under the canonical root). A single
+                # ``processing_albums_dir``-only guard protected the first
+                # two but silently fell through for the third: the realpath
+                # comparison in ``_cleanup_staged_dir`` never matched, so a
+                # successful YouTube import whose staged folder was the
+                # auto-import root's only child could ``rmdir`` that shared,
+                # externally provisioned root right out from under every
+                # other in-flight request. ``protected_staging_roots``
+                # covers every lane without branching on which one ran here
+                # (see the R3-3/F1 guard on the reject path and
+                # ``harness/import_one.py``'s own guard for the same
+                # reasoning applied at the other two ``_cleanup_staged_dir``
+                # producers). Ownership-drift residual (root deleted ->
+                # recreated cratedigger-owned by the next rescue): see
+                # ``lib.processing_paths.protected_staging_roots``'s
+                # docstring.
+                staged_path_protected_parents=(
+                    protected_staging_roots(
+                        processing_dir=cfg.processing_dir,
+                        beets_staging_dir=cfg.beets_staging_dir,
+                    )
+                    if settlement.staged_path is not None and cfg is not None
+                    else None
+                ),
+                duplicate_guard_source_path=settlement.duplicate_guard_path,
+                duplicate_guard_staging_dir=(
+                    settlement.duplicate_guard_staging_dir
+                ),
+                duplicate_guard_request_id=(
+                    request.request_id
+                    if settlement.duplicate_guard_path is not None
+                    else None
+                ),
+            )
+            if any((
+                settlement.staged_path,
+                settlement.duplicate_guard_path,
+            ))
+            else None
+        ),
+    )
+
+
 def dispatch_import_core(
     request: DispatchRequest,
     db: DispatchDB,
@@ -995,6 +1897,13 @@ def dispatch_import_core(
     the kwarg-DI seam (``.claude/rules/code-quality.md`` § "Mocks"), whose
     production defaults are the real implementations.
 
+    What remains inline in THIS function, deliberately, is the #898 fencing
+    sequence: taking the RELEASE lock, the launch-authority handshake, the
+    Beets launch, the exact-completion capture, and the action-sidecar
+    ``finally``. Those must be read as one piece, and their ordering is the
+    invariant. Everything on either side of them is a stage function that
+    takes ``(request, db, …)`` and returns a typed result.
+
     ``request.beets_library_db_path`` / ``request.beets_library_root`` are an
     inseparable explicit storage authority for isolated real-Beets worlds.
     Production leaves both unset and derives the complete pair from runtime
@@ -1003,62 +1912,15 @@ def dispatch_import_core(
     Used by the auto-import flow in ``lib.download`` and by
     ``dispatch_import_from_db()`` (force-import).
     """
-    # The three values dispatch re-derives from the request. They are locals,
-    # not fields, because the request is frozen: normalization, the
-    # evidence-resolved override, and the recovered preview audit all belong
-    # to THIS execution, not to the caller's description of it.
-    source_dirs = normalize_source_dirs(request.source_dirs or [])
-    override_min_bitrate = request.override_min_bitrate
-    from lib.config import read_runtime_config
-
-    beets_cfg = cfg or read_runtime_config()
-    effective_beets_library_db_path, effective_beets_library_root = (
-        _resolve_dispatch_beets_paths(
-            beets_cfg,
-            db_path=request.beets_library_db_path,
-            library_root=request.beets_library_root,
-        )
+    preamble = _prepare_dispatch(
+        request,
+        db,
+        cfg=cfg,
+        album_directory_snapshot_fn=album_directory_snapshot_fn,
     )
+    attempt_result = preamble.attempt_result
 
-    # Snapshot every album directory Beets currently holds for this release,
-    # before THIS dispatch's own beets-mutating subprocess launches
-    # (issue #1203 item 2) — the authoritative "before" half of the
-    # post-import reconciler's diff. On the automation lane the caller
-    # already holds the RELEASE advisory lock (acquired outer, before
-    # dispatch_import_core was even called), so this snapshot is fenced
-    # against a concurrent writer there; on the force/local lane this point
-    # is still BEFORE the lock is first acquired below, so it is not fenced
-    # against a fully concurrent external writer on that lane. Best-effort:
-    # see _capture_album_directory_snapshot.
-    pre_import_album_directories = _capture_album_directory_snapshot(
-        album_directory_snapshot_fn,
-        beets_library_db_path=effective_beets_library_db_path,
-        beets_library_root=effective_beets_library_root,
-        mb_release_id=request.mb_release_id,
-        when="pre-import",
-    )
-
-    # Operation identity is distinct from the eventual download-log outcome:
-    # an automatic attempt can still reject or fail after this start message.
-    mode = "FORCE-IMPORT" if request.force else "AUTO-IMPORT"
-    dist_label = f"{request.distance:.4f}" if request.distance is not None else "unmeasured"
-    logger.info(f"{mode}: {request.label} "
-                f"(source=request, dist={dist_label})")
-
-    attempt_result = request.attempt_result
-    if attempt_result is None:
-        attempt_result = ImportAttemptResult.from_import_job(
-            db,
-            request.candidate_import_job_id,
-            request.attempt_spectral_audit,
-        )
-
-    outcome_success = False
-    outcome_message = ""
-    terminal_outcome: PendingImportTerminalOutcome | None = None
-    post_commit_staged_path: str | None = None
-    post_commit_duplicate_guard_path: str | None = None
-    post_commit_duplicate_guard_staging_dir: str | None = None
+    settlement = _DispatchSettlement()
     beets_launch_authorized = False
     automation_completion_captured = False
     active_execution_lease = request.execution_lease
@@ -1098,7 +1960,7 @@ def dispatch_import_core(
         # there's nothing to serialise across, so skip the lock.
         release_lock_key = None
         logger.warning(
-            f"{mode}: mb_release_id is empty; skipping release lock "
+            f"{preamble.mode}: mb_release_id is empty; skipping release lock "
             "(no cross-release race to serialise)")
 
     if release_lock_key is not None:
@@ -1114,8 +1976,8 @@ def dispatch_import_core(
     with lock_ctx as got_release_lock:
         if not got_release_lock:
             logger.warning(
-                f"{mode} SKIPPED: {request.label} — release lock held by "
-                f"another process (mbid={request.mb_release_id})")
+                f"{preamble.mode} SKIPPED: {request.label} — release lock held "
+                f"by another process (mbid={request.mb_release_id})")
             # Contention == deferred retry. The entire function now
             # returns ``DispatchOutcome(deferred=True)`` without
             # mutating ANY state:
@@ -1158,216 +2020,26 @@ def dispatch_import_core(
 
         quality_evidence_action_file: str | None = None
         try:
-            # Bounded consistency boundary, not cross-system atomicity:
-            # PostgreSQL evidence, Beets SQLite authority, and the candidate /
-            # library filesystems cannot share one transaction. Reauthorize
-            # both sides against the world observed immediately before the
-            # unified decision and fail closed before Beets launch. Any later
-            # world failure is audited and returned to the runnable lifecycle.
-            evidence_gate_kwargs: dict[str, object] = {}
-            if current_evidence_loader is not None:
-                evidence_gate_kwargs["current_evidence_loader"] = (
-                    current_evidence_loader
-                )
-            evidence_gate = evidence_gate_fn(
+            evidence = _run_evidence_gate(
+                request,
                 db,
-                request_id=request.request_id,
-                mb_release_id=request.mb_release_id,
-                path=request.path,
-                quality_ranks=cfg.quality_ranks if cfg is not None else None,
-                candidate_import_job_id=request.candidate_import_job_id,
-                candidate_download_log_id=request.candidate_download_log_id,
-                prevalidated_candidate_result=request.prevalidated_candidate_result,
-                attempt_existing_spectral=(
-                    attempt_result.audit.existing
-                    if attempt_result.audit is not None
-                    else None
-                ),
-                attempt_have_audit_available=attempt_result.audit is not None,
-                beets_library_db_path=effective_beets_library_db_path,
-                beets_library_root=effective_beets_library_root,
-                **evidence_gate_kwargs,
+                cfg=cfg,
+                preamble=preamble,
+                attempt_result=attempt_result,
+                active_execution_lease=active_execution_lease,
+                evidence_gate_fn=evidence_gate_fn,
+                current_evidence_loader=current_evidence_loader,
             )
-            if request.prevalidated_candidate_result is not None:
-                # Re-check the queue-owned action copy before *any* evidence
-                # decision can become terminal. A late content change is a
-                # typed preview retry, never a false quality rejection.
-                from lib.import_evidence import ensure_candidate_evidence_for_action
-
-                fresh_candidate = ensure_candidate_evidence_for_action(
-                    db,
-                    source_path=request.path,
-                    import_job_id=request.candidate_import_job_id,
-                )
-                if (
-                    not fresh_candidate.available
-                    or fresh_candidate.evidence is None
-                    or evidence_gate.candidate is None
-                    or fresh_candidate.evidence.id != evidence_gate.candidate.id
-                    or fresh_candidate.evidence.snapshot_fingerprint
-                        != evidence_gate.candidate.snapshot_fingerprint
-                ):
-                    reason = (
-                        fresh_candidate.provenance.fallback_reason
-                        or fresh_candidate.provenance.candidate_status
-                        or "candidate evidence changed before dispatch"
-                    )
-                    return _requeue_import_job_to_preview(
-                        db,
-                        import_job_id=request.candidate_import_job_id,
-                        reason=reason,
-                        expected_execution_lease=active_execution_lease,
-                    )
-            if (
-                evidence_gate.candidate is not None
-                and _current_evidence_analysis_failed(evidence_gate)
-            ):
-                reason = (
-                    evidence_gate.current_reason
-                    or "installed HAVE analysis failed without diagnostics"
-                )
-                pending = _record_have_analysis_error(
-                    request,
-                    db,
-                    raw_error=reason,
-                    installed_path=evidence_gate.current_path,
-                    snapshot_guard=evidence_gate.current_snapshot_guard,
-                )
-                return DispatchOutcome(
-                    success=False,
-                    message=(
-                        "Installed HAVE analysis failed; "
-                        + (
-                            "request returned to wanted for a future retry"
-                            if request.requeue_on_failure
-                            else "request lifecycle was preserved"
-                        )
-                    ),
-                    code="have_analysis_error",
-                    terminal_outcome=(
-                        pending
-                        if isinstance(pending, PendingImportTerminalOutcome)
-                        else None
-                    ),
-                )
-            existing_v0_probe = audit_v0_probe_from_metric(
-                evidence_gate.current.v0_metric
-                if evidence_gate.current is not None
-                else None
+            # Recorded BEFORE the early return: the two launch-authority
+            # refusals below happen with the sidecar already on disk, and
+            # this function's ``finally`` owns removing it.
+            quality_evidence_action_file = evidence.quality_evidence_action_file
+            if evidence.outcome is not None:
+                return evidence.outcome
+            evidence_gate = evidence.gate
+            assert evidence_gate is not None, (
+                "a non-terminal evidence stage always resolves its gate"
             )
-            evidence_override = override_bitrate_from_current_evidence(
-                evidence_gate.current
-            )
-            if evidence_override is not None:
-                override_min_bitrate = evidence_override
-            if (
-                (request.candidate_import_job_id is not None
-                 or request.candidate_download_log_id is not None)
-                and evidence_gate.candidate is None
-            ):
-                # U4: outer callers (``_dispatch_import_from_db_locked`` and
-                # ``lib/download_validation.py::_process_beets_validation``) already
-                # call ``ensure_candidate_evidence_for_action`` and requeue
-                # via ``_requeue_import_job_to_preview`` when evidence is
-                # missing. Reaching this inner site means a caller bypassed
-                # the outer gate (test seam or future misuse). Behave
-                # consistently with the outer invariant — requeue rather
-                # than hard-fail — so the importer never measures and
-                # never writes a terminal failure on missing evidence.
-                reason = evidence_gate.candidate_reason or evidence_gate.candidate_status
-                return _requeue_import_job_to_preview(
-                    db,
-                    import_job_id=request.candidate_import_job_id,
-                    reason=reason or "missing",
-                    expected_execution_lease=active_execution_lease,
-                )
-            # Issue #1241: read the attempt's beets scenario ONCE — it feeds
-            # the decision's coverage conjunct here AND the terminal
-            # acceptance's mark-clear below. Auto/local import is
-            # strong_match by admission; a force import reads the linked
-            # row's persisted scenario, the same bit the Wrong Matches
-            # cleanup reducer derives from that row.
-            attempt_beets_scenario = _attempt_beets_scenario(
-                db,
-                scenario=request.scenario,
-                download_log_id=request.candidate_download_log_id,
-            )
-            attempt_program_covered = scenario_covers_declared_program(
-                attempt_beets_scenario
-            )
-            if evidence_gate.candidate is not None:
-                # U11: ``full_pipeline_decision_from_evidence`` is the single
-                # decision function. Folder/audio-integrity facts
-                # (audio_corrupt / bad_audio_hash / nested_layout /
-                # empty_fileset / mixed_source) are early-exit rejects at the
-                # top of that function. They still use the unified reject
-                # helper below, which honours caller lifecycle authority:
-                # automation self-heals; force imports preserve operator
-                # status.
-                facts = AlbumQualityEvidenceDecisionFacts(
-                    verified_lossless_target=request.verified_lossless_target or None,
-                    target_format=request.target_format,
-                    # Issue #1241 — the operator's mark on the request plus
-                    # beets' own coverage proof for THIS attempt. Both must
-                    # hold for the decider to disregard the installed side.
-                    installed_marked_incomplete=(
-                        db.request_marked_incomplete(request.request_id)
-                    ),
-                    candidate_covers_declared_program=(
-                        attempt_program_covered
-                    ),
-                )
-                evidence_decision = full_pipeline_decision_from_evidence(
-                    evidence_gate.candidate,
-                    evidence_gate.current,
-                    facts=facts,
-                    cfg=cfg.quality_ranks if cfg is not None else None,
-                )
-                if not _import_allowed_by_evidence_pipeline(evidence_decision):
-                    decision = evidence_decision_name(evidence_decision)
-                    detail = (
-                        evidence_gate.candidate.audio_error
-                        if (
-                            decision == "audio_corrupt"
-                            and evidence_gate.candidate.audio_error
-                        )
-                        else (
-                            "import-time persisted evidence rejected candidate "
-                            f"(decision={decision})"
-                        )
-                    )
-                    attempt_result.merge(_evidence_reject_import_result(
-                        decision=decision,
-                        candidate=evidence_gate.candidate,
-                        current=evidence_gate.current,
-                        evidence_decision=evidence_decision,
-                        existing_v0_probe=existing_v0_probe,
-                    ))
-                    return _reject_import_from_evidence_decision(
-                        request,
-                        db,
-                        attempt_result=attempt_result,
-                        decision=decision,
-                        detail=detail,
-                        quality_ranks=(
-                            cfg.quality_ranks if cfg is not None else None
-                        ),
-                        protected_roots=(
-                            protected_staging_roots(
-                                processing_dir=cfg.processing_dir,
-                                beets_staging_dir=cfg.beets_staging_dir,
-                            )
-                            if cfg is not None else None
-                        ),
-                    )
-                quality_evidence_action_file = _write_quality_evidence_action_file(
-                    candidate=evidence_gate.candidate,
-                    current=evidence_gate.current,
-                    decision=evidence_decision,
-                    target_format=request.target_format,
-                    verified_lossless_target=request.verified_lossless_target,
-                    gate=evidence_gate,
-                )
             if request.candidate_import_job_id is None:
                 return DispatchOutcome(
                     success=False,
@@ -1420,46 +2092,26 @@ def dispatch_import_core(
                 cancellation_token=cancellation_token,
                 owner_session_identity=request.owner_session_identity,
             )
-            if run_import_fn is None:
-                run = run_import_one(
-                    path=request.path, mb_release_id=request.mb_release_id,
-                    request_id=request.request_id, force=request.force,
-                    preserve_source=request.scenario in FORCE_IMPORT_SCENARIOS,
-                    override_min_bitrate=override_min_bitrate,
-                    target_format=request.target_format,
-                    verified_lossless_target=request.verified_lossless_target,
-                    beets_harness_path=request.beets_harness_path,
-                    quality_rank_config_json=quality_rank_config_json,
-                    existing_v0_probe=existing_v0_probe,
-                    quality_evidence_action_file=quality_evidence_action_file,
-                    beets_config_dir=beets_cfg.beets_config_dir,
-                    beets_python=beets_cfg.beets_python,
-                    beets_library_db_path=effective_beets_library_db_path,
-                    beets_library_root=effective_beets_library_root,
-                    cancellation_token=runner_cancellation_token,
-                    on_spawn=runner_on_spawn,
-                    owner_session_probe=runner_owner_session_probe,
-                )
-            else:
-                run = run_import_fn(
-                    path=request.path, mb_release_id=request.mb_release_id,
-                    request_id=request.request_id, force=request.force,
-                    preserve_source=request.scenario in FORCE_IMPORT_SCENARIOS,
-                    override_min_bitrate=override_min_bitrate,
-                    target_format=request.target_format,
-                    verified_lossless_target=request.verified_lossless_target,
-                    beets_harness_path=request.beets_harness_path,
-                    quality_rank_config_json=quality_rank_config_json,
-                    existing_v0_probe=existing_v0_probe,
-                    quality_evidence_action_file=quality_evidence_action_file,
-                    beets_config_dir=beets_cfg.beets_config_dir,
-                    beets_python=beets_cfg.beets_python,
-                    beets_library_db_path=effective_beets_library_db_path,
-                    beets_library_root=effective_beets_library_root,
-                    cancellation_token=runner_cancellation_token,
-                    on_spawn=runner_on_spawn,
-                    owner_session_probe=runner_owner_session_probe,
-                )
+            runner = run_import_fn if run_import_fn is not None else run_import_one
+            run = runner(
+                path=request.path, mb_release_id=request.mb_release_id,
+                request_id=request.request_id, force=request.force,
+                preserve_source=request.scenario in FORCE_IMPORT_SCENARIOS,
+                override_min_bitrate=evidence.override_min_bitrate,
+                target_format=request.target_format,
+                verified_lossless_target=request.verified_lossless_target,
+                beets_harness_path=request.beets_harness_path,
+                quality_rank_config_json=quality_rank_config_json,
+                existing_v0_probe=evidence.existing_v0_probe,
+                quality_evidence_action_file=quality_evidence_action_file,
+                beets_config_dir=preamble.beets_cfg.beets_config_dir,
+                beets_python=preamble.beets_cfg.beets_python,
+                beets_library_db_path=preamble.beets_library_db_path,
+                beets_library_root=preamble.beets_library_root,
+                cancellation_token=runner_cancellation_token,
+                on_spawn=runner_on_spawn,
+                owner_session_probe=runner_owner_session_probe,
+            )
             active_execution_lease = execution_lease_holder[0]
             _checkpoint_import_owner(
                 db,
@@ -1491,7 +2143,7 @@ def dispatch_import_core(
                 ir = attempt_result.merge(ir)
             if ir is None:
                 logger.error(
-                    f"{mode} ACKNOWLEDGEMENT AMBIGUOUS "
+                    f"{preamble.mode} ACKNOWLEDGEMENT AMBIGUOUS "
                     f"(no JSON, rc={run.returncode}): {request.label}")
                 for line in run.stdout.strip().split("\n"):
                     logger.error(f"  {line}")
@@ -1502,306 +2154,25 @@ def dispatch_import_core(
                     ),
                     code="beets_acknowledgement_ambiguous",
                 )
-            else:
-                _populate_dl_info_from_import_result(request.dl_info, ir)
-                _log_postflight_bad_extensions(
-                    ir=ir,
-                    mode=mode,
-                    request_id=request.request_id,
-                    label=request.label,
-                )
-                decision = ir.decision or "unknown"
-                action = dispatch_action(decision)
-                (
-                    search_action,
-                    should_denylist,
-                    usernames,
-                    file_list,
-                ) = _resolve_post_import_search_policy(
-                    decision=decision,
-                    files=request.files,
-                    fallback_username=request.dl_info.username,
-                )
-                narrowed_override = None
-                current_override = None
-                post_import_evidence = EvidenceBuildResult(
-                    None,
-                    "failed",
-                    "post-import evidence refresh did not run",
-                )
-
-                new_br = ir.source_measurement.min_bitrate_kbps if ir.source_measurement else None
-                prev_br = ir.current_measurement.min_bitrate_kbps if ir.current_measurement else None
-
-                # --- Mark done or failed with decision-specific details ---
-                if action.mark_done:
-                    logger.info(f"{mode} OK: {request.label} (decision={decision})")
-                    mark_scenario = (
-                        decision
-                        if decision == "provisional_lossless_upgrade"
-                        else request.scenario
-                    )
-                    pending = _do_mark_done(
-                        db, request.request_id, request.dl_info,
-                        distance=request.distance, scenario=mark_scenario,
-                        dest_path=request.path, outcome_label=request.outcome_label,
-                        clear_stale_v0_probe=acceptance_installs_new_files(
-                            decision
-                        ),
-                        attempt_result=attempt_result,
-                        import_job_id=request.candidate_import_job_id,
-                        source_download_log_id=request.candidate_download_log_id,
-                        # Issue #1241: a terminal acceptance whose candidate
-                        # beets proved whole satisfies the operator's
-                        # incomplete mark — clear it atomically with the
-                        # imported transition so a stale mark can never
-                        # churn the next complete candidate. Idempotent on
-                        # unmarked rows (writes NULL over NULL). Never on an
-                        # acceptance that installed nothing: the
-                        # still-incomplete existing copy must keep its mark
-                        # (#1257 review F1).
-                        clear_marked_incomplete=(
-                            attempt_program_covered
-                            and acceptance_installs_new_files(decision)
-                        ))
-                    if isinstance(pending, PendingImportTerminalOutcome):
-                        terminal_outcome = pending
-                    try:
-                        _checkpoint_import_owner(
-                            db,
-                            import_job_id=request.candidate_import_job_id,
-                            execution_lease=active_execution_lease,
-                            cancellation_token=cancellation_token,
-                            owner_session_identity=request.owner_session_identity,
-                        )
-                        post_import_evidence = _refresh_current_evidence_after_import(
-                            db,
-                            request_id=request.request_id,
-                            mb_release_id=request.mb_release_id,
-                            quality_ranks=(
-                                cfg.quality_ranks if cfg is not None else None
-                            ),
-                            source_candidate=evidence_gate.candidate,
-                            import_result=ir,
-                            beets_library_db_path=effective_beets_library_db_path,
-                            beets_library_root=effective_beets_library_root,
-                        )
-                    except ExecutionCancelled:
-                        raise
-                    except Exception as exc:
-                        logger.exception(
-                            "Failed to refresh current quality evidence "
-                            "after import for request %s",
-                            request.request_id,
-                        )
-                        post_import_evidence = EvidenceBuildResult(
-                            None,
-                            "failed",
-                            f"{type(exc).__name__}: {exc}",
-                        )
-                    try:
-                        _checkpoint_import_owner(
-                            db,
-                            import_job_id=request.candidate_import_job_id,
-                            execution_lease=active_execution_lease,
-                            cancellation_token=cancellation_token,
-                            owner_session_identity=request.owner_session_identity,
-                        )
-                        _write_album_sidecar_after_import(
-                            db,
-                            request_id=request.request_id,
-                            mb_release_id=request.mb_release_id,
-                            cfg=cfg,
-                            beets_library_db_path=effective_beets_library_db_path,
-                            beets_library_root=effective_beets_library_root,
-                        )
-                    except ExecutionCancelled:
-                        raise
-                    except Exception:
-                        logger.exception(
-                            "Failed to write verified-lossless sidecar "
-                            "after import for request %s",
-                            request.request_id,
-                        )
-                    if (
-                        decision in ("import", "preflight_existing")
-                        and (prev_br is not None or new_br is not None)
-                    ):
-                        try:
-                            delta_transition = transitions.RequestTransition.to_imported(
-                                from_status="imported",
-                                prev_min_bitrate=prev_br,
-                                min_bitrate=new_br,
-                            )
-                            terminal_outcome = _apply_or_stage_transition(
-                                db,
-                                request.request_id,
-                                terminal_outcome,
-                                delta_transition,
-                            )
-                        except Exception:
-                            logger.exception("Failed to update upgrade delta")
-                    outcome_success = True
-                    outcome_message = "Import successful"
-                elif action.record_rejection:
-                    rejection = _describe_rejection(
-                        decision=decision,
-                        import_result=ir,
-                        label=request.label,
-                        mode=mode,
-                        path=request.path,
-                        request_id=request.request_id,
-                        cfg=cfg,
-                        new_bitrate=new_br,
-                        previous_bitrate=prev_br,
-                    )
-                    fail_scenario = rejection.scenario
-                    fail_detail = rejection.detail
-                    fail_error = rejection.error
-                    post_commit_duplicate_guard_path = (
-                        rejection.duplicate_guard_path
-                    )
-                    post_commit_duplicate_guard_staging_dir = (
-                        rejection.duplicate_guard_staging_dir
-                    )
-
-                    current_override, narrowed_override = (
-                        _resolve_rejection_override(
-                            db,
-                            request_id=request.request_id,
-                            decision=decision,
-                            dl_info=request.dl_info,
-                            import_result=ir,
-                            cfg=cfg,
-                        )
-                    )
-
-                    pending = _record_rejection_and_maybe_requeue(
-                        db, request.request_id, request.dl_info,
-                        detail=fail_detail,
-                        error=fail_error,
-                        requeue=request.requeue_on_failure,
-                        outcome_label="rejected",
-                        search_filetype_override=narrowed_override,
-                        validation_result=(request.dl_info.validation_result
-                                           or ValidationResult(
-                                               distance=request.distance,
-                                               scenario=fail_scenario,
-                                               detail=fail_detail,
-                                               error=fail_error,
-                                               source_dirs=source_dirs,
-                                           ).to_json()),
-                        staged_path=request.path,
-                        attempt_result=attempt_result,
-                        import_job_id=request.candidate_import_job_id,
-                        source_download_log_id=request.candidate_download_log_id)
-                    if isinstance(pending, PendingImportTerminalOutcome):
-                        terminal_outcome = pending
-                    if narrowed_override is not None:
-                        logger.info(
-                            f"  Narrowed search_filetype_override '{current_override}'"
-                            f" -> '{narrowed_override}' after downgrade")
-                    outcome_message = f"Rejected: {fail_scenario} — {fail_detail}"
-
-                # Rejections use dispatch_action; retained imports use the
-                # canonical post-import reducer for the same denylist write.
-                if should_denylist:
-                    reason = _denylist_reason(decision, new_br)
-                    if (decision == "duplicate_remove_guard_failed"
-                            and not usernames):
-                        logger.error(
-                            "DUPLICATE REMOVE GUARD: no source username "
-                            "available to denylist for request %s",
-                            request.request_id,
-                        )
-                    terminal_outcome = _apply_or_stage_denylists(
-                        db,
-                        request.request_id,
-                        terminal_outcome,
-                        usernames,
-                        reason,
-                        request.cooled_down_users,
-                    )
-                    logger.info(f"  Denylisted {usernames} for request {request.request_id}")
-
-                # Rejected auto-imports are already requeued by
-                # _record_rejection_and_maybe_requeue(), which preserves retry
-                # counters and records the validation attempt. This second
-                # requeue is only for successful imports that intentionally go
-                # back to wanted to keep searching for a better source.
-                terminal_outcome = _apply_post_import_search_action(
-                    db,
-                    request_id=request.request_id,
-                    pending=terminal_outcome,
-                    decision=decision,
-                    search_action=search_action,
-                    mark_done=action.mark_done,
-                    new_bitrate=new_br,
-                )
-
-                # Authority: "D19 — Force-import overrides the beets distance
-                # and nothing else."
-                # https://github.com/abl030/cratedigger/issues/711#issuecomment-4999204451
-                # Authority: "The verified-lossless proof lock is absolute
-                # for every import mode."
-                # https://github.com/abl030/cratedigger/issues/711#issuecomment-5000425284
-                # Operator imports run the identical quality/search policy.
-                # The quality-gate plan explicitly distinguishes successful
-                # terminal acceptance from every non-accepting outcome; the
-                # terminal DB transaction owns search-stop arbitration.
-                if action.run_quality_gate:
-                    terminal_outcome = _run_or_stage_quality_gate(
-                        quality_gate_fn,
-                        terminal_outcome,
-                        mb_id=request.mb_release_id,
-                        label=request.label,
-                        request_id=request.request_id,
-                        files=list(file_list),
-                        db=db,
-                        quality_ranks=cfg.quality_ranks if cfg is not None else None,
-                        expected_current_evidence_id=(
-                            post_import_evidence.evidence.id
-                            if post_import_evidence.status == "ready"
-                            and post_import_evidence.evidence is not None
-                            and post_import_evidence.evidence.id is not None
-                            else 0
-                        ),
-                    )
-                if action.trigger_notifiers and cfg is not None:
-                    _trigger_post_import_notifiers(
-                        cfg,
-                        db,
-                        import_result=ir,
-                        request_id=request.request_id,
-                        mb_release_id=request.mb_release_id,
-                        import_job_id=request.candidate_import_job_id,
-                        execution_lease=active_execution_lease,
-                        cancellation_token=cancellation_token,
-                        owner_session_identity=request.owner_session_identity,
-                        beets_library_db_path=effective_beets_library_db_path,
-                        beets_library_root=effective_beets_library_root,
-                        pre_import_album_directories=pre_import_album_directories,
-                        album_directory_snapshot_fn=album_directory_snapshot_fn,
-                        media_server_notify_fn=media_server_notify_fn,
-                    )
-                if action.cleanup and _should_cleanup_path(request.scenario, action):
-                    # Issue #89: force-import passes the user's
-                    # ``failed_imports/…`` folder as ``path`` — cleanup is
-                    # data loss on a ``downgrade`` / ``transcode_downgrade``
-                    # decision where beets never moved the files.
-                    # ``_should_cleanup_path`` only allows cleanup on force
-                    # when the decision actually imported (mark_done=
-                    # True, i.e. beets has moved the files and the source
-                    # directory is now empty), which keeps the wrong-matches
-                    # tab honest and prevents duplicate re-imports of an
-                    # already-imported album. Auto-import scenarios always
-                    # clean — their exact-owner processing source is
-                    # disposable by design.
-                    post_commit_staged_path = request.path
+            settlement = _settle_import_result(
+                request,
+                db,
+                ir,
+                cfg=cfg,
+                preamble=preamble,
+                attempt_result=attempt_result,
+                attempt_program_covered=evidence.attempt_program_covered,
+                evidence_gate=evidence_gate,
+                active_execution_lease=active_execution_lease,
+                cancellation_token=cancellation_token,
+                quality_gate_fn=quality_gate_fn,
+                album_directory_snapshot_fn=album_directory_snapshot_fn,
+                media_server_notify_fn=media_server_notify_fn,
+            )
         except ExecutionCancelled:
             raise
         except sp.TimeoutExpired:
-            logger.error(f"{mode} TIMEOUT: {request.label}")
+            logger.error(f"{preamble.mode} TIMEOUT: {request.label}")
             if beets_launch_authorized:
                 return DispatchOutcome(
                     success=False,
@@ -1811,26 +2182,18 @@ def dispatch_import_core(
                     ),
                     code="beets_acknowledgement_ambiguous",
                 )
-            pending = _record_rejection_and_maybe_requeue(
-                db, request.request_id, request.dl_info,
-                detail="import_one.py timed out", error="timeout",
-                requeue=request.requeue_on_failure, outcome_label="failed",
-                validation_result=ValidationResult(
-                    distance=request.distance,
-                    scenario="timeout",
-                    detail="import_one.py timed out",
-                    error="timeout",
-                    source_dirs=source_dirs,
-                ).to_json(),
-                staged_path=request.path,
+            settlement = _settle_dispatch_failure(
+                request,
+                db,
                 attempt_result=attempt_result,
-                import_job_id=request.candidate_import_job_id,
-                source_download_log_id=request.candidate_download_log_id)
-            if isinstance(pending, PendingImportTerminalOutcome):
-                terminal_outcome = pending
-            outcome_message = "Import timed out"
+                source_dirs=preamble.source_dirs,
+                scenario="timeout",
+                detail="import_one.py timed out",
+                error="timeout",
+                message="Import timed out",
+            )
         except Exception:
-            logger.exception(f"{mode} ERROR: {request.label}")
+            logger.exception(f"{preamble.mode} ERROR: {request.label}")
             if beets_launch_authorized:
                 return DispatchOutcome(
                     success=False,
@@ -1840,24 +2203,16 @@ def dispatch_import_core(
                     ),
                     code="beets_acknowledgement_ambiguous",
                 )
-            pending = _record_rejection_and_maybe_requeue(
-                db, request.request_id, request.dl_info,
-                detail="unhandled exception in auto-import", error="exception",
-                requeue=request.requeue_on_failure, outcome_label="failed",
-                validation_result=ValidationResult(
-                    distance=request.distance,
-                    scenario="exception",
-                    detail="unhandled exception in auto-import",
-                    error="exception",
-                    source_dirs=source_dirs,
-                ).to_json(),
-                staged_path=request.path,
+            settlement = _settle_dispatch_failure(
+                request,
+                db,
                 attempt_result=attempt_result,
-                import_job_id=request.candidate_import_job_id,
-                source_download_log_id=request.candidate_download_log_id)
-            if isinstance(pending, PendingImportTerminalOutcome):
-                terminal_outcome = pending
-            outcome_message = "Unhandled exception"
+                source_dirs=preamble.source_dirs,
+                scenario="exception",
+                detail="unhandled exception in auto-import",
+                error="exception",
+                message="Unhandled exception",
+            )
         finally:
             cleanup_action_file = _should_cleanup_action_file(
                 quality_evidence_action_file=quality_evidence_action_file,
@@ -1884,58 +2239,4 @@ def dispatch_import_core(
         cancellation_token=cancellation_token,
         owner_session_identity=request.owner_session_identity,
     )
-    return DispatchOutcome(
-        success=outcome_success,
-        message=outcome_message,
-        terminal_outcome=terminal_outcome,
-        post_commit_cleanup=(
-            PostCommitCleanup(
-                staged_path=post_commit_staged_path,
-                # Issue #1077, R4-1 (round-4 review); widened issue #1122
-                # F2 (review round 2): ``post_commit_staged_path = path``
-                # above is set for EVERY successful cleanup-eligible lane —
-                # force (``<processing_dir>/albums/force-action-<id>``),
-                # automation (a direct child of the shared albums root), AND
-                # a YouTube rescue (a direct child of the shared auto-import
-                # staging root, since it imports in place and is never
-                # materialized under the canonical root). A single
-                # ``processing_albums_dir``-only guard protected the first
-                # two but silently fell through for the third: the realpath
-                # comparison in ``_cleanup_staged_dir`` never matched, so a
-                # successful YouTube import whose staged folder was the
-                # auto-import root's only child could ``rmdir`` that shared,
-                # externally provisioned root right out from under every
-                # other in-flight request. ``protected_staging_roots``
-                # covers every lane without branching on which one ran here
-                # (see the R3-3/F1 guard on the reject path and
-                # ``harness/import_one.py``'s own guard for the same
-                # reasoning applied at the other two ``_cleanup_staged_dir``
-                # producers). Ownership-drift residual (root deleted ->
-                # recreated cratedigger-owned by the next rescue): see
-                # ``lib.processing_paths.protected_staging_roots``'s
-                # docstring.
-                staged_path_protected_parents=(
-                    protected_staging_roots(
-                        processing_dir=cfg.processing_dir,
-                        beets_staging_dir=cfg.beets_staging_dir,
-                    )
-                    if post_commit_staged_path is not None and cfg is not None
-                    else None
-                ),
-                duplicate_guard_source_path=post_commit_duplicate_guard_path,
-                duplicate_guard_staging_dir=(
-                    post_commit_duplicate_guard_staging_dir
-                ),
-                duplicate_guard_request_id=(
-                    request.request_id
-                    if post_commit_duplicate_guard_path is not None
-                    else None
-                ),
-            )
-            if any((
-                post_commit_staged_path,
-                post_commit_duplicate_guard_path,
-            ))
-            else None
-        ),
-    )
+    return _dispatch_outcome_from_settlement(request, settlement, cfg=cfg)
