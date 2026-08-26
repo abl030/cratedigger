@@ -3155,6 +3155,18 @@ _UNANCHORED_MEASURED_REJECT_WORLD = replace(
     target_format="opus 64",
     verified_lossless_target="opus 64",
 )
+#: Request 2066 with both #1241 conjuncts set: the operator marked the
+#: installed OPUS 110 copy incomplete AND this attempt's candidate covers
+#: the whole declared program. Production disregards the installed side
+#: entirely on this predicate — the 177/175 anchor comparison V6 polices
+#: never happens, because there is no existing side left to anchor against.
+#: V6's checker must recognise this as out of its own scope, not assert the
+#: anchor law over a world production never treats as anchored.
+_REQUEST_2066_MARKED_INCOMPLETE_WORLD = replace(
+    _REQUEST_2066_WORLD,
+    installed_marked_incomplete=True,
+    candidate_covers_declared_program=True,
+)
 # Issue #1241 pin — request 1852, Dirt Dress *Theme Songs* (Discogs
 # 4738671, download_log 40355). Installed AAC ~128 missing 700 s of declared
 # program (operator-marked incomplete); candidate MP3 ~196 that beets proved
@@ -4842,6 +4854,7 @@ class TestUltrasonicProofLegProperties(unittest.TestCase):
 
     @given(world=parity_worlds())
     @example(world=_REQUEST_2066_WORLD)
+    @example(world=_REQUEST_2066_MARKED_INCOMPLETE_WORLD)
     def test_v6_an_unproven_source_never_outranks_its_anchor(self, world):
         candidate, current, facts = _parity_evidence_inputs(world)
         self.assertTrue(
@@ -5175,6 +5188,74 @@ class TestUltrasonicProofLegCheckerSelfTests(unittest.TestCase):
                 decider=_decoy_decider_lets_an_unproven_album_skip_the_anchor,
             )
         )
+
+    def test_v6_out_of_scope_when_installed_incomplete_disregarded(self):
+        """Issue #1241's predicate is out of V6's scope, Q1 half: when both
+        conjuncts hold, production nulls the anchor probe and admits the
+        candidate fresh, so there is no anchor left for V6 to police. Drive
+        the exact denial the checker itself would construct, straight
+        through the real decider, and confirm the decided outcome is NOT
+        the anchor law's confident reject — proving the scope exit is
+        load-bearing, not vacuous — while the checker still reports True."""
+        candidate, current, facts = _parity_evidence_inputs(
+            _REQUEST_2066_MARKED_INCOMPLETE_WORLD,
+        )
+        denied_candidate = _with_adjudicable_ultrasonic(
+            candidate, _DENYING_DEFICIT_DB,
+        )
+        self.assertFalse(_leg_is_withheld_by_oracle(denied_candidate))
+        real = full_pipeline_decision_from_evidence(
+            denied_candidate, current, facts=facts,
+        )
+        self.assertTrue(real["installed_incomplete_disregarded"])
+        self.assertIsNone(real["comparison_basis"])
+        self.assertEqual(real["stage2_import"], "provisional_lossless_upgrade")
+        self.assertTrue(real["imported"])
+        self.assertTrue(
+            an_unproven_lossless_source_never_outranks_its_anchor(
+                candidate, current, facts=facts,
+            )
+        )
+
+    def test_v6_stays_in_scope_when_only_one_1241_conjunct_holds(self):
+        """Issue #1241's predicate is out of V6's scope, Q2 half: neither
+        conjunct alone disarms the anchor law (mirrors the disregard
+        property's own four-corners pin at
+        ``test_operator_incomplete_mark_disregards_the_installed_side``).
+        A marked-but-not-covered or covered-but-not-marked world must
+        still decide the ordinary anchor law and the checker must still
+        catch the shipped grade-keyed-router bug on both."""
+        for label, world in (
+            ("marked_only", replace(
+                _REQUEST_2066_WORLD, installed_marked_incomplete=True)),
+            ("covered_only", replace(
+                _REQUEST_2066_WORLD, candidate_covers_declared_program=True)),
+        ):
+            with self.subTest(world=label):
+                candidate, current, facts = _parity_evidence_inputs(world)
+                denied_candidate = _with_adjudicable_ultrasonic(
+                    candidate, _DENYING_DEFICIT_DB,
+                )
+                real = full_pipeline_decision_from_evidence(
+                    denied_candidate, current, facts=facts,
+                )
+                self.assertFalse(real["installed_incomplete_disregarded"])
+                self.assertEqual(
+                    real["stage2_import"], "suspect_lossless_downgrade",
+                )
+                self.assertTrue(
+                    an_unproven_lossless_source_never_outranks_its_anchor(
+                        candidate, current, facts=facts,
+                    )
+                )
+                self.assertFalse(
+                    an_unproven_lossless_source_never_outranks_its_anchor(
+                        candidate, current, facts=facts,
+                        decider=(
+                            _decoy_decider_lets_an_unproven_album_skip_the_anchor
+                        ),
+                    )
+                )
 
 # ===========================================================================
 # Proof gate v4 — the AAC frame-lattice leg (issue #829 AAC-lattice leg PR-B)
@@ -5612,8 +5693,23 @@ def an_unproven_lossless_source_never_outranks_its_anchor(
     Accused grades are out of scope on purpose: their lane/override laws
     belong to V5/L5, and the V0-avg trust override may legitimately import
     over a within-tolerance anchor (PR3's core).
+
+    Issue #1241's disregard predicate is out of scope too, for the same
+    reason: when the operator marked the installed copy incomplete AND this
+    attempt's candidate covers the whole declared program, production nulls
+    every existing-side input — including the anchor probe this checker
+    reads — before Stage 2 ever runs, so there is no anchor left to compare
+    against. The decided outcome in that world is the ordinary fresh-import
+    admission (``installed_incomplete_disregarded=True``,
+    ``comparison_basis=None``), never this lane's confident reject.
     """
     if candidate.measurement.spectral_grade not in ("genuine", "marginal"):
+        return True
+    if (
+        facts is not None
+        and facts.installed_marked_incomplete
+        and facts.candidate_covers_declared_program
+    ):
         return True
     if current is None or current.verified_lossless_proof is not None:
         return True
