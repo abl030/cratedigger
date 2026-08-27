@@ -185,7 +185,8 @@ def _ledger_seed(
         for username, filename in file_pairs
     ])
     for username, filename in file_pairs:
-        fake_db.confirm_transfer_enqueue(username, filename)
+        fake_db.confirm_transfer_enqueue(
+            username, filename, request_id=request_id)
     for (username, filename), local_path in (local_paths or {}).items():
         fake_db.stamp_transfer_completion(
             username, filename, local_path)

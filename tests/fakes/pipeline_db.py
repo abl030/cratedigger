@@ -527,6 +527,13 @@ class FakePipelineDB:
         self._transfer_ledger: dict[int, FakeTransferLedgerRow] = {}
         self._transfer_ledger_next_id: int = 1
         self.record_transfer_enqueue_calls: list[TransferLedgerRow] = []
+        #: Every ``confirm_transfer_enqueue`` call, as
+        #: ``(username, filename, request_id)``. The write-ahead ledger's
+        #: T1.5 half is otherwise invisible when it legitimately promotes
+        #: nothing, so a test that pins "this path must not even ASK"
+        #: (#1278 item 2's ``request_id is None`` skip) has no observable
+        #: state to assert on without it.
+        self.confirm_transfer_enqueue_calls: list[tuple[str, str, int]] = []
         self.denylist: list[DenylistEntry] = []
         self.persist_import_terminal_outcome_calls: list[ImportTerminalOutcome] = []
         self.persist_preview_terminal_outcome_calls: list[PreviewTerminalOutcome] = []
@@ -8663,10 +8670,18 @@ class FakePipelineDB:
         newest.local_path = local_path
         return 1
 
-    def confirm_transfer_enqueue(self, username: str, filename: str) -> int:
+    def confirm_transfer_enqueue(
+        self, username: str, filename: str, *, request_id: int,
+    ) -> int:
+        """Mirror the request-scoped accepted-POST promotion (#1278 item 2):
+        only ``request_id``'s OWN newest pending row for this key may be
+        promoted, never a sibling request's."""
+        self.confirm_transfer_enqueue_calls.append(
+            (username, filename, request_id))
         candidates = [
             row for row in self._transfer_ledger.values()
             if row.username == username and row.filename == filename
+            and row.request_id == request_id
             and row.accepted_at is None
         ]
         if not candidates:

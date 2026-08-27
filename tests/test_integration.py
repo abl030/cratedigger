@@ -573,7 +573,8 @@ class TestCancelAndDelete(unittest.TestCase):
         ledger_db = FakePipelineDB()
         ledger_db.record_transfer_enqueue([TransferLedgerRow(
             request_id=1, username="user1", filename="track.flac")])
-        ledger_db.confirm_transfer_enqueue("user1", "track.flac")
+        ledger_db.confirm_transfer_enqueue(
+            "user1", "track.flac", request_id=1)
         ctx.download_ownership = DownloadOwnershipWriter(
             db_factory=lambda: ledger_db, close_after_use=False)
 

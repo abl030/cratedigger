@@ -8527,7 +8527,7 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         db.record_transfer_enqueue([
             TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
         ])
-        db.confirm_transfer_enqueue("p0", "a.flac")
+        db.confirm_transfer_enqueue("p0", "a.flac", request_id=1)
         stamped = db.stamp_transfer_completion(
             "p0", "a.flac", "/downloads/complete/a.flac")
         self.assertEqual(stamped, 1)
@@ -8542,7 +8542,8 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         db.record_transfer_enqueue([row, row])
         old_id = min(db._transfer_ledger)
 
-        self.assertEqual(db.confirm_transfer_enqueue("p0", "a.flac"), 1)
+        self.assertEqual(
+            db.confirm_transfer_enqueue("p0", "a.flac", request_id=1), 1)
 
         accepted = [
             item for item in db._transfer_ledger.values()
@@ -8551,6 +8552,64 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         self.assertEqual(len(accepted), 1)
         self.assertNotEqual(accepted[0].id, old_id)
         self.assertEqual(db.get_owned_transfer_keys(), {("p0", "a.flac")})
+
+    def test_confirm_transfer_enqueue_never_promotes_a_sibling_request(self):
+        """#1278 item 2: the fake mirrors PG's request scoping.
+
+        Without it the fake would answer more generously than production
+        -- promoting whichever request's pending row happened to be
+        newest -- and every ownership-gated test built on it would be a
+        fiction. Real-PG twin:
+        ``tests.test_pipeline_db.TestTransferLedgerRoundTrip::
+        test_confirm_transfer_enqueue_never_promotes_a_sibling_request``.
+        """
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+        # The sibling's intent is NEWER, so an unscoped confirm lands on it.
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=2, username="p0", filename="a.flac"),
+        ])
+
+        self.assertEqual(
+            db.confirm_transfer_enqueue("p0", "a.flac", request_id=1), 1)
+
+        by_request = {
+            row.request_id: row.accepted_at
+            for row in db._transfer_ledger.values()
+        }
+        self.assertIsNotNone(by_request[1])
+        self.assertIsNone(by_request[2])
+
+    def test_confirm_transfer_enqueue_is_zero_for_a_request_with_no_intent(self):
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=2, username="p0", filename="a.flac"),
+        ])
+
+        self.assertEqual(
+            db.confirm_transfer_enqueue("p0", "a.flac", request_id=1), 0)
+        self.assertEqual(db.get_owned_transfer_keys(), set())
+
+    def test_confirm_transfer_enqueue_records_every_call_it_is_asked(self):
+        """The recorder covers the promote-nothing case too -- which is
+        the whole reason it exists (#1278 item 2): a caller that must not
+        even ASK leaves no other trace."""
+        db = FakePipelineDB()
+        db.record_transfer_enqueue([
+            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
+        ])
+
+        db.confirm_transfer_enqueue("p0", "a.flac", request_id=1)
+        db.confirm_transfer_enqueue("p9", "nope.flac", request_id=7)
+
+        self.assertEqual(
+            db.confirm_transfer_enqueue_calls,
+            [("p0", "a.flac", 1), ("p9", "nope.flac", 7)])
+
+    def test_confirm_transfer_enqueue_calls_start_empty(self):
+        self.assertEqual(FakePipelineDB().confirm_transfer_enqueue_calls, [])
 
     def test_stamp_transfer_completion_unledgered_pair_is_a_noop(self):
         db = FakePipelineDB()
@@ -8572,7 +8631,7 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         db.record_transfer_enqueue([
             TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
         ])
-        db.confirm_transfer_enqueue("p0", "a.flac")
+        db.confirm_transfer_enqueue("p0", "a.flac", request_id=1)
         db.stamp_transfer_completion(
             "p0", "a.flac", "/downloads/complete/a.flac")
         rows = db._transfer_ledger.values()
@@ -8586,7 +8645,7 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
             TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
             TransferLedgerRow(request_id=1, username="p0", filename="b.flac"),
         ])
-        db.confirm_transfer_enqueue("p0", "a.flac")
+        db.confirm_transfer_enqueue("p0", "a.flac", request_id=1)
         db.stamp_transfer_completion(
             "p0", "a.flac", "/downloads/a.flac")
         self.assertEqual(db.get_owned_local_paths(), {"/downloads/a.flac"})
@@ -8610,7 +8669,7 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
                     TransferLedgerRow(
                         request_id=1, username="p0", filename="a.flac"),
                 ])
-                db.confirm_transfer_enqueue("p0", "a.flac")
+                db.confirm_transfer_enqueue("p0", "a.flac", request_id=1)
                 db.stamp_transfer_completion(
                     "p0", "a.flac", "/downloads/a.flac")
 
@@ -8628,7 +8687,7 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         db.record_transfer_enqueue([
             TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
         ])
-        db.confirm_transfer_enqueue("p0", "a.flac")
+        db.confirm_transfer_enqueue("p0", "a.flac", request_id=1)
 
         self.assertEqual(db.get_abandoned_owned_local_paths(), set())
 
@@ -8638,8 +8697,8 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
             TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
             TransferLedgerRow(request_id=1, username="p1", filename="b.flac"),
         ])
-        db.confirm_transfer_enqueue("p0", "a.flac")
-        db.confirm_transfer_enqueue("p1", "b.flac")
+        db.confirm_transfer_enqueue("p0", "a.flac", request_id=1)
+        db.confirm_transfer_enqueue("p1", "b.flac", request_id=1)
 
         self.assertEqual(
             db.get_owned_transfer_keys_for([("p0", "a.flac")]),
@@ -8658,7 +8717,7 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         self.assertEqual(
             db.get_owned_transfer_keys_for([("p0", "a.flac")]), set())
 
-        db.confirm_transfer_enqueue("p0", "a.flac")
+        db.confirm_transfer_enqueue("p0", "a.flac", request_id=1)
 
         self.assertEqual(
             db.get_owned_transfer_keys_for([("p0", "a.flac")]),
@@ -8675,7 +8734,7 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
             TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
             TransferLedgerRow(request_id=2, username="p1", filename="b.flac"),
         ])
-        db.confirm_transfer_enqueue("p0", "a.flac")
+        db.confirm_transfer_enqueue("p0", "a.flac", request_id=1)
         db.stamp_transfer_completion(
             "p0", "a.flac", "/downloads/a.flac")
         self.assertEqual(
@@ -8688,7 +8747,7 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         db.record_transfer_enqueue([
             TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
         ])
-        db.confirm_transfer_enqueue("p0", "a.flac")
+        db.confirm_transfer_enqueue("p0", "a.flac", request_id=1)
         old_id = next(iter(db._transfer_ledger))
         db._transfer_ledger[old_id].enqueued_at = (
             datetime.now(UTC) - timedelta(days=200))
@@ -8778,7 +8837,8 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
             TransferLedgerRow(
                 request_id=request_id, username=username, filename=filename),
         ])
-        db.confirm_transfer_enqueue(username, filename)
+        db.confirm_transfer_enqueue(
+            username, filename, request_id=request_id)
 
     def test_get_conflicting_transfer_request_ids_empty_keys_is_a_noop(self):
         db = FakePipelineDB()
@@ -8816,7 +8876,7 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         db.record_transfer_enqueue([
             TransferLedgerRow(request_id=99, username="OLD", filename="old.flac"),
         ])
-        db.confirm_transfer_enqueue("OLD", "old.flac")
+        db.confirm_transfer_enqueue("OLD", "old.flac", request_id=99)
         old_id = next(
             fid for fid, r in db._transfer_ledger.items()
             if r.username == "OLD")
@@ -8830,7 +8890,7 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         db.record_transfer_enqueue([
             TransferLedgerRow(request_id=99, username="NEW", filename="new.flac"),
         ])
-        db.confirm_transfer_enqueue("NEW", "new.flac")
+        db.confirm_transfer_enqueue("NEW", "new.flac", request_id=99)
 
         self.assertEqual(
             db.get_conflicting_transfer_request_ids(
@@ -8879,7 +8939,7 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
                 request_id=99, username="p0", filename="a.flac",
                 attempt_fingerprint="deadbeef"),
         ])
-        db.confirm_transfer_enqueue("p0", "a.flac")
+        db.confirm_transfer_enqueue("p0", "a.flac", request_id=99)
         db.request(99)["active_download_state"] = {
             "filetype": "flac", "enqueued_at": datetime.now(UTC).isoformat(),
             "files": [], "attempt_fingerprint": None,
@@ -8945,7 +9005,7 @@ class TestFakePipelineDBTransferLedger(unittest.TestCase):
         db.record_transfer_enqueue([
             TransferLedgerRow(request_id=99, username="p0", filename="a.flac"),
         ])
-        db.confirm_transfer_enqueue("p0", "a.flac")
+        db.confirm_transfer_enqueue("p0", "a.flac", request_id=99)
 
         conflicting = db.get_conflicting_transfer_request_ids(
             [("p0", "a.flac")], exclude_request_id=1)

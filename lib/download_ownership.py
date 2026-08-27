@@ -46,7 +46,7 @@ class DownloadOwnershipDB(transitions.TransitionsDB, Protocol):
     def record_transfer_enqueue(self, rows: list[TransferLedgerRow]) -> None: ...
 
     def confirm_transfer_enqueue(
-        self, username: str, filename: str,
+        self, username: str, filename: str, *, request_id: int,
     ) -> int: ...
 
     def get_conflicting_transfer_request_ids(
@@ -208,15 +208,22 @@ class DownloadOwnershipWriter:
             self._close_db(db)
 
     def confirm_transfer_enqueues(
-        self, username: str, filenames: list[str],
+        self, username: str, filenames: list[str], *, request_id: int,
     ) -> int:
-        """Confirm one accepted POST's write-ahead rows using one DB handle."""
+        """Confirm one accepted POST's write-ahead rows using one DB handle.
+
+        ``request_id`` is the request whose POST slskd just accepted, and
+        it scopes every promotion to that request's own pending rows
+        (issue #1278 item 2) -- the read side of the same scoping
+        ``_write_ahead_transfer_ledger`` already applies to the insert.
+        """
         if not filenames:
             return 0
         db = self._open_db()
         try:
             return sum(
-                db.confirm_transfer_enqueue(username, filename)
+                db.confirm_transfer_enqueue(
+                    username, filename, request_id=request_id)
                 for filename in filenames
             )
         finally:

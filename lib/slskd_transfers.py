@@ -91,19 +91,19 @@ def positively_owned_files[FileT: CanonicalFolderFile](
     decorative because it is unreachable; it was reachable, in
     production, for the length of one review round.
 
-    Two of ``_write_ahead_transfer_ledger``'s three skip conditions
-    mirror an empty result here exactly (it writes no row with no
-    writer, or with no files), so a context that never ledgered an
-    enqueue owns nothing to destroy. Its third condition,
-    ``request_id is None``, does NOT mirror: that skips the INSERT while
-    ``slskd_enqueue_with_outcome`` still calls
-    ``confirm_transfer_enqueues``, and ``confirm_transfer_enqueue``
-    matches the newest pending row for a ``(username, filename)`` across
-    the whole table without scoping to a request -- so it could promote
-    ANOTHER request's pending row and make the key look owned here. No
-    production caller reaches it (every enqueue carries an
-    ``album_requests`` id), which is the only reason that is not a live
-    cross-request promotion bug.
+    All three of ``_write_ahead_transfer_ledger``'s skip conditions now
+    mirror an empty result here exactly: it writes no row with no writer,
+    with no files, or with no ``request_id``, so a context that never
+    ledgered an enqueue owns nothing to destroy. The third condition used
+    NOT to mirror -- it skipped the INSERT while
+    ``slskd_enqueue_with_outcome`` still called
+    ``confirm_transfer_enqueues``, and ``confirm_transfer_enqueue`` took
+    the newest pending row for a ``(username, filename)`` across the whole
+    table, so it could promote ANOTHER request's pending row and make the
+    key look owned here. Issue #1278 item 2 closed that by scoping the
+    confirm to its request and skipping it outright when there is none.
+    No production caller ever reached the gap (every enqueue carries an
+    ``album_requests`` id), so this was latent, never a live incident.
 
     One fresh DB handle per call, the same worker-safe shape
     ``record_transfer_enqueue`` and ``confirm_transfer_enqueues`` already
@@ -430,10 +430,16 @@ def slskd_enqueue_with_outcome(
         return SlskdEnqueueOutcome(status="rejected")
 
     writer = getattr(ctx, "download_ownership", None)
-    if writer is not None:
+    if writer is not None and request_id is not None:
+        # ``request_id is None`` confirms NOTHING, mirroring
+        # ``_write_ahead_transfer_ledger``'s own skip exactly (issue #1278
+        # item 2): with no request there is no row of ours to promote, and
+        # an unscoped confirm would reach for whatever pending row that
+        # key happened to carry -- another request's.
         writer.confirm_transfer_enqueues(
             username,
             [str(file["filename"]) for file in files],
+            request_id=request_id,
         )
 
     # Poll for transfer IDs — slskd needs time to register the enqueue.

@@ -424,7 +424,8 @@ def _build_harness(world: EventWorld) -> tuple[FakePipelineDB, FakeSlskdAPI]:
             TransferLedgerRow(
                 request_id=owner, username=username, filename=filename),
         ])
-        db.confirm_transfer_enqueue(username, filename)
+        db.confirm_transfer_enqueue(
+            username, filename, request_id=owner)
     return db, slskd
 
 
@@ -652,7 +653,7 @@ def _build_incarnation_harness(
             filename=attempt_b_key[1],
         ),
     ])
-    db.confirm_transfer_enqueue(*attempt_b_key)
+    db.confirm_transfer_enqueue(*attempt_b_key, request_id=1)
     return db, slskd, attempt_b_key
 
 

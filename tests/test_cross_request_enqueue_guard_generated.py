@@ -294,7 +294,8 @@ def _run_world(world: GuardWorld) -> dict[tuple[int, int], bool]:
                     db._transfer_ledger[ledger_id].enqueued_at = (
                         witness + timedelta(milliseconds=1))
                 for un, fn in attempt.keys:
-                    db.confirm_transfer_enqueue(un, fn)
+                    db.confirm_transfer_enqueue(
+                        un, fn, request_id=attempt.request_id)
                 db._requests[attempt.request_id]["status"] = (
                     attempt.resulting_status)
     return proceeded

@@ -601,7 +601,8 @@ class TestCancelAndDelete(unittest.TestCase):
             for f in files
         ])
         for f in files:
-            self.ledger_db.confirm_transfer_enqueue(f.username, f.filename)
+            self.ledger_db.confirm_transfer_enqueue(
+                f.username, f.filename, request_id=1)
 
     def _file_event(self, slskd, *, id, username, filename, local_filename):
         import json as _json
@@ -1510,11 +1511,25 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
         """Documents the guard: the legacy/test fallback shape (no
         ownership context) never blocks the enqueue -- it just can't be
         ledgered, matching _claim_initial_download_ownership's own
-        request_id-is-None carve-out."""
+        request_id-is-None carve-out.
+
+        #1278 item 2: the CONFIRM half now skips identically. Writing no
+        row and then confirming anyway was the latent hazard -- with no
+        request to scope to, the confirm reached for whatever pending row
+        the key carried, which can only be ANOTHER request's. The sibling
+        pending row below is the world that made that visible; it must
+        still be pending afterwards.
+        """
+        from lib.pipeline_db import TransferLedgerRow
         from lib.slskd_transfers import slskd_enqueue_with_outcome
         from tests.fakes import FakePipelineDB
 
         db = FakePipelineDB()
+        db.record_transfer_enqueue([TransferLedgerRow(
+            request_id=4242, username="user1", filename="a.flac")])
+        # The recorder is the assertion below; drop the fixture's own
+        # seeding call so it only reports what the enqueue path wrote.
+        db.record_transfer_enqueue_calls.clear()
         slskd = FakeSlskdAPI(downloads=[{
             "username": "user1",
             "directories": [{
@@ -1531,6 +1546,14 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
 
         self.assertEqual(outcome.status, "accepted")
         self.assertEqual(db.record_transfer_enqueue_calls, [])
+        # Not "asked and got nothing back" -- never asked at all. The
+        # scoping in confirm_transfer_enqueue would make an unscoped ask
+        # inert anyway, so only the call recorder distinguishes the two.
+        self.assertEqual(db.confirm_transfer_enqueue_calls, [])
+        self.assertEqual(db.get_owned_transfer_keys(), set())
+        sibling_row = next(iter(db._transfer_ledger.values()))
+        self.assertEqual(sibling_row.request_id, 4242)
+        self.assertIsNone(sibling_row.accepted_at)
 
     def test_no_download_ownership_skips_ledger_but_still_enqueues(self):
         from lib.slskd_transfers import slskd_enqueue_with_outcome
@@ -6058,7 +6081,8 @@ class TestPollActiveDownloads(unittest.TestCase):
         fake_db.record_transfer_enqueue([TransferLedgerRow(
             request_id=1, username="user1",
             filename="user1\\Music\\01.flac")])
-        fake_db.confirm_transfer_enqueue("user1", "user1\\Music\\01.flac")
+        fake_db.confirm_transfer_enqueue(
+            "user1", "user1\\Music\\01.flac", request_id=1)
         ctx.download_ownership = DownloadOwnershipWriter(
             db_factory=lambda: fake_db, close_after_use=False)
 
@@ -7942,7 +7966,8 @@ class TestConvergeSlskdOrphans(unittest.TestCase):
                 for (username, filename) in ledger
             ])
             for username, filename in ledger:
-                fake_db.confirm_transfer_enqueue(username, filename)
+                fake_db.confirm_transfer_enqueue(
+                    username, filename, request_id=request_id)
         return make_ctx_with_fake_db(fake_db, slskd=slskd)
 
     def _seed_slskd(self):
@@ -8038,7 +8063,8 @@ class TestConvergeSlskdOrphans(unittest.TestCase):
                 filename=self.OWNED_FILE,
             ),
         ])
-        fake_db.confirm_transfer_enqueue("peer1", self.OWNED_FILE)
+        fake_db.confirm_transfer_enqueue(
+            "peer1", self.OWNED_FILE, request_id=1)
         ctx = make_ctx_with_fake_db(fake_db, slskd=slskd)
 
         cancelled = converge_slskd_orphans(ctx)
@@ -8162,7 +8188,8 @@ class TestPurgeCompletedTransfers(unittest.TestCase):
                 TransferLedgerRow(
                     request_id=1, username=username, filename=filename),
             ])
-            fake_db.confirm_transfer_enqueue(username, filename)
+            fake_db.confirm_transfer_enqueue(
+                username, filename, request_id=1)
         return make_ctx_with_fake_db(fake_db, slskd=slskd)
 
     def _seed_slskd(self):

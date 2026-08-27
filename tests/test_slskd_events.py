@@ -1249,7 +1249,8 @@ class TestTransferLedgerStamping(SlskdEventIngestCase):
                 filename="music\\Artist\\Album\\01 track.flac"),
         ])
         self.db.confirm_transfer_enqueue(
-            "peer1", "music\\Artist\\Album\\01 track.flac")
+            "peer1", "music\\Artist\\Album\\01 track.flac",
+            request_id=1)
         self.slskd.events.set_events([
             self.event(
                 id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
@@ -1305,7 +1306,8 @@ class TestTransferLedgerStamping(SlskdEventIngestCase):
                 filename="music\\Artist\\Album\\01 track.flac"),
         ])
         self.db.confirm_transfer_enqueue(
-            "peer1", "music\\Artist\\Album\\01 track.flac")
+            "peer1", "music\\Artist\\Album\\01 track.flac",
+            request_id=1)
         self.slskd.events.set_events([
             self.event(
                 id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",

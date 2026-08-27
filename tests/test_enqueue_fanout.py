@@ -218,7 +218,8 @@ def _ledger_enqueue_attempt(
     if not accepted:
         return
     for row in rows:
-        db.confirm_transfer_enqueue(row.username, row.filename)
+        db.confirm_transfer_enqueue(
+            row.username, row.filename, request_id=row.request_id)
 
 
 class TestEnqueueAttemptFingerprintPolicy(unittest.TestCase):
@@ -3371,7 +3372,7 @@ class TestCrossRequestEnqueueGuardCrossCycle(unittest.TestCase):
             TransferLedgerRow(
                 request_id=99, username=username, filename=filename),
         ])
-        db.confirm_transfer_enqueue(username, filename)
+        db.confirm_transfer_enqueue(username, filename, request_id=99)
         slskd = FakeSlskdAPI(downloads=[{
             "username": username,
             "directories": [{

@@ -1356,7 +1356,9 @@ class _TransferOwnershipDB(Protocol):
 
     def record_transfer_enqueue(self, rows: list[TransferLedgerRow]) -> None: ...
 
-    def confirm_transfer_enqueue(self, username: str, filename: str) -> int: ...
+    def confirm_transfer_enqueue(
+        self, username: str, filename: str, *, request_id: int,
+    ) -> int: ...
 
     def get_owned_transfer_keys(self) -> set[tuple[str, str]]: ...
 
@@ -1398,7 +1400,8 @@ def own_transfer_keys(
         return
     db.record_transfer_enqueue(rows)
     for row in rows:
-        db.confirm_transfer_enqueue(row.username, row.filename)
+        db.confirm_transfer_enqueue(
+            row.username, row.filename, request_id=row.request_id)
 
 
 def handoff_automation_owner(
