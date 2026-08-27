@@ -4884,6 +4884,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         slskd_downloads=None,
         fake_db: FakePipelineDB | None = None,
         slskd: FakeSlskdAPI | None = None,
+        own_files: bool = True,
     ):
         """Build context with fake DB + fake slskd for polling.
 
@@ -4893,6 +4894,14 @@ class TestPollActiveDownloads(unittest.TestCase):
         the loosely-typed context field) — used by tests that need to
         both seed the initial snapshot AND queue follow-up snapshots or
         inspect call recordings after the poll runs.
+
+        ``own_files`` defaults True because that is the steady state a
+        `downloading` request settles into. Pass False for the pending-only
+        world `_leave_claim_for_poll_recovery` leaves behind — a claim that
+        persisted `active_download_state` while its POST stayed ambiguous,
+        so the ledger holds intent and no acceptance. Without the opt-out
+        the fixture makes that world unreachable, and the #1278 item 1
+        ownership gate's whole behaviour change lives in it.
         """
         if slskd_downloads is None:
             # Default: return transfers that match the files
@@ -4941,13 +4950,14 @@ class TestPollActiveDownloads(unittest.TestCase):
         fake_db = fake_db or FakePipelineDB()
         for row in downloading_rows or []:
             fake_db.seed_request(row)
-            # Production shape post-#571: a downloading row's files always
-            # carry an ACCEPTED write-ahead ledger row, and #1278 item 1
-            # made that ownership the gate on event stamping too. Seeding
-            # the state without the ledger models a world production
-            # cannot produce (Rule B) and silently disables stamping.
+            # Steady state post-#571: a downloading row's files carry an
+            # ACCEPTED write-ahead ledger row, and #1278 item 1 made that
+            # ownership the gate on event stamping too. Seeding the state
+            # without the ledger models the pending-only recovery world
+            # instead, which silently disables stamping — deliberate only
+            # when the caller asks for it.
             raw_state = row.get("active_download_state")
-            if not isinstance(raw_state, dict):
+            if not isinstance(raw_state, dict) or not own_files:
                 continue
             own_transfer_keys(
                 fake_db,
@@ -5834,6 +5844,171 @@ class TestPollActiveDownloads(unittest.TestCase):
         )
         self.assertEqual(jobs[0].expected_request_status, "processing")
         self.assertTrue(os.path.isfile(source_path))
+
+    def _pending_only_world(self, *, accept: bool):
+        """One poll cycle over the world `_leave_claim_for_poll_recovery`
+        leaves behind, composed end to end.
+
+        `_claim_initial_download_ownership` persists `active_download_state`
+        via `writer.claim_downloading` BEFORE `_enqueue_with_claim_outcome`
+        writes the ledger row or issues the POST, so a claim whose POST
+        stayed ambiguous durably leaves a `downloading` request whose keys
+        hold pending intent and no acceptance. `accept=True` is the same
+        world after the POST was confirmed — the must-still-work control.
+        """
+        import json as _json
+
+        from lib.download import poll_active_downloads
+        from lib.quality import ActiveDownloadState
+
+        enqueued_at = "2026-07-01T09:00:00+00:00"
+        filename = "user1\\Music\\01.flac"
+        row = self._make_downloading_row(state_dict={
+            "filetype": "flac",
+            "enqueued_at": enqueued_at,
+            "files": [{
+                "username": "user1",
+                "filename": filename,
+                "file_dir": "user1\\Music",
+                "size": 30000000,
+                # No event stamp yet: this attempt's completion is in the
+                # window the poll is about to ingest.
+                "local_path": None,
+            }],
+        })
+        snapshot = [{
+            "username": "user1",
+            "directories": [{"directory": "user1\\Music", "files": [{
+                "filename": filename,
+                "id": "tid-1",
+                "state": "Completed, Succeeded",
+                "bytesTransferred": 30000000,
+                "requestedAt": enqueued_at,
+            }]}],
+        }]
+        slskd = FakeSlskdAPI(downloads=snapshot)
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=snapshot,
+            slskd=slskd,
+            own_files=False,
+        )
+        # Write-ahead intent, exactly as `_write_ahead_transfer_ledger`
+        # writes it before the POST.
+        fake_db.record_transfer_enqueue([TransferLedgerRow(
+            request_id=1, username="user1", filename=filename)])
+        if accept:
+            fake_db.confirm_transfer_enqueue(
+                "user1", filename, request_id=1)
+        fake_db.upsert_slskd_event_cursor(
+            "ev-cursor", "2026-07-01T00:00:00+00:00")
+        local_path = os.path.join(
+            ctx.cfg.slskd_download_dir, "Music", "01.flac")
+        slskd.events.set_events([
+            slskd.events.make_event(
+                id="ev-complete",
+                timestamp="2026-07-01T10:00:00+00:00",
+                type="DownloadFileComplete",
+                data=_json.dumps({
+                    "version": 0,
+                    "localFilename": local_path,
+                    "remoteFilename": filename,
+                    "transfer": {
+                        "id": "tid-1",
+                        "username": "user1",
+                        "filename": filename,
+                        "size": 30000000,
+                    },
+                }),
+            ),
+            slskd.events.make_event(
+                id="ev-cursor",
+                timestamp="2026-07-01T00:00:00+00:00",
+                type="Noise",
+                data="{}",
+            ),
+        ])
+
+        poll_active_downloads(ctx)
+
+        request = fake_db.request(1)
+        state = ActiveDownloadState.from_dict(
+            request["active_download_state"])
+        return ctx, request, state
+
+    def test_pending_only_ledger_world_refuses_the_stamp_and_hard_fails(self):
+        """#1278 item 1 review F3: the composed consequence of the gate.
+
+        No poll test could reach this world before — `_make_poll_ctx`
+        seeded accepted ledger rows for every downloading row — yet it is
+        exactly where the gate changes behaviour: the stamp is refused,
+        the poll still publishes the processing owner, and the processor
+        then hard-fails `event_path_never_stamped`, which returns the
+        request to `wanted` and re-downloads the whole album.
+        """
+        from lib.download_processing import (
+            CompletionFailed,
+            process_completed_album,
+        )
+        from lib.download_reconstruction import reconstruct_grab_list_entry
+
+        ctx, request, state = self._pending_only_world(accept=False)
+
+        self.assertIsNone(state.files[0].local_path)
+        # The poll still hands off — refusing the stamp is not refusing
+        # the lifecycle; the processor owns the source-path contract.
+        self.assertEqual(request["status"], "processing")
+        job_id = request["active_automation_import_job_id"]
+        assert job_id is not None
+
+        result = process_completed_album(
+            reconstruct_grab_list_entry(request, state),
+            ctx,
+            import_job_id=job_id,
+        )
+
+        self.assertIsInstance(result, CompletionFailed)
+        assert isinstance(result, CompletionFailed)
+        self.assertEqual(result.reason, "event_path_never_stamped")
+
+    def test_the_same_world_with_an_accepted_row_stamps_and_materializes(self):
+        """Must-still-work: acceptance is the ONLY difference, and the same
+        completion then stamps and materializes normally.
+
+        The gate has to fail closed on an unowned key WITHOUT failing closed
+        on an owned one, so this drives the identical world one confirm
+        apart and follows it to the materialized bytes — the state the
+        refused world never reaches.
+        """
+        from lib.download_processing import Completed, process_completed_album
+        from lib.download_reconstruction import reconstruct_grab_list_entry
+        from lib.processing_paths import (
+            canonical_folder_for_row,
+            processing_albums_dir,
+        )
+
+        ctx, request, state = self._pending_only_world(accept=True)
+
+        stamped = state.files[0].local_path
+        self.assertEqual(
+            stamped,
+            os.path.join(ctx.cfg.slskd_download_dir, "Music", "01.flac"))
+        job_id = request["active_automation_import_job_id"]
+        assert job_id is not None
+        # The poll fixture writes a placeholder byte string; materialization
+        # is followed by a real decode, so give the stamped path real audio.
+        assert stamped is not None
+        os.unlink(stamped)
+        _write_test_audio(stamped)
+        entry = reconstruct_grab_list_entry(request, state)
+        canonical = canonical_folder_for_row(
+            entry, processing_albums_dir(ctx.cfg.processing_dir))
+
+        result = process_completed_album(entry, ctx, import_job_id=job_id)
+
+        self.assertIsInstance(result, Completed)
+        self.assertTrue(
+            os.path.isfile(os.path.join(canonical, "01.flac")), canonical)
 
     def test_crash_after_handoff_leaves_target_absent_and_source_byte_exact(
         self,
