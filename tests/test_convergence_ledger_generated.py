@@ -130,7 +130,9 @@ def _build_world_fakes(
         db.record_transfer_enqueue(ledger_rows)
     for w in worlds:
         if w.ownership == "confirmed":
-            db.confirm_transfer_enqueue(_username(w.key), _filename(w.key))
+            db.confirm_transfer_enqueue(
+                _username(w.key), _filename(w.key),
+                request_id=w.key + 1)
     return db, slskd
 
 
@@ -253,7 +255,9 @@ def _build_cleanup_fakes(
         db.record_transfer_enqueue(ledger_rows)
     for w in worlds:
         if w.ownership == "confirmed":
-            db.confirm_transfer_enqueue(_username(w.key), _filename(w.key))
+            db.confirm_transfer_enqueue(
+                _username(w.key), _filename(w.key),
+                request_id=w.key + 1)
     return db, slskd, files, paths
 
 

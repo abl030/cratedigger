@@ -185,7 +185,8 @@ def _ledger_seed(
         for username, filename in file_pairs
     ])
     for username, filename in file_pairs:
-        fake_db.confirm_transfer_enqueue(username, filename)
+        fake_db.confirm_transfer_enqueue(
+            username, filename, request_id=request_id)
     for (username, filename), local_path in (local_paths or {}).items():
         fake_db.stamp_transfer_completion(
             username, filename, local_path)
@@ -237,10 +238,18 @@ def _seed_active_downloading(
     real derivation ``_downloading_row_and_canonical`` builds) AND its
     write-ahead ledger rows -- returns the canonical folder path.
 
-    Every production enqueue ledgers write-ahead BEFORE the row is even
-    ``downloading``, so a realistic world always carries both; the
+    Carrying both is the STEADY STATE a ``downloading`` row settles into,
+    not an ordering guarantee (issue #1278 review F3 corrected the
+    opposite claim here): ``lib.enqueue._claim_initial_download_ownership``
+    makes the row ``downloading`` BEFORE ``_enqueue_with_claim_outcome``
+    reaches ``slskd_enqueue_with_outcome``, which writes the write-ahead
+    row and only then confirms it. So a ``downloading`` row with no ledger
+    row at all exists transiently, and one whose write-ahead row was never
+    accepted exists durably -- ``tests.helpers.own_transfer_keys`` measures
+    64 live keys in that second state. A realistic disk-reaper world is
+    still the settled one, where the
     active-protection guard and the ledger's positive-ownership record
-    simply overlap for a row's CURRENT attempt.
+    overlap for a row's CURRENT attempt.
     """
     row, canonical = _downloading_row_and_canonical(
         request_id=request_id, artist=artist, title=title, year=year,

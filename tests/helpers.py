@@ -45,7 +45,10 @@ from lib.import_queue import (
     AutomationHandoffResult,
     ImportJob,
 )
-from lib.pipeline_db._shared import ADVISORY_LOCK_NAMESPACE_IMPORT
+from lib.pipeline_db._shared import (
+    ADVISORY_LOCK_NAMESPACE_IMPORT,
+    TransferLedgerRow,
+)
 from lib.quality import (
     CURRENT_EVIDENCE_LINEAGE_VERSION,
     DECISION_LOSSLESS_SOURCE_LOCKED,
@@ -1346,6 +1349,74 @@ def make_active_download_state_json(
         enqueued_at="2026-07-01T00:00:00+00:00",
         files=files,
     ).to_json()
+
+
+class _TransferOwnershipDB(Protocol):
+    """The two ledger writes plus the read ``own_transfer_keys`` needs."""
+
+    def record_transfer_enqueue(self, rows: list[TransferLedgerRow]) -> None: ...
+
+    def confirm_transfer_enqueue(
+        self, username: str, filename: str, *, request_id: int,
+    ) -> int: ...
+
+    def get_owned_transfer_keys(self) -> set[tuple[str, str]]: ...
+
+
+def own_transfer_keys(
+    db: _TransferOwnershipDB,
+    keys: Sequence[tuple[str, str]],
+    *,
+    request_id: int = 1,
+) -> None:
+    """Ensure each ``(username, filename)`` queue key is ledger-owned.
+
+    This is the STEADY STATE a ``downloading`` request settles into, not an
+    ordering guarantee. The real order runs the other way (issue #1278
+    review F3): ``lib.enqueue._claim_initial_download_ownership`` persists
+    ``active_download_state`` through ``writer.claim_downloading`` BEFORE
+    ``_enqueue_with_claim_outcome`` reaches
+    ``slskd_enqueue_with_outcome``, which writes the write-ahead row, POSTs,
+    and only then confirms. So a ``downloading`` row whose keys hold no
+    accepted row is produced routinely -- transiently between claim and
+    confirm, and DURABLY whenever ``_leave_claim_for_poll_recovery`` leaves
+    an ambiguous POST's claim in place. MEASURED 2026-08-27 on the live
+    ledger: 64 distinct queue keys carry write-ahead rows and no acceptance
+    at all, enqueued between 2026-07-09 and 2026-07-17 (none since, matching
+    the per-key gate's own rationale). That world is real, and the stamping
+    ownership gate (#1278 item 1) refuses to stamp in it; a test wanting it
+    seeds the pending row itself rather than calling this helper. Composed
+    end to end in
+    ``tests/test_download.py::TestPollActiveDownloads::
+    test_pending_only_ledger_world_refuses_the_stamp_and_hard_fails``.
+
+    What this helper is for is every OTHER fixture: seeding the state alone
+    and leaving the ledger empty silently models the recovery world by
+    accident, and a test that meant to exercise stamping then proves
+    nothing (Rule B, ``.claude/rules/test-fidelity.md``).
+
+    This is a PRECONDITION helper, not a replay of ``enqueue``: a key that
+    is already accepted is skipped, so re-seeding a request (an
+    incarnation swap) does not multiply the ledger rows a test is
+    counting. A test that needs a SECOND row on a key -- a later ambiguous
+    attempt, say -- writes it itself through ``record_transfer_enqueue``.
+    """
+    already_owned = db.get_owned_transfer_keys()
+    rows = [
+        TransferLedgerRow(
+            request_id=request_id,
+            username=username,
+            filename=filename,
+        )
+        for username, filename in keys
+        if (username, filename) not in already_owned
+    ]
+    if not rows:
+        return
+    db.record_transfer_enqueue(rows)
+    for row in rows:
+        db.confirm_transfer_enqueue(
+            row.username, row.filename, request_id=row.request_id)
 
 
 def handoff_automation_owner(

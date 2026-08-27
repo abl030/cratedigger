@@ -120,7 +120,8 @@ def _build_world(
                 ),
             ])
         if world.ownership == "confirmed":
-            db.confirm_transfer_enqueue(username, filename)
+            db.confirm_transfer_enqueue(
+                username, filename, request_id=world.key + 1)
         for attempt in world.attempts:
             transfer_id = _transfer_id(world.key, attempt.index)
             slskd.add_transfer(

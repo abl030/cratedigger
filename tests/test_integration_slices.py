@@ -5359,7 +5359,8 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             filename="Music\\Album\\01 - Track One.flac",
             attempt_fingerprint="ownerfp")])
         db.confirm_transfer_enqueue(
-            "good_peer", "Music\\Album\\01 - Track One.flac")
+            "good_peer", "Music\\Album\\01 - Track One.flac",
+            request_id=owner_rid)
 
         ctx = self._wire(cfg, slskd, db, album)
         # Locally wired on THIS test's ctx only -- _wire() itself stays

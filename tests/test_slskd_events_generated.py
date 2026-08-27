@@ -9,21 +9,25 @@ locations; issue #146).
 Four properties over generated feed histories:
 
 1. **Stamping oracle** — for worlds with a clean cursor (its id present in
-   the feed, unique event ids), every downloading file ends up stamped
-   with exactly the newest decodable DownloadFileComplete event for its
-   ``(username, remote filename)`` key inside the new-events window — and
-   nothing else: no invented paths, no stamps from behind the cursor, no
-   writes to rows that left ``downloading`` before fresh classification.
+   the feed, unique event ids), every downloading file whose queue key the
+   ledger proves is OURS ends up stamped with exactly the newest decodable
+   DownloadFileComplete event for its ``(username, remote filename)`` key
+   inside the new-events window — and nothing else: no invented paths, no
+   stamps from behind the cursor, no writes to rows that left
+   ``downloading`` before fresh classification, and no stamp at all on a
+   key that was never accepted (issue #1278 item 1).
    The SAME test also covers T2 (issue #571): a subset of world keys are
    pre-ledgered (``slskd_transfer_ledger`` rows, migration 045) and must be
    stamped with the SAME newest-event oracle, in the SAME pass — regardless
    of whether the owning request left ``downloading`` before fresh
-   classification (the ledger stamp is independent of
-   active_download_state's request-status gate).
+   classification. The two stamps now differ in exactly one respect: the
+   ledger's is independent of the request-STATUS gate, and shares active
+   stamping's OWNERSHIP gate.
 2. **Totality + exactly-once** — for arbitrary worlds (duplicate event
    ids, garbage timestamps, undecodable payloads, pruned cursors,
    bootstrap): ingestion never raises, every stamped path (both
-   active_download_state AND the ledger) originates from the feed, and
+   active_download_state AND the ledger) originates from the feed, neither
+   stamp reaches a key the ledger's accepted-POST rule refuses, and
    an immediate second pass over the unchanged feed is a no-op
    (``no_new_events``/``empty_feed``, identical states and cursor).
 3. **Duplicate-id invariance** — a feed with duplicated events (the
@@ -41,16 +45,21 @@ The T2 deterministic pins live in
 
 Per-clause proof (issue #1094): every checker clause here has a named
 world in ``TestEventCheckersTripOnViolations`` asserting that clause's own
-ANCHORED message, plus a production mutant killed at the gating (``suite``)
-tier. Two clauses are deliberately kept as fail-closed legislation with a
+message exactly (anchored for the raising checkers, by list equality for the
+accumulating ones), plus a production mutant killed at the gating (``suite``)
+tier. Three clauses are deliberately kept as fail-closed legislation with a
 self-test but no reachable production world: ``assert_ledger_stamps_match``'s
 key-set clause (expected and actual are both projected from the world's
-``ledgered_keys``, so divergence is unreachable by construction) and
+``ledgered_keys``, so divergence is unreachable by construction),
 ``assert_result_well_formed``'s cursor-gap-plus-hold clause (production
 couples the two, and the page-cap world needs a >10k-event feed — pinned by
 ``tests/test_slskd_events.py::TestIncarnationAwareStamping::
-test_cursor_gap_fail_open_advances_despite_lost_dirty_write``). Note also
-that a request leaving ``downloading`` is excluded here by
+test_cursor_gap_fail_open_advances_despite_lost_dirty_write``), and
+``ownership_agreement_violations``'s ledger clause (see that function's own
+docstring: ``stamp_transfer_completion`` writes a path only onto an already
+accepted row, so no mutant in ``lib/slskd_events.py`` can separate the two).
+
+Note also that a request leaving ``downloading`` is excluded here by
 ``get_downloading()``, not by the CAS status predicate: dropping that
 predicate from the DB layer changes nothing in these worlds, so this module
 does not patrol an interleaved status flip.
@@ -415,7 +424,8 @@ def _build_harness(world: EventWorld) -> tuple[FakePipelineDB, FakeSlskdAPI]:
             TransferLedgerRow(
                 request_id=owner, username=username, filename=filename),
         ])
-        db.confirm_transfer_enqueue(username, filename)
+        db.confirm_transfer_enqueue(
+            username, filename, request_id=owner)
     return db, slskd
 
 
@@ -465,14 +475,24 @@ def _newest_event_per_key(world: EventWorld) -> dict[tuple[str, str], str]:
 
 
 def expected_oracle_stamps(world: EventWorld) -> dict:
-    """The invariant: newest decodable file event per key in the new window."""
+    """The invariant: newest decodable file event per key in the new window,
+    for a key the ledger proves is OURS.
+
+    The ownership term is issue #1278 item 1. The events feed is
+    instance-wide, so a ``(username, filename)`` match is not evidence the
+    completed bytes are ours -- only an accepted POST is, which is exactly
+    what the ledger's own stamp already required in this same pass. A key
+    outside ``world.ledgered_keys`` was never accepted, so it stamps
+    nothing on either surface.
+    """
     newest_per_key = _newest_event_per_key(world)
+    owned = set(world.ledgered_keys)
     expected = {}
     for row in world.rows:
         for key in row.file_keys:
             expected[(row.request_id, key)] = (
                 None
-                if row.leaves_before_classification
+                if row.leaves_before_classification or key not in owned
                 else newest_per_key.get(key)
             )
     return expected
@@ -495,6 +515,28 @@ def _owned_local_paths(db: FakePipelineDB, world: EventWorld) -> dict[tuple[str,
         if key in actual:
             actual[key] = row.local_path
     return actual
+
+
+def _active_stamped_keys(stamped: dict) -> set[tuple[str, str]]:
+    """The ``(username, filename)`` keys this pass wrote a path onto.
+
+    Every generated world starts with every ``local_path`` unset, so a
+    non-``None`` value after the pass is this pass's own write.
+    """
+    return {key for (_request_id, key), path in stamped.items() if path is not None}
+
+
+def _ledger_stamped_keys(db: FakePipelineDB) -> set[tuple[str, str]]:
+    """Every ledger row carrying a completion path, keyed by queue key.
+
+    Reads the WHOLE ledger rather than the world's ``ledgered_keys``, so a
+    row the pass invented would be visible here instead of filtered out.
+    """
+    return {
+        (row.username, row.filename)
+        for row in db._transfer_ledger.values()
+        if row.local_path is not None
+    }
 
 
 def _seed_incarnation(
@@ -611,7 +653,7 @@ def _build_incarnation_harness(
             filename=attempt_b_key[1],
         ),
     ])
-    db.confirm_transfer_enqueue(*attempt_b_key)
+    db.confirm_transfer_enqueue(*attempt_b_key, request_id=1)
     return db, slskd, attempt_b_key
 
 
@@ -670,11 +712,52 @@ def feed_origin_violations(
     return violations
 
 
+def ownership_agreement_violations(
+    *,
+    owned_keys: set[tuple[str, str]],
+    active_stamped_keys: set[tuple[str, str]],
+    ledger_stamped_keys: set[tuple[str, str]],
+) -> list[str]:
+    """One ingestion pass, one ownership rule (issue #1278 item 1).
+
+    ``_stamp_local_paths`` and ``_stamp_transfer_ledger`` run in the same
+    pass off the same decoded events, and now answer to one rule instead
+    of two: only an accepted POST (``accepted_at IS NOT NULL``) proves the
+    completed bytes at an instance-wide ``(username, filename)`` are ours,
+    so NEITHER stamp may reach a key that rule refuses. ``owned_keys`` is
+    the ledger's own answer to that question, read after the pass.
+
+    Accumulating (``list[str]``) so the active clause cannot mask the
+    ledger clause and each carries its own message for the known-bad
+    self-test.
+
+    **Reachability, honestly.** The active clause is reachable: deleting
+    the ``owned_keys`` gate in ``_stamp_local_paths`` fires it. The ledger
+    clause is fail-closed legislation with a self-test but no reachable
+    production world -- ``stamp_transfer_completion`` writes ``local_path``
+    only onto a row that already carries ``accepted_at``, so a
+    ledger-stamped key is an owned key by construction of the DB method,
+    and no mutant inside ``lib/slskd_events.py`` can separate them. It
+    legislates for a future writer that stamps the ledger some other way.
+    """
+    violations = []
+    for key in sorted(active_stamped_keys - owned_keys):
+        violations.append(
+            f"active_download_state stamped {key!r}, which the transfer "
+            "ledger does not prove is ours")
+    for key in sorted(ledger_stamped_keys - owned_keys):
+        violations.append(
+            f"the transfer ledger stamped {key!r}, which its own "
+            "accepted-POST rule does not prove is ours")
+    return violations
+
+
 def assert_result_well_formed(result: EventIngestResult) -> None:
     if result.outcome not in _VALID_OUTCOMES:
         raise AssertionError(f"unknown ingest outcome: {result.outcome!r}")
     for field in ("events_seen", "file_events", "files_stamped",
-                  "requests_updated", "transfers_stamped"):
+                  "requests_updated", "transfers_stamped",
+                  "unowned_completions"):
         if getattr(result, field) < 0:
             raise AssertionError(f"negative counter {field}: {result!r}")
     if result.cursor_advanced and result.cursor_hold_reason is not None:
@@ -782,7 +865,17 @@ class TestGeneratedEventStamping(unittest.TestCase):
 
         assert_result_well_formed(result)
         expected = expected_oracle_stamps(world)
-        assert_stamps_match(expected, _stamped_paths(db, world))
+        stamped = _stamped_paths(db, world)
+        assert_stamps_match(expected, stamped)
+
+        # #1278 item 1: neither stamp may reach a key the ledger's own
+        # accepted-POST rule refuses.
+        self.assertEqual(
+            ownership_agreement_violations(
+                owned_keys=db.get_owned_transfer_keys(),
+                active_stamped_keys=_active_stamped_keys(stamped),
+                ledger_stamped_keys=_ledger_stamped_keys(db)),
+            [])
 
         # T2 (issue #571): ledgered keys follow the SAME oracle,
         # independent of whether the owner left downloading.
@@ -1018,6 +1111,14 @@ class TestGeneratedEventIngestTotality(unittest.TestCase):
                 ledger=ledger_after_first,
                 feed_paths=generated_paths),
             [])
+        # #1278 item 1: the same ownership rule, patrolled where no oracle
+        # exists (garbage timestamps, pruned cursors, bootstrap worlds).
+        self.assertEqual(
+            ownership_agreement_violations(
+                owned_keys=db.get_owned_transfer_keys(),
+                active_stamped_keys=_active_stamped_keys(stamped_after_first),
+                ledger_stamped_keys=_ledger_stamped_keys(db)),
+            [])
         cursor_after_first = db.get_slskd_event_cursor()
 
         second = ingest_download_file_events(db, slskd)
@@ -1208,6 +1309,14 @@ class TestEventCheckersTripOnViolations(unittest.TestCase):
                     "negative counter transfers_stamped: EventIngestResult("),
             ),
             (
+                "C10a negative unowned_completions",
+                EventIngestResult(
+                    outcome="ingested", unowned_completions=-1),
+                _prefix(
+                    "negative counter unowned_completions: "
+                    "EventIngestResult("),
+            ),
+            (
                 "C11 advanced cursor also reports a hold",
                 EventIngestResult(
                     outcome="ingested",
@@ -1328,6 +1437,36 @@ class TestEventCheckersTripOnViolations(unittest.TestCase):
                     feed_paths=feed),
                 [active_violation, ledger_violation])
 
+    def test_ownership_agreement_checker_clauses(self):
+        owned: set[tuple[str, str]] = {_LEDGER_A}
+        active_violation = (
+            "active_download_state stamped ('peer1', '02 track.flac'), "
+            "which the transfer ledger does not prove is ours")
+        ledger_violation = (
+            "the transfer ledger stamped ('peer1', '02 track.flac'), "
+            "which its own accepted-POST rule does not prove is ours")
+        with self.subTest(clause="C19 active stamp on an unowned key"):
+            self.assertEqual(
+                ownership_agreement_violations(
+                    owned_keys=owned,
+                    active_stamped_keys={_LEDGER_A, _LEDGER_B},
+                    ledger_stamped_keys={_LEDGER_A}),
+                [active_violation])
+        with self.subTest(clause="C20 ledger stamp on an unowned key"):
+            self.assertEqual(
+                ownership_agreement_violations(
+                    owned_keys=owned,
+                    active_stamped_keys={_LEDGER_A},
+                    ledger_stamped_keys={_LEDGER_A, _LEDGER_B}),
+                [ledger_violation])
+        with self.subTest(clause="both clauses report — neither masks"):
+            self.assertEqual(
+                ownership_agreement_violations(
+                    owned_keys=owned,
+                    active_stamped_keys={_LEDGER_B},
+                    ledger_stamped_keys={_LEDGER_B}),
+                [active_violation, ledger_violation])
+
     def test_owning_request_id_fails_closed_on_a_foreign_key(self):
         world = EventWorld(
             rows=(RequestWorld(
@@ -1380,6 +1519,18 @@ class TestEventCheckersTripOnViolations(unittest.TestCase):
                 stamped={_KEY_A: "/downloads/complete/0", _KEY_B: None},
                 ledger={_LEDGER_A: None},
                 feed_paths={"/downloads/complete/0"}),
+            [])
+        self.assertEqual(
+            ownership_agreement_violations(
+                owned_keys={_LEDGER_A, _LEDGER_B},
+                active_stamped_keys={_LEDGER_A},
+                ledger_stamped_keys={_LEDGER_A}),
+            [])
+        self.assertEqual(
+            ownership_agreement_violations(
+                owned_keys=set(),
+                active_stamped_keys=set(),
+                ledger_stamped_keys=set()),
             [])
 
 

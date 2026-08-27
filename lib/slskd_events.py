@@ -68,6 +68,13 @@ class EventIngestResult:
     # currently-downloading rows) — a ledger row can be stamped for a
     # request that has since left 'downloading' too.
     transfers_stamped: int = 0
+    # Issue #1278 item 1 review F5: distinct queue keys this pass REFUSED
+    # to stamp because the ledger proves no accepted enqueue behind them.
+    # Every sibling refusal in this subsystem is observable (the reaper's
+    # ``unowned=`` counter, ``cancel_and_delete``'s skip warning); without
+    # this the ownership gate is the only silent one. See
+    # ``_stamp_local_paths`` for exactly what is and is not counted.
+    unowned_completions: int = 0
     cursor_gap: bool = False
     cursor_advanced: bool = False
     cursor_hold_reason: str | None = None
@@ -78,6 +85,7 @@ class EventIngestResult:
             f"file_events={self.file_events} files_stamped={self.files_stamped} "
             f"requests_updated={self.requests_updated} "
             f"transfers_stamped={self.transfers_stamped} "
+            f"unowned_completions={self.unowned_completions} "
             f"cursor_gap={self.cursor_gap} "
             f"cursor_advanced={self.cursor_advanced} "
             f"cursor_hold_reason={self.cursor_hold_reason}"
@@ -199,6 +207,7 @@ class _StampLocalPathsResult:
     files_stamped: int = 0
     requests_updated: int = 0
     lost_current_incarnation_writes: int = 0
+    unowned_completions: int = 0
 
 
 def _stamp_local_paths(
@@ -208,16 +217,91 @@ def _stamp_local_paths(
         tuple[str, str],
         list[_EventCompletionInfo],
     ],
+    owned_keys: frozenset[tuple[str, str]],
 ) -> _StampLocalPathsResult:
     """Write matched local paths into each request's persisted state.
 
     A row is dirty only when a completion has a provable occurrence at or
     after its valid enqueue witness. A rejected CAS is distinct from a clean
     no-op: a complete event window must retain its cursor for replay.
+
+    ``owned_keys`` is the ownership gate (issue #1278 item 1). The event
+    feed is instance-wide, so a ``(username, filename)`` match plus a time
+    bound does NOT establish that the completed bytes are ours: on a
+    shared slskd, a foreign client completing our exact queue key
+    produced a completion this function would write into OUR
+    ``active_download_state`` as an authoritative local path. Everything
+    downstream — materialization, validation, import — then treated a
+    stranger's file as the album we downloaded.
+
+    ``_stamp_transfer_ledger`` already refuses that key, in this same
+    pass, off the same decoded events, because
+    ``stamp_transfer_completion`` requires an accepted POST. This gate is
+    that rule applied to the OTHER stamp the pass performs, so one
+    ingestion pass now has one ownership rule instead of two.
+
+    **What this closes, and what it does not.** The gate closes exactly
+    the sub-case where we NEVER created a transfer at that queue key: a
+    stranger's completion at a key we do not own now stamps nothing. It
+    does NOT make an instance-wide feed unambiguous. A foreign client
+    completing a key we DO own — one we enqueued at some point, whose
+    completion lands at or after this incarnation's ``enqueued_at`` — is
+    still indistinguishable from ours on this evidence and is stamped
+    exactly as before. Nothing in the events feed or the ledger can
+    separate those two, so that residual is accepted, not solved here;
+    the processor's own source-path validation is the next boundary.
+
+    Deliberately keyed on the QUEUE KEY, not on the current attempt.
+    MEASURED (2026-08-26, live ledger): pending ledger rows still occur
+    weekly (35 in one recent week), while a key that was never once
+    accepted stopped appearing in July. INFERRED from that, not measured:
+    that an ambiguous POST is normally followed by an accepted retry on
+    the same key — the statistic is consistent with it but does not
+    establish the causal link, because it counts only keys that
+    eventually became accepted. The residual the statistic cannot see is
+    the opposite case: an ambiguous POST slskd silently ACCEPTED,
+    downloading to completion at a key we never confirmed. That
+    completion is refused here, the album is re-downloaded once on the
+    next cycle, and the pending-only-key count never records it —
+    self-healing waste, invisible in that measurement. A per-attempt gate
+    would strand more than this: exactly the downloads that currently
+    recover through a retry on the same key. Having created a transfer
+    for this exact (peer, remote path) at some point is what makes bytes
+    completing at it ours.
+
+    ``unowned_completions`` counts the DISTINCT queue keys refused here:
+    a key this event window carried a completion for, held by a
+    ``downloading`` row's PARSED file list, and absent from
+    ``owned_keys``. It is a count of KEYS, and bounds the stamps the gate
+    prevented in neither direction (each world below MEASURED 2026-08-27
+    against the fake DB, refused and owned twins side by side):
+
+    * UNDER, because the tally is per key while stamping is per row. Two
+      ``downloading`` rows sharing one key — #1178's dual-claim world —
+      contribute 1, while the owned twin of that world stamps 2. Both
+      halves are pinned:
+      ``tests/test_slskd_events.py::TestIngestStamping::
+      test_one_refused_key_on_two_rows_counts_once`` and its neighbour
+      ``test_one_owned_key_on_two_rows_stamps_both``.
+    * OVER, by two routes, because the tally deliberately skips both
+      conditions the stamp below must satisfy: a completion occurring at
+      or after this incarnation's ``enqueued_at``, and a local path
+      differing from the one already stored. A refused key failing
+      either would have stamped nothing — measured at 1 refusal each,
+      with each owned twin stamping 0.
+
+    A row abandoned above the file loop contributes nothing however
+    foreign its keys: no ``active_download_state``, an unparseable one,
+    and an invalid ``enqueued_at`` witness each ``continue`` before any
+    file is looked at. The last is the one worth naming, because its file
+    list is parsed and right there (measured: a foreign completion on
+    such a row counts 0). Files with no completion in this window are not
+    refusals and are never counted.
     """
     files_stamped = 0
     requests_updated = 0
     lost_current_incarnation_writes = 0
+    unowned_keys: set[tuple[str, str]] = set()
     for row in downloading:
         raw_state = row.get("active_download_state")
         if not raw_state:
@@ -239,10 +323,15 @@ def _stamp_local_paths(
             continue
         row_stamped = 0
         for file_state in state.files:
-            candidates = completion_candidates.get(
-                (file_state.username, file_state.filename),
-                (),
-            )
+            key = (file_state.username, file_state.filename)
+            if key not in owned_keys:
+                # Only a key this window actually completed is a REFUSAL;
+                # a file with no event at all takes the same branch and is
+                # not one.
+                if key in completion_candidates:
+                    unowned_keys.add(key)
+                continue
+            candidates = completion_candidates.get(key, ())
             info = next(
                 (
                     candidate
@@ -270,6 +359,7 @@ def _stamp_local_paths(
         files_stamped=files_stamped,
         requests_updated=requests_updated,
         lost_current_incarnation_writes=lost_current_incarnation_writes,
+        unowned_completions=len(unowned_keys),
     )
 
 
@@ -381,11 +471,19 @@ def ingest_download_file_events(
         return EventIngestResult(outcome="no_new_events", cursor_gap=cursor_gap)
 
     completion_candidates = _completion_info_from_events(new_events)
+    # One ownership read for the whole pass (issue #1278 item 1), asked
+    # about exactly the keys this event window mentions — never the whole
+    # 33k-row accepted set. Both stamps below then answer to the same
+    # accepted-POST rule. An empty key list is answered without a query by
+    # ``get_owned_transfer_keys_for`` itself, so no guard is needed here.
+    owned_keys: frozenset[tuple[str, str]] = frozenset(
+        db.get_owned_transfer_keys_for(sorted(completion_candidates)))
     stamp_result = (
         _stamp_local_paths(
             db,
             db.get_downloading(),
             completion_candidates,
+            owned_keys,
         )
         if completion_candidates
         else _StampLocalPathsResult()
@@ -402,6 +500,15 @@ def ingest_download_file_events(
         if ledger_newest
         else 0
     )
+    if stamp_result.unowned_completions:
+        logger.warning(
+            "SLSKD EVENTS: refused to stamp %d completed queue key(s) with "
+            "no accepted enqueue in the transfer ledger — either a foreign "
+            "client on this shared slskd, or an ambiguous POST of ours that "
+            "slskd silently accepted; the affected request re-downloads on a "
+            "later cycle",
+            stamp_result.unowned_completions,
+        )
 
     newest = new_events[0]
     cursor_hold_reason: str | None = None
@@ -431,6 +538,7 @@ def ingest_download_file_events(
         files_stamped=stamp_result.files_stamped,
         requests_updated=stamp_result.requests_updated,
         transfers_stamped=transfers_stamped,
+        unowned_completions=stamp_result.unowned_completions,
         cursor_gap=cursor_gap,
         cursor_advanced=cursor_hold_reason is None,
         cursor_hold_reason=cursor_hold_reason,

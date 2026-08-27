@@ -308,7 +308,9 @@ def _build_prune_db(rows: tuple[LedgerPruneRow, ...]) -> FakePipelineDB:
                 filename=f"f-{row.request_id}.flac"),
         ])
         if row.accepted:
-            db.confirm_transfer_enqueue("p0", f"f-{row.request_id}.flac")
+            db.confirm_transfer_enqueue(
+                "p0", f"f-{row.request_id}.flac",
+                request_id=row.request_id)
         ledger_id = next(
             fid for fid, r in db._transfer_ledger.items()
             if r.request_id == row.request_id)
@@ -483,7 +485,9 @@ class TestTransferLedgerCheckersTripOnViolations(unittest.TestCase):
                     db.record_transfer_enqueue(list(rows))
                 if confirm:
                     for row in rows:
-                        db.confirm_transfer_enqueue(row.username, row.filename)
+                        db.confirm_transfer_enqueue(
+                            row.username, row.filename,
+                            request_id=row.request_id)
                 with self.assertRaisesRegex(AssertionError, expected):
                     assert_write_ahead_holds(world, order, db)
 

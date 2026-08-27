@@ -88,22 +88,34 @@ def positively_owned_files[FileT: CanonicalFolderFile](
     Phase 1 did NOT forward it until issue #1278's review caught that,
     which made this arm the only one the download-timeout path ever
     took — every timeout cleanup a logged no-op. Do not treat the arm as
-    decorative because it is unreachable; it was reachable, in
-    production, for the length of one review round.
+    decorative because it is unreachable: it was reachable on that
+    series' own branch for the length of one review round. The defect
+    (``e327f6f1``) and its fix (``14b8f533``) reached ``main`` together
+    in one merge, so no ``main`` revision ever carried it.
 
     Two of ``_write_ahead_transfer_ledger``'s three skip conditions
-    mirror an empty result here exactly (it writes no row with no
-    writer, or with no files), so a context that never ledgered an
-    enqueue owns nothing to destroy. Its third condition,
-    ``request_id is None``, does NOT mirror: that skips the INSERT while
-    ``slskd_enqueue_with_outcome`` still calls
-    ``confirm_transfer_enqueues``, and ``confirm_transfer_enqueue``
-    matches the newest pending row for a ``(username, filename)`` across
-    the whole table without scoping to a request -- so it could promote
-    ANOTHER request's pending row and make the key look owned here. No
-    production caller reaches it (every enqueue carries an
-    ``album_requests`` id), which is the only reason that is not a live
-    cross-request promotion bug.
+    mirror an empty result here exactly: with no ownership collaborator
+    and with no files, both functions do nothing. The third does NOT, and
+    cannot: that skip is per-REQUEST (no ``request_id``, no INSERT) while
+    the question asked here is per-KEY and table-wide
+    (``get_owned_transfer_keys_for`` joins on ``(username, filename)``
+    alone, with no request predicate), so a request-less context whose
+    keys some OTHER request already accepted still gets a non-empty
+    result. That answer is right for the doctrine — an accepted row
+    anywhere proves CRATEDIGGER created the transfer, which is the whole
+    question a shared slskd poses — but it is not the mirroring the
+    earlier wording claimed.
+
+    What issue #1278 item 2 fixed there was different and real:
+    ``_write_ahead_transfer_ledger`` skipped the INSERT with no
+    ``request_id`` while ``slskd_enqueue_with_outcome`` still called
+    ``confirm_transfer_enqueues``, and ``confirm_transfer_enqueue`` took
+    the newest pending row for a ``(username, filename)`` across the
+    whole table -- so one request's acceptance could promote ANOTHER's
+    pending row into ownership it never earned. The confirm is now scoped
+    to its request and skipped outright when there is none. No production
+    caller ever reached the gap (every enqueue carries an
+    ``album_requests`` id), so this was latent, never a live incident.
 
     One fresh DB handle per call, the same worker-safe shape
     ``record_transfer_enqueue`` and ``confirm_transfer_enqueues`` already
@@ -151,11 +163,13 @@ def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> bool:
     ``rederive_transfer_ids`` -> ``match_transfer_for_attempt``, which
     excludes only TERMINAL pre-boundary records — a LIVE foreign
     transfer at the same key can still win). ``file.local_path`` was
-    either stamped by ``lib.slskd_events._stamp_local_paths``, which
-    matches on that same key with no ownership check at all, or is
-    resolved below from ``recent_completion_paths``, one page of the
-    same instance-wide events feed. So a foreign client at the same key
-    supplies both an ID we would cancel and a path we would unlink —
+    either stamped by ``lib.slskd_events._stamp_local_paths`` — which
+    matched on that same key with NO ownership check at all until #1278
+    item 1 gave it this same accepted-POST gate, and whose historical
+    stamps therefore carry no such proof — or is resolved below from
+    ``recent_completion_paths``, one page of the same instance-wide
+    events feed, which still has none. So a foreign client at the same
+    key supplies both an ID we would cancel and a path we would unlink —
     under the same download root, which is why ``path_is_within_root``
     cannot tell the two apart.
 
@@ -428,10 +442,16 @@ def slskd_enqueue_with_outcome(
         return SlskdEnqueueOutcome(status="rejected")
 
     writer = getattr(ctx, "download_ownership", None)
-    if writer is not None:
+    if writer is not None and request_id is not None:
+        # ``request_id is None`` confirms NOTHING, mirroring
+        # ``_write_ahead_transfer_ledger``'s own skip exactly (issue #1278
+        # item 2): with no request there is no row of ours to promote, and
+        # an unscoped confirm would reach for whatever pending row that
+        # key happened to carry -- another request's.
         writer.confirm_transfer_enqueues(
             username,
             [str(file["filename"]) for file in files],
+            request_id=request_id,
         )
 
     # Poll for transfer IDs — slskd needs time to register the enqueue.

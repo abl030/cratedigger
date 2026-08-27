@@ -6,8 +6,9 @@ The methods this mixin adds:
 * ``record_transfer_enqueue`` -- write-ahead batch INSERT, called BEFORE
   ``ctx.slskd.transfers.enqueue(...)`` (T1). This preserves intent across
   crashes without treating a rejected or ambiguous POST as ownership.
-* ``confirm_transfer_enqueue`` -- accepted-POST write (T1.5). A write-ahead
-  intent becomes destructive authority only after slskd accepts the POST.
+* ``confirm_transfer_enqueue`` -- accepted-POST write (T1.5), scoped to the
+  request that made the POST. A write-ahead intent becomes destructive
+  authority only after slskd accepts the POST, and only for its own request.
 * ``stamp_transfer_completion`` -- event-ingestion success write: T2. Called
   from the SAME pass ``lib/slskd_events.py`` already stamps
   ``active_download_state`` from (issue #146), using the same durable
@@ -120,14 +121,29 @@ class _TransferLedgerMixin(_PipelineDBBase):
         )
         return cur.rowcount
 
-    def confirm_transfer_enqueue(self, username: str, filename: str) -> int:
-        """Confirm the newest pending write-ahead row after POST acceptance.
+    def confirm_transfer_enqueue(
+        self, username: str, filename: str, *, request_id: int,
+    ) -> int:
+        """Confirm ``request_id``'s newest pending write-ahead row after
+        POST acceptance.
 
         A ledger insert precedes the network call and is only intent evidence.
         This T1.5 write is the only runtime signal that grants destructive
         authority. Completion events may add path evidence only after this
         confirmation; a same-key human event must never promote rejected
         intent.
+
+        ``request_id`` scopes the promotion to the request that actually
+        made the POST (issue #1278 item 2). Two requests can hold pending
+        intent on the SAME ``(username, filename)`` -- one peer serving one
+        remote path for two pressings, or a Replace-lineage retry -- and
+        this UPDATE used to take the newest pending row for the key across
+        the WHOLE table. That made one request's acceptance capable of
+        promoting another's rejected or still-in-flight intent into
+        destructive ownership it never earned. It mirrors
+        ``_write_ahead_transfer_ledger``'s own scoping exactly: that INSERT
+        skips entirely without a ``request_id``, so there is no unscoped
+        row for an unscoped confirm to find.
         """
         cur = self._execute(
             """
@@ -137,13 +153,14 @@ class _TransferLedgerMixin(_PipelineDBBase):
                 SELECT id FROM slskd_transfer_ledger
                 WHERE username = %s
                   AND filename = %s
+                  AND request_id = %s
                   AND accepted_at IS NULL
                 ORDER BY enqueued_at DESC, id DESC
                 LIMIT 1
             )
               AND accepted_at IS NULL
             """,
-            (username, filename),
+            (username, filename, request_id),
         )
         return cur.rowcount
 
@@ -169,12 +186,35 @@ class _TransferLedgerMixin(_PipelineDBBase):
         """``get_owned_transfer_keys`` restricted to ``keys``.
 
         Same ownership question, same ``accepted_at IS NOT NULL``
-        answer -- asked about a handful of specific queue keys instead of
-        the whole ledger. ``converge_slskd_orphans`` legitimately wants
-        the whole set once per cycle; the destructive paths in
-        ``lib/slskd_transfers.py`` ask about one attempt's files and run
-        on find_download worker threads, where pulling all 33k accepted
-        keys per call to answer a five-key question is the wrong shape.
+        answer -- asked about specific queue keys instead of the whole
+        ledger. ``converge_slskd_orphans`` legitimately wants the whole
+        set once per cycle. Two callers want it keyed, and they are not
+        alike:
+
+        * the DESTRUCTIVE paths in ``lib/slskd_transfers.py``
+          (``positively_owned_files``), asking about one attempt's files
+          on a find_download worker thread, where pulling all 33k
+          accepted keys per call to answer a five-key question is the
+          wrong shape; and
+        * ``lib/slskd_events.py::ingest_download_file_events`` (issue
+          #1278 item 1), which destroys nothing -- it decides whether a
+          completion event may STAMP a local path -- runs once per cycle
+          on Phase 1's own single background thread, through that
+          thread's own ``PipelineDB`` handle rather than this
+          collaborator, and asks about every key its event window
+          mentions, up to the 10,000-event page cap.
+
+        Neither the caller's intent nor its key count changes the answer;
+        the query is deliberately shaped for both, and the ``unnest``
+        form below is what keeps the second one a single bound statement
+        rather than SQL text that grows with the window.
+
+        The keyed form is NOT request-scoped, by design. An accepted row
+        under ANY request proves Cratedigger created the transfer behind
+        that queue key, which is the exact question a shared slskd poses.
+        "WHICH request holds this key" is a different question with its
+        own method, ``get_conflicting_transfer_request_ids``, carrying its
+        own status and attempt scoping.
 
         Keys are passed as two parallel arrays zipped server-side by
         ``unnest(...)``, the same fixed-shape static SQL

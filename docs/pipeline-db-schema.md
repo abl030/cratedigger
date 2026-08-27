@@ -696,6 +696,19 @@ Completion events add file paths only to already-confirmed rows; they never
 promote pending intent. A definitively rejected POST therefore cannot gain
 destructive authority from a later same-key human completion.
 
+**Acceptance is scoped to the request that made the POST** (issue #1278 item
+2). `confirm_transfer_enqueue(username, filename, request_id=...)` promotes
+only that request's own newest pending row, and `slskd_enqueue_with_outcome`
+skips the confirm entirely when it has no request id — mirroring the
+write-ahead INSERT, which skips for the same reason. Unscoped, the UPDATE
+took the newest pending row for the key across the whole table, so one
+request's acceptance could promote another's rejected or still-in-flight
+intent into destructive ownership it never earned. Two requests reaching the
+same `(username, filename)` is not hypothetical — it is the collision the
+**Cross-request enqueue guard** below exists for. No production caller ever
+reached the unscoped path (every enqueue carries an `album_requests` id), so
+this closed a latent hazard rather than an incident.
+
 The durable ownership key is `(username, filename)`: slskd assigns a fresh
 transfer ID when it retries the same queued file, so an attempt-local ID cannot
 prove or disprove ownership of a later terminal record. Every terminal
@@ -722,12 +735,40 @@ covered every historical row.
 
 **Keyed ownership reads.** `get_owned_transfer_keys` answers "every key we
 own" for once-per-cycle convergence; `get_owned_transfer_keys_for(keys)`
-answers the same question about specific keys, for the destructive paths in
-`lib/slskd_transfers.py` that run on find_download worker threads and ask
-about one attempt's files. Both spell the same `accepted_at IS NOT NULL`
-gate; the keyed form zips its input server-side through `unnest(...)` rather
-than growing the SQL text, the same fixed-shape pattern
-`get_conflicting_transfer_request_ids` uses.
+answers the same question about specific keys. It has two callers of quite
+different shape: the destructive paths in `lib/slskd_transfers.py`, which run
+on find_download worker threads and ask about one attempt's files; and
+`lib/slskd_events.py::ingest_download_file_events`, which destroys nothing —
+it decides whether a completion event may stamp a local path onto
+`active_download_state` (issue #1278 item 1) — runs once per cycle on Phase
+1's own background thread, and asks about every key in its event window, up
+to the 10,000-event page cap. Both spell the same `accepted_at IS NOT NULL`
+gate,
+and neither is request-scoped: an accepted row under any request proves
+*Cratedigger* created the transfer, which is the question a shared slskd
+poses. "Which request holds this key" is a different question with its own
+method, `get_conflicting_transfer_request_ids`, which carries its own status
+and attempt scoping. The keyed form zips its input server-side through
+`unnest(...)` rather than growing the SQL text — the same fixed-shape pattern
+`get_conflicting_transfer_request_ids` uses, and what keeps the events
+caller's much larger key list a single bound statement.
+
+**One ingestion pass, one ownership rule.** `lib/slskd_events.py` performs
+two writes off the same decoded completion events. `stamp_transfer_completion`
+always required an accepted row; `_stamp_local_paths` required only a
+`(username, filename)` match plus a time bound, so a foreign client
+completing our exact queue key on a shared slskd handed us a `localFilename`
+we wrote into `active_download_state` as authoritative — and materialization,
+validation and import then treated a stranger's file as the album we
+downloaded. Issue #1278 item 1 gates that stamp on the same accepted-POST
+rule, per queue key rather than per attempt. Measured on the live ledger:
+pending rows still arrive weekly (36 in the seven days to 2026-08-27) while
+keys never once accepted stopped appearing in July — so a per-attempt gate
+would refuse keys a same-key retry currently recovers, while a per-key gate
+excludes only a key we have never owned. The refusal is reported on the cycle
+log line as `unowned_completions=`. It closes the never-owned case only: a
+foreign completion at a key we *do* own remains indistinguishable on this
+evidence, and the processor's source-path validation is the next boundary.
 
 Retention is a strict 90-day cutoff on `enqueued_at`: a row exactly at the
 cutoff survives. Older pending rows (`accepted_at IS NULL`) are deleted even

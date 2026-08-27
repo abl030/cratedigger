@@ -16737,7 +16737,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         first_id = self._ledger_rows(rid)[0]["id"]
         self.db.record_transfer_enqueue([row])
 
-        self.assertEqual(self.db.confirm_transfer_enqueue("p0", "a.flac"), 1)
+        self.assertEqual(
+            self.db.confirm_transfer_enqueue("p0", "a.flac", request_id=rid), 1)
 
         rows = self._ledger_rows(rid)
         accepted = [item for item in rows if item["accepted_at"] is not None]
@@ -16746,6 +16747,51 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.assertEqual(
             self.db.get_owned_transfer_keys(), {("p0", "a.flac")})
 
+    def test_confirm_transfer_enqueue_never_promotes_a_sibling_request(self):
+        """#1278 item 2: acceptance is scoped to the request that asked.
+
+        Two requests can hold pending intent on the SAME queue key -- the
+        same peer serving the same remote path for two pressings, or a
+        Replace-lineage retry. Unscoped, this UPDATE took the newest
+        pending row for the key ACROSS THE WHOLE TABLE, so one request's
+        accepted POST could promote another's rejected or still-in-flight
+        intent into destructive ownership it never earned.
+        """
+        mine = self._seed_request()
+        sibling = self.db.add_request(
+            artist_name="Artist", album_title="Other Album",
+            source="request", status="wanted")
+        self.db.record_transfer_enqueue([TransferLedgerRow(
+            request_id=mine, username="p0", filename="a.flac")])
+        # The sibling's intent is NEWER, so an unscoped "newest pending
+        # row for this key" confirm would land on it instead.
+        self.db.record_transfer_enqueue([TransferLedgerRow(
+            request_id=sibling, username="p0", filename="a.flac")])
+
+        confirmed = self.db.confirm_transfer_enqueue(
+            "p0", "a.flac", request_id=mine)
+
+        self.assertEqual(confirmed, 1)
+        self.assertIsNotNone(self._ledger_rows(mine)[0]["accepted_at"])
+        self.assertIsNone(self._ledger_rows(sibling)[0]["accepted_at"])
+
+    def test_confirm_transfer_enqueue_is_zero_for_a_request_with_no_intent(self):
+        """A request that never ledgered this key confirms nothing, even
+        when another request's pending row is sitting there."""
+        mine = self._seed_request()
+        sibling = self.db.add_request(
+            artist_name="Artist", album_title="Other Album",
+            source="request", status="wanted")
+        self.db.record_transfer_enqueue([TransferLedgerRow(
+            request_id=sibling, username="p0", filename="a.flac")])
+
+        self.assertEqual(
+            self.db.confirm_transfer_enqueue(
+                "p0", "a.flac", request_id=mine),
+            0)
+        self.assertIsNone(self._ledger_rows(sibling)[0]["accepted_at"])
+        self.assertEqual(self.db.get_owned_transfer_keys(), set())
+
     def test_completion_event_stamps_newest_open_queue_row(self):
         rid = self._seed_request()
         row = TransferLedgerRow(
@@ -16753,7 +16799,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.db.record_transfer_enqueue([row])
         first_id = self._ledger_rows(rid)[0]["id"]
         self.db.record_transfer_enqueue([row])
-        self.db.confirm_transfer_enqueue("p0", "a.flac")
+        self.db.confirm_transfer_enqueue("p0", "a.flac", request_id=rid)
 
         stamped = self.db.stamp_transfer_completion(
             "p0", "a.flac", "/downloads/a.flac")
@@ -16772,7 +16818,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         row = TransferLedgerRow(
             request_id=rid, username="p0", filename="a.flac")
         self.db.record_transfer_enqueue([row, row])
-        self.db.confirm_transfer_enqueue("p0", "a.flac")
+        self.db.confirm_transfer_enqueue("p0", "a.flac", request_id=rid)
 
         self.assertEqual(
             self.db.stamp_transfer_completion(
@@ -16805,8 +16851,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             TransferLedgerRow(
                 request_id=rid, username="p1", filename="b.flac"),
         ])
-        self.db.confirm_transfer_enqueue("p0", "a.flac")
-        self.db.confirm_transfer_enqueue("p1", "b.flac")
+        self.db.confirm_transfer_enqueue("p0", "a.flac", request_id=rid)
+        self.db.confirm_transfer_enqueue("p1", "b.flac", request_id=rid)
         self.db.stamp_transfer_completion(
             "p0", "a.flac", "/downloads/a.flac")
 
@@ -16844,7 +16890,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         ]
         for db in (self.db, fake):
             db.record_transfer_enqueue(rows)
-            db.confirm_transfer_enqueue("p0", "a.flac")
+            db.confirm_transfer_enqueue("p0", "a.flac", request_id=rid)
             # p1 stays pending intent: asked, never accepted.
 
         asked = [
@@ -16864,6 +16910,52 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                     db.get_owned_transfer_keys() & set(asked),
                 )
 
+    def test_confirm_transfer_enqueue_scoping_matches_the_fake(self):
+        """The request-scoped confirm (#1278 item 2) answers the same in
+        PG and in the fake, over identical two-request state.
+
+        Every ownership-gated test in the tree runs against the fake; a
+        fake that promoted a sibling's row where PG refuses would make
+        all of them fictions about a database that behaves differently.
+        """
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        mine = self._seed_request()
+        sibling = self.db.add_request(
+            artist_name="Artist", album_title="Other Album",
+            source="request", status="wanted")
+        for request_id, title in ((mine, "Album"), (sibling, "Other Album")):
+            fake.seed_request({
+                "id": request_id,
+                "status": "wanted",
+                "artist_name": "Artist",
+                "album_title": title,
+            })
+        for db in (self.db, fake):
+            db.record_transfer_enqueue([TransferLedgerRow(
+                request_id=mine, username="p0", filename="a.flac")])
+            db.record_transfer_enqueue([TransferLedgerRow(
+                request_id=sibling, username="p0", filename="a.flac")])
+
+        for db in (self.db, fake):
+            with self.subTest(db=type(db).__name__):
+                self.assertEqual(
+                    db.confirm_transfer_enqueue(
+                        "p0", "a.flac", request_id=mine),
+                    1)
+                # The sibling's intent stayed pending, so a second
+                # confirm for IT still has a row to promote.
+                self.assertEqual(
+                    db.confirm_transfer_enqueue(
+                        "p0", "a.flac", request_id=sibling),
+                    1)
+                # Both consumed: a third confirm finds nothing.
+                self.assertEqual(
+                    db.confirm_transfer_enqueue(
+                        "p0", "a.flac", request_id=mine),
+                    0)
+
     def test_owned_transfer_keys_for_answers_membership_not_row_count(self):
         """One queue key retried across attempts holds many accepted
         rows; the answer is a membership set, not one entry per row.
@@ -16877,7 +16969,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             request_id=rid, username="p0", filename="a.flac")
         for _ in range(3):
             self.db.record_transfer_enqueue([row])
-            self.db.confirm_transfer_enqueue("p0", "a.flac")
+            self.db.confirm_transfer_enqueue(
+                "p0", "a.flac", request_id=rid)
 
         self.assertEqual(
             self.db.get_owned_transfer_keys_for([("p0", "a.flac")]),
@@ -16933,7 +17026,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             TransferLedgerRow(
                 request_id=rid, username="p0", filename="a.flac"),
         ])
-        self.db.confirm_transfer_enqueue("p0", "a.flac")
+        self.db.confirm_transfer_enqueue("p0", "a.flac", request_id=rid)
         self.db.stamp_transfer_completion("p0", "a.flac", "/downloads/a.flac")
 
         with self.assertRaises(psycopg2.errors.CheckViolation):
@@ -16967,7 +17060,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         ]
         for db in (self.db, fake):
             db.record_transfer_enqueue(rows)
-            db.confirm_transfer_enqueue("p0", "a.flac")
+            db.confirm_transfer_enqueue("p0", "a.flac", request_id=rid)
             db.stamp_transfer_completion(
                 "p0", "a.flac", "/downloads/a.flac")
 
@@ -17002,7 +17095,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                         request_id=rid, username=f"u{index}",
                         filename=f"{index}.flac"),
                 ])
-                self.db.confirm_transfer_enqueue(f"u{index}", f"{index}.flac")
+                self.db.confirm_transfer_enqueue(
+                    f"u{index}", f"{index}.flac", request_id=rid)
                 self.db.stamp_transfer_completion(
                     f"u{index}", f"{index}.flac", path)
                 if with_state:
@@ -17029,7 +17123,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                 ),
             ])
             self.db.confirm_transfer_enqueue(
-                f"p{request_id}", f"{request_id}.flac")
+                f"p{request_id}", f"{request_id}.flac",
+                request_id=request_id)
         for request_id in (active, inactive, missing):
             self._backdate(request_id, days=200)
 
@@ -17064,7 +17159,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             self._backdate(request_id, days=200)
         for request_id in (accepted_wanted, accepted_downloading):
             self.db.confirm_transfer_enqueue(
-                f"p{request_id}", f"{request_id}.flac")
+                f"p{request_id}", f"{request_id}.flac",
+                request_id=request_id)
 
         removed = self.db.prune_transfer_ledger(
             older_than=datetime.now(UTC) - timedelta(days=90))
@@ -17134,7 +17230,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
         self.db.record_transfer_enqueue([
             TransferLedgerRow(request_id=rid, username=username, filename=filename),
         ])
-        self.db.confirm_transfer_enqueue(username, filename)
+        self.db.confirm_transfer_enqueue(
+            username, filename, request_id=rid)
         return rid
 
     def test_get_conflicting_transfer_request_ids_downloading_owner_conflicts(self):
@@ -17181,7 +17278,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             TransferLedgerRow(
                 request_id=owner, username=old_username, filename=old_filename),
         ])
-        self.db.confirm_transfer_enqueue(old_username, old_filename)
+        self.db.confirm_transfer_enqueue(
+            old_username, old_filename, request_id=owner)
         self.db._execute(
             "UPDATE slskd_transfer_ledger SET enqueued_at = "
             "NOW() - INTERVAL '30 days' "
@@ -17205,7 +17303,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                 request_id=owner, username=current_username,
                 filename=current_filename),
         ])
-        self.db.confirm_transfer_enqueue(current_username, current_filename)
+        self.db.confirm_transfer_enqueue(
+            current_username, current_filename, request_id=owner)
 
         self.assertEqual(
             self.db.get_conflicting_transfer_request_ids(
@@ -17319,7 +17418,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                 request_id=rid, username=username, filename="a.flac")
             for db in (self.db, fake):
                 db.record_transfer_enqueue([row])
-                db.confirm_transfer_enqueue(username, "a.flac")
+                db.confirm_transfer_enqueue(
+                    username, "a.flac", request_id=rid)
             keys.append((username, "a.flac"))
 
         # F6: a scoped owner carrying BOTH an old and a current accepted
@@ -17341,7 +17441,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                     request_id=scoped_owner, username=old_username,
                     filename=old_filename),
             ])
-            db.confirm_transfer_enqueue(old_username, old_filename)
+            db.confirm_transfer_enqueue(
+                old_username, old_filename, request_id=scoped_owner)
         self.db._execute(
             "UPDATE slskd_transfer_ledger SET enqueued_at = "
             "NOW() - INTERVAL '30 days' "
@@ -17370,7 +17471,9 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                     request_id=scoped_owner, username=current_username,
                     filename=current_filename),
             ])
-            db.confirm_transfer_enqueue(current_username, current_filename)
+            db.confirm_transfer_enqueue(
+                current_username, current_filename,
+                request_id=scoped_owner)
         keys.extend([
             (old_username, old_filename),
             (current_username, current_filename),
@@ -17413,8 +17516,10 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                     filename=fp_cur_filename,
                     attempt_fingerprint=fp_current),
             ])
-            db.confirm_transfer_enqueue(fp_old_username, fp_old_filename)
-            db.confirm_transfer_enqueue(fp_cur_username, fp_cur_filename)
+            db.confirm_transfer_enqueue(
+                fp_old_username, fp_old_filename, request_id=fp_owner)
+            db.confirm_transfer_enqueue(
+                fp_cur_username, fp_cur_filename, request_id=fp_owner)
         newer_than_witness = fp_witness + timedelta(seconds=5)
         self.db._execute(
             "UPDATE slskd_transfer_ledger SET enqueued_at = %s "
@@ -17493,7 +17598,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                 request_id=owner, username=username, filename=filename,
                 attempt_fingerprint=fp),
         ])
-        self.db.confirm_transfer_enqueue(username, filename)
+        self.db.confirm_transfer_enqueue(
+            username, filename, request_id=owner)
         ledger_enqueued_at = datetime.now(UTC)
         self.db._execute(
             "UPDATE slskd_transfer_ledger SET enqueued_at = %s "
@@ -17548,7 +17654,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                 request_id=owner, username=old_username,
                 filename=old_filename, attempt_fingerprint=fp_old),
         ])
-        self.db.confirm_transfer_enqueue(old_username, old_filename)
+        self.db.confirm_transfer_enqueue(
+            old_username, old_filename, request_id=owner)
         # NEWER than the witness -- the OLD time predicate
         # (enqueued_at >= witness) would have counted this row as the
         # current attempt and blocked.
@@ -17616,7 +17723,8 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                 request_id=owner, username=username, filename=filename,
                 attempt_fingerprint="deadbeef"),
         ])
-        self.db.confirm_transfer_enqueue(username, filename)
+        self.db.confirm_transfer_enqueue(
+            username, filename, request_id=owner)
         state = {
             "filetype": "flac", "enqueued_at": datetime.now(UTC).isoformat(),
             "files": [], "attempt_fingerprint": None,

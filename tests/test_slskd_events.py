@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import unittest
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from lib.pipeline_db import TransferLedgerRow
 from lib.quality import ActiveDownloadFileState, ActiveDownloadState
@@ -20,7 +21,7 @@ from lib.slskd_events import (
     ingest_download_file_events,
 )
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
-from tests.helpers import handoff_automation_owner
+from tests.helpers import handoff_automation_owner, own_transfer_keys
 from tests.helpers import (
     make_active_download_file_state as _file_state,
 )
@@ -103,6 +104,14 @@ class _CursorUpsertFailureDB(FakePipelineDB):
 
 
 class SlskdEventIngestCase(unittest.TestCase):
+    #: Whether `seed_downloading` also writes the accepted ledger rows a
+    #: production `downloading` request settles into carrying. True is the
+    #: steady state, and the right default for a fixture that means to
+    #: exercise stamping. `TestTransferLedgerStamping` sets it False
+    #: because it tests the ledger's OWN gate and needs unledgered worlds
+    #: the fixture would otherwise make unreachable.
+    SEED_OWNS_FILES = True
+
     def setUp(self) -> None:
         self.db = FakePipelineDB()
         self.slskd = FakeSlskdAPI()
@@ -113,7 +122,19 @@ class SlskdEventIngestCase(unittest.TestCase):
         files: list[ActiveDownloadFileState] | None = None,
         status: str = "downloading",
         enqueued_at: str = "2026-07-01T00:00:00+00:00",
+        own_files: bool | None = None,
     ) -> None:
+        """Seed a request in the shape production actually persists.
+
+        ``own_files`` defaults True because accepted write-ahead ledger
+        rows on a ``downloading`` request's files are the STEADY STATE,
+        not a guarantee -- see ``tests.helpers.own_transfer_keys``, whose
+        docstring measures the live world where they are absent. Seeding
+        the state alone would model that recovery world by accident, so
+        a test that means to exercise stamping gets the settled shape by
+        default. Pass False deliberately for the foreign or
+        never-accepted key.
+        """
         state = ActiveDownloadState(
             filetype="flac",
             enqueued_at=enqueued_at,
@@ -126,6 +147,23 @@ class SlskdEventIngestCase(unittest.TestCase):
             "album_title": "Album",
             "active_download_state": json.loads(state.to_json()),
         })
+        owns = self.SEED_OWNS_FILES if own_files is None else own_files
+        if not owns:
+            return
+        self.own_files(state.files, request_id=request_id)
+
+    def own_files(
+        self,
+        files: Sequence[ActiveDownloadFileState],
+        *,
+        request_id: int = 1,
+    ) -> None:
+        """Ensure these files' queue keys carry accepted ledger rows."""
+        own_transfer_keys(
+            self.db,
+            [(file.username, file.filename) for file in files],
+            request_id=request_id,
+        )
 
     def event(self, *, id: str, timestamp: str,
               type: str = "DownloadFileComplete", data: str = "{}"):
@@ -150,6 +188,7 @@ class TestEventIngestResult(unittest.TestCase):
             files_stamped=0,
             requests_updated=0,
             transfers_stamped=1,
+            unowned_completions=3,
             cursor_gap=False,
             cursor_advanced=False,
             cursor_hold_reason="lost_current_incarnation_write",
@@ -159,6 +198,7 @@ class TestEventIngestResult(unittest.TestCase):
             result.to_log_line(),
             "SLSKD EVENTS: outcome=ingested events_seen=2 file_events=1 "
             "files_stamped=0 requests_updated=0 transfers_stamped=1 "
+            "unowned_completions=3 "
             "cursor_gap=False cursor_advanced=False "
             "cursor_hold_reason=lost_current_incarnation_write",
         )
@@ -225,6 +265,226 @@ class TestIngestStamping(SlskdEventIngestCase):
         cursor = self.db.get_slskd_event_cursor()
         assert cursor is not None
         self.assertEqual(cursor["last_event_id"], "ev-1")
+
+    def test_foreign_completion_never_stamps_our_state(self):
+        """#1278 item 1: ONE ingestion pass, ONE ownership rule.
+
+        `_stamp_transfer_ledger` refuses a key with no accepted POST, in
+        this same pass, off the same decoded events. `_stamp_local_paths`
+        did not — it matched purely on `(username, filename)` plus a time
+        bound, so a foreign client's completion at our queue key was
+        written into OUR `active_download_state` as an authoritative
+        local path, and everything downstream then treated a stranger's
+        file as the album we downloaded.
+        """
+        self.seed_downloading(own_files=False)
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        result = self.ingest()
+
+        self.assertIsNone(self.file_local_path())
+        self.assertEqual(result.files_stamped, 0)
+        self.assertEqual(result.requests_updated, 0)
+
+    def test_a_refused_completion_is_counted_and_warned_about(self):
+        """#1278 review F5: the gate must not be the one silent refusal.
+
+        Every sibling refusal in this subsystem is observable — the disk
+        reaper's ``unowned=`` counter, ``cancel_and_delete``'s skip
+        warning. This one emitted nothing at all, so an operator reading
+        the once-per-cycle ``SLSKD EVENTS:`` line saw a pass that stamped
+        nothing and no reason why.
+        """
+        self.seed_downloading(own_files=False)
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        with self.assertLogs("cratedigger", level=logging.WARNING) as logs:
+            result = self.ingest()
+
+        self.assertEqual(result.unowned_completions, 1)
+        self.assertIn("unowned_completions=1", result.to_log_line())
+        self.assertIn(
+            "refused to stamp 1 completed queue key(s) with no accepted "
+            "enqueue in the transfer ledger",
+            "\n".join(logs.output))
+
+    def test_a_file_with_no_completion_event_is_not_a_refusal(self):
+        """The gate's ``continue`` also fires for a file this window
+        carried no completion for. Counting those would report a refusal
+        on every idle downloading file in the pipeline."""
+        self.seed_downloading(own_files=False)
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="someone-else",
+                    filename="other\\Album\\09 unrelated.flac",
+                    local_filename="/dl/Other/09 unrelated.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        result = self.ingest()
+
+        self.assertEqual(result.unowned_completions, 0)
+
+    def test_an_owned_stamped_completion_is_not_a_refusal(self):
+        """Must-still-work: the ordinary pass reports zero refusals."""
+        self.seed_downloading()
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        result = self.ingest()
+
+        self.assertEqual(result.files_stamped, 1)
+        self.assertEqual(result.unowned_completions, 0)
+
+    def test_one_refused_key_on_two_rows_counts_once(self):
+        """DISTINCT queue keys, not per-file occurrences: two requests
+        can hold the same key (#1178's dual-claim world), and reporting
+        one foreign completion twice overstates the refusal."""
+        shared = _file_state(
+            username="peer1",
+            filename="music\\Artist\\Album\\01 track.flac")
+        self.seed_downloading(request_id=1, files=[shared], own_files=False)
+        self.seed_downloading(request_id=2, files=[shared], own_files=False)
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        result = self.ingest()
+
+        self.assertEqual(result.unowned_completions, 1)
+
+    def test_one_owned_key_on_two_rows_stamps_both(self):
+        """The owned twin of the test above, and the reason
+        ``unowned_completions`` is not an upper bound on prevented stamps.
+
+        The refusal tally is per KEY; stamping is per ROW. The same
+        dual-claim world, owned, writes a local path into BOTH rows --
+        so the one refusal the twin above reports stands for the two
+        stamps this one performs. ``_stamp_local_paths``'s own docstring
+        cites this pair; deduplicating stamps by key the way the counter
+        deduplicates refusals would strand one of these rows with no
+        local path and no reason recorded anywhere.
+        """
+        shared = _file_state(
+            username="peer1",
+            filename="music\\Artist\\Album\\01 track.flac")
+        self.seed_downloading(request_id=1, files=[shared], own_files=True)
+        self.seed_downloading(request_id=2, files=[shared], own_files=True)
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        result = self.ingest()
+
+        self.assertEqual(result.files_stamped, 2)
+        self.assertEqual(result.requests_updated, 2)
+        self.assertEqual(result.unowned_completions, 0)
+        self.assertEqual(
+            self.file_local_path(request_id=1), "/dl/Album/01 track.flac")
+        self.assertEqual(
+            self.file_local_path(request_id=2), "/dl/Album/01 track.flac")
+
+    def test_pending_intent_alone_never_stamps_our_state(self):
+        """A write-ahead row records that we ASKED, never that slskd
+        agreed — the same boundary `stamp_transfer_completion` enforces
+        for the ledger's own `local_path`."""
+        self.seed_downloading(own_files=False)
+        self.db.record_transfer_enqueue([TransferLedgerRow(
+            request_id=1,
+            username="peer1",
+            filename="music\\Artist\\Album\\01 track.flac",
+        )])
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        self.ingest()
+
+        self.assertIsNone(self.file_local_path())
+
+    def test_owned_key_from_an_earlier_attempt_still_stamps(self):
+        """Deliberately per-KEY, not per-attempt.
+
+        Live measurement (2026-08-26) drove this: pending ledger ROWS
+        still occur weekly (35 in one recent week), but pending-only
+        KEYS — a key never once accepted — stopped in July. An ambiguous
+        POST is normally followed by an accepted retry on the SAME key,
+        so a per-attempt gate would strand exactly the downloads that
+        currently recover, while a per-key gate still excludes a key we
+        have never owned. Having once created a transfer for this exact
+        (peer, remote path) is what makes the completed bytes ours.
+        """
+        self.seed_downloading(own_files=True)
+        # A later ambiguous attempt adds pending intent on the same key.
+        self.db.record_transfer_enqueue([TransferLedgerRow(
+            request_id=1,
+            username="peer1",
+            filename="music\\Artist\\Album\\01 track.flac",
+        )])
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        self.ingest()
+
+        self.assertEqual(self.file_local_path(), "/dl/Album/01 track.flac")
 
     def test_collision_suffixed_local_filename_is_stored_verbatim(self):
         # The whole point of the refactor: slskd's _<ticks> rename is
@@ -560,16 +820,10 @@ class TestIncarnationAwareStamping(SlskdEventIngestCase):
         self.db = _BeforeStateWriteDB()
         self.db.upsert_slskd_event_cursor(
             "ev-cursor", "2026-07-01T00:00:00.0000000Z")
-        key = ("peer1", "music\\Artist\\Album\\01 track.flac")
+        # seed_downloading owns the key (SEED_OWNS_FILES) -- one accepted
+        # ledger row, which the replacement below reuses rather than
+        # duplicating (see tests.helpers.own_transfer_keys).
         self.seed_downloading(enqueued_at="2026-07-01T09:00:00+00:00")
-        self.db.record_transfer_enqueue([
-            TransferLedgerRow(
-                request_id=1,
-                username=key[0],
-                filename=key[1],
-            ),
-        ])
-        self.db.confirm_transfer_enqueue(*key)
         self.slskd.events.set_events([
             self._file_event(
                 event_id="ev-complete",
@@ -682,19 +936,13 @@ class TestIncarnationAwareStamping(SlskdEventIngestCase):
             keys,
             start=1,
         ):
+            # seed_downloading owns each key (SEED_OWNS_FILES): one
+            # accepted ledger row per request.
             self.seed_downloading(
                 request_id=request_id,
                 files=[_file_state(username=username, filename=filename)],
                 enqueued_at="2026-07-01T09:00:00+00:00",
             )
-            self.db.record_transfer_enqueue([
-                TransferLedgerRow(
-                    request_id=request_id,
-                    username=username,
-                    filename=filename,
-                ),
-            ])
-            self.db.confirm_transfer_enqueue(username, filename)
         self.slskd.events.set_events([
             self._file_event(
                 event_id=f"ev-{index}",
@@ -759,16 +1007,7 @@ class TestIncarnationAwareStamping(SlskdEventIngestCase):
         self.db = _CursorUpsertFailureDB()
         self.db.upsert_slskd_event_cursor(
             "ev-cursor", "2026-07-01T00:00:00.0000000Z")
-        key = ("peer1", "music\\Artist\\Album\\01 track.flac")
         self.seed_downloading(enqueued_at="2026-07-01T09:00:00+00:00")
-        self.db.record_transfer_enqueue([
-            TransferLedgerRow(
-                request_id=1,
-                username=key[0],
-                filename=key[1],
-            ),
-        ])
-        self.db.confirm_transfer_enqueue(*key)
         self.slskd.events.set_events([
             self._file_event(
                 event_id="ev-complete",
@@ -824,16 +1063,7 @@ class TestIncarnationAwareStamping(SlskdEventIngestCase):
         self.assertEqual(self.db.cursor_upsert_calls, 3)
 
     def test_malformed_occurrence_is_ledger_only_and_does_not_hold_cursor(self):
-        key = ("peer1", "music\\Artist\\Album\\01 track.flac")
         self.seed_downloading(enqueued_at="2026-07-01T09:00:00+00:00")
-        self.db.record_transfer_enqueue([
-            TransferLedgerRow(
-                request_id=1,
-                username=key[0],
-                filename=key[1],
-            ),
-        ])
-        self.db.confirm_transfer_enqueue(*key)
         self.slskd.events.set_events([
             self._file_event(
                 event_id="ev-malformed-time",
@@ -860,7 +1090,6 @@ class TestIncarnationAwareStamping(SlskdEventIngestCase):
         )
 
     def test_invalid_current_witness_excludes_active_but_keeps_ledger_progress(self):
-        key = ("peer1", "music\\Artist\\Album\\01 track.flac")
         for witness in ("", "not-an-iso-witness"):
             with self.subTest(witness=witness):
                 self.db = FakePipelineDB()
@@ -869,14 +1098,6 @@ class TestIncarnationAwareStamping(SlskdEventIngestCase):
                 self.seed_downloading(enqueued_at=witness)
                 state_before = copy.deepcopy(
                     self.db.request(1)["active_download_state"])
-                self.db.record_transfer_enqueue([
-                    TransferLedgerRow(
-                        request_id=1,
-                        username=key[0],
-                        filename=key[1],
-                    ),
-                ])
-                self.db.confirm_transfer_enqueue(*key)
                 self.slskd.events.set_events([
                     self._file_event(
                         event_id="ev-valid",
@@ -1147,6 +1368,11 @@ class TestTransferLedgerStamping(SlskdEventIngestCase):
     ingestion pass, from the SAME (username, remote filename) events,
     that already stamps ``active_download_state``."""
 
+    # This class exists to test the ledger's OWN gate, so it seeds every
+    # ledger row itself; pre-owning would make "unledgered" worlds
+    # unreachable.
+    SEED_OWNS_FILES = False
+
     def setUp(self) -> None:
         super().setUp()
         self.db.upsert_slskd_event_cursor(
@@ -1162,7 +1388,8 @@ class TestTransferLedgerStamping(SlskdEventIngestCase):
                 filename="music\\Artist\\Album\\01 track.flac"),
         ])
         self.db.confirm_transfer_enqueue(
-            "peer1", "music\\Artist\\Album\\01 track.flac")
+            "peer1", "music\\Artist\\Album\\01 track.flac",
+            request_id=1)
         self.slskd.events.set_events([
             self.event(
                 id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
@@ -1201,9 +1428,12 @@ class TestTransferLedgerStamping(SlskdEventIngestCase):
 
         self.assertEqual(result.transfers_stamped, 0)
         self.assertEqual(self.db._transfer_ledger, {})
-        # A foreign/unledgered pair doesn't block active_download_state
-        # stamping — the two writes are independent.
-        self.assertEqual(self.file_local_path(), "/dl/Album/01 track.flac")
+        # One pass, one ownership rule (#1278 item 1). This assertion used
+        # to read "the two writes are independent" and pin the OPPOSITE
+        # path -- the unledgered pair still stamped active_download_state.
+        # That independence was the defect: the ledger refused the key
+        # while the active stamp accepted it off the same event.
+        self.assertIsNone(self.file_local_path())
 
     def test_reprocessing_the_same_event_window_is_idempotent(self):
         from lib.pipeline_db import TransferLedgerRow
@@ -1215,7 +1445,8 @@ class TestTransferLedgerStamping(SlskdEventIngestCase):
                 filename="music\\Artist\\Album\\01 track.flac"),
         ])
         self.db.confirm_transfer_enqueue(
-            "peer1", "music\\Artist\\Album\\01 track.flac")
+            "peer1", "music\\Artist\\Album\\01 track.flac",
+            request_id=1)
         self.slskd.events.set_events([
             self.event(
                 id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
