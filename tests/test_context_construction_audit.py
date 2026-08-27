@@ -28,11 +28,19 @@ agreement, in every direction:
 Clause 3's count is not decoration. Sites are keyed by scope chain, not by
 line number, so the key survives ordinary edits — but that means two
 constructions in ONE function share a key. Until issue #1278's review this
-module collapsed them (``sites[site.key] = site``, last one wins), so a
-function holding a correct construction and a collaborator-less second one
-reported no violation at all. #1280's second construction happened to live
-in its own helper (``_run_phase1``); had it been inline in ``main``, the
-audit written to catch it would have been green.
+module collapsed them (``sites[site.key] = site``, LAST one wins), so every
+construction but the last at a key was invisible to every clause.
+
+Be exact about which world that hid, because the correction round that first
+wrote this paragraph got it wrong: with a conforming construction LAST, the
+collapse reports nothing at all, whatever the earlier ones do; with the
+collaborator-less one last, the surviving site trips the kwarg clause and the
+defect is caught by accident. So the hidden world is specifically "a bad
+construction ABOVE a good one in the same scope". #1280's own defect was
+neither: it sat in a nested helper (``main._run_phase1``, line 1603) whose
+scope chain differs from ``main``'s own construction (line 1551), so the
+collapse never applied to it. Inline that same pair into ``main`` in that
+same order and it vanishes.
 
 **The grammar is deliberately bounded** (`.claude/rules/code-quality.md`
 § "Semantic source scanners are prohibited"). This parses with ``ast`` and
@@ -471,25 +479,27 @@ class TestRegistryCheckerTripsOnViolations(unittest.TestCase):
         )
 
     def test_construction_count_clause(self) -> None:
-        """The #1278 review F6 world: a SECOND construction appears inside
-        an already-registered function, so it shares the registered key.
+        """The #1278 review F6 world: a SECOND construction appears in an
+        already-registered function, so it shares the registered key.
 
-        Before the count clause the discovery dict collapsed the two
-        (``sites[site.key] = site``) and this reported nothing at all --
-        the exact shape (a collaborator-less second construction) the
-        module was written to catch.
+        The ordering is the whole point and is deliberately the one the
+        old collapse HID: the collaborator-less construction comes FIRST,
+        so ``sites[site.key] = site`` kept the conforming one below it and
+        every clause saw a clean world. (With the order reversed the
+        collapse kept the bad site and the kwarg clause fired anyway --
+        measured, not assumed.)
         """
         discovered = self._discovered(**{
             "lib/thing.py::build": [
                 DiscoveredSite(
                     key="lib/thing.py::build",
                     lineno=10,
-                    wires_download_ownership=True,
+                    wires_download_ownership=False,
                 ),
                 DiscoveredSite(
                     key="lib/thing.py::build",
                     lineno=14,
-                    wires_download_ownership=False,
+                    wires_download_ownership=True,
                 ),
             ],
         })
@@ -506,7 +516,7 @@ class TestRegistryCheckerTripsOnViolations(unittest.TestCase):
                     "declared answer on download_ownership."
                 ),
                 (
-                    "lib/thing.py::build (line 14) lost its "
+                    "lib/thing.py::build (line 10) lost its "
                     "download_ownership= kwarg: the registry declares "
                     "wires_download_ownership=True, the source says False."
                 ),
@@ -623,13 +633,14 @@ class TestSiteDiscoveryGrammar(unittest.TestCase):
 
         Two constructions in one ``def`` share a scope chain, so they
         share a key. ``discover_production_context_sites`` used to assign
-        ``sites[site.key] = site`` and keep only the last, which made a
-        collaborator-less second construction invisible to every clause.
+        ``sites[site.key] = site`` and keep only the LAST, discarding
+        everything above it. Source order here is the hidden one: the
+        collaborator-less construction first, the conforming one last.
         """
         source = (
             "def main():\n"
-            "    a = CratediggerContext(cfg=1, download_ownership=w)\n"
-            "    b = CratediggerContext(cfg=1)\n"
+            "    a = CratediggerContext(cfg=1)\n"
+            "    b = CratediggerContext(cfg=1, download_ownership=w)\n"
             "    return a, b\n"
         )
 
@@ -641,7 +652,7 @@ class TestSiteDiscoveryGrammar(unittest.TestCase):
                 (site.lineno, site.wires_download_ownership)
                 for site in grouped["cratedigger.py::main"]
             ],
-            [(2, True), (3, False)],
+            [(2, False), (3, True)],
         )
 
     def test_a_nested_construction_keeps_its_full_scope_chain(self) -> None:

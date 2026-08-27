@@ -186,12 +186,35 @@ class _TransferLedgerMixin(_PipelineDBBase):
         """``get_owned_transfer_keys`` restricted to ``keys``.
 
         Same ownership question, same ``accepted_at IS NOT NULL``
-        answer -- asked about a handful of specific queue keys instead of
-        the whole ledger. ``converge_slskd_orphans`` legitimately wants
-        the whole set once per cycle; the destructive paths in
-        ``lib/slskd_transfers.py`` ask about one attempt's files and run
-        on find_download worker threads, where pulling all 33k accepted
-        keys per call to answer a five-key question is the wrong shape.
+        answer -- asked about specific queue keys instead of the whole
+        ledger. ``converge_slskd_orphans`` legitimately wants the whole
+        set once per cycle. Two callers want it keyed, and they are not
+        alike:
+
+        * the DESTRUCTIVE paths in ``lib/slskd_transfers.py``
+          (``positively_owned_files``), asking about one attempt's files
+          on a find_download worker thread, where pulling all 33k
+          accepted keys per call to answer a five-key question is the
+          wrong shape; and
+        * ``lib/slskd_events.py::ingest_download_file_events`` (issue
+          #1278 item 1), which destroys nothing -- it decides whether a
+          completion event may STAMP a local path -- runs once per cycle
+          on Phase 1's own single background thread, through that
+          thread's own ``PipelineDB`` handle rather than this
+          collaborator, and asks about every key its event window
+          mentions, up to the 10,000-event page cap.
+
+        Neither the caller's intent nor its key count changes the answer;
+        the query is deliberately shaped for both, and the ``unnest``
+        form below is what keeps the second one a single bound statement
+        rather than SQL text that grows with the window.
+
+        The keyed form is NOT request-scoped, by design. An accepted row
+        under ANY request proves Cratedigger created the transfer behind
+        that queue key, which is the exact question a shared slskd poses.
+        "WHICH request holds this key" is a different question with its
+        own method, ``get_conflicting_transfer_request_ids``, carrying its
+        own status and attempt scoping.
 
         Keys are passed as two parallel arrays zipped server-side by
         ``unnest(...)``, the same fixed-shape static SQL

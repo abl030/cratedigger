@@ -88,21 +88,33 @@ def positively_owned_files[FileT: CanonicalFolderFile](
     Phase 1 did NOT forward it until issue #1278's review caught that,
     which made this arm the only one the download-timeout path ever
     took — every timeout cleanup a logged no-op. Do not treat the arm as
-    decorative because it is unreachable; it was reachable, in
-    production, for the length of one review round.
+    decorative because it is unreachable: it was reachable on that
+    series' own branch for the length of one review round. The defect
+    (``e327f6f1``) and its fix (``14b8f533``) reached ``main`` together
+    in one merge, so no ``main`` revision ever carried it.
 
-    All three of ``_write_ahead_transfer_ledger``'s skip conditions now
-    mirror an empty result here exactly: it writes no row with no writer,
-    with no files, or with no ``request_id``, so a context that never
-    ledgered an enqueue owns nothing to destroy. The third condition used
-    NOT to mirror -- it skipped the INSERT while
-    ``slskd_enqueue_with_outcome`` still called
+    Two of ``_write_ahead_transfer_ledger``'s three skip conditions
+    mirror an empty result here exactly: with no ownership collaborator
+    and with no files, both functions do nothing. The third does NOT, and
+    cannot: that skip is per-REQUEST (no ``request_id``, no INSERT) while
+    the question asked here is per-KEY and table-wide
+    (``get_owned_transfer_keys_for`` joins on ``(username, filename)``
+    alone, with no request predicate), so a request-less context whose
+    keys some OTHER request already accepted still gets a non-empty
+    result. That answer is right for the doctrine — an accepted row
+    anywhere proves CRATEDIGGER created the transfer, which is the whole
+    question a shared slskd poses — but it is not the mirroring the
+    earlier wording claimed.
+
+    What issue #1278 item 2 fixed there was different and real:
+    ``_write_ahead_transfer_ledger`` skipped the INSERT with no
+    ``request_id`` while ``slskd_enqueue_with_outcome`` still called
     ``confirm_transfer_enqueues``, and ``confirm_transfer_enqueue`` took
-    the newest pending row for a ``(username, filename)`` across the whole
-    table, so it could promote ANOTHER request's pending row and make the
-    key look owned here. Issue #1278 item 2 closed that by scoping the
-    confirm to its request and skipping it outright when there is none.
-    No production caller ever reached the gap (every enqueue carries an
+    the newest pending row for a ``(username, filename)`` across the
+    whole table -- so one request's acceptance could promote ANOTHER's
+    pending row into ownership it never earned. The confirm is now scoped
+    to its request and skipped outright when there is none. No production
+    caller ever reached the gap (every enqueue carries an
     ``album_requests`` id), so this was latent, never a live incident.
 
     One fresh DB handle per call, the same worker-safe shape
