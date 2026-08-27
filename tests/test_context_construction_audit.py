@@ -12,14 +12,27 @@ A new site could appear, or an existing one lose a collaborator, without a
 single test noticing.
 
 ``PRODUCTION_CONTEXT_CONSTRUCTIONS`` below is that missing constraint. It
-is DATA a human maintains, one entry per site, each declaring whether the
-site wires ``download_ownership`` and why. The audit's only job is to hold
-the registry and the tree in exact agreement, in both directions:
+is DATA a human maintains, one entry per SCOPE, each declaring how many
+constructions that scope holds, whether they wire ``download_ownership``,
+and why. The audit's only job is to hold the registry and the tree in exact
+agreement, in every direction:
 
-1. every registered site still exists (else it is a STALE entry); and
-2. every discovered site is registered (else it is an UNREGISTERED site —
+1. every registered scope still holds a construction (else it is a STALE
+   entry); and
+2. every discovered scope is registered (else it is an UNREGISTERED site —
    the #1280 shape, failing closed at test time instead of in production);
-   and each site's ``download_ownership=`` kwarg matches its declaration.
+   and
+3. a registered scope holds exactly the declared NUMBER of constructions,
+   each of whose ``download_ownership=`` kwarg matches the declaration.
+
+Clause 3's count is not decoration. Sites are keyed by scope chain, not by
+line number, so the key survives ordinary edits — but that means two
+constructions in ONE function share a key. Until issue #1278's review this
+module collapsed them (``sites[site.key] = site``, last one wins), so a
+function holding a correct construction and a collaborator-less second one
+reported no violation at all. #1280's second construction happened to live
+in its own helper (``_run_phase1``); had it been inline in ``main``, the
+audit written to catch it would have been green.
 
 **The grammar is deliberately bounded** (`.claude/rules/code-quality.md`
 § "Semantic source scanners are prohibited"). This parses with ``ast`` and
@@ -32,15 +45,19 @@ passes is the RIGHT one is a question for that site's own test
 ``tests/test_convergence_runner_generated.py::TestPhase1ContextCallSite``),
 not for this audit.
 
-The one alias route out of that grammar is closed syntactically rather than
-semantically: binding the class to another name — ``from lib.context import
-CratediggerContext as X``, or ``X = CratediggerContext`` — is itself a
-violation, so a construction can never be spelled under a name this audit
-cannot see. Genuinely dynamic construction (``globals()[...]``,
-``functools.partial``) remains out of grammar and undetected; recognising it
-would require inferring runtime semantics from arbitrary source, which is
-the prohibited shape. Nothing in this repository does it, and review owns
-that boundary.
+Aliasing is closed syntactically rather than semantically: binding the class
+to another name is itself a violation, because a construction under that
+name would be spelled outside the call grammar above. Four binding forms are
+recognised — ``from lib.context import CratediggerContext as X``, ``X =
+CratediggerContext``, ``X = <something>.CratediggerContext``, and the
+annotated ``X: type = CratediggerContext`` (either value spelling). That is
+the whole claim; it is a list of forms, not a proof of exhaustiveness.
+Bindings through a data structure (``{"c": CratediggerContext}``, a tuple
+unpack, a parameter default) and genuinely dynamic construction
+(``globals()[...]``, ``functools.partial``) are out of grammar and
+undetected — recognising them would require inferring runtime semantics from
+arbitrary source, which is the prohibited shape. Nothing in this repository
+does any of them, and review owns that boundary.
 
 Deterministic only: this is test infrastructure auditing production shape,
 so per `.claude/rules/code-quality.md` § "Never property-test the test
@@ -51,7 +68,7 @@ from __future__ import annotations
 
 import ast
 import unittest
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -62,21 +79,30 @@ _CLASS_NAME = "CratediggerContext"
 
 @dataclass(frozen=True)
 class ContextSite:
-    """One registered production construction of ``CratediggerContext``.
+    """One registered production SCOPE that constructs ``CratediggerContext``.
 
     ``wires_download_ownership`` is the declaration the audit enforces
     against the source; ``why`` is the human's reason, enforced by nobody
     and read by the next author deciding whether a new site needs it.
+
+    ``constructions`` is how many constructions this scope holds — 1 for
+    every current entry, and the reason a second construction sneaked into
+    an already-registered function cannot pass unnoticed. Every one of them
+    must match ``wires_download_ownership``: a scope wanting two
+    constructions that disagree has to say so by splitting them into
+    separate functions, which is also how it earns separate reasons.
     """
 
     wires_download_ownership: bool
     why: str
+    constructions: int = 1
 
 
 #: Every production ``CratediggerContext(...)`` construction, keyed
 #: ``"<repo-relative path>::<enclosing def/class chain>"`` (``<module>``
 #: for a top-level one). Hand-maintained: adding a construction means
-#: adding an entry here and stating, in ``why``, whether the new context
+#: adding an entry here — or bumping an existing entry's
+#: ``constructions`` — and stating, in ``why``, whether the new context
 #: can reach a destructive slskd call.
 PRODUCTION_CONTEXT_CONSTRUCTIONS: Mapping[str, ContextSite] = {
     "cratedigger.py::main": ContextSite(
@@ -178,6 +204,19 @@ def _is_context_call(func: ast.expr) -> bool:
     return False
 
 
+def _names_the_class(value: ast.expr | None) -> bool:
+    """Whether this expression IS the class, in the two spellings
+    ``_is_context_call`` recognises for a call -- bare ``CratediggerContext``
+    or ``<something>.CratediggerContext``. Anything else (a subscript, a
+    call, a dict literal holding it) is out of grammar, deliberately.
+    """
+    if isinstance(value, ast.Name):
+        return value.id == _CLASS_NAME
+    if isinstance(value, ast.Attribute):
+        return value.attr == _CLASS_NAME
+    return False
+
+
 def _alias_bindings(rel_path: str, source: str) -> list[str]:
     """Names the class is bound to OTHER than its own.
 
@@ -185,6 +224,14 @@ def _alias_bindings(rel_path: str, source: str) -> list[str]:
     ``_is_context_call`` cannot recognise, so aliasing is itself the
     violation -- a syntactic fact, not an inference about what the alias
     is later used for.
+
+    Four forms, and only four (issue #1278 review F7): the aliased
+    ``from ... import ... as X``, and an ``X = ...`` / ``X: type = ...``
+    assignment whose value names the class either bare or through an
+    attribute. Attribute values and annotated assignments used to slip
+    through -- neither is dynamic, both are ordinary Python, and the
+    module docstring previously claimed no construction could hide from
+    this function at all.
     """
     violations: list[str] = []
     for node in ast.walk(ast.parse(source)):
@@ -197,9 +244,8 @@ def _alias_bindings(rel_path: str, source: str) -> list[str]:
                 if alias.name == _CLASS_NAME and alias.asname is not None
             )
         elif (
-            isinstance(node, ast.Assign)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == _CLASS_NAME
+            isinstance(node, ast.Assign | ast.AnnAssign)
+            and _names_the_class(node.value)
         ):
             violations.append(
                 f"{rel_path}:{node.lineno}: rebinds {_CLASS_NAME} to another "
@@ -209,23 +255,42 @@ def _alias_bindings(rel_path: str, source: str) -> list[str]:
     return violations
 
 
-def discover_production_context_sites() -> dict[str, DiscoveredSite]:
-    """Every production construction, keyed as the registry keys them.
+def discover_production_context_sites() -> dict[str, list[DiscoveredSite]]:
+    """Every production construction, grouped under the registry's keys.
+
+    A LIST per key, never one site per key: two constructions in one
+    function share a scope chain, and the earlier ``sites[site.key] =
+    site`` assignment silently dropped all but the last of them (see the
+    module docstring's clause 3).
 
     Uses the typing ratchet's own production walker rather than a second
     one -- it already prunes ``tests/``, ``docs/``, and every hidden
     directory (``.claude/worktrees`` above all: an unpruned walk crawls
     thousands of stale worktree files).
     """
-    sites: dict[str, DiscoveredSite] = {}
+    found: list[DiscoveredSite] = []
     for rel_path, abs_path in iter_production_paths():
         with open(abs_path, encoding="utf-8") as handle:
             source = handle.read()
         if _CLASS_NAME not in source:
             continue
-        for site in _sites_in_module(rel_path, source):
-            sites[site.key] = site
-    return sites
+        found.extend(_sites_in_module(rel_path, source))
+    return group_sites(found)
+
+
+def group_sites(
+    sites: Sequence[DiscoveredSite],
+) -> dict[str, list[DiscoveredSite]]:
+    """Group discovered sites by key, keeping every one of them.
+
+    Its own function so the keep-all-of-them behaviour is directly
+    testable: the collapse this replaces lived in one assignment inside a
+    walker that only runs against the whole real tree.
+    """
+    grouped: dict[str, list[DiscoveredSite]] = {}
+    for site in sites:
+        grouped.setdefault(site.key, []).append(site)
+    return grouped
 
 
 def discover_alias_bindings() -> list[str]:
@@ -242,19 +307,21 @@ def discover_alias_bindings() -> list[str]:
 
 def registry_violations(
     registry: Mapping[str, ContextSite],
-    discovered: Mapping[str, DiscoveredSite],
+    discovered: Mapping[str, Sequence[DiscoveredSite]],
 ) -> list[str]:
     """Where the registry and the tree disagree, one message per fact.
 
     Accumulating so no clause can mask another: a change that both adds an
-    unregistered site AND drops a collaborator elsewhere reports both.
+    unregistered site AND drops a collaborator elsewhere reports both. A
+    scope whose construction COUNT is wrong reports that as well as any
+    kwarg mismatch among its sites -- the two are different edits.
     """
     violations: list[str] = []
     for key in sorted(set(discovered) - set(registry)):
-        site = discovered[key]
+        lines = ", ".join(str(site.lineno) for site in discovered[key])
         violations.append(
             f"UNREGISTERED CratediggerContext construction at {key} "
-            f"(line {site.lineno}). Add it to "
+            f"(line {lines}). Add it to "
             "PRODUCTION_CONTEXT_CONSTRUCTIONS, declaring whether this "
             "context can reach a destructive slskd call and therefore "
             "needs download_ownership."
@@ -265,16 +332,26 @@ def registry_violations(
             "construction is there any more. Remove the entry."
         )
     for key in sorted(set(registry) & set(discovered)):
-        expected = registry[key].wires_download_ownership
-        actual = discovered[key].wires_download_ownership
-        if expected != actual:
+        entry = registry[key]
+        sites = sorted(discovered[key], key=lambda site: site.lineno)
+        if len(sites) != entry.constructions:
+            lines = ", ".join(str(site.lineno) for site in sites)
             violations.append(
-                f"{key} (line {discovered[key].lineno}) "
-                f"{'lost' if expected else 'gained'} its "
-                "download_ownership= kwarg: the registry declares "
-                f"wires_download_ownership={expected}, the source says "
-                f"{actual}."
+                f"{key} holds {len(sites)} CratediggerContext "
+                f"construction(s) (line {lines}), but the registry "
+                f"declares constructions={entry.constructions}. Every one "
+                "of them needs a declared answer on download_ownership."
             )
+        for site in sites:
+            if site.wires_download_ownership != entry.wires_download_ownership:
+                violations.append(
+                    f"{key} (line {site.lineno}) "
+                    f"{'lost' if entry.wires_download_ownership else 'gained'}"
+                    " its download_ownership= kwarg: the registry declares "
+                    f"wires_download_ownership="
+                    f"{entry.wires_download_ownership}, the source says "
+                    f"{site.wires_download_ownership}."
+                )
     return violations
 
 
@@ -331,24 +408,26 @@ class TestRegistryCheckerTripsOnViolations(unittest.TestCase):
         "lib/thing.py::build": ContextSite(True, "wires it"),
     }
 
-    def _discovered(self, **overrides: DiscoveredSite) -> dict[str, DiscoveredSite]:
+    def _discovered(
+        self, **overrides: list[DiscoveredSite],
+    ) -> dict[str, list[DiscoveredSite]]:
         base = {
-            "lib/thing.py::build": DiscoveredSite(
+            "lib/thing.py::build": [DiscoveredSite(
                 key="lib/thing.py::build",
                 lineno=10,
                 wires_download_ownership=True,
-            ),
+            )],
         }
         base.update(overrides)
         return base
 
     def test_unregistered_site_clause(self) -> None:
         discovered = self._discovered(**{
-            "lib/other.py::make": DiscoveredSite(
+            "lib/other.py::make": [DiscoveredSite(
                 key="lib/other.py::make",
                 lineno=42,
                 wires_download_ownership=False,
-            ),
+            )],
         })
 
         violations = registry_violations(self.REGISTERED, discovered)
@@ -373,11 +452,11 @@ class TestRegistryCheckerTripsOnViolations(unittest.TestCase):
 
     def test_lost_kwarg_clause(self) -> None:
         discovered = self._discovered(**{
-            "lib/thing.py::build": DiscoveredSite(
+            "lib/thing.py::build": [DiscoveredSite(
                 key="lib/thing.py::build",
                 lineno=10,
                 wires_download_ownership=False,
-            ),
+            )],
         })
 
         violations = registry_violations(self.REGISTERED, discovered)
@@ -390,6 +469,73 @@ class TestRegistryCheckerTripsOnViolations(unittest.TestCase):
                 "the source says False."
             )],
         )
+
+    def test_construction_count_clause(self) -> None:
+        """The #1278 review F6 world: a SECOND construction appears inside
+        an already-registered function, so it shares the registered key.
+
+        Before the count clause the discovery dict collapsed the two
+        (``sites[site.key] = site``) and this reported nothing at all --
+        the exact shape (a collaborator-less second construction) the
+        module was written to catch.
+        """
+        discovered = self._discovered(**{
+            "lib/thing.py::build": [
+                DiscoveredSite(
+                    key="lib/thing.py::build",
+                    lineno=10,
+                    wires_download_ownership=True,
+                ),
+                DiscoveredSite(
+                    key="lib/thing.py::build",
+                    lineno=14,
+                    wires_download_ownership=False,
+                ),
+            ],
+        })
+
+        violations = registry_violations(self.REGISTERED, discovered)
+
+        self.assertEqual(
+            violations,
+            [
+                (
+                    "lib/thing.py::build holds 2 CratediggerContext "
+                    "construction(s) (line 10, 14), but the registry "
+                    "declares constructions=1. Every one of them needs a "
+                    "declared answer on download_ownership."
+                ),
+                (
+                    "lib/thing.py::build (line 14) lost its "
+                    "download_ownership= kwarg: the registry declares "
+                    "wires_download_ownership=True, the source says False."
+                ),
+            ],
+        )
+
+    def test_a_conforming_second_construction_is_accepted_when_declared(
+        self,
+    ) -> None:
+        """Must-still-work: the count is a declaration, not a ban."""
+        registered = {
+            "lib/thing.py::build": ContextSite(True, "wires it", 2),
+        }
+        discovered = self._discovered(**{
+            "lib/thing.py::build": [
+                DiscoveredSite(
+                    key="lib/thing.py::build",
+                    lineno=10,
+                    wires_download_ownership=True,
+                ),
+                DiscoveredSite(
+                    key="lib/thing.py::build",
+                    lineno=14,
+                    wires_download_ownership=True,
+                ),
+            ],
+        })
+
+        self.assertEqual(registry_violations(registered, discovered), [])
 
     def test_gained_kwarg_clause(self) -> None:
         registered = {"lib/thing.py::build": ContextSite(False, "cannot")}
@@ -408,16 +554,16 @@ class TestRegistryCheckerTripsOnViolations(unittest.TestCase):
     def test_every_clause_reports_when_several_are_violated(self) -> None:
         """Accumulating, not short-circuiting: one edit can trip several."""
         discovered = self._discovered(**{
-            "lib/thing.py::build": DiscoveredSite(
+            "lib/thing.py::build": [DiscoveredSite(
                 key="lib/thing.py::build",
                 lineno=10,
                 wires_download_ownership=False,
-            ),
-            "lib/other.py::make": DiscoveredSite(
+            )],
+            "lib/other.py::make": [DiscoveredSite(
                 key="lib/other.py::make",
                 lineno=42,
                 wires_download_ownership=False,
-            ),
+            )],
         })
         registered = dict(self.REGISTERED)
         registered["lib/gone.py::old"] = ContextSite(True, "removed")
@@ -470,6 +616,34 @@ class TestSiteDiscoveryGrammar(unittest.TestCase):
         )
         self.assertEqual(_sites_in_module("lib/context.py", source), [])
 
+    def test_two_constructions_in_one_function_both_survive_grouping(
+        self,
+    ) -> None:
+        """Issue #1278 review F6, at the seam that actually lost them.
+
+        Two constructions in one ``def`` share a scope chain, so they
+        share a key. ``discover_production_context_sites`` used to assign
+        ``sites[site.key] = site`` and keep only the last, which made a
+        collaborator-less second construction invisible to every clause.
+        """
+        source = (
+            "def main():\n"
+            "    a = CratediggerContext(cfg=1, download_ownership=w)\n"
+            "    b = CratediggerContext(cfg=1)\n"
+            "    return a, b\n"
+        )
+
+        grouped = group_sites(_sites_in_module("cratedigger.py", source))
+
+        self.assertEqual(list(grouped), ["cratedigger.py::main"])
+        self.assertEqual(
+            [
+                (site.lineno, site.wires_download_ownership)
+                for site in grouped["cratedigger.py::main"]
+            ],
+            [(2, True), (3, False)],
+        )
+
     def test_a_nested_construction_keeps_its_full_scope_chain(self) -> None:
         source = (
             "def outer():\n"
@@ -508,6 +682,37 @@ class TestSiteDiscoveryGrammar(unittest.TestCase):
             )],
         )
 
+    def test_attribute_and_annotated_rebinds_are_violations(self) -> None:
+        """Issue #1278 review F7: neither form is dynamic, and both used
+        to slip through while the module claimed a construction could
+        never be spelled under a name it cannot see."""
+        attribute_rebind = (
+            "from lib import context\n"
+            "Ctx = context.CratediggerContext\n"
+        )
+        annotated_rebind = (
+            "from lib.context import CratediggerContext\n"
+            "Ctx: type = CratediggerContext\n"
+        )
+        annotated_attribute_rebind = (
+            "from lib import context\n"
+            "Ctx: type = context.CratediggerContext\n"
+        )
+        expected = (
+            "lib/x.py:2: rebinds CratediggerContext to another name -- "
+            "construct it under its own name so the construction-site "
+            "audit can see the site"
+        )
+
+        for label, source in (
+            ("X = pkg.CratediggerContext", attribute_rebind),
+            ("X: type = CratediggerContext", annotated_rebind),
+            ("X: type = pkg.CratediggerContext", annotated_attribute_rebind),
+        ):
+            with self.subTest(form=label):
+                self.assertEqual(_alias_bindings("lib/x.py", source),
+                                 [expected])
+
     def test_a_plain_import_is_not_an_alias(self) -> None:
         """Must-still-work: the ordinary import every site uses."""
         self.assertEqual(
@@ -515,6 +720,19 @@ class TestSiteDiscoveryGrammar(unittest.TestCase):
                 "lib/x.py",
                 "from lib.context import CratediggerContext\n"),
             [])
+
+    def test_an_ordinary_annotated_field_is_not_an_alias(self) -> None:
+        """Must-still-work: an annotated assignment whose value is not the
+        class, and a bare annotation with no value at all -- both ordinary
+        in ``lib/context.py`` itself."""
+        for source in (
+            "download_ownership: DownloadOwnershipWriter | None = None\n",
+            "ctx: CratediggerContext\n",
+            "def f() -> CratediggerContext: ...\n",
+            "from lib import context\nCtx = context.SomethingElse\n",
+        ):
+            with self.subTest(source=source.strip()):
+                self.assertEqual(_alias_bindings("lib/x.py", source), [])
 
 
 if __name__ == "__main__":
