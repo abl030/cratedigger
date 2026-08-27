@@ -75,8 +75,10 @@ machinery" there is no generated property here.
 from __future__ import annotations
 
 import ast
+import os
+import tempfile
 import unittest
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -263,7 +265,11 @@ def _alias_bindings(rel_path: str, source: str) -> list[str]:
     return violations
 
 
-def discover_production_context_sites() -> dict[str, list[DiscoveredSite]]:
+def discover_production_context_sites(
+    *,
+    iter_paths: Callable[
+        [], Iterable[tuple[str, str]]] = iter_production_paths,
+) -> dict[str, list[DiscoveredSite]]:
     """Every production construction, grouped under the registry's keys.
 
     A LIST per key, never one site per key: two constructions in one
@@ -271,13 +277,25 @@ def discover_production_context_sites() -> dict[str, list[DiscoveredSite]]:
     site`` assignment silently dropped all but the last of them (see the
     module docstring's clause 3).
 
+    ``iter_paths`` is the house kwarg-DI seam
+    (`.claude/rules/code-quality.md` § "Picking a strategy when you'd
+    otherwise want to patch our own code", option 2), defaulting to the
+    real walker. It exists because THIS function's use of ``group_sites``
+    was the last unguarded half of that fix: ``group_sites`` had a direct
+    pin and the count clause had a direct pin, but every scope in the real
+    tree holds exactly one construction, so
+    ``test_registry_matches_the_tree`` -- until this seam, the only
+    caller -- reports the same empty list whether the sites are grouped
+    or collapsed. Injecting a two-construction module is what makes the
+    difference observable (``TestWalkerGroupingReachesTheCountClause``).
+
     Uses the typing ratchet's own production walker rather than a second
     one -- it already prunes ``tests/``, ``docs/``, and every hidden
     directory (``.claude/worktrees`` above all: an unpruned walk crawls
     thousands of stale worktree files).
     """
     found: list[DiscoveredSite] = []
-    for rel_path, abs_path in iter_production_paths():
+    for rel_path, abs_path in iter_paths():
         with open(abs_path, encoding="utf-8") as handle:
             source = handle.read()
         if _CLASS_NAME not in source:
@@ -744,6 +762,126 @@ class TestSiteDiscoveryGrammar(unittest.TestCase):
         ):
             with self.subTest(source=source.strip()):
                 self.assertEqual(_alias_bindings("lib/x.py", source), [])
+
+
+class TestWalkerGroupingReachesTheCountClause(unittest.TestCase):
+    """``discover_production_context_sites`` -> ``registry_violations``,
+    over a module this test writes.
+
+    Issue #1278's fifth review round measured the gap this closes: the
+    fix for the two-sites-in-one-scope collapse is one expression --
+    ``return group_sites(found)`` -- and nothing constrained it.
+    ``group_sites`` and the count clause each had a direct pin, but the
+    walker's USE of ``group_sites`` had none, and the walker's only other
+    caller (``test_registry_matches_the_tree``) runs against a tree where
+    every scope holds exactly one construction, so grouping and collapsing
+    are indistinguishable there. Restoring the collapse in the walker
+    alone left all 20 tests in this module passing.
+    """
+
+    #: Deliberately the ordering the collapse HID (module docstring,
+    #: clause 3): the collaborator-less construction FIRST, the conforming
+    #: one LAST, so LAST-wins keeps the conforming site and the collapsed
+    #: world matches the registry exactly. MEASURED 2026-08-27 across both
+    #: orderings: collapsed, bad-first reports 0 violations while bad-last
+    #: reports 1 -- the kwarg clause, tripped by accident on the surviving
+    #: bad site; grouped, both report 2. Only bad-first isolates the
+    #: grouping, so a pin built on the reversed order would go red under
+    #: the collapse for a reason that has nothing to do with it.
+    SOURCE = (
+        "def build():\n"
+        "    first = CratediggerContext(cfg=1)\n"
+        "    second = CratediggerContext(cfg=1, download_ownership=w)\n"
+        "    return first, second\n"
+    )
+
+    REGISTRY: ClassVar[dict[str, ContextSite]] = {
+        "lib/two_sites.py::build": ContextSite(
+            wires_download_ownership=True,
+            why="declares a single construction that wires the writer",
+        ),
+    }
+
+    def _discovered(self) -> dict[str, list[DiscoveredSite]]:
+        """Run the real walker over one module written for this test."""
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        abs_path = os.path.join(tmpdir.name, "two_sites.py")
+        with open(abs_path, "w", encoding="utf-8") as handle:
+            handle.write(self.SOURCE)
+
+        def iter_paths() -> list[tuple[str, str]]:
+            return [("lib/two_sites.py", abs_path)]
+
+        return discover_production_context_sites(iter_paths=iter_paths)
+
+    def test_a_second_construction_in_one_scope_survives_the_walk(
+        self,
+    ) -> None:
+        discovered = self._discovered()
+
+        self.assertEqual(
+            [
+                (site.lineno, site.wires_download_ownership)
+                for site in discovered["lib/two_sites.py::build"]
+            ],
+            [(2, False), (3, True)],
+        )
+
+    def test_the_count_clause_fires_end_to_end_through_the_walker(
+        self,
+    ) -> None:
+        violations = registry_violations(self.REGISTRY, self._discovered())
+
+        self.assertEqual(
+            violations,
+            [
+                (
+                    "lib/two_sites.py::build holds 2 CratediggerContext "
+                    "construction(s) (line 2, 3), but the registry declares "
+                    "constructions=1. Every one of them needs a declared "
+                    "answer on download_ownership."
+                ),
+                (
+                    "lib/two_sites.py::build (line 2) lost its "
+                    "download_ownership= kwarg: the registry declares "
+                    "wires_download_ownership=True, the source says False."
+                ),
+            ],
+        )
+
+    def test_the_injected_walk_still_agrees_with_a_conforming_module(
+        self,
+    ) -> None:
+        """Must-still-work: the seam is a path source, not a bypass. One
+        construction matching its entry reports nothing, exactly as the
+        real tree does."""
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        abs_path = os.path.join(tmpdir.name, "one_site.py")
+        with open(abs_path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "def build():\n"
+                "    return CratediggerContext(cfg=1, download_ownership=w)\n"
+            )
+
+        def iter_paths() -> list[tuple[str, str]]:
+            return [("lib/one_site.py", abs_path)]
+
+        registry = {
+            "lib/one_site.py::build": ContextSite(
+                wires_download_ownership=True,
+                why="the ordinary one-construction shape every entry has",
+            ),
+        }
+
+        self.assertEqual(
+            registry_violations(
+                registry,
+                discover_production_context_sites(iter_paths=iter_paths),
+            ),
+            [],
+        )
 
 
 if __name__ == "__main__":
