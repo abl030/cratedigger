@@ -105,9 +105,9 @@ class _CursorUpsertFailureDB(FakePipelineDB):
 class SlskdEventIngestCase(unittest.TestCase):
     #: Whether `seed_downloading` also writes the accepted ledger rows a
     #: production `downloading` request always carries. True is the
-    #: production shape; classes that drive ledger state themselves (to
-    #: test the ledger's own gate, or a partial/failed ledger world) set
-    #: this False and own that seeding explicitly.
+    #: production shape. `TestTransferLedgerStamping` sets it False
+    #: because it tests the ledger's OWN gate and needs unledgered worlds
+    #: the fixture would otherwise make unreachable.
     SEED_OWNS_FILES = True
 
     def setUp(self) -> None:

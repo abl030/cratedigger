@@ -20,9 +20,9 @@ Four properties over generated feed histories:
    pre-ledgered (``slskd_transfer_ledger`` rows, migration 045) and must be
    stamped with the SAME newest-event oracle, in the SAME pass — regardless
    of whether the owning request left ``downloading`` before fresh
-   classification (the ledger stamp is independent of
-   active_download_state's request-status GATE ON REQUEST STATUS; it shares
-   active stamping's ownership gate).
+   classification. The two stamps now differ in exactly one respect: the
+   ledger's is independent of the request-STATUS gate, and shares active
+   stamping's OWNERSHIP gate.
 2. **Totality + exactly-once** — for arbitrary worlds (duplicate event
    ids, garbage timestamps, undecodable payloads, pruned cursors,
    bootstrap): ingestion never raises, every stamped path (both
@@ -58,8 +58,8 @@ test_cursor_gap_fail_open_advances_despite_lost_dirty_write``), and
 ``ownership_agreement_violations``'s ledger clause (see that function's own
 docstring: ``stamp_transfer_completion`` writes a path only onto an already
 accepted row, so no mutant in ``lib/slskd_events.py`` can separate the two).
-Note also
-that a request leaving ``downloading`` is excluded here by
+
+Note also that a request leaving ``downloading`` is excluded here by
 ``get_downloading()``, not by the CAS status predicate: dropping that
 predicate from the DB layer changes nothing in these worlds, so this module
 does not patrol an interleaved status flip.
@@ -721,10 +721,10 @@ def ownership_agreement_violations(
     """One ingestion pass, one ownership rule (issue #1278 item 1).
 
     ``_stamp_local_paths`` and ``_stamp_transfer_ledger`` run in the same
-    pass off the same decoded events. Neither may stamp a queue key the
-    other's ownership rule refuses: only an accepted POST
-    (``accepted_at IS NOT NULL``) proves the completed bytes at an
-    instance-wide ``(username, filename)`` are ours, and ``owned_keys`` is
+    pass off the same decoded events, and now answer to one rule instead
+    of two: only an accepted POST (``accepted_at IS NOT NULL``) proves the
+    completed bytes at an instance-wide ``(username, filename)`` are ours,
+    so NEITHER stamp may reach a key that rule refuses. ``owned_keys`` is
     the ledger's own answer to that question, read after the pass.
 
     Accumulating (``list[str]``) so the active clause cannot mask the
