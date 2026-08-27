@@ -270,13 +270,33 @@ def _stamp_local_paths(
     completing at it ours.
 
     ``unowned_completions`` counts the DISTINCT queue keys refused here:
-    a key this event window carried a completion for, present on a
-    ``downloading`` row's file list, and absent from ``owned_keys``. It
-    deliberately does NOT apply the occurrence-time bound below, so it is
-    an upper bound on the stamps the gate prevented — a refused key whose
-    only completion predates the incarnation would have stamped nothing
-    anyway. Files with no completion in this window are not refusals and
-    are never counted.
+    a key this event window carried a completion for, held by a
+    ``downloading`` row's PARSED file list, and absent from
+    ``owned_keys``. It is a count of KEYS, and bounds the stamps the gate
+    prevented in neither direction (each world below MEASURED 2026-08-27
+    against the fake DB, refused and owned twins side by side):
+
+    * UNDER, because the tally is per key while stamping is per row. Two
+      ``downloading`` rows sharing one key — #1178's dual-claim world —
+      contribute 1, while the owned twin of that world stamps 2. Both
+      halves are pinned:
+      ``tests/test_slskd_events.py::TestIngestStamping::
+      test_one_refused_key_on_two_rows_counts_once`` and its neighbour
+      ``test_one_owned_key_on_two_rows_stamps_both``.
+    * OVER, by two routes, because the tally deliberately skips both
+      conditions the stamp below must satisfy: a completion occurring at
+      or after this incarnation's ``enqueued_at``, and a local path
+      differing from the one already stored. A refused key failing
+      either would have stamped nothing — measured at 1 refusal each,
+      with each owned twin stamping 0.
+
+    A row abandoned above the file loop contributes nothing however
+    foreign its keys: no ``active_download_state``, an unparseable one,
+    and an invalid ``enqueued_at`` witness each ``continue`` before any
+    file is looked at. The last is the one worth naming, because its file
+    list is parsed and right there (measured: a foreign completion on
+    such a row counts 0). Files with no completion in this window are not
+    refusals and are never counted.
     """
     files_stamped = 0
     requests_updated = 0

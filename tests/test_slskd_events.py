@@ -105,8 +105,9 @@ class _CursorUpsertFailureDB(FakePipelineDB):
 
 class SlskdEventIngestCase(unittest.TestCase):
     #: Whether `seed_downloading` also writes the accepted ledger rows a
-    #: production `downloading` request always carries. True is the
-    #: production shape. `TestTransferLedgerStamping` sets it False
+    #: production `downloading` request settles into carrying. True is the
+    #: steady state, and the right default for a fixture that means to
+    #: exercise stamping. `TestTransferLedgerStamping` sets it False
     #: because it tests the ledger's OWN gate and needs unledgered worlds
     #: the fixture would otherwise make unreachable.
     SEED_OWNS_FILES = True
@@ -125,11 +126,14 @@ class SlskdEventIngestCase(unittest.TestCase):
     ) -> None:
         """Seed a request in the shape production actually persists.
 
-        ``own_files`` defaults True because a ``downloading`` request's
-        files ALWAYS carry accepted write-ahead ledger rows in
-        production -- see ``tests.helpers.own_transfer_keys`` for the
-        write order that guarantees it. Pass False deliberately to model
-        the foreign / never-accepted key.
+        ``own_files`` defaults True because accepted write-ahead ledger
+        rows on a ``downloading`` request's files are the STEADY STATE,
+        not a guarantee -- see ``tests.helpers.own_transfer_keys``, whose
+        docstring measures the live world where they are absent. Seeding
+        the state alone would model that recovery world by accident, so
+        a test that means to exercise stamping gets the settled shape by
+        default. Pass False deliberately for the foreign or
+        never-accepted key.
         """
         state = ActiveDownloadState(
             filetype="flac",
@@ -384,6 +388,44 @@ class TestIngestStamping(SlskdEventIngestCase):
         result = self.ingest()
 
         self.assertEqual(result.unowned_completions, 1)
+
+    def test_one_owned_key_on_two_rows_stamps_both(self):
+        """The owned twin of the test above, and the reason
+        ``unowned_completions`` is not an upper bound on prevented stamps.
+
+        The refusal tally is per KEY; stamping is per ROW. The same
+        dual-claim world, owned, writes a local path into BOTH rows --
+        so the one refusal the twin above reports stands for the two
+        stamps this one performs. ``_stamp_local_paths``'s own docstring
+        cites this pair; deduplicating stamps by key the way the counter
+        deduplicates refusals would strand one of these rows with no
+        local path and no reason recorded anywhere.
+        """
+        shared = _file_state(
+            username="peer1",
+            filename="music\\Artist\\Album\\01 track.flac")
+        self.seed_downloading(request_id=1, files=[shared], own_files=True)
+        self.seed_downloading(request_id=2, files=[shared], own_files=True)
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        result = self.ingest()
+
+        self.assertEqual(result.files_stamped, 2)
+        self.assertEqual(result.requests_updated, 2)
+        self.assertEqual(result.unowned_completions, 0)
+        self.assertEqual(
+            self.file_local_path(request_id=1), "/dl/Album/01 track.flac")
+        self.assertEqual(
+            self.file_local_path(request_id=2), "/dl/Album/01 track.flac")
 
     def test_pending_intent_alone_never_stamps_our_state(self):
         """A write-ahead row records that we ASKED, never that slskd
