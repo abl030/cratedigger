@@ -208,12 +208,38 @@ def _stamp_local_paths(
         tuple[str, str],
         list[_EventCompletionInfo],
     ],
+    owned_keys: frozenset[tuple[str, str]],
 ) -> _StampLocalPathsResult:
     """Write matched local paths into each request's persisted state.
 
     A row is dirty only when a completion has a provable occurrence at or
     after its valid enqueue witness. A rejected CAS is distinct from a clean
     no-op: a complete event window must retain its cursor for replay.
+
+    ``owned_keys`` is the ownership gate (issue #1278 item 1). The event
+    feed is instance-wide, so a ``(username, filename)`` match plus a time
+    bound does NOT establish that the completed bytes are ours: on a
+    shared slskd, a foreign client completing our exact queue key
+    produced a completion this function would write into OUR
+    ``active_download_state`` as an authoritative local path. Everything
+    downstream — materialization, validation, import — then treated a
+    stranger's file as the album we downloaded.
+
+    ``_stamp_transfer_ledger`` already refuses that key, in this same
+    pass, off the same decoded events, because
+    ``stamp_transfer_completion`` requires an accepted POST. This gate is
+    that rule applied to the OTHER stamp the pass performs, so one
+    ingestion pass now has one ownership rule instead of two.
+
+    Deliberately keyed on the QUEUE KEY, not on the current attempt.
+    Live measurement (2026-08-26): pending ledger rows still occur weekly
+    (35 in one recent week), but a key that was never once accepted
+    stopped appearing in July — an ambiguous POST is normally followed by
+    an accepted retry on the same key. A per-attempt gate would strand
+    exactly the downloads that currently recover; a per-key gate only
+    excludes a key we have never owned. Having created a transfer for
+    this exact (peer, remote path) at some point is what makes bytes
+    completing at it ours.
     """
     files_stamped = 0
     requests_updated = 0
@@ -239,10 +265,10 @@ def _stamp_local_paths(
             continue
         row_stamped = 0
         for file_state in state.files:
-            candidates = completion_candidates.get(
-                (file_state.username, file_state.filename),
-                (),
-            )
+            key = (file_state.username, file_state.filename)
+            if key not in owned_keys:
+                continue
+            candidates = completion_candidates.get(key, ())
             info = next(
                 (
                     candidate
@@ -381,11 +407,19 @@ def ingest_download_file_events(
         return EventIngestResult(outcome="no_new_events", cursor_gap=cursor_gap)
 
     completion_candidates = _completion_info_from_events(new_events)
+    # One ownership read for the whole pass (issue #1278 item 1), asked
+    # about exactly the keys this event window mentions — never the whole
+    # 33k-row accepted set. Both stamps below then answer to the same
+    # accepted-POST rule. An empty key list is answered without a query by
+    # ``get_owned_transfer_keys_for`` itself, so no guard is needed here.
+    owned_keys: frozenset[tuple[str, str]] = frozenset(
+        db.get_owned_transfer_keys_for(sorted(completion_candidates)))
     stamp_result = (
         _stamp_local_paths(
             db,
             db.get_downloading(),
             completion_candidates,
+            owned_keys,
         )
         if completion_candidates
         else _StampLocalPathsResult()

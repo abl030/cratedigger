@@ -45,7 +45,10 @@ from lib.import_queue import (
     AutomationHandoffResult,
     ImportJob,
 )
-from lib.pipeline_db._shared import ADVISORY_LOCK_NAMESPACE_IMPORT
+from lib.pipeline_db._shared import (
+    ADVISORY_LOCK_NAMESPACE_IMPORT,
+    TransferLedgerRow,
+)
 from lib.quality import (
     CURRENT_EVIDENCE_LINEAGE_VERSION,
     DECISION_LOSSLESS_SOURCE_LOCKED,
@@ -1346,6 +1349,56 @@ def make_active_download_state_json(
         enqueued_at="2026-07-01T00:00:00+00:00",
         files=files,
     ).to_json()
+
+
+class _TransferOwnershipDB(Protocol):
+    """The two ledger writes plus the read ``own_transfer_keys`` needs."""
+
+    def record_transfer_enqueue(self, rows: list[TransferLedgerRow]) -> None: ...
+
+    def confirm_transfer_enqueue(self, username: str, filename: str) -> int: ...
+
+    def get_owned_transfer_keys(self) -> set[tuple[str, str]]: ...
+
+
+def own_transfer_keys(
+    db: _TransferOwnershipDB,
+    keys: Sequence[tuple[str, str]],
+    *,
+    request_id: int = 1,
+) -> None:
+    """Ensure each ``(username, filename)`` queue key is ledger-owned.
+
+    A ``downloading`` request's files always carry an ACCEPTED write-ahead
+    ledger row in production: ``_write_ahead_transfer_ledger`` inserts the
+    row before the POST and ``slskd_enqueue_with_outcome`` confirms it the
+    moment slskd accepts, and only then is ``active_download_state``
+    persisted. A fixture that seeds the state without the ledger models a
+    world production cannot produce (Rule B, ``.claude/rules/
+    test-fidelity.md``) -- and one the stamping ownership gate (#1278 item
+    1) correctly refuses to act on.
+
+    This is a PRECONDITION helper, not a replay of ``enqueue``: a key that
+    is already accepted is skipped, so re-seeding a request (an
+    incarnation swap) does not multiply the ledger rows a test is
+    counting. A test that needs a SECOND row on a key -- a later ambiguous
+    attempt, say -- writes it itself through ``record_transfer_enqueue``.
+    """
+    already_owned = db.get_owned_transfer_keys()
+    rows = [
+        TransferLedgerRow(
+            request_id=request_id,
+            username=username,
+            filename=filename,
+        )
+        for username, filename in keys
+        if (username, filename) not in already_owned
+    ]
+    if not rows:
+        return
+    db.record_transfer_enqueue(rows)
+    for row in rows:
+        db.confirm_transfer_enqueue(row.username, row.filename)
 
 
 def handoff_automation_owner(

@@ -49,6 +49,7 @@ from tests.helpers import (
     make_request_row,
     make_requests_http_error,
     make_transfer_snapshot,
+    own_transfer_keys,
 )
 
 
@@ -4917,6 +4918,23 @@ class TestPollActiveDownloads(unittest.TestCase):
         fake_db = fake_db or FakePipelineDB()
         for row in downloading_rows or []:
             fake_db.seed_request(row)
+            # Production shape post-#571: a downloading row's files always
+            # carry an ACCEPTED write-ahead ledger row, and #1278 item 1
+            # made that ownership the gate on event stamping too. Seeding
+            # the state without the ledger models a world production
+            # cannot produce (Rule B) and silently disables stamping.
+            raw_state = row.get("active_download_state")
+            if not isinstance(raw_state, dict):
+                continue
+            own_transfer_keys(
+                fake_db,
+                [
+                    (str(f.get("username")), str(f.get("filename")))
+                    for f in raw_state.get("files") or []
+                    if isinstance(f, dict)
+                ],
+                request_id=int(row["id"]),
+            )
         ctx = make_ctx_with_fake_db(
             fake_db,
             cfg=cfg,
@@ -5455,6 +5473,12 @@ class TestPollActiveDownloads(unittest.TestCase):
                 return super().list(limit=limit, offset=offset)
 
         slskd.events = InstallBOnEventList(slskd)
+        # Incarnation B is a real fresh enqueue, so its own queue key
+        # carries an accepted write-ahead ledger row exactly as A's does
+        # (_make_poll_ctx seeds A's). Without it the #1278 item 1
+        # ownership gate refuses B's completion and the stamp under test
+        # never happens.
+        own_transfer_keys(fake_db, [("user-b", b_filename)], request_id=1)
         fake_db.upsert_slskd_event_cursor(
             "ev-cursor", "2026-07-01T00:00:00+00:00",
         )

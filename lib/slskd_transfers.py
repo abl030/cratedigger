@@ -151,11 +151,13 @@ def cancel_and_delete(files: list[Any], ctx: CratediggerContext) -> bool:
     ``rederive_transfer_ids`` -> ``match_transfer_for_attempt``, which
     excludes only TERMINAL pre-boundary records — a LIVE foreign
     transfer at the same key can still win). ``file.local_path`` was
-    either stamped by ``lib.slskd_events._stamp_local_paths``, which
-    matches on that same key with no ownership check at all, or is
-    resolved below from ``recent_completion_paths``, one page of the
-    same instance-wide events feed. So a foreign client at the same key
-    supplies both an ID we would cancel and a path we would unlink —
+    either stamped by ``lib.slskd_events._stamp_local_paths`` — which
+    matched on that same key with NO ownership check at all until #1278
+    item 1 gave it this same accepted-POST gate, and whose historical
+    stamps therefore carry no such proof — or is resolved below from
+    ``recent_completion_paths``, one page of the same instance-wide
+    events feed, which still has none. So a foreign client at the same
+    key supplies both an ID we would cancel and a path we would unlink —
     under the same download root, which is why ``path_is_within_root``
     cannot tell the two apart.
 
