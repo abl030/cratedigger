@@ -756,7 +756,8 @@ def assert_result_well_formed(result: EventIngestResult) -> None:
     if result.outcome not in _VALID_OUTCOMES:
         raise AssertionError(f"unknown ingest outcome: {result.outcome!r}")
     for field in ("events_seen", "file_events", "files_stamped",
-                  "requests_updated", "transfers_stamped"):
+                  "requests_updated", "transfers_stamped",
+                  "unowned_completions"):
         if getattr(result, field) < 0:
             raise AssertionError(f"negative counter {field}: {result!r}")
     if result.cursor_advanced and result.cursor_hold_reason is not None:
@@ -1306,6 +1307,14 @@ class TestEventCheckersTripOnViolations(unittest.TestCase):
                 EventIngestResult(outcome="ingested", transfers_stamped=-1),
                 _prefix(
                     "negative counter transfers_stamped: EventIngestResult("),
+            ),
+            (
+                "C10a negative unowned_completions",
+                EventIngestResult(
+                    outcome="ingested", unowned_completions=-1),
+                _prefix(
+                    "negative counter unowned_completions: "
+                    "EventIngestResult("),
             ),
             (
                 "C11 advanced cursor also reports a hold",

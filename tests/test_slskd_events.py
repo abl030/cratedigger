@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import unittest
 from collections.abc import Callable, Sequence
 
@@ -183,6 +184,7 @@ class TestEventIngestResult(unittest.TestCase):
             files_stamped=0,
             requests_updated=0,
             transfers_stamped=1,
+            unowned_completions=3,
             cursor_gap=False,
             cursor_advanced=False,
             cursor_hold_reason="lost_current_incarnation_write",
@@ -192,6 +194,7 @@ class TestEventIngestResult(unittest.TestCase):
             result.to_log_line(),
             "SLSKD EVENTS: outcome=ingested events_seen=2 file_events=1 "
             "files_stamped=0 requests_updated=0 transfers_stamped=1 "
+            "unowned_completions=3 "
             "cursor_gap=False cursor_advanced=False "
             "cursor_hold_reason=lost_current_incarnation_write",
         )
@@ -287,6 +290,100 @@ class TestIngestStamping(SlskdEventIngestCase):
         self.assertIsNone(self.file_local_path())
         self.assertEqual(result.files_stamped, 0)
         self.assertEqual(result.requests_updated, 0)
+
+    def test_a_refused_completion_is_counted_and_warned_about(self):
+        """#1278 review F5: the gate must not be the one silent refusal.
+
+        Every sibling refusal in this subsystem is observable — the disk
+        reaper's ``unowned=`` counter, ``cancel_and_delete``'s skip
+        warning. This one emitted nothing at all, so an operator reading
+        the once-per-cycle ``SLSKD EVENTS:`` line saw a pass that stamped
+        nothing and no reason why.
+        """
+        self.seed_downloading(own_files=False)
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        with self.assertLogs("cratedigger", level=logging.WARNING) as logs:
+            result = self.ingest()
+
+        self.assertEqual(result.unowned_completions, 1)
+        self.assertIn("unowned_completions=1", result.to_log_line())
+        self.assertIn(
+            "refused to stamp 1 completed queue key(s) with no accepted "
+            "enqueue in the transfer ledger",
+            "\n".join(logs.output))
+
+    def test_a_file_with_no_completion_event_is_not_a_refusal(self):
+        """The gate's ``continue`` also fires for a file this window
+        carried no completion for. Counting those would report a refusal
+        on every idle downloading file in the pipeline."""
+        self.seed_downloading(own_files=False)
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="someone-else",
+                    filename="other\\Album\\09 unrelated.flac",
+                    local_filename="/dl/Other/09 unrelated.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        result = self.ingest()
+
+        self.assertEqual(result.unowned_completions, 0)
+
+    def test_an_owned_stamped_completion_is_not_a_refusal(self):
+        """Must-still-work: the ordinary pass reports zero refusals."""
+        self.seed_downloading()
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        result = self.ingest()
+
+        self.assertEqual(result.files_stamped, 1)
+        self.assertEqual(result.unowned_completions, 0)
+
+    def test_one_refused_key_on_two_rows_counts_once(self):
+        """DISTINCT queue keys, not per-file occurrences: two requests
+        can hold the same key (#1178's dual-claim world), and reporting
+        one foreign completion twice overstates the refusal."""
+        shared = _file_state(
+            username="peer1",
+            filename="music\\Artist\\Album\\01 track.flac")
+        self.seed_downloading(request_id=1, files=[shared], own_files=False)
+        self.seed_downloading(request_id=2, files=[shared], own_files=False)
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        result = self.ingest()
+
+        self.assertEqual(result.unowned_completions, 1)
 
     def test_pending_intent_alone_never_stamps_our_state(self):
         """A write-ahead row records that we ASKED, never that slskd

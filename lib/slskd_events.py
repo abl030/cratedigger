@@ -68,6 +68,13 @@ class EventIngestResult:
     # currently-downloading rows) — a ledger row can be stamped for a
     # request that has since left 'downloading' too.
     transfers_stamped: int = 0
+    # Issue #1278 item 1 review F5: distinct queue keys this pass REFUSED
+    # to stamp because the ledger proves no accepted enqueue behind them.
+    # Every sibling refusal in this subsystem is observable (the reaper's
+    # ``unowned=`` counter, ``cancel_and_delete``'s skip warning); without
+    # this the ownership gate is the only silent one. See
+    # ``_stamp_local_paths`` for exactly what is and is not counted.
+    unowned_completions: int = 0
     cursor_gap: bool = False
     cursor_advanced: bool = False
     cursor_hold_reason: str | None = None
@@ -78,6 +85,7 @@ class EventIngestResult:
             f"file_events={self.file_events} files_stamped={self.files_stamped} "
             f"requests_updated={self.requests_updated} "
             f"transfers_stamped={self.transfers_stamped} "
+            f"unowned_completions={self.unowned_completions} "
             f"cursor_gap={self.cursor_gap} "
             f"cursor_advanced={self.cursor_advanced} "
             f"cursor_hold_reason={self.cursor_hold_reason}"
@@ -199,6 +207,7 @@ class _StampLocalPathsResult:
     files_stamped: int = 0
     requests_updated: int = 0
     lost_current_incarnation_writes: int = 0
+    unowned_completions: int = 0
 
 
 def _stamp_local_paths(
@@ -231,19 +240,48 @@ def _stamp_local_paths(
     that rule applied to the OTHER stamp the pass performs, so one
     ingestion pass now has one ownership rule instead of two.
 
+    **What this closes, and what it does not.** The gate closes exactly
+    the sub-case where we NEVER created a transfer at that queue key: a
+    stranger's completion at a key we do not own now stamps nothing. It
+    does NOT make an instance-wide feed unambiguous. A foreign client
+    completing a key we DO own — one we enqueued at some point, whose
+    completion lands at or after this incarnation's ``enqueued_at`` — is
+    still indistinguishable from ours on this evidence and is stamped
+    exactly as before. Nothing in the events feed or the ledger can
+    separate those two, so that residual is accepted, not solved here;
+    the processor's own source-path validation is the next boundary.
+
     Deliberately keyed on the QUEUE KEY, not on the current attempt.
-    Live measurement (2026-08-26): pending ledger rows still occur weekly
-    (35 in one recent week), but a key that was never once accepted
-    stopped appearing in July — an ambiguous POST is normally followed by
-    an accepted retry on the same key. A per-attempt gate would strand
-    exactly the downloads that currently recover; a per-key gate only
-    excludes a key we have never owned. Having created a transfer for
-    this exact (peer, remote path) at some point is what makes bytes
+    MEASURED (2026-08-26, live ledger): pending ledger rows still occur
+    weekly (35 in one recent week), while a key that was never once
+    accepted stopped appearing in July. INFERRED from that, not measured:
+    that an ambiguous POST is normally followed by an accepted retry on
+    the same key — the statistic is consistent with it but does not
+    establish the causal link, because it counts only keys that
+    eventually became accepted. The residual the statistic cannot see is
+    the opposite case: an ambiguous POST slskd silently ACCEPTED,
+    downloading to completion at a key we never confirmed. That
+    completion is refused here, the album is re-downloaded once on the
+    next cycle, and the pending-only-key count never records it —
+    self-healing waste, invisible in that measurement. A per-attempt gate
+    would strand more than this: exactly the downloads that currently
+    recover through a retry on the same key. Having created a transfer
+    for this exact (peer, remote path) at some point is what makes bytes
     completing at it ours.
+
+    ``unowned_completions`` counts the DISTINCT queue keys refused here:
+    a key this event window carried a completion for, present on a
+    ``downloading`` row's file list, and absent from ``owned_keys``. It
+    deliberately does NOT apply the occurrence-time bound below, so it is
+    an upper bound on the stamps the gate prevented — a refused key whose
+    only completion predates the incarnation would have stamped nothing
+    anyway. Files with no completion in this window are not refusals and
+    are never counted.
     """
     files_stamped = 0
     requests_updated = 0
     lost_current_incarnation_writes = 0
+    unowned_keys: set[tuple[str, str]] = set()
     for row in downloading:
         raw_state = row.get("active_download_state")
         if not raw_state:
@@ -267,6 +305,11 @@ def _stamp_local_paths(
         for file_state in state.files:
             key = (file_state.username, file_state.filename)
             if key not in owned_keys:
+                # Only a key this window actually completed is a REFUSAL;
+                # a file with no event at all takes the same branch and is
+                # not one.
+                if key in completion_candidates:
+                    unowned_keys.add(key)
                 continue
             candidates = completion_candidates.get(key, ())
             info = next(
@@ -296,6 +339,7 @@ def _stamp_local_paths(
         files_stamped=files_stamped,
         requests_updated=requests_updated,
         lost_current_incarnation_writes=lost_current_incarnation_writes,
+        unowned_completions=len(unowned_keys),
     )
 
 
@@ -436,6 +480,15 @@ def ingest_download_file_events(
         if ledger_newest
         else 0
     )
+    if stamp_result.unowned_completions:
+        logger.warning(
+            "SLSKD EVENTS: refused to stamp %d completed queue key(s) with "
+            "no accepted enqueue in the transfer ledger — either a foreign "
+            "client on this shared slskd, or an ambiguous POST of ours that "
+            "slskd silently accepted; the affected request re-downloads on a "
+            "later cycle",
+            stamp_result.unowned_completions,
+        )
 
     newest = new_events[0]
     cursor_hold_reason: str | None = None
@@ -465,6 +518,7 @@ def ingest_download_file_events(
         files_stamped=stamp_result.files_stamped,
         requests_updated=stamp_result.requests_updated,
         transfers_stamped=transfers_stamped,
+        unowned_completions=stamp_result.unowned_completions,
         cursor_gap=cursor_gap,
         cursor_advanced=cursor_hold_reason is None,
         cursor_hold_reason=cursor_hold_reason,
