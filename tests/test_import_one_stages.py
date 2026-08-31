@@ -2314,7 +2314,7 @@ class TestDryRunMintsVerifiedLosslessProof(unittest.TestCase):
             CdTocIdentity,
             QualityEvidenceActionPayload,
         )
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         cd_rip = CdRipBitVerification(
             toc=CdTocIdentity(

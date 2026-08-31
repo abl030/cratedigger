@@ -59,8 +59,9 @@ from lib.pipeline_db import (
     AlbumRequestRow,
 )
 from lib.release_identity import ReleaseIdentity
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import DenylistEntry, FakeBeetsDB, FakePipelineDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import make_request_row
 
 
 def assert_fresh_destructive_authority(

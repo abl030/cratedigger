@@ -34,12 +34,12 @@ import scripts.pipeline_cli.wrong_match as pipeline_cli_wrong_match
 from scripts import pipeline_cli
 from scripts.pipeline_cli import api_mutations
 from scripts.pipeline_cli.api_mutations import TcpApiEndpoint
+from tests.dispatch_helpers import handoff_automation_owner
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     REQUEST_CASCADE_RESET_TABLES,
     delete_all_rows,
-    handoff_automation_owner,
-    make_album_quality_evidence,
     make_request_row,
     seed_visible_wrong_match,
 )

@@ -84,14 +84,16 @@ from lib.quality import (
 from lib.quality_evidence import snapshot_audio_files
 from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from lib.staged_album import StagedAlbum
-from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import (
+from tests.dispatch_helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
     finalize_claimed_dispatch,
     handoff_automation_owner,
+)
+from tests.evidence_helpers import make_album_quality_evidence
+from tests.fakes import FakeBeetsDB, FakePipelineDB, FakePipelineDBSource
+from tests.helpers import (
     hermetic_beets_config_defaults,
-    make_album_quality_evidence,
     make_ctx_with_fake_db,
     make_grab_list_entry,
     make_request_row,
@@ -8185,6 +8187,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
             assert updated is not None
             self.assertEqual(updated.status, "failed")
             source = ctx.pipeline_db_source
+            assert isinstance(source, FakePipelineDBSource)
             self.assertEqual(len(source.reject_and_requeue_calls), 1)
             rejected = source.reject_and_requeue_calls[0]["bv_result"]
             self.assertEqual(rejected.scenario, "high_distance")

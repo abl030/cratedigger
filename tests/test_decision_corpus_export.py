@@ -41,7 +41,7 @@ from scripts.decision_differential import (
     replay_decision_transitions,
     verify_decision_corpus_pair,
 )
-from tests.helpers import make_album_quality_evidence
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 
 

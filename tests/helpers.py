@@ -2,6 +2,12 @@
 
 Builders for structured data used across tests. Use these instead of
 hand-rolling dicts or dataclass constructors with many fields.
+
+Two cohesive clusters live in sibling modules (issue #1278, "worth
+exploring" item 5): ``tests/evidence_helpers.py`` owns the
+``AlbumQualityEvidence``-family builders and parity worlds, and
+``tests/dispatch_helpers.py`` owns the dispatch/import-lane bridges,
+claim/handoff lifecycle helpers, and dispatch seam stubs.
 """
 
 from __future__ import annotations
@@ -11,13 +17,12 @@ import json
 import os
 import stat
 import tempfile
-import types
-from collections.abc import Callable, Generator, Mapping, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import msgspec
 import requests
@@ -25,53 +30,18 @@ import requests
 if TYPE_CHECKING:
     # Import-time cycle: ``tests.fakes`` does not import this module, but
     # keeping the reference type-only preserves that independence.
-    from album_source import DatabaseSource
-    from lib.dispatch.types import DispatchRequest, ImportAttemptResult
-    from lib.import_evidence import CandidateEvidenceActionResult
-    from lib.pipeline_db import DownloadLogOutcome
-    from lib.quality import SpectralDetail
+    from lib.context import CratediggerContext
     from tests.fakes import FakePipelineDB
 
 from lib.grab_list import DownloadFile, GrabListEntry
-from lib.import_execution import (
-    CancellationToken,
-    ExecutionLeaseSnapshot,
-    OwnerSessionIdentity,
-)
-from lib.import_queue import (
-    IMPORT_JOB_AUTOMATION,
-    IMPORT_JOB_FORCE,
-    IMPORT_JOB_LOCAL,
-    AutomationHandoffResult,
-    ImportJob,
-)
-from lib.pipeline_db._shared import (
-    ADVISORY_LOCK_NAMESPACE_IMPORT,
-    TransferLedgerRow,
-)
+from lib.pipeline_db._shared import TransferLedgerRow
 from lib.quality import (
-    CURRENT_EVIDENCE_LINEAGE_VERSION,
-    DECISION_LOSSLESS_SOURCE_LOCKED,
-    DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
-    DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
-    DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
-    EVIDENCE_PROVENANCE_CARRIED,
     EVIDENCE_PROVENANCE_MEASURED,
-    EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
-    AacLatticeCapture,
     ActiveDownloadFileState,
     ActiveDownloadState,
-    AlbumQualityEvidence,
-    AlbumQualityEvidenceFile,
-    AlbumQualityV0Metric,
     AudioQualityMeasurement,
-    AudioToolDiagnostic,
-    AudioValidationReport,
     CandidateSummary,
-    CdRipBitVerification,
-    CodecFamily,
-    CodecRankBands,
     ConversionInfo,
     DisambiguationFailure,
     DownloadInfo,
@@ -79,17 +49,13 @@ from lib.quality import (
     HarnessTrackInfo,
     ImportResult,
     PostflightInfo,
-    QualityRankConfig,
-    RankBitrateMetric,
     SpectralMeasurement,
     TargetQualityContract,
     TrackMapping,
     V0ProbeEvidence,
     ValidationResult,
     VerifiedLosslessProof,
-    legacy_unrecorded_audio_validation_report,
 )
-from lib.quality_evidence import snapshot_fingerprint
 from lib.slskd_client import DownloadDirectory, DownloadUser, TransferSnapshot
 
 _DEPLOYED_BEETS_DB_PATHS = frozenset({
@@ -364,7 +330,7 @@ def make_request_row(**overrides: object) -> dict[str, Any]:
     Mirrors the shape of PipelineDB.get_request() (SELECT * FROM album_requests).
     Use keyword overrides to set specific fields for your test scenario.
     """
-    row: dict[str, Any] = {
+    row: dict[str, object] = {
         "id": 1,
         "mb_release_id": "test-mbid-0001",
         "mb_release_group_id": None,
@@ -444,868 +410,6 @@ def make_request_row(**overrides: object) -> dict[str, Any]:
         suffix = f"{rid:04d}" if isinstance(rid, int) else str(rid)
         row["mb_release_id"] = f"test-mbid-{suffix}"
     return row
-
-
-def make_album_quality_evidence(
-    *,
-    mb_release_id: str = "test-mbid-0001",
-    source_path: str = "/tmp/test-staged",
-    measured_at: datetime | None = None,
-    files: list[AlbumQualityEvidenceFile] | None = None,
-    measurement: AudioQualityMeasurement | None = None,
-    v0_metric: AlbumQualityV0Metric | None = None,
-    verified_lossless_proof: VerifiedLosslessProof | None = None,
-    cd_rip_verification: CdRipBitVerification | None = None,
-    codec: str | None = "mp3",
-    container: str | None = "mp3",
-    storage_format: str | None = "MP3",
-    target_format: str | None = None,
-    target_is_cbr: bool | None = None,
-    lineage_version: int = CURRENT_EVIDENCE_LINEAGE_VERSION,
-    on_disk_v0_research_attempted: bool = False,
-    current_enrichment_required: bool = False,
-    preserve_spectral_measurement_version: bool = False,
-    audio_corrupt: bool = False,
-    audio_error: str | None = None,
-    audio_validation: AudioValidationReport | None = None,
-    aac_lattice: AacLatticeCapture | None = None,
-) -> AlbumQualityEvidence:
-    """Build production-shaped active album-quality evidence.
-
-    Migration 021: evidence is content-addressed by
-    ``(mb_release_id, snapshot_fingerprint)``. The fingerprint is computed
-    from ``files`` using the canonical helper, so the builder always
-    produces a self-consistent row.
-    """
-    if measured_at is None:
-        measured_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    if files is None:
-        files = [
-            AlbumQualityEvidenceFile(
-                relative_path="01 - Track.mp3",
-                size_bytes=123456,
-                mtime_ns=1_700_000_000_000_000_000,
-                extension="mp3",
-                container="mp3",
-                codec="mp3",
-            ),
-        ]
-    if measurement is None:
-        measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=245,
-            avg_bitrate_kbps=256,
-            median_bitrate_kbps=252,
-            format="MP3",
-            spectral_grade="genuine",
-            spectral_bitrate_kbps=None,
-        )
-    if (
-        lineage_version >= 4
-        and measurement.spectral_grade is not None
-        and measurement.spectral_subject is None
-    ):
-        measurement = msgspec.structs.replace(
-            measurement,
-            spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
-            spectral_provenance=EVIDENCE_PROVENANCE_MEASURED,
-        )
-    if (
-        lineage_version >= 4
-        and measurement.spectral_grade is not None
-        and measurement.spectral_measurement_version is None
-        and not preserve_spectral_measurement_version
-    ):
-        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
-
-        # This helper builds active production-shaped evidence by default.
-        # Tests of legacy generations must opt in explicitly so an accidental
-        # unstamped fixture cannot masquerade as reusable current evidence.
-        measurement = msgspec.structs.replace(
-            measurement,
-            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
-        )
-    if audio_validation is None and audio_corrupt:
-        audio_validation = make_audio_corrupt_validation_report(
-            files[0].relative_path if files else "",
-            detail=audio_error or "synthetic decode failure",
-            files_checked=len(files),
-        )
-        if files:
-            files = [
-                msgspec.structs.replace(file, decode_ok=index != 0)
-                for index, file in enumerate(files)
-            ]
-    return AlbumQualityEvidence(
-        mb_release_id=mb_release_id,
-        snapshot_fingerprint=snapshot_fingerprint(files),
-        source_path=source_path,
-        measurement=measurement,
-        measured_at=measured_at,
-        files=files,
-        codec=codec,
-        container=container,
-        storage_format=storage_format,
-        target_format=target_format,
-        target_is_cbr=(
-            target_is_cbr
-            if target_is_cbr is not None
-            else (
-                TargetQualityContract.from_explicit_label(target_format).is_cbr
-                if target_format is not None
-                else None
-            )
-        ),
-        lineage_version=lineage_version,
-        v0_metric=v0_metric,
-        on_disk_v0_research_attempted=on_disk_v0_research_attempted,
-        current_enrichment_required=current_enrichment_required,
-        verified_lossless_proof=verified_lossless_proof,
-        cd_rip_verification=cd_rip_verification,
-        audio_validation=(
-            audio_validation
-            if audio_validation is not None
-            else legacy_unrecorded_audio_validation_report()
-        ),
-        audio_corrupt=audio_corrupt,
-        audio_error=audio_error,
-        aac_lattice=aac_lattice,
-    )
-
-
-def make_audio_corrupt_validation_report(
-    relative_path: str,
-    *,
-    detail: str = "synthetic decode failure",
-    return_code: int = 69,
-    files_checked: int = 1,
-) -> AudioValidationReport:
-    """Build one production-shaped corrupt-audio report for tests."""
-    return AudioValidationReport(
-        outcome="audio_corrupt",
-        files_checked=files_checked,
-        files_failed=1,
-        diagnostics=[
-            AudioToolDiagnostic(
-                relative_path=relative_path,
-                category="decode_error",
-                return_code=return_code,
-                stderr_excerpt=detail,
-            ),
-        ],
-    )
-
-
-@contextmanager
-def pinned_dispatch_authority(
-    db: _PinnedDispatchDB,
-    execution_lease: ExecutionLeaseSnapshot | None,
-    *,
-    cancellation_token: CancellationToken | None = None,
-) -> Generator[
-    tuple[CancellationToken | None, OwnerSessionIdentity | None],
-]:
-    """Pin the real fake-DB owner session for one automation dispatch scope."""
-    if execution_lease is None:
-        if cancellation_token is not None:
-            raise AssertionError(
-                "non-automation dispatch cannot carry a cancellation token"
-            )
-        yield None, None
-        return
-
-    existing_pin = getattr(db, "_owner_session_pin", None)
-    if existing_pin is not None:
-        identity, pinned_token = existing_pin
-        if (
-            cancellation_token is not None
-            and cancellation_token is not pinned_token
-        ):
-            raise AssertionError(
-                "nested dispatch authority must reuse the pinned token"
-            )
-        yield pinned_token, identity
-        return
-
-    token = cancellation_token or CancellationToken()
-    with db._pin_owner_session(token) as identity:
-        yield token, identity
-
-
-def make_database_source_with_fake_db(
-    db: Any,
-    *,
-    musicbrainz_ws2_base: str,
-    discogs_api_base: str,
-) -> DatabaseSource:
-    """``Any``-accepting bridge from a ``FakePipelineDB`` fixture into
-    ``DatabaseSource``'s ``PipelineDB``-typed ``borrowed_db`` kwarg — same
-    established pattern as ``finalize_claimed_dispatch`` below: one
-    bridge, zero per-call-site escape hatches. Added for issue #1261's
-    fallback-writer pins, which need a stateful DB to assert the persisted
-    manifest rather than a call shape.
-    """
-    from album_source import DatabaseSource
-
-    return DatabaseSource(
-        "unused-dsn",
-        musicbrainz_ws2_base=musicbrainz_ws2_base,
-        discogs_api_base=discogs_api_base,
-        borrowed_db=db,
-    )
-
-
-def make_dispatch_request(
-    *,
-    path: str = "/tmp/dispatch-album",
-    mb_release_id: str = "mb-release-1",
-    request_id: int = 1,
-    label: str = "Test Artist - Test Album",
-    beets_harness_path: str = "/opt/cratedigger/harness/beets_harness.py",
-    dl_info: DownloadInfo | None = None,
-    force: bool = False,
-    scenario: str = "auto_import",
-    outcome_label: DownloadLogOutcome = "success",
-    requeue_on_failure: bool = True,
-    distance: float | None = None,
-    override_min_bitrate: int | None = None,
-    target_format: str | None = None,
-    verified_lossless_target: str = "",
-    files: Sequence[DownloadFile] | None = None,
-    cooled_down_users: set[str] | None = None,
-    source_dirs: list[str] | None = None,
-    candidate_import_job_id: int | None = None,
-    candidate_download_log_id: int | None = None,
-    attempt_spectral_audit: SpectralDetail | None = None,
-    attempt_result: ImportAttemptResult | None = None,
-    prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
-    beets_library_db_path: str | None = None,
-    beets_library_root: str | None = None,
-    launch_authority_path: str | None = None,
-    execution_lease: ExecutionLeaseSnapshot | None = None,
-    owner_session_identity: OwnerSessionIdentity | None = None,
-) -> DispatchRequest:
-    """Build a complete ``DispatchRequest`` with sensible defaults (#1277).
-
-    House idiom, same as ``make_request_row`` / ``make_download_file``: a
-    test names only the fields its scenario needs. Every optional parameter
-    repeats ``DispatchRequest``'s own default, and
-    ``TestMakeDispatchRequestBuilder`` pins that equality field-by-field so
-    the two cannot drift.
-
-    This replaced ``dispatch_import_with_fake_db``, the ``Any``-accepting
-    bridge that used to erase type-checking for all 36 dispatch kwargs at
-    every call site (issue #1246 / ``.claude/rules/code-quality.md``
-    § "Typing enforcement"). ``dispatch_import_core`` now takes a narrow
-    ``DispatchDB`` port that ``FakePipelineDB`` satisfies structurally, so
-    tests call it directly with no bridge at all.
-    """
-    from lib.dispatch.types import DispatchRequest
-
-    return DispatchRequest(
-        path=path,
-        mb_release_id=mb_release_id,
-        request_id=request_id,
-        label=label,
-        beets_harness_path=beets_harness_path,
-        dl_info=dl_info if dl_info is not None else DownloadInfo(),
-        force=force,
-        scenario=scenario,
-        outcome_label=outcome_label,
-        requeue_on_failure=requeue_on_failure,
-        distance=distance,
-        override_min_bitrate=override_min_bitrate,
-        target_format=target_format,
-        verified_lossless_target=verified_lossless_target,
-        files=files,
-        cooled_down_users=cooled_down_users,
-        source_dirs=source_dirs,
-        candidate_import_job_id=candidate_import_job_id,
-        candidate_download_log_id=candidate_download_log_id,
-        attempt_spectral_audit=attempt_spectral_audit,
-        attempt_result=attempt_result,
-        prevalidated_candidate_result=prevalidated_candidate_result,
-        beets_library_db_path=beets_library_db_path,
-        beets_library_root=beets_library_root,
-        launch_authority_path=launch_authority_path,
-        execution_lease=execution_lease,
-        owner_session_identity=owner_session_identity,
-    )
-
-
-def finalize_claimed_dispatch(db: Any, job: Any, outcome: Any) -> ImportJob | None:
-    """Apply a direct dispatch result through the production queue owner.
-
-    ``outcome`` is ordinarily the ``DispatchOutcome`` (or equivalent) the
-    caller already computed. Passing a ``BaseException`` INSTANCE instead
-    lets a fixture drive ``process_claimed_job``'s own executor-crash
-    handling without hand-rolling a raising ``execute_fn`` at the call
-    site — no existing caller passes one, so this is purely additive and
-    every existing caller's behavior is unchanged. This is the file's
-    established, ``Any``-typed bridge from a ``FakePipelineDB`` fixture
-    into the ``PipelineDB``-typed ``process_claimed_job``, so a crash-path
-    caller reuses it instead of calling ``process_claimed_job`` directly
-    (issue #1176 PR3 review round: keeps the tests typing ratchet frozen —
-    no new escape hatch).
-    """
-    from lib.import_queue import IMPORT_JOB_AUTOMATION
-    from scripts.importer import _execution_lease_from_job, process_claimed_job
-
-    def _execute(*_args: object, **_kwargs: object):
-        if isinstance(outcome, BaseException):
-            raise outcome
-        return outcome
-
-    if job.job_type == IMPORT_JOB_AUTOMATION:
-        execution_lease = _execution_lease_from_job(job)
-        assert execution_lease is not None, (
-            "automation fixture must claim with an importer execution lease"
-        )
-        with pinned_dispatch_authority(
-            db,
-            execution_lease,
-        ) as (cancellation_token, owner_session_identity):
-            assert cancellation_token is not None
-            assert owner_session_identity is not None
-            return process_claimed_job(
-                db,
-                job,
-                execute_fn=_execute,
-                execution_lease=execution_lease,
-                cancellation_token=cancellation_token,
-                owner_session_identity=owner_session_identity,
-            )
-    return process_claimed_job(
-        db,
-        job,
-        execute_fn=_execute,
-    )
-
-
-class ImportJobClaimDB(Protocol):
-    def peek_import_job_candidates(
-        self,
-        *,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
-        limit: int,
-        offset: int = 0,
-    ) -> list[ImportJob]: ...
-
-    def peek_import_preview_job_candidates(
-        self,
-        *,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
-        limit: int,
-        offset: int = 0,
-    ) -> list[ImportJob]: ...
-
-    def advisory_lock(
-        self,
-        namespace: int,
-        key: int,
-    ) -> AbstractContextManager[bool]: ...
-
-    def claim_import_job_candidate(
-        self,
-        job_id: int,
-        *,
-        worker_id: str | None = None,
-    ) -> ImportJob | None: ...
-
-    def claim_import_preview_job_candidate(
-        self,
-        job_id: int,
-        *,
-        worker_id: str | None = None,
-    ) -> ImportJob | None: ...
-
-    def claim_automation_import_job_under_lock(
-        self,
-        job_id: int,
-        *,
-        request_id: int,
-        worker_id: str | None,
-        execution_lease: ExecutionLeaseSnapshot,
-    ) -> ImportJob | None: ...
-
-    def claim_automation_import_preview_job_under_lock(
-        self,
-        job_id: int,
-        *,
-        request_id: int,
-        worker_id: str | None,
-        execution_lease: ExecutionLeaseSnapshot,
-    ) -> ImportJob | None: ...
-
-    def claim_force_import_job_under_lock(
-        self,
-        job_id: int,
-        *,
-        request_id: int,
-        worker_id: str | None,
-    ) -> ImportJob | None: ...
-
-    def claim_force_import_preview_job_under_lock(
-        self,
-        job_id: int,
-        *,
-        request_id: int,
-        worker_id: str | None,
-    ) -> ImportJob | None: ...
-
-    def claim_local_import_job_under_lock(
-        self,
-        job_id: int,
-        *,
-        request_id: int,
-        worker_id: str | None,
-    ) -> ImportJob | None: ...
-
-    def claim_local_import_preview_job_under_lock(
-        self,
-        job_id: int,
-        *,
-        request_id: int,
-        worker_id: str | None,
-    ) -> ImportJob | None: ...
-
-
-def claim_next_import_job(
-    db: ImportJobClaimDB,
-    *,
-    worker_id: str | None = None,
-    execution_lease: ExecutionLeaseSnapshot | None = None,
-) -> ImportJob | None:
-    """Claim the first import candidate for direct test setup.
-
-    Production workers scan bounded candidate pages and claim exact rows. Tests
-    that need a claimed fixture retain the old one-shot convenience here
-    without preserving a production API that no runtime caller uses.
-    """
-    candidates = db.peek_import_job_candidates(
-        execution_lease=execution_lease,
-        limit=1,
-    )
-    if not candidates:
-        return None
-    candidate = candidates[0]
-    if candidate.job_type == IMPORT_JOB_AUTOMATION:
-        if execution_lease is None or candidate.request_id is None:
-            return None
-        with db.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            candidate.request_id,
-        ) as acquired:
-            if not acquired:
-                return None
-            return db.claim_automation_import_job_under_lock(
-                candidate.id,
-                request_id=candidate.request_id,
-                worker_id=worker_id,
-                execution_lease=execution_lease,
-            )
-    if candidate.job_type == IMPORT_JOB_FORCE:
-        if candidate.request_id is None:
-            return None
-        with db.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            candidate.request_id,
-        ) as acquired:
-            if not acquired:
-                return None
-            return db.claim_force_import_job_under_lock(
-                candidate.id,
-                request_id=candidate.request_id,
-                worker_id=worker_id,
-            )
-    if candidate.job_type == IMPORT_JOB_LOCAL:
-        if candidate.request_id is None:
-            return None
-        with db.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            candidate.request_id,
-        ) as acquired:
-            if not acquired:
-                return None
-            return db.claim_local_import_job_under_lock(
-                candidate.id,
-                request_id=candidate.request_id,
-                worker_id=worker_id,
-            )
-    return db.claim_import_job_candidate(
-        candidate.id,
-        worker_id=worker_id,
-    )
-
-
-def claim_next_import_preview_job(
-    db: ImportJobClaimDB,
-    *,
-    worker_id: str | None = None,
-    execution_lease: ExecutionLeaseSnapshot | None = None,
-) -> ImportJob | None:
-    """Claim the first preview candidate for direct test setup."""
-    candidates = db.peek_import_preview_job_candidates(
-        execution_lease=execution_lease,
-        limit=1,
-    )
-    if not candidates:
-        return None
-    candidate = candidates[0]
-    if candidate.job_type == IMPORT_JOB_AUTOMATION:
-        if execution_lease is None or candidate.request_id is None:
-            return None
-        with db.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            candidate.request_id,
-        ) as acquired:
-            if not acquired:
-                return None
-            return db.claim_automation_import_preview_job_under_lock(
-                candidate.id,
-                request_id=candidate.request_id,
-                worker_id=worker_id,
-                execution_lease=execution_lease,
-            )
-    if candidate.job_type == IMPORT_JOB_FORCE:
-        if candidate.request_id is None:
-            return None
-        with db.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            candidate.request_id,
-        ) as acquired:
-            if not acquired:
-                return None
-            return db.claim_force_import_preview_job_under_lock(
-                candidate.id,
-                request_id=candidate.request_id,
-                worker_id=worker_id,
-            )
-    if candidate.job_type == IMPORT_JOB_LOCAL:
-        if candidate.request_id is None:
-            return None
-        with db.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            candidate.request_id,
-        ) as acquired:
-            if not acquired:
-                return None
-            return db.claim_local_import_preview_job_under_lock(
-                candidate.id,
-                request_id=candidate.request_id,
-                worker_id=worker_id,
-            )
-    return db.claim_import_preview_job_candidate(
-        candidate.id,
-        worker_id=worker_id,
-    )
-
-
-#: Every ``stage2_import`` decision produced by the provisional-lossless
-#: lane (``lib/quality/decisions.py::provisional_lossless_decision``) — the
-#: lane the V0 trust override routes an album AROUND. Membership is the
-#: observable answer to "which lane decided this album", which the v3
-#: ultrasonic leg must never change (issue #829 Phase 5 PR3): three of the
-#: four are confident rejects that also denylist the offering peer, so a
-#: leg that could re-route into this lane would turn a withheld proof into
-#: a discarded album. Spelled from the production constants, once, for the
-#: pins in ``tests/test_quality_classification.py`` and the property in
-#: ``tests/test_quality_generated.py``.
-PROVISIONAL_LANE_DECISIONS = frozenset({
-    DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
-    DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
-    DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
-    DECISION_LOSSLESS_SOURCE_LOCKED,
-})
-
-
-def make_aac_lattice_capture(
-    tracks: Sequence[tuple[int | None, float | None]],
-    *,
-    proba: float = 0.12,
-    error: str = "AacLatticeUnsupportedRateError: unsupported sample rate 96 kHz",
-) -> AacLatticeCapture:
-    """Build an AAC-lattice capture through the PRODUCTION derivation.
-
-    ``tracks`` is one ``(offset, z)`` pair per track, in the deterministic
-    filename order ``lib/aac_lattice.py`` scores them in; a pair whose
-    offset is ``None`` records a per-track detector failure instead of a
-    score, exactly as ``measure_album_aac_lattice`` does.
-
-    The album statistics (``modal_offset``/``modal_count``/
-    ``scored_tracks``/``max_z``) are ALWAYS derived by
-    ``AacLatticeCapture.from_tracks`` — the one function production uses —
-    never written by hand. A test that hand-set them could assert on an
-    album statistic no measurement can produce (test-fidelity.md Rule C).
-    """
-    from lib.quality import AacLatticeTrackScore
-
-    rows: list[AacLatticeTrackScore] = []
-    for index, (offset, z) in enumerate(tracks):
-        filename = f"{index + 1:02d}.flac"
-        if offset is None:
-            rows.append(AacLatticeTrackScore(filename=filename, error=error))
-            continue
-        rows.append(AacLatticeTrackScore(
-            filename=filename, offset=offset, z=z, proba=proba,
-        ))
-    return AacLatticeCapture.from_tracks(rows)
-
-
-def build_parity_candidate_evidence(
-    *,
-    is_flac: bool,
-    min_bitrate: int,
-    is_cbr: bool,
-    avg_bitrate: int | None = None,
-    spectral_grade: str | None = None,
-    spectral_bitrate: int | None = None,
-    post_conversion_min_bitrate: int | None = None,
-    candidate_v0_probe_avg: int | None = None,
-    candidate_v0_probe_min: int | None = None,
-    native_codec: str = "mp3",
-    native_format: str = "MP3",
-    mb_release_id: str = "mbid-parity-candidate",
-    audio_corrupt: bool = False,
-    folder_layout: str = "flat",
-    audio_file_count: int | None = None,
-    matched_bad_audio_hash_id: int | None = None,
-    matched_bad_audio_hash_path: str | None = None,
-    snapshot_fingerprint: str = "sha256:candidate-fingerprint",
-    cliff_hz: int | None = None,
-    codec_family: CodecFamily | None = None,
-    filetype_band: str | None = None,
-    ultrasonic_deficit_db: float | None = None,
-    spectral_measurement_version: int | None = 2,
-    was_converted_from: str | None = None,
-    lossless_container: str = "flac",
-    lossless_codec: str = "flac",
-    aac_lattice: AacLatticeCapture | None = None,
-) -> AlbumQualityEvidence:
-    """Build an ``AlbumQualityEvidence`` candidate row matching the
-    simulator's flat-kwargs shape (post-U2/U3 schema).
-
-    This is the canonical simulator-world → evidence-row mapping. The
-    hand-written parity tests in ``tests/test_quality_classification.py``
-    and the generated parity property in ``tests/test_quality_generated.py``
-    both consume it, so a divergence between the decision twins can never
-    hide behind two different world encodings.
-    """
-    # Candidate evidence always describes the downloaded source bytes.
-    # Conversion policy/output stay on the target contract and decision facts;
-    # a temporary V0 probe must never make a FLAC source wear an MP3 label.
-    # The two lossless branches (converting and kept-on-disk) built the
-    # identical row and were only ever spelled apart; PR3's
-    # container/codec split made that literally true, so they are one.
-    if is_flac:
-        container = lossless_container
-        codec = lossless_codec
-        storage_format = lossless_codec
-        measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=min_bitrate or 900,
-            avg_bitrate_kbps=min_bitrate or 900,
-            median_bitrate_kbps=min_bitrate or 900,
-            format=lossless_codec.upper(),
-            is_cbr=False,
-            spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=spectral_bitrate,
-            spectral_subject=(
-                EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
-            ),
-            spectral_provenance=(
-                EVIDENCE_PROVENANCE_MEASURED
-                if spectral_grade is not None else None
-            ),
-        )
-    else:
-        container = codec = native_codec
-        storage_format = native_format.lower()
-        _avg = avg_bitrate if avg_bitrate is not None else min_bitrate
-        measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=min_bitrate,
-            avg_bitrate_kbps=_avg,
-            median_bitrate_kbps=_avg,
-            format=native_format,
-            is_cbr=is_cbr,
-            spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=spectral_bitrate,
-            spectral_subject=(
-                EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
-            ),
-            spectral_provenance=(
-                EVIDENCE_PROVENANCE_MEASURED
-                if spectral_grade is not None else None
-            ),
-        )
-
-    # issue #829 Phase 5 PR1 capture. Stamped after the branch above so all
-    # three candidate shapes carry it identically; a row with no spectral
-    # grade may not carry these facts at all (evidence-row validation).
-    if spectral_grade is not None and (
-        cliff_hz is not None
-        or codec_family is not None
-        or ultrasonic_deficit_db is not None
-        or was_converted_from is not None
-    ):
-        # ``spectral_measurement_version`` defaults to 2 (the PR1+ capture
-        # code) because that is what any producer of these facts stamps.
-        # A caller pins it to None to build the legacy world explicitly.
-        measurement = msgspec.structs.replace(
-            measurement,
-            cliff_hz=cliff_hz,
-            codec_family=codec_family,
-            ultrasonic_deficit_db=ultrasonic_deficit_db,
-            was_converted_from=was_converted_from,
-            spectral_measurement_version=spectral_measurement_version,
-        )
-
-    v0_metric = None
-    if candidate_v0_probe_avg is not None or candidate_v0_probe_min is not None:
-        v0_metric = AlbumQualityV0Metric(
-            min_bitrate_kbps=candidate_v0_probe_min,
-            avg_bitrate_kbps=candidate_v0_probe_avg,
-            median_bitrate_kbps=candidate_v0_probe_avg,
-            subject=EVIDENCE_SUBJECT_SOURCE,
-            provenance=EVIDENCE_PROVENANCE_MEASURED,
-        )
-
-    files = [AlbumQualityEvidenceFile(
-        relative_path=f"01.{container}",
-        size_bytes=1, mtime_ns=1,
-        extension=container, container=container, codec=codec,
-    )]
-    audio_validation = legacy_unrecorded_audio_validation_report()
-    if audio_corrupt:
-        files = [msgspec.structs.replace(files[0], decode_ok=False)]
-        audio_validation = make_audio_corrupt_validation_report(
-            files[0].relative_path,
-        )
-    # ``audio_file_count`` defaults to len(files) for the standard
-    # parity scenarios. Tests covering empty_fileset explicitly pass
-    # ``audio_file_count=0`` and override ``files`` separately.
-    return AlbumQualityEvidence(
-        mb_release_id=mb_release_id,
-        snapshot_fingerprint=snapshot_fingerprint,
-        source_path="/Incoming/auto-import/candidate",
-        measurement=measurement,
-        measured_at=datetime(2026, 5, 16, tzinfo=UTC),
-        files=files,
-        codec=codec,
-        container=container,
-        storage_format=storage_format,
-        v0_metric=v0_metric,
-        audio_validation=audio_validation,
-        audio_corrupt=audio_corrupt,
-        folder_layout=folder_layout,
-        audio_file_count=(
-            audio_file_count if audio_file_count is not None else len(files)
-        ),
-        filetype_band=(
-            filetype_band if filetype_band is not None else storage_format
-        ),
-        matched_bad_audio_hash_id=matched_bad_audio_hash_id,
-        matched_bad_audio_hash_path=matched_bad_audio_hash_path,
-        aac_lattice=aac_lattice,
-    )
-
-
-def build_parity_current_evidence(
-    *,
-    min_bitrate: int | None,
-    avg_bitrate: int | None = None,
-    format: str = "MP3",
-    is_cbr: bool = False,
-    spectral_grade: str | None = None,
-    spectral_bitrate: int | None = None,
-    mb_release_id: str = "mbid-parity-candidate",
-    v0_metric: AlbumQualityV0Metric | None = None,
-    matched_bad_audio_hash_id: int | None = None,
-    matched_bad_audio_hash_path: str | None = None,
-    cliff_hz: int | None = None,
-    codec_family: CodecFamily | None = None,
-    filetype_band: str | None = None,
-    was_converted_from: str | None = None,
-) -> AlbumQualityEvidence | None:
-    """Build the existing-album evidence row for parity scenarios.
-
-    Returns ``None`` when ``min_bitrate`` is ``None`` — the fresh-request
-    shape where no current album exists.
-
-    ``was_converted_from`` builds the R19 converted-lineage shape (issue
-    #1204 defect 1's amended invariant): a row whose ``format`` names the
-    on-disk DERIVATIVE (e.g. an MP3 converted from FLAC) but whose spectral
-    facts describe the pre-conversion SOURCE. Matching production
-    (``resolve_measured_codec_family``'s ``converted`` branch requires
-    BOTH), setting it also switches ``spectral_subject`` from the ordinary
-    installed-row default to ``EVIDENCE_SUBJECT_SOURCE`` and
-    ``spectral_provenance`` to ``EVIDENCE_PROVENANCE_CARRIED`` — the
-    overwhelming majority live shape for this R19 cohort specifically
-    (15,333 of 15,368 rows; this is NOT the same population as the
-    general verified-lossless-proof carried-provenance count elsewhere
-    in this file).
-    """
-    if min_bitrate is None:
-        return None
-
-    container = format.lower().split()[0]
-    files = [AlbumQualityEvidenceFile(
-        relative_path=f"01.{container}",
-        size_bytes=1, mtime_ns=1,
-        extension=container, container=container, codec=container,
-    )]
-    return AlbumQualityEvidence(
-        mb_release_id=mb_release_id,
-        snapshot_fingerprint="sha256:current-fingerprint",
-        source_path="/Beets/current",
-        measurement=AudioQualityMeasurement(
-            min_bitrate_kbps=min_bitrate,
-            avg_bitrate_kbps=avg_bitrate if avg_bitrate is not None else min_bitrate,
-            median_bitrate_kbps=avg_bitrate if avg_bitrate is not None else min_bitrate,
-            format=format,
-            is_cbr=is_cbr,
-            spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=spectral_bitrate,
-            spectral_subject=(
-                (
-                    EVIDENCE_SUBJECT_SOURCE
-                    if was_converted_from is not None
-                    else EVIDENCE_SUBJECT_INSTALLED
-                )
-                if spectral_grade is not None
-                else None
-            ),
-            spectral_provenance=(
-                (
-                    EVIDENCE_PROVENANCE_CARRIED
-                    if was_converted_from is not None
-                    else EVIDENCE_PROVENANCE_MEASURED
-                )
-                if spectral_grade is not None else None
-            ),
-            cliff_hz=cliff_hz if spectral_grade is not None else None,
-            codec_family=codec_family if spectral_grade is not None else None,
-            was_converted_from=(
-                was_converted_from if spectral_grade is not None else None
-            ),
-            spectral_measurement_version=(
-                2
-                if spectral_grade is not None
-                and (cliff_hz is not None or codec_family is not None)
-                else None
-            ),
-        ),
-        measured_at=datetime(2026, 5, 16, tzinfo=UTC),
-        files=files,
-        codec=container,
-        container=container,
-        storage_format=format.lower(),
-        audio_file_count=len(files),
-        filetype_band=(
-            filetype_band if filetype_band is not None else format.lower()
-        ),
-        v0_metric=v0_metric,
-        matched_bad_audio_hash_id=matched_bad_audio_hash_id,
-        matched_bad_audio_hash_path=matched_bad_audio_hash_path,
-    )
 
 
 def make_file_complete_event_data(
@@ -1423,75 +527,6 @@ def own_transfer_keys(
             row.username, row.filename, request_id=row.request_id)
 
 
-def handoff_automation_owner(
-    db: _AutomationHandoffDB,
-    request_id: int,
-    *,
-    state: ActiveDownloadState | Mapping[str, object] | str | None = None,
-    canonical_path: str | None = None,
-    message: str = "test automation owner handoff",
-) -> ImportJob:
-    """Create a production-representable automation owner for tests.
-
-    Tests must never bypass the sole lifecycle edge by inserting an
-    ``automation_import`` job or assigning the owner pointer directly. This
-    helper performs the real ``wanted -> downloading -> processing`` transcript
-    through ``set_downloading`` and ``handoff_automation_import``.
-    """
-    active_state = (
-        ActiveDownloadState(
-            filetype="flac",
-            enqueued_at="2026-07-01T00:00:00+00:00",
-            files=[],
-        )
-        if state is None
-        else ActiveDownloadState.from_raw(state)
-    )
-    path = (
-        canonical_path
-        or active_state.current_path
-        or f"/processing/albums/request-{request_id}"
-    )
-    if not db.set_downloading(
-        request_id,
-        active_state.to_json(),
-        expected_status="wanted",
-    ):
-        raise AssertionError(
-            f"request {request_id} could not enter downloading for handoff"
-        )
-    result = db.handoff_automation_import(
-        request_id=request_id,
-        expected_enqueued_at=active_state.enqueued_at,
-        canonical_path=path,
-        message=message,
-    )
-    if not result.committed or result.job is None:
-        raise AssertionError(
-            f"request {request_id} handoff failed: {result.outcome}"
-        )
-    return result.job
-
-
-def make_evidence(
-    mb_release_id: str = "test-mbid-0001",
-    files: list[AlbumQualityEvidenceFile] | None = None,
-    **overrides: Any,
-) -> AlbumQualityEvidence:
-    """Concise builder for content-addressed evidence rows.
-
-    Mirrors :func:`make_album_quality_evidence` with a positional-first
-    signature optimised for the post-021 rekey: pass ``mb_release_id`` and
-    ``files``, get back a fully-formed row with the snapshot fingerprint
-    already computed.
-    """
-    return make_album_quality_evidence(
-        mb_release_id=mb_release_id,
-        files=files,
-        **overrides,
-    )
-
-
 def make_import_result(
     decision: str = "import",
     new_min_bitrate: int = 245,
@@ -1566,38 +601,6 @@ def make_import_result(
     )
 
 
-def make_quality_rank_config(
-    *,
-    bitrate_metric: RankBitrateMetric | None = None,
-    within_rank_tolerance_kbps: int | None = None,
-    opus: CodecRankBands | None = None,
-    mp3: CodecRankBands | None = None,
-    aac: CodecRankBands | None = None,
-) -> QualityRankConfig:
-    """Build a QualityRankConfig with test-friendly overrides.
-
-    Defaults match QualityRankConfig.defaults() — override individual fields
-    to test metric swaps or custom codec bands. Use
-    this instead of constructing QualityRankConfig directly so tests stay
-    stable when the dataclass grows new fields.
-    """
-    base = QualityRankConfig.defaults()
-    return QualityRankConfig(
-        bitrate_metric=bitrate_metric if bitrate_metric is not None else base.bitrate_metric,
-        within_rank_tolerance_kbps=(
-            within_rank_tolerance_kbps
-            if within_rank_tolerance_kbps is not None
-            else base.within_rank_tolerance_kbps
-        ),
-        opus=opus if opus is not None else base.opus,
-        mp3=mp3 if mp3 is not None else base.mp3,
-        aac=aac if aac is not None else base.aac,
-        mp3_vbr_levels=base.mp3_vbr_levels,
-        lossless_codecs=base.lossless_codecs,
-        mixed_format_precedence=base.mixed_format_precedence,
-    )
-
-
 def make_download_info(
     username: str | None = None,
     filetype: str | None = None,
@@ -1605,7 +608,7 @@ def make_download_info(
     download_spectral: SpectralMeasurement | None = None,
     current_spectral: SpectralMeasurement | None = None,
     existing_min_bitrate: int | None = None,
-    **overrides: Any,
+    **overrides: object,
 ) -> DownloadInfo:
     """Build a DownloadInfo with sensible defaults."""
     di = DownloadInfo(
@@ -1761,7 +764,7 @@ def make_candidate_summary(
     )
 
 
-def make_validation_result(**overrides: Any) -> ValidationResult:
+def make_validation_result(**overrides: object) -> ValidationResult:
     """Build a ValidationResult with sensible defaults.
 
     Uses keyword overrides like make_request_row.
@@ -1780,17 +783,20 @@ def make_validation_result(**overrides: Any) -> ValidationResult:
 # ---------------------------------------------------------------------------
 
 def make_ctx_with_fake_db(
-    fake_db: Any,
+    fake_db: FakePipelineDB,
     *,
     cfg: Any = None,
     slskd: Any = None,
-) -> Any:
+) -> CratediggerContext:
     """Build a CratediggerContext wired to a FakePipelineDB.
 
     The fake is wrapped in a ``FakePipelineDBSource`` so production code
     that calls ``ctx.pipeline_db_source._get_db()`` (or any of the source's
     higher-level methods) hits a typed surface, not a MagicMock that
-    silently accepts arbitrary attribute access.
+    silently accepts arbitrary attribute access. ``cfg``/``slskd`` stay
+    ``Any`` on purpose: tests pass a real ``CratediggerConfig`` or
+    ``FakeSlskdAPI`` when the scenario needs one and fall back to the
+    ``MagicMock`` default otherwise.
     """
     from lib.context import CratediggerContext
     from tests.fakes import FakePipelineDBSource
@@ -1800,17 +806,6 @@ def make_ctx_with_fake_db(
         slskd=slskd if slskd is not None else MagicMock(),
         pipeline_db_source=source,
     )
-
-
-def noop_quality_gate(**_kwargs: object) -> None:
-    """No-op quality-gate stub for ``dispatch_import_core(quality_gate_fn=...)``.
-
-    Replaces the legacy module-attribute patch on
-    ``_check_quality_gate_core`` for dispatch tests that don't care
-    about the post-import quality gate's side effects — they want a
-    no-op so the dispatch decision tree runs end-to-end without
-    inspecting beets DB state."""
-    return
 
 
 def make_requests_http_error(
@@ -1828,104 +823,6 @@ def make_requests_http_error(
     response.status_code = status_code
     response._content = body.encode()
     return requests.HTTPError(f"{status_code} Server Error", response=response)
-
-
-class RecordingQualityGate:
-    """Recorder ``quality_gate_fn`` stub. Replaces the legacy
-    module-attribute patch on ``_check_quality_gate_core`` (paired with
-    ``as mock_gate``) for tests that assert
-    ``mock_gate.assert_called_once()``.
-
-    Records each invocation's kwargs (the gate is keyword-only) so tests
-    can assert call counts and arguments."""
-
-    def __init__(self, *, result: object | None = None) -> None:
-        self.calls: list[dict[str, object]] = []
-        self.result = result
-
-    def __call__(self, **kwargs: object) -> object | None:
-        self.calls.append(kwargs)
-        return self.result
-
-    @property
-    def call_count(self) -> int:
-        return len(self.calls)
-
-    def assert_called_once(self) -> None:
-        if len(self.calls) != 1:
-            raise AssertionError(
-                f"expected quality_gate_fn called exactly once, got {len(self.calls)}"
-            )
-
-    def assert_not_called(self) -> None:
-        if self.calls:
-            raise AssertionError(
-                f"expected quality_gate_fn not called, got {len(self.calls)} call(s)"
-            )
-
-
-@contextmanager
-def patch_dispatch_externals():
-    """Patch external edges shared by all dispatch_import_core tests.
-
-    Patches: sp.run, the evidence-rejection cleanup seam, trigger_plex_scan,
-    and trigger_jellyfin_scan.
-
-    Does NOT patch parse_import_result, _check_quality_gate_core,
-    BeetsDB, read_runtime_config, or the vanished-replaced-album-path
-    reconciler (issue #1203 item 2) — callers nest those as needed. The
-    reconciler is a kwarg-DI seam on ``dispatch_import_core`` itself
-    (``media_server_notify_fn``), not a module patch: it now contains real
-    escalation-decision logic (``lib.library_delete_notifiers
-    .notify_library_delete``), so it no longer qualifies as a thin leaf-seam
-    wrapper for the mock-audit allowlist. Since ``sp.run`` below is always
-    mocked, no test using this helper ever mutates the real Beets DB, so the
-    reconciler's own before/after snapshot diff is empty by construction
-    unless a test deliberately mutates Beets out of band (as
-    ``tests.test_import_dispatch.TestVanishedPathReconciliation`` does) —
-    ordinary dispatch tests never reach the reconciler at all and need no
-    stand-in for it.
-
-    Yields a SimpleNamespace with attributes: run, cleanup, plex, jellyfin.
-    run is pre-configured with returncode=0, stdout="", stderr="".
-
-    Importer post-commit cleanup is exercised through real inputs or its
-    dedicated queue-owner seam; this helper does not patch that owned code.
-    """
-    cleanup = MagicMock()
-    with patch("lib.dispatch.subprocess_runner.sp.run") as run, \
-         patch("lib.dispatch.outcome_actions._cleanup_staged_dir", cleanup), \
-         patch("lib.util.trigger_plex_scan") as plex, \
-         patch("lib.util.trigger_jellyfin_scan") as jellyfin:
-        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        yield types.SimpleNamespace(
-            run=run, cleanup=cleanup, plex=plex, jellyfin=jellyfin)
-class _PinnedDispatchDB(Protocol):
-    _owner_session_pin: tuple[OwnerSessionIdentity, CancellationToken] | None
-
-    def _pin_owner_session(
-        self,
-        token: CancellationToken,
-    ) -> AbstractContextManager[OwnerSessionIdentity]: ...
-
-
-class _AutomationHandoffDB(Protocol):
-    def set_downloading(
-        self,
-        request_id: int,
-        state_json: str,
-        *,
-        expected_status: str = "wanted",
-    ) -> bool: ...
-
-    def handoff_automation_import(
-        self,
-        *,
-        request_id: int,
-        expected_enqueued_at: str,
-        canonical_path: str,
-        message: str,
-    ) -> AutomationHandoffResult: ...
 
 
 class SeededWrongMatch(msgspec.Struct, frozen=True):

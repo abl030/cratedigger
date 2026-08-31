@@ -20,8 +20,9 @@ from lib.quality_evidence import (
     current_evidence_for_policy,
     propagate_candidate_evidence_to_current,
 )
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes.pipeline_db import FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import make_request_row
 
 _PRESERVED_GRADE = "likely_transcode"
 

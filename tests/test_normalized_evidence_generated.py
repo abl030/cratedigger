@@ -22,8 +22,9 @@ from lib.quality_evidence import (
     snapshot_audio_files,
     snapshot_fingerprint,
 )
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import make_request_row
 
 
 def is_album_quality_evidence_file_list(

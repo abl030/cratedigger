@@ -23,15 +23,15 @@ from lib.wrong_match_policy import (
     DELETE_ELIGIBLE_REJECTION_SCENARIOS,
     WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS,
 )
-from tests.fakes import FakePipelineDB
-from tests.helpers import (
+from tests.dispatch_helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
     finalize_claimed_dispatch,
     handoff_automation_owner,
-    make_album_quality_evidence,
-    make_request_row,
 )
+from tests.evidence_helpers import make_album_quality_evidence
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 
 _REQUEST_ID = 42
 _RELEASE_ID = "generated-wrong-match-release"

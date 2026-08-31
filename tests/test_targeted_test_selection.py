@@ -273,7 +273,7 @@ class TestTargetedTestSelection(unittest.TestCase):
         importer.py, ``process_claimed_preview_job`` for import_preview_
         worker.py) run against every module found by grepping for real
         imports PLUS every module reaching the entry point indirectly
-        through ``tests/helpers.py::finalize_claimed_dispatch`` -- a
+        through ``tests/dispatch_helpers.py::finalize_claimed_dispatch`` -- a
         QUALIFIED SUBSET of confirmed killers, not a claimed-complete kill
         set; see the registry's own comment for the full killed/not-killed/
         excluded-for-cost breakdown.

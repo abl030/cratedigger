@@ -22,8 +22,9 @@ from lib.force_import_service import (
 )
 from lib.fs_authority import refusal_is_indeterminate
 from lib.import_queue import ForceImportPayload, force_import_dedupe_key
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakePipelineDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import make_request_row
 
 
 class TestForceImportService(unittest.TestCase):

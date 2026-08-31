@@ -21,11 +21,11 @@ import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from album_source import AlbumRecord, DatabaseSource
 from lib.grab_list import GrabListEntry
 from lib.quality import DownloadInfo, ValidationResult
+from tests.dispatch_helpers import make_database_source_with_fake_db
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     REQUEST_CASCADE_RESET_TABLES,
     delete_all_rows,
-    make_database_source_with_fake_db,
     make_request_row,
 )
 

@@ -36,11 +36,13 @@ from lib.import_execution import (
 from lib.pipeline_db import AlbumRequestRow, TransferLedgerRow
 from lib.quality import CURRENT_EVIDENCE_LINEAGE_VERSION
 from lib.slskd_client import TransferSnapshot
-from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
-from tests.helpers import (
+from tests.dispatch_helpers import (
     claim_next_import_preview_job,
     handoff_automation_owner,
-    make_album_quality_evidence,
+)
+from tests.evidence_helpers import make_album_quality_evidence
+from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+from tests.helpers import (
     make_ctx_with_fake_db,
     make_download_directory,
     make_download_file,
@@ -3464,8 +3466,9 @@ class TestHandleValidResultMissingMbid(unittest.TestCase):
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
-        ctx = make_ctx_with_fake_db(db)
-        ctx.cfg.beets_distance_threshold = 0.15
+        cfg = MagicMock()
+        cfg.beets_distance_threshold = 0.15
+        ctx = make_ctx_with_fake_db(db, cfg=cfg)
 
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch("lib.download_rejection.log_validation_result"):
@@ -3527,8 +3530,9 @@ class TestHandleValidResultMissingMbid(unittest.TestCase):
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
-        ctx = make_ctx_with_fake_db(db)
-        ctx.cfg.beets_distance_threshold = 0.15
+        cfg = MagicMock()
+        cfg.beets_distance_threshold = 0.15
+        ctx = make_ctx_with_fake_db(db, cfg=cfg)
 
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch("lib.download_rejection.log_validation_result"):

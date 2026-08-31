@@ -26,6 +26,7 @@ from unittest.mock import MagicMock, patch
 import msgspec
 
 from lib.config import CratediggerConfig
+from lib.context import CratediggerContext
 from lib.dispatch import core as dispatch_core_module
 from lib.dispatch.types import DispatchDB, DispatchOutcome, DispatchRequest
 from lib.import_execution import (
@@ -59,22 +60,24 @@ from lib.quality import (
     VerifiedLosslessProof,
 )
 from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
-from tests.fakes import FakePipelineDB
-from tests.helpers import (
+from tests.dispatch_helpers import (
     RecordingQualityGate,
     claim_next_import_job,
     claim_next_import_preview_job,
     finalize_claimed_dispatch,
-    hermetic_beets_config_defaults,
-    make_album_quality_evidence,
-    make_ctx_with_fake_db,
     make_dispatch_request,
-    make_download_file,
-    make_import_result,
-    make_request_row,
     noop_quality_gate,
     patch_dispatch_externals,
     pinned_dispatch_authority,
+)
+from tests.evidence_helpers import make_album_quality_evidence
+from tests.fakes import FakePipelineDB
+from tests.helpers import (
+    hermetic_beets_config_defaults,
+    make_ctx_with_fake_db,
+    make_download_file,
+    make_import_result,
+    make_request_row,
 )
 
 _HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
@@ -181,14 +184,15 @@ def _make_album_data(artist="Test Artist", title="Test Album",
     return mock
 
 
-def _make_ctx():
+def _make_ctx(**cfg_overrides: object):
     """Build a CratediggerContext wired to a seeded FakePipelineDB.
 
     The DB is seeded with request id 42 in ``downloading`` status — the
     auto-import dispatch path expects to find an owning request. The
     config remains a ``MagicMock`` because the tests only read a handful
     of attributes from it; ``cfg`` is not a stateful-collaborator name
-    in the audit's heuristic.
+    in the audit's heuristic. ``cfg_overrides`` set additional attributes
+    on that mock at construction time.
     """
     cfg = MagicMock()
     cfg.beets_harness_path = "/nix/store/fake/harness/run_beets_harness.sh"
@@ -196,6 +200,8 @@ def _make_ctx():
     cfg.beets_staging_dir = "/tmp/staging"
     cfg.verified_lossless_target = ""
     cfg.quality_ranks = QualityRankConfig.defaults()
+    for name, value in cfg_overrides.items():
+        setattr(cfg, name, value)
     fake_db = FakePipelineDB()
     fake_db.seed_request(make_request_row(
         id=42,
@@ -205,6 +211,14 @@ def _make_ctx():
     ctx = make_ctx_with_fake_db(fake_db, cfg=cfg)
     ctx.cooled_down_users = set()
     return ctx
+
+
+def _ctx_cfg(ctx: CratediggerContext) -> MagicMock:
+    """The ctx's ``_make_ctx`` MagicMock config, typed for post-hoc
+    attribute setting (every ctx in this module carries one)."""
+    cfg = ctx.cfg
+    assert isinstance(cfg, MagicMock)
+    return cfg
 
 
 def _make_bv_result(distance=0.05):
@@ -244,7 +258,7 @@ def _claim_dispatch_job(
         CandidateEvidenceActionResult,
     )
     from lib.import_queue import IMPORT_JOB_FORCE
-    from tests.helpers import handoff_automation_owner
+    from tests.dispatch_helpers import handoff_automation_owner
 
     # Production-shaped dispatch tests must persist the snapshot of the path
     # they later hand to the freshness guard.
@@ -716,13 +730,14 @@ def _dispatch_valid_result_cmd(
         # Drive the real ``stage_to_ai_path`` by pointing the staging dir at
         # the tempdir. ``StagedAlbum.move_to`` creates the destination
         # directory itself, so we just need the staging root to exist.
-        ctx.cfg.beets_staging_dir = tmpdir
+        cfg = _ctx_cfg(ctx)
+        cfg.beets_staging_dir = tmpdir
         # This argv seam deliberately has no installed album. Supply a
         # disposable complete authority pair anyway, so an accidental return
         # to the real current-evidence loader can never consult host Beets.
-        ctx.cfg.beets_library_db = os.path.join(tmpdir, "beets-library.db")
-        ctx.cfg.beets_directory = os.path.join(tmpdir, "beets-library")
-        os.makedirs(ctx.cfg.beets_directory)
+        cfg.beets_library_db = os.path.join(tmpdir, "beets-library.db")
+        cfg.beets_directory = os.path.join(tmpdir, "beets-library")
+        os.makedirs(cfg.beets_directory)
 
         def no_current_evidence(*_args: object, **_kwargs: object) -> None:
             """Typed current-evidence boundary for this subprocess argv seam."""
@@ -2097,7 +2112,7 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
 
     def _persist_failed_outcome(self, db, claimed, outcome) -> None:
         self.assertIsNotNone(outcome.terminal_outcome)
-        from tests.helpers import finalize_claimed_dispatch
+        from tests.dispatch_helpers import finalize_claimed_dispatch
 
         finalize_claimed_dispatch(db, claimed, outcome)
 
@@ -2392,7 +2407,7 @@ class TestDispatchImport(unittest.TestCase):
                     run_import_fn=_owned_test_runner if execution_lease is not None else None,
                 )
             if not skip_finalize:
-                from tests.helpers import finalize_claimed_dispatch
+                from tests.dispatch_helpers import finalize_claimed_dispatch
 
                 finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -2977,7 +2992,7 @@ class TestDispatchImport(unittest.TestCase):
                     run_import_fn=_owned_test_runner,
                 )
                 assert outcome.terminal_outcome is not None
-                from tests.helpers import finalize_claimed_dispatch
+                from tests.dispatch_helpers import finalize_claimed_dispatch
 
                 finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -3294,7 +3309,7 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
                     run_import_fn=_owned_test_runner,
                 )
                 assert outcome.terminal_outcome is not None
-                from tests.helpers import finalize_claimed_dispatch
+                from tests.dispatch_helpers import finalize_claimed_dispatch
 
                 finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -4307,7 +4322,7 @@ class TestQualityGateUsesIntent(unittest.TestCase):
                 run_import_fn=_owned_test_runner,
             )
         assert outcome.terminal_outcome is not None
-        from tests.helpers import finalize_claimed_dispatch
+        from tests.dispatch_helpers import finalize_claimed_dispatch
 
         finalize_claimed_dispatch(db, claimed, outcome)
 
@@ -4394,8 +4409,7 @@ class TestOpusConversionDispatch(unittest.TestCase):
 
     def _get_cmd(self, verified_lossless_target=""):
         album_data = _make_album_data()
-        ctx = _make_ctx()
-        ctx.cfg.verified_lossless_target = verified_lossless_target
+        ctx = _make_ctx(verified_lossless_target=verified_lossless_target)
         ir = make_import_result(decision="import", was_converted=True,
                                 original_filetype="flac", target_filetype="mp3")
         return _dispatch_valid_result_cmd(album_data=album_data, ctx=ctx, ir=ir)
@@ -4445,7 +4459,6 @@ class TestTargetFormatDispatch(unittest.TestCase):
         album_data = _make_album_data()
         album_data.db_target_format = target_format
         ctx = _make_ctx()
-        ctx.cfg.verified_lossless_target = ""
         ir = make_import_result(decision="import")
         return _dispatch_valid_result_cmd(album_data=album_data, ctx=ctx, ir=ir)
 

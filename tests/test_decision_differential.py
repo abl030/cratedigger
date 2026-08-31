@@ -65,7 +65,7 @@ from scripts.decision_differential import (
     resolve_native_current_pairs,
     without_persisted_proof,
 )
-from tests.helpers import PROVISIONAL_LANE_DECISIONS
+from tests.evidence_helpers import PROVISIONAL_LANE_DECISIONS
 
 
 def _corpus_row(**overrides: object) -> dict[str, object]:

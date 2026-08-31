@@ -115,8 +115,9 @@ path and retain a direct zero-tolerance check; delete the scanner only when a
 configured tool enforces the same syntax.
 
 Before adding a new escape hatch in tests, or before widening the tests
-baseline to admit one, check `tests/helpers.py`'s existing typed bridges
-first. The `db=<FakePipelineDB>` kwarg gap used to be the largest single
+baseline to admit one, check the existing typed bridges first
+(`tests/dispatch_helpers.py` for the import/dispatch lane,
+`tests/helpers.py` for context wiring). The `db=<FakePipelineDB>` kwarg gap used to be the largest single
 cluster of frozen tests-side `type_ignore` debt; issue #1277 removed most of
 it by narrowing the production annotation instead of bridging the call site.
 Measured 2026-08-31, after the follow-up that closed the last genuine
@@ -137,12 +138,14 @@ the methods `lib/dispatch/` calls, and `FakePipelineDB` satisfies it
 structurally — so the bridge was deleted rather than reused.
 
 **Narrowing the annotation is the preferred remedy; a bridge is the
-fallback.** `tests/helpers.py` provides typed bridges for two call shapes
-in this family — `finalize_claimed_dispatch` (an `Any`-typed bridge from a
-`FakePipelineDB` fixture into the `PipelineDB`-typed `process_claimed_job`)
-and `make_ctx_with_fake_db` (wraps a fake in `FakePipelineDBSource` so
-production code hits a typed `CratediggerContext`, not a `PipelineDB`) —
-and neither covers the deliberate injections above. So for a new hatch of
+fallback.** Two typed bridges exist for this family —
+`tests/dispatch_helpers.py::finalize_claimed_dispatch` (its `db` is the
+one `Any`-typed seam from a `FakePipelineDB` fixture into the
+`PipelineDB`-typed `process_claimed_job`; `job` and `outcome` carry real
+types) and `tests/helpers.py::make_ctx_with_fake_db` (typed at the DB
+seam: `FakePipelineDB` in, `CratediggerContext` out, the fake wrapped in
+`FakePipelineDBSource`; `cfg`/`slskd` stay `Any` on purpose) — and neither
+covers the deliberate injections above. So for a new hatch of
 this shape: first ask whether the production function actually needs the
 concrete `PipelineDB` (usually it does not — ~40 narrow DB Protocols
 already exist); if it genuinely does, reuse an existing bridge where the
@@ -998,7 +1001,7 @@ Four categories of tests. Each has different rules for what's acceptable. **All 
 - Implementation assertions (call args, payload shape) are **acceptable and encouraged** here.
 - Examples: `--force` flag forwarded, `--override-min-bitrate` derived correctly, route returns required fields.
 - These are legitimate tests — do not delete them to satisfy an "assert behavior not implementation" rule.
-- For dispatch tests, use `patch_dispatch_externals()` from `tests/helpers.py` — it patches the 5 external edges (`sp.run`, `_cleanup_staged_dir`, `trigger_plex_scan`, `trigger_jellyfin_scan`, `cleanup_disambiguation_orphans`) and yields a `SimpleNamespace` with mock references. Add your own test-specific patches inside the `with` block.
+- For dispatch tests, use `patch_dispatch_externals()` from `tests/dispatch_helpers.py` — it patches the 4 external edges (`sp.run`, `_cleanup_staged_dir`, `trigger_plex_scan`, `trigger_jellyfin_scan`) and yields a `SimpleNamespace` with mock references. Add your own test-specific patches inside the `with` block.
 
 ### 3. Orchestration tests
 - Must assert **domain outcomes**, not only helper call shapes.
@@ -1030,18 +1033,36 @@ Four categories of tests. Each has different rules for what's acceptable. **All 
 
 Always use these instead of inventing parallel scaffolding:
 
-**`tests/helpers.py`** — builders + helpers:
+**`tests/helpers.py`** — general builders + context wiring:
 - `make_request_row(**overrides)` — full album_requests row dict
 - `make_import_result(decision=..., new_min_bitrate=..., ...)` — `ImportResult` dataclass
 - `make_validation_result(**overrides)` — `ValidationResult` dataclass
 - `make_download_info(...)` — `DownloadInfo` dataclass
 - `make_download_file(...)` — real `DownloadFile` (not MagicMock)
-- `make_dispatch_request(**overrides)` — the `DispatchRequest` every `dispatch_import_core` / `_reject_import_from_evidence_decision` test constructs through (#1277). Its optional defaults ARE the dataclass's own, pinned field-by-field by `tests/test_dispatch_request.py`.
 - `make_grab_list_entry(...)` — real `GrabListEntry`
 - `make_ctx_with_fake_db(fake_db)` — `CratediggerContext` wired to a fake
-- `patch_dispatch_externals()` — context manager for the 6 dispatch external patches
+- plus the slskd envelope/event builders, `make_candidate_summary`,
+  `delete_all_rows`/`REQUEST_CASCADE_RESET_TABLES`, `make_socket_file`,
+  `hermetic_beets_config_defaults`, `own_transfer_keys`,
+  `seed_visible_wrong_match`/`SeededWrongMatch`, `make_requests_http_error`
+
+**`tests/dispatch_helpers.py`** — dispatch/import-lane support (split out of
+`tests/helpers.py`, #1278):
+- `make_dispatch_request(**overrides)` — the `DispatchRequest` every `dispatch_import_core` / `_reject_import_from_evidence_decision` test constructs through (#1277). Its optional defaults ARE the dataclass's own, pinned field-by-field by `tests/test_dispatch_request.py`.
+- `finalize_claimed_dispatch(db, job, outcome)` — applies a computed dispatch outcome (or a raising `BaseException`) through the production queue owner
+- `claim_next_import_job` / `claim_next_import_preview_job` — one-shot claim conveniences over the production candidate-scan API
+- `handoff_automation_owner(db, request_id)` — the real `wanted -> downloading -> processing` transcript; never inserts an owner directly
+- `pinned_dispatch_authority` / `make_database_source_with_fake_db` — fixture→production bridges
+- `patch_dispatch_externals()` — context manager for the 4 dispatch external patches
 - `noop_quality_gate(**kwargs) -> None` — drop-in `quality_gate_fn` stub for dispatch tests that don't care about the post-import gate. Pair with `dispatch_import_core(..., quality_gate_fn=noop_quality_gate)`.
 - `RecordingQualityGate()` — recorder `quality_gate_fn` with `assert_called_once()` / `assert_not_called()` / `call_count` / `calls` (list of kwargs). For tests that assert the gate ran with specific args.
+
+**`tests/evidence_helpers.py`** — `AlbumQualityEvidence`-family builders
+(split out of `tests/helpers.py`, #1278):
+- `make_album_quality_evidence(...)` — production-shaped content-addressed evidence row (fingerprint computed by the canonical helper)
+- `build_parity_candidate_evidence` / `build_parity_current_evidence` — the canonical simulator-world → evidence-row mapping shared by the hand-written parity tests and the generated parity property
+- `make_aac_lattice_capture(...)` — AAC-lattice capture through the production derivation
+- `make_audio_corrupt_validation_report(...)`, `PROVISIONAL_LANE_DECISIONS`
 
 **`tests/fakes/`** — stateful fakes:
 - `FakePipelineDB` — full PipelineDB stand-in: requests, download_logs, denylist, cooldowns, status history, spectral state, attempt counters. Includes `assert_log()` helper. Has `queue_execute_results(*cursors)` + `execute_calls` recording for tests driving raw-SQL CLI paths.

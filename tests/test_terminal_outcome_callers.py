@@ -26,12 +26,12 @@ from lib.terminal_outcomes import (
 )
 from scripts import import_preview_worker, importer
 from tests.audio_fixtures import make_test_flac
-from tests.fakes import FakePipelineDB
-from tests.helpers import (
+from tests.dispatch_helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
-    make_request_row,
 )
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 
 
 def _seed_request(db: FakePipelineDB) -> None:

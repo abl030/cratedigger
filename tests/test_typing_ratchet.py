@@ -194,8 +194,9 @@ class TestTestsEscapeHatchFreeze(unittest.TestCase):
         msg = ["Tests escape-hatch freeze mismatch (issue #784)."]
         if regressions:
             msg.append(
-                "NEW escape hatches in tests — check tests/helpers.py's "
-                "typed bridges first (finalize_claimed_dispatch, "
+                "NEW escape hatches in tests — check the typed bridges "
+                "first (tests/dispatch_helpers.py's "
+                "finalize_claimed_dispatch, tests/helpers.py's "
                 "make_ctx_with_fake_db): reuse one if your call site "
                 "matches, or extend the bridge set for the call site you "
                 "need, before adding a new hatch here (frozen, exact-match "

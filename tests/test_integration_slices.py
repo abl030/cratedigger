@@ -56,6 +56,19 @@ from lib.quality import (
 )
 from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION, AlbumResult
 from lib.staged_album import StagedAlbum
+from tests.dispatch_helpers import (
+    RecordingQualityGate,
+    claim_next_import_job,
+    claim_next_import_preview_job,
+    finalize_claimed_dispatch,
+    handoff_automation_owner,
+    make_dispatch_request,
+    patch_dispatch_externals,
+)
+from tests.evidence_helpers import (
+    make_album_quality_evidence,
+    make_audio_corrupt_validation_report,
+)
 from tests.fakes import (
     FakeBeetsDB,
     FakePipelineDB,
@@ -64,24 +77,15 @@ from tests.fakes import (
 )
 from tests.helpers import (
     REQUEST_CASCADE_RESET_TABLES,
-    RecordingQualityGate,
-    claim_next_import_job,
-    claim_next_import_preview_job,
     delete_all_rows,
-    finalize_claimed_dispatch,
-    handoff_automation_owner,
     hermetic_beets_config_defaults,
-    make_album_quality_evidence,
-    make_audio_corrupt_validation_report,
     make_ctx_with_fake_db,
-    make_dispatch_request,
     make_download_file,
     make_grab_list_entry,
     make_import_result,
     make_request_row,
     make_requests_http_error,
     make_validation_result,
-    patch_dispatch_externals,
 )
 
 _HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
@@ -3008,9 +3012,10 @@ class TestLocalImportSlice(unittest.TestCase):
 
         # finalize_claimed_dispatch raises `outcome` through the real
         # process_claimed_job when it is a BaseException instance instead
-        # of a DispatchOutcome — the file's established Any-typed bridge,
-        # extended (issue #1176 PR3 review round) so this crash-path test
-        # reuses it instead of calling process_claimed_job directly.
+        # of a DispatchOutcome — tests/dispatch_helpers.py's established
+        # Any-typed bridge, extended (issue #1176 PR3 review round) so this
+        # crash-path test reuses it instead of calling process_claimed_job
+        # directly.
         updated = finalize_claimed_dispatch(
             db, claimed,
             RuntimeError("simulated launched-but-unacknowledged crash"),
@@ -6593,7 +6598,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
         from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
         from scripts import import_preview_worker
-        from tests.helpers import noop_quality_gate
+        from tests.dispatch_helpers import noop_quality_gate
 
         with tempfile.TemporaryDirectory() as root:
             staging_dir = os.path.join(root, "Incoming")
@@ -7672,7 +7677,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         spectral_bitrate_kbps=None,
     ):
         from lib.quality import AudioQualityMeasurement
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         return make_album_quality_evidence(
             mb_release_id=f"mbid-u6-current-{owner_id}",

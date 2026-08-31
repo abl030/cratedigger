@@ -21,12 +21,10 @@ from lib.import_manifest import (
 )
 from lib.import_queue import IMPORT_JOB_FORCE
 from lib.quality_evidence import snapshot_audio_files
+from tests.dispatch_helpers import claim_next_import_job
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakePipelineDB
-from tests.helpers import (
-    claim_next_import_job,
-    make_album_quality_evidence,
-    make_request_row,
-)
+from tests.helpers import make_request_row
 
 
 class TestImportManifest(unittest.TestCase):
@@ -361,7 +359,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
     ) -> None:
         terminal = outcome.terminal_outcome
         if terminal is not None:
-            from tests.helpers import finalize_claimed_dispatch
+            from tests.dispatch_helpers import finalize_claimed_dispatch
 
             job = db.get_import_job(terminal.import_job_id)
             assert job is not None

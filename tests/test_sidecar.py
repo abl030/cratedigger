@@ -28,7 +28,7 @@ from lib.sidecar import (
     build_sidecar,
     should_write_sidecar,
 )
-from tests.helpers import make_album_quality_evidence
+from tests.evidence_helpers import make_album_quality_evidence
 
 
 def _verified_lossless_evidence(**overrides):

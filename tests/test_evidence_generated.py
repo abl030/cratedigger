@@ -71,12 +71,10 @@ from lib.quality_evidence import (
     snapshot_fingerprint,
 )
 from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+from tests.dispatch_helpers import claim_next_import_preview_job
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import (
-    claim_next_import_preview_job,
-    make_album_quality_evidence,
-    make_request_row,
-)
+from tests.helpers import make_request_row
 
 _CHANGED_SNAPSHOT_FACT_SHAPES: tuple[
     tuple[EvidenceSubject | None, EvidenceSubject | None], ...

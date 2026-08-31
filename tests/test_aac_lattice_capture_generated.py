@@ -69,8 +69,8 @@ from lib.quality import (
     SpectralAnalysisDetail,
     full_pipeline_decision_from_evidence,
 )
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence
 from tests.test_quality_generated import wild_ready_candidate_evidence
 
 Decider = Callable[

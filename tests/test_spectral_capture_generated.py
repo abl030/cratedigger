@@ -75,8 +75,9 @@ from lib.spectral_check import (
     TrackResult,
     classify_track,
 )
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import make_request_row
 from tests.test_quality_generated import wild_ready_candidate_evidence
 
 Decider = Callable[

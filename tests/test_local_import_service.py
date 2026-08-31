@@ -21,8 +21,9 @@ from lib.local_import_service import (
     LocalImportEnqueueResult,
     enqueue_local_import,
 )
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakePipelineDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import make_request_row
 
 
 class TestLocalImportService(unittest.TestCase):

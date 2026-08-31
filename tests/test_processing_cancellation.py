@@ -29,9 +29,9 @@ from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.quality import ValidationResult
 from lib.quality_evidence import EvidenceBuildResult
 from lib.staged_album import StagedAlbum
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
-    handoff_automation_owner,
     make_download_file,
     make_grab_list_entry,
     make_request_row,

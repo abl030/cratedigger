@@ -34,12 +34,9 @@ from lib.quality import (
     TrackMapping,
     ValidationResult,
 )
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakeBeetsDB
-from tests.helpers import (
-    handoff_automation_owner,
-    make_candidate_summary,
-    make_request_row,
-)
+from tests.helpers import make_candidate_summary, make_request_row
 from tests.web._harness import (
     _assert_required_fields,
     _FakeDbWebServerCase,
@@ -707,7 +704,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
     def test_new_import_never_projects_post_import_current_evidence(self):
         from lib.quality import AudioQualityMeasurement
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         evidence = make_album_quality_evidence(
             mb_release_id="test-mbid-0100",
@@ -740,7 +737,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         from datetime import timedelta
 
         from lib.quality import AudioQualityMeasurement
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         log_id = self.db.log_download(
             100,
@@ -818,7 +815,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             SpectralAnalysisDetail,
             SpectralDetail,
         )
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         evidence = make_album_quality_evidence(
             mb_release_id="test-mbid-0100",
@@ -916,7 +913,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             ImportResult,
             TargetQualityContract,
         )
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         source_log_id = self.db.log_download(
             100,
@@ -1031,7 +1028,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
     def test_deleted_triage_uses_complete_canonical_current_have(self):
         import web.server as srv
         from lib.quality import AlbumQualityV0Metric, AudioQualityMeasurement
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         self.db.log_download(
             100,
@@ -1108,7 +1105,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         """Music for Qigong Dancing: a lone audit V0 is not a HAVE row."""
         import web.server as srv
         from lib.quality import AlbumQualityV0Metric, AudioQualityMeasurement
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         self.db.log_download(
             100,
@@ -1309,7 +1306,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
     def test_pipeline_log_projects_complete_canonical_candidate_evidence(self):
         from lib.quality import AlbumQualityV0Metric, AudioQualityMeasurement
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         log_id = self.db.log_download(
             100,
@@ -1377,7 +1374,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             CdRipBitVerification,
             CdTocIdentity,
         )
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         cd_rip = CdRipBitVerification(
             toc=CdTocIdentity(
@@ -1458,7 +1455,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
     def test_pipeline_log_withholds_poisoned_current_evidence(self):
         from lib.quality import AlbumQualityV0Metric, AudioQualityMeasurement
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         log_id = self.db.log_download(100, outcome="rejected")
         sibling = make_album_quality_evidence(
@@ -1515,7 +1512,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
     def _seed_verdict_evidence(self, *, log_id, **evidence_kwargs):
         """Attach production-shaped candidate evidence to a download-log row."""
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         evidence = make_album_quality_evidence(
             mb_release_id="test-mbid-0100", **evidence_kwargs)
@@ -1594,7 +1591,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
     def test_pipeline_log_never_accuses_an_audit_only_have(self):
         """Request 6387's shape: the INSTALLED copy is the AAC (#829)."""
         from lib.quality import AudioQualityMeasurement
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         log_id = self.db.log_download(
             100, outcome="rejected", beets_scenario="quality_reject")
@@ -2011,7 +2008,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
     def _seed_installed_evidence(self, measurement, **evidence_kwargs):
         """Link a production-shaped installed evidence row to request 100."""
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         installed = make_album_quality_evidence(
             mb_release_id="test-mbid-0100",
@@ -2087,7 +2084,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             CdRipBitVerification,
             CdTocIdentity,
         )
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         cd_rip = CdRipBitVerification(
             toc=CdTocIdentity(
@@ -2141,7 +2138,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
     def test_pipeline_detail_does_not_treat_two_empty_release_ids_as_exact(self):
         from lib.quality import AudioQualityMeasurement
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         poisoned = make_album_quality_evidence(
             mb_release_id="temporary-valid-id",
@@ -2268,7 +2265,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         """The candidate half of the chain: the flags must belong to the
         attempt whose grade ``last_download_spectral_grade`` copied."""
         from lib.quality import AudioQualityMeasurement
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         candidate = make_album_quality_evidence(
             mb_release_id="test-mbid-0100",
@@ -2308,7 +2305,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         """Fail-accusing: when the denorm names a grade no retained attempt
         measured, the pair is empty rather than a different album's."""
         from lib.quality import AudioQualityMeasurement
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         candidate = make_album_quality_evidence(
             mb_release_id="test-mbid-0100",

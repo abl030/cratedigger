@@ -48,8 +48,9 @@ from lib.pipeline_db import (
 from lib.release_identity import ReleaseIdentity
 from lib.transitions import TransitionConflict, TransitionConflictKind
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import make_request_row
 from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 
 RELEASE_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

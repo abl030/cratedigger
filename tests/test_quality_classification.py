@@ -24,7 +24,7 @@ from lib.quality import (
     classify_full_pipeline_decision,
     full_pipeline_decision,
 )
-from tests.helpers import (
+from tests.evidence_helpers import (
     PROVISIONAL_LANE_DECISIONS,
     build_parity_candidate_evidence,
     build_parity_current_evidence,

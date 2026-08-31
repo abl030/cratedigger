@@ -18,8 +18,9 @@ from lib.beets_delete import (
     BeetsDeleteFailed,
     BeetsDeleteRequest,
 )
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import make_request_row
 from tests.web._harness import (
     _assert_required_fields,
     _FakeDbWebServerCase,

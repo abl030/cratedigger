@@ -57,12 +57,9 @@ from lib.pipeline_db import MbidCollisionError, SupersedeRaceError
 from lib.release_identity import ReleaseIdentity
 from lib.wrong_match_delete_service import WrongMatchDeleteSummary
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakeBeetsDB, FakePipelineDB, FakeSlskdAPI
-from tests.helpers import (
-    handoff_automation_owner,
-    make_request_row,
-    seed_visible_wrong_match,
-)
+from tests.helpers import make_request_row, seed_visible_wrong_match
 from web.discogs import DiscogsMirrorNotConfigured
 
 # NOTE: must be a valid MB release id per ``detect_release_source``

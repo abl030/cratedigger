@@ -23,11 +23,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from lib.fs_authority import DirectoryObservation
 from lib.import_queue import ForceImportPayload
-from tests.helpers import (
-    handoff_automation_owner,
-    make_request_row,
-    seed_visible_wrong_match,
-)
+from tests.dispatch_helpers import handoff_automation_owner
+from tests.helpers import make_request_row, seed_visible_wrong_match
 from tests.web._harness import (
     _DEFAULT_WRONG_MATCH_VALIDATION,
     _assert_required_fields,
@@ -356,7 +353,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             AudioQualityMeasurement,
             VerifiedLosslessProof,
         )
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
         evidence = make_album_quality_evidence(
             mb_release_id=f"ev-{log_id}",
             storage_format=storage_format,
@@ -496,7 +493,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self, request_id: int, measurement, **evidence_kwargs,
     ) -> None:
         """Link a production-shaped installed evidence row to a request."""
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         installed = make_album_quality_evidence(
             mb_release_id=f"installed-{request_id}",
@@ -603,7 +600,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
     def test_entry_chip_withholds_the_accusation_for_an_audit_only_codec(self):
         """The CANDIDATE's own codec decides the per-entry chip."""
         from lib.quality import AudioQualityMeasurement
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         log_id = self._seed_wrong_match(
             request_id=143, mb_release_id="abc-143")
@@ -639,7 +636,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
     def test_shared_current_row_cannot_lend_lineage_to_candidate_chip(self):
         """Wrong Matches renders source semantics for a shared evidence row."""
         from lib.quality import AudioQualityMeasurement
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         log_id = self._seed_wrong_match(
             request_id=146, mb_release_id="abc-146",

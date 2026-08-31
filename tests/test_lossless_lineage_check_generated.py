@@ -27,8 +27,9 @@ from lib.quality_evidence import (
     candidate_evidence_for_policy,
     snapshot_audio_files,
 )
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import make_request_row
 from tests.test_pipeline_db import TEST_DSN, requires_postgres
 
 

@@ -20,8 +20,9 @@ from unittest.mock import patch
 from scripts import pipeline_cli
 from scripts.pipeline_cli import api_mutations
 from scripts.pipeline_cli.routes_meta import _build_parser
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakePipelineDB, FakeYTMusic
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import make_request_row
 from tests.web._harness import _FakeDbWebServerCase
 
 
@@ -704,8 +705,8 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
             configured_canonical_base,
         )
         from lib.quality import AlbumQualityEvidenceFile
+        from tests.evidence_helpers import make_album_quality_evidence
         from tests.fakes import FakeBeetsDB
-        from tests.helpers import make_album_quality_evidence
 
         merged = "6b209cc5-62b0-4ef7-9336-c2dbd876301a"
         survivor = "9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4"

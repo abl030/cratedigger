@@ -40,14 +40,14 @@ from lib.terminal_outcomes import (
     TerminalDownloadAudit,
     TerminalOutcomeResult,
 )
-from tests.fakes import FakePipelineDB
-from tests.helpers import (
+from tests.dispatch_helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
     handoff_automation_owner,
-    make_album_quality_evidence,
-    make_request_row,
 )
+from tests.evidence_helpers import make_album_quality_evidence
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 from tests.test_automation_startup_recovery import (
     _no_debris_removal,
     _no_force_action_copy_path,

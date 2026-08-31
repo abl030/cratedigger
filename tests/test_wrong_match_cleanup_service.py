@@ -53,11 +53,9 @@ from lib.wrong_match_cleanup_service import (
     cleanup_wrong_match,
 )
 from lib.wrong_matches import WrongMatchCleanupResult
+from tests.evidence_helpers import make_audio_corrupt_validation_report
 from tests.fakes import FakePipelineDB
-from tests.helpers import (
-    make_audio_corrupt_validation_report,
-    make_request_row,
-)
+from tests.helpers import make_request_row
 from web.download_history_view import build_recents_download_log_rows
 
 

@@ -50,7 +50,7 @@ from tests.beets_world import (
     HISTORICAL_PASSENGER_PATH_TEMPLATE,
     BeetsWorldRelease,
 )
-from tests.helpers import claim_next_import_job
+from tests.dispatch_helpers import claim_next_import_job
 from tests.world_model.census_seeds import (
     EVIDENCE_DRIFT_FACT_SEEDS,
     EVIDENCE_DRIFT_MUTATION_SEEDS,

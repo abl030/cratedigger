@@ -51,16 +51,15 @@ from lib.terminal_outcomes import (
     TerminalDenylist,
     TerminalDownloadAudit,
 )
-from tests.fakes import FakePipelineDB
-from tests.fakes.download import RecordingProcessAlbum
-from tests.helpers import (
+from tests.dispatch_helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
     handoff_automation_owner,
-    make_album_quality_evidence,
-    make_ctx_with_fake_db,
-    make_request_row,
 )
+from tests.evidence_helpers import make_album_quality_evidence
+from tests.fakes import FakePipelineDB
+from tests.fakes.download import RecordingProcessAlbum
+from tests.helpers import make_ctx_with_fake_db, make_request_row
 from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 
 
@@ -2334,7 +2333,11 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         assert execution_lease is not None
         process_album = RecordingProcessAlbum(outcome=completion)
 
-        ctx = make_ctx_with_fake_db(db)
+        # Deliberate seam: the real-PG db rides in the fake source, whose
+        # only surface this flow reaches is ``_get_db()`` (plus the mock
+        # cfg). The cast spells that one type lie at the seam instead of
+        # hiding it behind an Any-typed helper.
+        ctx = make_ctx_with_fake_db(cast(FakePipelineDB, db))
 
         def execute(
             owner: PipelineDB,

@@ -7,12 +7,12 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.import_execution import ExecutionLeaseSnapshot, ProcessIdentity
-from tests.fakes import FakePipelineDB
-from tests.helpers import (
+from tests.dispatch_helpers import (
     claim_next_import_preview_job,
     handoff_automation_owner,
-    make_request_row,
 )
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 
 
 def _lease(invocation_id: str) -> ExecutionLeaseSnapshot:

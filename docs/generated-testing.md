@@ -906,7 +906,7 @@ and stay readable.
 for every world expressible in the twins' **common language**, the simulator
 twin and the production evidence decider must produce identical outcomes.
 The world→evidence mapping is the same shared builder the hand-written
-parity tests use (`tests/helpers.py::build_parity_candidate_evidence` /
+parity tests use (`tests/evidence_helpers.py::build_parity_candidate_evidence` /
 `build_parity_current_evidence`), so a divergence can't hide behind two
 different encodings. The common-language constraints (candidate V0 probes
 only on FLAC candidates, derived `is_vbr`, explicit conversion facts) are
@@ -1260,7 +1260,8 @@ may still patrol nothing; only review and mutant-kill counts show that.
 - **Check the burst's `SHALLOW` lines for the property you just wrote.** A
   strategy space smaller than the budget is a fact worth knowing before the
   next mutant hunt reports a survivor.
-- Reuse the shared fakes/builders (`tests/fakes/`, `tests/helpers.py`)
+- Reuse the shared fakes/builders (`tests/fakes/`, `tests/helpers.py`,
+  `tests/evidence_helpers.py`, `tests/dispatch_helpers.py`)
   per `.claude/rules/code-quality.md`; leaf-seam mock rules apply to
   generated tests like any other test.
 

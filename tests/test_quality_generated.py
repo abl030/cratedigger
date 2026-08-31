@@ -6,7 +6,8 @@ Hypothesis-driven properties over the quality decision twins:
   through ``simulate()`` (the canonical scenario language of the album
   test set).
 * ``full_pipeline_decision_from_evidence`` — the production decider,
-  driven through the shared parity builders in ``tests/helpers.py``.
+  driven through the shared parity builders in
+  ``tests/evidence_helpers.py``.
 
 Two tiers, selected by ``CRATEDIGGER_HYPOTHESIS_PROFILE`` (see
 ``tests/_hypothesis_profiles.py``):
@@ -119,7 +120,7 @@ from lib.spectral_check import (
     MIN_CLIFF_SLICES,
     SLICE_FREQS,
 )
-from tests.helpers import (
+from tests.evidence_helpers import (
     PROVISIONAL_LANE_DECISIONS,
     build_parity_candidate_evidence,
     build_parity_current_evidence,
@@ -2788,7 +2789,7 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
 # Parity property — the twins must agree on every world both can express.
 #
 # The world space here is the twins' COMMON language, i.e. exactly what the
-# shared parity builders (tests/helpers.py) can encode:
+# shared parity builders (tests/evidence_helpers.py) can encode:
 #   * candidate V0 probes only on FLAC candidates (a lossy candidate with a
 #     lossless-source V0 metric is not expressible in the flat kwargs);
 #   * ``is_vbr`` is always derived as ``not is_cbr`` (the evidence decider

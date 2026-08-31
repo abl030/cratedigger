@@ -23,8 +23,9 @@ from lib.terminal_outcomes import (
     TerminalDenylist,
     TerminalDownloadAudit,
 )
+from tests.dispatch_helpers import claim_next_import_job
 from tests.fakes import FakePipelineDB
-from tests.helpers import claim_next_import_job, make_request_row
+from tests.helpers import make_request_row
 from tests.test_pipeline_db import TEST_DSN, requires_postgres
 from tests.test_terminal_outcomes import (
     SEEDED_BACKOFF_MINUTES,

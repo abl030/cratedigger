@@ -83,9 +83,9 @@ from lib.slskd_transfers import (
     reap_disk_orphans,
 )
 from lib.wrong_match_policy import WRONG_MATCH_QUARANTINE_DIR
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
-    handoff_automation_owner,
     make_ctx_with_fake_db,
     make_download_file,
     make_grab_list_entry,

@@ -42,8 +42,9 @@ from lib.quality_evidence import (
     snapshot_audio_files,
 )
 from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import make_request_row
 
 
 class TestImportEvidenceAcquisition(unittest.TestCase):
@@ -240,7 +241,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             force_import_dedupe_key,
             force_import_payload,
         )
-        from tests.helpers import claim_next_import_preview_job
+        from tests.dispatch_helpers import claim_next_import_preview_job
 
         evidence_id = self._persist_candidate()
         evidence = self.db.load_album_quality_evidence_by_id(evidence_id)
@@ -378,7 +379,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             force_import_payload,
         )
         from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
-        from tests.helpers import claim_next_import_preview_job
+        from tests.dispatch_helpers import claim_next_import_preview_job
 
         os.remove(os.path.join(self.root, "01 - Track.mp3"))
         with open(os.path.join(self.root, "01 - Track.opus"), "wb") as handle:

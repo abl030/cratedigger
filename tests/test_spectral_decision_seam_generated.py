@@ -73,7 +73,7 @@ from lib.quality import (
 )
 from lib.quality.ranks import _codec_family_of
 from lib.quality.spectral_interpretation import _family_from_label
-from tests.helpers import (
+from tests.evidence_helpers import (
     build_parity_candidate_evidence,
     build_parity_current_evidence,
 )

@@ -23,8 +23,9 @@ from lib.quality_evidence import snapshot_audio_files
 from lib.sidecar import SIDECAR_FILENAME
 from lib.sidecar_service import write_sidecar_for_request
 from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import make_request_row
 
 _MBID = "rel-1140"
 _REQUEST_ID = 1140

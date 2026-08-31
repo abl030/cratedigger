@@ -37,20 +37,22 @@ from lib.quality import (
 )
 from lib.quality_evidence import snapshot_audio_files
 from lib.terminal_outcomes import ImportJobTerminal
-from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import (
+from tests.dispatch_helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
     finalize_claimed_dispatch,
     handoff_automation_owner,
-    make_album_quality_evidence,
     make_dispatch_request,
-    make_download_file,
-    make_import_result,
-    make_request_row,
     noop_quality_gate,
     patch_dispatch_externals,
     pinned_dispatch_authority,
+)
+from tests.evidence_helpers import make_album_quality_evidence
+from tests.fakes import FakeBeetsDB, FakePipelineDB
+from tests.helpers import (
+    make_download_file,
+    make_import_result,
+    make_request_row,
 )
 
 
