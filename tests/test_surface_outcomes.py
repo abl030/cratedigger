@@ -84,6 +84,12 @@ REGISTRY: tuple[RegisteredOutcomeMaps, ...] = (
         "OUTCOME_HTTP_STATUS",
         "OUTCOME_EXIT_CODE",
     ),
+    RegisteredOutcomeMaps(
+        "lib.set_intent_service",
+        "SET_INTENT_HTTP_STATUS",
+        "SET_INTENT_EXIT_CODES",
+        "SetIntentOutcome",
+    ),
     RegisteredOutcomeMaps("lib.force_import_service", "FORCE_IMPORT_HTTP_STATUS"),
     RegisteredOutcomeMaps("lib.local_import_service", "LOCAL_IMPORT_HTTP_STATUS"),
     RegisteredOutcomeMaps("lib.merge_rekey_service", "MERGE_REKEY_HTTP_STATUS"),

@@ -590,6 +590,31 @@ class TestCmdSet(unittest.TestCase):
         self.assertEqual(rc, 4)
         self.assertEqual(db.request(8)["status"], "imported")
 
+    def test_vanished_row_conflict_exits_2(self):
+        """A row deleted mid-command classifies not_found: the route twin
+        answers 404, so cmd_set exits 2 (#1278 review F2 — it used to
+        blanket-exit 4 for every conflict kind)."""
+        class VanishingDB(FakePipelineDB):
+            def __init__(self) -> None:
+                super().__init__()
+                self._reads = 0
+
+            def get_request(self, request_id: int):
+                row = super().get_request(request_id)
+                self._reads += 1
+                if self._reads == 1:
+                    self._requests.pop(request_id, None)
+                return row
+
+        db = VanishingDB()
+        db.seed_request(make_request_row(id=12, status="unsearchable"))
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_set(db, MagicMock(id=12, status="wanted"))
+        self.assertEqual(rc, 2)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["reason"], "not_found")
+
     def test_processing_status_change_reports_exact_owner_exit_4(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -2891,7 +2916,7 @@ class TestCmdSetIntent(unittest.TestCase):
     """Tests for cmd_set_intent — lossless-on-disk toggle."""
 
     @patch("builtins.print")
-    def test_set_lossless_on_wanted(self, _mock_print):
+    def test_set_lossless_on_wanted(self, mock_print):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=1, status="wanted", artist_name="A", album_title="B",
@@ -2899,9 +2924,13 @@ class TestCmdSetIntent(unittest.TestCase):
         args = MagicMock(id=1, intent="lossless")
         pipeline_cli.cmd_set_intent(db, args)
         self.assertEqual(db.update_request_fields_calls, [(1, {"target_format": "lossless"})])
+        rendered = mock_print.call_args.args[0]
+        self.assertIn("A - B", rendered)
+        self.assertIn("lossless on disk", rendered)
+        self.assertIn("target_format: None → lossless", rendered)
 
     @patch("builtins.print")
-    def test_set_default_clears_target(self, _mock_print):
+    def test_set_default_clears_target(self, mock_print):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=1, status="wanted", artist_name="A", album_title="B",
@@ -2909,31 +2938,31 @@ class TestCmdSetIntent(unittest.TestCase):
         args = MagicMock(id=1, intent="default")
         pipeline_cli.cmd_set_intent(db, args)
         self.assertEqual(db.update_request_fields_calls, [(1, {"target_format": None})])
+        self.assertIn(
+            "default (pipeline decides)", mock_print.call_args.args[0])
 
     @patch("builtins.print")
-    @patch("scripts.pipeline_cli.album_requests.finalize_request")
-    def test_set_lossless_on_imported_requeues(self, mock_finalize, _mock_print):
+    def test_set_lossless_on_imported_requeues(self, mock_print):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=2, status="imported", artist_name="A", album_title="B",
             min_bitrate=245,
         ))
         args = MagicMock(id=2, intent="lossless")
-        mock_finalize.side_effect = (
-            pipeline_cli_album_requests.transitions.finalize_request
-        )
         result = pipeline_cli.cmd_set_intent(db, args)
         self.assertEqual(result, 0)
-        called_db, request_id, transition = mock_finalize.call_args.args
-        self.assertIs(called_db, db)
-        self.assertEqual(request_id, 2)
-        self.assertEqual(transition.target_status, "wanted")
-        self.assertEqual(transition.from_status, "imported")
-        self.assertEqual(
-            transition.fields,
-            {"search_filetype_override": "lossless", "min_bitrate": 245},
-        )
+        # The transition seam itself is proven in
+        # tests/test_set_intent_service.py; the wrapper test asserts the
+        # domain outcome the real path produced. prev_min_bitrate is the
+        # observable that distinguishes "min_bitrate passed through" from
+        # "never touched" (PR2 mutant-runner survivor M5).
+        row = db.request(2)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], "lossless")
+        self.assertEqual(row["min_bitrate"], 245)
+        self.assertEqual(row["prev_min_bitrate"], 245)
         self.assertEqual(db.update_request_fields_calls, [(2, {"target_format": "lossless"})])
+        self.assertIn("re-queued for search", mock_print.call_args.args[0])
 
     @patch("builtins.print")
     def test_set_intent_reports_replace_race_instead_of_success(
@@ -3001,22 +3030,73 @@ class TestCmdSetIntent(unittest.TestCase):
             4, {"target_format": None, "search_filetype_override": None})])
 
     @patch("builtins.print")
-    def test_set_intent_refuses_downloading(self, _mock_print):
+    def test_set_intent_refuses_downloading_exit_4(self, mock_print):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=3, status="downloading", artist_name="A", album_title="B",
         ))
         args = MagicMock(id=3, intent="lossless")
-        pipeline_cli.cmd_set_intent(db, args)
+        # Wrong-state refusal: 409/exit 4 by the repository convention
+        # (issue #1278 — this used to exit 1 while the route answered 400).
+        self.assertEqual(pipeline_cli.cmd_set_intent(db, args), 4)
         self.assertEqual(db.update_request_fields_calls, [])
+        # Operator copy is contract too (PR2 mutant-runner survivor M12:
+        # swapping this and the not-found message survived every test).
+        self.assertIn("downloading", mock_print.call_args.args[0])
 
     @patch("builtins.print")
-    def test_set_intent_not_found(self, _mock_print):
+    def test_set_intent_not_found_exit_2(self, mock_print):
         db = FakePipelineDB()
         # no rows seeded → get_request returns None
         args = MagicMock(id=99, intent="lossless")
-        pipeline_cli.cmd_set_intent(db, args)
+        self.assertEqual(pipeline_cli.cmd_set_intent(db, args), 2)
         self.assertEqual(db.update_request_fields_calls, [])
+        self.assertIn("Request 99 not found", mock_print.call_args.args[0])
+
+    def test_set_intent_vanished_row_cas_miss_exits_2(self):
+        """A row deleted mid-CAS classifies not_found: the route answers
+        404, so the CLI exits 2 (PR2 review — the derived-conflict-exit
+        change had no adapter-level pin for its one new exit value)."""
+        class VanishingDB(FakePipelineDB):
+            def update_request_fields(
+                self,
+                request_id: int,
+                *,
+                expected_status: str | None = None,
+                **fields: object,
+            ) -> bool:
+                del expected_status, fields
+                self._requests.pop(request_id, None)
+                return False
+
+        db = VanishingDB()
+        db.seed_request(make_request_row(
+            id=8, status="wanted", artist_name="A", album_title="B",
+        ))
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            result = pipeline_cli.cmd_set_intent(
+                db, MagicMock(id=8, intent="lossless"),
+            )
+        self.assertEqual(result, 2)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["reason"], "not_found")
+
+    def test_set_intent_replaced_reports_frozen_conflict_exit_4(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=11, status="replaced", artist_name="A", album_title="B",
+        ))
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            result = pipeline_cli.cmd_set_intent(
+                db, MagicMock(id=11, intent="lossless"),
+            )
+        self.assertEqual(result, 4)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["error"], "transition_conflict")
+        self.assertEqual(payload["reason"], "invalid_edge")
+        self.assertEqual(db.request(11)["status"], "replaced")
 
 
 class TestCmdRepairSpectral(unittest.TestCase):
