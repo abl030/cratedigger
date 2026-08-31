@@ -397,10 +397,25 @@ class TestCloseOutSteps(unittest.TestCase):
         self.assertEqual(len(db.peer_observations), 2)
 
     def test_record_peer_observations_skips_an_empty_roster(self):
+        # Assert the guard itself, not the end state: the fake's
+        # record_peer_observations is naturally idempotent on empty input,
+        # so an empty peer_observations dict would hold even with the
+        # production guard deleted (review mutant M17 survived on exactly
+        # that). The step's contract is that an empty roster makes NO DB
+        # call and logs NO persisted line.
         db = FakePipelineDB()
         ctx = self._ctx(db)
+        calls: list[object] = []
+        real_record = db.record_peer_observations
+
+        def _recording_record(*args, **kwargs):
+            calls.append((args, kwargs))
+            return real_record(*args, **kwargs)
+
+        db.record_peer_observations = _recording_record
 
         self.assertEqual(record_peer_observations_cycle(ctx), 0)
+        self.assertEqual(calls, [])
         self.assertEqual(db.peer_observations, {})
 
 
