@@ -1690,29 +1690,29 @@ class TestGrabMostWanted(unittest.TestCase):
 
 
 class TestMatchTransferId(unittest.TestCase):
-    """Test match_transfer_id() — find slskd transfer ID by filename."""
+    """Test _match_transfer_id() — find slskd transfer ID by filename."""
 
     def test_exact_filename_match(self):
-        from lib.slskd_transfers import match_transfer_id
+        from lib.slskd_transfers import _match_transfer_id
         downloads = make_download_user(directories=[
             make_download_directory(directory="user\\Music", files=[
                 make_transfer_snapshot(filename="user\\Music\\01.flac", id="abc-123"),
                 make_transfer_snapshot(filename="user\\Music\\02.flac", id="def-456"),
             ]),
         ])
-        result = match_transfer_id(downloads, "user\\Music\\01.flac")
+        result = _match_transfer_id(downloads, "user\\Music\\01.flac")
         self.assertEqual(result, "abc-123")
 
     def test_not_found(self):
-        from lib.slskd_transfers import match_transfer_id
+        from lib.slskd_transfers import _match_transfer_id
         downloads = make_download_user(directories=[
             make_download_directory(directory="user\\Music", files=[]),
         ])
-        result = match_transfer_id(downloads, "user\\Music\\missing.flac")
+        result = _match_transfer_id(downloads, "user\\Music\\missing.flac")
         self.assertIsNone(result)
 
     def test_multi_directory(self):
-        from lib.slskd_transfers import match_transfer_id
+        from lib.slskd_transfers import _match_transfer_id
         downloads = make_download_user(directories=[
             make_download_directory(directory="d1", files=[
                 make_transfer_snapshot(filename="d1\\01.flac", id="id-1"),
@@ -1721,11 +1721,11 @@ class TestMatchTransferId(unittest.TestCase):
                 make_transfer_snapshot(filename="d2\\01.flac", id="id-2"),
             ]),
         ])
-        result = match_transfer_id(downloads, "d2\\01.flac")
+        result = _match_transfer_id(downloads, "d2\\01.flac")
         self.assertEqual(result, "id-2")
 
     def test_bulk_downloads_respects_username(self):
-        from lib.slskd_transfers import match_transfer_id
+        from lib.slskd_transfers import _match_transfer_id
         downloads = [
             make_download_user(username="Mr. Odd", directories=[
                 make_download_directory(directory="a", files=[
@@ -1738,7 +1738,7 @@ class TestMatchTransferId(unittest.TestCase):
                 ]),
             ]),
         ]
-        result = match_transfer_id(
+        result = _match_transfer_id(
             downloads,
             "shared\\01.flac",
             username="Miick Starr",
@@ -1753,7 +1753,7 @@ class TestMatchTransferId(unittest.TestCase):
         documented, still-accepted default for callers with no attempt
         boundary available (see ``test_not_before_scopes_to_attempt_boundary``
         below for the scoped alternative)."""
-        from lib.slskd_transfers import match_transfer_id
+        from lib.slskd_transfers import _match_transfer_id
         downloads = make_download_user(username="user1", directories=[
             make_download_directory(directory="d", files=[
                 make_transfer_snapshot(
@@ -1770,14 +1770,14 @@ class TestMatchTransferId(unittest.TestCase):
                 ),
             ]),
         ])
-        result = match_transfer_id(downloads, "shared\\01.flac", username="user1")
+        result = _match_transfer_id(downloads, "shared\\01.flac", username="user1")
         self.assertEqual(result, "stale-succeeded")
 
     def test_not_before_scopes_to_attempt_boundary(self):
         """Passing not_before (issue #822 item 3) routes to
         ``match_transfer_for_attempt`` and excludes the stale pre-boundary
         record the default branch above returns."""
-        from lib.slskd_transfers import match_transfer_id
+        from lib.slskd_transfers import _match_transfer_id
         downloads = make_download_user(username="user1", directories=[
             make_download_directory(directory="d", files=[
                 make_transfer_snapshot(
@@ -1794,7 +1794,7 @@ class TestMatchTransferId(unittest.TestCase):
                 ),
             ]),
         ])
-        result = match_transfer_id(
+        result = _match_transfer_id(
             downloads, "shared\\01.flac", username="user1",
             not_before="2026-06-01T00:00:00+00:00",
         )
@@ -1803,7 +1803,7 @@ class TestMatchTransferId(unittest.TestCase):
 
 class TestMatchTransferAllHistory(unittest.TestCase):
     """Test _match_transfer_all_history() — the private, deliberately
-    narrow all-history walk behind match_transfer_id's default branch
+    narrow all-history walk behind _match_transfer_id's default branch
     (issue #822 item 1; renamed from the formerly-public match_transfer)."""
 
     def test_bulk_downloads_prefers_active_over_old_completed(self):

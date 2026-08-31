@@ -412,7 +412,7 @@ def slskd_enqueue_with_outcome(
     """Enqueue files for download via slskd with an explicit outcome.
 
     ``not_before`` (issue #822 item 3) scopes the post-POST transfer-ID
-    reconciliation below to this attempt via ``match_transfer_id``'s own
+    reconciliation below to this attempt via ``_match_transfer_id``'s own
     ``not_before`` — the caller's own pre-POST timestamp (``claim.enqueued_at``
     / ``state.enqueued_at``), the same attempt boundary
     ``match_transfer_for_attempt`` uses everywhere else. Omitting it (the
@@ -471,7 +471,7 @@ def slskd_enqueue_with_outcome(
         if download_list is None:
             continue
         if all(
-            match_transfer_id(
+            _match_transfer_id(
                 download_list, f["filename"], username=username,
                 not_before=not_before)
             is not None
@@ -482,7 +482,7 @@ def slskd_enqueue_with_outcome(
     downloads: list[DownloadFile] = []
     for file in files:
         transfer_id = (
-            match_transfer_id(
+            _match_transfer_id(
                 download_list,
                 file["filename"],
                 username=username,
@@ -527,7 +527,7 @@ def slskd_do_enqueue(username: str, files: list[dict[str, Any]],
 
 # === Transfer ID re-derivation ===
 
-def match_transfer_id(
+def _match_transfer_id(
     downloads: DownloadUser | list[DownloadUser],
     target_filename: str,
     username: str | None = None,
@@ -543,7 +543,13 @@ def match_transfer_id(
 
     This is the ONE production seam still allowed to reach all-history
     matching (issue #822 item 1) -- ``slskd_enqueue_with_outcome``'s
-    post-POST reconciliation, the only caller. Passing ``not_before`` scopes
+    post-POST reconciliation, the only caller. Module-private for exactly
+    that reason (#1278): no production module outside this one calls it, and
+    the private name is what makes reaching all-history matching from a new
+    call site unrepresentable rather than merely discouraged -- the same
+    narrowing ``_match_transfer_all_history`` already carries below. Every
+    other production site that matches transfers MUST use the public
+    ``match_transfer_for_attempt``. Passing ``not_before`` scopes
     the match to that attempt boundary via ``match_transfer_for_attempt``
     instead; omitting it (the default) reaches the deliberate private
     all-history walk, ``_match_transfer_all_history``, for callers with no
@@ -553,7 +559,7 @@ def match_transfer_id(
     """
     if not_before is not None:
         assert username is not None, (
-            "match_transfer_id: not_before requires an explicit username")
+            "_match_transfer_id: not_before requires an explicit username")
         transfer = match_transfer_for_attempt(
             downloads, target_filename, username=username, not_before=not_before)
     else:
@@ -668,7 +674,7 @@ def _match_transfer_all_history(
     from long-past attempts).
 
     Private and deliberately narrow (issue #822 item 1): the ONLY caller is
-    ``match_transfer_id``'s default (no ``not_before``) branch, itself
+    ``_match_transfer_id``'s default (no ``not_before``) branch, itself
     reached only by ``slskd_enqueue_with_outcome``'s post-POST
     reconciliation when no attempt boundary is available. Every other
     production site that matches transfers binds evidence to a specific
