@@ -2,9 +2,10 @@
 
 The three registered end-of-cycle steps below (summary line, cycle-metrics
 row, browsed-peer roster) read the per-cycle accumulators off the context and
-the wall-clock anchors ``cycle_started_at``/``cycle_start`` that ``main()``
-sets as the cycle body starts. Failures deliberately propagate to
-``lib/convergence.py``: the registry owns cycle-preserving failure isolation.
+the wall-clock anchors ``cycle_started_at``/``cycle_start`` that
+``cratedigger.run_cycle`` sets as the cycle body starts. Failures deliberately
+propagate to ``lib/convergence.py``: the registry owns cycle-preserving
+failure isolation.
 """
 from __future__ import annotations
 

@@ -135,10 +135,10 @@ class CratediggerContext:
     fanout_waves: int = 0
 
     # --- Cycle wall-clock anchors. ---
-    # Set by main() as the cycle body starts; read by the registered
+    # Set by run_cycle() as the cycle body starts; read by the registered
     # end-of-cycle close-out steps (lib/cycle_summary.py) to derive elapsed
-    # time and the metrics row's started_at without main() threading the
-    # values through each call.
+    # time and the metrics row's started_at without the cycle body threading
+    # the values through each call.
     cycle_started_at: datetime | None = None
     cycle_start: float = 0.0
 

@@ -67,9 +67,10 @@ class TestConvergenceRegistryPins(unittest.TestCase):
         # The four pre-phase steps (cooldown load, search-plan
         # reconciliation, media-server pin reconcilers) precede the slskd
         # convergence sweeps in the order main() used to hand-roll them.
-        # load_user_cooldowns MUST stay ahead of Phase 1's submit:
-        # build_phase1_context forwards ctx.cooled_down_users by reference
-        # after the loader replaces the set.
+        # load_user_cooldowns MUST stay ahead of Phase 1's submit so the
+        # roster is loaded before either phase reads it; the loader
+        # mutates ctx.cooled_down_users in place, keeping
+        # build_phase1_context's by-reference forward coherent.
         self.assertEqual(
             tuple(step.name for step in CONVERGENCE_STEPS[ConvergenceGroup.PHASE_ZERO]),
             (
@@ -236,11 +237,35 @@ class TestCycleConvergenceWindows(unittest.TestCase):
             len(calls), 1,
             "main() must run exactly one cycle via run_cycle(ctx)")
 
+    def test_dry_run_gate_precedes_the_cycle_handoff(self):
+        # A count alone would let run_cycle(ctx) move ABOVE the dry-run
+        # gate, silently breaking --reconcile-dry-run's read-only contract
+        # while keeping the count at 1 (review F2). Pin the position.
+        tree = ast.parse(inspect.getsource(cratedigger.main))
+        gate_lines = [
+            node.lineno for node in ast.walk(tree)
+            if isinstance(node, ast.If)
+            and any(
+                isinstance(child, ast.Attribute)
+                and child.attr == "reconcile_dry_run"
+                for child in ast.walk(node.test)
+            )
+        ]
+        run_cycle_lines = [
+            node.lineno for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "run_cycle"
+        ]
+        self.assertEqual(len(gate_lines), 1)
+        self.assertEqual(len(run_cycle_lines), 1)
+        self.assertLess(gate_lines[0], run_cycle_lines[0])
+
 
 class TestMainContextWiring(unittest.TestCase):
     """#1178 PR2 review F1 (mutant b): a bounded AST parse of
     ``cratedigger.main`` -- the same technique as
-    ``TestMainConvergenceWindows`` above, since ``main()`` needs a live DB
+    ``TestCycleConvergenceWindows`` above, since ``main()`` needs a live DB
     / slskd client to actually run -- pinning that the per-cycle
     owner-``ctx`` construction wires a real
     ``lib.enqueue.ClaimedQueueKeysRegistry()`` into
@@ -375,10 +400,20 @@ class TestRegisteredStepFailureMessagesReachable(unittest.TestCase):
     registered step through the runner, and asserts the runner logged THAT
     step's message.
 
-    Scope: the steps this series registered or corrected. The slskd
-    convergence sweeps (orphans, disk reap, search ledger, harvest, purge)
-    keep their own internal isolation contracts and belong to the
-    owned-key-module work (#1278 strong candidate 1), not this table.
+    Scope: the steps this series registered or corrected, plus
+    ``prune_terminal_pin_rows_cycle`` — already registered and already
+    propagating before this series, included as regression patrol so its
+    row cannot silently regain a swallow. The slskd convergence sweeps
+    (orphans, disk reap, search ledger, harvest, purge) keep their own
+    internal isolation contracts and belong to the owned-key-module work
+    (#1278 strong candidate 1), not this table.
+
+    One row is fail-closed LEGISLATION rather than reachability proof:
+    ``log_cycle_summary``'s world (``ctx.cycle_start = None``) is not
+    producible by ``run_cycle``, which always assigns a float — the row
+    proves the runner logs the message when the step raises, guarding any
+    future summary implementation, not that production can currently reach
+    it (the ``assert_quarantine_verdict_is_earned`` pattern).
     """
 
     def _ctx(self, failing_method: str):
@@ -421,10 +456,49 @@ class TestRegisteredStepFailureMessagesReachable(unittest.TestCase):
                 log.exception.assert_called_once_with(step.failure_message)
 
 
+class TestReconcileDryRun(unittest.TestCase):
+    """--reconcile-dry-run's helper is read-only and always exits 0."""
+
+    def test_dry_run_reconciles_read_only_and_exits_zero(self):
+        db = FakePipelineDB()
+        source = FakePipelineDBSource(db)
+        with self.assertLogs(
+                "lib.startup_reconciliation", level="INFO") as captured:
+            self.assertEqual(cratedigger._reconcile_dry_run(source), 0)
+        self.assertTrue(any(
+            "dry_run=true" in line for line in captured.output))
+        # Read-only: no convergence step ran, nothing was persisted.
+        self.assertEqual(db.cycle_metrics, [])
+        self.assertEqual(db.peer_observations, {})
+        self.assertEqual(db.search_plans, {})
+
+    def test_dry_run_failure_logs_its_own_copy_and_still_exits_zero(self):
+        source = FakePipelineDBSource(
+            _raising_db("list_wanted_for_plan_reconciliation"))
+        with self.assertLogs("cratedigger", level="ERROR") as captured:
+            self.assertEqual(cratedigger._reconcile_dry_run(source), 0)
+        self.assertTrue(any(
+            "no summary produced" in line for line in captured.output))
+
+
 def _cycle_cfg():
-    """All-defaults production config shape for a fake-driven cycle."""
+    """Production config shape for a fake-driven cycle.
+
+    Media-server backends are CONFIGURED so both pin reconcilers actually
+    reach their pending-pin fetch instead of early-returning unconfigured
+    (review F1: with the defaults, the two steps whose failure semantics
+    this series changed were no-ops in every cycle-level test). With zero
+    pending pins neither reconciler makes an HTTP call.
+    """
     import configparser
-    return CratediggerConfig.from_ini(configparser.ConfigParser())
+    from dataclasses import replace
+    cfg = CratediggerConfig.from_ini(configparser.ConfigParser())
+    return replace(
+        cfg,
+        plex_url="http://plex:32400",
+        jellyfin_url="http://jellyfin:8096",
+        jellyfin_token="tok",
+    )
 
 
 def _cycle_ctx(db, *, cfg=None):
@@ -450,6 +524,9 @@ class TestRunCycleExecutable(unittest.TestCase):
             "cool-peer",
             cooldown_until=datetime.now(UTC) + timedelta(hours=1))
         ctx = _cycle_ctx(db)
+        # Seed one browsed peer so the observation flush is a real DB write
+        # in this composition, not a guard-skipped no-op (review F1).
+        ctx.peer_observations.add("observed-peer")
 
         phase1_sources: list[FakePipelineDBSource] = []
 
@@ -458,27 +535,37 @@ class TestRunCycleExecutable(unittest.TestCase):
             phase1_sources.append(source)
             return source
 
-        with self.assertNoLogs("cratedigger", level="ERROR"):
+        # Two loggers: every step module logs to "cratedigger" except
+        # lib/startup_reconciliation.py, which uses __name__ (review F10) —
+        # without the second guard its per-row ERRORs would escape.
+        with self.assertNoLogs("cratedigger", level="ERROR"), \
+                self.assertNoLogs("lib.startup_reconciliation", level="ERROR"):
             cratedigger.run_cycle(ctx, phase1_source_factory=factory)
 
-        # Phase 0 ran: the cooldown loader replaced the roster.
+        # Phase 0 ran: the cooldown loader filled the roster in place.
         self.assertEqual(ctx.cooled_down_users, {"cool-peer"})
         # Phase 1 ran on its own source, and the source was closed.
         self.assertEqual(len(phase1_sources), 1)
         self.assertEqual(phase1_sources[0].close_calls, 1)
         # End-of-cycle close-out persisted the metrics row with the
-        # ctx-anchored start time.
+        # ctx-anchored start time, and flushed the peer roster.
         self.assertEqual(len(db.cycle_metrics), 1)
         self.assertEqual(
             db.cycle_metrics[0]["started_at"], ctx.cycle_started_at)
         self.assertIsNotNone(ctx.cycle_started_at)
+        self.assertEqual(len(db.peer_observations), 1)
 
 
 #: DB methods touched only by best-effort registered steps — never by the
 #: Phase 1/Phase 2 spine — so a failure in any subset must be isolated.
+#: The pin-fetch pair is reachable because _cycle_cfg configures both
+#: media-server backends; record_peer_observations because the property
+#: seeds one browsed peer (review F1).
 _STEP_DB_METHODS = (
     "get_cooled_down_users",
     "list_wanted_for_plan_reconciliation",
+    "get_pending_plex_added_at_pins",
+    "get_pending_jellyfin_date_created_pins",
     "prune_transfer_ledger",
     "prune_terminal_plex_added_at_pins",
     "prune_terminal_jellyfin_date_created_pins",
@@ -504,6 +591,9 @@ class TestGeneratedCycleSurvivesStepFailures(unittest.TestCase):
                 raise RuntimeError(f"{_name} down")
             setattr(db, name, _boom)
         ctx = _cycle_ctx(db)
+        # One browsed peer so the observation flush reaches the DB in
+        # every world instead of guard-skipping (review F1).
+        ctx.peer_observations.add("observed-peer")
         wanted_scans: list[str] = []
         source = ctx.pipeline_db_source
         real_get_wanted = source.get_wanted_searchable

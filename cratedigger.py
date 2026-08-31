@@ -16,6 +16,11 @@ from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 from lib.config import resolve_startup_config_paths
 
 # Unified slskd search lifecycle (issue #466).
+# _SlskdClient/_SlskdJson are lib/search_exec.py's shared untyped-boundary
+# aliases (= Any under the hood). Using them here relocates this module's
+# slskd-facing Any tokens behind that one accounted definition — it does NOT
+# retype the boundary; lib/search_exec.py's honest-accounting note and #468
+# own that.
 from lib.search_exec import (
     SearchSubmitError,
     SearchSubmitRetryPolicy,
@@ -1416,8 +1421,6 @@ def build_phase1_context(
     )
 
 
-
-
 def grab_most_wanted(albums: list[AlbumRecord], ctx: CratediggerContext) -> int:
     # A nested ``def`` (not a lambda) so ``albs`` can carry an explicit
     # annotation -- Python lambdas cannot be annotated, and
@@ -1466,6 +1469,31 @@ def _run_phase1(
         phase1_source.close()
 
 
+def _reconcile_dry_run(pipeline_db_source: PipelineDBSource) -> int:
+    """Deploy-verification mode: read-only reconciliation only, then exit.
+
+    Runs BEFORE any convergence step, Phase 1, or Phase 2 — the position pin
+    in tests/test_convergence_runner_generated.py holds the dry-run gate
+    ahead of main()'s run_cycle hand-off. No plans are generated and nothing
+    is mutated; only classification counts are emitted.
+    """
+    from lib.startup_reconciliation import (
+        log_reconciliation_summary,
+        reconcile_search_plans,
+    )
+    try:
+        log_reconciliation_summary(reconcile_search_plans(
+            pipeline_db_source._get_db(), None, dry_run=True))
+    except Exception:
+        logger.exception(
+            "--reconcile-dry-run: search-plan reconciliation failed; "
+            "no summary produced.")
+    logger.info(
+        "--reconcile-dry-run set; skipping Phase 1 + Phase 2 "
+        "search execution.")
+    return 0
+
+
 def run_cycle(
     ctx: CratediggerContext,
     *,
@@ -1499,9 +1527,11 @@ def run_cycle(
     # convergence / reaper / ledger sweeps while the loop is quiescent,
     # before Phase 1/Phase 2 can race their ownership snapshots.  The
     # registry's runner isolates every step so no best-effort step can
-    # abort the cycle.  The cooldown loader must stay ahead of Phase 1's
-    # submit below: build_phase1_context forwards ctx.cooled_down_users
-    # by reference after the loader replaces it.
+    # abort the cycle.  The cooldown loader stays ahead of Phase 1's
+    # submit below so the roster is loaded before either phase reads it;
+    # the loader mutates ctx.cooled_down_users IN PLACE, so every alias
+    # (including build_phase1_context's by-reference forward) stays
+    # coherent regardless of when it was captured.
     run_convergence_group(ctx, ConvergenceGroup.PHASE_ZERO)
 
     # --- Phase 1 + Phase 2 run concurrently ---
@@ -1712,24 +1742,7 @@ def main() -> int:
         ctx.peer_cache = connect_from_config(cfg)
 
         if args.reconcile_dry_run:
-            # Dry-run mode is a deploy-verification tool: run ONLY the
-            # startup search-plan reconciliation, read-only, then exit --
-            # no convergence steps, no Phase 1, no search traffic.
-            from lib.startup_reconciliation import (
-                log_reconciliation_summary,
-                reconcile_search_plans,
-            )
-            try:
-                log_reconciliation_summary(reconcile_search_plans(
-                    pipeline_db_source._get_db(), None, dry_run=True))
-            except Exception:
-                logger.exception(
-                    "Startup search-plan reconciliation failed; continuing "
-                    "with whatever rows are already searchable.")
-            logger.info(
-                "--reconcile-dry-run set; skipping Phase 1 + Phase 2 "
-                "search execution.")
-            return 0
+            return _reconcile_dry_run(pipeline_db_source)
 
         run_cycle(ctx)
 

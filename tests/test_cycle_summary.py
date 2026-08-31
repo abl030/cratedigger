@@ -371,22 +371,34 @@ class TestCloseOutSteps(unittest.TestCase):
         self.assertIn("peers_browsed=3", line)
         self.assertIn(line, captured.output[0])
 
-    def test_record_cycle_metrics_persists_the_context_accumulators(self):
+    def test_record_cycle_metrics_persists_every_context_accumulator(self):
+        # Distinct value per forwarded field so a swapped forward
+        # (e.g. browse_time_s=ctx.match_time_s) fails, not only a dropped
+        # one — asserting a 3-field sample left the other 13 unpinned.
         db = FakePipelineDB()
         ctx = self._ctx(db)
-        ctx.peers_browsed = 7
-        ctx.cache_pos_hits = 4
-        ctx.find_download_queued = 2
+        forwarded = {
+            "browse_time_s": 1.5, "match_time_s": 2.5, "search_time_s": 3.5,
+            "cache_pos_hits": 4, "cache_neg_hits": 5, "cache_misses": 6,
+            "cache_errors": 7, "cache_fuse_tripped": 8,
+            "cache_write_errors": 9, "peers_browsed": 10,
+            "peers_browsed_lazy": 11, "fanout_waves": 12,
+            "cycle_searches_watchdog_killed": 13,
+            "find_download_queued": 14, "find_download_completed": 15,
+            "find_download_drain_time_s": 16.5,
+        }
+        for fieldname, value in forwarded.items():
+            setattr(ctx, fieldname, value)
 
         record_cycle_metrics_cycle(ctx)
 
         self.assertEqual(len(db.cycle_metrics), 1)
         row = db.cycle_metrics[0]
         self.assertEqual(row["started_at"], ctx.cycle_started_at)
-        self.assertEqual(row["peers_browsed"], 7)
-        self.assertEqual(row["cache_pos_hits"], 4)
-        self.assertEqual(row["find_download_queued"], 2)
         self.assertGreaterEqual(row["cycle_total_s"], 12.0)
+        for fieldname, value in forwarded.items():
+            with self.subTest(field=fieldname):
+                self.assertEqual(row[fieldname], value)
 
     def test_record_peer_observations_flushes_the_roster(self):
         db = FakePipelineDB()
