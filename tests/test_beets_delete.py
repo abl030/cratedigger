@@ -724,6 +724,9 @@ class TestSelectorDestructiveBypassRetired(unittest.TestCase):
     )
 
     def test_retired_selector_modules_are_absent(self) -> None:
+        # Absence assertions are trivially satisfied by a typo'd path — this
+        # only holds while these two strings stay correct. Recreating either
+        # real file does fail it (verified); a misspelling would not.
         for relative in ("lib/release_cleanup.py", "lib/beets_album_op.py"):
             with self.subTest(module=relative):
                 self.assertFalse((self.REPO_ROOT / relative).exists())

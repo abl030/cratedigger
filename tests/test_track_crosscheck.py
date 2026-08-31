@@ -27,17 +27,60 @@ def make_slskd_files(filenames):
     return [{"filename": f} for f in filenames]
 
 
+# Twenty-track tolerance fixture (see TestCrossCheckToleranceBoundary).
+# ``_TOLERANCE_MATCHED`` titles get an exact filename each;
+# ``_TOLERANCE_FOREIGN`` titles get none, so each one is a mismatch. Every
+# foreign title scores below 0.45 against every supplied filename (measured),
+# well clear of the 0.5 match threshold, so the mismatch COUNT is exact rather
+# than a near-threshold accident.
+_TOLERANCE_MATCHED = [
+    "Harbour Lights", "Velvet Morning", "Copper Wire", "Glass Elevator",
+    "Northern Kingdom", "Paper Aeroplane", "Quiet Machinery", "Rust and Bone",
+    "Silver Wolves", "Tangerine Sky", "Underwater Ballroom", "Winter Postcard",
+    "Yellow Submarine Dream", "Zephyr Boulevard", "Amber Corridor",
+    "Bicycle Thieves",
+]
+_TOLERANCE_FOREIGN = [
+    "Frozen Cathedral", "Ostrich Nebula Quintet", "Kyoto Pawnshop",
+    "Gravel Hymnbook", "Plum Duff Waltz",
+]
+
+
+def make_tolerance_world(mismatches):
+    """A 20-track release where exactly ``mismatches`` titles have no file."""
+    matched = _TOLERANCE_MATCHED[:20 - mismatches]
+    expected = matched + _TOLERANCE_FOREIGN[:mismatches]
+    assert len(expected) == 20, "the divisor pins depend on exactly 20 tracks"
+    files = [f"{i + 1:02d} - {t}.mp3" for i, t in enumerate(matched)]
+    return make_tracks(expected), make_slskd_files(files)
+
+
+# === Title normalization tests ===
+
+class TestNormalizeTitle(unittest.TestCase):
+    def test_strips_punctuation_but_keeps_apostrophe_and_ampersand(self):
+        # The `[^\w\s'&]` pass: parentheses, the comma, the period, the em
+        # dash and the bang all become whitespace and collapse away. The
+        # character class whitelists ' and &, so those two survive.
+        assert _normalize_title(
+            "Undone (The Sweater Song), Pt. 2 — Live!"
+        ) == "undone the sweater song pt 2 live"
+        assert _normalize_title(
+            "Rock & Roll Ain't Noise Pollution"
+        ) == "rock & roll ain't noise pollution"
+
+
 # === Filename extraction tests ===
 
 class TestExtractTitleFromFilename(unittest.TestCase):
     def test_standard_dash(self):
-        assert _extract_title_from_filename("01 - Enter Sandman.mp3") == _normalize_title("Enter Sandman")
+        assert _extract_title_from_filename("01 - Enter Sandman.mp3") == "enter sandman"
 
     def test_standard_dot(self):
-        assert _extract_title_from_filename("01. Enter Sandman.mp3") == _normalize_title("Enter Sandman")
+        assert _extract_title_from_filename("01. Enter Sandman.mp3") == "enter sandman"
 
     def test_underscore(self):
-        assert _extract_title_from_filename("01_Enter_Sandman.flac") == _normalize_title("Enter Sandman")
+        assert _extract_title_from_filename("01_Enter_Sandman.flac") == "enter sandman"
 
     def test_no_separator(self):
         # "01 Enter Sandman.mp3" — number followed by space
@@ -59,9 +102,10 @@ class TestExtractTitleFromFilename(unittest.TestCase):
         assert "enter sandman" in result
 
     def test_unicode(self):
-        result = _extract_title_from_filename("03 - Où est la plage.mp3")
-        # Should normalize accents
-        assert "ou est la plage" in result or "ou est la plage" in result
+        # NFKD splits "ù" into "u" + a combining grave (U+0300); the
+        # `[^\w\s'&]` pass then drops the combining mark, so "Où" -> "ou".
+        assert _extract_title_from_filename(
+            "03 - Où est la plage.mp3") == "ou est la plage"
 
 
 # === Cross-check: correct matches should PASS ===
@@ -167,6 +211,32 @@ class TestCrossCheckFail(unittest.TestCase):
             "02 - Nothing Similar.mp3",
             "03 - Wrong Album Entirely.mp3",
         ])
+        assert _track_titles_cross_check(tracks, files) == False
+
+
+# === Cross-check: the tolerance divisor itself ===
+
+class TestCrossCheckToleranceBoundary(unittest.TestCase):
+    """Pin ``max_allowed = max(1, len(expected) // 5)`` in BOTH directions.
+
+    The other cross-check fixtures cannot constrain it. The 3- and 5-track
+    ones are floored to an allowance of 1 by ``max(1, ...)`` whichever divisor
+    is used; the two 10-track ones carry 0 and 8 mismatches (measured), which
+    land the same side of an allowance of 1, 2 or 3 alike. So `// 3` and
+    `// 10` both survive every one of them. At 20 expected tracks the
+    allowance is 4, and these two worlds straddle it.
+    """
+
+    def test_four_of_twenty_missing_is_within_tolerance(self):
+        # 4 mismatches, allowance 4 → PASS. A stricter divisor (// 10 → 2)
+        # would reject this legitimate release.
+        tracks, files = make_tolerance_world(4)
+        assert _track_titles_cross_check(tracks, files) == True
+
+    def test_five_of_twenty_missing_exceeds_tolerance(self):
+        # 5 mismatches, allowance 4 → FAIL. A looser divisor (// 3 → 6)
+        # would wave this wrong pressing through.
+        tracks, files = make_tolerance_world(5)
         assert _track_titles_cross_check(tracks, files) == False
 
 

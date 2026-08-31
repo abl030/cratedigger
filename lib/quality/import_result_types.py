@@ -120,9 +120,15 @@ class DisambiguationFailure(msgspec.Struct, frozen=True):
     """Typed failure record for the retired post-import ``beet move``.
 
     Wire-boundary type per ``.claude/rules/code-quality.md`` § "Wire-boundary
-    types": historical ``download_log.import_result`` JSONB rows store exactly
-    this shape under ``postflight.disambiguation_failure``, so the field names,
-    order and defaults are a persisted decode contract — not free to change.
+    types": historical ``download_log.import_result`` JSONB rows store this
+    shape under ``postflight.disambiguation_failure``, so the field NAMES and
+    which of them carry defaults are a persisted decode contract — not free to
+    change. Declaration ORDER is not part of it: msgspec decodes by name, and
+    every construction site passes keywords, so a reorder is inert for every
+    stored row. It only permutes the key order of newly encoded JSON, and the
+    destination is a JSONB column, which does not preserve key order anyway.
+    The one ordering rule that does bind is msgspec's own — fields carrying
+    defaults come last.
 
     Issue #133 unified this payload with the destructive selector-op failure
     record, which is where ``selector`` comes from; the union lived in

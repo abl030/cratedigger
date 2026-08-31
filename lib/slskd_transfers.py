@@ -544,10 +544,12 @@ def _match_transfer_id(
     This is the ONE production seam still allowed to reach all-history
     matching (issue #822 item 1) -- ``slskd_enqueue_with_outcome``'s
     post-POST reconciliation, the only caller. Module-private for exactly
-    that reason (#1278): no production module outside this one calls it, and
-    the private name is what makes reaching all-history matching from a new
-    call site unrepresentable rather than merely discouraged -- the same
-    narrowing ``_match_transfer_all_history`` already carries below. Every
+    that reason (#1278): no production module outside this one calls it, so
+    the leading underscore records a closed seam and gives review something
+    to catch a new caller on. It is NOT an enforced boundary --
+    ``reportPrivateUsage`` is off in ``pyrightconfig.production.json`` and
+    cross-module private imports are the house convention (PR #775), so a
+    future caller CAN import this; the name is a marker, not a wall. Every
     other production site that matches transfers MUST use the public
     ``match_transfer_for_attempt``. Passing ``not_before`` scopes
     the match to that attempt boundary via ``match_transfer_for_attempt``

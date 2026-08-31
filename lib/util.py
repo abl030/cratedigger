@@ -69,8 +69,10 @@ def _json_text(value: object) -> str:
     dict/list narrowers, and this is the scalar companion these call sites
     need. ``web/classify.py::_as_str`` and ``lib/beets_distance.py::
     _mb_str_field`` are the existing module-local precedents for this narrow;
-    both answer ``str | None`` because their callers distinguish absent from
-    empty, and none of the call sites here do.
+    both answer ``str | None`` because SOME of their callers distinguish
+    absent from empty (others coalesce with ``or ""`` at the call site).
+    None of the call sites here make that distinction, so this one answers
+    ``str``.
     """
     return value if isinstance(value, str) else ""
 
