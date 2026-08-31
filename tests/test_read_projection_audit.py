@@ -35,7 +35,9 @@ import unittest
 
 from tests.read_projection_registry import (
     ALLOWLIST,
+    COMPUTED_RATIONALE_MARKER,
     PARITY_REGISTRY,
+    VALUE_GATE_EXEMPTIONS,
     VALUE_PARITY_REGISTRY,
     ValueExclusion,
     compare_projection_values,
@@ -262,6 +264,52 @@ class TestValueParityRegistry(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "needs a field path"):
             ValueExclusion("", "some reason")
 
+    def test_every_computed_allowlist_entry_is_value_gated_or_exempt(
+        self,
+    ) -> None:
+        """The value axis's completeness ratchet (#1278 item 7).
+
+        A mirror excused from the KEY gate for being a computed aggregate
+        must then be gated on VALUES, or carry a written reason why not.
+        Without this, "computed" is a way out of both gates at once.
+        """
+        ungated = sorted(
+            name for name, rationale in ALLOWLIST.items()
+            if COMPUTED_RATIONALE_MARKER in rationale
+            and name not in VALUE_PARITY_REGISTRY
+            and name not in VALUE_GATE_EXEMPTIONS
+        )
+        self.assertEqual(
+            ungated, [],
+            msg=(
+                "These read mirrors are ALLOWLISTED out of the key-set gate "
+                "for being computed aggregates but are gated on neither "
+                "axis. Add a VALUE_PARITY_REGISTRY entry, or a "
+                "VALUE_GATE_EXEMPTIONS reason, in "
+                "tests/read_projection_registry.py:\n  - "
+                + "\n  - ".join(ungated)
+            ),
+        )
+
+    def test_exemptions_are_computed_allowlist_entries_with_reasons(
+        self,
+    ) -> None:
+        """The exemption dict only shrinks, and never goes stale."""
+        for name, reason in sorted(VALUE_GATE_EXEMPTIONS.items()):
+            with self.subTest(method=name):
+                self.assertIn(
+                    name, ALLOWLIST,
+                    "an exemption from the VALUE gate only makes sense for "
+                    "a method the KEY gate already allowlists")
+                self.assertIn(
+                    COMPUTED_RATIONALE_MARKER, ALLOWLIST[name],
+                    "exempting a method the allowlist does not call "
+                    "computed exempts it from a rule it was never under")
+                self.assertTrue(reason.strip())
+                self.assertNotIn(
+                    name, VALUE_PARITY_REGISTRY,
+                    "a method cannot be both value-gated and exempt")
+
 
 class TestValueComparator(unittest.TestCase):
     """Known-bad self-tests for ``compare_projection_values``.
@@ -348,6 +396,67 @@ class TestValueComparator(unittest.TestCase):
             excluded=frozenset({"totals.known_peers"}))
         self.assertEqual(len(result.mismatches), 1)
         self.assertIn("totals.new_24h", result.mismatches[0])
+
+    def test_recursion_reaches_deeply_nested_leaves(self) -> None:
+        """Three levels down still gets compared AND counted (#1278 S2).
+
+        A mutant that stopped recursing past the first nested dict
+        survived every other self-test here and silently unwatched 37
+        substantive dashboard leaves while reporting zero mismatches, so
+        this asserts both halves: the deep mismatch IS reported, and the
+        exact number of leaves the walk reached.
+        """
+        deep_real = {"a": {"b": {"c": {"leaf": 1, "sibling": "same"}}},
+                     "top": 5}
+        deep_fake = {"a": {"b": {"c": {"leaf": 2, "sibling": "same"}}},
+                     "top": 5}
+        result = compare_projection_values(
+            [deep_real], [deep_fake], excluded=frozenset())
+        self.assertEqual(
+            result.mismatches,
+            ("row 0 a.b.c.leaf: real PG 1 != FakePipelineDB 2",))
+        self.assertEqual(result.compared_leaves, 3)
+
+    def test_recursion_reaches_leaves_nested_under_lists(self) -> None:
+        """Same depth question through list elements, not just dicts."""
+        real: dict[str, object] = {
+            "days": [{"inner": {"leaf": "a"}}, {"inner": {"leaf": "b"}}]}
+        fake: dict[str, object] = {
+            "days": [{"inner": {"leaf": "a"}}, {"inner": {"leaf": "X"}}]}
+        result = compare_projection_values(
+            [real], [fake], excluded=frozenset())
+        self.assertEqual(
+            result.mismatches,
+            ("row 0 days[].inner.leaf: real PG 'b' != FakePipelineDB 'X'",))
+        self.assertEqual(result.compared_leaves, 2)
+
+    def test_exclusion_matching_is_exact_not_substring(self) -> None:
+        """``id`` must not excuse ``mb_release_id`` (#1278 S3).
+
+        A substring-matching mutant survived every other self-test while
+        silently unwatching every field whose name merely CONTAINS an
+        excluded path.
+        """
+        result = compare_projection_values(
+            [{"id": 1, "mb_release_id": "real-mbid"}],
+            [{"id": 900, "mb_release_id": "fake-mbid"}],
+            excluded=frozenset({"id"}))
+        expected = (
+            "row 0 mb_release_id: real PG 'real-mbid' != "
+            "FakePipelineDB 'fake-mbid'"
+        )
+        self.assertEqual(result.mismatches, (expected,))
+        self.assertEqual(result.excluded_hits, frozenset({"id"}))
+
+    def test_a_reached_exclusion_is_reported_and_an_unreached_one_is_not(
+        self,
+    ) -> None:
+        """``excluded_hits`` is what makes a dead exclusion visible."""
+        result = compare_projection_values(
+            [{"id": 1}], [{"id": 2}],
+            excluded=frozenset({"id", "renamed_away"}))
+        self.assertEqual(result.mismatches, ())
+        self.assertEqual(result.excluded_hits, frozenset({"id"}))
 
     def test_a_payload_of_nulls_zeros_and_empties_is_not_substantive(
         self,

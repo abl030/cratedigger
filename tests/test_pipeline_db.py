@@ -18970,21 +18970,26 @@ class TestReadProjectionRegistryParity(unittest.TestCase):
 class TestReadProjectionValueParity(unittest.TestCase):
     """#1278 item 7 — registry-driven read-projection VALUE parity gate.
 
-    ``TestReadProjectionRegistryParity`` above compares KEY SETS, and its
-    ``ALLOWLIST`` deliberately excuses the mirrors whose key set is
-    assembled in Python rather than by a SELECT column list: the SQL-owned
-    aggregates — a rollup view, a ``CASE`` ladder, a percentile, a
-    ``DISTINCT ON`` collapse. For those the key set was never the risk;
-    what the aggregate COMPUTES is. Extracting that SQL into shared Python
-    would be the wrong fix (the database is the authority on its own
-    aggregation), so this gate takes the other axis instead: run the same
-    seeder on both backends and compare every non-excluded field by VALUE.
+    The key gate above compares KEY SETS. The mirrors registered here are
+    the ones whose VALUES are decided by SQL the fake reimplements —
+    whether that key gate EXCUSES them via ``ALLOWLIST`` (a percentile, a
+    computed metric dict) or merely HAND-COVERS their key set with a test
+    in this file (a rollup view's aggregate, a ``DISTINCT ON`` collapse, a
+    view join that decides membership, a table's column DEFAULTs). In
+    every case the key set was not the risk; what the SQL computes is.
+    Extracting that SQL into shared Python would be the wrong fix (the
+    database is the authority on its own aggregation), so this gate takes
+    the other axis instead: run the same seeder on both backends and
+    compare every non-excluded field by VALUE.
 
     Each held-out field carries its own rationale in the registry, so a
-    field can only leave the comparison with a written reason attached.
+    field can only leave the comparison with a written reason attached —
+    and every declared exclusion must actually be REACHED, so one that
+    quietly stops excluding anything fails instead of rotting.
     """
 
     def test_every_value_registered_mirror_agrees_on_values(self):
+        from lib import pipeline_db
         from tests.fakes import FakePipelineDB
         from tests.read_projection_registry import (
             VALUE_PARITY_REGISTRY,
@@ -18996,6 +19001,14 @@ class TestReadProjectionValueParity(unittest.TestCase):
                 real_db = make_db()
                 try:
                     fake_db = FakePipelineDB()
+                    # Both sides must genuinely be the two DIFFERENT
+                    # backends. Swapping make_db() for a second
+                    # FakePipelineDB passed this whole gate silently
+                    # (#1278 item 7 runner survivor S1) — the fake agreeing
+                    # with itself is not parity.
+                    self.assertIsInstance(real_db, pipeline_db.PipelineDB)
+                    self.assertNotIsInstance(real_db, FakePipelineDB)
+                    self.assertIsInstance(fake_db, FakePipelineDB)
                     real_rows = entry.seeder(real_db)
                     fake_rows = entry.seeder(fake_db)
                     self.assertTrue(
@@ -19019,6 +19032,14 @@ class TestReadProjectionValueParity(unittest.TestCase):
                         f"them held a non-null, non-empty, non-zero value "
                         f"— a payload of nulls and zeros agrees for free. "
                         f"Seed values that DISTINGUISH.")
+                    dead = sorted(
+                        entry.excluded_paths - result.excluded_hits)
+                    self.assertEqual(
+                        dead, [],
+                        f"{method_name}: these declared exclusions were "
+                        f"never reached, so they excuse nothing — the field "
+                        f"was renamed, or the seeder stopped producing it. "
+                        f"Delete them or fix the path: {dead}")
                     self.assertEqual(
                         result.mismatches, (),
                         f"{method_name}: real PG and FakePipelineDB "

@@ -2965,12 +2965,31 @@ class FakePipelineDB:
             ),
         }
 
+    @staticmethod
+    def _projected_request_row(row):
+        """One request row as a read returns it.
+
+        ``album_requests.active_download_state`` is JSONB written as a JSON
+        string (``... = %s::jsonb`` in ``lib/pipeline_db/requests.py``), so
+        every real read hands back a parsed object — which is what
+        ``AlbumRequestRow`` declares and what
+        ``lib/download_recovery.py``'s ``_is_str_object_dict`` gate
+        requires. The fake stores the string it was handed (its own
+        internals re-parse it), so the parse belongs here, on the way out
+        (issue #1278 item 7). Every request-row projection goes through
+        this.
+        """
+        projected = copy.deepcopy(dict(row))
+        projected["active_download_state"] = _jsonb_column(
+            projected.get("active_download_state"))
+        return projected
+
     def _request_presentation_copy(
         self,
         row,
     ):
         """Mirror the production pointer join without latest-job inference."""
-        projected = copy.deepcopy(dict(row))
+        projected = self._projected_request_row(row)
         projected.update(self._processing_owner_join_aliases(projected))
         projected["processing_owner"] = processing_owner_payload(projected)
         projected.pop("_processing_owner_job_id")
@@ -5678,7 +5697,8 @@ class FakePipelineDB:
     def get_downloading(self) -> list[AlbumRequestRow]:
         return cast(
             "list[AlbumRequestRow]",
-            [copy.deepcopy(r) for r in self._requests.values()
+            [self._projected_request_row(r)
+             for r in self._requests.values()
              if r.get("status") == "downloading"],
         )
 
@@ -6517,7 +6537,7 @@ class FakePipelineDB:
             eligible = eligible[:int(limit)]
         return cast(
             "list[AlbumRequestRow]",
-            [copy.deepcopy(r) for r in eligible],
+            [self._projected_request_row(r) for r in eligible],
         )
 
     def get_download_log_counts(self) -> DownloadLogCounts:
@@ -8231,6 +8251,23 @@ class FakePipelineDB:
 
     @staticmethod
     def _validation_result_dict(vr: Any) -> dict[str, Any] | None:
+        """Read a stored ``validation_result`` for FILTERING, not projection.
+
+        Two decoders touch this one column, deliberately and with
+        different jobs (issue #1278 item 7, reader F4). This one answers
+        "does this row have a failed_path / a triage blob?" and degrades a
+        non-object to ``None`` so a predicate can simply say no.
+        ``_jsonb_column`` answers "what does a SELECT hand the caller?"
+        and raises instead, because PostgreSQL rejects malformed JSON at
+        INSERT and a JSONB column therefore cannot hold any.
+
+        The two can never disagree on a value production could actually
+        store: for a stored JSON OBJECT both return the same dict. They
+        differ only on inputs a real column cannot hold — a non-JSON
+        string, or valid JSON that is not an object — where filtering
+        wants a quiet "no" and projection wants the fake to stop being
+        more permissive than the database.
+        """
         if isinstance(vr, dict):
             return vr
         if isinstance(vr, str):
@@ -8439,13 +8476,9 @@ class FakePipelineDB:
         # ``search_log.candidates`` (JSONB) into a Python list/dict on
         # ``SELECT *``. The fake stores the encoded JSON string, so decode
         # here so consumers (e.g. the U7 web route + CLI) see the same
-        # parsed-list shape they get from the real DB.
-        candidates: object | None
-        if entry.candidates is None:
-            candidates = None
-        else:
-            import json as _json
-            candidates = _json.loads(entry.candidates)
+        # parsed-list shape they get from the real DB. Same job, same
+        # column class, one helper (issue #1278 item 7, reader F4).
+        candidates = _jsonb_column(entry.candidates)
         return {
             "id": entry.id,
             "request_id": entry.request_id,
