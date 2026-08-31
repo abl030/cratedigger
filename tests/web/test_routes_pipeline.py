@@ -304,7 +304,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
     #
     # Every pin here drives the FULL outermost adapter — the actual
     # /api/pipeline/log route, through build_recents_download_log_rows,
-    # classify_log_entry, and JSON encoding — not classify_log_entry alone.
+    # _classify_log_entry, and JSON encoding — not the classifier alone.
     # The prior (reverted) validation-time-gate review found helper-level
     # pins let adapter-wiring mutants survive (F3/M1); this is the fix.
 

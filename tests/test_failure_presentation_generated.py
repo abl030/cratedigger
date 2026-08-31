@@ -74,7 +74,7 @@ from lib.failure_presentation import (
     peer_failure_family,
     present_failure,
 )
-from web.classify import LogEntry, classify_log_entry
+from web.classify import LogEntry, _classify_log_entry
 
 # ---------------------------------------------------------------------------
 # Worlds
@@ -622,7 +622,7 @@ class TestLocalStorageIsNeverPeerAttributed(unittest.TestCase):
             peers.append(username)
         # The list row, not just the verdict — that is the line the
         # operator reads (review #12).
-        classified = classify_log_entry(LogEntry(
+        classified = _classify_log_entry(LogEntry(
             id=1, request_id=2, outcome="timeout",
             error_message="all files errored",
             soulseek_username=username,
@@ -667,7 +667,7 @@ class TestLocalStorageIsNeverPeerAttributed(unittest.TestCase):
         self.assertIn("local storage error", verdict)
         self.assertIn("rejected by the peer", verdict)
         self.assertFalse(presentation.peer_attributable)
-        classified = classify_log_entry(LogEntry(
+        classified = _classify_log_entry(LogEntry(
             id=1, request_id=2, outcome="timeout",
             error_message="all files errored",
             soulseek_username=username,
@@ -1063,7 +1063,7 @@ class TestPresentationIsPure(unittest.TestCase):
             transfer_detail=files,
         )
         before = entry.to_json_dict()
-        classify_log_entry(entry)
+        _classify_log_entry(entry)
         self.assertEqual(entry.to_json_dict(), before)
 
 

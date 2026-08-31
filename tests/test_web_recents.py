@@ -4,7 +4,7 @@ Every scenario the pipeline can produce is driven through
 ``web/download_history_view.py::build_recents_download_log_rows`` — the
 function the Recents route itself calls — so a pin here describes what an
 operator sees, not what one stage of the composition computed.
-``web/classify.py::classify_log_entry`` is the middle of that path and is
+``web/classify.py::_classify_log_entry`` is the middle of that path and is
 deliberately not called directly: the persisted-evidence projections that
 run after it are part of the rendered row (issue #1278).
 """

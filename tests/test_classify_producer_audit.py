@@ -73,7 +73,7 @@ from lib.quality import (
 from lib.quality.dispatch_actions import decision_denylists
 from tests.helpers import make_import_result
 from web import classify
-from web.classify import LogEntry, classify_log_entry
+from web.classify import LogEntry, _classify_log_entry
 
 _REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
 _CLASSIFY_RELPATH = "web/classify.py"
@@ -1102,7 +1102,7 @@ class TestFabricatedCopyIsGone(unittest.TestCase):
 
     def test_a_populated_candidate_set_reads_as_a_pressing_mismatch(self) -> None:
         """32 of the 50 live rows (2026-07-26): one candidate, not ours."""
-        classified = classify_log_entry(
+        classified = _classify_log_entry(
             _rejected("mbid_not_found", mbid_not_found_blob(1)))
         self.assertEqual(
             classified.verdict,
@@ -1122,7 +1122,7 @@ class TestFabricatedCopyIsGone(unittest.TestCase):
         sibling attempts on the SAME release ID that did return candidates
         (issue #882 review F1).
         """
-        classified = classify_log_entry(
+        classified = _classify_log_entry(
             _rejected("mbid_not_found", mbid_not_found_blob(0)))
         self.assertEqual(
             classified.verdict,
@@ -1154,7 +1154,7 @@ class TestFabricatedCopyIsGone(unittest.TestCase):
             synthesized_rejection_blob("mbid_not_found"),
         ):
             with self.subTest(blob=blob):
-                classified = classify_log_entry(_rejected("mbid_not_found", blob))
+                classified = _classify_log_entry(_rejected("mbid_not_found", blob))
                 self.assertEqual(
                     classified.verdict,
                     "Requested release ID not among the match candidates",
@@ -1189,7 +1189,7 @@ class TestFabricatedCopyIsGone(unittest.TestCase):
             _rejected("mbid_not_found", mbid_not_found_blob(1))))
 
     def test_the_fabricated_key_no_longer_manufactures_a_sentence(self) -> None:
-        classified = classify_log_entry(_rejected("no_candidates"))
+        classified = _classify_log_entry(_rejected("no_candidates"))
         self.assertEqual(classified.verdict, "no candidates")
 
     def test_the_unproduced_triage_actions_no_longer_have_labels(self) -> None:
@@ -1234,7 +1234,7 @@ class TestFabricatedCopyIsGone(unittest.TestCase):
     def test_the_historical_literals_keep_their_copy(self) -> None:
         """One live row from 2026-03-24 still renders as a sentence."""
         self.assertEqual(
-            classify_log_entry(_rejected("album_name_mismatch")).verdict,
+            _classify_log_entry(_rejected("album_name_mismatch")).verdict,
             "Album name mismatch",
         )
         self.assertEqual(
@@ -1278,10 +1278,10 @@ class TestUnhandledScenariosReadAsWords(unittest.TestCase):
         for scenario, expected, changed_rows in self.CASES:
             with self.subTest(scenario, changed_rows=changed_rows):
                 self.assertEqual(
-                    classify_log_entry(_rejected(scenario)).verdict, expected)
+                    _classify_log_entry(_rejected(scenario)).verdict, expected)
 
     def test_an_empty_scenario_still_says_rejected(self) -> None:
-        self.assertEqual(classify_log_entry(_rejected("")).verdict, "Rejected")
+        self.assertEqual(_classify_log_entry(_rejected("")).verdict, "Rejected")
 
 
 class TestProducibleRejectionScenariosNameTheirProducersFact(
@@ -1347,7 +1347,7 @@ class TestProducibleRejectionScenariosNameTheirProducersFact(
         that array, and its length equals the number in their persisted
         detail on every one of them.
         """
-        classified = classify_log_entry(
+        classified = _classify_log_entry(
             _rejected("extra_tracks", extra_tracks_blob(3)))
         self.assertEqual(
             classified.verdict,
@@ -1355,7 +1355,7 @@ class TestProducibleRejectionScenariosNameTheirProducersFact(
 
     def test_extra_tracks_agrees_in_number_with_one_missing_track(self) -> None:
         """29 of the 45 live rows are a single unmatched track."""
-        classified = classify_log_entry(
+        classified = _classify_log_entry(
             _rejected("extra_tracks", extra_tracks_blob(1)))
         self.assertEqual(
             classified.verdict,
@@ -1367,7 +1367,7 @@ class TestProducibleRejectionScenariosNameTheirProducersFact(
                      synthesized_rejection_blob("extra_tracks")):
             with self.subTest(blob=blob):
                 self.assertEqual(
-                    classify_log_entry(_rejected("extra_tracks", blob)).verdict,
+                    _classify_log_entry(_rejected("extra_tracks", blob)).verdict,
                     "Requested release has tracks with no matching local file")
 
     # -- harness/import_one.py ------------------------------------------
@@ -1377,25 +1377,25 @@ class TestProducibleRejectionScenariosNameTheirProducersFact(
         recorded = (
             "Post-import: release 07d51bc7 has multiple beets album rows "
             "[10583, 19190]")
-        classified = classify_log_entry(_rejected_with_error(
+        classified = _classify_log_entry(_rejected_with_error(
             "import_failed", recorded))
         self.assertEqual(classified.verdict, f"Import failed: {recorded}")
 
     def test_import_failed_without_a_reason_claims_only_the_end_state(self):
         self.assertEqual(
-            classify_log_entry(_rejected("import_failed")).verdict,
+            _classify_log_entry(_rejected("import_failed")).verdict,
             "Import did not leave beets in the expected state")
 
     def test_crash_quotes_the_unhandled_exception_it_recorded(self) -> None:
         """``import_one.py``'s top-level envelope records
         ``f"{type(exc).__name__}: {exc}"`` and nothing else."""
         recorded = "FileNotFoundError: [Errno 2] No such file or directory: 'beet'"
-        classified = classify_log_entry(_rejected_with_error("crash", recorded))
+        classified = _classify_log_entry(_rejected_with_error("crash", recorded))
         self.assertEqual(classified.verdict, f"Import crashed: {recorded}")
 
     def test_crash_without_a_reason_still_names_the_unhandled_exception(self):
         self.assertEqual(
-            classify_log_entry(_rejected("crash")).verdict,
+            _classify_log_entry(_rejected("crash")).verdict,
             "Import crashed with an unhandled exception")
 
     def test_mbid_missing_names_the_import_candidate_set_it_was_absent_from(
@@ -1415,9 +1415,9 @@ class TestProducibleRejectionScenariosNameTheirProducersFact(
             "Requested release ID was not among the import candidates; "
             "nothing was applied")
         self.assertEqual(
-            classify_log_entry(_rejected("mbid_missing")).verdict, expected)
+            _classify_log_entry(_rejected("mbid_missing")).verdict, expected)
         self.assertEqual(
-            classify_log_entry(
+            _classify_log_entry(
                 _rejected_with_error("mbid_missing", "Harness returned rc=4")
             ).verdict,
             expected,
@@ -1426,13 +1426,13 @@ class TestProducibleRejectionScenariosNameTheirProducersFact(
     def test_quality_evidence_action_failure_says_beets_never_ran(self) -> None:
         """Both producer sites ``_emit_and_exit`` before ``run_import``."""
         recorded = "10 opus 128 conversions failed"
-        classified = classify_log_entry(_rejected_with_error(
+        classified = _classify_log_entry(_rejected_with_error(
             "quality_evidence_action_failed", recorded))
         self.assertEqual(
             classified.verdict,
             f"Quality-evidence action failed before beets ran: {recorded}")
         self.assertEqual(
-            classify_log_entry(
+            _classify_log_entry(
                 _rejected("quality_evidence_action_failed")).verdict,
             "Quality-evidence action failed before beets ran")
 
@@ -1442,7 +1442,7 @@ class TestProducibleRejectionScenariosNameTheirProducersFact(
         ``_check_staged_audio_manifest`` labels either one
         ``untracked_audio`` — so "contains extra audio" would be false of a
         source that is merely short, however the live rows read today."""
-        verdict = classify_log_entry(_rejected("untracked_audio")).verdict
+        verdict = _classify_log_entry(_rejected("untracked_audio")).verdict
         self.assertEqual(
             verdict, "Import folder does not match the selected audio manifest")
         self.assertNotIn("extra", verdict.casefold())
@@ -1453,7 +1453,7 @@ class TestProducibleRejectionScenariosNameTheirProducersFact(
         "exception" / "unhandled exception in auto-import", so quoting the
         row would hand the operator the token back."""
         self.assertEqual(
-            classify_log_entry(_rejected_with_error("exception", "exception")
+            _classify_log_entry(_rejected_with_error("exception", "exception")
                                ).verdict,
             "Auto-import raised an unhandled exception; the traceback is in "
             "the service log")
@@ -1463,7 +1463,7 @@ class TestProducibleRejectionScenariosNameTheirProducersFact(
         """The verdict is the collapsed list row; one 4KB beets traceback
         must not become the operator's whole worklist line."""
         recorded = "sqlite3.OperationalError: " + ("x" * 900)
-        verdict = classify_log_entry(
+        verdict = _classify_log_entry(
             _rejected_with_error("import_failed", recorded)).verdict
         self.assertTrue(verdict.startswith("Import failed: sqlite3."))
         self.assertLess(len(verdict), len(recorded))
@@ -1485,7 +1485,7 @@ class TestQualityVerdictCopyMatchesTheProducersAction(unittest.TestCase):
         action = dispatch_action("verified_lossless_locked")
         self.assertTrue(action.preserve_imported)
         self.assertFalse(decision_denylists("verified_lossless_locked"))
-        verdict = classify_log_entry(_rejected("verified_lossless_locked")).verdict
+        verdict = _classify_log_entry(_rejected("verified_lossless_locked")).verdict
         self.assertEqual(
             verdict,
             "Verified lossless already on disk; automatic candidate declined "
@@ -1496,7 +1496,7 @@ class TestQualityVerdictCopyMatchesTheProducersAction(unittest.TestCase):
     def test_a_source_lock_says_searching_continues_and_admits_the_denylist(self):
         self.assertFalse(dispatch_action("lossless_source_locked").preserve_imported)
         self.assertTrue(decision_denylists("lossless_source_locked"))
-        verdict = classify_log_entry(_rejected("lossless_source_locked")).verdict
+        verdict = _classify_log_entry(_rejected("lossless_source_locked")).verdict
         self.assertIn("searching continues", verdict)
         self.assertNotIn("no denylist", verdict.casefold())
         self.assertNotIn("acquisition is complete", verdict)
@@ -1506,7 +1506,7 @@ class TestQualityVerdictCopyMatchesTheProducersAction(unittest.TestCase):
                          "suspect_lossless_downgrade",
                          "suspect_lossless_probe_missing"):
             with self.subTest(scenario):
-                verdict = classify_log_entry(_rejected(scenario)).verdict
+                verdict = _classify_log_entry(_rejected(scenario)).verdict
                 self.assertIn("searching continues", verdict)
                 self.assertNotIn("acquisition is complete", verdict)
 
@@ -1514,7 +1514,7 @@ class TestQualityVerdictCopyMatchesTheProducersAction(unittest.TestCase):
         for scenario in ("nested_layout", "high_distance", "album_name_mismatch"):
             with self.subTest(scenario):
                 self.assertFalse(decision_denylists(scenario))
-                verdict = classify_log_entry(_rejected(scenario)).verdict
+                verdict = _classify_log_entry(_rejected(scenario)).verdict
                 self.assertNotIn("denylist", verdict.casefold())
 
 

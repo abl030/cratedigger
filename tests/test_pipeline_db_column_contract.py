@@ -963,7 +963,7 @@ class TestRenderAliasMap(unittest.TestCase):
     consumer reads. The narrower case — an alias one consumer reads and
     another silently drops, which is what left the minted proof unread
     while the verdict guessed — is caught downstream, by the composed
-    overlay → ``LogEntry`` → ``classify_log_entry`` property in
+    overlay → ``LogEntry`` → composed-render property in
     ``tests/test_web_recents_generated.py``.
     """
 
