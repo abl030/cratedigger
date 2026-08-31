@@ -534,13 +534,12 @@ class TestServiceOutcomeContract(unittest.TestCase):
     }
 
     def test_outcome_set_is_stable(self) -> None:
+        # Adapters branch on outcome and look up in both dicts; the two
+        # dicts agree on keys by construction (the exit map is derived —
+        # ``lib/surface_outcomes.py``), so pinning ONE against the
+        # expected vocabulary covers both.
         self.assertEqual(set(OUTCOME_HTTP_STATUS), self.EXPECTED_OUTCOMES)
         self.assertEqual(set(OUTCOME_EXIT_CODE), self.EXPECTED_OUTCOMES)
-        # The two dicts must be aligned — adapters branch on outcome
-        # and look up in both dicts, so a missing entry on either side
-        # is a 500/exit-1 fallback bug waiting to happen.
-        self.assertEqual(
-            set(OUTCOME_HTTP_STATUS), set(OUTCOME_EXIT_CODE))
 
     def test_outcome_values_pin_the_status_and_exit_code(self) -> None:
         """Round 2 T-4: also pin the VALUES, not just the key set. A

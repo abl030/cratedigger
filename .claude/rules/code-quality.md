@@ -914,7 +914,7 @@ JavaScript and `web/routes/*.py` conventions live in `.claude/rules/web.md`
   - `tests/test_<thing>_service.py` — authoritative coverage of every outcome branch
   - `tests/test_pipeline_cli.py` — CLI wrapper test (exit-code mapping)
   - `tests/web/test_routes_<module>.py` — API contract test (status-code mapping); classification is `classified=True` on the route's `RouteRegistration`, enforced by `TestRouteContractAudit` (`tests/web/test_route_audit.py`)
-- Status/exit-code convention to match: `200/0` success, `400/3` input validation (API only — CLI argparse covers this), `404/2` not found, `409/4` wrong state, `422/3` semantic violation, `503/5` transient/retryable.
+- Status/exit-code convention to match: `200/0` success, `400/3` input validation (API only — CLI argparse covers this), `404/2` not found, `409/4` wrong state, `422/3` semantic violation, `503/5` transient/retryable. The convention's code home is `lib/surface_outcomes.py`: a service owns ONE outcome → HTTP-status table and derives its exit-code map via `exit_codes_from_http`; thin CLI HTTP adapters map live response statuses via `exit_code_for_http_status`. Every outcome map is registered and audited in `tests/test_surface_outcomes.py`.
 - See `CLAUDE.md` § "CLI ⇄ API surface symmetry" for the full pattern table.
 
 ## New Work Checklist (read this first)

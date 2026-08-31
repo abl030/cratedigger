@@ -130,10 +130,10 @@ RESULT_SURVIVOR_COLLISION = "survivor_collision"
 RESULT_REKEY_REFUSED = "rekey_refused"
 
 #: The route's status mapping. The CLI needs no paired exit-code dict of its
-#: own: every status here already matches ``_exit_code``'s default
-#: status->exit mapping (200/0, 404/2, 422/3, 409/4, 503/5) in
-#: ``scripts/pipeline_cli/api_mutations.py``, so ``cmd_merge_rekey`` relays
-#: with no ``exit_overrides``.
+#: own: every status here already matches the default status->exit mapping
+#: (200/0, 404/2, 422/3, 409/4, 503/5) in
+#: ``lib.surface_outcomes.exit_code_for_http_status``, so ``cmd_merge_rekey``
+#: relays with no ``exit_overrides``.
 MERGE_REKEY_HTTP_STATUS: dict[str, int] = {
     RESULT_REKEYED: 200,
     RESULT_NOT_FOUND: 404,

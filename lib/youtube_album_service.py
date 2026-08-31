@@ -62,6 +62,7 @@ from lib.json_narrow import (
 )
 from lib.pipeline_db import PersistedDistance, PersistedTrack, PersistedYoutubeRow
 from lib.release_identity import detect_release_source, normalize_release_id
+from lib.surface_outcomes import exit_codes_from_http
 
 # Exception classes that the MB / Discogs adapters in ``web/mb.py`` and
 # ``web/discogs.py`` raise on miss / mirror outage.
@@ -256,10 +257,9 @@ OUTCOME_HTTP_STATUS: dict[str, int] = {
 }
 """Service outcome → HTTP status. U8 imports this directly.
 
-The outcome set is pinned by the test
-``test_outcome_set_is_stable`` which asserts
-``set(OUTCOME_HTTP_STATUS) == set(OUTCOME_EXIT_CODE)`` — keep these
-two dicts in sync. Per-pair outcomes (``ok``, ``wrong_release_group``,
+Audited against the repository convention by
+``tests/test_surface_outcomes.py``; the exit-code map below is derived
+from this one. Per-pair outcomes (``ok``, ``wrong_release_group``,
 ``mb_lookup_failed``, ``mb_no_release_group``, ``no_audio``,
 ``empty_items_override``, ``invalid_input``, ``distance_failed``) flow
 through from ``compute_beets_distance`` verbatim inside
@@ -272,16 +272,9 @@ now resolve as one-element matrices via ``_GroupResolution.is_orphan``
 the service level."""
 
 
-OUTCOME_EXIT_CODE: dict[str, int] = {
-    "ok": 0,
-    "not_found": 2,
-    "unresolved_4xx_client": 5,
-    "unresolved_mirror_unavailable": 5,
-    "unresolved_timeout": 5,
-    "youtube_parse_failed": 5,
-    "transient": 5,
-}
-"""Service outcome → CLI exit code. U7 imports this directly."""
+OUTCOME_EXIT_CODE: dict[str, int] = exit_codes_from_http(OUTCOME_HTTP_STATUS)
+"""Service outcome → CLI exit code, derived branch for branch from the
+HTTP map (``lib/surface_outcomes.py``). U7 imports this directly."""
 
 
 # ---------------------------------------------------------------------------

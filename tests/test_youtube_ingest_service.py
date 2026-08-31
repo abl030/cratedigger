@@ -174,13 +174,9 @@ def _make_service(
 
 
 class TestOutcomeMapsAreComplete(unittest.TestCase):
-    def test_outcome_set_is_stable(self) -> None:
-        """``OUTCOME_HTTP_STATUS`` and ``OUTCOME_EXIT_CODE`` must agree on keys."""
-        self.assertEqual(
-            set(OUTCOME_HTTP_STATUS),
-            set(OUTCOME_EXIT_CODE),
-            "OUTCOME_HTTP_STATUS / OUTCOME_EXIT_CODE keys drifted",
-        )
+    """Key agreement between the two maps holds by construction (the exit
+    map is derived — ``lib/surface_outcomes.py``) and is audited centrally
+    in ``tests/test_surface_outcomes.py``."""
 
     def test_every_submit_outcome_has_an_entry(self) -> None:
         """Every value in the ``SubmitOutcome`` Literal must map."""

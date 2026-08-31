@@ -81,19 +81,10 @@ class TestSetIncompleteMark(unittest.TestCase):
 
 
 class TestOutcomeMapsAgree(unittest.TestCase):
-    """CLI ⇄ API symmetry: one outcome vocabulary, matched code mappings."""
-
-    def test_maps_cover_the_same_outcomes(self) -> None:
-        self.assertEqual(
-            set(INCOMPLETE_MARK_EXIT_CODES),
-            set(INCOMPLETE_MARK_HTTP_STATUS),
-        )
-
-    def test_success_and_failure_branches_match(self) -> None:
-        for outcome, exit_code in INCOMPLETE_MARK_EXIT_CODES.items():
-            with self.subTest(outcome=outcome):
-                http = INCOMPLETE_MARK_HTTP_STATUS[outcome]
-                self.assertEqual(exit_code == 0, http == 200)
+    """CLI ⇄ API symmetry: the exit map is derived from the HTTP map
+    (``lib/surface_outcomes.py``), so key/polarity agreement holds by
+    construction and ``tests/test_surface_outcomes.py`` audits it; the
+    values below pin the convention semantics this action relies on."""
 
     def test_convention_codes(self) -> None:
         # 404/2 not found, 409/4 wrong state — the repository convention.
