@@ -812,6 +812,26 @@ class TestVerdictTierProperties(unittest.TestCase):
             )
         self.assertEqual(evidence_accusation_flags(None), AccusationFlags())
 
+    @given(facts=_evidence_facts())
+    def test_an_unjoined_row_projects_no_proof_gate_verdict(
+        self, facts,
+    ) -> None:
+        """No candidate evidence joined → the EMPTY projection, always.
+
+        The guard under test is ``proof_gate_projection``'s
+        ``candidate_evidence_id`` short-circuit. Without it, a row whose
+        LEFT JOIN matched nothing would still derive a tier from whatever
+        alias values it carries and render a finding nothing tested for —
+        the same lie, in the accusing direction, that
+        ``AlbumProofVerdict.has_finding`` separates on the clearance side.
+        Every other world in this module that reaches
+        ``proof_gate_projection`` joins real evidence
+        (``candidate_evidence_id`` non-NULL), which is why this world has
+        to be stated separately.
+        """
+        row = {**_row_aliases_from_facts(facts), "candidate_evidence_id": None}
+        self.assertEqual(proof_gate_projection(row), ProofGateProjection())
+
     @given(
         lineage=st.sampled_from((1, 3, 4)),
         provenance=st.sampled_from(

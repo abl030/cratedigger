@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 import msgspec
 
+from lib.surface_outcomes import exit_code_for_http_status
 from web.request_security import CHANNEL_HEADER, CLI_CHANNEL
 
 DEFAULT_API_BASE = "http://127.0.0.1:8085"
@@ -159,30 +160,6 @@ def _failure(error: str, detail: str) -> int:
     return 5
 
 
-def _exit_code(
-    status: int,
-    exit_overrides: Mapping[int, int] | None = None,
-) -> int:
-    """Map one HTTP status onto the CLI's stable exit-code convention.
-
-    ``exit_overrides`` is how a routed command keeps the exact exit code
-    it had while it executed in-process. It never invents a mapping: each
-    entry pins one status to the code that command's own outcome table
-    already used (issue #1063).
-    """
-    if exit_overrides is not None and status in exit_overrides:
-        return exit_overrides[status]
-    if 200 <= status < 300:
-        return 0
-    if status == 404:
-        return 2
-    if status in (400, 422):
-        return 3
-    if status == 409:
-        return 4
-    return 5
-
-
 def _send_unix(
     endpoint: UnixApiEndpoint,
     mutation: _ApiMutation,
@@ -291,7 +268,7 @@ def _relay(
     if _decode(result) is None:
         return 5
     print(result.body.decode("utf-8"))
-    return _exit_code(result.status, exit_overrides)
+    return exit_code_for_http_status(result.status, exit_overrides)
 
 
 ApiRenderer = Callable[[int, dict[str, object]], None]
@@ -322,7 +299,7 @@ def relay_rendered(
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         render(result.status, payload)
-    return _exit_code(result.status, exit_overrides)
+    return exit_code_for_http_status(result.status, exit_overrides)
 
 
 def poll_to_completion(
@@ -373,7 +350,7 @@ def poll_to_completion(
                 print(json.dumps(payload, indent=2, sort_keys=True))
             else:
                 render(polled.status, payload)
-            return _exit_code(polled.status)
+            return exit_code_for_http_status(polled.status)
         if is_complete(payload):
             if json_output:
                 print(json.dumps(payload, indent=2, sort_keys=True))
@@ -418,7 +395,7 @@ def relay_polled(
             print(json.dumps(start_payload, indent=2, sort_keys=True))
         else:
             render(started.status, start_payload)
-        return _exit_code(started.status)
+        return exit_code_for_http_status(started.status)
 
     return poll_to_completion(
         endpoint,
@@ -490,7 +467,8 @@ def cmd_merge_rekey(_db: object, args: argparse.Namespace) -> int:
     The route is the one canonical execution path
     (``MergeRekeyService.rekey_request``); every status this command's
     outcomes can produce (``lib.merge_rekey_service.MERGE_REKEY_HTTP_STATUS``
-    — 200/404/409/422/503) already matches ``_exit_code``'s default
+    — 200/404/409/422/503) already matches
+    ``lib.surface_outcomes.exit_code_for_http_status``'s default
     status→exit mapping, so no ``exit_overrides`` are needed.
 
     Uses ``TIMEOUT_MIRROR_SECONDS``, not the 15s enqueue default: the route
@@ -515,8 +493,8 @@ def cmd_sync_file_tags(_db: object, args: argparse.Namespace) -> int:
     (``lib.beets_tag_sync.sync_album_file_tags_from_borrowed_factory``);
     every status its outcomes can produce
     (``lib.beets_tag_sync.TAG_SYNC_HTTP_STATUS`` — 200/404/409/503)
-    already matches ``_exit_code``'s default status→exit mapping, so no
-    ``exit_overrides`` are needed.
+    already matches ``lib.surface_outcomes.exit_code_for_http_status``'s
+    default status→exit mapping, so no ``exit_overrides`` are needed.
 
     The client budget must strictly EXCEED the route's own worst case —
     two per-file tag scans over virtiofs plus a ``beet write`` bounded at

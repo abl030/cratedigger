@@ -26,8 +26,8 @@ _GUARDED_WRITE_METHODS = frozenset({
     "update_track_artists",
 })
 _GUARDED_RESULT_HANDLERS = frozenset({
-    "_request_fields_applied_or_report",
     "_request_fields_applied_or_respond",
+    "request_fields_cas_conflict",
 })
 
 

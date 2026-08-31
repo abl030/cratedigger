@@ -71,7 +71,7 @@ from lib.wrong_match_policy import (
     rejection_scenario_is_wrong_match_candidate,
 )
 from lib.wrong_matches import wrong_match_row_is_visible
-from web.classify import LogEntry, classify_log_entry
+from web.download_history_view import build_recents_download_log_rows
 
 TARGET_MBID = "aaaaaaaa-1111-2222-3333-444444444444"
 
@@ -752,16 +752,18 @@ class TestTheCopyIsReachableFromTheProducer(unittest.TestCase):
     """Rule C, in its strongest form: the trigger is produced, not typed."""
 
     def _classified_verdict(self, result: ValidationResult) -> str:
-        entry = LogEntry(
-            id=1,
-            request_id=2,
-            outcome="rejected",
-            beets_scenario=result.scenario,
-            beets_detail=result.detail,
-            error_message=result.error,
-            validation_result=result.to_json(),
-        )
-        return classify_log_entry(entry).verdict
+        rendered = build_recents_download_log_rows([{
+            "id": 1,
+            "request_id": 2,
+            "outcome": "rejected",
+            "beets_scenario": result.scenario,
+            "beets_detail": result.detail,
+            "error_message": result.error,
+            "validation_result": result.to_json(),
+        }])[0]
+        verdict = rendered["verdict"]
+        assert isinstance(verdict, str)
+        return verdict
 
     def test_a_real_no_match_run_renders_the_named_verdict(self):
         result = run_fake_harness([SESSION_END_LINE])
@@ -802,17 +804,20 @@ class TestTheCopyIsReachableFromTheProducer(unittest.TestCase):
                 self.assertNotEqual(
                     self._classified_verdict(run_fake_harness(lines)),
                     "Rejected")
-        unnamed = LogEntry(
-            id=1, request_id=2, outcome="rejected", beets_scenario=None)
-        self.assertEqual(classify_log_entry(unnamed).verdict, "Rejected")
+        unnamed = build_recents_download_log_rows([{
+            "id": 1, "request_id": 2, "outcome": "rejected",
+            "beets_scenario": None,
+        }])[0]
+        self.assertEqual(unnamed["verdict"], "Rejected")
 
     def test_a_validation_error_without_a_recorded_message_still_reads(self):
         """``error_message`` is NULL on no live row today, but the verdict
         must not render a dangling colon if one ever appears."""
         self.assertEqual(
-            classify_log_entry(LogEntry(
-                id=1, request_id=2, outcome="rejected",
-                beets_scenario=VALIDATION_ERROR_SCENARIO)).verdict,
+            build_recents_download_log_rows([{
+                "id": 1, "request_id": 2, "outcome": "rejected",
+                "beets_scenario": VALIDATION_ERROR_SCENARIO,
+            }])[0]["verdict"],
             VALIDATION_ERROR_VERDICT_PREFIX,
         )
 

@@ -107,3 +107,5 @@
 - [Alert blast radius](feedback_alert_blast_radius.md) — never fix a silent-alert path by paging unconditionally; enumerate cases, fix only the broken one
 - [Poll gates at short intervals](feedback_poll_gates_short_intervals.md) — doc1 gates run ~2 min now; 60-90s polls, never long sleeps
 - [Mutant restore git-checkout trap](feedback_mutant_restore_git_checkout_trap.md) — restoring a mutant via git checkout wipes uncommitted edits in the same file; restore by inverse edit
+- [#1277 dispatch deepening SHIPPED](project_1277_dispatch_request_shipped.md) — 2026-08-26 live-verified; DispatchDB shape guarded by Pyright only; #1278 = debt register
+- [Worktree-isolated git boundaries](feedback_worktree_isolated_git_boundaries.md) — no git outside own worktree for session+subagents; deploy from shared checkout; hash-proof mutant restoration

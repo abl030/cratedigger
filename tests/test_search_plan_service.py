@@ -54,6 +54,16 @@ from lib.search_plan_service import (
     RESULT_REQUEST_NOT_FOUND,
     RESULT_REQUEST_REPLACED,
     RESULT_SUCCESS,
+    SEARCH_PLAN_ADVANCE_EXIT_CODES,
+    SEARCH_PLAN_ADVANCE_HTTP_STATUS,
+    SEARCH_PLAN_DRY_RUN_EXIT_CODES,
+    SEARCH_PLAN_DRY_RUN_HTTP_STATUS,
+    SEARCH_PLAN_HISTORY_EXIT_CODES,
+    SEARCH_PLAN_HISTORY_HTTP_STATUS,
+    SEARCH_PLAN_REGENERATE_EXIT_CODES,
+    SEARCH_PLAN_REGENERATE_HTTP_STATUS,
+    SEARCH_PLAN_SATURATION_EXIT_CODES,
+    SEARCH_PLAN_SATURATION_HTTP_STATUS,
     SearchPlanService,
     sanitize_error_message,
     sanitize_provenance,
@@ -90,6 +100,91 @@ def _va_tracks() -> list[dict[str, object]]:
         {"disc_number": 1, "track_number": 3, "title": "Starlight",
          "track_artist": "Birdband"},
     ]
+
+
+class TestSearchPlanOutcomeTables(unittest.TestCase):
+    """Value pins for the five per-action tables (#1278 item 3).
+
+    Vocabulary/derivation conformance is audited centrally in
+    ``tests/test_surface_outcomes.py``; these pin the exact values both
+    surfaces look up, per action, because the actions' outcome strings
+    collide ("success" x4) and only the per-action pin can tell them
+    apart.
+    """
+
+    def test_regenerate_table_values(self) -> None:
+        self.assertEqual(SEARCH_PLAN_REGENERATE_HTTP_STATUS, {
+            "success": 200,
+            "noop_active_plan_exists": 200,
+            "request_not_found": 404,
+            "request_replaced": 409,
+            "failed_deterministic": 422,
+            "failed_transient": 503,
+        })
+        self.assertEqual(SEARCH_PLAN_REGENERATE_EXIT_CODES, {
+            "success": 0,
+            "noop_active_plan_exists": 0,
+            "request_not_found": 2,
+            "request_replaced": 4,
+            "failed_deterministic": 3,
+            # 5 per the convention (issue #1278); the CLI exited 4 here
+            # before the table while the route always answered 503.
+            "failed_transient": 5,
+        })
+
+    def test_dry_run_table_values(self) -> None:
+        self.assertEqual(SEARCH_PLAN_DRY_RUN_HTTP_STATUS, {
+            "success": 200,
+            "generation_failed": 200,
+            "request_not_found": 404,
+        })
+        self.assertEqual(SEARCH_PLAN_DRY_RUN_EXIT_CODES, {
+            "success": 0,
+            "generation_failed": 0,
+            "request_not_found": 2,
+        })
+
+    def test_saturation_table_values(self) -> None:
+        self.assertEqual(SEARCH_PLAN_SATURATION_HTTP_STATUS, {
+            "success": 200,
+            "request_not_found": 404,
+            "input_invalid": 400,
+        })
+        self.assertEqual(SEARCH_PLAN_SATURATION_EXIT_CODES, {
+            "success": 0,
+            "request_not_found": 2,
+            "input_invalid": 3,
+        })
+
+    def test_advance_table_values(self) -> None:
+        self.assertEqual(SEARCH_PLAN_ADVANCE_HTTP_STATUS, {
+            "advanced": 200,
+            "request_not_found": 404,
+            "request_replaced": 409,
+            "no_active_plan": 409,
+            "invalid_target": 422,
+            "failed_transient": 503,
+        })
+        self.assertEqual(SEARCH_PLAN_ADVANCE_EXIT_CODES, {
+            "advanced": 0,
+            "request_not_found": 2,
+            "request_replaced": 4,
+            "no_active_plan": 4,
+            "invalid_target": 3,
+            "failed_transient": 5,
+        })
+
+    def test_history_table_values(self) -> None:
+        self.assertEqual(SEARCH_PLAN_HISTORY_HTTP_STATUS, {
+            "success": 200,
+            "request_not_found": 404,
+            "input_invalid": 400,
+        })
+        self.assertEqual(SEARCH_PLAN_HISTORY_EXIT_CODES, {
+            "success": 0,
+            "request_not_found": 2,
+            "input_invalid": 3,
+        })
 
 
 class TestSearchPlanServiceAddTime(unittest.TestCase):

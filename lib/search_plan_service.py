@@ -72,6 +72,7 @@ from lib.search import (
     SearchPlanConfig,
     generate_search_plan,
 )
+from lib.surface_outcomes import exit_codes_from_http
 
 if TYPE_CHECKING:
     from lib.pipeline_db.rows import AlbumRequestRow
@@ -191,6 +192,65 @@ RESULT_DRY_RUN_GENERATION_FAILED = "generation_failed"
 # saturation_for_request outcomes (U7 — read-only telemetry aggregate).
 RESULT_SATURATION_SUCCESS = "success"
 RESULT_SATURATION_INPUT_INVALID = "input_invalid"
+
+# Per-action outcome tables (issue #1278 item 3). Search-plan is FIVE
+# actions whose outcome strings collide ("success" x4, "input_invalid" x2),
+# so each action owns its own table beside its outcome vocabulary above;
+# the CLI exit maps are derived branch for branch through the repository
+# convention (lib/surface_outcomes.py) and both surfaces look up instead of
+# hand-writing ladders. Audited by tests/test_surface_outcomes.py.
+SEARCH_PLAN_REGENERATE_HTTP_STATUS: dict[str, int] = {
+    RESULT_SUCCESS: 200,
+    RESULT_NOOP_ACTIVE_PLAN_EXISTS: 200,
+    RESULT_REQUEST_NOT_FOUND: 404,
+    RESULT_REQUEST_REPLACED: 409,
+    RESULT_FAILED_DETERMINISTIC: 422,
+    RESULT_FAILED_TRANSIENT: 503,
+}
+SEARCH_PLAN_REGENERATE_EXIT_CODES: dict[str, int] = exit_codes_from_http(
+    SEARCH_PLAN_REGENERATE_HTTP_STATUS
+)
+
+SEARCH_PLAN_DRY_RUN_HTTP_STATUS: dict[str, int] = {
+    RESULT_DRY_RUN_SUCCESS: 200,
+    # A generator that produced no runnable plan is a successfully
+    # simulated dry run, not an HTTP failure.
+    RESULT_DRY_RUN_GENERATION_FAILED: 200,
+    RESULT_REQUEST_NOT_FOUND: 404,
+}
+SEARCH_PLAN_DRY_RUN_EXIT_CODES: dict[str, int] = exit_codes_from_http(
+    SEARCH_PLAN_DRY_RUN_HTTP_STATUS
+)
+
+SEARCH_PLAN_SATURATION_HTTP_STATUS: dict[str, int] = {
+    RESULT_SATURATION_SUCCESS: 200,
+    RESULT_REQUEST_NOT_FOUND: 404,
+    RESULT_SATURATION_INPUT_INVALID: 400,
+}
+SEARCH_PLAN_SATURATION_EXIT_CODES: dict[str, int] = exit_codes_from_http(
+    SEARCH_PLAN_SATURATION_HTTP_STATUS
+)
+
+SEARCH_PLAN_ADVANCE_HTTP_STATUS: dict[str, int] = {
+    RESULT_ADVANCED: 200,
+    RESULT_REQUEST_NOT_FOUND: 404,
+    RESULT_REQUEST_REPLACED: 409,
+    RESULT_NO_ACTIVE_PLAN: 409,
+    RESULT_INVALID_TARGET: 422,
+    RESULT_FAILED_TRANSIENT: 503,
+}
+SEARCH_PLAN_ADVANCE_EXIT_CODES: dict[str, int] = exit_codes_from_http(
+    SEARCH_PLAN_ADVANCE_HTTP_STATUS
+)
+
+SEARCH_PLAN_HISTORY_HTTP_STATUS: dict[str, int] = {
+    RESULT_HISTORY_PAGE_SUCCESS: 200,
+    RESULT_REQUEST_NOT_FOUND: 404,
+    RESULT_HISTORY_PAGE_INPUT_INVALID: 400,
+}
+SEARCH_PLAN_HISTORY_EXIT_CODES: dict[str, int] = exit_codes_from_http(
+    SEARCH_PLAN_HISTORY_HTTP_STATUS
+)
 
 # Saturation telemetry window bounds (U7). Operators can ask for any
 # window in [1, 90] days; defaults to 14 days matching the brainstorm.

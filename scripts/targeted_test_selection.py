@@ -461,6 +461,21 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "harness/import_one.py": (
         "tests.test_disambiguation",
     ),
+    # lib/surface_outcomes.py is the repository-wide status/exit
+    # convention (#1278): a change to it must run the services whose exit
+    # maps derive from it and the CLI relay adapters, not only its own
+    # unit tests — basename probing alone selected exactly
+    # tests.test_surface_outcomes (founding-PR reader finding R8).
+    "lib/surface_outcomes.py": (
+        "tests.test_surface_outcomes",
+        "tests.test_incomplete_mark_service",
+        "tests.test_youtube_ingest_service",
+        "tests.test_youtube_album_service",
+        "tests.test_force_import_service",
+        "tests.test_local_import_service",
+        "tests.test_pipeline_cli_api_mutations",
+        "tests.test_pipeline_cli_api_mutations_generated",
+    ),
     # lib/beets_child.py is the shared spawner UNDER the three
     # run-to-completion Beets mutation lanes (#1278 item 4). Its own two
     # modules arrive via the basename probes; the lane suites — one of them

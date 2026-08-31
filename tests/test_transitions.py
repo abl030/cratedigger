@@ -20,6 +20,8 @@ from lib.transitions import (
     finalize_operator_request,
     finalize_request,
     publish_initialized_request,
+    request_fields_cas_conflict,
+    transition_conflict_http_status,
     transition_conflict_payload,
     validate_transition,
 )
@@ -775,6 +777,67 @@ if TYPE_CHECKING:
     # tests/test_wrong_match_cleanup_service.py for the rationale.
     _pipeline_db_satisfies_transitions_protocol: _TransitionsDB = cast("PipelineDB", None)
     _fake_db_satisfies_transitions_protocol: _TransitionsDB = cast("FakePipelineDB", None)
+
+
+class TestTransitionConflictHttpStatus(unittest.TestCase):
+    """Both operator surfaces classify a conflict through this one map."""
+
+    def _conflict(self, kind: TransitionConflictKind) -> TransitionConflict:
+        return TransitionConflict(
+            request_id=1,
+            target_status="wanted",
+            kind=kind,
+            expected_status=None,
+            actual_status=None,
+        )
+
+    def test_kinds_map_to_the_convention(self) -> None:
+        cases = [
+            (TransitionConflictKind.not_found, 404),
+            (TransitionConflictKind.invalid_edge, 409),
+            (TransitionConflictKind.stale_source, 409),
+            (TransitionConflictKind.processing_locked, 409),
+        ]
+        for kind, expected in cases:
+            with self.subTest(kind=kind):
+                self.assertEqual(
+                    transition_conflict_http_status(self._conflict(kind)),
+                    expected,
+                )
+
+
+class TestRequestFieldsCasConflict(unittest.TestCase):
+    """One shared explanation for a metadata compare-and-set miss."""
+
+    def test_vanished_row_is_not_found(self) -> None:
+        conflict = request_fields_cas_conflict(
+            FakePipelineDB(), 41, expected_status="wanted",
+        )
+        self.assertEqual(conflict.kind, TransitionConflictKind.not_found)
+        self.assertEqual(conflict.expected_status, "wanted")
+        self.assertIsNone(conflict.actual_status)
+
+    def test_concurrent_lifecycle_change_is_stale_source(self) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="imported"))
+        conflict = request_fields_cas_conflict(
+            db, 42, expected_status="wanted",
+        )
+        self.assertEqual(conflict.kind, TransitionConflictKind.stale_source)
+        self.assertEqual(conflict.actual_status, "imported")
+
+    def test_processing_row_names_the_exact_owner(self) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=43, status="wanted"))
+        owner = handoff_automation_owner(db, 43)
+        conflict = request_fields_cas_conflict(
+            db, 43, expected_status="wanted",
+        )
+        self.assertEqual(
+            conflict.kind, TransitionConflictKind.processing_locked
+        )
+        assert conflict.processing_owner is not None
+        self.assertEqual(conflict.processing_owner.job_id, owner.id)
 
 
 class TestTransitionsDBProtocolParity(unittest.TestCase):

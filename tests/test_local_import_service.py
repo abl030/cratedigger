@@ -28,7 +28,7 @@ from tests.helpers import handoff_automation_owner, make_request_row
 class TestLocalImportService(unittest.TestCase):
     def test_centralized_adapter_outcome_maps(self) -> None:
         """One table serves both surfaces (mirrors force-import, #1063)."""
-        from scripts.pipeline_cli.api_mutations import _exit_code
+        from lib.surface_outcomes import exit_code_for_http_status
 
         expected_exit = {
             RESULT_QUEUED: 0,
@@ -54,7 +54,8 @@ class TestLocalImportService(unittest.TestCase):
         for outcome, exit_code in expected_exit.items():
             with self.subTest(outcome=outcome):
                 self.assertEqual(
-                    _exit_code(LOCAL_IMPORT_HTTP_STATUS[outcome]), exit_code)
+                    exit_code_for_http_status(
+                        LOCAL_IMPORT_HTTP_STATUS[outcome]), exit_code)
 
     def _world(self, *, enabled: bool = True) -> tuple[FakePipelineDB, SimpleNamespace, str]:
         temp = tempfile.TemporaryDirectory()

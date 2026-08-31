@@ -54,7 +54,7 @@ from tests.test_beets_harness_session import (
     choose_match_line,
     run_fake_harness,
 )
-from web.classify import LogEntry, classify_log_entry
+from web.download_history_view import build_recents_download_log_rows
 
 # ---------------------------------------------------------------------------
 # Transcript worlds
@@ -270,15 +270,20 @@ def assert_the_row_explains_itself(
     them sentences production never produces, rather than patching this
     module's own constants.
     """
-    verdict = classify_log_entry(LogEntry(
-        id=1,
-        request_id=2,
-        outcome="rejected",
-        beets_scenario=result.scenario,
-        beets_detail=result.detail,
-        error_message=result.error,
-        validation_result=result.to_json(),
-    )).verdict
+    rendered = build_recents_download_log_rows([{
+        "id": 1,
+        "request_id": 2,
+        "outcome": "rejected",
+        "beets_scenario": result.scenario,
+        "beets_detail": result.detail,
+        "error_message": result.error,
+        "validation_result": result.to_json(),
+    }])[0]
+    # Type narrowing only, not an invariant clause: the composed renderer
+    # returns ``dict[str, object]`` while ``ClassifiedEntry.verdict`` is
+    # declared ``str``. The clauses are the message-carrying asserts below.
+    verdict = rendered["verdict"]
+    assert isinstance(verdict, str)
     assert verdict != "Rejected", (
         "the rejection still reads as the bare word 'Rejected'")
     if result.scenario == NO_CHOOSE_MATCH_SCENARIO:

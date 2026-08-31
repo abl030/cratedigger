@@ -6,7 +6,7 @@ the under-bound world, the non-success outcome, the non-target-sibling
 world, the no-candidates world, and the #1196 composite exemption) live in
 ``tests/web/test_routes_pipeline.py``, driven through the FULL outermost
 adapter (the real ``/api/pipeline/log`` route). This module patrols the
-derivation's world space by calling ``classify_log_entry`` directly — the
+derivation's world space by calling ``_classify_log_entry`` directly — the
 real production function, never a reimplemented copy of it.
 
 **F9 (test-fidelity review lesson): worlds are PLANTED, never recomputed
@@ -80,7 +80,7 @@ from lib.quality import (
 from web.classify import (
     TRACK_LENGTH_WARNING_BOUND_SECONDS,
     LogEntry,
-    classify_log_entry,
+    _classify_log_entry,
 )
 
 ROLE_UNDER = "under"
@@ -349,7 +349,7 @@ class TestTrackLengthWarningGenerated(unittest.TestCase):
     ) -> None:
         candidates, target_pairs = world
         entry = _entry_for_candidate_world(candidates)
-        classified = classify_log_entry(entry)
+        classified = _classify_log_entry(entry)
         assert_warning_matches_planted_roles(
             target_pairs, classified.track_length_warning,
         )
@@ -393,7 +393,7 @@ class TestCheckerTripsOnViolations(unittest.TestCase):
     def test_a_classified_world_passes(self) -> None:
         planted = [(ROLE_OVER, 15.0, 237.633167, 1)]
         entry = _entry_for_planted_pairs(planted)
-        classified = classify_log_entry(entry)
+        classified = _classify_log_entry(entry)
         assert_warning_matches_planted_roles(
             planted, classified.track_length_warning,
         )
@@ -410,7 +410,7 @@ class TestCheckerTripsOnViolations(unittest.TestCase):
             (True, []),
         ]
         entry = _entry_for_candidate_world(candidates)
-        classified = classify_log_entry(entry)
+        classified = _classify_log_entry(entry)
         self.assertIsNone(classified.track_length_warning)
         assert_warning_matches_planted_roles(
             [], classified.track_length_warning,
@@ -423,7 +423,7 @@ class TestCheckerTripsOnViolations(unittest.TestCase):
         the planted composite pair) must not raise."""
         planted: list[_PlantedPair] = [(ROLE_OVER, 100.0, 700.0, 3)]
         entry = _entry_for_planted_pairs(planted)
-        classified = classify_log_entry(entry)
+        classified = _classify_log_entry(entry)
         self.assertIsNone(classified.track_length_warning)
         assert_warning_matches_planted_roles(
             planted, classified.track_length_warning,

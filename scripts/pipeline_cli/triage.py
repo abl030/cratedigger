@@ -310,14 +310,11 @@ def _render_convergence_stop_result(
             f"  Could not stop request {result.request_id}: {result.outcome}",
             file=sys.stderr,
         )
-    return {
-        "stopped": 0,
-        "not_found": 2,
-        "not_converged": 3,
-        "wrong_state": 4,
-        "stale": 4,
-        "unavailable": 5,
-    }[result.outcome]
+    from lib.convergence_service import STOP_CONVERGED_SEARCH_EXIT_CODES
+
+    # Defensive .get, mirroring the search-plan commands: an unknown
+    # future outcome exits 1 instead of a bare KeyError traceback.
+    return STOP_CONVERGED_SEARCH_EXIT_CODES.get(result.outcome, 1)
 
 
 def _convergence_stop_unavailable(args: argparse.Namespace) -> int:

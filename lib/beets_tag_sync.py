@@ -147,7 +147,7 @@ RESULT_BEETS_UNAVAILABLE: Final = "beets_unavailable"
 #: The route's status mapping (CLI ⇄ API convention table: 200/0 success,
 #: 404/2 not found, 409/4 wrong state, 503/5 transient/retryable). The CLI
 #: adapter relays the route, so these statuses ARE its exit codes via
-#: ``scripts/pipeline_cli/api_mutations.py::_exit_code``'s default mapping.
+#: ``lib.surface_outcomes.exit_code_for_http_status``'s default mapping.
 TAG_SYNC_HTTP_STATUS: Final[dict[str, int]] = {
     RESULT_SYNCED: 200,
     RESULT_ALREADY_SYNCED: 200,

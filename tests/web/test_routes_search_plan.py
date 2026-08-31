@@ -350,6 +350,19 @@ class TestPipelineSearchPlanDryRunContract(_FakeDbWebServerCase):
     def tearDown(self) -> None:
         self._cfg_patcher.stop()
 
+    def test_dry_run_generation_failure_returns_200_without_error_key(self):
+        """`generation_failed` is informational: 200, full payload, no
+        error key (PR3 mutant-runner M14 — this key is what makes the
+        dry-run table distinct, and a wrong-table lookup here would 500)."""
+        self.db.seed_request(make_request_row(
+            id=101, status="wanted", artist_name="", album_title="",
+        ))
+        status, data = self._get(
+            "/api/pipeline/101/search-plan/dry-run")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["outcome"], "generation_failed")
+        self.assertNotIn("error", data)
+
     def test_dry_run_happy_path_returns_200_with_required_fields(self):
         status, data = self._get(
             "/api/pipeline/100/search-plan/dry-run")

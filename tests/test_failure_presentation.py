@@ -53,7 +53,7 @@ from lib.fs_authority import (
     open_configured_quarantine_directory,
 )
 from lib.quality import FileFailureDetail
-from web.classify import LogEntry, classify_log_entry
+from web.classify import LogEntry, _classify_log_entry
 
 
 @dataclass(frozen=True)
@@ -174,7 +174,7 @@ class TestDownloadLog38272(unittest.TestCase):
         )
         before = msgspec.json.encode(entry.transfer_detail)
 
-        classified = classify_log_entry(entry)
+        classified = _classify_log_entry(entry)
 
         self.assertEqual(classified.badge, "Failed")
         self.assertEqual(
@@ -890,7 +890,7 @@ class TestReviewedCopyClaims(unittest.TestCase):
                 "jmkirchoff", "f0", last_state="Completed, Errored",
                 last_exception="Failed to create file f0: Stale file handle")],
         )
-        classified = classify_log_entry(entry)
+        classified = _classify_log_entry(entry)
         self.assertNotIn("jmkirchoff", classified.summary)
         self.assertEqual(classified.summary, classified.verdict)
 
@@ -900,7 +900,7 @@ class TestReviewedCopyClaims(unittest.TestCase):
             soulseek_username="jmkirchoff",
             actual_filetype="mp3", actual_min_bitrate=320,
         )
-        self.assertIn("jmkirchoff", classify_log_entry(entry).summary)
+        self.assertIn("jmkirchoff", _classify_log_entry(entry).summary)
 
 
 class TestMaterializeReasonCopy(unittest.TestCase):
