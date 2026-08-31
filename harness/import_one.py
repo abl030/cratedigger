@@ -1299,6 +1299,7 @@ def _run_import_once(
         HARNESS,
         mb_release_id=mb_release_id,
         album_path=path,
+        pretend=False,
         preserve_discogs_flat_subtracks=preserve_discogs_flat_subtracks,
     )
     print(f"  [HARNESS] {' '.join(cmd)}", file=sys.stderr)

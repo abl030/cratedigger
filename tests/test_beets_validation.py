@@ -12,7 +12,7 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Iterator
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # Heavy third-party deps (``requests``, ``music_tag``, ``slskd_api``)
 # used to be mocked here at module-discovery time, before the dev shell
@@ -23,6 +23,7 @@ from unittest.mock import MagicMock
 # (e.g. ``lib.youtube_album_service``) that uses real
 # ``requests.Timeout`` / ``ConnectionError`` exception classes.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib import beets as lib_beets
 from lib.beets import _beets_validate_once, apply_candidate_scenario, beets_validate
 from lib.beets_child import spawn_harness_session
 from lib.grab_list import GrabListEntry
@@ -481,6 +482,25 @@ class TestBeetsValidate(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertFalse(result.mbid_found)
         self.assertIsNone(result.distance)
+        self.assertEqual(result.scenario, "mbid_not_found")
+
+    def test_a_long_shared_prefix_is_not_the_target(self):
+        """Strict pressing identity: the candidate match is full-string
+        equality, never a prefix — two real Discogs releases can share
+        eight leading digits (review round 2, mutant-runner survivor M12)."""
+        target = "208513400"
+        near_miss = "208513401"
+        spawn = RecordingSpawn(
+            make_validation_proc(make_choose_match_msg(near_miss, 0.02)),
+        )
+
+        result = beets_validate(
+            self.HARNESS, "/test/album", target, 0.15, spawn=spawn,
+        )
+
+        self.assertFalse(result.mbid_found)
+        self.assertFalse(result.valid)
+        self.assertEqual(result.scenario, "mbid_not_found")
 
     def test_no_candidates(self):
         """Empty candidates list → valid=False."""
@@ -497,9 +517,13 @@ class TestBeetsValidate(unittest.TestCase):
 
         self.assertFalse(result.valid)
         self.assertFalse(result.mbid_found)
+        self.assertEqual(result.scenario, "mbid_not_found")
 
     def test_subprocess_start_failure(self):
-        """Harness fails to start → valid=False, error set."""
+        """Harness fails to start → valid=False, error set, and the run
+        still owes its issue-#888 evidence stamp (scenario + session
+        evidence) — the branch is a named validation_error, not a bare
+        error string (review round 2, mutant-runner observation M14)."""
         spawn = RecordingSpawn(raises=FileNotFoundError("No such file"))
 
         result = beets_validate(
@@ -509,6 +533,52 @@ class TestBeetsValidate(unittest.TestCase):
         self.assertFalse(result.valid)
         assert result.error is not None
         self.assertIn("Failed to start harness", result.error)
+        self.assertEqual(result.scenario, "validation_error")
+        self.assertIsNotNone(result.harness_session)
+
+    def test_a_hanging_session_is_killed_and_named_a_timeout(self):
+        """The hang-kill wiring end to end through the seam: a session
+        whose stdout never yields must be killed at
+        HARNESS_SESSION_TIMEOUT_SECONDS (patched short here) and the run
+        named a timeout (review round 2, mutant-runner survivor M13)."""
+        import threading
+
+        class _BlockingStdout:
+            def __init__(self) -> None:
+                self.released = threading.Event()
+
+            def __iter__(self) -> "_BlockingStdout":
+                return self
+
+            def __next__(self) -> str:
+                if self.released.wait(timeout=30):
+                    raise StopIteration
+                raise AssertionError("timeout kill never released the read")
+
+        class _HangingSession(FakeHarnessSession):
+            def __init__(self) -> None:
+                super().__init__([])
+                self.blocking = _BlockingStdout()
+                self.stdout = self.blocking
+                self.kill_calls = 0
+
+            def kill(self) -> None:
+                self.kill_calls += 1
+                self.blocking.released.set()
+
+        session = _HangingSession()
+        spawn = RecordingSpawn(session)
+        with patch.object(
+            lib_beets, "HARNESS_SESSION_TIMEOUT_SECONDS", 0.05,
+        ):
+            result = beets_validate(
+                self.HARNESS, "/test/album", "some-mbid", 0.15, spawn=spawn,
+            )
+
+        self.assertEqual(session.kill_calls, 1)
+        self.assertEqual(result.error, "Harness timed out after 0.05s")
+        self.assertEqual(result.scenario, "validation_error")
+        self.assertFalse(result.valid)
 
     def test_long_stderr_logged_in_full(self):
         """A multi-frame Python traceback in harness stderr must be logged
@@ -603,8 +673,11 @@ class TestBeetsValidate(unittest.TestCase):
         )
 
         self.assertTrue(result.valid)
-        # Two skip calls: one for should_resume, one for choose_match
-        self.assertEqual(len(proc.stdin.written), 2)
+        # Two skip calls: one for should_resume, one for choose_match —
+        # and both must actually SAY skip: a session that answered a
+        # resume/duplicate prompt with "apply" would act inside a
+        # --pretend validation (review round 2, mutant-runner survivor M10).
+        self.assertEqual(proc.stdin.written, ['{"action":"skip"}\n'] * 2)
 
     def test_exact_threshold(self):
         """Distance exactly at threshold → valid=True."""

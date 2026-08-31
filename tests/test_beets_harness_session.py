@@ -139,7 +139,10 @@ def write_fake_harness(
 
     Returns the harness path to hand to ``beets_validate``. The lines are
     emitted verbatim, so a caller can plant malformed JSON, blank lines, or
-    nothing at all. A negative ``process_returncode`` makes the harness
+    nothing at all. At RUN time the harness first records its argv into
+    ``FAKE_HARNESS_ARGS_FILENAME`` inside ``directory`` (read it back with
+    :func:`read_fake_harness_args`); the file is truncated per invocation,
+    so a multi-pass session leaves only the LAST pass's argv. A negative ``process_returncode`` makes the harness
     signal itself, so ``Popen`` observes a real negative return code — but
     ONLY for a signal no ancestor can be holding: ``SIG_IGN`` and the
     blocked mask are both inherited across ``exec``, and a held signal

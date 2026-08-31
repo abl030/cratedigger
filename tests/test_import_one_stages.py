@@ -3,6 +3,7 @@
 These test the decision points extracted from main() — each stage function
 takes data inputs and returns a StageResult without I/O.
 """
+import contextlib
 import io
 import json
 import os
@@ -80,12 +81,16 @@ print(outcome.failure_reason)
 """
 
 
-def run_import_with_fake_harness(
+@contextlib.contextmanager
+def fake_harness_import_world(
     *,
     process_status: int,
     stderr_lines: Sequence[str] = (),
 ):
-    """Drive real ``run_import`` pipes against an executable fake harness."""
+    """Yield ``(tmpdir, run)``: an executable fake harness world plus a
+    ``run()`` that drives the real ``run_import`` against it under the
+    documented signal/warnings discipline. ``tmpdir`` doubles as the album
+    path and holds the fake harness's argv record while the world lives."""
     from harness import import_one
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -102,7 +107,21 @@ def run_import_with_fake_harness(
             patch.object(import_one, "HARNESS", harness_path),
         ):
             warnings.simplefilter("ignore", ResourceWarning)
-            return import_one.run_import(tmpdir, "release-under-test")
+            yield tmpdir, lambda: import_one.run_import(
+                tmpdir, "release-under-test",
+            )
+
+
+def run_import_with_fake_harness(
+    *,
+    process_status: int,
+    stderr_lines: Sequence[str] = (),
+):
+    """Drive real ``run_import`` pipes against an executable fake harness."""
+    with fake_harness_import_world(
+        process_status=process_status, stderr_lines=stderr_lines,
+    ) as (_tmpdir, run):
+        return run()
 
 
 def _spectral_collection_precedes_conversion(source: str) -> bool:
@@ -380,19 +399,8 @@ class TestImportSessionArgvShape(unittest.TestCase):
         exact ``--search-id``/path pair, and never ``--pretend`` — the
         validation-only flag (``lib/beets_child.py::harness_session_argv``
         owns the shape)."""
-        from harness import import_one
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            harness_path = write_fake_harness(
-                tmpdir, stdout_lines=[], process_returncode=0,
-            )
-            with (
-                warnings.catch_warnings(),
-                patch("sys.stderr", io.StringIO()),
-                patch.object(import_one, "HARNESS", harness_path),
-            ):
-                warnings.simplefilter("ignore", ResourceWarning)
-                import_one.run_import(tmpdir, "release-under-test")
+        with fake_harness_import_world(process_status=0) as (tmpdir, run):
+            run()
             args = read_fake_harness_args(tmpdir)
 
         self.assertEqual(

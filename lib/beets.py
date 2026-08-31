@@ -68,6 +68,12 @@ VALIDATION_ERROR_CLAUSE = "beets validation did not complete, so no match was re
 #: full text still goes to the journal; this is the bounded audit copy.
 _STDERR_TAIL_CHARS = 4000
 
+#: How long one streaming validation session may run before it is killed.
+#: A module constant (not a kwarg — no production caller varies it) so the
+#: hang-kill path is testable through the ``spawn`` seam with a patched
+#: bound instead of a real two-minute wait.
+HARNESS_SESSION_TIMEOUT_SECONDS: Final = 120.0
+
 #: Bounds on the composed ``detail``, which reaches ``download_log
 #: .beets_detail`` and the Recents card. A single 500 KB newline-free stderr
 #: line is a real shape (measured), and neither the DB column nor the card is
@@ -284,15 +290,18 @@ def _beets_validate_once(
     assert proc.stderr is not None
 
     got_choose_match = False
-    # Kill harness if it hangs — 120s total timeout
+    # Kill harness if it hangs — one bounded session, total.
     import threading
     timed_out = False
     def _timeout_kill():
         nonlocal timed_out
         timed_out = True
-        logger.error("BEETS_VALIDATE: harness timed out after 120s, killing")
+        logger.error(
+            "BEETS_VALIDATE: harness timed out after %gs, killing",
+            HARNESS_SESSION_TIMEOUT_SECONDS,
+        )
         proc.kill()
-    timer = threading.Timer(120.0, _timeout_kill)
+    timer = threading.Timer(HARNESS_SESSION_TIMEOUT_SECONDS, _timeout_kill)
     timer.start()
     try:
         for line in proc.stdout:
@@ -386,7 +395,9 @@ def _beets_validate_once(
     finally:
         timer.cancel()
         if timed_out:
-            result.error = "Harness timed out after 120s"
+            result.error = (
+                f"Harness timed out after {HARNESS_SESSION_TIMEOUT_SECONDS:g}s"
+            )
         stderr_out = ""
         try:
             stderr_out = proc.stderr.read()

@@ -40,8 +40,8 @@ anything; it launches, captures, and reports.
 The four Beets mutation lanes stay four (CLAUDE.md § Decision
 architecture); this module adds no lane — only the mechanics they share.
 The module top stays deliberately light (stdlib only today), and
-``beets_subprocess_env`` is imported inside the run function, continuing
-the lanes' own convention. Neither is load-bearing: the pinned interpreter
+``beets_subprocess_env`` is imported inside the two spawning functions,
+continuing the lanes' own convention. Neither is load-bearing: the pinned interpreter
 in this deployment is Cratedigger's own Python environment
 (``nix/module.nix`` renders ``[Beets] python`` from the same ``pythonEnv``
 the pipeline runs on), so ``harness/delete_album.py``'s in-child import of
@@ -166,7 +166,10 @@ def harness_session_argv(
     *,
     mb_release_id: str,
     album_path: str,
-    pretend: bool = False,
+    # Deliberately NO default: this is the one flag separating a dry run
+    # from a real Beets import, so a forgotten kwarg must be a TypeError,
+    # never a silent real import (review round, reader finding 5).
+    pretend: bool,
     preserve_discogs_flat_subtracks: bool = False,
 ) -> list[str]:
     """The one argv shape for a streaming harness session
