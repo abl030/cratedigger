@@ -44,10 +44,10 @@ from scripts.run_python_tests import (
     settings_max_examples,
     shard_test_ids,
 )
-from scripts.run_test_suite import (
+from scripts.test_substrate import (
     TEST_RAM_ROOT_EXHAUSTED,
     RamRootExhaustedError,
-    _check_suite_headroom,
+    check_suite_headroom,
     headroom_floor_bytes,
     private_runtime_dir,
 )
@@ -931,7 +931,7 @@ def run_fuzz_targets(
     a cycle, and this check still fires that cycle; "right before any new
     target would be admitted" overstated the guarantee. The production
     caller (``main`` below) binds it to the same
-    ``_check_suite_headroom``/``headroom_floor_bytes`` precondition the
+    ``check_suite_headroom``/``headroom_floor_bytes`` precondition the
     coordinator already ran once, before any work, so a run admitted at
     floor+ε does not silently ENOSPC deep into the burst — it aborts here,
     under the same named identity, instead of surfacing as an opaque
@@ -1280,14 +1280,14 @@ def main(
 
     ``check_headroom`` mirrors ``run_world_model_burst.py::main``'s own DI
     seam (issue #1156 item 3): ``None`` (the production default) builds the
-    real ``_check_suite_headroom``/``headroom_floor_bytes`` closure below;
+    real ``check_suite_headroom``/``headroom_floor_bytes`` closure below;
     tests inject a controlled fake so BOTH the preflight call and the
     SAME callable threaded into ``run_fuzz_targets`` for the mid-run
     admission-loop check can be driven deterministically end-to-end,
     including through this function's own post-run reporting.
 
     Design note (issue #1156, task scoping explicitly left this call): this
-    coordinator does NOT take ``scripts/run_test_suite.py::
+    coordinator does NOT take ``scripts/test_substrate.py::
     acquire_suite_admission``'s exclusive lock. It is long-running and
     variable-duration (minutes interactively, up to the full overnight
     ``CRATEDIGGER_FUZZ_MAX_EXAMPLES`` budget in the daily gate); folding it
@@ -1324,7 +1324,7 @@ def main(
             # the fuzz burst does not extend the suite's per-worker
             # multiplier to itself.
             headroom_minimum = headroom_floor_bytes(1)
-            check_headroom = lambda: _check_suite_headroom(
+            check_headroom = lambda: check_suite_headroom(
                 runtime, minimum_bytes=headroom_minimum
             )
         check_headroom()

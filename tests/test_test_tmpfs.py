@@ -14,7 +14,7 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path
 
-from scripts.run_test_suite import (
+from scripts.test_substrate import (
     SCRATCH_TREE_OWNER_MARKER_NAME,
     SCRATCH_TREE_PREFIX,
     _scratch_tree_owner_dead,
@@ -66,7 +66,7 @@ def run_tmpfs_setup_and_hold(
     TMPDIR then lets the whole script exit immediately, firing the EXIT
     trap before a caller can observe anything about the still-live tree —
     useless for proving the ownership marker's PRODUCER (this file) agrees
-    with its READER (``scripts.run_test_suite._scratch_tree_owner_dead``).
+    with its READER (``scripts.test_substrate._scratch_tree_owner_dead``).
     This variant blocks on a `read` after allocation so a test can inspect
     the real ``.owner`` marker the real ``setup_cratedigger_test_tmpfs``
     wrote, and the real process it names, while genuinely alive — then
@@ -332,7 +332,7 @@ class TestTmpfsSetup(unittest.TestCase):
 class ScratchTreeOwnershipMarkerTestCase(unittest.TestCase):
     """Issue #1208 review D1: nothing bound the ``.owner`` PRODUCER (this
     file, ``scripts/test_tmpfs.sh``) to its READER
-    (``scripts.run_test_suite._scratch_tree_owner_dead``). Every existing
+    (``scripts.test_substrate._scratch_tree_owner_dead``). Every existing
     test of the reader hand-typed the marker content
     (``tests/test_suite_coordinator.py``'s ``_write_owner_marker``), so a
     one-character producer edit — the wrong ``/proc`` field, ``$$`` ->

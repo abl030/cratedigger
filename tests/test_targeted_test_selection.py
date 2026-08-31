@@ -22,7 +22,6 @@ from scripts.run_python_tests import (
     select_test_targets,
 )
 from scripts.run_targeted_tests import targeted_phases
-from scripts.run_test_suite import admission_lock_path
 from scripts.targeted_test_selection import (
     ALWAYS_AMBIENT_TESTS,
     EXACT_PATH_NEIGHBOURS,
@@ -33,6 +32,7 @@ from scripts.targeted_test_selection import (
     assert_selection_complete,
     expand_test_selection,
 )
+from scripts.test_substrate import admission_lock_path
 from tests._source_pins import pinned_source
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -522,7 +522,7 @@ class TestTargetedSuiteWiring(unittest.TestCase):
         self.assertTrue(shared.is_dir(), "private runtime tmpfs is required")
         isolated = Path(
             # Matches _REAPABLE_PREFIXES' "cratedigger-admission-test-" entry
-            # (scripts/run_test_suite.py) — a literal-prefix glob, so a
+            # (scripts/test_substrate.py) — a literal-prefix glob, so a
             # differently-worded prefix here would silently escape reaping
             # (issue #1111 review m12).
             tempfile.mkdtemp(dir=shared, prefix="cratedigger-admission-test-")

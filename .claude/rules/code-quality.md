@@ -437,7 +437,7 @@ complete phase log.
 **Admission control on the shared test RAM root** (issue #1111): the fixed-size
 tmpfs backing `TMPDIR` has no capacity of its own to arbitrate concurrent
 suites, so `scripts/run_test_suite.py::run_suite` takes an advisory
-`fcntl.flock` (`acquire_suite_admission`, lockfile
+`fcntl.flock` (`acquire_suite_admission`, in `scripts/test_substrate.py`; lockfile
 `<runtime>/.cratedigger-test-admission.lock`) before running any phase, held
 for the whole run — never per-phase. Scoped to `run_suite` itself, not to
 every `nix-shell` shellHook entry, which would also serialize interactive
@@ -546,7 +546,7 @@ age; a missing or malformed marker fails closed (treated as "unknown,
 never reap", not "abandoned") rather than falling back to age alone.
 Known residual (issue #1208 review D7): the reaper resolves its runtime
 root from `XDG_RUNTIME_DIR` only (`private_runtime_dir`), while
-`_check_suite_headroom` below and `scripts/test_tmpfs.sh`'s own scratch-
+`check_suite_headroom` below and `scripts/test_tmpfs.sh`'s own scratch-
 tree parent both honor a `CRATEDIGGER_TEST_RAM_ROOT` override — set that
 override and the reaper looks in a different directory than the scratch
 trees it exists to reap. Latent: nothing in this repository sets that
@@ -602,7 +602,7 @@ genuinely dangling receipt; the protection does not paper over that —
 `status`'s own stat check surfaces it, and the honest response is to
 re-run.
 
-`run_suite` then checks headroom (`_check_suite_headroom`, same
+`run_suite` then checks headroom (`check_suite_headroom`, same
 `CRATEDIGGER_TEST_RAM_MIN_BYTES` env var and 1 GiB default as
 `scripts/test_tmpfs.sh`'s own shell-entry guard, and honoring the same
 `CRATEDIGGER_TEST_RAM_ROOT` override when set) BEFORE creating a bundle.
@@ -612,8 +612,8 @@ reason, instead of a phase deep into the run tripping the same guard after
 earlier phases already passed. Mid-run,
 `scripts/run_python_tests.py::_collapse_disk_full_failures` folds every
 disk-full-classified target/test into ONE `test RAM root exhausted`
-`CheckFailureMarker` (`TEST_RAM_ROOT_EXHAUSTED`, shared with
-`scripts/run_test_suite.py`) instead of N separately-indexed disguises
+`CheckFailureMarker` (`TEST_RAM_ROOT_EXHAUSTED`, defined in
+`scripts/test_substrate.py`) instead of N separately-indexed disguises
 (`FileNotFoundError` on `raw-output.log`, a Hypothesis `FlakyFailure`, ...);
 classification measures free bytes at the moment a worker's own exception is
 caught (`_classify_target_infrastructure_failure`, same configured
@@ -632,7 +632,7 @@ A target whose failures are ENTIRELY disk-full returns
 `scripts/fuzz_burst.sh` (`scripts/run_fuzz_tests.py`) and
 `scripts/run_world_model_burst.py` each now run their own analogous
 headroom precondition (issue #1156 item 3) — `headroom_floor_bytes`/
-`_check_suite_headroom`, called once before any work and again once per
+`check_suite_headroom`, called once before any work and again once per
 admission CYCLE inside their own admission loop (a cycle can admit up to
 `worker_count` targets at once, so this is not a per-target check).
 Honestly stated (independent review F6/F7): in the daily gate specifically

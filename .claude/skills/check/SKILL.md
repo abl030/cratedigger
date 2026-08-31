@@ -40,7 +40,7 @@ it still exists — contains the typed summaries and complete per-phase logs.
 A second concurrently-launched canonical suite on this shared host waits on
 `run_suite`'s own admission lock rather than colliding with this one; once
 admitted it first retires eligible receipts
-(`scripts/run_test_suite.py::reap_stale_final_gate_receipts`, issue #1208
+(`scripts/test_substrate.py::reap_stale_final_gate_receipts`, issue #1208
 item 4 — a receipt whose lifecycle is provably over, `terminal` present or
 its recorded helper/gate process identities conclusively dead, AND older
 than a fixed 7-day floor), then best-effort reaps check bundles idle past

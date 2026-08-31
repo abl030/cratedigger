@@ -112,6 +112,22 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "scripts/test.sh": (
         "tests.test_targeted_test_selection",
     ),
+    "scripts/test_substrate.py": (
+        # Issue #1278 item 6: the shared test-runtime substrate (admission,
+        # headroom, /proc liveness, scratch/bundle/receipt reaping, the
+        # on-disk name spellings) extracted out of scripts/run_test_suite.py.
+        # _direct_test_candidates already derives tests.test_test_substrate
+        # from this basename, but that module only pins the stdlib-only
+        # import boundary — the behaviour these functions actually own is
+        # driven by the two modules named here, which no basename probe can
+        # reach: tests.test_suite_coordinator (admission lock, holder
+        # identity, headroom floors, both reapers) and tests.test_test_tmpfs
+        # (the real ".owner" marker written by scripts/test_tmpfs.sh, read
+        # back through _scratch_tree_owner_dead).
+        "tests.test_suite_coordinator",
+        "tests.test_test_substrate",
+        "tests.test_test_tmpfs",
+    ),
     "scripts/test_tmpfs.sh": (
         # Issue #1208 review D1: this file had NO entry at all — a solo
         # producer-side edit here (the /proc field index, $$ vs $PPID, the
@@ -121,7 +137,7 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # tests.test_test_tmpfs drives this file's real
         # setup_cratedigger_test_tmpfs end to end, including the real
         # ".owner" marker round-tripped through
-        # scripts.run_test_suite._scratch_tree_owner_dead.
+        # scripts.test_substrate._scratch_tree_owner_dead.
         "tests.test_test_tmpfs",
     ),
     # Shared tests/ infrastructure (issue #1081): none of these are

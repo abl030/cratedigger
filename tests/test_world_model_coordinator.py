@@ -20,7 +20,6 @@ from hypothesis.stateful import RuleBasedStateMachine, rule
 
 import tests._hypothesis_profiles  # noqa: F401 - required profile side effect
 from scripts.run_python_tests import TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
-from scripts.run_test_suite import TEST_RAM_ROOT_EXHAUSTED, RamRootExhaustedError
 from scripts.run_world_model_burst import (
     ChildReceipt,
     ReplayReceipt,
@@ -40,6 +39,7 @@ from scripts.run_world_model_burst import (
     replace_canonical_database,
     target_seed,
 )
+from scripts.test_substrate import TEST_RAM_ROOT_EXHAUSTED, RamRootExhaustedError
 
 GENERATED = tuple(
     f"tests.world_model.state_machine.Generated{i}.test_world" for i in range(5)
@@ -589,7 +589,7 @@ class TestWorldModelReplayDatabase(unittest.TestCase):
 
             # Independent review B1 (BLOCKING): check_headroom=None (the
             # production default) drives the REAL private_runtime_dir()/
-            # _check_suite_headroom(), coupling this test -- which is NOT
+            # check_suite_headroom(), coupling this test -- which is NOT
             # about headroom -- to whatever the shared tmpfs root happens
             # to have free at test time. Pin it to an always-satisfied
             # no-op; the tests that ARE about headroom inject their own.
