@@ -141,6 +141,18 @@ class TestTargetedTestSelection(unittest.TestCase):
 
         self.assertIn("tests.test_final_gate_receipt", selected)
 
+    def test_enqueue_change_selects_its_behaviour_contracts(self) -> None:
+        """Issue #1306: keep enqueue's narrow direct neighbour set exact."""
+        self.assertEqual(
+            _changed_path_neighbours("lib/enqueue.py", REPO_ROOT),
+            (
+                "tests.test_enqueue_fanout",
+                "tests.test_enqueue_admission_generated",
+                "tests.test_multidisc_manifest_generated",
+                "tests.test_cross_request_enqueue_guard_generated",
+            ),
+        )
+
     def test_unmapped_shell_wrapper_fails_closed_with_its_name(self) -> None:
         """Issue #1278 item 9: a `scripts/**/*.sh` wrapper that resolves no
         neighbour must fail closed exactly as its `.py` siblings do. Until

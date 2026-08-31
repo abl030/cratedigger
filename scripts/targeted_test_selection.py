@@ -106,6 +106,15 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # registry module, whose name the probes cannot derive.
         "tests.test_convergence_runner_generated",
     ),
+    "lib/enqueue.py": (
+        # Was an admitted zero-neighbour gap even though its outer-adapter
+        # pins and generated behaviour contracts live under names the
+        # basename probe cannot derive (issue #1306).
+        "tests.test_enqueue_fanout",
+        "tests.test_enqueue_admission_generated",
+        "tests.test_multidisc_manifest_generated",
+        "tests.test_cross_request_enqueue_guard_generated",
+    ),
     "lib/slskd_transfer_ledger.py": (
         # Was an admitted zero-neighbour gap (issue #1199): no
         # tests.test_slskd_transfer_ledger. The registered cycle step's
@@ -1195,11 +1204,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "measured 2026-08-19: zero neighbours -- "
         "tests.test_download_validation does not exist and no EXACT_PATH_"
         "NEIGHBOURS/prefix rule covers it (issue #1199)"
-    ),
-    "lib/enqueue.py": (
-        "measured 2026-08-19: zero neighbours -- tests.test_enqueue does "
-        "not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
-        "(issue #1199)"
     ),
     "lib/ephemeral_postgres.py": (
         "measured 2026-08-19: zero neighbours -- "
