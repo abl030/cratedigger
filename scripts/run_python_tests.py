@@ -39,10 +39,12 @@ from lib.json_narrow import json_dict, json_list
 from scripts.run_test_suite import (
     FAILURE_MARKER_PREFIX,
     METRICS_MARKER_PREFIX,
-    TEST_RAM_ROOT_EXHAUSTED,
     CheckFailureMarker,
     CheckMetricsMarker,
-    _default_min_headroom_bytes,
+)
+from scripts.test_substrate import (
+    TEST_RAM_ROOT_EXHAUSTED,
+    default_min_headroom_bytes,
     private_runtime_dir,
     recommended_worker_count,
 )
@@ -1591,7 +1593,7 @@ def _classify_target_infrastructure_failure(
     genuinely low right now," not "any bug at all."
     """
     available = available_bytes()
-    floor = minimum_bytes if minimum_bytes is not None else _default_min_headroom_bytes()
+    floor = minimum_bytes if minimum_bytes is not None else default_min_headroom_bytes()
     disk_full = available is not None and available < floor
     memory_exhausted = False
     available_memory: int | None = None
