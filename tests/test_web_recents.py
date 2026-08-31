@@ -7,9 +7,10 @@ operator sees, not what one stage of the composition computed.
 ``web/classify.py::_classify_log_entry`` is the middle of that path and is
 deliberately never called here: the persisted-evidence projections that
 run after it are part of the rendered row (issue #1278). The remaining
-tests unit-test the pieces around that path — ``LogEntry.from_row``,
-``ClassifiedEntry`` construction, and the quality-label and basis-verdict
-helpers.
+tests unit-test ``LogEntry.from_row``, ``ClassifiedEntry`` construction,
+the quality-label helpers, and — directly, the one deliberate reach into
+the classifier's own internals — its basis-verdict stage
+(``_verdict_from_basis``).
 """
 import dataclasses
 import os
@@ -1313,14 +1314,20 @@ class TestClassifyVerdict(unittest.TestCase):
     def test_upgrade_verdict_never_re_derives_the_proof(self):
         """Live dl 39094 req 2147: converted from FLAC, graded genuine, and
         the decider minted NO proof. The identical world without a
-        classifier must not claim one."""
+        classifier must not claim one. The attempt WAS measured, so this
+        is a joined row (``candidate_evidence_id`` non-NULL) whose
+        classifier column is NULL — the no-proof branch THROUGH the
+        projection, not the unjoined short-circuit."""
         result = _classified(
             outcome="success", was_converted=True, original_filetype="flac",
             actual_filetype="mp3", actual_min_bitrate=243,
             existing_min_bitrate=192, spectral_grade="genuine",
+            candidate_evidence_id=4711,
             _evidence_verified_lossless_classifier=None)
         self.assertNotIn("verified lossless", _text(result, "verdict").lower())
         self.assertNotIn("verified lossless", _text(result, "summary").lower())
+        self.assertIsNone(result["verified_lossless_classifier"])
+        self.assertIsNone(result["verified_lossless_generation"])
         # The conversion is still reported — only the proof claim is gone.
         self.assertIn("from FLAC", _text(result, "verdict"))
 
@@ -2474,8 +2481,8 @@ class TestProofGateNeedsAJoinedCandidate(unittest.TestCase):
     The same evidence aliases that fire the in-window-cliff leg when
     ``candidate_evidence_id`` names a real join must project the EMPTY
     verdict when it does not — the card must never report a finding (or a
-    clearance) nothing tested for. The firing world is borrowed from the
-    deterministic tier table (``tests/test_verdict_tiers.py``): a
+    clearance) nothing tested for. The firing world is borrowed from
+    ``tests/test_verdict_tiers.py::TestProofVerdictFromFacts``: a
     FLAC-banded ``likely_transcode`` grade is Tier 1, and the joined twin
     below proves this world really would fire, so the unjoined half pins
     the ``candidate_evidence_id`` short-circuit rather than a world that

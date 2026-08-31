@@ -824,7 +824,8 @@ class TestVerdictTierProperties(unittest.TestCase):
         alias values it carries and render a finding nothing tested for —
         the same lie, in the accusing direction, that
         ``AlbumProofVerdict.has_finding`` separates on the clearance side.
-        Every other world in this module joins real evidence
+        Every other world in this module that reaches
+        ``proof_gate_projection`` joins real evidence
         (``candidate_evidence_id`` non-NULL), which is why this world has
         to be stated separately.
         """

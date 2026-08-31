@@ -116,9 +116,11 @@ def assert_composite_triage_projection(
 
     ``result`` is a row rendered by ``build_recents_download_log_rows`` —
     the Recents surface only. The detail view's history panel shares the
-    classifier stage but stops before ``_project_current_library_have``,
-    so a world carrying ``_current_evidence_*`` aliases renders different
-    ``existing_*`` values there; this checker pins the Recents render.
+    classifier stage but stops before ``_project_current_library_have``
+    and ``_project_linked_import_evidence``, so a world carrying
+    ``_current_evidence_*`` aliases CAN render different ``existing_*``
+    values there (the overlay is gated on outcome and pre-attempt
+    provenance); this checker pins the Recents render.
     """
     expected_object = (
         "download deleted" if action.startswith("deleted_") else "download kept"
