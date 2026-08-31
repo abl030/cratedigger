@@ -37,9 +37,20 @@ from tests.web._harness import (
 from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
 
 
+@contextmanager
 def _observed_paths(observe):
-    """Patch the route's ONE filesystem observation seam."""
-    return patch("web.routes.imports.observe_failed_path", side_effect=observe)
+    """Patch the ONE filesystem observation seam, in both its homes.
+
+    The queue projection reads ``web.wrong_match_queue_view``'s binding
+    (#1278 extraction); converge keeps the route module's own. Patch both
+    so every /api/wrong-matches surface in this file sees the same
+    observation.
+    """
+    with patch("web.routes.imports.observe_failed_path",
+               side_effect=observe), \
+         patch("web.wrong_match_queue_view.observe_failed_path",
+               side_effect=observe):
+        yield
 
 
 def _present_paths():
@@ -100,20 +111,30 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             "web.routes.imports.delete_wrong_match_group",
             side_effect=lambda _db, rid: self._manual_group_cleanup_result(rid),
         )
-        # The route's own filesystem observation is the leaf seam here;
-        # every path in these fixtures is nominal and present.
-        resolve_patch = patch(
-            "web.routes.imports.observe_failed_path",
-            side_effect=lambda p: DirectoryObservation(
+        # The filesystem observation is the leaf seam here; every path in
+        # these fixtures is nominal and present. Patched in both homes —
+        # the queue projection's module and the route's converge binding.
+        def _default_observe(p):
+            return DirectoryObservation(
                 presence="present", path=p,
             ) if p else DirectoryObservation(
                 presence="absent", code="missing",
-            ),
+            )
+        resolve_patch = patch(
+            "web.routes.imports.observe_failed_path",
+            side_effect=_default_observe,
+        )
+        view_resolve_patch = patch(
+            "web.wrong_match_queue_view.observe_failed_path",
+            side_effect=_default_observe,
         )
         self.mock_cleanup = cleanup_patch.start()
         self.mock_manual_cleanup = manual_cleanup_patch.start()
         self.mock_manual_group_cleanup = manual_group_cleanup_patch.start()
-        self.mock_observe_failed_path = resolve_patch.start()
+        # Both mocks are deliberately unbound: an assertion helper here
+        # would silently see only one of the two flows' observations.
+        resolve_patch.start()
+        view_resolve_patch.start()
         # Two tests need the REAL primitive against a REAL unreadable
         # directory — the #1063 defect WAS a fake answer from this seam.
         self._observe_patch_running = True
@@ -121,6 +142,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         def _stop_observe_patch() -> None:
             if self._observe_patch_running:
                 resolve_patch.stop()
+                view_resolve_patch.stop()
                 self._observe_patch_running = False
 
         self.use_real_path_observation = _stop_observe_patch
@@ -147,6 +169,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # Summary of the last successful import for the request — tells the
         # user what's actually on disk, not the most recent attempt.
         "latest_import",
+        # Active import jobs for the request — the JS renders queue chips
+        # from these (#1278 wx4 review: field content was unpinned).
+        "import_jobs",
     }
     ENTRY_REQUIRED_FIELDS: ClassVar = {
         "download_log_id", "soulseek_username", "failed_path", "files_exist",
@@ -170,6 +195,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # view of the broken world. The JS turns these into a badge, an
         # amber card, disabled actions, and an explanation.
         "path_unavailable", "path_unavailable_reason",
+        # This candidate's own active import job, or null (#1278 wx4
+        # review: field content was unpinned).
+        "import_job",
     }
     DELETE_RESULT_REQUIRED_FIELDS: ClassVar = {
         "status", "download_log_id", "outcome", "success", "request_id",
@@ -1887,7 +1915,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertIn("distance_breakdown", candidate)
         self.assertIn("mapping", candidate)
 
-    @patch("web.routes.imports.observe_failed_path",
+    @patch("web.wrong_match_queue_view.observe_failed_path",
            return_value=DirectoryObservation(
                presence="present",
                path="/mnt/virtio/music/slskd/failed_imports/Test"))

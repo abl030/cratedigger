@@ -296,6 +296,10 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_protected_path_truth_generated",
         "tests.test_render_differential",
     ),
+    "web/wrong_match_queue_view.py": (
+        "tests.web.test_wrong_match_queue_view",
+        "tests.web.test_routes_imports",
+    ),
 }
 
 
