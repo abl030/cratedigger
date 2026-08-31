@@ -68,7 +68,7 @@ if TYPE_CHECKING:
         WantedReconciliationCandidate,
     )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("cratedigger")
 
 
 # Default progress-log batch size. Production has ~600 wanted rows; one

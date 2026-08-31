@@ -5759,7 +5759,7 @@ class TestStartupReconciliationSlice(unittest.TestCase):
         )
 
         with self.assertLogs(
-            "lib.startup_reconciliation", level="INFO",
+            "cratedigger", level="INFO",
         ) as cm:
             summary = reconcile_search_plans(
                 db, self._service(db, generator_id="g-current"),
@@ -5804,7 +5804,7 @@ class TestStartupReconciliationSlice(unittest.TestCase):
         )
 
         with self.assertNoLogs(
-            "lib.startup_reconciliation", level="INFO",
+            "cratedigger", level="INFO",
         ):
             reconcile_search_plans(
                 db, self._service(db, generator_id="g-current"),
@@ -6006,7 +6006,7 @@ class TestStartupReconciliationSlice(unittest.TestCase):
 
         ctx = make_ctx_with_fake_db(db, cfg=self._cfg())
         with self.assertLogs(
-                "lib.startup_reconciliation", level="INFO") as captured:
+                "cratedigger", level="INFO") as captured:
             summary = reconcile_search_plans_cycle(ctx)
 
         self.assertEqual(summary.wanted_total, 1)
@@ -6031,7 +6031,7 @@ class TestStartupReconciliationSlice(unittest.TestCase):
             retryable_failed=0, skipped=0, unclassified_no_plan=1,
             duration_s=0.1, dry_run=False)
         with self.assertLogs(
-                "lib.startup_reconciliation", level="ERROR") as captured:
+                "cratedigger", level="ERROR") as captured:
             log_reconciliation_summary(unclassified)
         self.assertTrue(any(
             "stop-the-deploy signal" in line for line in captured.output))
