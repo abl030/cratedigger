@@ -17,6 +17,7 @@ import {
   pendingEarlyCompareHandoffsForTest,
   reloadBrowseArtist,
   resolverTargetIdentityKind,
+  searchArtists,
   setBrowseSource,
 } from '../web/js/browse.js';
 import { state } from '../web/js/state.js';
@@ -635,6 +636,86 @@ for (const newestSource of ['mb', 'discogs']) {
   assert(requests.some(url => url.includes(expectedEndpoint)));
   assert(!requests.some(url => url.includes(staleId)));
   assert.equal(artistBody.innerHTML, newestHtml);
+}
+
+// Search result rows wire their onclick handlers with the exact argument
+// order (#1110/#1241 argument-inversion class): window.openBrowseArtist on
+// artist rows and both arms of the release-row ternary — openBrowseArtist
+// for ordinary releases, loadReleaseGroup for VA/masterless ones.
+resetWorld();
+{
+  state.browseSearchType = 'artist';
+  globalThis.fetch = async url => {
+    assert(url.includes('/api/search?q='), 'artist search hits the MB search endpoint');
+    return response(200, {
+      artists: [{ id: 'a1', name: 'ArtName', disambiguation: '' }],
+    });
+  };
+  await searchArtists('artname');
+  assert.match(elements.results.innerHTML,
+    /onclick="window\.openBrowseArtist\(&quot;a1&quot;, &quot;ArtName&quot;\)"/,
+    'artist row onclick carries (artist id, artist name) in order');
+}
+
+resetWorld();
+{
+  state.browseSearchType = 'release';
+  globalThis.fetch = async () => response(200, {
+    release_groups: [{
+      id: 'rg1',
+      artist_id: 'a2',
+      artist_name: 'RelArtist',
+      title: 'RelTitle',
+      primary_type: 'Album',
+    }],
+  });
+  await searchArtists('reltitle');
+  assert.match(elements.results.innerHTML,
+    /onclick="window\.openBrowseArtist\(&quot;a2&quot;, &quot;RelArtist&quot;\)"/,
+    'non-VA release row onclick routes to the artist page with (id, name) in order');
+  state.browseSearchType = 'artist';
+}
+
+resetWorld();
+{
+  state.browseSearchType = 'release';
+  state.browseSource = 'discogs';
+  globalThis.fetch = async () => response(200, {
+    release_groups: [{
+      id: 'm1',
+      discogs_release_id: 'dr9',
+      artist_id: 'a3',
+      artist_name: 'NoMaster',
+      title: 'Masterless',
+      is_master: false,
+    }],
+  });
+  await searchArtists('masterless');
+  assert.match(elements.results.innerHTML,
+    /onclick="window\.loadReleaseGroup\(&quot;dr9&quot;, this, \{source:'discogs',identityKind:'release',masterless:true\}\)"/,
+    'masterless Discogs release row onclick carries (discogs release id, this, load opts) in order');
+  state.browseSearchType = 'artist';
+  state.browseSource = 'mb';
+}
+
+resetWorld();
+{
+  // The VA disjunct of the same ternary: a Various Artists release group
+  // must route to loadReleaseGroup too, never to a dead-end artist page.
+  state.browseSearchType = 'release';
+  globalThis.fetch = async () => response(200, {
+    release_groups: [{
+      id: 'rgva',
+      artist_id: '89ad4ac3-39f7-470e-963a-56509c546377',
+      artist_name: 'Various Artists',
+      title: 'VA Comp',
+    }],
+  });
+  await searchArtists('va comp');
+  assert.match(elements.results.innerHTML,
+    /onclick="window\.loadReleaseGroup\(&quot;rgva&quot;, this, \{source:'mb',identityKind:'work'\}\)"/,
+    'VA release row onclick routes to loadReleaseGroup with (release group id, this, load opts)');
+  state.browseSearchType = 'artist';
 }
 
 console.log('JS browse fast-pair failure tests passed');

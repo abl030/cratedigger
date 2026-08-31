@@ -130,6 +130,20 @@ export function setPipelineView(view) {
   loadPipelineDashboard();
 }
 
+/**
+ * Render the dashboard cards from cached state into #pipeline-content.
+ * The composer takes payload + target element as parameters (so its card
+ * wiring is Node-testable); this is the one production call site that
+ * supplies both.
+ */
+function renderDashboard() {
+  renderDashboardCards(
+    renderPipelineNav(),
+    state.pipelineDashboardData,
+    document.getElementById('pipeline-content'),
+  );
+}
+
 export function toggleCoverageMatchGraph(scope = 'hourly') {
   if (scope === 'daily') {
     state.pipelineDailyMatchGraphOpen = !state.pipelineDailyMatchGraphOpen;
@@ -137,7 +151,7 @@ export function toggleCoverageMatchGraph(scope = 'hourly') {
     state.pipelineHourlyMatchGraphOpen = !state.pipelineHourlyMatchGraphOpen;
     state.pipelineMatchGraphOpen = state.pipelineHourlyMatchGraphOpen;
   }
-  renderDashboardCards(renderPipelineNav());
+  renderDashboard();
 }
 
 /**
@@ -151,7 +165,7 @@ export async function loadPipelineDashboard() {
     const r = await fetch(`${API}/api/pipeline/dashboard`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     state.pipelineDashboardData = await r.json();
-    renderDashboardCards(renderPipelineNav());
+    renderDashboard();
   } catch (e) {
     el.innerHTML = `${renderPipelineNav()}<div class="loading">Failed to load dashboard</div>`;
   }
@@ -405,7 +419,7 @@ export async function syncRetagDivergenceAlbum(albumId, btn) {
 export function renderPipeline() {
   const el = document.getElementById('pipeline-content');
   if (state.pipelineView === 'dashboard') {
-    renderDashboardCards(renderPipelineNav());
+    renderDashboard();
     return;
   }
   if (state.pipelineView === 'long-tail') {
