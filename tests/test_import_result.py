@@ -620,7 +620,9 @@ class TestDisambiguationFailureWireContract(unittest.TestCase):
 
     Relocated from ``tests/test_beets_album_op.py`` when ``DisambiguationFailure``
     moved out of the deleted ``lib/beets_album_op.py`` (#1278). Same subject,
-    same assertions; ``lib.quality`` is now the import path production uses.
+    same assertions; the type is now defined in
+    ``lib/quality/import_result_types.py`` and imported here through the
+    ``lib.quality`` re-export, the way the rest of the repo reaches it.
     """
 
     def test_op_failure_fields_and_legacy_selector_default(self):
