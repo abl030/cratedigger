@@ -207,6 +207,19 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_search_exec",
     ),
     # The harness/ prefix rule resolves tests.test_harness_beets2_contract
+    # regardless (and beets_compat.py's basename probe its own era pins),
+    # masking the loss of the duplicates-seam composition coverage.
+    "harness/beets_compat.py": ("tests.test_harness_duplicate_lookup",),
+    # The harness/ prefix rule resolves tests.test_harness_beets2_contract
+    # regardless, masking the loss of the moved Discogs family.
+    "harness/discogs_patches.py": (
+        "tests.test_discogs_subtracks",
+        "tests.test_discogs_subtracks_generated",
+        "tests.test_discogs_subtracks_e2e",
+        "tests.test_discogs_cover_art_fallback",
+        "tests.test_discogs_cover_art_fallback_generated",
+    ),
+    # The harness/ prefix rule resolves tests.test_harness_beets2_contract
     # regardless, masking the loss of the second-pass argv coverage.
     "harness/import_one.py": ("tests.test_disambiguation",),
     # Basename probes resolve tests.test_beets_child(_generated).

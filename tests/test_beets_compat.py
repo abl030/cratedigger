@@ -253,6 +253,153 @@ class TestBeetsCompatTaskDescription(TestCase):
             beets_compat.task_description(_ExplodingSource())
 
 
+def _library_module_with_album(album_class: type) -> ModuleType:
+    """A ``beets.library`` stand-in for the Album duplicates-query probes.
+
+    ``Library`` keeps a callable ``get_replacements`` so the library-era
+    check stays deterministically modern; only the ``Album`` shape varies.
+    """
+    return _module(
+        "beets.library",
+        Album=album_class,
+        Library=type("Library", (), {"get_replacements": lambda self: None}),
+    )
+
+
+class TestBeetsCompatDuplicatesQueryEra(TestCase):
+    """Fail-closed pins for the ``Album`` duplicate-lookup builder era
+    (#1278 wx6 — the era decision that lived inline in
+    ``beets_harness.py``): ``Album.duplicates_query`` replaced the
+    inherited ``all_fields_query`` classmethod in beets 2.3.0, so exactly
+    one builder is present on every supported release and the probe uses
+    the same exactly-one ambiguity check as the sibling eras."""
+
+    def test_modern_era_when_album_has_duplicates_query(self) -> None:
+        album = type("Album", (), {"duplicates_query": lambda self, keys: None})
+        with patch.object(beets_compat, "library", _library_module_with_album(album)):
+            capabilities = beets_compat._load_capabilities()
+        self.assertEqual(capabilities.duplicates_query_era, "modern")
+
+    def test_both_builders_present_fails_loudly(self) -> None:
+        """No supported Beets carries both builders (2.3.0 swapped one for
+        the other) — both present is an unexpected upstream shape."""
+        album = type("Album", (), {
+            "duplicates_query": lambda self, keys: None,
+            "all_fields_query": classmethod(lambda cls, by: None),
+        })
+        with (
+            patch.object(beets_compat, "library", _library_module_with_album(album)),
+            self.assertRaisesRegex(
+                beets_compat.BeetsCapabilityError,
+                "exactly one of duplicates_query or all_fields_query"),
+        ):
+            beets_compat._load_capabilities()
+
+    def test_legacy_era_when_only_all_fields_query_is_present(self) -> None:
+        album = type("Album", (), {
+            "all_fields_query": classmethod(lambda cls, by: None),
+        })
+        with patch.object(beets_compat, "library", _library_module_with_album(album)):
+            capabilities = beets_compat._load_capabilities()
+        self.assertEqual(capabilities.duplicates_query_era, "legacy")
+
+    def test_neither_builder_present_fails_loudly(self) -> None:
+        album = type("Album", (), {})
+        with (
+            patch.object(beets_compat, "library", _library_module_with_album(album)),
+            self.assertRaisesRegex(
+                beets_compat.BeetsCapabilityError,
+                "exactly one of duplicates_query or all_fields_query"),
+        ):
+            beets_compat._load_capabilities()
+
+
+class TestBeetsCompatAlbumDuplicatesQuery(TestCase):
+    """``album_duplicates_query`` builds the duplicate-detection query with
+    the builder the active era actually has, replacing ``beets_harness``'s
+    own inline ``hasattr(library.Album, "duplicates_query")`` probe
+    (#1278 wx6)."""
+
+    def test_modern_era_calls_the_instance_builder_with_keys(self) -> None:
+        class _Album:
+            def duplicates_query(self, keys: list[str]) -> object:
+                return ("modern-query", tuple(keys))
+
+        modern = dataclasses.replace(
+            beets_compat.CAPABILITIES, duplicates_query_era="modern")
+        with patch.object(beets_compat, "CAPABILITIES", modern):
+            query = beets_compat.album_duplicates_query(
+                _Album(), ["mb_albumid", "discogs_albumid"])
+        self.assertEqual(
+            query, ("modern-query", ("mb_albumid", "discogs_albumid")))
+
+    def test_modern_era_without_callable_builder_fails_loudly(self) -> None:
+        modern = dataclasses.replace(
+            beets_compat.CAPABILITIES, duplicates_query_era="modern")
+        with (
+            patch.object(beets_compat, "CAPABILITIES", modern),
+            self.assertRaisesRegex(
+                beets_compat.BeetsCapabilityError, "duplicates_query"),
+        ):
+            beets_compat.album_duplicates_query(object(), ["mb_albumid"])
+
+    def test_legacy_era_builds_the_field_mapping_in_key_order(self) -> None:
+        class _Album:
+            def __init__(self) -> None:
+                self.fields: dict[str, object] = {
+                    "mb_albumid": "mb-123", "discogs_albumid": 0}
+
+            def __getitem__(self, key: str) -> object:
+                return self.fields[key]
+
+            @classmethod
+            def all_fields_query(cls, by: dict[str, object]) -> object:
+                return ("legacy-query", by)
+
+        legacy = dataclasses.replace(
+            beets_compat.CAPABILITIES, duplicates_query_era="legacy")
+        with patch.object(beets_compat, "CAPABILITIES", legacy):
+            query = beets_compat.album_duplicates_query(
+                _Album(), ["mb_albumid", "discogs_albumid"])
+        self.assertEqual(
+            query,
+            ("legacy-query", {"mb_albumid": "mb-123", "discogs_albumid": 0}))
+
+    def test_legacy_era_without_callable_builder_fails_loudly(self) -> None:
+        class _Album:
+            all_fields_query = "not callable"
+
+            def __getitem__(self, key: str) -> object:
+                return None
+
+        legacy = dataclasses.replace(
+            beets_compat.CAPABILITIES, duplicates_query_era="legacy")
+        with (
+            patch.object(beets_compat, "CAPABILITIES", legacy),
+            self.assertRaisesRegex(
+                beets_compat.BeetsCapabilityError, "all_fields_query"),
+        ):
+            beets_compat.album_duplicates_query(_Album(), ["mb_albumid"])
+
+    def test_legacy_era_without_field_access_fails_loudly(self) -> None:
+        """Fail-closed legislation: ``library.Album`` is always
+        field-readable, but a divergent instance must raise the capability
+        error, not a bare ``TypeError`` from the mapping comprehension."""
+        class _Album:
+            @classmethod
+            def all_fields_query(cls, by: dict[str, object]) -> object:
+                return ("legacy-query", by)
+
+        legacy = dataclasses.replace(
+            beets_compat.CAPABILITIES, duplicates_query_era="legacy")
+        with (
+            patch.object(beets_compat, "CAPABILITIES", legacy),
+            self.assertRaisesRegex(
+                beets_compat.BeetsCapabilityError, "not field-readable"),
+        ):
+            beets_compat.album_duplicates_query(_Album(), ["mb_albumid"])
+
+
 if __name__ == "__main__":
     import unittest
 

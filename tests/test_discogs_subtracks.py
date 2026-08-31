@@ -8,7 +8,7 @@ from beets import config
 from beetsplug.discogs import ArtistState, DiscogsPlugin
 from beetsplug.discogs.types import Artist, AudioTrack, IndexTrack, Track
 
-from harness.beets_compat import (
+from harness.discogs_patches import (
     BeetsCapabilityError,
     _discogs_subtrack_methods,
     configure_discogs_subtracks,
@@ -348,7 +348,7 @@ class TestDiscogsHeadingRowExclusion(unittest.TestCase):
         # allows a heading to carry a duration, and the type_ marker
         # outranks the shape. Only the direct filter call can see this
         # (upstream drops typed headings through get_tracks regardless).
-        from harness.beets_compat import filter_discogs_heading_rows
+        from harness.discogs_patches import filter_discogs_heading_rows
 
         rows: list[dict[str, object]] = [
             {"type_": "heading", "position": "", "title": "Timed Heading",
@@ -386,7 +386,7 @@ class TestDiscogsHeadingRowExclusion(unittest.TestCase):
         # Pathological upstream data: every row a heading. The filter
         # must never manufacture an empty candidate from non-empty
         # input — the unfiltered list passes through to Beets.
-        from harness.beets_compat import filter_discogs_heading_rows
+        from harness.discogs_patches import filter_discogs_heading_rows
 
         tracklist: list[dict[str, object]] = [
             dict(self._heading("Section One")),

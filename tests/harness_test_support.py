@@ -11,7 +11,11 @@ from contextlib import contextmanager
 from types import ModuleType
 from unittest.mock import MagicMock
 
-_HARNESS_MODULES = ("harness.beets_harness", "harness.beets_compat")
+_HARNESS_MODULES = (
+    "harness.beets_harness",
+    "harness.discogs_patches",
+    "harness.beets_compat",
+)
 
 
 def legacy_import_task_stub() -> type:
@@ -20,6 +24,15 @@ def legacy_import_task_stub() -> type:
     ``beets.importer.tasks.ImportTask`` needs one attribute present or
     ``beets_compat.py``'s era ambiguity check (issue #1088) fails closed."""
     return type("ImportTask", (object,), {"cur_artist": None, "cur_album": None})
+
+
+def modern_album_stub() -> type:
+    """A bare ``library.Album`` stand-in pinning the modern duplicates-query
+    era. Every harness mock-module fixture that swaps in a synthetic
+    ``beets.library`` needs exactly one of the two duplicate-lookup builders
+    present or ``beets_compat.py``'s era ambiguity check (#1278 wx6) fails
+    closed — a bare ``MagicMock`` manufactures BOTH via auto-attributes."""
+    return type("Album", (object,), {"duplicates_query": lambda self, keys: None})
 
 
 def beets_module_mocks() -> dict[str, MagicMock]:
@@ -32,7 +45,8 @@ def beets_module_mocks() -> dict[str, MagicMock]:
     the ``beets.ui`` legacy getters are set to None so exactly one library
     era (modern) is detected, a real ``ImportSession`` class exposes only
     ``resolve_duplicate`` (legacy duplicate era, and subclassing works),
-    and ``legacy_import_task_stub`` pins the legacy task-metadata era.
+    ``legacy_import_task_stub`` pins the legacy task-metadata era, and
+    ``modern_album_stub`` pins the modern duplicates-query era.
     Callers may add further attributes to the returned mocks before
     entering ``isolated_beets_harness``.
     """
@@ -59,6 +73,17 @@ def beets_module_mocks() -> dict[str, MagicMock]:
         "ImportSession", (object,), {"resolve_duplicate": lambda *_args: None},
     )
     mocks["beets.importer.tasks"].ImportTask = legacy_import_task_stub()
+    mocks["beets.library"].Album = modern_album_stub()
+    # ``from beets import config, library, plugins`` (beets_harness.py)
+    # resolves the PARENT module's attributes, which on a bare MagicMock
+    # parent are divergent auto-children, not the sys.modules entries the
+    # stubs above were pinned on — bind all three names the statement
+    # imports, as the real package machinery would. Dotted-module imports
+    # (``importlib``, ``from beets.autotag import ...``) already resolve
+    # the sys.modules entries and need no binding.
+    mocks["beets"].config = mocks["beets.config"]
+    mocks["beets"].library = mocks["beets.library"]
+    mocks["beets"].plugins = mocks["beets.plugins"]
     return mocks
 
 

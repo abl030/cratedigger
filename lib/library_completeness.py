@@ -200,7 +200,7 @@ def _discogs_get_track_index(position: str) -> tuple[str | None, str | None, str
     Calls ``beetsplug.discogs.DiscogsPlugin.get_track_index`` -- the exact
     static parser ``_subtrack_position`` itself delegates to -- via
     ``importlib``/``getattr`` rather than a static import. This is the
-    same seam ``harness/beets_compat.py`` already uses to reach into this
+    same seam ``harness/discogs_patches.py`` already uses to reach into this
     package: it avoids requiring third-party type stubs for
     ``beetsplug.discogs`` under production-strict Pyright, and fails
     closed (``SourceManifestError``) rather than silently trusting an

@@ -571,6 +571,22 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_dispatch_outcomes_generated",
         "tests.test_local_import_lane",
     ),
+    # harness/beets_compat.py's basename probe resolves its own era pins,
+    # but the duplicates-query seam's composition pin — the real harness
+    # driving album_duplicates_query — lives here (#1278 wx6).
+    "harness/beets_compat.py": (
+        "tests.test_harness_duplicate_lookup",
+    ),
+    # harness/discogs_patches.py has no basename-matched test module: its
+    # coverage is the Discogs subtrack/heading/cover-art families that
+    # moved with it out of beets_compat.py (#1278 wx6).
+    "harness/discogs_patches.py": (
+        "tests.test_discogs_subtracks",
+        "tests.test_discogs_subtracks_generated",
+        "tests.test_discogs_subtracks_e2e",
+        "tests.test_discogs_cover_art_fallback",
+        "tests.test_discogs_cover_art_fallback_generated",
+    ),
     # harness/import_one.py's basename probes resolve its stage tests, but
     # tests/test_disambiguation.py is what pins the SECOND harness pass's
     # argv (--preserve-discogs-flat-subtracks on the retry) — exactly the

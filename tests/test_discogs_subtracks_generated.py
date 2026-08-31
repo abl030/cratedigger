@@ -32,7 +32,7 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from harness.beets_compat import configure_discogs_subtracks
+from harness.discogs_patches import configure_discogs_subtracks
 from lib.discogs_positions import normalize_release_tracks
 
 

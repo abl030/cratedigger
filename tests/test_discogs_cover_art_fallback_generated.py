@@ -44,7 +44,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-from harness.beets_compat import (
+from harness.discogs_patches import (
     _DISCOGS_COVER_ART_TIMEOUT_SECONDS,
     DISCOGS_REAL_API_BASE,
     configure_discogs_cover_art_fallback,

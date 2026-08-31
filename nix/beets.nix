@@ -19,7 +19,7 @@
 #     against a live dump, issue #1200), so the plugin's cover_art_url field
 #     is never populated for a mirror-backed lookup, and fetchart falls
 #     through to a title-guessed source (e.g. itunes), which can put the
-#     wrong pressing's art on an album. harness/beets_compat.py's
+#     wrong pressing's art on an album. harness/discogs_patches.py's
 #     configure_discogs_cover_art_fallback compensates by wrapping
 #     DiscogsPlugin.select_cover_art itself (unconditionally, whether or not
 #     this file's mirror patch is applied): a miss from whatever client is
