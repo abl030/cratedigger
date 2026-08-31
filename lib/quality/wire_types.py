@@ -45,7 +45,12 @@ import msgspec
 
 
 class HarnessItem(msgspec.Struct):
-    """Local file as seen by the beets harness during matching."""
+    """Local file as seen by the beets harness during matching.
+
+    Every field stays defaulted (#1278 item 8): ``harness/import_one.py``'s
+    filesystem fallback legitimately constructs path-only items, and the
+    wire key set is audited in ``tests/test_harness_wire_contract_audit.py``.
+    """
     path: str = ""
     title: str = ""
     artist: str = ""
@@ -65,6 +70,10 @@ class HarnessTrackInfo(msgspec.Struct):
     `track_id` and `release_track_id` are declared `str`; msgspec raises
     ValidationError if beets leaks an int through (regression guard for
     the PR #98 bug).
+
+    Every field stays defaulted (#1278 item 8): the two Discogs fields
+    below carry documented semantic defaults, and the wire key set is
+    audited in ``tests/test_harness_wire_contract_audit.py``.
     """
     title: str = ""
     artist: str = ""
@@ -89,9 +98,14 @@ class HarnessTrackInfo(msgspec.Struct):
 
 
 class TrackMapping(msgspec.Struct):
-    """Which local item matched which MB/Discogs track."""
-    item: HarnessItem = msgspec.field(default_factory=HarnessItem)
-    track: HarnessTrackInfo = msgspec.field(default_factory=HarnessTrackInfo)
+    """Which local item matched which MB/Discogs track.
+
+    Both halves are required: the harness emits every mapping entry with
+    both keys, and a defaulted empty item/track pair is meaningless — a
+    dropped key must raise at the decode boundary (#1278 item 8).
+    """
+    item: HarnessItem
+    track: HarnessTrackInfo
 
 
 class CandidateSummary(msgspec.Struct, rename={"mbid": "album_id"}):
@@ -110,18 +124,36 @@ class CandidateSummary(msgspec.Struct, rename={"mbid": "album_id"}):
     AFTER commit 48914ca (PR #100) use the key `album_id`; earlier rows
     use `mbid`. No production code round-trips old rows back through
     `ValidationResult.from_dict` (web routes parse the raw dict), so
-    this is a forward-only format change. If you ever need to decode
+    this is a forward-only format change. Such a row now fails loud at
+    decode (`album_id` is required, below); if you ever need to decode
     pre-48914ca rows via msgspec, either pre-rename the key or add
     `"mbid"` as a secondary key on the Struct.
+
+    Required/optional split (#1278 item 8): the fields a production
+    decision path consumes are required, so a dropped/renamed wire key
+    raises ``msgspec.ValidationError`` at decode instead of silently
+    filling a default — `mbid` is release identity (the PR #98 incident
+    class), `distance` the accept gate, `data_source` the Discogs
+    second-pass decision in ``lib/beets.py``, and the four track/item
+    lists feed the `extra_tracks` validity scenario and
+    ``candidate_audio_coverage``. The audit-only metadata keeps defaults;
+    ``tests/test_harness_wire_contract_audit.py`` pins both the split and
+    the key-set equality with the harness serializers.
     """
-    # Core identity
-    mbid: str = ""
+    # Decision-consumed fields — required on the wire.
+    mbid: str
+    distance: float
+    data_source: str
+    tracks: list[HarnessTrackInfo]
+    mapping: list[TrackMapping]
+    extra_items: list[HarnessItem]
+    extra_tracks: list[HarnessTrackInfo]
+    # Audit metadata — defaulted.
     artist: str = ""
     album: str = ""
-    distance: float = 0.0
     distance_breakdown: dict[str, float] = {}
+    # Lib-side annotation stamped after decode, never on the wire.
     is_target: bool = False
-    # AlbumInfo metadata
     albumdisambig: str = ""
     year: int | None = None
     original_year: int | None = None
@@ -138,32 +170,32 @@ class CandidateSummary(msgspec.Struct, rename={"mbid": "album_id"}):
     va: bool = False
     language: str | None = None
     script: str | None = None
-    data_source: str = ""
     barcode: str = ""
     asin: str = ""
-    # Tracks and mapping
     track_count: int = 0
-    tracks: list[HarnessTrackInfo] = []
-    mapping: list[TrackMapping] = []
-    extra_items: list[HarnessItem] = []
-    extra_tracks: list[HarnessTrackInfo] = []
 
 
 class ChooseMatchMessage(msgspec.Struct):
     """Full schema of the harness `choose_match` JSON message. Decoded in
-    one shot at the wire boundary (`lib/beets.py::beets_validate`) via
+    one shot at the wire boundary (`lib/beets.py::beets_validate` and
+    `harness/import_one.py`) via
     `msgspec.convert(msg, type=ChooseMatchMessage)` — any type drift in
     any nested field raises `msgspec.ValidationError` immediately.
+
+    Every field is required (#1278 item 8): the message is decode-only in
+    production and the harness emits every key unconditionally, so a
+    missing key is drift, not a partial message — `candidates` or `items`
+    silently reading as empty would be the worst shape of it.
     """
-    task_id: int = 0
-    path: str = ""
-    cur_artist: str = ""
-    cur_album: str = ""
-    item_count: int = 0
-    items: list[HarnessItem] = []
-    recommendation: str = "none"
-    candidate_count: int = 0
-    candidates: list[CandidateSummary] = []
+    task_id: int
+    path: str
+    cur_artist: str
+    cur_album: str
+    item_count: int
+    items: list[HarnessItem]
+    recommendation: str
+    candidate_count: int
+    candidates: list[CandidateSummary]
 
 
 class HarnessSessionEvidence(msgspec.Struct):

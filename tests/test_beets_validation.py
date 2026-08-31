@@ -37,32 +37,55 @@ from lib.quality import (
 )
 from lib.staged_album import StagedAlbum
 from lib.util import log_validation_result
+from tests.helpers import make_candidate_summary
 
 
-def make_choose_match_msg(mb_release_id, distance, extra_candidates=None):
-    """Build a choose_match JSON message with the given MBID and distance."""
-    candidates = [{
+def complete_candidate(**overrides: object) -> dict[str, object]:
+    """One candidate with every required wire key present (#1278 item 8)."""
+    base: dict[str, object] = {
         "index": 0,
-        "distance": distance,
+        "distance": 0.05,
         "artist": "Test Artist",
         "album": "Test Album",
-        "album_id": mb_release_id,
+        "album_id": "12345678-1234-1234-1234-123456789abc",
+        "data_source": "MusicBrainz",
         "year": 2020,
         "country": "US",
         "track_count": 10,
         "albumstatus": "Official",
-    }]
-    if extra_candidates:
-        candidates.extend(extra_candidates)
-    return json.dumps({
+        "tracks": [],
+        "mapping": [],
+        "extra_items": [],
+        "extra_tracks": [],
+    }
+    base.update(overrides)
+    return base
+
+
+def complete_msg(candidates: list[dict[str, object]], **overrides: object) -> str:
+    """A choose_match message carrying every required wire key."""
+    base: dict[str, object] = {
         "type": "choose_match",
         "task_id": 0,
         "path": "/test/path",
         "cur_artist": "Test Artist",
         "cur_album": "Test Album",
         "item_count": 10,
+        "items": [],
+        "recommendation": "strong",
+        "candidate_count": len(candidates),
         "candidates": candidates,
-    })
+    }
+    base.update(overrides)
+    return json.dumps(base)
+
+
+def make_choose_match_msg(mb_release_id, distance, extra_candidates=None):
+    """Build a choose_match JSON message with the given MBID and distance."""
+    candidates = [complete_candidate(album_id=mb_release_id, distance=distance)]
+    if extra_candidates:
+        candidates.extend(extra_candidates)
+    return complete_msg(candidates)
 
 
 def make_session_end():
@@ -125,24 +148,22 @@ def make_coverage_choose_match_msg(
         }
         for path in mapped_paths
     ]
-    return json.dumps({
-        "type": "choose_match",
-        "task_id": 0,
-        "path": "/test/path",
-        "item_count": len(items),
-        "items": items,
-        "candidates": [{
-            "index": 0,
-            "distance": 0.01,
-            "artist": "David Bowie",
-            "album": "David Bowie",
-            "album_id": release_id,
-            "data_source": data_source,
-            "track_count": len(mapping),
-            "mapping": mapping,
-            "extra_items": [{"path": path} for path in extra_paths],
-        }],
-    })
+    return complete_msg(
+        [complete_candidate(
+            distance=0.01,
+            artist="David Bowie",
+            album="David Bowie",
+            album_id=release_id,
+            data_source=data_source,
+            track_count=len(mapping),
+            mapping=mapping,
+            extra_items=[{"path": path} for path in extra_paths],
+        )],
+        cur_artist="David Bowie",
+        cur_album="David Bowie",
+        item_count=len(items),
+        items=items,
+    )
 
 
 class FakeHarnessStdin:
@@ -504,12 +525,9 @@ class TestBeetsValidate(unittest.TestCase):
 
     def test_no_candidates(self):
         """Empty candidates list → valid=False."""
-        spawn = RecordingSpawn(make_validation_proc(json.dumps({
-            "type": "choose_match",
-            "task_id": 0,
-            "path": "/test",
-            "candidates": [],
-        })))
+        spawn = RecordingSpawn(make_validation_proc(
+            complete_msg([], path="/test"),
+        ))
 
         result = beets_validate(
             self.HARNESS, "/test/album", "some-mbid", 0.15, spawn=spawn,
@@ -724,18 +742,11 @@ class TestBeetsValidate(unittest.TestCase):
     def test_extra_tracks_rejected(self):
         """MB has more tracks than local files → valid=False even at low distance."""
         mbid = "12345678-1234-1234-1234-123456789abc"
-        candidates = [{
-            "index": 0, "distance": 0.02, "artist": "Test Artist",
-            "album": "Test Album", "album_id": mbid, "year": 2020,
-            "country": "US", "track_count": 12,
-            "extra_tracks": [{"title": "Bonus 1"}, {"title": "Bonus 2"}],
-            "albumstatus": "Official",
-        }]
-        msg = json.dumps({
-            "type": "choose_match", "task_id": 0, "path": "/test/path",
-            "cur_artist": "Test Artist", "cur_album": "Test Album",
-            "item_count": 10, "candidates": candidates,
-        })
+        candidates = [complete_candidate(
+            distance=0.02, album_id=mbid, track_count=12,
+            extra_tracks=[{"title": "Bonus 1"}, {"title": "Bonus 2"}],
+        )]
+        msg = complete_msg(candidates)
         spawn = RecordingSpawn(make_validation_proc(msg))
 
         result = beets_validate(
@@ -748,16 +759,10 @@ class TestBeetsValidate(unittest.TestCase):
     def test_non_official_accepted_if_match(self):
         """Non-official release (bootleg/promo) with good match → valid=True."""
         mbid = "12345678-1234-1234-1234-123456789abc"
-        candidates = [{
-            "index": 0, "distance": 0.05, "artist": "Test Artist",
-            "album": "Test Album", "album_id": mbid, "year": 2020,
-            "country": "US", "track_count": 10, "albumstatus": "Bootleg",
-        }]
-        msg = json.dumps({
-            "type": "choose_match", "task_id": 0, "path": "/test/path",
-            "cur_artist": "Test Artist", "cur_album": "Test Album",
-            "item_count": 10, "candidates": candidates,
-        })
+        candidates = [complete_candidate(
+            album_id=mbid, albumstatus="Bootleg",
+        )]
+        msg = complete_msg(candidates)
         spawn = RecordingSpawn(make_validation_proc(msg))
 
         result = beets_validate(
@@ -776,18 +781,17 @@ class TestBeetsValidate(unittest.TestCase):
         has already done its job.
         """
         target_mbid = "2085134"  # numeric Discogs ID stored as str in DB
-        candidates = [{
-            "index": 0, "distance": 0.05, "artist": "Blueline Medic",
-            "album": "The Apology Wars",
-            "album_id": "2085134",  # harness-emitted str
-            "year": 2001, "country": "AU", "track_count": 11,
-            "albumstatus": "Official", "data_source": "Discogs",
-        }]
-        msg = json.dumps({
-            "type": "choose_match", "task_id": 0, "path": "/test/path",
-            "cur_artist": "Blueline Medic", "cur_album": "The Apology Wars",
-            "item_count": 11, "candidates": candidates,
-        })
+        candidates = [complete_candidate(
+            artist="Blueline Medic", album="The Apology Wars",
+            album_id="2085134",  # harness-emitted str
+            year=2001, country="AU", track_count=11,
+            data_source="Discogs",
+        )]
+        msg = complete_msg(
+            candidates,
+            cur_artist="Blueline Medic", cur_album="The Apology Wars",
+            item_count=11,
+        )
         spawn = RecordingSpawn(make_validation_proc(msg))
 
         result = beets_validate(
@@ -815,17 +819,14 @@ class TestBeetsValidate(unittest.TestCase):
         has regressed and we want to know immediately.
         """
         target_mbid = "2085134"
-        # int album_id — the shape of the live bug
-        candidates = [{
-            "index": 0, "distance": 0.05, "artist": "X",
-            "album": "Y", "album_id": 2085134,
-            "track_count": 11, "albumstatus": "Official",
-        }]
-        msg = json.dumps({
-            "type": "choose_match", "task_id": 0, "path": "/test/path",
-            "cur_artist": "X", "cur_album": "Y",
-            "item_count": 11, "candidates": candidates,
-        })
+        # int album_id — the shape of the live bug. Every other wire key is
+        # complete, so the ValidationError is specifically the type drift.
+        candidates = [complete_candidate(
+            artist="X", album="Y", album_id=2085134, track_count=11,
+        )]
+        msg = complete_msg(
+            candidates, cur_artist="X", cur_album="Y", item_count=11,
+        )
         spawn = RecordingSpawn(make_validation_proc(msg))
 
         result = beets_validate(
@@ -843,16 +844,15 @@ class TestBeetsValidate(unittest.TestCase):
     def test_artist_collab_match(self):
         """Collab credit — MBID matches and distance is good → valid=True."""
         mbid = "12345678-1234-1234-1234-123456789abc"
-        candidates = [{
-            "index": 0, "distance": 0.06, "artist": "Action Bronson & Party Supplies",
-            "album": "Blue Chips", "album_id": mbid, "year": 2012,
-            "country": "US", "track_count": 16, "albumstatus": "Official",
-        }]
-        msg = json.dumps({
-            "type": "choose_match", "task_id": 0, "path": "/test/path",
-            "cur_artist": "Action Bronson", "cur_album": "Blue Chips",
-            "item_count": 16, "candidates": candidates,
-        })
+        candidates = [complete_candidate(
+            distance=0.06, artist="Action Bronson & Party Supplies",
+            album="Blue Chips", album_id=mbid, year=2012, track_count=16,
+        )]
+        msg = complete_msg(
+            candidates,
+            cur_artist="Action Bronson", cur_album="Blue Chips",
+            item_count=16,
+        )
         spawn = RecordingSpawn(make_validation_proc(msg))
 
         result = beets_validate(
@@ -910,7 +910,7 @@ class TestApplyCandidateScenarioIdempotence(unittest.TestCase):
 
     def _composite_candidate(self, *, local_length: float, indexed_length: float) -> CandidateSummary:
         path = "composite.flac"
-        return CandidateSummary(
+        return make_candidate_summary(
             mbid="release",
             data_source="Discogs",
             mapping=[TrackMapping(
