@@ -754,11 +754,13 @@ def measure_preimport_state(
     This is the pure measurement helper introduced in U3. It has NO decision
     fields, no denylist writes, no requeue decisions, and no DB writes at
     all: its only DB access is the read-only bad-hash gate through
-    ``bad_hash_db``. HAVE spectral state persists exclusively through the
-    content-addressed evidence row
+    ``bad_hash_db``. From the measurement lanes, HAVE spectral state
+    persists exclusively through the content-addressed evidence row
     (``lib.import_preview.persist_exact_current_spectral_from_attempt``),
     which writes ONLY a real measured existing spectral — the candidate
     download's spectral is never adopted as HAVE state (issue #815 bail).
+    (Dispatch separately stamps ``album_requests.current_spectral_*`` at
+    import acceptance; that is its writer, not measurement's.)
 
     As of U11 there is exactly one decision function: persisted evidence
     flows into ``lib.quality.full_pipeline_decision_from_evidence``, whose

@@ -426,6 +426,23 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures" / "audio_hash"
 class TestCheckBadAudioHashes(unittest.TestCase):
     """Direct tests of the per-track hash + lookup loop."""
 
+    def test_supported_exts_match_the_hasher_exactly(self):
+        """The gate's ext filter IS audio_hash's support set — both ways.
+
+        Narrowing it silently skips reported formats; widening it (the
+        mutant-runner survivor R3 on the gate-revival review round) makes
+        every legitimate wav/alac album log a per-track failure on every
+        measurement. Pin equality against the hasher's own format map so
+        drift in either direction is loud.
+        """
+        from lib.audio_hash import _EXT_TO_FORMAT
+        from lib.measurement import _BAD_HASH_SUPPORTED_EXTS
+
+        self.assertEqual(
+            _BAD_HASH_SUPPORTED_EXTS,
+            {ext.lstrip(".") for ext in _EXT_TO_FORMAT},
+        )
+
     def test_hits_first_match_and_returns_id_and_path(self):
         """Single-track candidate whose hash matches a seeded bad hash."""
         from lib.audio_hash import hash_audio_content
