@@ -1647,7 +1647,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
             is_cbr=False,
             spectral_grade="suspect",
             spectral_bitrate=160,
-            post_conversion_min_bitrate=198,
             candidate_v0_probe_avg=211,
             candidate_v0_probe_min=198,
         )
@@ -1679,7 +1678,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         candidate = self._build_candidate(
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="likely_transcode",
-            post_conversion_min_bitrate=214,
             candidate_v0_probe_avg=214,
         )
         current = self._build_current(
@@ -2071,7 +2069,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
             is_cbr=False,
             spectral_grade="likely_transcode",
             spectral_bitrate=128,
-            post_conversion_min_bitrate=184,
             candidate_v0_probe_avg=215,
             candidate_v0_probe_min=184,
         )
@@ -2238,7 +2235,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
             min_bitrate=0,
             is_cbr=False,
             spectral_grade="genuine",
-            post_conversion_min_bitrate=216,
             candidate_v0_probe_avg=255,
             candidate_v0_probe_min=216,
         )
@@ -2487,7 +2483,6 @@ class TestUltrasonicProofGateV3(unittest.TestCase):
         candidate = build_parity_candidate_evidence(
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="genuine",
-            post_conversion_min_bitrate=245,
             candidate_v0_probe_avg=245,
             candidate_v0_probe_min=245,
             codec_family="lossless",
@@ -2616,7 +2611,6 @@ class TestUltrasonicProofGateV3(unittest.TestCase):
             candidate = build_parity_candidate_evidence(
                 is_flac=True, min_bitrate=0, is_cbr=False,
                 spectral_grade="suspect",
-                post_conversion_min_bitrate=219,
                 candidate_v0_probe_avg=241,
                 candidate_v0_probe_min=219,
                 codec_family="lossless",
@@ -2663,7 +2657,6 @@ class TestUltrasonicProofGateV3(unittest.TestCase):
         candidate = build_parity_candidate_evidence(
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="suspect",
-            post_conversion_min_bitrate=219,
             candidate_v0_probe_avg=241,
             candidate_v0_probe_min=219,
             codec_family="lossless",
@@ -2988,7 +2981,6 @@ class TestProvisionalAnchorOwnsTheUnprovenCohort(unittest.TestCase):
             codec_family="lossless",
             ultrasonic_deficit_db=ultrasonic_deficit_db,
             spectral_measurement_version=2,
-            post_conversion_min_bitrate=93,
             candidate_v0_probe_avg=candidate_v0_probe_avg,
             candidate_v0_probe_min=candidate_v0_probe_min,
         )
@@ -3261,7 +3253,6 @@ class TestProvisionalAnchorOwnsTheUnprovenCohort(unittest.TestCase):
                 codec_family="lossless",
                 ultrasonic_deficit_db=self.DENIED_DEFICIT_DB,
                 spectral_measurement_version=2,
-                post_conversion_min_bitrate=93,
                 candidate_v0_probe_avg=175,
                 candidate_v0_probe_min=148,
             ),
@@ -3433,7 +3424,6 @@ class TestAacLatticeProofGate(unittest.TestCase):
         candidate = build_parity_candidate_evidence(
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="genuine",
-            post_conversion_min_bitrate=245,
             candidate_v0_probe_avg=245,
             candidate_v0_probe_min=245,
             codec_family="lossless",
@@ -3592,7 +3582,6 @@ class TestAacLatticeProofGate(unittest.TestCase):
             candidate = build_parity_candidate_evidence(
                 is_flac=True, min_bitrate=0, is_cbr=False,
                 spectral_grade="suspect",
-                post_conversion_min_bitrate=219,
                 candidate_v0_probe_avg=241,
                 candidate_v0_probe_min=219,
                 codec_family="lossless",
@@ -3657,7 +3646,6 @@ class TestAacLatticeProofGate(unittest.TestCase):
         candidate = build_parity_candidate_evidence(
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="suspect",
-            post_conversion_min_bitrate=219,
             candidate_v0_probe_avg=241,
             candidate_v0_probe_min=219,
             codec_family="lossless",
@@ -3918,7 +3906,6 @@ class TestLosslessStoredFormatIsProofBlind(unittest.TestCase):
         candidate = build_parity_candidate_evidence(
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="genuine",
-            post_conversion_min_bitrate=245,
             candidate_v0_probe_avg=245,
             candidate_v0_probe_min=245,
             codec_family="lossless",

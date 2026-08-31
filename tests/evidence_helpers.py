@@ -248,7 +248,6 @@ def build_parity_candidate_evidence(
     avg_bitrate: int | None = None,
     spectral_grade: str | None = None,
     spectral_bitrate: int | None = None,
-    post_conversion_min_bitrate: int | None = None,
     candidate_v0_probe_avg: int | None = None,
     candidate_v0_probe_min: int | None = None,
     native_codec: str = "mp3",
@@ -278,6 +277,14 @@ def build_parity_candidate_evidence(
     and the generated parity property in ``tests/test_quality_generated.py``
     both consume it, so a divergence between the decision twins can never
     hide behind two different world encodings.
+
+    Deliberately NO ``post_conversion_min_bitrate`` parameter (#1278
+    helpers-split residual 2): the post-conversion projection is never
+    evidence-row data — on the evidence side it travels through
+    ``AlbumQualityEvidenceDecisionFacts.post_conversion_min_bitrate`` (or
+    derives from the candidate V0 probe when the facts leave it None).
+    The builder used to accept and silently discard it, which is exactly
+    the two-different-world-encodings trap this helper exists to close.
     """
     # Candidate evidence always describes the downloaded source bytes.
     # Conversion policy/output stay on the target contract and decision facts;
