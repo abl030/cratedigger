@@ -79,8 +79,8 @@ from lib.quality import (
     SpectralMeasurement,
     V0ProbeEvidence,
 )
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.helpers import (
-    make_album_quality_evidence,
     make_import_result,
     make_request_row,
     make_validation_result,

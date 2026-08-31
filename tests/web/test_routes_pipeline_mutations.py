@@ -52,8 +52,9 @@ from lib.local_import_service import (
     RESULT_UNAUTHORIZED_PATH as LOCAL_RESULT_UNAUTHORIZED_PATH,
 )
 from lib.transitions import TransitionConflict, TransitionConflictKind
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import make_request_row
 from tests.web._harness import (
     _assert_required_fields,
     _FakeDbWebServerCase,

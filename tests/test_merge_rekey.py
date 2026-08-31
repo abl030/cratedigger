@@ -149,10 +149,10 @@ from lib.quality import (
 from lib.quality_evidence import backfill_current_evidence_from_album_info
 from lib.release_identity import ReleaseIdentity
 from lib.staged_album import StagedAlbum
+from tests.dispatch_helpers import handoff_automation_owner
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
-    handoff_automation_owner,
-    make_album_quality_evidence,
     make_candidate_summary,
     make_ctx_with_fake_db,
     make_grab_list_entry,

@@ -25,8 +25,9 @@ from lib.transitions import (
     transition_conflict_payload,
     validate_transition,
 )
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakePipelineDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import make_request_row
 
 
 class TestValidateTransition(unittest.TestCase):

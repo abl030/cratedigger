@@ -559,8 +559,8 @@ class TestAutomationRecoveryDetailPostgres(unittest.TestCase):
         self.db.close()
 
     def test_real_and_fake_reads_share_the_same_recovery_states(self) -> None:
+        from tests.dispatch_helpers import handoff_automation_owner
         from tests.fakes import FakePipelineDB
-        from tests.helpers import handoff_automation_owner
 
         request_id = self.db.add_request(
             "Recovery Artist",

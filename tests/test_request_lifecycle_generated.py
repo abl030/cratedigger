@@ -80,11 +80,9 @@ from lib.transitions import (
     finalize_request,
 )
 from lib.world_invariants import assert_replaced_row_frozen
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakePipelineDB
-from tests.helpers import (
-    handoff_automation_owner,
-    make_active_download_state_json,
-)
+from tests.helpers import make_active_download_state_json
 
 LEGAL_STATUSES = frozenset({
     "initializing",

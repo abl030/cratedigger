@@ -51,12 +51,12 @@ from lib.quality_evidence import (
     snapshot_audio_files,
 )
 from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
-from tests.fakes import FakePipelineDB
-from tests.helpers import (
+from tests.evidence_helpers import (
     make_album_quality_evidence,
     make_audio_corrupt_validation_report,
-    make_request_row,
 )
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 
 
 class TestQualityEvidenceConstruction(unittest.TestCase):

@@ -25,18 +25,17 @@ from lib.import_execution import CancellationToken
 from lib.import_queue import IMPORT_JOB_FORCE
 from lib.quality import AudioQualityMeasurement, ImportResult
 from lib.quality_evidence import snapshot_audio_files
-from tests.fakes import FakePipelineDB
-from tests.helpers import (
+from tests.dispatch_helpers import (
     RecordingQualityGate,
     claim_next_import_job,
     finalize_claimed_dispatch,
     handoff_automation_owner,
-    make_album_quality_evidence,
-    make_import_result,
-    make_request_row,
     noop_quality_gate,
     patch_dispatch_externals,
 )
+from tests.evidence_helpers import make_album_quality_evidence
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_import_result, make_request_row
 
 
 # Migration 021 helpers — seed evidence and wire the FK chain that

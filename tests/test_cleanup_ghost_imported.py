@@ -16,8 +16,9 @@ from lib.beets_db import BeetsDB
 from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
 from scripts import cleanup_ghost_imported
 from scripts.cleanup_ghost_imported import classify_imported_rows
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakePipelineDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import make_request_row
 
 
 def _make_beets_db(path: str) -> None:

@@ -39,12 +39,10 @@ from lib.merge_rekey_service import (
 )
 from lib.quality_evidence import AlbumQualityEvidenceFile
 from lib.release_identity import ReleaseIdentity
+from tests.dispatch_helpers import handoff_automation_owner
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import (
-    handoff_automation_owner,
-    make_album_quality_evidence,
-    make_request_row,
-)
+from tests.helpers import make_request_row
 
 MERGED = "6b209cc5-62b0-4ef7-9336-c2dbd876301a"
 SURVIVOR = "9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4"

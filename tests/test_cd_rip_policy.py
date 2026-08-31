@@ -12,7 +12,7 @@ from lib.quality import (
     full_pipeline_decision,
     full_pipeline_decision_from_evidence,
 )
-from tests.helpers import make_album_quality_evidence
+from tests.evidence_helpers import make_album_quality_evidence
 
 
 class CdRipCanonicalPolicyTest(unittest.TestCase):

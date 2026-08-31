@@ -51,12 +51,12 @@ from lib.quality_evidence import (
 from lib.release_identity import ReleaseIdentity
 from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from scripts import import_preview_worker
-from tests.helpers import (
-    claim_next_import_preview_job,
-    hermetic_beets_config_defaults,
+from tests.dispatch_helpers import claim_next_import_preview_job
+from tests.evidence_helpers import (
     make_album_quality_evidence,
     make_audio_corrupt_validation_report,
 )
+from tests.helpers import hermetic_beets_config_defaults
 
 
 class TestBackToMonoPostgresOuterComposition(unittest.TestCase):

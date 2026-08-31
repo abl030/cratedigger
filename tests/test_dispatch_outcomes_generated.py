@@ -93,21 +93,23 @@ from lib.quality import (
 )
 from lib.quality_evidence import snapshot_audio_files
 from tests.beets_world import BeetsWorld
-from tests.fakes import DownloadLogRow, FakePipelineDB
-from tests.helpers import (
+from tests.dispatch_helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
     finalize_claimed_dispatch,
     handoff_automation_owner,
-    make_album_quality_evidence,
     make_dispatch_request,
+    noop_quality_gate,
+    patch_dispatch_externals,
+    pinned_dispatch_authority,
+)
+from tests.evidence_helpers import make_album_quality_evidence
+from tests.fakes import DownloadLogRow, FakePipelineDB
+from tests.helpers import (
     make_download_file,
     make_grab_list_entry,
     make_import_result,
     make_request_row,
-    noop_quality_gate,
-    patch_dispatch_externals,
-    pinned_dispatch_authority,
 )
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"

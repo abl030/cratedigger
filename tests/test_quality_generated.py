@@ -119,7 +119,7 @@ from lib.spectral_check import (
     MIN_CLIFF_SLICES,
     SLICE_FREQS,
 )
-from tests.helpers import (
+from tests.evidence_helpers import (
     PROVISIONAL_LANE_DECISIONS,
     build_parity_candidate_evidence,
     build_parity_current_evidence,

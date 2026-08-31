@@ -18,7 +18,10 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
 from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from tests.beets_world import BeetsWorld
-from tests.helpers import claim_next_import_job, claim_next_import_preview_job
+from tests.dispatch_helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
+)
 from tests.test_pipeline_db import make_db, requires_postgres
 
 
@@ -174,11 +177,9 @@ def _run_have_boundary_through_both_adapters(
     from lib.quality_evidence import snapshot_audio_files
     from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
     from scripts.import_preview_worker import process_claimed_preview_job
+    from tests.evidence_helpers import make_album_quality_evidence
     from tests.fakes import FakeBeetsDB, FakePipelineDB
-    from tests.helpers import (
-        make_album_quality_evidence,
-        make_request_row,
-    )
+    from tests.helpers import make_request_row
 
     request_id = 42
     mbid = "mbid-42"
@@ -537,8 +538,9 @@ def _run_candidate_snapshot_reuse_world(
     from lib.quality_evidence import snapshot_audio_files
     from scripts import import_preview_worker
     from scripts.import_preview_worker import process_claimed_preview_job
+    from tests.evidence_helpers import make_album_quality_evidence
     from tests.fakes import FakeBeetsDB, FakePipelineDB
-    from tests.helpers import make_album_quality_evidence, make_request_row
+    from tests.helpers import make_request_row
 
     request_id = 8883
     mbid = "generated-candidate-reuse-mbid"
@@ -885,17 +887,16 @@ def _run_dispatch_finalization_world(
         ProcessIdentity,
     )
     from lib.quality import DownloadInfo, ImportResult, QualityComparisonBasis
-    from tests.fakes import FakePipelineDB
-    from tests.helpers import (
+    from tests.dispatch_helpers import (
         finalize_claimed_dispatch,
-        make_album_quality_evidence,
         make_dispatch_request,
-        make_import_result,
-        make_request_row,
         noop_quality_gate,
         patch_dispatch_externals,
         pinned_dispatch_authority,
     )
+    from tests.evidence_helpers import make_album_quality_evidence
+    from tests.fakes import FakePipelineDB
+    from tests.helpers import make_import_result, make_request_row
 
     db = FakePipelineDB()
     db.seed_request(make_request_row(
@@ -1595,7 +1596,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             current_evidence_for_policy,
             current_evidence_preserves_source_spectral,
         )
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         extension, storage_format = native
         evidence = make_album_quality_evidence(
@@ -1668,7 +1669,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         from lib.import_preview import current_spectral_evidence_reusable
         from lib.quality import AudioQualityMeasurement
         from lib.quality_evidence import current_evidence_for_policy
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         evidence = make_album_quality_evidence(
             preserve_spectral_measurement_version=True,
@@ -1852,8 +1853,9 @@ class TestAttemptAuditGenerated(unittest.TestCase):
     ):
         from lib.import_preview import load_persisted_existing_spectral
         from lib.quality import AudioQualityMeasurement
+        from tests.evidence_helpers import make_album_quality_evidence
         from tests.fakes import FakePipelineDB
-        from tests.helpers import make_album_quality_evidence, make_request_row
+        from tests.helpers import make_request_row
 
         db = FakePipelineDB()
         req = make_request_row(
@@ -2181,12 +2183,12 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
         from lib.quality_evidence import snapshot_audio_files
         from scripts import import_preview_worker
         from scripts.importer import execute_automation_import_job, process_claimed_job
-        from tests.fakes import FakeBeetsDB
-        from tests.helpers import (
+        from tests.dispatch_helpers import (
             handoff_automation_owner,
-            make_album_quality_evidence,
             make_dispatch_request,
         )
+        from tests.evidence_helpers import make_album_quality_evidence
+        from tests.fakes import FakeBeetsDB
 
         db = make_db()
         self.addCleanup(db.close)

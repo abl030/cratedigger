@@ -20,8 +20,8 @@ import unittest
 from lib.dispatch.types import DispatchDB, DispatchRequest
 from lib.grab_list import DownloadFile
 from lib.quality import DownloadInfo
+from tests.dispatch_helpers import make_dispatch_request
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_dispatch_request
 
 #: ``dataclasses.MISSING`` is the stdlib's own "this field has no default"
 #: sentinel, and identity is the documented way to test it. Aliased to a

@@ -430,7 +430,10 @@ class TestRegisteredStepFailureMessagesReachable(unittest.TestCase):
                 jellyfin_url="http://jellyfin:8096", jellyfin_token="tok"))
         summary_ctx = make_ctx_with_fake_db(
             FakePipelineDB(), cfg=CratediggerConfig())
-        summary_ctx.cycle_start = None  # time.time() - None raises TypeError
+        # Deliberate wrong-type injection (see the class docstring's
+        # fail-closed-legislation note); the cast spells it out now that
+        # make_ctx_with_fake_db returns a typed CratediggerContext.
+        summary_ctx.cycle_start = cast(float, None)  # time.time() - None raises
         observations_ctx = self._ctx("record_peer_observations")
         observations_ctx.peer_observations = {"peer-a"}
         return [

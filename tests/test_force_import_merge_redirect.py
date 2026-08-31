@@ -89,14 +89,10 @@ from lib.quality import (
 )
 from lib.quality_evidence import snapshot_audio_files
 from lib.release_identity import ReleaseIdentity
+from tests.dispatch_helpers import noop_quality_gate, patch_dispatch_externals
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import (
-    make_album_quality_evidence,
-    make_import_result,
-    make_request_row,
-    noop_quality_gate,
-    patch_dispatch_externals,
-)
+from tests.helpers import make_import_result, make_request_row
 from tests.test_merge_rekey import (
     MERGED,
     SURVIVOR,
@@ -306,7 +302,7 @@ class _ForceWorld:
             beets_scenario="mbid_not_found",
         )
         if automation_owned:
-            from tests.helpers import handoff_automation_owner
+            from tests.dispatch_helpers import handoff_automation_owner
 
             handoff_automation_owner(
                 self.db,
@@ -852,7 +848,8 @@ class TestOneComparisonSeamTwoThresholds(unittest.TestCase):
 
         from lib.download_validation import _process_beets_validation
         from lib.staged_album import StagedAlbum
-        from tests.helpers import handoff_automation_owner, make_ctx_with_fake_db
+        from tests.dispatch_helpers import handoff_automation_owner
+        from tests.helpers import make_ctx_with_fake_db
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(

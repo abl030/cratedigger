@@ -59,7 +59,7 @@ from lib.quality import (
 from lib.quality.compare import _shared_spectral_bitrates
 from lib.quality.decisions import post_import_search_action
 from lib.quality.spectral_interpretation import interpret_measurement
-from tests.helpers import make_audio_corrupt_validation_report
+from tests.evidence_helpers import make_audio_corrupt_validation_report
 
 # ============================================================================
 # spectral_import_decision

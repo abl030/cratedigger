@@ -30,6 +30,12 @@ from lib.quality import (
     ValidationResult,
     legacy_unrecorded_audio_validation_report,
 )
+from tests.dispatch_helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
+    handoff_automation_owner,
+)
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import (
     FakeBeetsDB,
     FakeCursor,
@@ -39,10 +45,6 @@ from tests.fakes import (
     RecordingProcessAlbum,
 )
 from tests.helpers import (
-    claim_next_import_job,
-    claim_next_import_preview_job,
-    handoff_automation_owner,
-    make_album_quality_evidence,
     make_ctx_with_fake_db,
     make_download_file,
     make_grab_list_entry,

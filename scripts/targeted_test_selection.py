@@ -301,6 +301,24 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_parallel_test_runner",
         "tests.test_pipeline_db",
     ),
+    # Dispatch/import-lane cluster split out of tests/helpers.py (issue
+    # #1278, "worth exploring" item 5). ``tests.test_dispatch_request`` is
+    # the direct pin of the ``make_dispatch_request`` builder itself; the
+    # other three drive the claim/handoff/finalize bridges and the dispatch
+    # seam stubs through real production entry points.
+    "tests/dispatch_helpers.py": (
+        "tests.test_dispatch_request",
+        "tests.test_dispatch_core",
+        "tests.test_import_queue",
+        "tests.test_integration_slices",
+    ),
+    # AlbumQualityEvidence-family builders split out of tests/helpers.py
+    # (same #1278 item). The parity builders' consumers are the contract:
+    # the hand-written parity tests and the generated parity property.
+    "tests/evidence_helpers.py": (
+        "tests.test_quality_classification",
+        "tests.test_quality_generated",
+    ),
     "tests/fakes/beets_contract.py": (
         "tests.test_beets_config_startup",
         "tests.test_beets_config_startup_generated",
@@ -605,7 +623,7 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # worker.py, its direct analogue), run against every module found by
     # grepping for real imports of the module under test, PLUS every
     # module that reaches the entry point indirectly through tests/
-    # helpers.py's finalize_claimed_dispatch bridge (a search grep alone
+    # dispatch_helpers.py's finalize_claimed_dispatch bridge (a search grep alone
     # cannot find, since those modules never spell the module's own
     # name). This list is a QUALIFIED SUBSET chosen for coverage value,
     # NOT a complete kill set -- an import-name grep is structurally

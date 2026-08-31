@@ -92,14 +92,16 @@ from lib.quality import (
     VerifiedLosslessProof,
     legacy_unrecorded_audio_validation_report,
 )
+from tests.dispatch_helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
+    handoff_automation_owner,
+)
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     REQUEST_CASCADE_RESET_TABLES,
-    claim_next_import_job,
-    claim_next_import_preview_job,
     delete_all_rows,
-    handoff_automation_owner,
-    make_album_quality_evidence,
     make_request_row,
 )
 
@@ -8126,7 +8128,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             snapshot_audio_files,
         )
         from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
-        from tests.helpers import make_audio_corrupt_validation_report
+        from tests.evidence_helpers import make_audio_corrupt_validation_report
 
         release_id = "a3e94b84-d6e8-4897-938f-250b9e3a6abb"
         with tempfile.TemporaryDirectory() as source_path:
@@ -16796,7 +16798,7 @@ class TestGetPipelineOverlay(unittest.TestCase):
     def _seed_identity_state(self, db) -> None:
         """Seed one verified, one provisional, one plain request."""
         from lib.quality import AlbumQualityV0Metric, VerifiedLosslessProof
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         def link_evidence(mbid: str, proof) -> None:
             rid = db.add_request(

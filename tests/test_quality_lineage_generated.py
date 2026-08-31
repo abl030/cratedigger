@@ -67,12 +67,12 @@ from lib.wrong_match_cleanup_service import (
     _cleanup_audit_payload,
     _result,
 )
-from tests.fakes import FakePipelineDB
-from tests.helpers import (
+from tests.evidence_helpers import (
     make_album_quality_evidence,
     make_audio_corrupt_validation_report,
-    make_request_row,
 )
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 from web.download_history_view import build_recents_download_log_rows
 
 _LABEL_WHITESPACE = st.text(

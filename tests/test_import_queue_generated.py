@@ -30,13 +30,13 @@ from lib.import_queue import (
     force_import_payload,
 )
 from lib.quality import ActiveDownloadState
-from tests.fakes import FakePipelineDB
-from tests.helpers import (
+from tests.dispatch_helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
     handoff_automation_owner,
-    make_request_row,
 )
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 
 _EXPECTED_REQUEUE_DELAYS_SECONDS = {
     1: 60,

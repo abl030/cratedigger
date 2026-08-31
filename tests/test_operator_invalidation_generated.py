@@ -22,8 +22,9 @@ from lib.pipeline_delete_service import (
     PipelineDeleteApplied,
     delete_pipeline_request,
 )
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakePipelineDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import make_request_row
 
 
 def _owner_blind_delete_mutant(db: FakePipelineDB, request_id: int) -> bool:

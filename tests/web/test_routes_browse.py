@@ -19,8 +19,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from lib.artist_catalogue import ArtistCatalogueRow
 from lib.pipeline_db.rows import ArtistRequestRow
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import make_request_row
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 from web.library_album_row import LibraryAlbumRow
 

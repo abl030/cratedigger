@@ -22,7 +22,7 @@ from lib.quality import (
     AudioToolDiagnostic,
     AudioValidationReport,
 )
-from tests.helpers import make_album_quality_evidence
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.test_pipeline_db import make_db, requires_postgres
 
 RawMutator = Callable[[dict[str, object], list[dict[str, object]]], None]

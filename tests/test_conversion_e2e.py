@@ -1042,7 +1042,7 @@ class TestDeniedProofStillStoresTheConfiguredTarget(unittest.TestCase):
             AlbumQualityEvidenceDecisionFacts,
             full_pipeline_decision_from_evidence,
         )
-        from tests.helpers import build_parity_candidate_evidence
+        from tests.evidence_helpers import build_parity_candidate_evidence
 
         candidate = build_parity_candidate_evidence(
             is_flac=True, min_bitrate=0, is_cbr=False,

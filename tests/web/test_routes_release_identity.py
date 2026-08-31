@@ -16,8 +16,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakeBeetsDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import make_request_row
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
 
@@ -972,7 +973,7 @@ class TestPipelineMergeRekeyContract(_FakeDbWebServerCase):
             configured_canonical_base,
         )
         from lib.quality import AlbumQualityEvidenceFile, AudioQualityMeasurement
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         self.db.seed_request(make_request_row(
             id=316, mb_release_id=self.MERGED, status="imported",

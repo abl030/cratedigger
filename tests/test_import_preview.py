@@ -51,15 +51,16 @@ from lib.quality_evidence import (
     snapshot_fingerprint,
 )
 from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
-from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import (
+from tests.dispatch_helpers import (
     claim_next_import_preview_job,
     handoff_automation_owner,
-    hermetic_beets_config_defaults,
+)
+from tests.evidence_helpers import (
     make_album_quality_evidence,
     make_audio_corrupt_validation_report,
-    make_request_row,
 )
+from tests.fakes import FakeBeetsDB, FakePipelineDB
+from tests.helpers import hermetic_beets_config_defaults, make_request_row
 
 _HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
 

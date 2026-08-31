@@ -98,7 +98,7 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
     def _link_installed_evidence(self, request_id: int, measurement,
                                  **evidence_kwargs) -> None:
         """Link a production-shaped installed evidence row to a request."""
-        from tests.helpers import make_album_quality_evidence
+        from tests.evidence_helpers import make_album_quality_evidence
 
         installed = make_album_quality_evidence(
             mb_release_id=f"installed-{request_id}",

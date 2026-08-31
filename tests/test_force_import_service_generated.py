@@ -35,9 +35,9 @@ from lib.processing_paths import processing_albums_dir
 from lib.quality import ValidationResult
 from lib.staged_album import StagedAlbum
 from lib.validation_envelope import decode_validation_envelope
+from tests.dispatch_helpers import claim_next_import_job
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
-    claim_next_import_job,
     make_download_file,
     make_grab_list_entry,
     make_request_row,

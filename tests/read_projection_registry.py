@@ -1215,7 +1215,7 @@ def _verified_lossless_evidence_id(
 ) -> int:
     """Persist one verified-lossless evidence row and return its id.
 
-    Built through ``tests.helpers.make_album_quality_evidence`` so the
+    Built through ``tests.evidence_helpers.make_album_quality_evidence`` so the
     content-addressed fingerprint is production's own, then read back by
     that fingerprint exactly as the linking call sites do.
     """
@@ -1224,7 +1224,7 @@ def _verified_lossless_evidence_id(
         AudioQualityMeasurement,
         VerifiedLosslessProof,
     )
-    from tests.helpers import make_album_quality_evidence
+    from tests.evidence_helpers import make_album_quality_evidence
 
     evidence = make_album_quality_evidence(
         mb_release_id=mb_release_id,

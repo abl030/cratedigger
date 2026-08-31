@@ -25,8 +25,9 @@ from lib.quality_evidence import snapshot_audio_files
 from lib.sidecar import SIDECAR_FILENAME
 from lib.sidecar_service import write_sidecar_for_request
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import make_request_row
 
 REPO = Path(__file__).resolve().parent.parent
 MB_RELEASE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

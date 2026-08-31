@@ -108,10 +108,10 @@ from lib.quality import (
 )
 from lib.release_identity import ReleaseIdentity
 from lib.staged_album import StagedAlbum
+from tests.dispatch_helpers import handoff_automation_owner
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
-    handoff_automation_owner,
-    make_album_quality_evidence,
     make_ctx_with_fake_db,
     make_grab_list_entry,
     make_request_row,

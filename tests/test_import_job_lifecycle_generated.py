@@ -24,8 +24,9 @@ from lib.import_queue import (
     youtube_import_payload,
 )
 from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+from tests.dispatch_helpers import claim_next_import_job
 from tests.fakes import FakePipelineDB
-from tests.helpers import claim_next_import_job, make_request_row
+from tests.helpers import make_request_row
 
 
 def assert_only_evidence_ready_is_claimable(

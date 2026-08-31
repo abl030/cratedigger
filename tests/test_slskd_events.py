@@ -20,14 +20,15 @@ from lib.slskd_events import (
     EventIngestResult,
     ingest_download_file_events,
 )
+from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
-from tests.helpers import handoff_automation_owner, own_transfer_keys
 from tests.helpers import (
     make_active_download_file_state as _file_state,
 )
 from tests.helpers import (
     make_file_complete_event_data as _file_complete_data,
 )
+from tests.helpers import own_transfer_keys
 
 
 class _BeforeStateWriteDB(FakePipelineDB):

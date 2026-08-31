@@ -62,13 +62,13 @@ from lib.import_queue import (
 )
 from lib.pipeline_delete_service import delete_pipeline_request
 from lib.quality import ActiveDownloadState
-from tests.fakes import FakePipelineDB
-from tests.helpers import (
+from tests.dispatch_helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
-    make_album_quality_evidence,
-    make_request_row,
 )
+from tests.evidence_helpers import make_album_quality_evidence
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 
 _REQUEST_ID = 898
 _RELEASE_ID = "75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0"
