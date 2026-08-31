@@ -36,7 +36,7 @@ import requests
 from beetsplug.discogs import DiscogsPlugin
 
 from harness import beets_harness
-from harness.beets_compat import (
+from harness.discogs_patches import (
     _DISCOGS_COVER_ART_TIMEOUT_SECONDS,
     DISCOGS_REAL_API_BASE,
     BeetsCapabilityError,
@@ -209,7 +209,7 @@ class TestDiscogsCoverArtFallback(unittest.TestCase):
         release = _release(_BOWIE_1969_RELEASE_ID, [])
         plugin = object.__new__(DiscogsPlugin)
         plugin.config = _config(token)
-        with self.assertLogs("harness.beets_compat", level="WARNING") as logs:
+        with self.assertLogs("harness.discogs_patches", level="WARNING") as logs:
             result = plugin.select_cover_art(release)
         self.assertIsNone(result)
         self.assertEqual(len(logs.output), 1)
@@ -230,7 +230,7 @@ class TestDiscogsCoverArtFallback(unittest.TestCase):
                 "requests.get",
                 return_value=_fake_response(429, b"too many requests"),
             ),
-            self.assertLogs("harness.beets_compat", level="WARNING") as logs,
+            self.assertLogs("harness.discogs_patches", level="WARNING") as logs,
         ):
             result = plugin.select_cover_art(release)
         self.assertIsNone(result)

@@ -343,7 +343,7 @@ class TestGroupedCompositePhysicalCheck(unittest.TestCase):
 
     def test_unknown_duration_short_still_decides_from_audio_alone(self) -> None:
         """A declared component duration of "" (Discogs' own unknown-
-        duration shape, ``harness/beets_compat.py``'s ``duration_complete``
+        duration shape, ``harness/discogs_patches.py``'s ``duration_complete``
         analog) must not change anything: the census never models declared
         duration at the manifest level -- grouping is identity-only, and
         design 5's verdict is audio-only.

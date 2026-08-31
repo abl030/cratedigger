@@ -11,7 +11,11 @@ from contextlib import contextmanager
 from types import ModuleType
 from unittest.mock import MagicMock
 
-_HARNESS_MODULES = ("harness.beets_harness", "harness.beets_compat")
+_HARNESS_MODULES = (
+    "harness.beets_harness",
+    "harness.discogs_patches",
+    "harness.beets_compat",
+)
 
 
 def legacy_import_task_stub() -> type:

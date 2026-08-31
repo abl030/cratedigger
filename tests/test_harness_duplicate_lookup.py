@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import sys
 import unittest
 from collections.abc import Iterable
 from types import SimpleNamespace
 from typing import ClassVar
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from tests.harness_test_support import isolated_beets_harness, legacy_import_task_stub
 
@@ -132,6 +133,72 @@ class TestDuplicateLookupMetadata(unittest.TestCase):
         self.assertEqual(last.kwargs["mb_albumid"], "mb-123")
         self.assertEqual(last.kwargs["discogs_albumid"], 0)
         self.assertEqual(last.keys, ["mb_albumid", "discogs_albumid"])
+
+    def test_find_duplicates_legacy_era_uses_all_fields_query(self) -> None:
+        """The legacy arm flows through ``beets_compat``'s seam — the era
+        decision no longer lives in the harness (#1278 wx6). The fake
+        deliberately has NO ``duplicates_query``: only the seam's legacy
+        builder can produce the query."""
+
+        class FakeAlbumInfo:
+            item_data: ClassVar = {
+                "albumartist": "The National",
+                "album": "High Violet",
+                "mb_albumid": "mb-123",
+                "discogs_albumid": 0,
+            }
+
+        class FakeAlbum:
+            legacy_queries: ClassVar[list[dict[str, object]]] = []
+
+            kwargs: dict[str, object]
+
+            def __init__(self, lib: object, **kwargs: object) -> None:
+                del lib
+                self.kwargs = kwargs
+
+            def __getitem__(self, key: str) -> object:
+                return self.kwargs[key]
+
+            @classmethod
+            def all_fields_query(cls, by: dict[str, object]) -> object:
+                cls.legacy_queries.append(dict(by))
+                return ("legacy-query", tuple(sorted(by)))
+
+        duplicate = SimpleNamespace(
+            items=lambda: [SimpleNamespace(path=b"/beets/old/01.opus")],
+        )
+        lib = MagicMock()
+        lib.albums.return_value = [duplicate]
+        task = SimpleNamespace(
+            chosen_info=lambda: FakeAlbumInfo(),
+            items=[SimpleNamespace(path=b"/incoming/new/01.opus")],
+        )
+
+        compat = beets_harness.beets_compat
+        legacy = dataclasses.replace(
+            compat.CAPABILITIES, duplicates_query_era="legacy")
+        old_config = beets_harness.config
+        old_album = beets_harness.library.Album
+        vars(beets_harness)["config"] = _make_cfg(["mb_albumid", "discogs_albumid"])
+        beets_harness.library.Album = FakeAlbum
+        try:
+            with patch.object(compat, "CAPABILITIES", legacy):
+                duplicates = beets_harness._find_duplicates_with_mapped_release_ids(
+                    task,
+                    lib,
+                )
+        finally:
+            vars(beets_harness)["config"] = old_config
+            beets_harness.library.Album = old_album
+
+        self.assertEqual(duplicates, [duplicate])
+        self.assertEqual(
+            FakeAlbum.legacy_queries,
+            [{"mb_albumid": "mb-123", "discogs_albumid": 0}],
+        )
+        lib.albums.assert_called_once_with(
+            ("legacy-query", ("discogs_albumid", "mb_albumid")), None)
 
 
 if __name__ == "__main__":

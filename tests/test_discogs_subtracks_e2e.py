@@ -81,7 +81,7 @@ def _install():
     def _album():
         from beets.autotag.hooks import AlbumInfo, TrackInfo
         from beetsplug.discogs import DiscogsPlugin
-        from harness.beets_compat import register_discogs_indexed_program
+        from harness.discogs_patches import register_discogs_indexed_program
 
         duration_by_position = {duration_by_position!r}
         raw = [

@@ -51,9 +51,14 @@ each final release. These checks do not establish live-catalog upgrade or downgr
 safety. LRCLIB and unrelated external plugin behaviour are deployment-owned
 configuration, outside the compatibility promise.
 
-`harness/beets_compat.py` (`CAPABILITIES`) is the one place an upstream era is
-ever decided, always by attribute presence, never `__version__`. Alongside the
-existing duplicate-resolution-hook and Library-construction eras, it detects a
+`harness/beets_compat.py` (`CAPABILITIES`) is the one place a beets-core
+upstream era is ever decided, always by attribute presence, never
+`__version__` (the Discogs plugin's own behaviour seams live in
+`harness/discogs_patches.py`, resolved the same way). Alongside the
+duplicate-resolution-hook, Library-construction, and
+duplicates-query-builder eras (the last absorbed `beets_harness.py`'s
+former inline `Album.duplicates_query` probe — the seam is
+`beets_compat.album_duplicates_query`), it detects a
 **task-metadata era**: unreleased upstream PR #6681 removed
 `ImportTask.cur_artist`/`cur_album` in favour of a cached `ImportTask.source`
 property (a `Source` NamedTuple exposing `.artist`/`.name`), and in the SAME
@@ -555,7 +560,7 @@ Discogs-sourced request, by `beetsplug.discogs.DiscogsPlugin.select_cover_art`.
 Cratedigger's Discogs mirror (`nix/beets.nix`) is built from the CC0 XML
 dumps, which carry **zero artwork**, so the mirror-backed client structurally
 cannot populate `cover_art_url` on its own — it always sees `"images": []`.
-`harness/beets_compat.py::configure_discogs_cover_art_fallback` wraps
+`harness/discogs_patches.py::configure_discogs_cover_art_fallback` wraps
 `select_cover_art` to fall through to ONE authenticated lookup against the
 real `api.discogs.com` for that exact release id whenever the (mirror- or
 stock-)original returns nothing, using `discogs.user_token` from the Beets

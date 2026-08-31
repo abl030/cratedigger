@@ -250,7 +250,7 @@ def _to_beets_shape(entries: list[dict[str, object]]) -> list[Track]:
 def _beets_oracle_groups(entries: list[dict[str, object]]) -> list[tuple[str, str]]:
     """Ground truth for issue #1237's coalescing: run the REAL Beets
     Discogs plugin's own ``_coalesce_tracks`` (the same "modern" cohort
-    ``harness/beets_compat.py`` targets) over Cratedigger's raw entries
+    ``harness/discogs_patches.py`` targets) over Cratedigger's raw entries
     and read off ``(position, title)`` for each resulting physical track.
     ``object.__new__`` bypasses ``DiscogsPlugin.__init__`` (network/config
     setup this call never needs) -- the same construction

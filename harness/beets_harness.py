@@ -20,18 +20,19 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, TextIO, TypeGuard
+from typing import TYPE_CHECKING, TextIO
 
 from beets import config, library, plugins
 from beets.autotag import AlbumInfo, AlbumMatch, TrackInfo, TrackMatch
 from beets.dbcore import Query
 
 try:
-    from harness import beets_compat
+    from harness import beets_compat, discogs_patches
 except ModuleNotFoundError:  # direct wrapper execution puts harness/ first
     beets_compat = importlib.import_module("beets_compat")
+    discogs_patches = importlib.import_module("discogs_patches")
 
 if TYPE_CHECKING:
     # Current Beets imports are type-only. Runtime aliases below deliberately
@@ -154,10 +155,10 @@ def _serialize_track_info(ti: TrackInfo) -> dict[str, object]:
         "disctitle": getattr(ti, "disctitle", None),
         "data_source": getattr(ti, "data_source", None) or "",
         "discogs_indexed_component_count": (
-            beets_compat.discogs_indexed_component_count(ti)
+            discogs_patches.discogs_indexed_component_count(ti)
         ),
         "discogs_indexed_duration_complete": (
-            beets_compat.discogs_indexed_duration_complete(ti)
+            discogs_patches.discogs_indexed_duration_complete(ti)
         ),
     }
 
@@ -394,16 +395,10 @@ def _find_duplicates_with_mapped_release_ids(
 
     tmp_album = library.Album(lib, **info)
     keys = config["import"]["duplicate_keys"]["album"].as_str_seq()
-    if hasattr(library.Album, "duplicates_query"):
-        dup_query = tmp_album.duplicates_query(keys)
-    else:
-        # Beets 2.1 predates Album.duplicates_query; its own ImportTask used
-        # this equivalent query builder. Keep the real-library lookup active
-        # rather than treating a historical API gap as "no duplicates".
-        legacy_all_fields_query = _legacy_all_fields_query(library.Album)
-        dup_query = legacy_all_fields_query(
-            {key: tmp_album[key] for key in keys},
-        )
+    # Beets 2.1 predates Album.duplicates_query; the era decision between it
+    # and the equivalent legacy query builder lives behind the compat
+    # boundary, never inline here (#1278 wx6).
+    dup_query = beets_compat.album_duplicates_query(tmp_album, keys)
 
     # Same exclusion as upstream beets: a task re-importing exactly the same
     # file paths is not a duplicate replacement.
@@ -414,21 +409,6 @@ def _find_duplicates_with_mapped_release_ids(
         if not (album_paths <= task_paths):
             duplicates.append(album)
     return duplicates
-
-
-def _legacy_all_fields_query(model: object) -> Callable[[dict[str, object]], Query]:
-    """Expose Beets 2.1's inherited query classmethod through a typed seam."""
-    method_name = "all_fields_query"
-    candidate = getattr(model, method_name)
-    if not _is_legacy_query_builder(candidate):
-        raise RuntimeError("legacy Album has no callable all_fields_query")
-    return candidate
-
-
-def _is_legacy_query_builder(
-    candidate: object,
-) -> TypeGuard[Callable[[dict[str, object]], Query]]:
-    return callable(candidate)
 
 
 def _install_release_id_duplicate_lookup() -> None:
@@ -833,10 +813,10 @@ def _run_protocol(args: argparse.Namespace) -> None:
     # Load beets configuration
     config.read()
 
-    beets_compat.configure_discogs_subtracks(
+    discogs_patches.configure_discogs_subtracks(
         preserve_flat=args.preserve_discogs_flat_subtracks,
     )
-    beets_compat.configure_discogs_cover_art_fallback()
+    discogs_patches.configure_discogs_cover_art_fallback()
 
     _install_release_id_duplicate_lookup()
 
