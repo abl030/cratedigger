@@ -1,11 +1,13 @@
 """ImportResult + postflight Structs and the stdout sentinel parser.
 
-Extracted verbatim from the monolithic ``lib/quality.py`` (issue #477).
-Pure move: every definition is AST-identical to the original.
+Extracted from the monolithic ``lib/quality.py`` (issue #477) as a pure move.
+``DisambiguationFailure`` joined it later, when ``lib/beets_album_op.py`` — the
+retired selector-op module that had held it since #133 — was deleted (#1278);
+it is the one definition here that did not come from the #477 extraction.
 """
 
 import json
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 import msgspec
 
@@ -111,16 +113,33 @@ class SpectralDetail(msgspec.Struct):
     existing: SpectralAnalysisDetail | None = None
 
 
-# Issue #133 unified the historical ``DisambiguationFailure`` and destructive
-# selector failure payloads. The selector-based path was retired in #762, but
-# ``lib.beets_album_op.BeetsOpFailure`` remains so these aliases preserve old
-# imports (``from lib.quality import DisambiguationFailure`` in the
-# harness, tests/helpers.py, etc). The unified type added a ``selector``
-# field (default ``""``) so old JSON rows with only ``{reason, detail}``
-# still decode cleanly via the ``msgspec.convert(d, type=ImportResult)``
-# call in ``ImportResult.from_dict`` — msgspec defaults fill in any
-# missing key on the nested Struct.
-from lib.beets_album_op import BeetsOpFailure as DisambiguationFailure
+DisambiguationFailureReason = Literal["timeout", "nonzero_rc", "exception"]
+
+
+class DisambiguationFailure(msgspec.Struct, frozen=True):
+    """Typed failure record for the retired post-import ``beet move``.
+
+    Wire-boundary type per ``.claude/rules/code-quality.md`` § "Wire-boundary
+    types": historical ``download_log.import_result`` JSONB rows store exactly
+    this shape under ``postflight.disambiguation_failure``, so the field names,
+    order and defaults are a persisted decode contract — not free to change.
+
+    Issue #133 unified this payload with the destructive selector-op failure
+    record, which is where ``selector`` comes from; the union lived in
+    ``lib/beets_album_op.py`` as ``BeetsOpFailure`` until the selector-based
+    path was retired (#762) and that module was deleted (#1278). Rows written
+    before ``selector`` existed carry only ``{reason, detail}``; the ``""``
+    default is what lets them still decode through the
+    ``msgspec.convert(d, type=ImportResult)`` call in ``ImportResult.from_dict``.
+
+    New imports never emit this: Cratedigger no longer runs post-import
+    ``beet move``. It survives to decode old audit rows and render them
+    (``web/classify.py`` projects ``reason`` onto the Recents card).
+    """
+
+    reason: DisambiguationFailureReason
+    detail: str
+    selector: str = ""
 
 
 class MovedSibling(msgspec.Struct, frozen=True):
