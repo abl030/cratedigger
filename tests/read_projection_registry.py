@@ -26,15 +26,30 @@ A ``Seeder`` is deliberately backend-agnostic: it takes a db that is
 EITHER a real ``PipelineDB`` OR a ``FakePipelineDB`` (they share the
 same duck-typed surface), seeds identical deterministic state, calls
 exactly ONE read-projection method, and returns the projected rows
-flattened to ``list[dict]``. Only KEYS are compared downstream (ids and
-timestamps are backend-assigned/time-anchored), so seeders must never
-put timestamps or random values in row KEYS. Every seeder must produce
->= 1 row on BOTH backends — a vacuous parity check is worthless.
+flattened to ``list[dict]``. ``PARITY_REGISTRY`` compares only KEYS
+(ids and timestamps are backend-assigned/time-anchored), so its seeders
+must never put timestamps or random values in row KEYS. Every seeder
+must produce >= 1 row on BOTH backends — a vacuous parity check is
+worthless.
+
+``VALUE_PARITY_REGISTRY`` (issue #1278 item 7) is the second axis: the
+same backend-agnostic seeder, run on both backends, with every
+non-excluded field compared by VALUE. It gates the mirrors whose values
+are decided by SQL the fake reimplements — whether the key audit
+EXCUSES them (``ALLOWLIST``: a percentile, a computed metric dict) or
+merely HAND-COVERS their key set (a rollup view's aggregate, a
+``DISTINCT ON`` collapse, a view join that decides membership, a
+table's column DEFAULTs). In every case the key set was not the risk:
+what the SQL computes is. Extracting that SQL into shared Python would
+be the wrong fix — the database is the authority on its own
+aggregation — so the gate is on the output. Each excluded field carries
+its own written rationale; see ``ValueExclusion``.
 """
 # ruff: noqa: UP037 - quoted Any annotations are part of the typing ratchet
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -45,6 +60,7 @@ from lib.pipeline_db import (
     PersistedYoutubeRow,
     PipelineDB,
 )
+from lib.quality import CandidateScore
 from tests.fakes import FakePipelineDB
 
 # A seeder takes a db (real ``PipelineDB`` or ``FakePipelineDB``), seeds
@@ -681,4 +697,811 @@ ALLOWLIST: dict[str, str] = {
     "get_search_plan_readiness":
         "computed readiness metric dict — key set assembled in Python, "
         "not a raw SELECT column list",
+}
+
+
+# --------------------------------------------------------------------------
+# VALUE parity (issue #1278 item 7). The key gate above is silent about what
+# an aggregate COMPUTES. Some of the entries below are ALLOWLISTED there (a
+# percentile, a computed metric dict) — those stay allowlisted, since the
+# rationale ("not a raw SELECT column list") is still true — and the rest
+# are merely HAND-COVERED for keys by a test in tests/test_pipeline_db.py.
+# Either way the key set was never the risk: SQL, not the column list,
+# decides their values (view-join membership, a DISTINCT ON collapse, a
+# table's column DEFAULTs).
+#
+# The two legitimate exclusion classes, plus surrogate keys, are spelled
+# once and cited per field; anything else is a real divergence to fix in the
+# fake (production SQL is the authority on its own aggregation).
+# --------------------------------------------------------------------------
+
+#: A backend's own surrogate keys. The suite resets tables with DELETE
+#: (``tests.helpers.delete_all_rows``), which never resets a PostgreSQL
+#: sequence, while ``FakePipelineDB`` counts from 1 in every instance —
+#: so the two ids cannot match, by construction, whatever the seeder does.
+_EXCL_SURROGATE_ID = (
+    "backend-assigned surrogate key — PG sequences keep climbing across the "
+    "suite's DELETE-based reset while the fake counts from 1 per instance"
+)
+
+#: Server clock vs the fake's clock. Real PG stamps ``NOW()`` inside the
+#: statement; the fake calls ``_utcnow()`` in-process. Two different
+#: instants, so any value derived from "the moment the read ran" differs by
+#: however long the two calls were apart.
+_EXCL_WALL_CLOCK = (
+    "wall-clock instant — real PG stamps NOW() server-side, the fake calls "
+    "_utcnow() in-process; the two moments are never the same"
+)
+
+#: Deliberate, documented approximation in the fake's dashboard mirror:
+#: production uses ``percentile_cont`` (interpolating), the fake a
+#: nearest-rank cut. See ``FakePipelineDB.get_pipeline_dashboard_metrics``.
+_EXCL_PERCENTILE = (
+    "percentile — production SQL interpolates with percentile_cont, the fake "
+    "takes a nearest-rank cut (deliberate; the SQL is the authority on exact "
+    "statistics)"
+)
+
+
+@dataclass(frozen=True)
+class ValueExclusion:
+    """One field held out of value parity, with its mandatory rationale.
+
+    Both fields are required positionally, and a blank rationale raises —
+    so an exclusion cannot be written without saying why the two backends
+    are allowed to disagree on it. ``path`` is a dotted path into the
+    projected row (``"totals.known_peers"``), with ``[]`` standing for
+    "every element of this list" (``"days[].new_peers"``); it therefore
+    excludes that field uniformly across rows and list elements rather
+    than one lucky index.
+    """
+
+    path: str
+    rationale: str
+
+    def __post_init__(self) -> None:
+        if not self.path.strip():
+            raise ValueError("a value-parity exclusion needs a field path")
+        if not self.rationale.strip():
+            raise ValueError(
+                f"value-parity exclusion {self.path!r} needs a one-line "
+                f"rationale — say why the two backends may disagree on it"
+            )
+
+
+@dataclass(frozen=True)
+class ValueParityEntry:
+    """One value-gated read mirror: a seeder plus its held-out fields."""
+
+    seeder: Seeder
+    exclusions: tuple[ValueExclusion, ...] = field(default_factory=tuple)
+
+    @property
+    def excluded_paths(self) -> frozenset[str]:
+        return frozenset(exclusion.path for exclusion in self.exclusions)
+
+
+@dataclass(frozen=True)
+class ValueParityResult:
+    """What ``compare_projection_values`` found.
+
+    ``substantive_leaves`` counts compared leaves that are neither ``None``
+    nor an empty/zero value — the non-degeneracy measure. A payload of
+    nothing but nulls, empty lists, and zeros compares equal for free, and
+    that is precisely the vacuous pass this module's header warns about.
+
+    ``excluded_hits`` names every exclusion path the walk actually reached.
+    An exclusion whose field was renamed away, or whose seeder stopped
+    producing it, silently stops excluding anything; the driver asserts
+    every declared path is in here, so a dead exclusion is a failure
+    rather than a comment that quietly became false.
+    """
+
+    mismatches: tuple[str, ...]
+    compared_leaves: int
+    substantive_leaves: int
+    excluded_hits: frozenset[str]
+
+
+def _is_substantive(value: object) -> bool:
+    return value is not None and bool(value)
+
+
+def _compare_node(
+    real: object,
+    fake: object,
+    path: str,
+    excluded: "frozenset[str]",
+    mismatches: "list[str]",
+    counts: "list[int]",
+    hits: "set[str]",
+) -> None:
+    """Recursive value walk. ``counts`` is ``[compared, substantive]``.
+
+    Exclusion matching is EXACT on the full path, never a prefix or
+    substring: excluding ``"id"`` must not also excuse ``mb_release_id``
+    (#1278 item 7 runner survivor S3).
+    """
+    if path in excluded:
+        hits.add(path)
+        return
+    label = path or "<row>"
+    if isinstance(real, dict) or isinstance(fake, dict):
+        if not (isinstance(real, dict) and isinstance(fake, dict)):
+            mismatches.append(
+                f"{label}: real PG returned {type(real).__name__}, "
+                f"FakePipelineDB returned {type(fake).__name__}")
+            return
+        real_keys = set(real)
+        fake_keys = set(fake)
+        if real_keys != fake_keys:
+            mismatches.append(
+                f"{label}: key sets differ — only in real PG "
+                f"{sorted(real_keys - fake_keys)}, only in FakePipelineDB "
+                f"{sorted(fake_keys - real_keys)}")
+        for key in sorted(real_keys & fake_keys):
+            _compare_node(
+                real[key], fake[key],
+                f"{path}.{key}" if path else str(key),
+                excluded, mismatches, counts, hits)
+        return
+    if isinstance(real, list) or isinstance(fake, list):
+        if not (isinstance(real, list) and isinstance(fake, list)):
+            mismatches.append(
+                f"{label}: real PG returned {type(real).__name__}, "
+                f"FakePipelineDB returned {type(fake).__name__}")
+            return
+        if len(real) != len(fake):
+            mismatches.append(
+                f"{label}: real PG returned {len(real)} element(s), "
+                f"FakePipelineDB returned {len(fake)}")
+            return
+        for real_item, fake_item in zip(real, fake, strict=True):
+            _compare_node(
+                real_item, fake_item, f"{path}[]",
+                excluded, mismatches, counts, hits)
+        return
+    counts[0] += 1
+    if _is_substantive(real):
+        counts[1] += 1
+    if real != fake:
+        mismatches.append(
+            f"{label}: real PG {real!r} != FakePipelineDB {fake!r}")
+
+
+def compare_projection_values(
+    real_rows: "list[dict[str, object]]",
+    fake_rows: "list[dict[str, object]]",
+    *,
+    excluded: "frozenset[str]",
+) -> ValueParityResult:
+    """Compare two seeded projections field by field.
+
+    Row count first (a membership difference is the most consequential
+    divergence an aggregate can have), then every non-excluded leaf of
+    every row, recursively.
+    """
+    mismatches: list[str] = []
+    counts = [0, 0]
+    hits: set[str] = set()
+    if len(real_rows) != len(fake_rows):
+        mismatches.append(
+            f"row count: real PG returned {len(real_rows)} row(s), "
+            f"FakePipelineDB returned {len(fake_rows)}")
+    for index, (real_row, fake_row) in enumerate(
+        zip(real_rows, fake_rows, strict=False)
+    ):
+        row_mismatches: list[str] = []
+        _compare_node(
+            real_row, fake_row, "", excluded, row_mismatches, counts, hits)
+        mismatches.extend(f"row {index} {m}" for m in row_mismatches)
+    return ValueParityResult(
+        mismatches=tuple(mismatches),
+        compared_leaves=counts[0],
+        substantive_leaves=counts[1],
+        excluded_hits=frozenset(hits),
+    )
+
+
+# --------------------------------------------------------------------------
+# Value-parity seeders. Same contract as the key seeders, with one extra
+# obligation: seed values that DISTINGUISH. A world where every count is 1
+# and every string is "x" passes a value comparison with two fields swapped.
+# --------------------------------------------------------------------------
+
+#: Deliberately far outside every window under test (the search-summary
+#: view's 14 days, the saturation default of 14, the dashboard's 24h/7d),
+#: so no seeded row can drift across a boundary while the test runs.
+_OUT_OF_WINDOW = timedelta(days=20)
+
+_SEED_ANCHOR: "datetime | None" = None
+
+
+def seed_anchor() -> datetime:
+    """One shared "now" for every value-parity seeder in this process.
+
+    A seeder runs TWICE — once per backend — so a fresh
+    ``datetime.now(UTC)`` inside it would stamp two different instants and
+    make every seeded timestamp differ by the microseconds between the two
+    calls. Anchoring once per process makes seeded timestamps genuinely
+    comparable, which is what lets ``last_search_at`` stay IN the value
+    comparison instead of being excused as wall-clock noise. It is still
+    derived from the real clock, so relative windows (14 days, 24 hours)
+    mean the same thing they mean in production.
+    """
+    global _SEED_ANCHOR
+    if _SEED_ANCHOR is None:
+        _SEED_ANCHOR = datetime.now(UTC)
+    return _SEED_ANCHOR
+
+
+def _stamp_latest_search_log(
+    db: PipelineDB | FakePipelineDB,
+    *,
+    created_at: datetime,
+    plan_strategy: str | None = None,
+) -> None:
+    """Backend-appropriate stamp of the ``search_log`` row just written.
+
+    ``log_search`` takes neither ``created_at`` nor ``plan_strategy`` on
+    EITHER backend (plan context is written only by the plan-attempt
+    loggers, which need a persisted plan), so a window-crossing world has
+    to be stamped after the fact. The two branches write the same logical
+    row; only the mechanism differs, which is the same latitude the
+    ``_seed_*`` helpers already take when a backend needs its own call.
+    ``MAX(id)`` IS the row just written: a seeder runs serially against a
+    database emptied by ``make_db()``, with no concurrent writer.
+    """
+    if isinstance(db, FakePipelineDB):
+        entry = db.search_logs[-1]
+        entry.created_at = created_at
+        entry.plan_strategy = plan_strategy
+        return
+    db._execute(
+        "UPDATE search_log SET created_at = %s, plan_strategy = %s "
+        "WHERE id = (SELECT MAX(id) FROM search_log)",
+        (created_at, plan_strategy),
+    )
+
+
+def _candidate_scores(username: str) -> "list[CandidateScore]":
+    return [CandidateScore(
+        username=username, dir=f"/{username}/album", filetype="flac",
+        matched_tracks=9, total_tracks=10, avg_ratio=0.91,
+        missing_titles=["Missing One"], file_count=11,
+    )]
+
+
+def _seed_search_summary_world(
+    db: PipelineDB | FakePipelineDB,
+) -> "tuple[int, int]":
+    """Two requests whose search history straddles the view's 14-day window.
+
+    Request A carries BOTH in-window and out-of-window rows, so every
+    aggregate the view computes has a different value depending on whether
+    the window is applied. Request B is the must-still-work control: purely
+    in-window, one found search, no rejection reasons.
+
+    The in-window rejection reasons are a deliberate 1-1 TIE
+    (``b_stale_metadata`` logged first, then ``a_count_mismatch``):
+    PostgreSQL's ``MODE() WITHIN GROUP (ORDER BY sl.rejection_reason)``
+    breaks it on the sort order, so the tie is decided by the reason
+    itself, never by insertion order.
+    """
+    now = seed_anchor()
+    request_a = db.add_request(
+        "Value Parity Artist", "Straddling Album", "request",
+        mb_release_id="search-summary-value-parity-a")
+    request_b = db.add_request(
+        "Value Parity Artist", "In Window Album", "request",
+        mb_release_id="search-summary-value-parity-b")
+
+    # --- Out of window: rich values the 14-day cut must throw away. ---
+    db.log_search(
+        request_a, query="ancient wide", outcome="no_match",
+        result_count=0, elapsed_s=9.0, pre_filter_skip_count=7,
+        rejection_reason="c_ancient_only",
+        candidates=_candidate_scores("ancient-peer"))
+    _stamp_latest_search_log(
+        db, created_at=now - _OUT_OF_WINDOW,
+        plan_strategy="ancient_strategy")
+    db.log_search(
+        request_a, query="ancient narrow", outcome="found",
+        result_count=980, elapsed_s=8.0, pre_filter_skip_count=7,
+        rejection_reason="c_ancient_only")
+    _stamp_latest_search_log(
+        db, created_at=now - _OUT_OF_WINDOW + timedelta(hours=1))
+
+    # --- In window: the values both backends must actually report. ---
+    db.log_search(
+        request_a, query="recent one", outcome="no_match",
+        result_count=4, elapsed_s=1.5, pre_filter_skip_count=2,
+        rejection_reason="b_stale_metadata")
+    _stamp_latest_search_log(db, created_at=now - timedelta(days=3))
+    db.log_search(
+        request_a, query="recent two", outcome="no_match",
+        result_count=0, elapsed_s=2.5, pre_filter_skip_count=1,
+        rejection_reason="a_count_mismatch",
+        candidates=_candidate_scores("recent-peer"))
+    _stamp_latest_search_log(
+        db, created_at=now - timedelta(days=2),
+        plan_strategy="recent_strategy")
+    db.log_search(
+        request_a, query="recent three", outcome="exhausted",
+        result_count=960, elapsed_s=3.5)
+    _stamp_latest_search_log(db, created_at=now - timedelta(days=1))
+    # Inside the 14-day window but outside a 7-day one. Without a row in
+    # the 7-14 day band, narrowing the window to 7 days changes nothing
+    # and the mutant survives (#1278 item 7 runner survivor S4). It
+    # carries NO rejection_reason on purpose, so the 1-1 tie above stays
+    # a tie; its counts still move total_searches, near_cap_count and
+    # pre_filter_skips_total when the window narrows.
+    db.log_search(
+        request_a, query="ten days back", outcome="no_match",
+        result_count=955, elapsed_s=4.5, pre_filter_skip_count=6)
+    _stamp_latest_search_log(db, created_at=now - timedelta(days=10))
+
+    db.log_search(
+        request_b, query="control", outcome="found",
+        result_count=12, elapsed_s=0.5, pre_filter_skip_count=3,
+        candidates=_candidate_scores("control-peer"))
+    _stamp_latest_search_log(
+        db, created_at=now - timedelta(hours=6),
+        plan_strategy="control_strategy")
+    return request_a, request_b
+
+
+def _seed_value_get_search_summaries_for_requests(
+    db: PipelineDB | FakePipelineDB,
+) -> "list[dict[str, object]]":
+    request_a, request_b = _seed_search_summary_world(db)
+    # One call per request: the production SELECT has no ORDER BY, so a
+    # single two-id call would compare rows in an arbitrary order.
+    rows: list[dict[str, object]] = []
+    for request_id in (request_a, request_b):
+        summaries = db.get_search_summaries_for_requests([request_id])
+        rows.extend(dict(row) for row in summaries.values())
+    return rows
+
+
+def _seed_value_list_triage_page(
+    db: PipelineDB | FakePipelineDB,
+) -> "list[dict[str, object]]":
+    """``search_not_converting`` membership — the view join, not the rollup.
+
+    Same window question as the summary rollup, one adapter further out:
+    production JOINs ``request_search_summary`` and the fake calls its own
+    ``_compute_search_summary``, so a windowless fake puts a request whose
+    only searches are ancient on an operator worklist production leaves
+    off it.
+    """
+    from lib.triage_service import parse_filter
+
+    now = seed_anchor()
+    ancient_only = db.add_request(
+        "Triage Value Artist", "Ancient Searches Only", "request",
+        mb_release_id="triage-value-parity-ancient", status="wanted")
+    db.log_search(
+        ancient_only, query="ancient", outcome="no_match", result_count=0,
+        elapsed_s=1.0)
+    _stamp_latest_search_log(db, created_at=now - _OUT_OF_WINDOW)
+
+    converting_now = db.add_request(
+        "Triage Value Artist", "Recent Searches", "request",
+        mb_release_id="triage-value-parity-recent", status="wanted")
+    db.log_search(
+        converting_now, query="recent", outcome="no_match", result_count=3,
+        elapsed_s=2.0)
+    _stamp_latest_search_log(db, created_at=now - timedelta(days=2))
+
+    return [
+        dict(row) for row in db.list_triage_page(
+            filter_spec=parse_filter("search_not_converting"),
+            page_size=50,
+            after_request_id=None,
+        )
+    ]
+
+
+def _seed_value_get_saturation_summary(
+    db: PipelineDB | FakePipelineDB,
+) -> "list[dict[str, object]]":
+    """Saturation over the same straddling world — a second window aggregate.
+
+    Request A's ancient rows carry ``LimitReached`` final states and seven
+    pre-filter skips each, so an unwindowed count would inflate every field
+    of the summary at once.
+    """
+    import dataclasses
+
+    request_a, _request_b = _seed_search_summary_world(db)
+    db.log_search(
+        request_a, query="saturated ancient", outcome="no_match",
+        final_state="Completed, ResponseLimitReached",
+        result_count=1000, elapsed_s=7.0, pre_filter_skip_count=5)
+    _stamp_latest_search_log(
+        db, created_at=seed_anchor() - _OUT_OF_WINDOW)
+    db.log_search(
+        request_a, query="saturated recent", outcome="no_match",
+        final_state="Completed, FileLimitReached",
+        result_count=1000, elapsed_s=6.0, pre_filter_skip_count=4)
+    _stamp_latest_search_log(
+        db, created_at=seed_anchor() - timedelta(days=5))
+    return [dataclasses.asdict(db.get_saturation_summary(request_a))]
+
+
+def _seed_value_get_peer_metrics(
+    db: PipelineDB | FakePipelineDB,
+) -> "list[dict[str, object]]":
+    """Peer growth curve — a dense per-day series with a cumulative total."""
+    db.record_peer_observations(["peer-alpha", "peer-beta", "peer-gamma"])
+    # A second pass observes one known peer again and adds one new one, so
+    # ``known_peers`` (4) and the day's ``new_peers`` are not the same
+    # number as the observation count.
+    db.record_peer_observations(["peer-alpha", "peer-delta"])
+    return [dict(db.get_peer_metrics(days=3))]
+
+
+def _seed_value_get_pipeline_dashboard_metrics(
+    db: PipelineDB | FakePipelineDB,
+) -> "list[dict[str, object]]":
+    """The whole dashboard envelope, values and all.
+
+    ``TestDashboardFakeParity`` already gates the SHAPE of this payload —
+    key sets, list lengths, leaf type categories — and explicitly does not
+    compare values. This gates what production's server-side aggregates
+    and the fake's Python mirror each COMPUTE from the same telemetry. The
+    seeded world deliberately gives every counter a different number.
+
+    Search and cycle rows straddle the panels' own 24h/6h cuts: without a
+    row on the far side of a boundary, widening or removing a window
+    changes nothing and the mutant survives (#1278 item 7, reader F7).
+    """
+    now = seed_anchor()
+    request_id = db.add_request(
+        "Dashboard Value Artist", "Dashboard Value Album", "request",
+        mb_release_id="dashboard-value-parity", status="wanted")
+    db.log_search(
+        request_id, query="found q", outcome="found", result_count=5,
+        elapsed_s=2.0, variant="v1", final_state="Completed",
+        browse_time_s=42.0, match_time_s=1.0, peers_browsed=110,
+        peers_browsed_lazy=5, fanout_waves=6)
+    db.log_search(
+        request_id, query="loop", outcome="no_match", elapsed_s=1.0,
+        result_count=0)
+    db.log_search(
+        request_id, query="third", outcome="exhausted", elapsed_s=3.0,
+        result_count=7, peers_browsed=4, fanout_waves=2)
+    # Outside 24h: every searches/outcome/peer counter on both windows
+    # must exclude it.
+    db.log_search(
+        request_id, query="yesterday plus", outcome="found",
+        result_count=11, elapsed_s=7.0, peers_browsed=9, fanout_waves=3)
+    _stamp_latest_search_log(db, created_at=now - timedelta(hours=25))
+    # Inside 24h but outside 6h: only the 6h window may exclude it.
+    db.log_search(
+        request_id, query="this morning", outcome="no_match",
+        result_count=2, elapsed_s=5.0, peers_browsed=6, fanout_waves=1)
+    _stamp_latest_search_log(db, created_at=now - timedelta(hours=9))
+    db.record_cycle_metrics(
+        cycle_total_s=300.0, browse_time_s=20.0, match_time_s=10.0,
+        search_time_s=240.0, peers_browsed=8, fanout_waves=2,
+        find_download_queued=4, find_download_completed=3,
+        cycle_searches_watchdog_killed=1, wanted_total=10)
+    # Outside 24h, so the outlier panel and both cycle windows must drop
+    # it despite its far larger cycle_total_s.
+    db.record_cycle_metrics(
+        completed_at=now - timedelta(hours=26),
+        cycle_total_s=900.0, browse_time_s=60.0, match_time_s=30.0,
+        search_time_s=780.0, peers_browsed=17, fanout_waves=5,
+        find_download_queued=9, find_download_completed=8,
+        cycle_searches_watchdog_killed=2, wanted_total=12)
+    db.record_peer_observations(["dash-peer-a", "dash-peer-b"])
+    # The partition/probe CHECKs on unfindable_run_metrics (migration 077)
+    # are real: categorised + no_change must equal candidates_processed,
+    # and probes_attempted must equal it too when nothing was skipped.
+    db.record_unfindable_run_metrics(
+        cohort_total=10, due_backlog_at_start=6, batch_limit=4,
+        candidates_processed=3, probes_attempted=3, breaker_tripped=False,
+        duration_seconds=12.5, categorised_count=1, no_change_count=2)
+    return [dict(db.get_pipeline_dashboard_metrics())]
+
+
+def _verified_lossless_evidence_id(
+    db: PipelineDB | FakePipelineDB,
+    *,
+    mb_release_id: str,
+    source_path: str,
+) -> int:
+    """Persist one verified-lossless evidence row and return its id.
+
+    Built through ``tests.helpers.make_album_quality_evidence`` so the
+    content-addressed fingerprint is production's own, then read back by
+    that fingerprint exactly as the linking call sites do.
+    """
+    from lib.quality import (
+        AlbumQualityEvidenceFile,
+        AudioQualityMeasurement,
+        VerifiedLosslessProof,
+    )
+    from tests.helpers import make_album_quality_evidence
+
+    evidence = make_album_quality_evidence(
+        mb_release_id=mb_release_id,
+        source_path=source_path,
+        files=[AlbumQualityEvidenceFile(
+            relative_path="01 - joined.flac",
+            size_bytes=987654,
+            mtime_ns=1_700_000_000_000_000_000,
+            extension="flac",
+            container="flac",
+            codec="flac",
+        )],
+        measurement=AudioQualityMeasurement(
+            min_bitrate_kbps=901, avg_bitrate_kbps=934, is_cbr=False,
+            format="FLAC", spectral_grade="genuine",
+            spectral_bitrate_kbps=None, spectral_subject="source",
+            spectral_provenance="measured", cliff_hz=21000,
+            codec_family="lossless", spectral_measurement_version=2,
+        ),
+        verified_lossless_proof=VerifiedLosslessProof(
+            provenance="measured", source="flac",
+            classifier="value-parity-classifier", detail="genuine",
+        ),
+        codec="flac", container="flac", storage_format="FLAC",
+    )
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert persisted is not None and persisted.id is not None
+    return persisted.id
+
+
+def _seed_value_get_wrong_matches(
+    db: PipelineDB | FakePipelineDB,
+) -> "list[dict[str, object]]":
+    """The Wrong Matches queue's ``DISTINCT ON`` collapse, by value.
+
+    Two rejections share a ``failed_path`` (the newest must win, with a
+    distinguishable ``import_result.decision`` on each so the collapse is
+    checked by value and not just by count) and a third has its own. The
+    legacy denorm quality columns are populated so the production
+    ``COALESCE(evidence, denorm)`` fallback is compared with real values
+    rather than a pair of nulls, and both audit blobs are seeded the way
+    production writes them: as JSON strings into JSONB columns.
+
+    Exactly ONE surviving row carries a linked
+    ``album_quality_evidence`` row, so the ``LEFT JOIN``'s two sides are
+    both compared: the joined row's real ``verified_lossless`` /
+    measurement values, and the unjoined row's SQL NULLs. With every row
+    unjoined, forcing the joined branch to ``None`` changes nothing and
+    the mutant survives (#1278 item 7 runner survivor S5).
+    """
+    import json as _json
+
+    request_id = db.add_request(
+        "Wrong Match Artist", "Wrong Match Album", "request",
+        mb_release_id="wrong-match-value-parity",
+        mb_release_group_id="wrong-match-value-parity-rg")
+    log_ids: dict[str, int] = {}
+    for username, path, grade, bitrate, decision in (
+        ("older-peer", "/processing/albums/wrong_matches/first",
+         "C", 190, "superseded_decision"),
+        ("newer-peer", "/processing/albums/wrong_matches/first",
+         "A", 285, "surviving_decision"),
+        ("other-peer", "/processing/albums/wrong_matches/second",
+         "B", 240, "other_path_decision"),
+    ):
+        log_ids[username] = db.log_download(
+            request_id=request_id,
+            soulseek_username=username,
+            outcome="rejected",
+            spectral_grade=grade,
+            spectral_bitrate=bitrate,
+            import_result=_json.dumps({"decision": decision}),
+            validation_result=_json.dumps({
+                "scenario": "high_distance",
+                "distance": 0.25,
+                "failed_path": path,
+            }),
+        )
+    db.set_download_log_candidate_evidence(
+        log_ids["other-peer"],
+        _verified_lossless_evidence_id(
+            db, mb_release_id="wrong-match-value-parity",
+            source_path="/processing/albums/wrong_matches/second"),
+    )
+    return [dict(row) for row in db.get_wrong_matches()]
+
+
+def _seed_value_get_request(
+    db: PipelineDB | FakePipelineDB,
+) -> "list[dict[str, object]]":
+    """A freshly added request, read back field by field.
+
+    ``FakePipelineDB.add_request`` hand-mirrors this table's column
+    DEFAULTs. The key registry's ``get_request`` entry proves the fake
+    returns the same COLUMNS; a default that drifted to the wrong VALUE
+    would sail straight through it.
+
+    The row is then moved to ``downloading`` so ``active_download_state``
+    carries a value: it is a JSONB column written as a JSON string, and a
+    row left at ``wanted`` compares it as ``None`` on both sides — the
+    vacuous pass that hid the fake projecting the raw string (#1278 item
+    7, divergence 6).
+    """
+    request_id = db.add_request(
+        "Default Mirror Artist", "Default Mirror Album", "request",
+        mb_release_id="request-defaults-value-parity",
+        mb_release_group_id="request-defaults-value-parity-rg",
+        year=1998)
+    assert db.set_downloading(
+        request_id,
+        (
+            '{"filetype":"flac",'
+            '"enqueued_at":"2026-07-29T00:00:00+00:00",'
+            '"username":"defaults-peer",'
+            '"attempt_fingerprint":"defaults-fingerprint",'
+            '"files":[{"filename":"01.flac","size":4096}]}'
+        ),
+        expected_status="wanted",
+    )
+    row = db.get_request(request_id)
+    return [dict(row)] if row is not None else []
+
+
+VALUE_PARITY_REGISTRY: dict[str, ValueParityEntry] = {
+    "get_request": ValueParityEntry(
+        seeder=_seed_value_get_request,
+        exclusions=(
+            ValueExclusion("id", _EXCL_SURROGATE_ID),
+            ValueExclusion("created_at", _EXCL_WALL_CLOCK),
+            ValueExclusion("updated_at", _EXCL_WALL_CLOCK),
+            ValueExclusion("last_attempt_at", _EXCL_WALL_CLOCK),
+        ),
+    ),
+    "get_search_summaries_for_requests": ValueParityEntry(
+        seeder=_seed_value_get_search_summaries_for_requests,
+        exclusions=(
+            ValueExclusion("request_id", _EXCL_SURROGATE_ID),
+        ),
+    ),
+    "list_triage_page": ValueParityEntry(
+        seeder=_seed_value_list_triage_page,
+        exclusions=(
+            ValueExclusion("id", _EXCL_SURROGATE_ID),
+        ),
+    ),
+    "get_saturation_summary": ValueParityEntry(
+        seeder=_seed_value_get_saturation_summary,
+    ),
+    # Two deliberate absences, both recorded in VALUE_GATE_EXEMPTIONS or
+    # here so a later reader does not re-derive them:
+    #
+    # get_search_plan_readiness — its CASE ladder already has a dedicated
+    # real-PG value-parity test with a strictly richer world,
+    # ``tests/test_pipeline_db.py::TestPlanReadinessParity`` (all five
+    # buckets, exact counts; #1278 item 7 PR 2). A registry entry would be
+    # a weaker duplicate, not extra coverage.
+    #
+    # get_pipeline_overlay — DECLINED (#1278 item 7, PR 3; flagged for this
+    # PR by PR #1289's body). The fake emulates production's WHERE clause
+    # and join by hand and its own docstring calls that emulation
+    # approximate, so a value entry would either trip on a divergence the
+    # fake is documented to have or dodge it with a world narrow enough to
+    # avoid the approximation — evidence either way, but not about the
+    # seam. ``tests/test_pipeline_db.py::TestGetPipelineOverlay`` holds the
+    # seam with absolute assertions on real PG instead
+    # (``test_maps_known_mbids_with_overlay_fields``,
+    # ``test_matches_and_keys_exact_mb_and_discogs_release_identities``,
+    # ``test_numeric_overlay_supports_legacy_layout_and_prefers_dedicated_column``).
+    "get_peer_metrics": ValueParityEntry(
+        seeder=_seed_value_get_peer_metrics,
+        exclusions=(
+            ValueExclusion("totals.tracked_since", _EXCL_WALL_CLOCK),
+        ),
+    ),
+    "get_wrong_matches": ValueParityEntry(
+        seeder=_seed_value_get_wrong_matches,
+        exclusions=(
+            ValueExclusion("download_log_id", _EXCL_SURROGATE_ID),
+            ValueExclusion("request_id", _EXCL_SURROGATE_ID),
+        ),
+    ),
+    "get_pipeline_dashboard_metrics": ValueParityEntry(
+        seeder=_seed_value_get_pipeline_dashboard_metrics,
+        exclusions=(
+            ValueExclusion("generated_at", _EXCL_WALL_CLOCK),
+            ValueExclusion("cycles.recent[].id", _EXCL_SURROGATE_ID),
+            ValueExclusion("cycles.recent[].created_at", _EXCL_WALL_CLOCK),
+            ValueExclusion("cycles.outliers[].id", _EXCL_SURROGATE_ID),
+            ValueExclusion("cycles.outliers[].created_at", _EXCL_WALL_CLOCK),
+            ValueExclusion("cycles.windows[].median_cycle_s",
+                           _EXCL_PERCENTILE),
+            ValueExclusion("cycles.windows[].median_search_s",
+                           _EXCL_PERCENTILE),
+            ValueExclusion("cycles.windows[].p95_cycle_s", _EXCL_PERCENTILE),
+            ValueExclusion("searches.windows[].median_elapsed_s",
+                           _EXCL_PERCENTILE),
+            ValueExclusion("searches.windows[].p95_elapsed_s",
+                           _EXCL_PERCENTILE),
+            ValueExclusion("coverage.oldest_last_search_at",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("coverage.match_rate_series_24h[].bucket_start",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("coverage.match_rate_series_28d[].bucket_start",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("coverage.top_loop_suspects[].request_id",
+                           _EXCL_SURROGATE_ID),
+            ValueExclusion("coverage.top_loop_suspects[].last_search_at",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("coverage.stale_wanted[].request_id",
+                           _EXCL_SURROGATE_ID),
+            ValueExclusion("coverage.stale_wanted[].last_search_at",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("coverage.stale_wanted[].hours_since_search",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("coverage.wanted_trend.latest_sample_at",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("coverage.wanted_trend.series_24h[].sampled_at",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("coverage.wanted_trend.windows[].start_sample_at",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("coverage.wanted_trend.windows[].end_sample_at",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("coverage.wanted_trend.windows[].delta_per_hour",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("coverage.wanted_trend.windows[].drain_per_hour",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("coverage.wanted_trend.windows[].eta_hours",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("peers.totals.tracked_since", _EXCL_WALL_CLOCK),
+            ValueExclusion("peers.heavy_queries[].search_log_id",
+                           _EXCL_SURROGATE_ID),
+            ValueExclusion("peers.heavy_queries[].request_id",
+                           _EXCL_SURROGATE_ID),
+            ValueExclusion("peers.heavy_queries[].created_at",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("unfindable.recent_runs[].id", _EXCL_SURROGATE_ID),
+            ValueExclusion("unfindable.recent_runs[].created_at",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("unfindable.backlog_trend.latest_sample_at",
+                           _EXCL_WALL_CLOCK),
+            ValueExclusion("unfindable.backlog_trend.series[].sampled_at",
+                           _EXCL_WALL_CLOCK),
+        ),
+    ),
+}
+
+
+#: The substring an ``ALLOWLIST`` rationale uses to say "this mirror is a
+#: SQL-owned aggregate, not a SELECT column list". A bounded substring test
+#: over hand-written rationale prose — deliberately NOT an inference about
+#: what a method does. The rationale grammar is hand-maintained data, like
+#: every other registry in this module; measured 2026-08-31 it selects
+#: exactly the six aggregate entries and nothing else.
+COMPUTED_RATIONALE_MARKER = "computed"
+
+
+#: Read mirrors the key ``ALLOWLIST`` marks as computed aggregates that are
+#: deliberately NOT in ``VALUE_PARITY_REGISTRY``, each with its reason. This
+#: is the value axis's completeness ratchet: without it, an aggregate can be
+#: excused from the KEY gate for being computed and then never value-gated
+#: either, with nothing recording the gap.
+VALUE_GATE_EXEMPTIONS: dict[str, str] = {
+    "get_search_plan_readiness":
+        "value-gated by the hand-written "
+        "tests/test_pipeline_db.py::TestPlanReadinessParity, whose world is "
+        "strictly richer (all five buckets, exact counts); a registry entry "
+        "would be a weaker duplicate",
+    "get_search_plan_stats":
+        "not yet value-gated — a non-vacuous world needs a persisted plan "
+        "plus consumed plan attempts, so the seeder is real work rather "
+        "than a few log_search calls; registered so the gap is visible",
+    "get_unfindable_search_log_signal":
+        "not yet value-gated — its aggregate keys on plan_cycle_snapshot, "
+        "which only the plan-attempt loggers write, so the same persisted-"
+        "plan seeding is required; registered so the gap is visible",
 }

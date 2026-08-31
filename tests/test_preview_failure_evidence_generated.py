@@ -226,15 +226,18 @@ def assert_preview_failure_have_contract(
     audit = observation.audit
     if audit is None:
         raise AssertionError("request-owned preview failure lost its terminal audit")
-    raw_validation = audit.get("validation_result")
-    if not isinstance(raw_validation, str):
+    # ``download_log.validation_result`` is JSONB: whatever the writer
+    # handed it (production writers pass a JSON string), every read of the
+    # terminal audit row returns parsed JSON. Requiring a ``str`` here
+    # described a shape no real read produces (issue #1278 item 7).
+    validation = audit.get("validation_result")
+    if not isinstance(validation, dict):
         raise AssertionError(  # noqa: TRY004 - generated invariant failure
             "terminal audit lost the typed failure payload"
         )
-    detail = json.loads(raw_validation).get("detail")
+    detail = validation.get("detail")
     if not isinstance(detail, str) or not detail:
         raise AssertionError("terminal audit lost the diagnostic detail")
-    validation = json.loads(raw_validation)
     if validation.get("source_path") != observation.expected_failure_source_path:
         raise AssertionError("terminal audit lost the authoritative source path")
     if observation.expected_payload_failed_path is not None:
@@ -861,10 +864,11 @@ class TestPreviewFailureEvidenceCheckerKnownBad(unittest.TestCase):
                 },
             },
             "audit": {
-                "validation_result": json.dumps({
+                # Parsed JSON, the shape a JSONB read returns.
+                "validation_result": {
                     "detail": "decoder failed",
                     "source_path": "/candidate",
-                }),
+                },
                 "beets_detail": "decoder failed",
                 "error_message": "decoder failed",
                 "_current_evidence_id": 7,
@@ -886,16 +890,238 @@ class TestPreviewFailureEvidenceCheckerKnownBad(unittest.TestCase):
         base.update(overrides)
         return PreviewFailureObservation(**base)
 
+    def test_trips_when_the_typed_failure_payload_is_missing(self) -> None:
+        """Known-bad self-test for the payload clause (#1278 item 7).
+
+        The clause used to demand a ``str``, which no JSONB read returns;
+        it now demands the parsed object. Both the absent case and the
+        old string shape must trip it — otherwise the tightening would be
+        a clause that cannot fail.
+        """
+        observed_audit = self._observation().audit
+        assert observed_audit is not None
+        audit = dict(observed_audit)
+        for bad in (None, json.dumps({"detail": "d", "source_path": "/c"})):
+            with self.subTest(validation_result=bad), self.assertRaisesRegex(
+                AssertionError, "typed failure payload",
+            ):
+                assert_preview_failure_have_contract(self._observation(
+                    audit={**audit, "validation_result": bad},
+                ))
+
+    # --- Standing-scope per-clause audit (#1278 item 7) ------------------
+    #
+    # Changing one clause of this checker put every clause under the
+    # per-clause rule. The nine self-tests that already existed cover nine
+    # of them; the block below is the remainder, one world per clause,
+    # each asserting THAT clause's own message. Every world is minimal:
+    # it makes exactly one clause's condition true while every earlier
+    # clause still passes, so a short-circuiting raise cannot mask it.
+
+    def test_trips_when_an_orphan_failure_fabricates_an_audit(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "fabricated an audit owner"):
+            assert_preview_failure_have_contract(
+                self._observation(request_owned=False))
+
+    def test_an_orphan_failure_without_an_audit_is_accepted(self) -> None:
+        """The same clause's must-still-work side: no audit, no complaint."""
+        assert_preview_failure_have_contract(
+            self._observation(request_owned=False, audit=None))
+
+    def test_trips_when_an_owned_failure_has_no_audit(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "lost its terminal audit"):
+            assert_preview_failure_have_contract(
+                self._observation(audit=None))
+
+    def test_trips_when_the_diagnostic_detail_is_missing(self) -> None:
+        observed_audit = self._observation().audit
+        assert observed_audit is not None
+        audit = dict(observed_audit)
+        for bad in (None, ""):
+            with self.subTest(detail=bad), self.assertRaisesRegex(
+                AssertionError, "lost the diagnostic detail",
+            ):
+                assert_preview_failure_have_contract(self._observation(
+                    audit={
+                        **audit,
+                        "validation_result": {
+                            "detail": bad, "source_path": "/candidate"},
+                    }))
+
+    def _force_observation(
+        self, **overrides: object,
+    ) -> PreviewFailureObservation:
+        """A well-formed force world: DB path and payload path differ."""
+        observed_audit = self._observation().audit
+        assert observed_audit is not None
+        base: dict[str, object] = {
+            "expected_payload_failed_path": "/payload",
+            "force_snapshot_path": "/private/snapshot",
+            "force_snapshot_bytes": b"generated database bytes",
+            "force_preview_children": [],
+            "audit": dict(observed_audit),
+        }
+        base.update(overrides)
+        return self._observation(**base)
+
+    def test_a_well_formed_force_world_is_accepted(self) -> None:
+        """Must-still-work: the force clauses do not fire on a good world."""
+        assert_preview_failure_have_contract(self._force_observation())
+
+    def test_trips_when_force_world_conflates_db_and_payload_paths(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            AssertionError, "did not distinguish DB and payload paths",
+        ):
+            assert_preview_failure_have_contract(self._force_observation(
+                expected_payload_failed_path="/candidate"))
+
+    def test_the_two_payload_trust_clauses_are_unreachable_by_construction(
+        self,
+    ) -> None:
+        """Per-clause audit finding: two clauses cannot fire (#1278 item 7).
+
+        ``terminal audit trusted the force payload path`` and ``job preview
+        result trusted the force payload path`` are both dominated by
+        earlier clauses. For either to fire, the audit's (or preview's)
+        ``source_path`` must equal ``expected_payload_failed_path``; but an
+        earlier clause already required it to equal
+        ``expected_failure_source_path``, and ``force world did not
+        distinguish DB and payload paths`` already required those two
+        expectations to DIFFER. No world satisfies all three.
+
+        The rule says delete a clause only when its world is impossible by
+        construction, and say so. It is — but it is also fail-closed
+        legislation against a future reordering of the clauses above it,
+        which is the documented reason to keep such a clause. So both
+        stay, and this test records the derivation and pins the two
+        dominating clauses that actually fire instead.
+        """
+        observed_audit = self._observation().audit
+        assert observed_audit is not None
+        # The audit path leads with "lost the authoritative source path".
+        with self.assertRaisesRegex(
+            AssertionError, "lost the authoritative source path",
+        ):
+            assert_preview_failure_have_contract(self._force_observation(
+                audit={
+                    **dict(observed_audit),
+                    "validation_result": {
+                        "detail": "decoder failed",
+                        "source_path": "/payload",
+                    },
+                },
+            ))
+        # The preview path leads with "did not distinguish DB and payload".
+        with self.assertRaisesRegex(
+            AssertionError, "did not distinguish DB and payload paths",
+        ):
+            assert_preview_failure_have_contract(self._force_observation(
+                expected_payload_failed_path="/candidate"))
+
+    def test_trips_when_the_force_preview_leaks_its_snapshot(self) -> None:
+        for leaked in (None, ["leftover.flac"]):
+            with self.subTest(children=leaked), self.assertRaisesRegex(
+                AssertionError, "leaked its private snapshot",
+            ):
+                assert_preview_failure_have_contract(
+                    self._force_observation(force_preview_children=leaked))
+
+    def test_trips_when_the_job_preview_result_disagrees(self) -> None:
+        for bad_preview in (
+            None,
+            {"detail": "other", "failure": {
+                "detail": "decoder failed", "source_path": "/candidate"}},
+            {"detail": "decoder failed", "failure": None},
+            {"detail": "decoder failed", "failure": {
+                "detail": "decoder failed", "source_path": "/elsewhere"}},
+        ):
+            with self.subTest(preview=bad_preview), self.assertRaisesRegex(
+                AssertionError, "preview result disagrees on the diagnostic",
+            ):
+                assert_preview_failure_have_contract(
+                    self._observation(preview_result=bad_preview))
+
+    def test_trips_when_an_ineligible_failure_rewrites_current_evidence(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            AssertionError, "rewrote existing current evidence",
+        ):
+            assert_preview_failure_have_contract(self._observation(
+                should_prepare=False,
+                before_current_id=3,
+                after_current_id=9))
+
+    def test_trips_when_the_request_fk_and_loaded_evidence_disagree(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            AssertionError, "loaded current evidence disagree",
+        ):
+            assert_preview_failure_have_contract(self._observation(
+                after_current_id=8,
+                audit={
+                    **dict(self._observation().audit or {}),
+                    "_current_evidence_id": 8,
+                }))
+
+    def test_trips_when_current_evidence_belongs_to_another_release(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            AssertionError, "belongs to a different release",
+        ):
+            assert_preview_failure_have_contract(self._observation(
+                expected_mbid="a-different-mbid"))
+
+    def test_trips_when_current_evidence_describes_the_candidate(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            AssertionError, "describes the candidate, not HAVE",
+        ):
+            assert_preview_failure_have_contract(self._observation(
+                expected_path="/library/somewhere-else"))
+
+    def test_trips_when_the_current_evidence_core_is_partial(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "core is partial"):
+            assert_preview_failure_have_contract(self._observation(
+                expected_minimum=111))
+
+    def test_trips_when_current_evidence_lost_the_file_snapshot(self) -> None:
+        evidence = self._observation().current_evidence
+        assert evidence is not None
+        stripped = msgspec.structs.replace(evidence, files=[])
+        with self.assertRaisesRegex(
+            AssertionError, "lost the installed file snapshot",
+        ):
+            assert_preview_failure_have_contract(
+                self._observation(current_evidence=stripped))
+
+    def test_trips_when_the_audit_did_not_project_linked_evidence(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            AssertionError, "did not project linked current evidence",
+        ):
+            assert_preview_failure_have_contract(self._observation(
+                audit={
+                    **dict(self._observation().audit or {}),
+                    "_current_evidence_id": None,
+                }))
+
     def test_trips_when_installed_release_has_no_current_evidence(self) -> None:
         with self.assertRaisesRegex(AssertionError, "without linked HAVE"):
             assert_preview_failure_have_contract(self._observation(
                 after_current_id=None,
                 current_evidence=None,
                 audit={
-                    "validation_result": json.dumps({
+                    "validation_result": {
                         "detail": "decoder failed",
                         "source_path": "/candidate",
-                    }),
+                    },
                     "beets_detail": "decoder failed",
                     "error_message": "decoder failed",
                     "_current_evidence_id": None,
@@ -925,10 +1151,10 @@ class TestPreviewFailureEvidenceCheckerKnownBad(unittest.TestCase):
             assert_preview_failure_have_contract(self._observation(
                 audit={
                     **audit,
-                    "validation_result": json.dumps({
+                    "validation_result": {
                         "detail": "decoder failed",
                         "source_path": "",
-                    }),
+                    },
                 },
             ))
 
@@ -953,10 +1179,10 @@ class TestPreviewFailureEvidenceCheckerKnownBad(unittest.TestCase):
                 },
                 audit={
                     **audit,
-                    "validation_result": json.dumps({
+                    "validation_result": {
                         "detail": "decoder failed",
                         "source_path": source_path,
-                    }),
+                    },
                 },
             ))
 
