@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import subprocess
 import sys
 import textwrap
@@ -48,6 +49,13 @@ class TestIsolatedBeetsHarness(unittest.TestCase):
         session = modules["beets.importer.session"].ImportSession
         task = modules["beets.importer.tasks"].ImportTask
 
+        # Seed the stale-module world deliberately: on a first import in the
+        # process nothing is cached yet, so the identity assertions below
+        # would pass even if the purge list dropped a member (proven by a
+        # surviving mutant in review). A pre-imported harness.discogs_patches
+        # bound to the REAL beets_compat is exactly what the purge must evict.
+        stale_patches = importlib.import_module("harness.discogs_patches")
+
         with isolated_beets_harness(modules) as harness:
             compatibility = harness.beets_compat
             self.assertIs(compatibility, sys.modules["harness.beets_compat"])
@@ -60,6 +68,7 @@ class TestIsolatedBeetsHarness(unittest.TestCase):
             # OUTER beets_compat, minting a foreign BeetsCapabilityError
             # class and leaking its monkeypatch globals across isolations.
             patches = harness.discogs_patches
+            self.assertIsNot(patches, stale_patches)
             self.assertIs(patches, sys.modules["harness.discogs_patches"])
             self.assertIs(patches.beets_compat, compatibility)
             self.assertIs(
