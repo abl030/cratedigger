@@ -2580,9 +2580,15 @@ class TestCoordinatorRunsAsAScript(unittest.TestCase):
 
     `--help` short-circuits inside argparse, before `run_suite`, so this
     drives the real script-mode import boundary without running a suite
-    inside a suite. `PYTHONPATH` is stripped deliberately: with the ambient
-    dev-shell value inherited, the root is importable anyway and the pin
-    would pass with the bootstrap deleted.
+    inside a suite. `PYTHONPATH` is stripped deliberately: when this test
+    runs under the canonical suite or targeted runner, the inherited value
+    is the suite worker's own environment
+    (`scripts/run_python_tests.py::_python_path_environment` prepends
+    `REPO_ROOT`), which makes the root importable anyway, so the pin would
+    pass with the bootstrap deleted. The ambient dev-shell `PYTHONPATH`
+    holds only store site-packages entries and would NOT rescue it —
+    measured during independent review; the strip covers the suite-worker
+    case, which is the one every gating run exercises.
     """
 
     def test_script_mode_resolves_the_substrate_import(self) -> None:

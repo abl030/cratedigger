@@ -34,7 +34,7 @@ evidence.
 2. The helper prints a mode-0700 receipt path under the private runtime tmpfs
 before launching the one canonical underlying command
 (`env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 nix develop --command bash -c "bash scripts/run_tests.sh"`
-since issue #1229 — the receipt's recorded `canonical_command` is still
+since issue #1229 — the receipt's recorded `command` file still holds
 `bash scripts/run_tests.sh`, so `status` compares it unchanged; only the
 launcher around it moved). It saves complete output in
 `output.log`, records the validated private suite-bundle path in `bundle`, then
