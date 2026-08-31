@@ -29,7 +29,7 @@ def make_slskd_files(filenames):
 
 # === Filename extraction tests ===
 
-class TestExtractTitleFromFilename:
+class TestExtractTitleFromFilename(unittest.TestCase):
     def test_standard_dash(self):
         assert _extract_title_from_filename("01 - Enter Sandman.mp3") == _normalize_title("Enter Sandman")
 
@@ -66,7 +66,7 @@ class TestExtractTitleFromFilename:
 
 # === Cross-check: correct matches should PASS ===
 
-class TestCrossCheckPass:
+class TestCrossCheckPass(unittest.TestCase):
     def test_metallica_correct(self):
         tracks = make_tracks([
             "Enter Sandman", "Sad but True", "Holier Than Thou",
@@ -125,7 +125,7 @@ class TestCrossCheckPass:
 
 # === Cross-check: wrong matches should FAIL ===
 
-class TestCrossCheckFail:
+class TestCrossCheckFail(unittest.TestCase):
     def test_weezer_green_vs_blue(self):
         """Green Album files matched against Blue Album expected tracks → FAIL."""
         blue_tracks = make_tracks([
