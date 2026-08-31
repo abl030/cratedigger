@@ -109,3 +109,5 @@
 - [Mutant restore git-checkout trap](feedback_mutant_restore_git_checkout_trap.md) — restoring a mutant via git checkout wipes uncommitted edits in the same file; restore by inverse edit
 - [#1277 dispatch deepening SHIPPED](project_1277_dispatch_request_shipped.md) — 2026-08-26 live-verified; DispatchDB shape guarded by Pyright only; #1278 = debt register
 - [Worktree-isolated git boundaries](feedback_worktree_isolated_git_boundaries.md) — no git outside own worktree for session+subagents; deploy from shared checkout; hash-proof mutant restoration
+- [#1278 pt5 classify render interface shipped](project_1278_pt5_classify_render_interface.md) — classify demoted private, composed render is the pinned interface; PR #1283 live
+- [#1278 items 2+3 shipped](project_1278_items_2_3_shipped.md) — surface-outcome convention + set-intent service + table sweep live 2026-08-31; residue on the issue
