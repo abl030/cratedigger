@@ -941,10 +941,12 @@ console.log('renderPipelineDashboard() composes all 14 cards, in order, each fro
     generated_at: '2026-08-30T16:30:00+00:00',
     redis: { status: 'rs-status-sentinel' },
     coverage: {
+      // No matches_per_hour_* here, deliberately: their absence forces the
+      // composer's one real derivation (withCoverageMatchRates over the
+      // search windows) to run, so deleting that call is a killed mutant,
+      // not a no-op.
       wanted_total: 641,
       wanted_searched_24h: 640,
-      matches_per_hour_6h: 0.5,
-      matches_per_hour_24h: 0.25,
       top_loop_suspects: [{ request_id: 71, artist_name: 'LOOPARTIST', album_title: 'LoopX', searches_24h: 4 }],
       stale_wanted: [{ request_id: 81, artist_name: 'STALE-ARTIST', album_title: 'StaleX', hours_since_search: 30 }],
       wanted_trend: { current_wanted: 741, windows: [{ label: 'TREND-W' }], series_24h: [] },
@@ -958,7 +960,10 @@ console.log('renderPipelineDashboard() composes all 14 cards, in order, each fro
       heavy_queries: [{ created_at: '2026-08-30T11:00:00+00:00', query: 'heavy-query-sentinel' }],
       heavy_query_hours: 24,
     },
-    searches: { windows: [{ label: 'SEARCH-W', searches: 5, hours: 6, outcomes: {} }] },
+    searches: { windows: [
+      { label: 'SEARCH-W', searches: 5, hours: 6, outcomes: { found: 3 } },
+      { label: 'SEARCH-W24', searches: 20, hours: 24, outcomes: { found: 48 } },
+    ] },
     cycles: {
       windows: [{ label: 'CYCLE-W', cycles: 2 }],
       outliers: [{ created_at: '2026-08-30T10:00:00+00:00', cycle_total_s: 47.3 }],
@@ -998,13 +1003,17 @@ console.log('renderPipelineDashboard() composes all 14 cards, in order, each fro
     prev = at;
   }
   assert(ordered, 'the 14 cards appear in the documented order');
+  assert(html.split('dashboard-card-title').length - 1 === titles.length,
+    'exactly 14 card titles render — no duplicated card');
 
   const navAt = html.indexOf('nav-sentinel');
   const headerAt = html.indexOf('dashboard-header');
   assert(navAt !== -1 && headerAt !== -1 && navAt < headerAt,
     'nav strip renders before the dashboard header');
   const headerSlice = html.slice(headerAt, html.indexOf(markers[0]));
-  assertContains(headerSlice, awstDateTime(data.generated_at),
+  const generatedLabel = awstDateTime(data.generated_at);
+  assert(generatedLabel.length > 0, 'header timestamp formatter yields a non-empty needle');
+  assertContains(headerSlice, generatedLabel,
     'generated_at renders in the dashboard header');
 
   /**
@@ -1020,6 +1029,10 @@ console.log('renderPipelineDashboard() composes all 14 cards, in order, each fro
   }
   assertInCard(0, 'rs-status-sentinel', 'Redis card renders data.redis');
   assertInCard(1, '<strong>641</strong>', 'Coverage card renders data.coverage');
+  // Derived, not seeded: 48 found / 24h from the search windows — proves
+  // withCoverageMatchRates ran over data.searches.windows.
+  assertInCard(1, '<strong class="metric-good">2.00</strong>',
+    'Coverage card renders the match rate derived from the search windows');
   assertInCard(2, '<strong>611 / 612</strong>', 'Disk Coverage card renders data.disk_coverage');
   assertInCard(3, 'lc-err-sentinel', 'Library Completeness card renders data.library_completeness');
   assertInCard(4, 'rc-err-sentinel', 'Retag census card renders data.retag_divergence_census');

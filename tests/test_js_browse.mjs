@@ -638,9 +638,10 @@ for (const newestSource of ['mb', 'discogs']) {
   assert.equal(artistBody.innerHTML, newestHtml);
 }
 
-// Artist-search result rows wire window.openBrowseArtist with the exact
-// (id, name) argument order (#1110/#1241 argument-inversion class) — the
-// last unasserted multi-arg onclick handlers on the browse surface.
+// Search result rows wire their onclick handlers with the exact argument
+// order (#1110/#1241 argument-inversion class): window.openBrowseArtist on
+// artist rows and both arms of the release-row ternary — openBrowseArtist
+// for ordinary releases, loadReleaseGroup for VA/masterless ones.
 resetWorld();
 {
   state.browseSearchType = 'artist';
@@ -673,6 +674,28 @@ resetWorld();
     /onclick="window\.openBrowseArtist\(&quot;a2&quot;, &quot;RelArtist&quot;\)"/,
     'non-VA release row onclick routes to the artist page with (id, name) in order');
   state.browseSearchType = 'artist';
+}
+
+resetWorld();
+{
+  state.browseSearchType = 'release';
+  state.browseSource = 'discogs';
+  globalThis.fetch = async () => response(200, {
+    release_groups: [{
+      id: 'm1',
+      discogs_release_id: 'dr9',
+      artist_id: 'a3',
+      artist_name: 'NoMaster',
+      title: 'Masterless',
+      is_master: false,
+    }],
+  });
+  await searchArtists('masterless');
+  assert.match(elements.results.innerHTML,
+    /onclick="window\.loadReleaseGroup\(&quot;dr9&quot;, this, \{source:'discogs',identityKind:'release',masterless:true\}\)"/,
+    'masterless Discogs release row onclick carries (discogs release id, this, load opts) in order');
+  state.browseSearchType = 'artist';
+  state.browseSource = 'mb';
 }
 
 console.log('JS browse fast-pair failure tests passed');

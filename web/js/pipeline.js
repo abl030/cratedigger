@@ -133,7 +133,8 @@ export function setPipelineView(view) {
 /**
  * Render the dashboard cards from cached state into #pipeline-content.
  * The composer takes payload + target element as parameters (so its card
- * wiring is Node-testable); this is the one place that supplies both.
+ * wiring is Node-testable); this is the one production call site that
+ * supplies both.
  */
 function renderDashboard() {
   renderDashboardCards(

@@ -8,11 +8,13 @@
  * `LabelEntity` and release-row contracts the route layer returns
  * are source-agnostic and read identically here.
  *
- * Pure helpers (`applyLabelFilters`, `sortByYearDesc`, `parseYear`,
- * `buildLabelSearchUrl`) are testable via Node — see
- * `tests/test_js_util.mjs`; the search-result render + click wiring is
- * Node-tested in `tests/test_js_labels.mjs`. The remaining render
- * helpers are DOM-bound and verified via playwright.
+ * Much of this module is Node-tested: filters, sorting, URL builders,
+ * and several renderers (`renderLabelLinks`, `renderPaginationControls`,
+ * `renderLabelRows`, ...) in `tests/test_js_util.mjs`, and the
+ * search-result render + click wiring in `tests/test_js_labels.mjs`.
+ * The label-detail page flow (`openLabelDetail`, `closeLabelDetail`,
+ * `goToLabelPage`, `renderLabelDetail`) is DOM-bound and verified via
+ * playwright.
  */
 
 import { state, API, toast } from './state.js';

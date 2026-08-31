@@ -545,6 +545,15 @@ console.log('renderLibraryAlbumRow() wires pipeline-only rows through window.tog
     'pipeline-only row onclick carries (lib-pipeline-<id>, pipeline id) in order');
   assertContains(html, 'id="lib-pipeline-17"',
     'detail placeholder id matches the toggle target');
+
+  const fallback = renderLibraryAlbumRow({
+    id: 42,
+    album: 'No Pipeline Id',
+    track_count: 3,
+    in_library: false,
+  });
+  assertContains(fallback, "window.toggleDetail('lib-pipeline-42', 42)",
+    'row without a pipeline_id falls back to the library row id for both arguments');
 }
 
 console.log('renderLibraryAlbumRow() wires in-library rows through window.toggleLibDetail');

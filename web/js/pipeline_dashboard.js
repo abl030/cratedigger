@@ -1,7 +1,8 @@
 // @ts-check
 // Pipeline Dashboard cards + charts (#434) — split from pipeline.js so
-// queue and dashboard concerns evolve independently. Pure render
-// helpers over the dashboard payload; the queue module owns the nav
+// queue and dashboard concerns evolve independently. Render helpers over
+// the dashboard payload (renderCoverageCard alone still reads the
+// graph-open flags from state); the queue module owns the nav
 // strip and passes its HTML, the payload, and the target element in,
 // keeping this dependency one-way (pipeline.js -> pipeline_dashboard.js)
 // and the composer's card order + payload-key wiring Node-testable
@@ -14,7 +15,9 @@ import { esc, awstDate, awstDateTime, awstTime } from './util.js';
  * Compose the full dashboard (nav, header, all cards) into `el`.
  * @param {string} navHtml - nav strip HTML from the queue module
  * @param {any} data - the /api/pipeline/dashboard payload, or null while loading
- * @param {{ innerHTML: string }} el - target container (#pipeline-content)
+ * @param {{ innerHTML: string }} el - target container (#pipeline-content);
+ *   a missing container is a deliberate hard fail, as before this took
+ *   parameters
  */
 export function renderPipelineDashboard(navHtml, data, el) {
   if (!data) {

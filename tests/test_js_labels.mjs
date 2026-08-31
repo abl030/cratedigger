@@ -65,6 +65,8 @@ console.log('renderLabelSearchResults() renders the empty state without stashing
   const containerEl = { innerHTML: '' };
   renderLabelSearchResults(containerEl, [], () => {});
   assertContains(containerEl.innerHTML, 'No label results', 'empty search renders its empty state');
+  assert(/** @type {any} */ (containerEl)._labelHits === undefined,
+    'empty search never stashes hits on the container');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

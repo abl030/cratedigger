@@ -761,6 +761,23 @@ console.log('Acquisition row wires window.toggleDetail with (acquisition-<id>, i
     'acquisition row onclick carries (acquisition-<request id>, request id)');
   assertContains(html, 'id="acquisition-55"',
     'detail placeholder id matches the toggle target');
+
+  // The YouTube arm is the case where the two arguments DIVERGE (detail
+  // key from the yt download_log id, navigation by request id) — the
+  // non-YouTube row above cannot distinguish a detailKey/item.id mix-up.
+  const yt = renderAcquisitionItems([{
+    id: 202,
+    download_kind: 'youtube_ingest',
+    download_log_id: 301,
+    status: 'processing',
+    album_title: 'YT Album',
+    artist_name: 'YT Artist',
+    created_at: '2026-08-03T12:00:00+00:00',
+  }]);
+  assertContains(yt, "window.toggleDetail('acquisition-youtube-301', 202)",
+    'YouTube acquisition row keys the detail on the yt log id but navigates by request id');
+  assertContains(yt, 'id="acquisition-youtube-301"',
+    'YouTube detail placeholder id matches the toggle target');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
