@@ -1,16 +1,22 @@
 // @ts-check
 // Pipeline Dashboard cards + charts (#434) — split from pipeline.js so
 // queue and dashboard concerns evolve independently. Pure render
-// helpers over `state.pipelineDashboardData`; the queue module owns
-// the nav strip and passes its HTML in, keeping this dependency
-// one-way (pipeline.js -> pipeline_dashboard.js).
+// helpers over the dashboard payload; the queue module owns the nav
+// strip and passes its HTML, the payload, and the target element in,
+// keeping this dependency one-way (pipeline.js -> pipeline_dashboard.js)
+// and the composer's card order + payload-key wiring Node-testable
+// (#1278 item: dashboard composer).
 import { state } from './state.js';
 import { esc, awstDate, awstDateTime, awstTime } from './util.js';
 
 
-export function renderPipelineDashboard(navHtml) {
-  const el = document.getElementById('pipeline-content');
-  const data = state.pipelineDashboardData;
+/**
+ * Compose the full dashboard (nav, header, all cards) into `el`.
+ * @param {string} navHtml - nav strip HTML from the queue module
+ * @param {any} data - the /api/pipeline/dashboard payload, or null while loading
+ * @param {{ innerHTML: string }} el - target container (#pipeline-content)
+ */
+export function renderPipelineDashboard(navHtml, data, el) {
   if (!data) {
     el.innerHTML = `${navHtml}<div class="loading">Loading...</div>`;
     return;
@@ -1064,13 +1070,6 @@ function formatPercent(value) {
   if (value == null || Number.isNaN(Number(value))) return 'n/a';
   return `${(Number(value) * 100).toFixed(1)}%`;
 }
-
-/**
- * Render a single pipeline item row.
- * @param {Object} item
- * @returns {string} HTML string
- */
-
 
 export const __test__ = {
   formatEtaHours,

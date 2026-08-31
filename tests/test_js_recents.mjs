@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_recents.mjs
  */
 
-import { __test__ } from '../web/js/recents.js';
+import { __test__, renderAcquisitionItems } from '../web/js/recents.js';
 import { state } from '../web/js/state.js';
 import { esc } from '../web/js/util.js';
 import { validDualProviderProof } from './fixtures/cd_rip_proof.mjs';
@@ -724,6 +724,43 @@ console.log('renderRecentsItems() surfaces retryable HAVE analysis failures');
   assertContains(html, 'PermissionError: &lt;denied&gt;', 'raw analysis error is visible and escaped');
   assertContains(html, 'remains wanted', 'retryable state copy rendered');
   assertExcludes(html, 'PermissionError: <denied>', 'raw error HTML is never rendered');
+}
+
+console.log('Recents row wires window.toggleDetail with (dl-<log id>, request_id)');
+{
+  const html = renderRecentsFixture([{
+    id: 10,
+    request_id: 41,
+    request_status: 'wanted',
+    created_at: '2026-08-03T12:00:00+00:00',
+    album_title: 'Wired Album',
+    artist_name: 'Wired Artist',
+    badge: 'Imported',
+    badge_class: 'badge-ok',
+    border_color: '#2a2',
+    summary: 'FLAC',
+  }]);
+  // Exact handler + argument order (#1110/#1241 argument-inversion class):
+  // first the detail element key from the download_log id, then request_id.
+  assertContains(html, "window.toggleDetail('dl-10', 41)",
+    'recents row onclick carries (dl-<download_log id>, request_id) in order');
+  assertContains(html, 'id="dl-10"',
+    'detail placeholder id matches the toggle target');
+}
+
+console.log('Acquisition row wires window.toggleDetail with (acquisition-<id>, id)');
+{
+  const html = renderAcquisitionItems([{
+    id: 55,
+    status: 'wanted',
+    album_title: 'Acq Album',
+    artist_name: 'Acq Artist',
+    created_at: '2026-08-03T12:00:00+00:00',
+  }]);
+  assertContains(html, "window.toggleDetail('acquisition-55', 55)",
+    'acquisition row onclick carries (acquisition-<request id>, request id)');
+  assertContains(html, 'id="acquisition-55"',
+    'detail placeholder id matches the toggle target');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

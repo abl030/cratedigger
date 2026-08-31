@@ -10,8 +10,9 @@
  *
  * Pure helpers (`applyLabelFilters`, `sortByYearDesc`, `parseYear`,
  * `buildLabelSearchUrl`) are testable via Node — see
- * `tests/test_js_util.mjs`. Render helpers are DOM-bound and
- * verified via playwright.
+ * `tests/test_js_util.mjs`; the search-result render + click wiring is
+ * Node-tested in `tests/test_js_labels.mjs`. The remaining render
+ * helpers are DOM-bound and verified via playwright.
  */
 
 import { state, API, toast } from './state.js';

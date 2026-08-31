@@ -531,5 +531,36 @@ console.log('Library status controls disable invalid unsearchable transitions');
   assertContains(stopped, 'class="p-btn active-status"', 'unsearchable remains visibly current');
 }
 
+console.log('renderLibraryAlbumRow() wires pipeline-only rows through window.toggleDetail');
+{
+  const html = renderLibraryAlbumRow({
+    id: 42,
+    album: 'Pipeline Only',
+    track_count: 3,
+    in_library: false,
+    pipeline_id: 17,
+  });
+  // Exact handler + argument order (#1110/#1241 argument-inversion class).
+  assertContains(html, "window.toggleDetail('lib-pipeline-17', 17)",
+    'pipeline-only row onclick carries (lib-pipeline-<id>, pipeline id) in order');
+  assertContains(html, 'id="lib-pipeline-17"',
+    'detail placeholder id matches the toggle target');
+}
+
+console.log('renderLibraryAlbumRow() wires in-library rows through window.toggleLibDetail');
+{
+  const html = renderLibraryAlbumRow({
+    id: 42,
+    album: 'In Library',
+    track_count: 3,
+    in_library: true,
+    beets_album_id: 99,
+  });
+  assertContains(html, 'window.toggleLibDetail(99)',
+    'in-library row onclick keys on the beets album id');
+  assertContains(html, 'id="lib-99"',
+    'detail placeholder id matches the toggle target');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
