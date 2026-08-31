@@ -26,6 +26,7 @@ from unittest.mock import MagicMock, patch
 import msgspec
 
 from lib.config import CratediggerConfig
+from lib.context import CratediggerContext
 from lib.dispatch import core as dispatch_core_module
 from lib.dispatch.types import DispatchDB, DispatchOutcome, DispatchRequest
 from lib.import_execution import (
@@ -212,7 +213,7 @@ def _make_ctx(**cfg_overrides: object):
     return ctx
 
 
-def _ctx_cfg(ctx) -> MagicMock:
+def _ctx_cfg(ctx: CratediggerContext) -> MagicMock:
     """The ctx's ``_make_ctx`` MagicMock config, typed for post-hoc
     attribute setting (every ctx in this module carries one)."""
     cfg = ctx.cfg

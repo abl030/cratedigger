@@ -313,11 +313,16 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_integration_slices",
     ),
     # AlbumQualityEvidence-family builders split out of tests/helpers.py
-    # (same #1278 item). The parity builders' consumers are the contract:
-    # the hand-written parity tests and the generated parity property.
+    # (same #1278 item). The parity builders' consumers are the contract
+    # (the hand-written parity tests and the generated parity property);
+    # test_quality_decisions and test_dispatch_core are heavy real
+    # consumers of make_audio_corrupt_validation_report and
+    # make_album_quality_evidence respectively.
     "tests/evidence_helpers.py": (
         "tests.test_quality_classification",
         "tests.test_quality_generated",
+        "tests.test_quality_decisions",
+        "tests.test_dispatch_core",
     ),
     "tests/fakes/beets_contract.py": (
         "tests.test_beets_config_startup",
@@ -358,7 +363,6 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_harness_beets2_contract",
     ),
     "tests/helpers.py": (
-        "tests.test_quality_decisions",
         "tests.test_dispatch_core",
         "tests.test_integration_slices",
         # ``make_socket_file``'s own end-to-end pin, including the
@@ -622,10 +626,10 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # own docstring; ``process_claimed_preview_job`` for import_preview_
     # worker.py, its direct analogue), run against every module found by
     # grepping for real imports of the module under test, PLUS every
-    # module that reaches the entry point indirectly through tests/
-    # dispatch_helpers.py's finalize_claimed_dispatch bridge (a search grep alone
-    # cannot find, since those modules never spell the module's own
-    # name). This list is a QUALIFIED SUBSET chosen for coverage value,
+    # module that reaches the entry point indirectly through
+    # tests/dispatch_helpers.py's finalize_claimed_dispatch bridge (a
+    # search grep alone cannot find, since those modules never spell the
+    # module's own name). This list is a QUALIFIED SUBSET chosen for coverage value,
     # NOT a complete kill set -- an import-name grep is structurally
     # incomplete for the bridge-reached case, and other real consumers
     # likely exist beyond what either search turned up. Preference order

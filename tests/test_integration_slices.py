@@ -3012,9 +3012,10 @@ class TestLocalImportSlice(unittest.TestCase):
 
         # finalize_claimed_dispatch raises `outcome` through the real
         # process_claimed_job when it is a BaseException instance instead
-        # of a DispatchOutcome — the file's established Any-typed bridge,
-        # extended (issue #1176 PR3 review round) so this crash-path test
-        # reuses it instead of calling process_claimed_job directly.
+        # of a DispatchOutcome — tests/dispatch_helpers.py's established
+        # Any-typed bridge, extended (issue #1176 PR3 review round) so this
+        # crash-path test reuses it instead of calling process_claimed_job
+        # directly.
         updated = finalize_claimed_dispatch(
             db, claimed,
             RuntimeError("simulated launched-but-unacknowledged crash"),

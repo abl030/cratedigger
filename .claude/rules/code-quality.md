@@ -142,9 +142,9 @@ fallback.** Two typed bridges exist for this family —
 `tests/dispatch_helpers.py::finalize_claimed_dispatch` (its `db` is the
 one `Any`-typed seam from a `FakePipelineDB` fixture into the
 `PipelineDB`-typed `process_claimed_job`; `job` and `outcome` carry real
-types) and `tests/helpers.py::make_ctx_with_fake_db` (fully typed:
-`FakePipelineDB` in, `CratediggerContext` out, the fake wrapped in
-`FakePipelineDBSource` so production hits a typed surface) — and neither
+types) and `tests/helpers.py::make_ctx_with_fake_db` (typed at the DB
+seam: `FakePipelineDB` in, `CratediggerContext` out, the fake wrapped in
+`FakePipelineDBSource`; `cfg`/`slskd` stay `Any` on purpose) — and neither
 covers the deliberate injections above. So for a new hatch of
 this shape: first ask whether the production function actually needs the
 concrete `PipelineDB` (usually it does not — ~40 narrow DB Protocols
@@ -1044,7 +1044,7 @@ Always use these instead of inventing parallel scaffolding:
 - plus the slskd envelope/event builders, `make_candidate_summary`,
   `delete_all_rows`/`REQUEST_CASCADE_RESET_TABLES`, `make_socket_file`,
   `hermetic_beets_config_defaults`, `own_transfer_keys`,
-  `seed_visible_wrong_match`, `make_requests_http_error`
+  `seed_visible_wrong_match`/`SeededWrongMatch`, `make_requests_http_error`
 
 **`tests/dispatch_helpers.py`** — dispatch/import-lane support (split out of
 `tests/helpers.py`, #1278):

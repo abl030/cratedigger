@@ -93,11 +93,10 @@ regardless of the HTTP status.
 Current consumers in this repo and their state:
 
 - `lib/util.py::trigger_plex_scan` — fixed (PR #236).
-- `lib/util.py::cleanup_disambiguation_orphans` — same latent assumption
-  (`os.path.dirname` then `os.path.isdir` on a relative path). Only runs
-  on the rare `ir.postflight.disambiguated == True` branch so hasn't been
-  noticed; worth a follow-up to either absolutize at one source or harden
-  each consumer.
+- `lib/util.py::cleanup_disambiguation_orphans` — carried the same latent
+  assumption (`os.path.dirname` then `os.path.isdir` on a relative path)
+  on its rare `ir.postflight.disambiguated == True` branch. The function
+  has since been deleted from the codebase, so no follow-up remains.
 - The web UI displays `album_requests.imported_path` as-is — semantics
   there are "relative to the beets library", which is fine for display.
 

@@ -3,10 +3,11 @@
 Split out of ``tests/helpers.py`` (issue #1278, "worth exploring" item 5):
 the bridges from ``FakePipelineDB`` fixtures into typed production
 import/dispatch surfaces (``finalize_claimed_dispatch``,
-``make_database_source_with_fake_db``), the import-queue claim and
-automation-handoff lifecycle helpers, the ``DispatchRequest`` builder, and
-the dispatch-test seam stubs (``noop_quality_gate``,
-``RecordingQualityGate``, ``patch_dispatch_externals``).
+``make_database_source_with_fake_db``, ``pinned_dispatch_authority``), the
+import-queue claim and automation-handoff lifecycle helpers, the
+``DispatchRequest`` builder, and the dispatch-test seam stubs
+(``noop_quality_gate``, ``RecordingQualityGate``,
+``patch_dispatch_externals``).
 """
 
 from __future__ import annotations
@@ -190,17 +191,16 @@ def finalize_claimed_dispatch(
     """Apply a direct dispatch result through the production queue owner.
 
     ``outcome`` is ordinarily the ``DispatchOutcome`` the caller already
-    computed. Passing a ``BaseException`` INSTANCE instead lets a fixture
-    drive ``process_claimed_job``'s own executor-crash handling without
-    hand-rolling a raising ``execute_fn`` at the call site — no existing
-    caller passes one, so this is purely additive and every existing
-    caller's behavior is unchanged. ``db`` is the established,
+    computed. Passing a ``BaseException`` INSTANCE instead drives
+    ``process_claimed_job``'s own executor-crash handling without
+    hand-rolling a raising ``execute_fn`` at the call site —
+    ``tests/test_integration_slices.py``'s launched-but-unacknowledged-
+    crash slice is the caller that does. ``db`` is the established,
     ``Any``-typed bridge from a ``FakePipelineDB`` fixture into the
     ``PipelineDB``-typed ``process_claimed_job``, so a crash-path caller
     reuses it instead of calling ``process_claimed_job`` directly (issue
     #1176 PR3 review round: keeps the tests typing ratchet frozen — no new
-    escape hatch). ``job`` and ``outcome`` carry real types: every caller
-    passes a claimed ``ImportJob`` and a computed outcome, so only the
+    escape hatch). ``job`` and ``outcome`` carry real types, so only the
     fake-vs-concrete DB seam needs the hatch (#1278 helpers split).
     """
     from lib.import_queue import IMPORT_JOB_AUTOMATION
