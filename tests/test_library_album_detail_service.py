@@ -551,7 +551,14 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
         self.assertEqual(detail.mb_albumid, "fixture-mb-id")
         self.assertIsNone(detail.pipeline_id)
 
-    def test_load_library_album_detail_preserves_string_history_json_blobs(self) -> None:
+    def test_load_library_album_detail_parses_history_json_blobs(self) -> None:
+        """History JSONB blobs reach the view as parsed JSON.
+
+        ``import_result`` / ``validation_result`` are JSONB columns, so a
+        production writer's JSON string comes back out of every read as an
+        object. This used to assert the strings back — a shape only the
+        fake produced (issue #1278 item 7).
+        """
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(
             id=88,
@@ -585,17 +592,17 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
         assert detail is not None
         self.assertEqual(
             detail.download_history[0].import_result,
-            json.dumps({
+            {
                 "version": 2,
                 "exit_code": 0,
                 "decision": "import",
-            }),
+            },
         )
         self.assertEqual(
             detail.download_history[0].validation_result,
-            json.dumps({
+            {
                 "failed_path": "/mnt/virtio/music/slskd/failed_imports/Test",
-            }),
+            },
         )
 
     def test_load_library_album_detail_returns_none_when_album_missing(self) -> None:

@@ -102,13 +102,15 @@ class TestBadHashGateThroughPreviewLaneGenerated(unittest.TestCase):
     @given(
         n_tracks=st.integers(min_value=1, max_value=3),
         seed_kind=st.sampled_from(_SEED_KINDS),
+        decoy_first=st.booleans(),
     )
-    @example(n_tracks=1, seed_kind="match")
-    @example(n_tracks=1, seed_kind="wrong_format")
-    @example(n_tracks=3, seed_kind="different_digest")
-    @example(n_tracks=1, seed_kind="empty_table")
+    @example(n_tracks=1, seed_kind="match", decoy_first=False)
+    @example(n_tracks=1, seed_kind="match", decoy_first=True)
+    @example(n_tracks=1, seed_kind="wrong_format", decoy_first=False)
+    @example(n_tracks=3, seed_kind="different_digest", decoy_first=False)
+    @example(n_tracks=1, seed_kind="empty_table", decoy_first=False)
     def test_gate_fires_iff_a_seeded_row_matches_track_bytes(
-        self, n_tracks: int, seed_kind: str,
+        self, n_tracks: int, seed_kind: str, decoy_first: bool,
     ) -> None:
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -118,15 +120,27 @@ class TestBadHashGateThroughPreviewLaneGenerated(unittest.TestCase):
             album_title="Album",
         ))
         digest = hash_audio_content(_FIXTURE_MP3, "mp3")
+        if decoy_first and seed_kind != "empty_table":
+            # Shift the matching row's id off 1, so the expected id can
+            # only come from the seeded row itself — never from the count
+            # ``add_bad_audio_hashes`` returns or a hardcoded constant.
+            db.add_bad_audio_hashes(
+                request_id=42,
+                reported_username="curator",
+                reason="unrelated rip",
+                hashes=[BadAudioHashInput(
+                    hash_value=b"\x01" * len(digest), audio_format="ogg")],
+            )
         expected_bad_hash_id: int | None = None
         if seed_kind == "match":
-            expected_bad_hash_id = db.add_bad_audio_hashes(
+            db.add_bad_audio_hashes(
                 request_id=42,
                 reported_username="curator",
                 reason="exemplar bad rip",
                 hashes=[BadAudioHashInput(
                     hash_value=digest, audio_format="mp3")],
             )
+            expected_bad_hash_id = db.bad_audio_hashes[-1].id
         elif seed_kind == "different_digest":
             db.add_bad_audio_hashes(
                 request_id=42,

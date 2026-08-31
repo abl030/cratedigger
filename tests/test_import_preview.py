@@ -3290,17 +3290,29 @@ class TestBadHashGateReachesPreviewLanes(unittest.TestCase):
             "sine_440.mp3",
         )
         digest = hash_audio_content(Path(fixture), "mp3")
-        bad_hash_id = db.add_bad_audio_hashes(
+        # A decoy row first, so the matching row's id is NOT the row count
+        # add_bad_audio_hashes returns — the expected id must come from the
+        # seeded row itself (reader finding on the first review round: a
+        # mutant hardcoding bad_hash_id=1 survived the count binding).
+        db.add_bad_audio_hashes(
+            request_id=42,
+            reported_username="curator",
+            reason="unrelated rip",
+            hashes=[BadAudioHashInput(
+                hash_value=b"\x01" * len(digest), audio_format="mp3")],
+        )
+        db.add_bad_audio_hashes(
             request_id=42,
             reported_username="curator",
             reason="exemplar bad rip",
             hashes=[BadAudioHashInput(hash_value=digest, audio_format="mp3")],
         )
-        self.assertEqual(bad_hash_id, 1)
+        bad_hash_id = db.bad_audio_hashes[-1].id
+        self.assertGreater(bad_hash_id, 1)
         source = tempfile.mkdtemp(dir=_PREVIEW_SOURCE_ROOT)
         self.addCleanup(shutil.rmtree, source, ignore_errors=True)
         shutil.copy(fixture, os.path.join(source, "01 - Track.mp3"))
-        return db, source, 1
+        return db, source, bad_hash_id
 
     def _single_evidence_row(self, db: FakePipelineDB):
         rows = list(db.album_quality_evidence.values())

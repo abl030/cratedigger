@@ -112,3 +112,6 @@
 - [#1278 pt5 classify render interface shipped](project_1278_pt5_classify_render_interface.md) — classify demoted private, composed render is the pinned interface; PR #1283 live
 - [#1278 items 2+3 shipped](project_1278_items_2_3_shipped.md) — surface-outcome convention + set-intent service + table sweep live 2026-08-31; residue on the issue
 - [#1278 pt4 beets child module shipped](project_1278_pt4_beets_child_shipped.md) — PRs #1282/#1287 live 2026-08-31; per-lane exit-code doctrine; beets_validate waiver stays; deferred debt on the issue
+- [#1278 item 8 wire contract shipped](project_1278_item8_wire_contract.md) — key-set audit + required split live 2026-08-31; reader re-derived every required-field claim
+- [#1278 item 7 fake delegation shipped](project_1278_item7_fake_delegation.md) — PRs #1289/#1291/#1293 live 2026-08-31; extraction-vs-value-parity split; PG POWER overflow fixed; 8 mutant survivors pinned
+- [#1278 pt9 root-coverage rule shipped](project_1278_pt9_root_coverage_rule.md) — PR #1294 live 2026-08-31; audit self-vacation lesson: anchor scope columns externally; new fallback-backed entries need MASKABLE_ENTRY_PINS

@@ -400,7 +400,8 @@ stem>`/`tests.test_<stem>_generated` probes, which are keyed on basename only
 and so miss real coverage filed under the file's full path (e.g.
 `lib/dispatch/core.py`) — yields zero test modules, selection fails the same
 way unless the path is admitted in `LIB_MODULES_WITHOUT_SELECTION_COVERAGE`
-(measured fresh at 35 files, `tests/test_lib_selection_coverage_audit.py`
+(measured fresh at 33 files on 2026-08-31,
+`tests/test_selection_coverage_audit.py`
 proves the registry exact in both directions: no stale admission, no
 unregistered zero-neighbour file). Unlike the tests/-side registry, an
 admitted lib/ gap does not early-return at all — the full resolution already
@@ -412,13 +413,33 @@ a registration that later gains real coverage is selected immediately with
 no code change here (only the now-stale registry entry needs deleting,
 which the audit demands). A changed `scripts/**/*.py` file gets the SAME
 non-early-return, admitted-gap treatment (issue #1248) via
-`SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE` and
-`tests/test_scripts_selection_coverage_audit.py` — the scripts/ mirror of
+`SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE` — the scripts/ mirror of
 the lib/ case above, including the same nested-subdirectory basename-only
 miss (`scripts/pipeline_cli/
 cli.py` probes only `tests.test_cli`, ignoring the `pipeline_cli/`
-component). This is development feedback; the full suite
-remains the exhaustive pre-review boundary.
+component) — and, since #1278 item 9, so does a changed
+`scripts/**/*.sh`: the shell wrappers had no fail-closed story at all
+(`scripts/run_final_gate.sh`'s entry was added by item 6's PR2, the same
+commit that made it a wrapper — through item 6's PR1 and everything
+earlier, editing that file selected nothing), and they now resolve through
+the same `tests.test_<stem>` basename probe or fail closed like their `.py`
+siblings. All three roots are one `ROOT_COVERAGE_RULES` table — root,
+policed suffixes, registry, whether admitted gaps early-return, and the
+unmapped-path message — audited by one parameterized
+`tests/test_selection_coverage_audit.py` that derives its rows from that
+table (with the scope-deciding columns anchored outside it) and proves the
+`lib/`/`scripts/` registries exact in both directions; the `tests/`
+registry's exactness stays with `tests/test_targeted_test_selection.py` and
+`tests/test_negative_coverage_audit.py`. That audit also polices
+`EXACT_PATH_NEIGHBOURS` itself: every named
+module exists, no entry is fully redundant with what the path resolves
+without it, and every entry whose deletion no fail-closed rule would catch
+(because a basename probe or prefix rule still resolves something, or
+because no rule polices that root and suffix) carries an explicit
+`MASKABLE_ENTRY_PINS` pin — single-place deletion can never be silent,
+while deleting an entry AND its pin together stays review-owned, the same
+boundary the typing ratchet has. This is development feedback; the full
+suite remains the exhaustive pre-review boundary.
 
 Always use `nix-shell --run` for Python (`.claude/rules/nix-shell.md`). Direct
 Nix-shell runs are ordinary development feedback; fix their failures in the

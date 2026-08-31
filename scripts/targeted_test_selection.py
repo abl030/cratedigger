@@ -6,6 +6,7 @@ import subprocess
 import sys
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 ALWAYS_AMBIENT_TESTS = (
@@ -116,11 +117,13 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     ),
     "scripts/run_final_gate.sh": (
         # Issue #1278 item 6: this file is now a thin wrapper that execs
-        # scripts/test_substrate.py's `final-gate` subcommand, and nothing
-        # resolves neighbours for a .sh path by basename — so before this
-        # entry, editing the wrapper (or deleting the exec line outright)
-        # selected no test at all. tests.test_final_gate_receipt drives the
-        # real wrapper end to end with a fake `nix` on PATH.
+        # scripts/test_substrate.py's `final-gate` subcommand, and before
+        # this entry, editing the wrapper (or deleting the exec line
+        # outright) selected no test at all. The .sh basename probe added
+        # in item 9 does not rescue it either — there is no
+        # tests/test_run_final_gate.py; the module that drives the real
+        # wrapper end to end with a fake `nix` on PATH is named for the
+        # receipt, not the file.
         "tests.test_final_gate_receipt",
     ),
     "scripts/run_pyright_checks.py": (
@@ -135,9 +138,9 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "scripts/run_targeted_tests.py": (
         "tests.test_targeted_test_selection",
     ),
-    "scripts/targeted_test_selection.py": (
-        "tests.test_targeted_test_selection",
-    ),
+    # scripts/targeted_test_selection.py needs no entry: its basename probe
+    # already resolves exactly tests.test_targeted_test_selection, which is
+    # all its deleted entry ever named (issue #1278 item 9, contract B).
     "scripts/test.sh": (
         "tests.test_targeted_test_selection",
     ),
@@ -178,18 +181,13 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_test_tmpfs",
         "tests.test_world_model_coordinator",
     ),
-    "scripts/test_tmpfs.sh": (
-        # Issue #1208 review D1: this file had NO entry at all — a solo
-        # producer-side edit here (the /proc field index, $$ vs $PPID, the
-        # marker filename/delimiter) selected nothing, so the two mutants
-        # review found surviving were also unreachable by targeted
-        # selection, not just by the test suite's own coverage.
-        # tests.test_test_tmpfs drives this file's real
-        # setup_cratedigger_test_tmpfs end to end, including the real
-        # ".owner" marker round-tripped through
-        # scripts.test_substrate._scratch_tree_owner_dead.
-        "tests.test_test_tmpfs",
-    ),
+    # scripts/test_tmpfs.sh needed a hand-written entry under issue #1208
+    # review D1, when a solo producer-side edit here (the /proc field index,
+    # $$ vs $PPID, the marker filename/delimiter) selected nothing at all.
+    # The .sh basename probe added in #1278 item 9 now resolves exactly the
+    # tests.test_test_tmpfs that entry named, so the entry was pure
+    # redundancy and is gone (contract B); the selection it produced is
+    # unchanged.
     # Shared tests/ infrastructure (issue #1081): none of these are
     # discoverable test modules themselves, so each needs an explicit
     # mapping to the test(s) that actually exercise it. tests/structural_audits/
@@ -908,6 +906,93 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_pipeline_cli",
         "tests.test_pipeline_cli_api_mutations",
     ),
+    # scripts/**/*.sh (issue #1278 item 9). The sixteen shell wrappers had
+    # no fail-closed selection story at all: `_direct_test_candidates` only
+    # ever probed .py paths, so any wrapper without a hand-written entry
+    # resolved zero neighbours SILENTLY -- thirteen of the sixteen,
+    # measured 2026-08-31. scripts/run_final_gate.sh is the instance that
+    # was actually paid for: on main's history the ONLY commit that ever
+    # added its entry is item 6's PR2 (0c3bae8e), the same commit that made
+    # it a wrapper -- so through item 6's PR1 and everything earlier, an
+    # edit to that file selected nothing. The scripts/ root rule now
+    # polices `.sh` too, and the same basename probe resolves five of those
+    # thirteen (daily_beets_tip_update, daily_flake_update,
+    # daily_resource_monitor, fuzz_burst, world_model_burst -- each has a
+    # real tests/test_<stem>.py; test_tmpfs.sh is a sixth probe-resolved
+    # wrapper, but it had an entry and so was never among the thirteen).
+    # The six below need an explicit entry, and
+    # scripts/lint.sh + scripts/mcp-playwright.sh are admitted gaps in
+    # SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE.
+    #
+    # Every entry was verified by READING the referencing test, never by
+    # grepping the filename: for each, the named module either executes the
+    # wrapper as a real subprocess or reads its source and asserts against
+    # its content. A filename in a comment, docstring, or an assertion on
+    # some OTHER file's command string does not qualify -- which is why
+    # tests.test_final_gate_receipt is absent from the run_tests.sh entry
+    # (it asserts the literal "bash scripts/run_tests.sh" as the GATE's
+    # argv, never reading this file), and tests.test_suite_coordinator is
+    # absent from find_dead_code.sh / run_ruff.sh (it likewise pins only
+    # the coordinator's own command tuples).
+    "scripts/find_dead_code.sh": (
+        # tests.test_unused_import_audit's run_full_dead_code_gate and
+        # run_vulture_freshness_world both `subprocess.run(["bash",
+        # <this file>])` for real, and two of its tests read this file's
+        # source and plant mutants in it (the freshness-wiring call, the
+        # --make-whitelist invocation).
+        "tests.test_unused_import_audit",
+    ),
+    "scripts/pin_nixosconfig.sh": (
+        # Both modules run the real script through the deploy-pin fake
+        # command harness, which `subprocess.run([str(script), ...])`s the
+        # path it is handed -- `SCRIPT = REPO_ROOT/"scripts"/
+        # "pin_nixosconfig.sh"`, then `fake.run(SCRIPT)` / `fake.popen(
+        # SCRIPT)` at dozens of sites. The deterministic module also reads
+        # this file's own source for its shell-contract audit (shebang,
+        # zero contract violations, `flock 9` before `worktree add`).
+        "tests.test_deploy_pin_script",
+        "tests.test_deploy_pin_generated",
+    ),
+    "scripts/run_js_checks.sh": (
+        # tests.test_js_suite_audit parses this file's source to prove
+        # every tests/test_js_*.mjs suite is actually reached.
+        # tests.test_suite_coordinator executes it for real in both modes
+        # (`[str(JS_HELPER), mode]`), against a fake node and once against
+        # the real one.
+        "tests.test_js_suite_audit",
+        "tests.test_suite_coordinator",
+    ),
+    "scripts/run_ruff.sh": (
+        # tests.test_unused_import_audit runs `bash scripts/run_ruff.sh`
+        # for real (ruff_findings, run_ruff_gate, the TID251 stdin
+        # control) and plants a non-enforcing mutant in a copy of its
+        # source.
+        "tests.test_unused_import_audit",
+    ),
+    "scripts/run_tests.sh": (
+        # All three read this file's source and pin a distinct property of
+        # it: test_js_suite_audit that it still reaches the coordinator,
+        # test_parallel_test_runner the exact `exec python3
+        # scripts/run_test_suite.py` line, test_world_model_burst that the
+        # standard suite runs neither burst script nor the world-model
+        # module directly. tests.test_unused_import_audit pins the same
+        # coordinator line the first two already cover and is excluded for
+        # cost (it runs real Ruff and Vulture subprocesses).
+        "tests.test_js_suite_audit",
+        "tests.test_parallel_test_runner",
+        "tests.test_world_model_burst",
+    ),
+    "scripts/verify_cratedigger_cycle.sh": (
+        # Both modules run the real verifier through the deploy-cycle fake
+        # command harness, which `subprocess.run([str(script), *args])`s
+        # the path it is handed (`fake.run(SCRIPT, "capture-migrate")`,
+        # `fake.run(SCRIPT, "verify-migrate-ran", ...)`, ...). Neither
+        # reads this file's source -- their only `pinned_source` calls
+        # target the deploy SKILL, not the verifier -- so the coverage
+        # here is real execution, nothing else.
+        "tests.test_deploy_cycle_verifier",
+        "tests.test_deploy_cycle_verifier_generated",
+    ),
 }
 
 #: Shared tests/ modules with NO real consuming test today — an admitted,
@@ -956,12 +1041,12 @@ SHARED_MODULES_WITHOUT_COVERAGE: dict[str, str] = {
 #: rule, or a newly-created tests.test_<stem> module) SELECTS them
 #: immediately, on its very next diff, with no code change here — but the
 #: registration itself goes stale the moment that happens and the entry
-#: must then be deleted, which tests/test_lib_selection_coverage_audit.py
+#: must then be deleted, which tests/test_selection_coverage_audit.py
 #: enforces (issue #1199 review F1: caught by adding a real test module for
 #: a registered path and observing the audit go RED demanding removal — a
 #: prior version of this comment claimed "no code change needed to un-admit
 #: it" at all, which was false; selection self-corrects, the registry does
-#: not). tests/test_lib_selection_coverage_audit.py proves both directions: a
+#: not). tests/test_selection_coverage_audit.py proves both directions: a
 #: registered path that now resolves neighbours (stale — must be removed),
 #: and a lib/**/*.py file with zero neighbours that is NOT registered here
 #: (must be added, or given real coverage). Population is a fresh
@@ -1139,10 +1224,13 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
 }
 
 
-#: Changed `scripts/**/*.py` files whose full neighbour resolution
+#: Changed `scripts/**/*.py` and `scripts/**/*.sh` files whose full
+#: neighbour resolution
 #: (EXACT_PATH_NEIGHBOURS + prefix rules + direct candidates that actually
 #: exist) yields ZERO test modules -- the scripts/ twin of
-#: LIB_MODULES_WITHOUT_SELECTION_COVERAGE (issue #1248).
+#: LIB_MODULES_WITHOUT_SELECTION_COVERAGE (issue #1248; the `.sh` half
+#: joined in #1278 item 9, when the shell wrappers gained the same
+#: fail-closed treatment their `.py` siblings already had).
 #: `_direct_test_candidates` probes only `tests.test_<basename>` for a
 #: scripts/ path (no `_generated` sibling probe, unlike lib/), so a
 #: script whose real coverage
@@ -1155,7 +1243,7 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
 #: that later gains a real EXACT_PATH_NEIGHBOURS entry, prefix rule, or
 #: `tests.test_<stem>` module selects it immediately with no code change
 #: here, and the stale registration is what
-#: `tests/test_scripts_selection_coverage_audit.py` then demands be deleted.
+#: `tests/test_selection_coverage_audit.py` then demands be deleted.
 #:
 #: Population is a fresh measurement (driving the real resolution function
 #: plus a grep-and-read pass over every candidate test file to confirm REAL
@@ -1198,7 +1286,141 @@ SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "so no dotted-import test module can drive its bootstrap or its "
         "delegation into scripts.pipeline_cli.cli.main (issue #1248)"
     ),
+    "scripts/lint.sh": (
+        "measured 2026-08-31: zero neighbours -- tests.test_lint does not "
+        "exist, and a repository-wide grep for the string 'lint.sh' "
+        "matches nothing outside this file: no test, no doc, no Nix "
+        "module, no other script, and not the wrapper itself either. "
+        "It is a "
+        "bare developer convenience wrapper around `nix-shell --run "
+        "pyright` on a hand-typed file list; the canonical typing "
+        "contracts run through scripts/run_pyright_checks.py instead "
+        "(issue #1278 item 9)"
+    ),
+    "scripts/mcp-playwright.sh": (
+        "measured 2026-08-31: zero neighbours -- tests.test_mcp-playwright "
+        "is not even a legal module name, and nothing under tests/ "
+        "mentions this file at all, so no test depends on its contents. "
+        "Its consumers are agent/docs surfaces -- .mcp.json's `command` "
+        "string and the generated .codex/config.toml / "
+        ".codex/agents/playwright.toml beside it, "
+        ".claude/agents/playwright.md, docs/playwright-mcp.md, and two "
+        ".claude/memory notes -- which invoke it by PATH, describe its "
+        "behaviour in prose, or both; none of them is a selectable test, "
+        "so the binary-name resolution and CDP/headless mode selection "
+        "inside it are exercised only by really launching an MCP server "
+        "(issue #1278 item 9)"
+    ),
 }
+
+
+#: The stderr line a registered, genuinely zero-neighbour path logs instead
+#: of raising. One template for every non-early-returning rule below, so
+#: the rules that use it cannot drift in wording.
+ADMITTED_GAP_MESSAGE = (
+    "admitted selection gap: {path} resolves zero test neighbours "
+    "({rationale})"
+)
+
+
+@dataclass(frozen=True)
+class RootCoverageRule:
+    """One repository root's fail-closed zero-neighbour contract.
+
+    The three roots that police under-selection (`tests/`, `lib/`,
+    `scripts/`) had three structurally identical branches in
+    `_changed_path_neighbours`, each with its own registry and its own
+    error string (issue #1278 item 9). This is that shape as data: a root,
+    the file suffixes it polices, its admitted-gap registry, and the exact
+    message an unmapped path raises. The registries themselves stay
+    hand-maintained data — nothing here infers coverage from an import
+    graph.
+
+    Every column is behavioural — this is a table production reads, not
+    documentation. Two of them decide this table's own SCOPE, which is why
+    `tests/test_selection_coverage_audit.py` anchors both against values
+    held outside the table (`EXPECTED_SUFFIXES`,
+    `EXPECTED_ADMITTED_SELECTS_NOTHING`): `suffixes` decides which files a
+    root polices at all (`.sh` joined the `scripts/` row in item 9), and
+    `admitted_selects_nothing` decides WHEN a registered path is honoured
+    AND which rows that audit examines — so without the anchors a table
+    edit could quietly vacate its own policing.
+    The `tests/` registry early-returns BEFORE resolution
+    (a registration must not be a lookalike neighbour set — issue #1081),
+    so a registered `tests/` path never reaches the post-resolution branch
+    at all. The `lib/` and `scripts/` registries do not early-return: full
+    resolution runs first, and a registered path merely logs
+    `ADMITTED_GAP_MESSAGE` on the way out, so a path that later gains real
+    coverage selects it immediately (issues #1199, #1248).
+    """
+
+    root: str
+    suffixes: tuple[str, ...]
+    registry: Mapping[str, str]
+    registry_name: str
+    admitted_selects_nothing: bool
+    unmapped_message: str
+
+    def covers(self, path: PurePosixPath) -> bool:
+        """True when this rule polices ``path``'s root and file suffix."""
+        return path.parts[:1] == (self.root,) and path.suffix in self.suffixes
+
+
+#: Root → admitted-gap registry → fail-closed behaviour, one row per root.
+#: `_changed_path_neighbours` and the import-time double-registration guard
+#: both loop this table, and
+#: `tests/test_selection_coverage_audit.py` parameterizes over it rather
+#: than naming roots by hand.
+ROOT_COVERAGE_RULES: tuple[RootCoverageRule, ...] = (
+    RootCoverageRule(
+        root="tests",
+        suffixes=(".py",),
+        registry=SHARED_MODULES_WITHOUT_COVERAGE,
+        registry_name="SHARED_MODULES_WITHOUT_COVERAGE",
+        admitted_selects_nothing=True,
+        # Names only the real mapping mechanisms — never advertises the
+        # admitted-gap registry as the easy way out (a registration there
+        # is a reviewed admission, issue #1081).
+        unmapped_message=(
+            "unmapped shared test module: {path} — add an "
+            "EXACT_PATH_NEIGHBOURS entry or a prefix rule for it in "
+            "scripts/targeted_test_selection.py"
+        ),
+    ),
+    RootCoverageRule(
+        root="lib",
+        suffixes=(".py",),
+        registry=LIB_MODULES_WITHOUT_SELECTION_COVERAGE,
+        registry_name="LIB_MODULES_WITHOUT_SELECTION_COVERAGE",
+        admitted_selects_nothing=False,
+        unmapped_message=(
+            "unmapped lib module: {path} resolves zero test "
+            "neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
+            "prefix rule for it in scripts/targeted_test_selection.py"
+        ),
+    ),
+    RootCoverageRule(
+        root="scripts",
+        # ``.sh`` joined this row in issue #1278 item 9: the shell wrappers
+        # are entry points with no fail-closed selection story at all until
+        # then. scripts/run_final_gate.sh is the measured case — on main's
+        # history the ONLY commit that ever gave it an entry is item 6's
+        # PR2 (0c3bae8e), the same commit that turned it into a wrapper, so
+        # through item 6's PR1 and everything before it an edit to that file
+        # selected nothing and no audit noticed. ``lib/`` and ``tests/``
+        # hold no ``.sh`` files, so the suffix stays on this row rather than
+        # becoming a global default.
+        suffixes=(".py", ".sh"),
+        registry=SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE,
+        registry_name="SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE",
+        admitted_selects_nothing=False,
+        unmapped_message=(
+            "unmapped scripts module: {path} resolves zero "
+            "test neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
+            "prefix rule for it in scripts/targeted_test_selection.py"
+        ),
+    ),
+)
 
 
 def _assert_no_double_registration(
@@ -1233,17 +1455,26 @@ def _assert_no_double_registration(
         )
 
 
-_assert_no_double_registration(EXACT_PATH_NEIGHBOURS, SHARED_MODULES_WITHOUT_COVERAGE)
-_assert_no_double_registration(
-    EXACT_PATH_NEIGHBOURS,
-    LIB_MODULES_WITHOUT_SELECTION_COVERAGE,
-    gap_registry_name="LIB_MODULES_WITHOUT_SELECTION_COVERAGE",
-)
-_assert_no_double_registration(
-    EXACT_PATH_NEIGHBOURS,
-    SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE,
-    gap_registry_name="SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE",
-)
+def _assert_registries_disjoint(
+    rules: Sequence[RootCoverageRule],
+    exact_path_neighbours: Mapping[str, tuple[str, ...]],
+) -> None:
+    """Run the double-registration guard for EVERY row of a rule table.
+
+    A function rather than an inline import-time loop so a self-test can
+    drive it with a fabricated table whose contradiction sits in the LAST
+    row — truncating the real loop to its first row was otherwise green
+    (issue #1278 item 9 review M24).
+    """
+    for rule in rules:
+        _assert_no_double_registration(
+            exact_path_neighbours,
+            rule.registry,
+            gap_registry_name=rule.registry_name,
+        )
+
+
+_assert_registries_disjoint(ROOT_COVERAGE_RULES, EXACT_PATH_NEIGHBOURS)
 
 
 def _module_path(module: str, repo_root: Path) -> Path:
@@ -1304,9 +1535,21 @@ def ambient_test_modules(repo_root: Path) -> tuple[str, ...]:
 
 
 def _direct_test_candidates(path: PurePosixPath) -> tuple[str, ...]:
+    stem = path.stem
+    if path.parts[:1] == ("scripts",) and path.suffix == ".sh":
+        # The same mechanical basename-only probe every .py root gets, for
+        # the shell wrappers under scripts/ (issue #1278 item 9). Five of
+        # the sixteen already have a tests/test_<stem>.py that drives them
+        # and needed no entry once this probe existed; scripts/test_tmpfs.sh
+        # had a hand-written entry naming exactly the module this probe now
+        # finds, and it was deleted as redundant in the same change. The
+        # caller still checks the candidate really exists via
+        # _existing_module, so this claims nothing: it is a naming
+        # convention, not evidence that the matched module executes or
+        # reads the wrapper.
+        return (f"tests.test_{stem}",)
     if path.suffix != ".py":
         return ()
-    stem = path.stem
     if path.parts[:1] == ("lib",):
         # tests.test_<stem>_generated is the same mechanical basename-only
         # probe as tests.test_<stem> above, just for the generated sibling
@@ -1328,16 +1571,25 @@ def _resolve_neighbours(
     relative_path: str,
     path: PurePosixPath,
     repo_root: Path,
+    *,
+    exact_path_neighbours: Mapping[str, tuple[str, ...]] = EXACT_PATH_NEIGHBOURS,
 ) -> list[str]:
     """The full EXACT_PATH_NEIGHBOURS + self-selector + direct-candidate +
-    prefix-rule resolution, with NEITHER admitted-gap registry's fail-closed
-    check applied yet. Split out of _changed_path_neighbours so both the
-    tests/ and lib/ fail-closed checks can run against the SAME raw result,
-    and so a one-off measurement (issue #1199 item 1's registry population)
-    can call this directly without tripping the fail-closed raise for every
+    prefix-rule resolution, with NO admitted-gap registry's fail-closed check
+    applied yet. Split out of _changed_path_neighbours so every root rule's
+    fail-closed check can run against the SAME raw result, and so a one-off
+    measurement (issue #1199 item 1's registry population) can call this
+    directly without tripping the fail-closed raise for every
     still-unregistered zero-neighbour file.
+
+    ``exact_path_neighbours`` is a kwarg-DI seam (issue #1278 item 9): pass
+    an empty mapping to measure what a path resolves WITHOUT its
+    hand-authored entry — the "would deleting this entry be visible?"
+    question tests/test_selection_coverage_audit.py's maskable-entry pins
+    exist to answer. It is a definition-time default, so a replacement must
+    be passed explicitly; patching the module binding does not reach it.
     """
-    neighbours: list[str] = list(EXACT_PATH_NEIGHBOURS.get(relative_path, ()))
+    neighbours: list[str] = list(exact_path_neighbours.get(relative_path, ()))
     module = _path_module(path)
     if module is not None and module.startswith("tests."):
         neighbours.append(module)
@@ -1381,79 +1633,42 @@ def _changed_path_neighbours(
     relative_path: str,
     repo_root: Path,
 ) -> tuple[str, ...]:
-    if relative_path in SHARED_MODULES_WITHOUT_COVERAGE:
-        # An admitted gap always selects nothing beyond ambient, regardless
-        # of what a prefix rule below would otherwise contribute — a
-        # registration must not be a lookalike neighbour set (issue #1081
-        # review round: mirror_harness.py was registered but the
-        # tests/world_model/ prefix rule below would still have populated
-        # WORLD_MODEL_NEIGHBOURS for it).
-        return ()
     path = PurePosixPath(relative_path)
+    for rule in ROOT_COVERAGE_RULES:
+        if rule.admitted_selects_nothing and relative_path in rule.registry:
+            # An admitted gap on such a rule always selects nothing beyond
+            # ambient, regardless of what a prefix rule would otherwise
+            # contribute — a registration must not be a lookalike neighbour
+            # set (issue #1081 review round: mirror_harness.py was
+            # registered but the tests/world_model/ prefix rule would still
+            # have populated WORLD_MODEL_NEIGHBOURS for it).
+            return ()
     neighbours = _resolve_neighbours(relative_path, path, repo_root)
-    if path.suffix == ".py" and path.parts[:1] == ("tests",) and not neighbours:
-        # A non-test .py file under tests/ with no direct self-selector, no
-        # EXACT_PATH_NEIGHBOURS entry, and no matching prefix rule is shared
-        # test infrastructure nobody has mapped to a consuming test. Silently
-        # dropping it under-selects — the more dangerous failure for a test
-        # selector, since the run reports green having exercised nothing
-        # relevant to the change (issue #1081). Fail closed and name the
-        # file so whoever touches it adds the mapping — or, if it genuinely
-        # has none, registers it in SHARED_MODULES_WITHOUT_COVERAGE (that
-        # registration is a reviewed admission, not something this error
-        # should advertise as the easy way out).
-        raise ValueError(
-            f"unmapped shared test module: {relative_path} — add an "
-            "EXACT_PATH_NEIGHBOURS entry or a prefix rule for it in "
-            "scripts/targeted_test_selection.py"
-        )
-    if path.suffix == ".py" and path.parts[:1] == ("lib",) and not neighbours:
-        # The lib/ twin of the tests/-side check above (issue #1199 item 1,
-        # the durable fix behind #1196 item 4): a changed lib/**/*.py file
-        # that resolves zero test neighbours under-selects silently unless
-        # it is an admitted, reviewed gap. Unlike the tests/ case, an
-        # admitted lib/ gap does not return early above — it reaches here
-        # having already tried every real mechanism — so selection proceeds
-        # (ambient gates still run) but logs loudly naming the admitted gap;
-        # no silent caps.
-        if relative_path in LIB_MODULES_WITHOUT_SELECTION_COVERAGE:
+    if not neighbours:
+        for rule in ROOT_COVERAGE_RULES:
+            # A file this rule polices that resolves zero test neighbours
+            # under-selects — the more dangerous failure for a test
+            # selector, since the run reports green having exercised
+            # nothing relevant to the change (issue #1081). Fail closed and
+            # name the file, unless it is an admitted, reviewed gap.
+            if not rule.covers(path):
+                continue
+            rationale = rule.registry.get(relative_path)
+            if rationale is None:
+                raise ValueError(
+                    rule.unmapped_message.format(path=relative_path)
+                )
+            # Reachable only for a rule that does NOT early-return its
+            # admitted gaps (lib/, scripts/): selection proceeds — ambient
+            # gates still run — but logs loudly naming the gap, so a
+            # registration that later gains real coverage selects it with
+            # no code change here. An admitted_selects_nothing rule's
+            # registered paths returned () above and never reach this.
             print(
-                "admitted selection gap: "
-                f"{relative_path} resolves zero test neighbours "
-                f"({LIB_MODULES_WITHOUT_SELECTION_COVERAGE[relative_path]})",
+                ADMITTED_GAP_MESSAGE.format(
+                    path=relative_path, rationale=rationale
+                ),
                 file=sys.stderr,
-            )
-        else:
-            # Mirrors the tests/-side raise above: names only the real
-            # mapping mechanisms, never advertises the admitted-gap
-            # registry as an easy way out (issue #1199 review F6) — a
-            # registration there is a reviewed admission, made by touching
-            # LIB_MODULES_WITHOUT_SELECTION_COVERAGE directly, not something
-            # this error should suggest as equivalent to real coverage.
-            raise ValueError(
-                f"unmapped lib module: {relative_path} resolves zero test "
-                "neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
-                "prefix rule for it in scripts/targeted_test_selection.py"
-            )
-    if path.suffix == ".py" and path.parts[:1] == ("scripts",) and not neighbours:
-        # The scripts/ twin of the lib/ check above (issue #1248): a changed
-        # scripts/**/*.py file that resolves zero test neighbours
-        # under-selects silently unless it is an admitted, reviewed gap.
-        # Same non-early-return shape as the lib/ branch: selection proceeds
-        # (ambient gates still run) either way, only the stderr/raise
-        # differs.
-        if relative_path in SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE:
-            print(
-                "admitted selection gap: "
-                f"{relative_path} resolves zero test neighbours "
-                f"({SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE[relative_path]})",
-                file=sys.stderr,
-            )
-        else:
-            raise ValueError(
-                f"unmapped scripts module: {relative_path} resolves zero "
-                "test neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
-                "prefix rule for it in scripts/targeted_test_selection.py"
             )
     return tuple(neighbours)
 

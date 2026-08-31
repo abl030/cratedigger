@@ -2423,6 +2423,11 @@ def measure_and_persist_candidate_evidence(
     classify contract does NOT — ``preview_import_from_path`` calls
     ``measure_preimport_state`` without a measure fn, because a synchronous
     operator surface must not block on tens of seconds of CPU per track.
+    (The curator bad-hash gate is different: BOTH lanes run it — a
+    decode-speed per-track content hash when the ``bad_audio_hashes``
+    table is non-empty, comparable to the strict decode
+    ``validate_audio`` already performs on the same call, not a
+    tens-of-seconds capture.)
 
     Flow:
       1. Validate request / mbid / path inputs (return measurement_failed on
