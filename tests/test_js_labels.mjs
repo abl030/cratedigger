@@ -42,6 +42,10 @@ console.log('renderLabelSearchResults() wires each row through window.openLabelD
     "onclick=\"window.openLabelDetailFromList(this.closest('.artist'), 1)\"",
     'second row resolves index 1');
   assertContains(containerEl.innerHTML, 'Second Label', 'row renders the hit name');
+  // Assert the stash in THIS block too — the click-resolution block below
+  // reads the same key, but this render contract must hold on its own.
+  assert(/** @type {any} */ (containerEl)._labelHits?.length === 2,
+    'render stashes the hits array the click resolver reads');
 }
 
 console.log('openLabelDetailFromList() resolves the stashed hit and calls the handler as (id, name)');
@@ -56,7 +60,16 @@ console.log('openLabelDetailFromList() resolves the stashed hit and calls the ha
   assert(calls.length === 1, 'one click resolves exactly one handler call');
   assert(calls[0][0] === '9' && calls[0][1] === 'Second Label',
     'handler receives (String(id), String(name)) for the clicked index, in order');
-  openLabelDetailFromList({ parentElement: containerEl }, 5);
+  // The missing-hit guard must make an out-of-range click a quiet no-op:
+  // assert both halves explicitly so removing the guard fails these
+  // assertions rather than crashing before they evaluate.
+  let threw = false;
+  try {
+    openLabelDetailFromList({ parentElement: containerEl }, 5);
+  } catch (_e) {
+    threw = true;
+  }
+  assert(!threw, 'an out-of-range click never throws');
   assert(calls.length === 1, 'an out-of-range index never reaches the handler');
 }
 
