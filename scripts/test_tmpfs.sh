@@ -1,18 +1,6 @@
 #!/usr/bin/env bash
 # Allocate one isolated RAM-backed scratch directory for the dev shell.
 
-# Field 22 of /proc/<pid>/stat (process start time in clock ticks since
-# boot) — same shape as scripts/run_final_gate.sh's proc_start_ticks and
-# scripts/test_substrate.py's _proc_start_ticks, kept as its own copy here
-# since no shared shell lib exists yet in this repo.
-_cratedigger_test_tmpfs_proc_start_ticks() {
-    local pid=$1 stat
-    [[ -r "/proc/$pid/stat" ]] || return 1
-    stat=$(<"/proc/$pid/stat")
-    stat=${stat##*) }
-    awk '{print $20}' <<<"$stat"
-}
-
 _cleanup_cratedigger_test_tmpfs() {
     local scratch="${_CRATEDIGGER_TEST_TMPDIR:-}"
     local parent="${_CRATEDIGGER_TEST_TMP_PARENT:-}"
@@ -53,7 +41,6 @@ setup_cratedigger_test_tmpfs() {
     local filesystem_type
     local available_bytes
     local mode
-    local _cratedigger_test_tmpfs_owner_ticks
 
     if [[ ! "$minimum_bytes" =~ ^[0-9]+$ ]]; then
         echo "CRATEDIGGER_TEST_RAM_MIN_BYTES must be a non-negative integer" >&2
@@ -129,41 +116,33 @@ setup_cratedigger_test_tmpfs() {
     # Ownership marker (issue #1208 item 1): a "<pid> <ticks>\n" pair naming
     # THIS shell process, written immediately after mktemp so the window
     # during which the directory exists with no marker at all is as small
-    # as possible. Same content shape as scripts/test_substrate.py's own
-    # admission-lock holder identity (issue #1208 review D8: NOT the same
-    # shape as scripts/run_final_gate.sh's helper/gate identity, which
-    # stores pid and start-ticks in two SEPARATE files rather than one
-    # "<pid> <ticks>" line — an earlier version of this comment claimed
-    # otherwise). scripts/test_substrate.py::_scratch_tree_owner_dead reads
-    # it on the reaping side and verifies liveness with the same
-    # pid-reuse-safe start-ticks comparison those two already use — never
-    # on readability alone. A missing or unparseable marker (this write
-    # failing, or a reap racing the tiny window before it lands) is read
-    # as "unknown, never reap", not "abandoned" — fail closed, not fail
-    # open, which is why this write is best-effort: a lost write leaves
-    # the tree unreaped forever rather than wrongly reaped while live.
-    _cratedigger_test_tmpfs_owner_ticks="$(
-        _cratedigger_test_tmpfs_proc_start_ticks "$$" 2>/dev/null
-    )" || _cratedigger_test_tmpfs_owner_ticks=""
-    if [[ -n "$_cratedigger_test_tmpfs_owner_ticks" ]]; then
-        # Issue #1208 review D5: redirections apply LEFT TO RIGHT, so a
-        # `>file 2>/dev/null` order does NOT suppress a failed open of
-        # `file` — bash reports that diagnostic on the still-live original
-        # stderr before the `2>/dev/null` redirection is even installed.
-        # Issue #1208 review D-F5: this ".owner" write is new in this PR
-        # and has never actually run in a real dev shell in the failing
-        # state described below — the finding is a controlled
-        # reproduction, not observed production history. Forcing the
-        # write to fail (a read-only scratch tree) with the OLD ordering
-        # printed an unexplained "Permission denied" naming this hidden
-        # dotfile on real stderr; shell entry itself still succeeded
-        # (TMPDIR still exported) either way. `2>/dev/null` FIRST makes
-        # stderr point at /dev/null before the `>` open is attempted, so
-        # that failure diagnostic (like everything else here) is
-        # genuinely silent — verified the same way, with the corrected
-        # ordering.
-        printf '%s %s\n' "$$" "$_cratedigger_test_tmpfs_owner_ticks" \
-            2>/dev/null >"$_CRATEDIGGER_TEST_TMPDIR/.owner" || true
+    # as possible. scripts/test_substrate.py::_scratch_tree_owner_dead reads
+    # it on the reaping side and verifies liveness with a pid-reuse-safe
+    # start-ticks comparison — never on readability alone. A missing or
+    # unparseable marker (this write failing, or a reap racing the tiny
+    # window before it lands) is read as "unknown, never reap", not
+    # "abandoned" — fail closed, not fail open, which is why this write is
+    # best-effort: a lost write leaves the tree unreaped forever rather
+    # than wrongly reaped while live.
+    #
+    # Issue #1278 item 6: the marker's FORMAT and the /proc start-ticks read
+    # behind it now live in exactly one place, beside the reader that
+    # consumes them, rather than in a bash copy here that could drift from
+    # it silently. The CLI is best-effort by construction (it exits 0 on
+    # every failure and writes nothing), and the two guards on the call
+    # itself keep that true from this side as well: `[[ -f ... ]]` skips
+    # the marker entirely for a shell whose working directory is not the
+    # repository root (no marker written, so that tree is simply never
+    # reaped — every real entry path is the repository root: `nix develop`
+    # and `nix-shell` resolve the flake/shell there, and scripts/test.sh
+    # and the gate both run from it), and `|| true` keeps a lost marker
+    # from failing shell entry itself. Both redirections are here rather
+    # than inside the CLI because a shell hook must stay silent on stdout
+    # (its caller reads TMPDIR from there) and on stderr (issue #1208
+    # review D5).
+    if [[ -f scripts/test_substrate.py ]]; then
+        python3 scripts/test_substrate.py write-owner-marker \
+            "$_CRATEDIGGER_TEST_TMPDIR" "$$" >/dev/null 2>&1 || true
     fi
 
     trap _exit_cratedigger_test_tmpfs EXIT

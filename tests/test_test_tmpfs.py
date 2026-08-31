@@ -8,6 +8,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -23,6 +24,7 @@ from tests._source_pins import pinned_source
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TMPFS_SETUP = REPO_ROOT / "scripts" / "test_tmpfs.sh"
+SUBSTRATE_CLI = REPO_ROOT / "scripts" / "test_substrate.py"
 NIX_SHELL = REPO_ROOT / "nix" / "shell.nix"
 TMPFS_SETUP_AND_PRINT_TMPDIR = (
     'source "$1" && setup_cratedigger_test_tmpfs && printf "%s" "$TMPDIR"'
@@ -504,6 +506,93 @@ class ScratchTreeOwnershipMarkerTestCase(unittest.TestCase):
             if tree is not None and tree.exists():
                 tree.chmod(0o700)
                 shutil.rmtree(tree, ignore_errors=True)
+
+
+class OwnerMarkerCliTestCase(unittest.TestCase):
+    """Issue #1278 item 6: ``scripts/test_tmpfs.sh`` no longer writes the
+    ``.owner`` marker itself — it execs ``write-owner-marker`` on
+    ``scripts/test_substrate.py``, so the marker's format and the ``/proc``
+    start-ticks read behind it exist once, beside the reader that consumes
+    them. That makes the CLI a writer of a namespace another process reads,
+    so it is pinned by composing the REAL writer with the REAL reader over
+    a real process, never by asserting the file's bytes on either side
+    (code-quality.md, "Invariants live at the widest boundary").
+
+    ``ScratchTreeOwnershipMarkerTestCase`` above still drives the shell
+    end to end; this covers the CLI's own contract, including the
+    best-effort failure posture that the shell's ``|| true`` would
+    otherwise hide.
+    """
+
+    def _write_marker(self, tree: Path, pid: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(SUBSTRATE_CLI),
+                "write-owner-marker",
+                str(tree),
+                str(pid),
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def _scratch_tree(self) -> Path:
+        tree = Path(tempfile.mkdtemp(prefix=SCRATCH_TREE_PREFIX))
+        self.addCleanup(shutil.rmtree, tree, True)
+        return tree
+
+    def test_marker_reads_alive_then_dead_across_the_owner_exiting(self) -> None:
+        """THE writer<->reader binding proof for the CLI. The marker names a
+        real, live process, so the real reader must report NOT dead; once
+        that process is gone and reaped, the same marker must flip the same
+        reader's verdict to dead."""
+        tree = self._scratch_tree()
+        owner = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(owner.wait)
+        self.addCleanup(owner.kill)
+
+        completed = self._write_marker(tree, owner.pid)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(completed.stderr, "")
+        self.assertTrue((tree / SCRATCH_TREE_OWNER_MARKER_NAME).is_file())
+        self.assertFalse(
+            _scratch_tree_owner_dead(tree),
+            "the owning process is alive but the marker the CLI wrote for "
+            "it was read as dead",
+        )
+
+        owner.kill()
+        owner.wait(timeout=5)
+
+        self.assertTrue(
+            _scratch_tree_owner_dead(tree),
+            "the owning process is confirmed dead but the marker the CLI "
+            "wrote for it was read as alive",
+        )
+
+    def test_a_failed_write_stays_silent_and_leaves_the_tree_unreapable(
+        self,
+    ) -> None:
+        """Best-effort, fail-closed: a marker that cannot be written must
+        not fail the shell entry that asked for it (exit 0, nothing on
+        either stream), and the unmarked tree must read as unknown — never
+        reaped — rather than as abandoned."""
+        tree = self._scratch_tree()
+        self.addCleanup(tree.chmod, 0o700)
+        tree.chmod(0o500)
+
+        completed = self._write_marker(tree, os.getpid())
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(completed.stderr, "")
+        self.assertFalse((tree / SCRATCH_TREE_OWNER_MARKER_NAME).exists())
+        self.assertFalse(_scratch_tree_owner_dead(tree))
 
 
 if __name__ == "__main__":

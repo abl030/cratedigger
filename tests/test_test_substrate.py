@@ -1,10 +1,13 @@
 """Pin the shared test-runtime substrate's standard-library-only boundary.
 
 ``scripts/test_substrate.py`` is the one home for admission, headroom,
-``/proc`` liveness, reaping, and the on-disk names those formats use (issue
-#1278 item 6). The shell-side copies of those same facts run BEFORE the Nix
-dev shell exists, so the module has to stay importable with nothing but a
-bare interpreter: no ``msgspec``, no ``lib/``, no ``tests/``.
+``/proc`` liveness, reaping, the final gate, and the on-disk names those
+formats use (issue #1278 item 6). Two shell wrappers exec it BEFORE the Nix
+dev shell exists — ``scripts/run_final_gate.sh``, whose gate is what
+launches ``nix develop`` in the first place, and ``scripts/test_tmpfs.sh``,
+whose shell hook marks the scratch tree it is still setting up — so the
+module has to stay importable with nothing but a bare interpreter: no
+``msgspec``, no ``lib/``, no ``tests/``.
 
 Two independent instruments, because either alone is weak. The AST audit is a
 deliberately bounded, single-file syntactic check (it reads one named file and

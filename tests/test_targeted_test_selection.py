@@ -95,14 +95,15 @@ class TestTargetedTestSelection(unittest.TestCase):
         self,
     ) -> None:
         """Issue #1278 item 6: `scripts/test_substrate.py` owns the admission
-        lock, headroom floors, `/proc` liveness and both reapers, but its
-        basename resolves only `tests.test_test_substrate` -- which pins the
-        stdlib-only import boundary and nothing else. Without the
-        EXACT_PATH_NEIGHBOURS entry, editing the reaper would select no test
-        that runs it, and the scripts-selection coverage audit would still
-        pass (it only requires at least one neighbour, and the basename
-        candidate satisfies that trivially). Drive the real resolution so
-        deleting the entry goes RED here.
+        lock, headroom floors, `/proc` liveness, both reapers and the final
+        gate itself, but its basename resolves only
+        `tests.test_test_substrate` -- which pins the stdlib-only import
+        boundary and nothing else. Without the EXACT_PATH_NEIGHBOURS entry,
+        editing the reaper (or the gate's status ladder) would select no
+        test that runs it, and the scripts-selection coverage audit would
+        still pass (it only requires at least one neighbour, and the
+        basename candidate satisfies that trivially). Drive the real
+        resolution so deleting the entry goes RED here.
         """
         selected = expand_test_selection(
             (),
@@ -112,11 +113,30 @@ class TestTargetedTestSelection(unittest.TestCase):
 
         self.assertTrue(
             {
+                "tests.test_final_gate_receipt",
                 "tests.test_suite_coordinator",
                 "tests.test_test_tmpfs",
             }.issubset(selected),
             selected,
         )
+
+    def test_final_gate_wrapper_change_selects_the_gate_contract_tests(
+        self,
+    ) -> None:
+        """The wrapper is a `.sh` file, so nothing resolves a neighbour for
+        it by basename the way `_direct_test_candidates` does for Python
+        modules -- before its EXACT_PATH_NEIGHBOURS entry, deleting the one
+        `exec` line that reaches the real gate selected nothing at all, and
+        no coverage audit noticed (the scripts/ registry audits only
+        `scripts/**/*.py`).
+        """
+        selected = expand_test_selection(
+            (),
+            changed_paths=("scripts/run_final_gate.sh",),
+            repo_root=REPO_ROOT,
+        )
+
+        self.assertIn("tests.test_final_gate_receipt", selected)
 
     def test_pipeline_db_change_adds_shared_boundary_contracts(self) -> None:
         selected = expand_test_selection(

@@ -455,13 +455,17 @@ unlike the headroom minimum below; expiry is exit-2-indistinguishable from a
 genuine infrastructure failure, a stated residual), printing progress naming
 the contended lockfile and, only when a stored pid+start-ticks pair is BOTH
 present AND verified currently live (`_proc_start_ticks(pid) == ticks`, the
-same `same_process` liveness check `run_final_gate.sh` already uses), the
+same liveness comparison the final gate's own receipt identities use — one
+implementation since #1278 item 6 moved that gate into this same module), the
 current holder's identity — never an unverified one, since the identity is
 cleared on release but a write can itself be lost to the very exhaustion
 this PR exists for, so a stale or unreadable value falls back to the plain
 lockfile-path message rather than confidently naming a dead process
 (`_write_lock_holder_identity` / `_read_lock_holder_identity`, mirroring
-`run_final_gate.sh`'s own helper/gate identity precedent). Since the shellHook's own
+the final gate's own helper/gate identity precedent — `scripts/run_final_gate.sh`
+is a thin wrapper over `scripts/test_substrate.py`'s `final-gate` subcommand
+since #1278 item 6, so both identities are written and read by one module,
+never by a bash copy). Since the shellHook's own
 entry-time headroom check (`scripts/test_tmpfs.sh`) runs BEFORE this lock is
 even reached, a naive second suite would still die at shell entry under
 contention with the old unnamed message instead of queueing — so every

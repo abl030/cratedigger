@@ -11,6 +11,8 @@ import time
 import unittest
 from pathlib import Path
 
+from tests._source_pins import pinned_source
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HELPER = REPO_ROOT / "scripts" / "run_final_gate.sh"
 
@@ -331,3 +333,40 @@ class FinalGateReceiptTestCase(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("usage", result.stderr)
+
+
+class FinalGateWrapperTestCase(unittest.TestCase):
+    """The gate is Python; the ``.sh`` is a wrapper (issue #1278 item 6).
+
+    Every other test in this file drives the wrapper as a black box and so
+    passes whether the logic behind it is bash or Python. These two name
+    the split itself: one canonical implementation, reached by an ``exec``,
+    with no second copy of the gate left behind in shell. Same shape as
+    ``scripts/run_tests.sh``'s own wrapper pin
+    (``tests/test_parallel_test_runner.py::TestRunTestsWiring``).
+    """
+
+    def test_the_wrapper_execs_the_substrate_cli(self) -> None:
+        self.assertIn(
+            'exec python3 "$here/test_substrate.py" final-gate "$@"',
+            pinned_source(HELPER),
+        )
+
+    def test_the_wrapper_keeps_no_copy_of_the_gate_it_delegates(self) -> None:
+        """Read through ``pinned_source``, so a spelling that survives only
+        inside a comment is correctly ignored — a comment naming
+        ``nix develop`` is documentation, while a command running it is a
+        second implementation.
+        """
+        source = pinned_source(HELPER)
+
+        for spelling in (
+            "/proc/",
+            "cratedigger-final-gate.",
+            "gate_start_ticks",
+            "helper_start_ticks",
+            "nix develop",
+            "bash scripts/run_tests.sh",
+        ):
+            with self.subTest(spelling=spelling):
+                self.assertNotIn(spelling, source)

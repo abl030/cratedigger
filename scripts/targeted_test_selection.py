@@ -94,6 +94,15 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "pyrightconfig.production.json": (
         "tests.test_pyright_checks",
     ),
+    "scripts/run_final_gate.sh": (
+        # Issue #1278 item 6: this file is now a thin wrapper that execs
+        # scripts/test_substrate.py's `final-gate` subcommand, and nothing
+        # resolves neighbours for a .sh path by basename — so before this
+        # entry, editing the wrapper (or deleting the exec line outright)
+        # selected no test at all. tests.test_final_gate_receipt drives the
+        # real wrapper end to end with a fake `nix` on PATH.
+        "tests.test_final_gate_receipt",
+    ),
     "scripts/run_pyright_checks.py": (
         "tests.test_pyright_checks",
     ),
@@ -131,9 +140,16 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # exhaustion identity), tests.test_parallel_test_runner (the same
         # identity mid-run) and tests.test_targeted_test_selection (the
         # admission lockfile a targeted run waits on).
+        # tests.test_final_gate_receipt joined the list in the item-6
+        # follow-up PR, when the final gate itself moved here out of bash:
+        # scripts/run_final_gate.sh is now a wrapper, so the receipt
+        # format, the gate's argv, its signal semantics and the whole
+        # status ladder are this file's behaviour and nothing else drives
+        # them.
         # tests.test_targeted_test_selection also pins this very entry's
         # resolved selection, so deleting it goes RED there instead of
         # falling silently back to the basename candidate.
+        "tests.test_final_gate_receipt",
         "tests.test_fuzz_burst",
         "tests.test_parallel_test_runner",
         "tests.test_suite_coordinator",
