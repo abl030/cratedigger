@@ -1187,7 +1187,7 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             FaultInjectingPipelineDB,
             InjectedTerminalWriteFailure,
         )
-        from web.classify import LogEntry, classify_log_entry
+        from web.download_history_view import build_recents_download_log_rows
 
         assert TEST_DSN is not None
         db = make_db()
@@ -1247,7 +1247,7 @@ class TestImportOperationFencePostgres(unittest.TestCase):
         self.assertEqual(audit["source_download_log_id"], source_download_log_id)
         self.assertEqual(audit["source"], "slskd")
         self.assertEqual(
-            classify_log_entry(LogEntry.from_row(dict(audit))).verdict,
+            build_recents_download_log_rows([dict(audit)])[0]["verdict"],
             "Force import attempt failed: force executor crashed after launch "
             "authority",
         )

@@ -1,12 +1,16 @@
-"""Unit tests for web/classify.py — recents tab classification.
+"""Unit tests for the composed Recents render interface.
 
-Tests every scenario the pipeline can produce, ensuring each gets
-the correct badge, verdict, and summary line.
+Every scenario the pipeline can produce is driven through
+``web/download_history_view.py::build_recents_download_log_rows`` — the
+function the Recents route itself calls — so a pin here describes what an
+operator sees, not what one stage of the composition computed.
+``web/classify.py::classify_log_entry`` is the middle of that path and is
+deliberately not called directly: the persisted-evidence projections that
+run after it are part of the rendered row (issue #1278).
 """
 import os
 import sys
 import unittest
-from dataclasses import replace
 from typing import ClassVar
 
 import msgspec
@@ -15,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from datetime import UTC
 
+from lib.json_narrow import is_str_object_dict
 from lib.quality import (
     AudioQualityMeasurement,
     DuplicateRemoveCandidate,
@@ -31,42 +36,73 @@ from lib.quality import (
 from web.classify import (
     ClassifiedEntry,
     LogEntry,
-    _parse_import_result,
     average_quality_label,
-    classify_log_entry,
     legacy_floor_quality_label,
 )
+from web.download_history_view import build_recents_download_log_rows
 
 # ---------------------------------------------------------------------------
-# Helper to build a minimal LogEntry with sensible defaults
+# Helpers to build a minimal download_log row and render it like Recents does
 # ---------------------------------------------------------------------------
 
-_DEFAULTS = LogEntry(
-    id=1,
-    request_id=100,
-    outcome="success",
-    beets_scenario="strong_match",
-    beets_distance=0.012,
-    soulseek_username="testuser",
-    was_converted=False,
-    actual_filetype="mp3",
-    actual_min_bitrate=320,
-    slskd_filetype="mp3",
-    spectral_grade=None,
-    spectral_bitrate=None,
-    existing_min_bitrate=None,
-    existing_spectral_bitrate=None,
-    request_min_bitrate=320,
-    search_filetype_override=None,
-    request_status="imported",
-    bitrate=320000,
-    filetype="mp3",
-)
+_ROW_DEFAULTS: dict[str, object] = {
+    "id": 1,
+    "request_id": 100,
+    "outcome": "success",
+    "beets_scenario": "strong_match",
+    "beets_distance": 0.012,
+    "soulseek_username": "testuser",
+    "was_converted": False,
+    "actual_filetype": "mp3",
+    "actual_min_bitrate": 320,
+    "slskd_filetype": "mp3",
+    "spectral_grade": None,
+    "spectral_bitrate": None,
+    "existing_min_bitrate": None,
+    "existing_spectral_bitrate": None,
+    "request_min_bitrate": 320,
+    "search_filetype_override": None,
+    "request_status": "imported",
+    "bitrate": 320000,
+    "filetype": "mp3",
+}
 
 
-def _entry(**overrides: object) -> LogEntry:
-    """Build a LogEntry with sensible defaults, overridden as needed."""
-    return replace(_DEFAULTS, **overrides)
+def _row(**overrides: object) -> dict[str, object]:
+    """Build a raw download_log row with sensible defaults."""
+    return {**_ROW_DEFAULTS, **overrides}
+
+
+def _render(row: dict[str, object]) -> dict[str, object]:
+    """Render one raw row exactly as the Recents route renders a page."""
+    return build_recents_download_log_rows([row])[0]
+
+
+def _classified(**overrides: object) -> dict[str, object]:
+    """Render a defaulted row, overridden as needed."""
+    return _render(_row(**overrides))
+
+
+def _text(item: dict[str, object], field: str) -> str:
+    """One rendered text field, typed for string assertions.
+
+    The rendered row is a plain JSON dict, so a field's static type is
+    ``object``. Asserting the value really is text here keeps the caller
+    readable AND fails loudly if a render path ever stops producing a
+    string, which a cast or an ignore comment would hide.
+    """
+    value = item[field]
+    assert isinstance(value, str), f"{field} did not render as text: {value!r}"
+    return value
+
+
+def _optional_text(item: dict[str, object], field: str) -> str:
+    """A nullable rendered text field, empty when the render left it unset."""
+    value = item[field]
+    if value is None:
+        return ""
+    assert isinstance(value, str), f"{field} did not render as text: {value!r}"
+    return value
 
 
 def _minted_proof_classifier() -> str:
@@ -203,7 +239,8 @@ class TestLogEntry(unittest.TestCase):
 
     def test_to_json_dict(self):
         """to_json_dict returns a plain dict suitable for JSON."""
-        entry = _entry(album_title="Test", artist_name="Artist")
+        entry = LogEntry.from_row(
+            _row(album_title="Test", artist_name="Artist"))
         d = entry.to_json_dict()
         self.assertIsInstance(d, dict)
         self.assertEqual(d["album_title"], "Test")
@@ -212,7 +249,7 @@ class TestLogEntry(unittest.TestCase):
     def test_to_json_dict_no_datetime_objects(self):
         """to_json_dict should not contain datetime objects."""
         from datetime import datetime
-        entry = _entry()
+        entry = LogEntry.from_row(_row())
         entry.created_at = "2026-03-30T12:00:00+00:00"
         d = entry.to_json_dict()
         for v in d.values():
@@ -245,36 +282,36 @@ class TestClassifiedEntry(unittest.TestCase):
         self.assertEqual(c.wrong_match_triage_stage_chain, [])
 
     def test_attempt_audit_surfaces_both_spectral_grades_and_floors(self):
-        result = classify_log_entry(_entry(import_result=ImportResult(
+        result = _classified(import_result=ImportResult(
             spectral=SpectralDetail(
                 candidate=SpectralAnalysisDetail(
                     attempted=True, grade="suspect", bitrate_kbps=160),
                 existing=SpectralAnalysisDetail(
                     attempted=True, grade="genuine", bitrate_kbps=None),
             )
-        ).to_json()))
-        self.assertEqual(result.spectral_grade, "suspect")
-        self.assertEqual(result.spectral_bitrate, 160)
-        self.assertEqual(result.existing_spectral_grade, "genuine")
-        self.assertIsNone(result.existing_spectral_bitrate)
+        ).to_json())
+        self.assertEqual(result["spectral_grade"], "suspect")
+        self.assertEqual(result["spectral_bitrate"], 160)
+        self.assertEqual(result["existing_spectral_grade"], "genuine")
+        self.assertIsNone(result["existing_spectral_bitrate"])
 
     def test_attempt_audit_surfaces_side_specific_analysis_failure(self):
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
-        result = classify_log_entry(_entry(import_result=ImportResult(
+        result = _classified(import_result=ImportResult(
             spectral=SpectralDetail(
                 candidate=SpectralAnalysisDetail(
                     attempted=True, error="RuntimeError: candidate failed"),
                 existing=SpectralAnalysisDetail(
                     attempted=True, grade="genuine"),
             )
-        ).to_json()))
-        self.assertTrue(result.spectral_attempted)
-        self.assertEqual(result.spectral_error, "RuntimeError: candidate failed")
-        self.assertTrue(result.existing_spectral_attempted)
-        self.assertIsNone(result.existing_spectral_error)
+        ).to_json())
+        self.assertTrue(result["spectral_attempted"])
+        self.assertEqual(result["spectral_error"], "RuntimeError: candidate failed")
+        self.assertTrue(result["existing_spectral_attempted"])
+        self.assertIsNone(result["existing_spectral_error"])
 
     def test_explicit_unattempted_sides_suppress_legacy_spectral_fallbacks(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             spectral_grade="suspect",
             spectral_bitrate=160,
             existing_spectral_grade="likely_transcode",
@@ -283,17 +320,17 @@ class TestClassifiedEntry(unittest.TestCase):
                 candidate=SpectralAnalysisDetail(attempted=False),
                 existing=SpectralAnalysisDetail(attempted=False),
             )).to_json(),
-        ))
-        self.assertFalse(result.spectral_attempted)
-        self.assertIsNone(result.spectral_grade)
-        self.assertIsNone(result.spectral_bitrate)
-        self.assertFalse(result.existing_spectral_attempted)
-        self.assertIsNone(result.existing_spectral_grade)
-        self.assertIsNone(result.existing_spectral_bitrate)
+        )
+        self.assertFalse(result["spectral_attempted"])
+        self.assertIsNone(result["spectral_grade"])
+        self.assertIsNone(result["spectral_bitrate"])
+        self.assertFalse(result["existing_spectral_attempted"])
+        self.assertIsNone(result["existing_spectral_grade"])
+        self.assertIsNone(result["existing_spectral_bitrate"])
 
 
 # ============================================================================
-# classify_log_entry — disambiguation_failure surface (#130)
+# Recents render — disambiguation_failure surface (#130)
 # ============================================================================
 
 class TestClassifyDisambiguationFailure(unittest.TestCase):
@@ -304,8 +341,8 @@ class TestClassifyDisambiguationFailure(unittest.TestCase):
     render a warning chip. See issue #130.
     """
 
-    def _entry_with_disambig(self, reason: str, detail: str) -> LogEntry:
-        return _entry(
+    def _row_with_disambig(self, reason: str, detail: str) -> dict[str, object]:
+        return _row(
             outcome="success",
             import_result={
                 "version": 2,
@@ -352,52 +389,53 @@ class TestClassifyDisambiguationFailure(unittest.TestCase):
         )
 
     def test_timeout_reason_surfaces(self):
-        result = classify_log_entry(
-            self._entry_with_disambig("timeout", "timeout after 120s"))
-        self.assertEqual(result.disambiguation_failure, "timeout")
-        self.assertEqual(result.disambiguation_detail, "timeout after 120s")
+        result = _render(
+            self._row_with_disambig("timeout", "timeout after 120s"))
+        self.assertEqual(result["disambiguation_failure"], "timeout")
+        self.assertEqual(result["disambiguation_detail"], "timeout after 120s")
 
     def test_nonzero_rc_reason_surfaces(self):
-        result = classify_log_entry(
-            self._entry_with_disambig("nonzero_rc", "rc=1: no matching album"))
-        self.assertEqual(result.disambiguation_failure, "nonzero_rc")
-        self.assertEqual(result.disambiguation_detail,
+        result = _render(
+            self._row_with_disambig("nonzero_rc", "rc=1: no matching album"))
+        self.assertEqual(result["disambiguation_failure"], "nonzero_rc")
+        self.assertEqual(result["disambiguation_detail"],
                          "rc=1: no matching album")
 
     def test_exception_reason_surfaces(self):
-        result = classify_log_entry(
-            self._entry_with_disambig("exception",
+        result = _render(
+            self._row_with_disambig("exception",
                                        "FileNotFoundError: beet missing"))
-        self.assertEqual(result.disambiguation_failure, "exception")
-        self.assertEqual(result.disambiguation_detail,
+        self.assertEqual(result["disambiguation_failure"], "exception")
+        self.assertEqual(result["disambiguation_detail"],
                          "FileNotFoundError: beet missing")
 
     def test_clean_import_leaves_fields_none(self):
         # Happy path: ImportResult present, disambiguation succeeded.
-        entry = self._entry_with_disambig("timeout", "ignored")
-        assert isinstance(entry.import_result, dict)
-        postflight = entry.import_result["postflight"]
+        row = self._row_with_disambig("timeout", "ignored")
+        import_result = row["import_result"]
+        assert isinstance(import_result, dict)
+        postflight = import_result["postflight"]
         assert isinstance(postflight, dict)
         postflight["disambiguation_failure"] = None
         postflight["disambiguated"] = True
-        result = classify_log_entry(entry)
-        self.assertIsNone(result.disambiguation_failure)
-        self.assertIsNone(result.disambiguation_detail)
+        result = _render(row)
+        self.assertIsNone(result["disambiguation_failure"])
+        self.assertIsNone(result["disambiguation_detail"])
 
     def test_no_import_result_leaves_fields_none(self):
         # Rejected/timeout rows have no import_result — must not raise.
-        result = classify_log_entry(
-            _entry(outcome="rejected", import_result=None,
-                   beets_scenario="high_distance", beets_distance=0.4))
-        self.assertIsNone(result.disambiguation_failure)
-        self.assertIsNone(result.disambiguation_detail)
+        result = _classified(outcome="rejected", import_result=None,
+                             beets_scenario="high_distance",
+                             beets_distance=0.4)
+        self.assertIsNone(result["disambiguation_failure"])
+        self.assertIsNone(result["disambiguation_detail"])
 
 
 class TestClassifyBadExtensions(unittest.TestCase):
     """Bad postflight extensions should be visible without parsing JSONB."""
 
     def test_bad_extensions_surface_from_import_result(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success",
             import_result={
                 "version": 2,
@@ -411,20 +449,20 @@ class TestClassifyBadExtensions(unittest.TestCase):
                     "moved_siblings": [],
                 },
             },
-        ))
+        )
 
-        self.assertEqual(result.bad_extensions, ["01 Track.bak"])
+        self.assertEqual(result["bad_extensions"], ["01 Track.bak"])
 
     def test_no_import_result_has_no_bad_extensions(self):
-        result = classify_log_entry(_entry(import_result=None))
-        self.assertEqual(result.bad_extensions, [])
+        result = _classified(import_result=None)
+        self.assertEqual(result["bad_extensions"], [])
 
 
 class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
     """Wrong-match triage audit should be visible in Recents without JSONB spelunking."""
 
-    def _rejected_with_triage(self, triage: object) -> LogEntry:
-        return _entry(
+    def _rejected_with_triage(self, triage: object) -> dict[str, object]:
+        return _row(
             outcome="rejected",
             beets_scenario="high_distance",
             beets_distance=0.190,
@@ -438,7 +476,7 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
         )
 
     def test_deleted_spectral_reject_becomes_triaged_deleted_badge(self):
-        result = classify_log_entry(self._rejected_with_triage({
+        result = _render(self._rejected_with_triage({
             "action": "deleted_reject",
             "reason": "spectral_reject",
             "preview_verdict": "confident_reject",
@@ -446,28 +484,28 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
             "stage_chain": ["stage1_spectral:reject"],
         }))
 
-        self.assertEqual(result.badge, "Triaged · download deleted")
-        self.assertEqual(result.badge_class, "badge-rejected")
-        self.assertEqual(result.border_color, "#a33")
-        self.assertEqual(result.verdict, "Wrong match (dist 0.190)")
+        self.assertEqual(result["badge"], "Triaged · download deleted")
+        self.assertEqual(result["badge_class"], "badge-rejected")
+        self.assertEqual(result["border_color"], "#a33")
+        self.assertEqual(result["verdict"], "Wrong match (dist 0.190)")
         self.assertEqual(
-            result.summary,
+            result["summary"],
             "Wrong match (dist 0.190) · download deleted: spectral reject "
             "· moundsofass",
         )
-        self.assertEqual(result.wrong_match_triage_action, "deleted_reject")
-        self.assertEqual(result.wrong_match_triage_preview_verdict,
+        self.assertEqual(result["wrong_match_triage_action"], "deleted_reject")
+        self.assertEqual(result["wrong_match_triage_preview_verdict"],
                          "confident_reject")
-        self.assertEqual(result.wrong_match_triage_preview_decision,
+        self.assertEqual(result["wrong_match_triage_preview_decision"],
                          "requeue_upgrade")
-        self.assertEqual(result.wrong_match_triage_reason, "spectral_reject")
-        self.assertEqual(result.wrong_match_triage_stage_chain,
+        self.assertEqual(result["wrong_match_triage_reason"], "spectral_reject")
+        self.assertEqual(result["wrong_match_triage_stage_chain"],
                          ["stage1_spectral:reject"])
-        self.assertIn("deleted", result.wrong_match_triage_summary or "")
-        self.assertIn("spectral", result.wrong_match_triage_summary or "")
+        self.assertIn("deleted", _optional_text(result, "wrong_match_triage_summary"))
+        self.assertIn("spectral", _optional_text(result, "wrong_match_triage_summary"))
 
     def test_non_reject_spectral_stage_never_overrides_persisted_reason(self):
-        result = classify_log_entry(self._rejected_with_triage({
+        result = _render(self._rejected_with_triage({
             "action": "deleted_reject",
             "reason": "suspect_lossless_downgrade",
             "preview_verdict": "confident_reject",
@@ -479,15 +517,15 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
             ],
         }))
 
-        self.assertEqual(result.wrong_match_triage_action, "deleted_reject")
-        self.assertIn("deleted", result.wrong_match_triage_summary or "")
+        self.assertEqual(result["wrong_match_triage_action"], "deleted_reject")
+        self.assertIn("deleted", _optional_text(result, "wrong_match_triage_summary"))
         self.assertIn("suspect lossless downgrade",
-                      result.wrong_match_triage_summary or "")
+                      _optional_text(result, "wrong_match_triage_summary"))
         self.assertNotIn("spectral reject",
-                         result.wrong_match_triage_summary or "")
+                         _optional_text(result, "wrong_match_triage_summary"))
 
     def test_triage_snapshot_projects_ordinary_in_have_evidence(self):
-        result = classify_log_entry(self._rejected_with_triage({
+        result = _render(self._rejected_with_triage({
             "action": "deleted_reject",
             "outcome": "deleted",
             "reason": "suspect_lossless_downgrade",
@@ -528,20 +566,20 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
             },
         }))
 
-        self.assertEqual(result.source_format, "MP3")
-        self.assertEqual(result.source_avg_bitrate, 320)
-        self.assertEqual(result.existing_format, "MP3")
-        self.assertEqual(result.existing_min_bitrate, 320)
-        self.assertEqual(result.existing_avg_bitrate, 320)
-        self.assertEqual(result.spectral_grade, "likely_transcode")
-        self.assertEqual(result.v0_probe_avg_bitrate, 259)
-        self.assertEqual(result.existing_v0_probe_kind,
+        self.assertEqual(result["source_format"], "MP3")
+        self.assertEqual(result["source_avg_bitrate"], 320)
+        self.assertEqual(result["existing_format"], "MP3")
+        self.assertEqual(result["existing_min_bitrate"], 320)
+        self.assertEqual(result["existing_avg_bitrate"], 320)
+        self.assertEqual(result["spectral_grade"], "likely_transcode")
+        self.assertEqual(result["v0_probe_avg_bitrate"], 259)
+        self.assertEqual(result["existing_v0_probe_kind"],
                          "on_disk_research_v0")
-        self.assertEqual(result.existing_v0_probe_avg_bitrate, 260)
-        self.assertIsNotNone(result.comparison_basis)
+        self.assertEqual(result["existing_v0_probe_avg_bitrate"], 260)
+        self.assertIsNotNone(result["comparison_basis"])
 
     def test_kept_would_import_surfaces_importable_summary(self):
-        result = classify_log_entry(self._rejected_with_triage({
+        result = _render(self._rejected_with_triage({
             "action": "kept_would_import",
             "reason": "import",
             "preview_verdict": "would_import",
@@ -549,23 +587,23 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
             "stage_chain": ["stage2_import:import"],
         }))
 
-        self.assertEqual(result.badge, "Triaged · download kept")
-        self.assertEqual(result.badge_class, "badge-warn")
-        self.assertEqual(result.border_color, "#a33")
-        self.assertEqual(result.wrong_match_triage_action, "kept_would_import")
-        self.assertIn("kept", result.wrong_match_triage_summary or "")
-        self.assertIn("import", result.wrong_match_triage_summary or "")
+        self.assertEqual(result["badge"], "Triaged · download kept")
+        self.assertEqual(result["badge_class"], "badge-warn")
+        self.assertEqual(result["border_color"], "#a33")
+        self.assertEqual(result["wrong_match_triage_action"], "kept_would_import")
+        self.assertIn("kept", _optional_text(result, "wrong_match_triage_summary"))
+        self.assertIn("import", _optional_text(result, "wrong_match_triage_summary"))
 
     def test_missing_triage_defaults_empty(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="high_distance",
             validation_result={"scenario": "wrong_match"},
-        ))
+        )
 
-        self.assertIsNone(result.wrong_match_triage_action)
-        self.assertIsNone(result.wrong_match_triage_summary)
-        self.assertEqual(result.wrong_match_triage_stage_chain, [])
+        self.assertIsNone(result["wrong_match_triage_action"])
+        self.assertIsNone(result["wrong_match_triage_summary"])
+        self.assertEqual(result["wrong_match_triage_stage_chain"], [])
 
     def test_audio_corrupt_direct_and_triaged_rows_hide_invalid_quality_claims(self):
         """Corrupt input never renders a bitrate or positive spectral grade.
@@ -586,13 +624,13 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
                 attempted=True, grade="genuine",
             )),
         ).to_json()
-        direct = classify_log_entry(_entry(
+        direct = _classified(
             outcome="rejected",
             beets_scenario="audio_corrupt",
             actual_min_bitrate=0,
             import_result=corrupt_import,
-        ))
-        triaged = classify_log_entry(_entry(
+        )
+        triaged = _classified(
             outcome="rejected",
             beets_scenario="high_distance",
             beets_distance=0.181,
@@ -612,24 +650,24 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
                     "spectral_grade": "genuine",
                 },
             }},
-        ))
+        )
 
         for result in (direct, triaged):
-            with self.subTest(badge=result.badge):
-                self.assertEqual(result.source_format, "FLAC")
-                self.assertIsNone(result.source_min_bitrate)
-                self.assertIsNone(result.source_avg_bitrate)
-                self.assertIsNone(result.source_median_bitrate)
-                self.assertIsNone(result.spectral_grade)
-                self.assertIsNone(result.spectral_bitrate)
-                self.assertIsNone(result.actual_min_bitrate)
-        self.assertEqual(direct.verdict, "Corrupt audio files detected")
-        self.assertEqual(triaged.verdict, "Wrong match (dist 0.181)")
-        self.assertEqual(triaged.badge, "Triaged · download deleted")
-        self.assertIn("download deleted: audio corrupt", triaged.summary)
+            with self.subTest(badge=result["badge"]):
+                self.assertEqual(result["source_format"], "FLAC")
+                self.assertIsNone(result["source_min_bitrate"])
+                self.assertIsNone(result["source_avg_bitrate"])
+                self.assertIsNone(result["source_median_bitrate"])
+                self.assertIsNone(result["spectral_grade"])
+                self.assertIsNone(result["spectral_bitrate"])
+                self.assertIsNone(result["actual_min_bitrate"])
+        self.assertEqual(direct["verdict"], "Corrupt audio files detected")
+        self.assertEqual(triaged["verdict"], "Wrong match (dist 0.181)")
+        self.assertEqual(triaged["badge"], "Triaged · download deleted")
+        self.assertIn("download deleted: audio corrupt", _text(triaged, "summary"))
 
     def test_string_validation_result_decodes_same_as_dict(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="high_distance",
             validation_result=(
@@ -638,29 +676,29 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
                 '"preview_decision": "requeue_upgrade", '
                 '"stage_chain": ["stage1_spectral:reject"]}}'
             ),
-        ))
+        )
 
-        self.assertEqual(result.wrong_match_triage_action, "deleted_reject")
-        self.assertIn("requeue upgrade", result.wrong_match_triage_summary or "")
-        self.assertNotIn("spectral", result.wrong_match_triage_summary or "")
-        self.assertEqual(result.wrong_match_triage_stage_chain,
+        self.assertEqual(result["wrong_match_triage_action"], "deleted_reject")
+        self.assertIn("requeue upgrade", _optional_text(result, "wrong_match_triage_summary"))
+        self.assertNotIn("spectral", _optional_text(result, "wrong_match_triage_summary"))
+        self.assertEqual(result["wrong_match_triage_stage_chain"],
                          ["stage1_spectral:reject"])
 
     def test_malformed_validation_result_does_not_raise(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="high_distance",
             validation_result="{not-json",
-        ))
+        )
 
-        self.assertIsNone(result.wrong_match_triage_action)
-        self.assertIsNone(result.wrong_match_triage_summary)
+        self.assertIsNone(result["wrong_match_triage_action"])
+        self.assertIsNone(result["wrong_match_triage_summary"])
 
     def test_non_object_triage_does_not_raise(self):
-        result = classify_log_entry(self._rejected_with_triage("deleted_reject"))
+        result = _render(self._rejected_with_triage("deleted_reject"))
 
-        self.assertIsNone(result.wrong_match_triage_action)
-        self.assertIsNone(result.wrong_match_triage_summary)
+        self.assertIsNone(result["wrong_match_triage_action"])
+        self.assertIsNone(result["wrong_match_triage_summary"])
 
 
 # ============================================================================
@@ -705,7 +743,7 @@ class TestQualityLabel(unittest.TestCase):
 
 
 # ============================================================================
-# classify_log_entry — badge classification
+# Recents render — badge classification
 # ============================================================================
 
 class TestClassifyExistingFormat(unittest.TestCase):
@@ -716,7 +754,7 @@ class TestClassifyExistingFormat(unittest.TestCase):
     shown)."""
 
     def test_existing_format_derived_from_import_result(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success",
             import_result={
                 "version": 2,
@@ -728,77 +766,77 @@ class TestClassifyExistingFormat(unittest.TestCase):
                     "avg_bitrate_kbps": 256,
                 },
             },
-        ))
-        self.assertEqual(result.existing_format, "MP3")
+        )
+        self.assertEqual(result["existing_format"], "MP3")
 
     def test_existing_format_none_without_import_result(self):
-        result = classify_log_entry(_entry(outcome="success"))
-        self.assertIsNone(result.existing_format)
+        result = _classified(outcome="success")
+        self.assertIsNone(result["existing_format"])
 
     def test_existing_format_none_when_measurement_absent(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success",
             import_result={"version": 2, "decision": "import"},
-        ))
-        self.assertIsNone(result.existing_format)
+        )
+        self.assertIsNone(result["existing_format"])
 
 
 class TestClassifyBadge(unittest.TestCase):
-    """Test that classify_log_entry returns the correct badge for each scenario."""
+    """Test that a rendered row carries the right badge for each scenario."""
 
     def test_measurement_failed_badge_is_humanized(self):
         """Raw enum outcomes must not leak underscores into the badge."""
-        result = classify_log_entry(_entry(outcome="measurement_failed"))
-        self.assertEqual(result.badge, "Measurement failed")
-        self.assertEqual(result.badge_class, "badge-warn")
+        result = _classified(outcome="measurement_failed")
+        self.assertEqual(result["badge"], "Measurement failed")
+        self.assertEqual(result["badge_class"], "badge-warn")
 
     def test_new_import(self):
         """First-time import, nothing on disk before."""
-        result = classify_log_entry(_entry(outcome="success"))
-        self.assertEqual(result.badge, "Imported")
-        self.assertEqual(result.badge_class, "badge-new")
+        result = _classified(outcome="success")
+        self.assertEqual(result["badge"], "Imported")
+        self.assertEqual(result["badge_class"], "badge-new")
 
     def test_upgrade(self):
         """Successful import that upgraded existing quality."""
-        result = classify_log_entry(_entry(
-            outcome="success", existing_min_bitrate=192, actual_min_bitrate=320))
-        self.assertEqual(result.badge, "Upgraded")
-        self.assertEqual(result.badge_class, "badge-upgraded")
+        result = _classified(
+            outcome="success", existing_min_bitrate=192, actual_min_bitrate=320)
+        self.assertEqual(result["badge"], "Upgraded")
+        self.assertEqual(result["badge_class"], "badge-upgraded")
 
     def test_rejected_quality_downgrade(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected", beets_scenario="quality_downgrade",
-            actual_min_bitrate=320, existing_min_bitrate=320))
-        self.assertEqual(result.badge, "Rejected")
-        self.assertEqual(result.badge_class, "badge-rejected")
+            actual_min_bitrate=320, existing_min_bitrate=320)
+        self.assertEqual(result["badge"], "Rejected")
+        self.assertEqual(result["badge_class"], "badge-rejected")
 
     def test_rejected_spectral(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected", beets_scenario="spectral_reject",
-            spectral_bitrate=160, existing_spectral_bitrate=192))
-        self.assertEqual(result.badge, "Rejected")
-        self.assertEqual(result.badge_class, "badge-rejected")
+            spectral_bitrate=160, existing_spectral_bitrate=192)
+        self.assertEqual(result["badge"], "Rejected")
+        self.assertEqual(result["badge_class"], "badge-rejected")
 
     def test_rejected_transcode_downgrade(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected", beets_scenario="transcode_downgrade",
-            actual_min_bitrate=197, existing_min_bitrate=320))
-        self.assertEqual(result.badge, "Rejected")
-        self.assertEqual(result.badge_class, "badge-rejected")
+            actual_min_bitrate=197, existing_min_bitrate=320)
+        self.assertEqual(result["badge"], "Rejected")
+        self.assertEqual(result["badge_class"], "badge-rejected")
 
     def test_rejected_suspect_lossless_downgrade(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="suspect_lossless_downgrade",
             spectral_grade="suspect",
             spectral_bitrate=160,
             v0_probe_avg_bitrate=175,
             existing_v0_probe_avg_bitrate=171,
-        ))
-        self.assertEqual(result.badge, "Rejected")
-        self.assertEqual(result.badge_class, "badge-rejected")
+        )
+        self.assertEqual(result["badge"], "Rejected")
+        self.assertEqual(result["badge_class"], "badge-rejected")
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Unproven lossless source not better than on-disk copy; "
             "searching continues",
         )
@@ -812,18 +850,18 @@ class TestClassifyBadge(unittest.TestCase):
         # override"). All three are read by users in the recents log to
         # understand WHY the candidate was rejected even though its avg
         # exceeded the on-disk transcode floor.
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="lossless_source_locked",
             actual_min_bitrate=176,
             spectral_grade="likely_transcode",
             spectral_bitrate=128,
             existing_v0_probe_avg_bitrate=240,
-        ))
-        self.assertEqual(result.badge, "Rejected")
-        self.assertEqual(result.badge_class, "badge-rejected")
+        )
+        self.assertEqual(result["badge"], "Rejected")
+        self.assertEqual(result["badge_class"], "badge-rejected")
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Lossless-source locked; only another lossless source can "
             "override; searching continues",
         )
@@ -833,14 +871,14 @@ class TestClassifyBadge(unittest.TestCase):
         # verified, the request stays imported, and the source is not
         # denylisted. It must NOT wear the red "Rejected" badge or leak
         # the raw scenario token.
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="verified_lossless_locked",
-        ))
-        self.assertEqual(result.badge, "Proof locked")
-        self.assertEqual(result.badge_class, "badge-library")
+        )
+        self.assertEqual(result["badge"], "Proof locked")
+        self.assertEqual(result["badge_class"], "badge-library")
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Verified lossless already on disk; automatic candidate "
             "declined (no denylist); acquisition is complete",
         )
@@ -860,53 +898,53 @@ class TestClassifyBadge(unittest.TestCase):
         }
         for scenario, expected in cases.items():
             with self.subTest(scenario=scenario):
-                result = classify_log_entry(_entry(
+                result = _classified(
                     outcome="rejected",
                     beets_scenario=scenario,
                     actual_min_bitrate=176,
                     existing_min_bitrate=240,
                     spectral_bitrate=128,
                     existing_spectral_bitrate=192,
-                ))
-                self.assertEqual(result.verdict, expected)
+                )
+                self.assertEqual(result["verdict"], expected)
 
     def test_rejected_high_distance(self):
-        result = classify_log_entry(_entry(
-            outcome="rejected", beets_scenario="high_distance", beets_distance=0.45))
-        self.assertEqual(result.badge, "Rejected")
-        self.assertEqual(result.badge_class, "badge-rejected")
+        result = _classified(
+            outcome="rejected", beets_scenario="high_distance", beets_distance=0.45)
+        self.assertEqual(result["badge"], "Rejected")
+        self.assertEqual(result["badge_class"], "badge-rejected")
 
     def test_rejected_audio_corrupt(self):
-        result = classify_log_entry(_entry(
-            outcome="rejected", beets_scenario="audio_corrupt"))
-        self.assertEqual(result.badge, "Rejected")
+        result = _classified(
+            outcome="rejected", beets_scenario="audio_corrupt")
+        self.assertEqual(result["badge"], "Rejected")
 
     def test_rejected_mbid_not_found(self):
-        result = classify_log_entry(_entry(
-            outcome="rejected", beets_scenario="mbid_not_found"))
-        self.assertEqual(result.badge, "Rejected")
+        result = _classified(
+            outcome="rejected", beets_scenario="mbid_not_found")
+        self.assertEqual(result["badge"], "Rejected")
 
     def test_rejected_album_name_mismatch(self):
-        result = classify_log_entry(_entry(
-            outcome="rejected", beets_scenario="album_name_mismatch"))
-        self.assertEqual(result.badge, "Rejected")
+        result = _classified(
+            outcome="rejected", beets_scenario="album_name_mismatch")
+        self.assertEqual(result["badge"], "Rejected")
 
     def test_transcode_upgrade(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", beets_scenario="transcode_upgrade",
-            was_converted=True, actual_min_bitrate=240, existing_min_bitrate=192))
-        self.assertEqual(result.badge, "Transcode")
-        self.assertEqual(result.badge_class, "badge-transcode")
+            was_converted=True, actual_min_bitrate=240, existing_min_bitrate=192)
+        self.assertEqual(result["badge"], "Transcode")
+        self.assertEqual(result["badge_class"], "badge-transcode")
 
     def test_transcode_first(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", beets_scenario="transcode_first",
-            was_converted=True, actual_min_bitrate=197))
-        self.assertEqual(result.badge, "Transcode")
-        self.assertEqual(result.badge_class, "badge-transcode")
+            was_converted=True, actual_min_bitrate=197)
+        self.assertEqual(result["badge"], "Transcode")
+        self.assertEqual(result["badge_class"], "badge-transcode")
 
     def test_provisional_lossless_upgrade(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success",
             beets_scenario="provisional_lossless_upgrade",
             spectral_grade="suspect",
@@ -915,100 +953,100 @@ class TestClassifyBadge(unittest.TestCase):
             v0_probe_avg_bitrate=228,
             existing_v0_probe_avg_bitrate=171,
             final_format="opus 128",
-        ))
-        self.assertEqual(result.badge, "Provisional")
-        self.assertEqual(result.badge_class, "badge-provisional")
-        self.assertIn("source V0 avg 228kbps", result.verdict)
-        self.assertIn("existing source V0 avg 171kbps", result.verdict)
-        self.assertIn("stored as opus 128", result.verdict)
-        self.assertIn("searching continues", result.verdict)
+        )
+        self.assertEqual(result["badge"], "Provisional")
+        self.assertEqual(result["badge_class"], "badge-provisional")
+        self.assertIn("source V0 avg 228kbps", _text(result, "verdict"))
+        self.assertIn("existing source V0 avg 171kbps", _text(result, "verdict"))
+        self.assertIn("stored as opus 128", _text(result, "verdict"))
+        self.assertIn("searching continues", _text(result, "verdict"))
 
     def test_provisional_lossless_first_probe(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success",
             beets_scenario="provisional_lossless_upgrade",
             spectral_grade="likely_transcode",
             v0_probe_avg_bitrate=250,
-        ))
-        self.assertEqual(result.badge, "Provisional")
-        self.assertIn("no comparable source probe", result.verdict)
+        )
+        self.assertEqual(result["badge"], "Provisional")
+        self.assertIn("no comparable source probe", _text(result, "verdict"))
 
     def test_force_import(self):
-        result = classify_log_entry(_entry(outcome="force_import"))
-        self.assertEqual(result.badge, "Force imported")
-        self.assertEqual(result.badge_class, "badge-force")
+        result = _classified(outcome="force_import")
+        self.assertEqual(result["badge"], "Force imported")
+        self.assertEqual(result["badge_class"], "badge-force")
 
     def test_local_import(self):
         """Issue #1176 PR3: must not fall through to badge-rejected."""
-        result = classify_log_entry(_entry(outcome="local_import"))
-        self.assertEqual(result.badge, "Local imported")
-        self.assertEqual(result.badge_class, "badge-force")
+        result = _classified(outcome="local_import")
+        self.assertEqual(result["badge"], "Local imported")
+        self.assertEqual(result["badge_class"], "badge-force")
 
     def test_curator_ban_with_username(self):
         """#188 follow-up: bad-rip click surfaces as a download_log event."""
-        result = classify_log_entry(_entry(
-            outcome="curator_ban", soulseek_username="H@rco"))
-        self.assertEqual(result.badge, "Bad rip")
-        self.assertEqual(result.badge_class, "badge-rejected")
-        self.assertEqual(result.border_color, "#a33")
-        self.assertIn("H@rco", result.verdict)
-        self.assertIn("Marked bad rip", result.verdict)
+        result = _classified(
+            outcome="curator_ban", soulseek_username="H@rco")
+        self.assertEqual(result["badge"], "Bad rip")
+        self.assertEqual(result["badge_class"], "badge-rejected")
+        self.assertEqual(result["border_color"], "#a33")
+        self.assertIn("H@rco", _text(result, "verdict"))
+        self.assertIn("Marked bad rip", _text(result, "verdict"))
         # The summary keeps its trailing peer attribution: this verdict
         # names the uploader as a denylist target, not with the presenter's
         # "peer <name>" grammar (issue #868 review finding #4).
-        self.assertEqual(result.summary, f"{result.verdict} \u00b7 H@rco")
+        self.assertEqual(result["summary"], f"{result['verdict']} \u00b7 H@rco")
 
     def test_curator_ban_without_username(self):
         """E1.1 — no uploader resolved → still surfaces, terser verdict."""
-        result = classify_log_entry(_entry(
-            outcome="curator_ban", soulseek_username=None))
-        self.assertEqual(result.badge, "Bad rip")
-        self.assertEqual(result.border_color, "#a33")
-        self.assertEqual(result.verdict, "Marked bad rip")
+        result = _classified(
+            outcome="curator_ban", soulseek_username=None)
+        self.assertEqual(result["badge"], "Bad rip")
+        self.assertEqual(result["border_color"], "#a33")
+        self.assertEqual(result["verdict"], "Marked bad rip")
 
     def test_failed(self):
-        result = classify_log_entry(_entry(outcome="failed", beets_scenario="exception"))
-        self.assertEqual(result.badge, "Failed")
-        self.assertEqual(result.badge_class, "badge-warn")
+        result = _classified(outcome="failed", beets_scenario="exception")
+        self.assertEqual(result["badge"], "Failed")
+        self.assertEqual(result["badge_class"], "badge-warn")
 
     def test_abandoned_auto_import_failed_row_uses_readable_error(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="failed",
             beets_scenario="abandoned_auto_import",
             error_message="Abandoned interrupted auto-import; queued for redownload",
-        ))
+        )
 
-        self.assertEqual(result.badge, "Failed")
+        self.assertEqual(result["badge"], "Failed")
         # Issue #868: nothing was imported, so the row is not an import
         # error — and the internal "queued for redownload" phrasing is the
         # presenter's job now.
         self.assertEqual(
-            result.verdict, "Interrupted import abandoned and requeued")
-        self.assertNotIn("Import error", result.verdict)
+            result["verdict"], "Interrupted import abandoned and requeued")
+        self.assertNotIn("Import error", _text(result, "verdict"))
 
     def test_timeout(self):
-        result = classify_log_entry(_entry(outcome="timeout", beets_scenario="timeout"))
-        self.assertEqual(result.badge, "Failed")
-        self.assertEqual(result.badge_class, "badge-failed")
+        result = _classified(outcome="timeout", beets_scenario="timeout")
+        self.assertEqual(result["badge"], "Failed")
+        self.assertEqual(result["badge_class"], "badge-failed")
 
     def test_user_offline(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="user_offline", beets_scenario=None,
-            error_message="peer appears to be offline"))
-        self.assertEqual(result.badge, "Peer offline")
-        self.assertEqual(result.badge_class, "badge-rejected")
+            error_message="peer appears to be offline")
+        self.assertEqual(result["badge"], "Peer offline")
+        self.assertEqual(result["badge_class"], "badge-rejected")
 
     def test_search_filetype_override_upgrade(self):
         """search_filetype_override set - replacing garbage CBR with genuine V0."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", search_filetype_override="flac",
-            existing_min_bitrate=320, actual_min_bitrate=243))
-        self.assertEqual(result.badge, "Upgraded")
-        self.assertEqual(result.badge_class, "badge-upgraded")
+            existing_min_bitrate=320, actual_min_bitrate=243)
+        self.assertEqual(result["badge"], "Upgraded")
+        self.assertEqual(result["badge_class"], "badge-upgraded")
 
 
 # ============================================================================
-# classify_log_entry — border colors
+# Recents render — border colors
 # ============================================================================
 
 class TestClassifyBorderColor(unittest.TestCase):
@@ -1021,53 +1059,53 @@ class TestClassifyBorderColor(unittest.TestCase):
             ("have_analysis_error", "Environment failure"),
         ):
             with self.subTest(outcome=outcome):
-                result = classify_log_entry(_entry(outcome=outcome))
-                self.assertEqual(result.badge, badge)
-                self.assertEqual(result.badge_class, "badge-warn")
-                self.assertEqual(result.border_color, "#a86f20")
+                result = _classified(outcome=outcome)
+                self.assertEqual(result["badge"], badge)
+                self.assertEqual(result["badge_class"], "badge-warn")
+                self.assertEqual(result["border_color"], "#a86f20")
 
     def test_success_green_border(self):
-        result = classify_log_entry(_entry(outcome="success"))
-        self.assertIn(result.border_color, ("#3a6", "#1a4a2a"))
+        result = _classified(outcome="success")
+        self.assertIn(result["border_color"], ("#3a6", "#1a4a2a"))
 
     def test_rejected_red_border(self):
-        result = classify_log_entry(_entry(
-            outcome="rejected", beets_scenario="quality_downgrade"))
-        self.assertEqual(result.border_color, "#a33")
+        result = _classified(
+            outcome="rejected", beets_scenario="quality_downgrade")
+        self.assertEqual(result["border_color"], "#a33")
 
     def test_timeout_stays_a_failed_red_history_row(self):
-        result = classify_log_entry(_entry(outcome="timeout"))
-        self.assertEqual(result.badge, "Failed")
-        self.assertEqual(result.badge_class, "badge-failed")
-        self.assertEqual(result.border_color, "#a33")
+        result = _classified(outcome="timeout")
+        self.assertEqual(result["badge"], "Failed")
+        self.assertEqual(result["badge_class"], "badge-failed")
+        self.assertEqual(result["border_color"], "#a33")
 
     def test_transcode_amber_border(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", beets_scenario="transcode_upgrade",
-            was_converted=True, actual_min_bitrate=240, existing_min_bitrate=192))
-        self.assertEqual(result.border_color, "#a93")
+            was_converted=True, actual_min_bitrate=240, existing_min_bitrate=192)
+        self.assertEqual(result["border_color"], "#a93")
 
     def test_force_import_blue_border(self):
-        result = classify_log_entry(_entry(outcome="force_import"))
-        self.assertEqual(result.border_color, "#46a")
+        result = _classified(outcome="force_import")
+        self.assertEqual(result["border_color"], "#46a")
 
     def test_local_import_blue_border(self):
-        result = classify_log_entry(_entry(outcome="local_import"))
-        self.assertEqual(result.border_color, "#46a")
+        result = _classified(outcome="local_import")
+        self.assertEqual(result["border_color"], "#46a")
 
 
 # ============================================================================
-# classify_log_entry — verdicts
+# Recents render — verdicts
 # ============================================================================
 
 class TestClassifyVerdict(unittest.TestCase):
 
     def test_quality_downgrade_verdict(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected", beets_scenario="quality_downgrade",
-            actual_min_bitrate=320, existing_min_bitrate=320))
+            actual_min_bitrate=320, existing_min_bitrate=320)
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Quality not better than on-disk copy; searching continues",
         )
 
@@ -1076,7 +1114,7 @@ class TestClassifyVerdict(unittest.TestCase):
 
         This is the post-validation-envelope shape that regressed in PR #623.
         """
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="strong_match",
             soulseek_username="CondosInQueens",
@@ -1097,55 +1135,55 @@ class TestClassifyVerdict(unittest.TestCase):
                     "format": "MP3",
                 },
             },
-        ))
+        )
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Quality not better than on-disk copy; searching continues",
         )
-        self.assertIn("CondosInQueens", result.summary)
+        self.assertIn("CondosInQueens", _text(result, "summary"))
 
     def test_spectral_reject_verdict(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected", beets_scenario="spectral_reject",
-            spectral_bitrate=160, existing_spectral_bitrate=192))
+            spectral_bitrate=160, existing_spectral_bitrate=192)
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Spectral quality not better than on-disk copy; searching continues",
         )
-        self.assertEqual(result.spectral_bitrate, 160)
-        self.assertEqual(result.existing_spectral_bitrate, 192)
+        self.assertEqual(result["spectral_bitrate"], 160)
+        self.assertEqual(result["existing_spectral_bitrate"], 192)
 
     def test_spectral_reject_verdict_falls_back_to_min_bitrate(self):
         """When existing_spectral_bitrate is 0/None (genuine files have no cliff),
         the verdict should fall back to existing_min_bitrate."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected", beets_scenario="spectral_reject",
             spectral_bitrate=192, existing_spectral_bitrate=0,
-            existing_min_bitrate=226))
+            existing_min_bitrate=226)
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Spectral quality not better than on-disk copy; searching continues",
         )
 
     def test_transcode_downgrade_verdict(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected", beets_scenario="transcode_downgrade",
-            actual_min_bitrate=197, existing_min_bitrate=320))
+            actual_min_bitrate=197, existing_min_bitrate=320)
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Transcode not better than on-disk copy; searching continues",
         )
 
     def test_high_distance_verdict(self):
-        result = classify_log_entry(_entry(
-            outcome="rejected", beets_scenario="high_distance", beets_distance=0.45))
-        self.assertIn("wrong match", result.verdict.lower())
-        self.assertIn("0.45", result.verdict)
+        result = _classified(
+            outcome="rejected", beets_scenario="high_distance", beets_distance=0.45)
+        self.assertIn("wrong match", _text(result, "verdict").lower())
+        self.assertIn("0.45", _text(result, "verdict"))
 
     def test_audio_corrupt_verdict(self):
-        result = classify_log_entry(_entry(
-            outcome="rejected", beets_scenario="audio_corrupt"))
-        self.assertIn("corrupt", result.verdict.lower())
+        result = _classified(
+            outcome="rejected", beets_scenario="audio_corrupt")
+        self.assertIn("corrupt", _text(result, "verdict").lower())
 
     def test_duplicate_remove_guard_verdict(self):
         ir = ImportResult(
@@ -1169,14 +1207,14 @@ class TestClassifyVerdict(unittest.TestCase):
                 ),
             ),
         )
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="duplicate_remove_guard_failed",
             import_result=ir.to_json(),
-        ))
+        )
 
-        self.assertIn("duplicate remove guard failed", result.verdict.lower())
-        self.assertIn("2 duplicates", result.verdict.lower())
+        self.assertIn("duplicate remove guard failed", _text(result, "verdict").lower())
+        self.assertIn("2 duplicates", _text(result, "verdict").lower())
 
     def test_mbid_not_found_verdict(self):
         """The producer's own fact: the requested ID was not in the set.
@@ -1188,17 +1226,17 @@ class TestClassifyVerdict(unittest.TestCase):
         ``lib/beets.py`` has never emitted — and claimed the stronger,
         false fact that no match existed at all (issue #882).
         """
-        result = classify_log_entry(_entry(
-            outcome="rejected", beets_scenario="mbid_not_found"))
+        result = _classified(
+            outcome="rejected", beets_scenario="mbid_not_found")
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Requested release ID not among the match candidates",
         )
 
     def test_album_name_mismatch_verdict(self):
-        result = classify_log_entry(_entry(
-            outcome="rejected", beets_scenario="album_name_mismatch"))
-        self.assertIn("name mismatch", result.verdict.lower())
+        result = _classified(
+            outcome="rejected", beets_scenario="album_name_mismatch")
+        self.assertIn("name mismatch", _text(result, "verdict").lower())
 
     def test_nested_layout_verdict(self):
         """Gate-rejected force-import of a nested folder layout must
@@ -1206,59 +1244,63 @@ class TestClassifyVerdict(unittest.TestCase):
         string. Otherwise operators see the literal "nested_layout" and have
         to go grepping for what it means.
         """
-        result = classify_log_entry(_entry(
-            outcome="rejected", beets_scenario="nested_layout"))
-        self.assertIn("nested", result.verdict.lower())
-        self.assertIn("flatten", result.verdict.lower())
+        result = _classified(
+            outcome="rejected", beets_scenario="nested_layout")
+        self.assertIn("nested", _text(result, "verdict").lower())
+        self.assertIn("flatten", _text(result, "verdict").lower())
         self.assertNotEqual(
-            result.verdict, "nested_layout",
+            result["verdict"], "nested_layout",
             "verdict must be a friendly label, not the raw scenario string")
 
     def test_transcode_upgrade_verdict(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", beets_scenario="transcode_upgrade",
-            was_converted=True, actual_min_bitrate=240, existing_min_bitrate=192))
-        self.assertIn("searching", result.verdict.lower())
+            was_converted=True, actual_min_bitrate=240, existing_min_bitrate=192)
+        self.assertIn("searching", _text(result, "verdict").lower())
 
     def test_transcode_first_verdict(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", beets_scenario="transcode_first",
-            was_converted=True, actual_min_bitrate=197))
-        self.assertIn("searching", result.verdict.lower())
+            was_converted=True, actual_min_bitrate=197)
+        self.assertIn("searching", _text(result, "verdict").lower())
 
     def test_new_import_verdict(self):
-        result = classify_log_entry(_entry(outcome="success"))
-        v = result.verdict.lower()
+        result = _classified(outcome="success")
+        v = _text(result, "verdict").lower()
         self.assertNotIn("not", v)
         self.assertNotIn("reject", v)
 
     def test_upgrade_verdict(self):
-        result = classify_log_entry(_entry(
-            outcome="success", existing_min_bitrate=192, actual_min_bitrate=320))
-        v = result.verdict.lower()
+        result = _classified(
+            outcome="success", existing_min_bitrate=192, actual_min_bitrate=320)
+        v = _text(result, "verdict").lower()
         self.assertTrue("upgrade" in v or "192" in v or "320" in v)
 
     def test_verified_lossless_upgrade_verdict(self):
-        result = classify_log_entry(_entry(
+        classifier = _minted_proof_classifier()
+        result = _classified(
             outcome="success", was_converted=True, original_filetype="flac",
             actual_filetype="mp3", actual_min_bitrate=243,
             existing_min_bitrate=192, spectral_grade="genuine",
-            verified_lossless_classifier=_minted_proof_classifier()))
-        self.assertIn("verified lossless", result.verdict.lower())
+            candidate_evidence_id=4711,
+            _evidence_verified_lossless_classifier=classifier)
+        self.assertIn("verified lossless", _text(result, "verdict").lower())
+        # The joined proof reaches the rendered row as well as the verdict.
+        self.assertEqual(result["verified_lossless_classifier"], classifier)
 
     def test_upgrade_verdict_never_re_derives_the_proof(self):
         """Live dl 39094 req 2147: converted from FLAC, graded genuine, and
         the decider minted NO proof. The identical world without a
         classifier must not claim one."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", was_converted=True, original_filetype="flac",
             actual_filetype="mp3", actual_min_bitrate=243,
             existing_min_bitrate=192, spectral_grade="genuine",
-            verified_lossless_classifier=None))
-        self.assertNotIn("verified lossless", result.verdict.lower())
-        self.assertNotIn("verified lossless", result.summary.lower())
+            _evidence_verified_lossless_classifier=None)
+        self.assertNotIn("verified lossless", _text(result, "verdict").lower())
+        self.assertNotIn("verified lossless", _text(result, "summary").lower())
         # The conversion is still reported — only the proof claim is gone.
-        self.assertIn("from FLAC", result.verdict)
+        self.assertIn("from FLAC", _text(result, "verdict"))
 
     def test_upgrade_verdict_ignores_a_persisted_import_result_proof(self):
         """An ``ImportResult`` proof is not an attributable evidence row.
@@ -1275,11 +1317,11 @@ class TestClassifyVerdict(unittest.TestCase):
         can justify, so the phrase keys on the attributable evidence row and
         nothing else.
         """
-        entry = _entry(
+        row = _row(
             outcome="success", was_converted=True, original_filetype="flac",
             actual_filetype="opus", actual_min_bitrate=112,
             existing_min_bitrate=173, spectral_grade="genuine",
-            verified_lossless_classifier=None,
+            _evidence_verified_lossless_classifier=None,
             import_result={
                 "version": 3,
                 "decision": "import",
@@ -1293,45 +1335,46 @@ class TestClassifyVerdict(unittest.TestCase):
                 },
             },
         )
-        projected = _parse_import_result(entry)
-        assert projected is not None
+        blob = row["import_result"]
+        assert isinstance(blob, dict)
+        projected = ImportResult.from_dict(blob)
         # The blob DOES carry a projected proof — this is not an
         # absent-proof world, it is a not-attributable one.
         self.assertIsNotNone(projected.verified_lossless_proof)
-        result = classify_log_entry(entry)
-        self.assertNotIn("verified lossless", result.verdict.lower())
-        self.assertNotIn("verified lossless", result.summary.lower())
+        result = _render(row)
+        self.assertNotIn("verified lossless", _text(result, "verdict").lower())
+        self.assertNotIn("verified lossless", _text(result, "summary").lower())
 
     def test_timeout_verdict(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="timeout", beets_scenario=None,
             error_message="all transfers vanished from slskd before any "
-                          "status was observed (slskd restart?)"))
+                          "status was observed (slskd restart?)")
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Transfers disappeared from slskd before the download finished",
         )
         # Issue #868: "(slskd restart?)" is a guess, not evidence.
-        self.assertNotIn("restart", result.verdict)
+        self.assertNotIn("restart", _text(result, "verdict"))
 
     def test_user_offline_verdict_uses_error_message(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="user_offline", beets_scenario=None,
-            error_message="peer appears to be offline"))
-        self.assertEqual(result.verdict, "peer appears to be offline")
+            error_message="peer appears to be offline")
+        self.assertEqual(result["verdict"], "peer appears to be offline")
 
     def test_user_offline_verdict_falls_back_when_no_error_message(self):
-        result = classify_log_entry(_entry(
-            outcome="user_offline", beets_scenario=None, error_message=None))
-        self.assertEqual(result.verdict, "Peer offline at enqueue")
+        result = _classified(
+            outcome="user_offline", beets_scenario=None, error_message=None)
+        self.assertEqual(result["verdict"], "Peer offline at enqueue")
 
     def test_exception_verdict(self):
-        result = classify_log_entry(_entry(outcome="failed", beets_scenario="exception"))
-        self.assertIn("error", result.verdict.lower())
+        result = _classified(outcome="failed", beets_scenario="exception")
+        self.assertIn("error", _text(result, "verdict").lower())
 
     def test_force_import_verdict(self):
-        result = classify_log_entry(_entry(outcome="force_import"))
-        self.assertIn("force", result.verdict.lower())
+        result = _classified(outcome="force_import")
+        self.assertIn("force", _text(result, "verdict").lower())
 
     def test_local_import_verdict(self):
         # The raw-token fallback would ALSO produce a verdict containing
@@ -1339,76 +1382,76 @@ class TestClassifyVerdict(unittest.TestCase):
         # asserts the full sentence the local_import branch actually
         # writes — the only string that distinguishes it from the
         # catch-all's raw token.
-        result = classify_log_entry(_entry(outcome="local_import"))
+        result = _classified(outcome="local_import")
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Imported from a local folder after strict validation",
         )
 
 
 # ============================================================================
-# classify_log_entry — summary (folded in from build_summary_line)
+# Recents render — summary (folded in from build_summary_line)
 # ============================================================================
 
 class TestClassifySummary(unittest.TestCase):
     """Test that ClassifiedEntry.summary is concise and contains key info."""
 
     def test_new_import_summary(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", actual_min_bitrate=320,
-            soulseek_username="aguavivi23"))
-        self.assertIn("320", result.summary)
-        self.assertIn("aguavivi23", result.summary)
+            soulseek_username="aguavivi23")
+        self.assertIn("320", _text(result, "summary"))
+        self.assertIn("aguavivi23", _text(result, "summary"))
 
     def test_upgrade_summary_includes_username(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", existing_min_bitrate=192, actual_min_bitrate=320,
-            soulseek_username="gooduser"))
-        self.assertIn("gooduser", result.summary)
+            soulseek_username="gooduser")
+        self.assertIn("gooduser", _text(result, "summary"))
 
     def test_rejected_summary_includes_username(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected", beets_scenario="quality_downgrade",
             actual_min_bitrate=320, existing_min_bitrate=320,
-            soulseek_username="baduser"))
-        self.assertIn("baduser", result.summary)
+            soulseek_username="baduser")
+        self.assertIn("baduser", _text(result, "summary"))
 
     def test_flac_conversion_summary(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", was_converted=True, original_filetype="flac",
             actual_filetype="mp3", actual_min_bitrate=243,
-            soulseek_username="flacuser"))
-        self.assertTrue("flac" in result.summary.lower()
-                        or "converted" in result.summary.lower()
-                        or "V0" in result.summary)
+            soulseek_username="flacuser")
+        self.assertTrue("flac" in _text(result, "summary").lower()
+                        or "converted" in _text(result, "summary").lower()
+                        or "V0" in _text(result, "summary"))
 
     def test_spectral_reject_summary(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected", beets_scenario="spectral_reject",
             spectral_bitrate=160, existing_spectral_bitrate=192,
-            soulseek_username="fakeflac"))
-        self.assertIn("fakeflac", result.summary)
-        self.assertIn("Spectral quality not better", result.summary)
+            soulseek_username="fakeflac")
+        self.assertIn("fakeflac", _text(result, "summary"))
+        self.assertIn("Spectral quality not better", _text(result, "summary"))
 
     def test_summary_no_html(self):
-        result = classify_log_entry(_entry(
-            outcome="success", existing_min_bitrate=192, actual_min_bitrate=320))
-        self.assertNotIn("<", result.summary)
-        self.assertNotIn(">", result.summary)
+        result = _classified(
+            outcome="success", existing_min_bitrate=192, actual_min_bitrate=320)
+        self.assertNotIn("<", _text(result, "summary"))
+        self.assertNotIn(">", _text(result, "summary"))
 
     def test_no_arrow_chains(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected", beets_scenario="quality_downgrade",
-            actual_min_bitrate=320, existing_min_bitrate=320))
-        self.assertNotIn("slskd:", result.summary)
-        self.assertNotIn("actual:", result.summary)
-        self.assertNotIn("\u2192", result.summary)
+            actual_min_bitrate=320, existing_min_bitrate=320)
+        self.assertNotIn("slskd:", _text(result, "summary"))
+        self.assertNotIn("actual:", _text(result, "summary"))
+        self.assertNotIn("\u2192", _text(result, "summary"))
 
     def test_missing_username(self):
-        result = classify_log_entry(_entry(
-            outcome="success", soulseek_username=None))
-        self.assertIsInstance(result.summary, str)
-        self.assertTrue(len(result.summary) > 0)
+        result = _classified(
+            outcome="success", soulseek_username=None)
+        self.assertIsInstance(result["summary"], str)
+        self.assertTrue(len(_text(result, "summary")) > 0)
 
 
 # ============================================================================
@@ -1418,40 +1461,46 @@ class TestClassifySummary(unittest.TestCase):
 class TestClassifyEdgeCases(unittest.TestCase):
 
     def test_missing_scenario(self):
-        result = classify_log_entry(_entry(outcome="success", beets_scenario=None))
-        self.assertIsInstance(result.badge, str)
-        self.assertIsInstance(result.verdict, str)
+        result = _classified(outcome="success", beets_scenario=None)
+        self.assertIsInstance(result["badge"], str)
+        self.assertIsInstance(result["verdict"], str)
 
     def test_zero_bitrate(self):
-        result = classify_log_entry(_entry(
-            outcome="success", actual_min_bitrate=0, existing_min_bitrate=0))
-        self.assertIsInstance(result.badge, str)
+        result = _classified(
+            outcome="success", actual_min_bitrate=0, existing_min_bitrate=0)
+        self.assertIsInstance(result["badge"], str)
 
     def test_none_bitrate(self):
-        result = classify_log_entry(_entry(
-            outcome="success", actual_min_bitrate=None, existing_min_bitrate=None))
-        self.assertIsInstance(result.badge, str)
+        result = _classified(
+            outcome="success", actual_min_bitrate=None, existing_min_bitrate=None)
+        self.assertIsInstance(result["badge"], str)
 
     def test_unknown_outcome(self):
-        result = classify_log_entry(_entry(outcome="something_new"))
-        self.assertIsInstance(result.badge, str)
+        result = _classified(outcome="something_new")
+        self.assertIsInstance(result["badge"], str)
 
-    def test_all_results_are_classified_entry(self):
-        """Every result is a ClassifiedEntry with all fields."""
-        entries = [
-            _entry(outcome="success"),
-            _entry(outcome="rejected", beets_scenario="high_distance"),
-            _entry(outcome="force_import"),
-            _entry(outcome="timeout"),
-            _entry(outcome="failed"),
+    def test_every_rendered_row_carries_the_whole_classification(self):
+        """Every rendered row carries every ClassifiedEntry field."""
+        classified_fields = [
+            f.name for f in msgspec.structs.fields(ClassifiedEntry)
         ]
-        for entry in entries:
-            result = classify_log_entry(entry)
-            self.assertIsInstance(result, ClassifiedEntry,
-                                 f"Expected ClassifiedEntry for outcome={entry.outcome}")
-            self.assertTrue(result.badge)
-            self.assertTrue(result.verdict)
-            self.assertTrue(result.summary)
+        rows = [
+            _row(outcome="success"),
+            _row(outcome="rejected", beets_scenario="high_distance"),
+            _row(outcome="force_import"),
+            _row(outcome="timeout"),
+            _row(outcome="failed"),
+        ]
+        for row in rows:
+            result = _render(row)
+            missing = [f for f in classified_fields if f not in result]
+            self.assertEqual(
+                missing, [],
+                f"missing classification fields for outcome="
+                f"{row['outcome']}")
+            self.assertTrue(result["badge"])
+            self.assertTrue(result["verdict"])
+            self.assertTrue(result["summary"])
 
 
 # ============================================================================
@@ -1461,49 +1510,49 @@ class TestClassifyEdgeCases(unittest.TestCase):
 class TestExceptionVerdicts(unittest.TestCase):
 
     def test_measurement_failed_uses_persisted_error_message(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="measurement_failed",
             beets_scenario="measurement_failed",
             error_message="ffmpeg decode failed on track 05",
             beets_detail="generic measurement failure",
-        ))
-        self.assertEqual(result.badge, "Measurement failed")
-        self.assertEqual(result.badge_class, "badge-warn")
-        self.assertEqual(result.border_color, "#a86f20")
+        )
+        self.assertEqual(result["badge"], "Measurement failed")
+        self.assertEqual(result["badge_class"], "badge-warn")
+        self.assertEqual(result["border_color"], "#a86f20")
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Measurement failed: ffmpeg decode failed on track 05",
         )
 
     def test_measurement_failed_legacy_row_falls_back_to_beets_detail(self):
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="measurement_failed",
             beets_scenario="measurement_failed",
             error_message=None,
             beets_detail="lossless spectral analysis returned no usable grade",
-        ))
+        )
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Measurement failed: lossless spectral analysis returned no usable grade",
         )
 
     def test_exception_with_error_message(self):
         """Exception verdict should include the error_message when available."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="failed", beets_scenario="exception",
-            error_message="FileNotFoundError: /mnt/virtio/music/slskd/foo"))
-        self.assertIn("FileNotFoundError", result.verdict)
+            error_message="FileNotFoundError: /mnt/virtio/music/slskd/foo")
+        self.assertIn("FileNotFoundError", _text(result, "verdict"))
 
     def test_exception_without_error_message(self):
         """Exception verdict without error_message should still work."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="failed", beets_scenario="exception",
-            error_message=None))
-        self.assertIn("error", result.verdict.lower())
+            error_message=None)
+        self.assertIn("error", _text(result, "verdict").lower())
 
     def test_failed_falls_back_to_import_result_downgrade(self):
         """Manual-import failures with only import_result still get a verdict."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="failed",
             beets_scenario=None,
             error_message=None,
@@ -1514,15 +1563,15 @@ class TestExceptionVerdicts(unittest.TestCase):
                 "new_measurement": {"min_bitrate_kbps": 239},
                 "existing_measurement": {"min_bitrate_kbps": 320},
             },
-        ))
+        )
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Quality not better than on-disk copy; searching continues",
         )
 
     def test_failed_falls_back_to_import_result_error(self):
         """ImportResult error text is surfaced when error_message is blank."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="failed",
             beets_scenario=None,
             error_message=None,
@@ -1532,24 +1581,24 @@ class TestExceptionVerdicts(unittest.TestCase):
                 "decision": "import_failed",
                 "error": "Harness returned rc=2",
             },
-        ))
-        self.assertIn("Harness returned rc=2", result.verdict)
+        )
+        self.assertIn("Harness returned rc=2", _text(result, "verdict"))
 
     def test_timeout_uses_error_message(self):
         """Issue #564 C6: a download timeout's verdict now names the real
         evidence in error_message instead of a fixed "timed out" string."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="timeout", beets_scenario=None,
-            error_message="all 2 files errored — 2× 'Transfer rejected: Banned'"))
+            error_message="all 2 files errored — 2× 'Transfer rejected: Banned'")
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Download failed: all 2 files errored — "
             "2× 'Transfer rejected: Banned'")
 
     def test_timeout_without_error_message_uses_generic_fallback(self):
-        result = classify_log_entry(_entry(
-            outcome="timeout", beets_scenario=None, error_message=None))
-        self.assertEqual(result.verdict, "Download failed")
+        result = _classified(
+            outcome="timeout", beets_scenario=None, error_message=None)
+        self.assertEqual(result["verdict"], "Download failed")
 
 
 # ============================================================================
@@ -1560,7 +1609,7 @@ class TestDownloadedLabel(unittest.TestCase):
 
     def test_live_v2_materialized_measurement_stays_in_recents(self):
         """The live v2 cohort's legacy source flag cannot erase its output."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="force_import",
             import_result={
                 "version": 2, "decision": "import", "conversion": {},
@@ -1573,9 +1622,9 @@ class TestDownloadedLabel(unittest.TestCase):
                     "was_converted_from": "flac",
                 },
             },
-        ))
-        self.assertEqual(result.materialized_format, "OPUS")
-        self.assertEqual(result.materialized_avg_bitrate, 128)
+        )
+        self.assertEqual(result["materialized_format"], "OPUS")
+        self.assertEqual(result["materialized_avg_bitrate"], 128)
 
     def test_gas_materialized_output_stays_separate_from_v0_proxy(self):
         """The source, target contract, and output codec/bitrates are three
@@ -1590,7 +1639,7 @@ class TestDownloadedLabel(unittest.TestCase):
             "spectral_clamped": False, "tolerance_kbps": None,
             "verified_lossless_bypass": False,
         }
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="force_import",
             filetype="opus",
             slskd_filetype="flac",
@@ -1625,97 +1674,97 @@ class TestDownloadedLabel(unittest.TestCase):
                 comparison_basis=msgspec.convert(
                     basis, type=QualityComparisonBasis),
             ).to_json(),
-        ))
+        )
 
-        self.assertEqual(result.downloaded_label, "FLAC → OPUS 128")
-        self.assertEqual(result.source_format, "FLAC")
-        self.assertEqual(result.source_min_bitrate, 742)
-        self.assertEqual(result.source_avg_bitrate, 811)
-        self.assertEqual(result.source_median_bitrate, 803)
-        self.assertEqual(result.target_contract_format, "opus 128")
-        self.assertIsNone(result.legacy_projection_version)
-        self.assertEqual(result.materialized_format, "Opus")
-        self.assertEqual(result.materialized_min_bitrate, 102)
-        self.assertEqual(result.materialized_avg_bitrate, 132)
-        self.assertEqual(result.materialized_median_bitrate, 144)
+        self.assertEqual(result["downloaded_label"], "FLAC → OPUS 128")
+        self.assertEqual(result["source_format"], "FLAC")
+        self.assertEqual(result["source_min_bitrate"], 742)
+        self.assertEqual(result["source_avg_bitrate"], 811)
+        self.assertEqual(result["source_median_bitrate"], 803)
+        self.assertEqual(result["target_contract_format"], "opus 128")
+        self.assertIsNone(result["legacy_projection_version"])
+        self.assertEqual(result["materialized_format"], "Opus")
+        self.assertEqual(result["materialized_min_bitrate"], 102)
+        self.assertEqual(result["materialized_avg_bitrate"], 132)
+        self.assertEqual(result["materialized_median_bitrate"], 144)
 
     def test_mixed_source_preserves_every_downloaded_codec(self):
         """The Slow Club live row carried ``flac, ogg`` but rendered FLAC."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             actual_filetype="flac, ogg",
             actual_min_bitrate=224,
             import_result=ImportResult(decision="mixed_source").to_json(),
-        ))
-        self.assertEqual(result.downloaded_label, "FLAC + OGG")
+        )
+        self.assertEqual(result["downloaded_label"], "FLAC + OGG")
 
     def test_mp3_download(self):
         """MP3 320 download gets a label."""
-        result = classify_log_entry(_entry(
-            outcome="success", actual_filetype="mp3", actual_min_bitrate=320))
-        self.assertTrue(hasattr(result, "downloaded_label"))
-        self.assertIn("320", result.downloaded_label)
+        result = _classified(
+            outcome="success", actual_filetype="mp3", actual_min_bitrate=320)
+        self.assertIn("downloaded_label", result)
+        self.assertIn("320", _text(result, "downloaded_label"))
 
     def test_flac_converted_download(self):
         """FLAC converted to V0 shows conversion."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", was_converted=True,
             original_filetype="flac", actual_filetype="mp3",
-            actual_min_bitrate=243, bitrate=243000))
-        self.assertTrue(hasattr(result, "downloaded_label"))
-        self.assertIn("FLAC", result.downloaded_label)
-        self.assertIn("V0", result.downloaded_label)
+            actual_min_bitrate=243, bitrate=243000)
+        self.assertIn("downloaded_label", result)
+        self.assertIn("FLAC", _text(result, "downloaded_label"))
+        self.assertIn("V0", _text(result, "downloaded_label"))
 
     def test_opus_converted_download(self):
         """FLAC converted to Opus shows correct format, not MP3."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", was_converted=True,
             original_filetype="flac", actual_filetype="opus",
-            actual_min_bitrate=117, bitrate=117000))
-        self.assertIn("FLAC", result.downloaded_label)
-        self.assertIn("OPUS", result.downloaded_label)
-        self.assertNotIn("MP3", result.downloaded_label)
+            actual_min_bitrate=117, bitrate=117000)
+        self.assertIn("FLAC", _text(result, "downloaded_label"))
+        self.assertIn("OPUS", _text(result, "downloaded_label"))
+        self.assertNotIn("MP3", _text(result, "downloaded_label"))
 
     def test_no_filetype_download(self):
         """Missing filetype doesn't crash."""
-        result = classify_log_entry(_entry(
-            outcome="force_import", actual_filetype=None, filetype=None))
-        self.assertTrue(hasattr(result, "downloaded_label"))
+        result = _classified(
+            outcome="force_import", actual_filetype=None, filetype=None)
+        self.assertIn("downloaded_label", result)
 
     def test_bitrate_fallback(self):
         """Falls back to bitrate (bps) when actual_min_bitrate is None."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", actual_min_bitrate=None,
-            bitrate=155000, actual_filetype="mp3"))
-        self.assertTrue(hasattr(result, "downloaded_label"))
-        self.assertIn("155", result.downloaded_label)
+            bitrate=155000, actual_filetype="mp3")
+        self.assertIn("downloaded_label", result)
+        self.assertIn("155", _text(result, "downloaded_label"))
 
 
 class TestRejectedDecisionProjection(unittest.TestCase):
 
     def test_mixed_source_decision_overrides_successful_validation_headline(self):
         """Live row 36844 matched its pressing, then failed mixed-source policy."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="strong_match",
             actual_filetype="flac, ogg",
             actual_min_bitrate=224,
             import_result=ImportResult(decision="mixed_source").to_json(),
-        ))
-        self.assertEqual(result.verdict, "Mixed lossless+lossy source")
+        )
+        self.assertEqual(result["verdict"], "Mixed lossless+lossy source")
         self.assertEqual(
-            result.summary,
+            result["summary"],
             "Mixed lossless+lossy source · testuser",
         )
 
     def test_non_reject_import_decision_does_not_hide_later_failure(self):
         """A successful import-stage token cannot replace a later reject."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="nested_layout",
             import_result=ImportResult(decision="import").to_json(),
-        ))
-        self.assertIn("Nested folder layout", result.verdict)
+        )
+        self.assertIn("Nested folder layout", _text(result, "verdict"))
 
 
 # ============================================================================
@@ -1726,36 +1775,36 @@ class TestSearchFiletypeOverride(unittest.TestCase):
 
     def test_search_filetype_override_without_existing_is_new_import(self):
         """search_filetype_override set but nothing on disk = new import, not upgrade."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", search_filetype_override="flac",
-            existing_min_bitrate=None, actual_min_bitrate=243))
-        self.assertEqual(result.badge, "Imported")
+            existing_min_bitrate=None, actual_min_bitrate=243)
+        self.assertEqual(result["badge"], "Imported")
 
     def test_search_filetype_override_with_existing_is_upgrade(self):
         """search_filetype_override set AND existing on disk = upgrade."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", search_filetype_override="flac",
-            existing_min_bitrate=320, actual_min_bitrate=243))
-        self.assertEqual(result.badge, "Upgraded")
+            existing_min_bitrate=320, actual_min_bitrate=243)
+        self.assertEqual(result["badge"], "Upgraded")
 
     def test_search_filetype_override_opus_shows_opus(self):
         """Opus upgrade should show OPUS in verdict, not MP3."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", search_filetype_override="flac",
             existing_min_bitrate=320, actual_filetype="opus",
-            was_converted=True, original_filetype="flac"))
-        self.assertEqual(result.badge, "Upgraded")
-        self.assertIn("OPUS", result.verdict)
-        self.assertNotIn("MP3", result.verdict)
+            was_converted=True, original_filetype="flac")
+        self.assertEqual(result["badge"], "Upgraded")
+        self.assertIn("OPUS", _text(result, "verdict"))
+        self.assertNotIn("MP3", _text(result, "verdict"))
 
     def test_upgrade_opus_shows_opus_in_verdict(self):
         """Opus upgrade verdict should use actual filetype."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success", existing_min_bitrate=192,
             actual_filetype="opus", actual_min_bitrate=117,
-            was_converted=True, original_filetype="flac"))
-        self.assertEqual(result.badge, "Upgraded")
-        self.assertIn("OPUS", result.verdict)
+            was_converted=True, original_filetype="flac")
+        self.assertEqual(result["badge"], "Upgraded")
+        self.assertIn("OPUS", _text(result, "verdict"))
 
 
 # ============================================================================
@@ -1785,7 +1834,7 @@ class TestVerdictSpectralFallback(unittest.TestCase):
         estimate. Avg explains the container measurement; spectral explains
         why the pipeline still rejected it.
         """
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="quality_downgrade",
             actual_min_bitrate=None,
@@ -1816,17 +1865,17 @@ class TestVerdictSpectralFallback(unittest.TestCase):
                     "verified_lossless": False,
                 },
             },
-        ))
+        )
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Quality not better than on-disk copy; searching continues",
         )
-        self.assertEqual(result.spectral_bitrate, 96)
+        self.assertEqual(result["spectral_bitrate"], 96)
 
     def test_quality_downgrade_without_import_result_uses_container_bitrate(self):
         """When there's no import_result at all, fall back to bitrate field
         (container bitrate in bps), while still showing spectral context."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="quality_downgrade",
             actual_min_bitrate=None,
@@ -1835,17 +1884,17 @@ class TestVerdictSpectralFallback(unittest.TestCase):
             existing_spectral_bitrate=96,
             bitrate=128000,
             import_result=None,
-        ))
+        )
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Quality not better than on-disk copy; searching continues",
         )
-        self.assertEqual(result.downloaded_label, "MP3 128k")
-        self.assertEqual(result.spectral_bitrate, 96)
+        self.assertEqual(result["downloaded_label"], "MP3 128k")
+        self.assertEqual(result["spectral_bitrate"], 96)
 
     def test_transcode_downgrade_uses_real_bitrate_not_spectral(self):
         """Same spectral fallback bug in transcode_downgrade scenario."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="transcode_downgrade",
             actual_min_bitrate=None,
@@ -1860,9 +1909,9 @@ class TestVerdictSpectralFallback(unittest.TestCase):
                 "new_measurement": {"min_bitrate_kbps": 192},
                 "existing_measurement": {"min_bitrate_kbps": 240},
             },
-        ))
+        )
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Transcode not better than on-disk copy; searching continues",
         )
 
@@ -1884,7 +1933,7 @@ class TestVerdictSpectralFallback(unittest.TestCase):
         the spectral estimates for both sides. It must not collapse the
         comparison into a naked "152 is not better than 96" contradiction.
         """
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="quality_downgrade",
             actual_min_bitrate=152,
@@ -1917,9 +1966,9 @@ class TestVerdictSpectralFallback(unittest.TestCase):
                     "verified_lossless": False,
                 },
             },
-        ))
+        )
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Quality not better than on-disk copy; searching continues",
         )
 
@@ -1931,7 +1980,7 @@ class TestVerdictSpectralFallback(unittest.TestCase):
         Showing only "222kbps avg is not better than existing 192kbps avg"
         makes the correct rejection look like arithmetic failed.
         """
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="quality_downgrade",
             actual_min_bitrate=None,
@@ -1965,18 +2014,18 @@ class TestVerdictSpectralFallback(unittest.TestCase):
                     "verified_lossless": False,
                 },
             },
-        ))
+        )
 
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Quality not better than on-disk copy; searching continues",
         )
-        self.assertEqual(result.spectral_bitrate, 128)
-        self.assertEqual(result.existing_spectral_bitrate, 192)
+        self.assertEqual(result["spectral_bitrate"], 128)
+        self.assertEqual(result["existing_spectral_bitrate"], 192)
 
     def test_transcode_classify_uses_real_bitrate_not_spectral(self):
         """_classify_transcode has the same or-chain bug for success transcodes."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success",
             beets_scenario="transcode_upgrade",
             actual_min_bitrate=None,
@@ -1984,15 +2033,15 @@ class TestVerdictSpectralFallback(unittest.TestCase):
             existing_min_bitrate=192,
             bitrate=210000,
             was_converted=True,
-        ))
+        )
         # Should show 210 (bitrate // 1000), not 96 (spectral)
-        self.assertIn("210", result.verdict)
-        self.assertNotIn("96", result.verdict)
+        self.assertIn("210", _text(result, "verdict"))
+        self.assertNotIn("96", _text(result, "verdict"))
 
     def test_summary_also_uses_real_bitrate(self):
         """The summary line (collapsed card) inherits from the verdict.
         If the verdict is wrong, the summary is wrong too."""
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario="quality_downgrade",
             actual_min_bitrate=None,
@@ -2008,9 +2057,9 @@ class TestVerdictSpectralFallback(unittest.TestCase):
                 "new_measurement": {"min_bitrate_kbps": 128},
                 "existing_measurement": {"min_bitrate_kbps": 128},
             },
-        ))
-        self.assertIn("Quality not better than on-disk copy", result.summary)
-        self.assertIn("nexus15", result.summary)
+        )
+        self.assertIn("Quality not better than on-disk copy", _text(result, "summary"))
+        self.assertIn("nexus15", _text(result, "summary"))
 
 
 # ============================================================================
@@ -2038,7 +2087,7 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
     def _brandlos_row(self):
         """Earlier of two successive upgrades — column NULL, JSONB has 119.
         Must display as '128 → 119', not '128 → 162'."""
-        return _entry(
+        return _row(
             outcome="success",
             existing_min_bitrate=128,
             actual_min_bitrate=None,          # pre-fix rows have NULL
@@ -2069,32 +2118,32 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
     def test_upgrade_verdict_uses_point_in_time_bitrate(self):
         """The headline bug: two successive upgrades both show current album
         state as the 'to' bitrate. Must use this row's new_measurement."""
-        result = classify_log_entry(self._brandlos_row())
-        self.assertIn("119", result.verdict,
-                      f"verdict must contain 119 (this download), got: {result.verdict!r}")
-        self.assertNotIn("162", result.verdict,
-                         f"verdict must NOT contain 162 (current album state): {result.verdict!r}")
+        result = _render(self._brandlos_row())
+        self.assertIn("119", _text(result, "verdict"),
+                      f"verdict must contain 119 (this download), got: {result['verdict']!r}")
+        self.assertNotIn("162", _text(result, "verdict"),
+                         f"verdict must NOT contain 162 (current album state): {result['verdict']!r}")
 
     def test_upgrade_verdict_reads_from_import_result_when_column_null(self):
         """Historical rows with NULL actual_min_bitrate must render correctly
         from the JSONB — no retroactive reindex needed."""
-        result = classify_log_entry(self._brandlos_row())
-        self.assertIn("128", result.verdict)  # existing
-        self.assertIn("119", result.verdict)  # new, from JSONB
-        self.assertTrue(result.verdict.startswith("Upgrade:"),
-                        f"expected 'Upgrade:' prefix, got: {result.verdict!r}")
+        result = _render(self._brandlos_row())
+        self.assertIn("128", _text(result, "verdict"))  # existing
+        self.assertIn("119", _text(result, "verdict"))  # new, from JSONB
+        self.assertTrue(_text(result, "verdict").startswith("Upgrade:"),
+                        f"expected 'Upgrade:' prefix, got: {result['verdict']!r}")
 
     # ---- _build_summary (line 404) for the Upgraded branch ----
 
     def test_upgrade_summary_uses_point_in_time_bitrate(self):
         """The collapsed-card summary inherits the verdict for upgrades, so it
         must also be point-in-time (not current album state)."""
-        entry = self._brandlos_row()
-        entry.soulseek_username = "brandlos"
-        result = classify_log_entry(entry)
-        self.assertIn("119", result.summary)
-        self.assertNotIn("162", result.summary)
-        self.assertIn("brandlos", result.summary)
+        row = self._brandlos_row()
+        row["soulseek_username"] = "brandlos"
+        result = _render(row)
+        self.assertIn("119", _text(result, "summary"))
+        self.assertNotIn("162", _text(result, "summary"))
+        self.assertIn("brandlos", _text(result, "summary"))
 
     # ---- _build_summary (line 404) for the Imported branch ----
 
@@ -2102,7 +2151,7 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
         """New-import rows (existing_min_bitrate=None) still share the same
         or-chain bug. If a request later gets upgraded, the 'Imported' summary
         for the historical row must not inherit the newer state."""
-        entry = _entry(
+        row = _row(
             outcome="success",
             existing_min_bitrate=None,         # first import
             actual_min_bitrate=None,           # column NULL
@@ -2115,16 +2164,16 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
                 "existing_measurement": None,
             },
         )
-        result = classify_log_entry(entry)
-        self.assertEqual(result.badge, "Imported")
-        self.assertIn("128", result.summary)
-        self.assertNotIn("320", result.summary)
+        result = _render(row)
+        self.assertEqual(result["badge"], "Imported")
+        self.assertIn("128", _text(result, "summary"))
+        self.assertNotIn("320", _text(result, "summary"))
 
     # ---- _new_import_verdict (line 312) ----
 
     def test_new_import_verdict_uses_point_in_time_bitrate(self):
         """Same or-chain in _new_import_verdict."""
-        entry = _entry(
+        row = _row(
             outcome="success",
             existing_min_bitrate=None,
             actual_min_bitrate=None,
@@ -2136,9 +2185,9 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
                 "new_measurement": {"min_bitrate_kbps": 128},
             },
         )
-        result = classify_log_entry(entry)
-        self.assertIn("128", result.verdict)
-        self.assertNotIn("320", result.verdict)
+        result = _render(row)
+        self.assertIn("128", _text(result, "verdict"))
+        self.assertNotIn("320", _text(result, "verdict"))
 
     # ---- _classify_search_filetype_override (line 300-301) ----
 
@@ -2146,7 +2195,7 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
         """The 'Replaced unverified CBR with X' label must reflect this row's
         bitrate tier, not the album's current state. Point-in-time 243kbps
         renders as 'V0'; leaked current-state 350kbps would render as '320'."""
-        entry = _entry(
+        row = _row(
             outcome="success",
             search_filetype_override="flac",
             existing_min_bitrate=320,
@@ -2160,12 +2209,12 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
                 "new_measurement": {"min_bitrate_kbps": 243},
             },
         )
-        result = classify_log_entry(entry)
-        self.assertEqual(result.badge, "Upgraded")
-        self.assertIn("V0", result.verdict,
-                      f"expected V0 tier (from 243kbps), got: {result.verdict!r}")
-        self.assertNotIn("320", result.verdict,
-                         f"verdict leaked current-state 320 tier: {result.verdict!r}")
+        result = _render(row)
+        self.assertEqual(result["badge"], "Upgraded")
+        self.assertIn("V0", _text(result, "verdict"),
+                      f"expected V0 tier (from 243kbps), got: {result['verdict']!r}")
+        self.assertNotIn("320", _text(result, "verdict"),
+                         f"verdict leaked current-state 320 tier: {result['verdict']!r}")
 
     def test_search_filetype_override_names_the_replaced_codec(self):
         """Live dl 39120 req 2066: an OPUS have, replaced under a
@@ -2186,7 +2235,7 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
         ))
         self.assertEqual(basis["existing_format"], "opus")
         self.assertEqual(basis["verdict"], "better")
-        entry = _entry(
+        row = _row(
             outcome="success",
             search_filetype_override="lossless",
             was_converted=True,
@@ -2197,29 +2246,29 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
             existing_min_bitrate=93,
             bitrate=93000,
             filetype="opus",
-            verified_lossless_classifier=None,
+            _evidence_verified_lossless_classifier=None,
             import_result={"version": 2, "decision": "import",
                            "comparison_basis": basis},
         )
-        result = classify_log_entry(entry)
-        self.assertEqual(result.badge, "Upgraded")
+        result = _render(row)
+        self.assertEqual(result["badge"], "Upgraded")
         self.assertEqual(
-            result.verdict, "Replaced OPUS with OPUS 93k, from FLAC")
+            result["verdict"], "Replaced OPUS with OPUS 93k, from FLAC")
 
     def test_search_filetype_override_without_a_basis_names_no_codec(self):
         """No persisted basis, no invented fact about the replaced side."""
-        entry = _entry(
+        row = _row(
             outcome="success",
             search_filetype_override="lossless",
             existing_min_bitrate=192,
             actual_filetype="mp3",
             actual_min_bitrate=243,
-            verified_lossless_classifier=None,
+            _evidence_verified_lossless_classifier=None,
             import_result=None,
         )
-        result = classify_log_entry(entry)
+        result = _render(row)
         self.assertEqual(
-            result.verdict, "Replaced the existing copy with MP3 V0")
+            result["verdict"], "Replaced the existing copy with MP3 V0")
 
     def test_search_filetype_override_with_a_codecless_basis_names_no_codec(
         self,
@@ -2241,19 +2290,19 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
             QualityRankConfig.defaults(),
         ))
         self.assertIsNone(basis["existing_format"])
-        entry = _entry(
+        row = _row(
             outcome="success",
             search_filetype_override="lossless",
             existing_min_bitrate=192,
             actual_filetype="mp3",
             actual_min_bitrate=243,
-            verified_lossless_classifier=None,
+            _evidence_verified_lossless_classifier=None,
             import_result={"version": 2, "decision": "import",
                            "comparison_basis": basis},
         )
-        result = classify_log_entry(entry)
+        result = _render(row)
         self.assertEqual(
-            result.verdict, "Replaced the existing copy with MP3 V0")
+            result["verdict"], "Replaced the existing copy with MP3 V0")
 
     # ---- _build_downloaded_label (line 432-434) ----
 
@@ -2261,7 +2310,7 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
         """downloaded_label builds from actual_min_bitrate or bitrate//1000;
         it already avoids request_min_bitrate. But for retroactive
         correctness (NULL column rows), the JSONB should be consulted first."""
-        entry = _entry(
+        row = _row(
             outcome="success",
             actual_min_bitrate=None,
             bitrate=119000,
@@ -2273,10 +2322,10 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
                 "new_measurement": {"min_bitrate_kbps": 119},
             },
         )
-        result = classify_log_entry(entry)
+        result = _render(row)
         # The label must reflect this row's download, not current state.
-        self.assertIn("119", result.downloaded_label)
-        self.assertNotIn("162", result.downloaded_label)
+        self.assertIn("119", _text(result, "downloaded_label"))
+        self.assertNotIn("162", _text(result, "downloaded_label"))
 
     # ---- Parametrized guard: current album state never leaks into a per-row
     # display regardless of which render path runs. ----
@@ -2296,7 +2345,7 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
         POINT_IN_TIME = 245  # ≥220 → renders as 'MP3 V0', no digit overlap
         scenarios = [
             ("upgrade",
-             _entry(outcome="success",
+             _row(outcome="success",
                     existing_min_bitrate=128,
                     actual_min_bitrate=None, bitrate=POINT_IN_TIME * 1000,
                     request_min_bitrate=ALIEN,
@@ -2306,7 +2355,7 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
                         "existing_measurement": {"min_bitrate_kbps": 128},
                     })),
             ("new_import",
-             _entry(outcome="success",
+             _row(outcome="success",
                     existing_min_bitrate=None,
                     actual_min_bitrate=None, bitrate=POINT_IN_TIME * 1000,
                     request_min_bitrate=ALIEN,
@@ -2315,7 +2364,7 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
                         "new_measurement": {"min_bitrate_kbps": POINT_IN_TIME},
                     })),
             ("search_filetype_override",
-             _entry(outcome="success",
+             _row(outcome="success",
                     search_filetype_override="flac",
                     existing_min_bitrate=320,
                     actual_min_bitrate=None, bitrate=POINT_IN_TIME * 1000,
@@ -2326,52 +2375,79 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
                     })),
         ]
         alien = str(ALIEN)
-        for desc, entry in scenarios:
+        for desc, row in scenarios:
             with self.subTest(desc=desc):
-                result = classify_log_entry(entry)
+                result = _render(row)
                 self.assertNotIn(
-                    alien, result.verdict,
-                    f"{desc}: verdict leaked current album state: {result.verdict!r}")
+                    alien, _text(result, "verdict"),
+                    f"{desc}: verdict leaked current album state: {result['verdict']!r}")
                 self.assertNotIn(
-                    alien, result.summary,
-                    f"{desc}: summary leaked current album state: {result.summary!r}")
+                    alien, _text(result, "summary"),
+                    f"{desc}: summary leaked current album state: {result['summary']!r}")
                 self.assertNotIn(
-                    alien, result.downloaded_label,
+                    alien, _text(result, "downloaded_label"),
                     f"{desc}: downloaded_label leaked current album state: "
-                    f"{result.downloaded_label!r}")
+                    f"{result['downloaded_label']!r}")
 
 
-class TestParseImportResultTolerantOfMsgspecValidationError(unittest.TestCase):
+class TestMalformedImportResultDegradesInsteadOfRaising(unittest.TestCase):
     """Issue #141 regression guard.
 
     Post-migration, strict ``msgspec.Struct`` decode raises
-    ``msgspec.ValidationError`` on type drift. ``_parse_import_result``
-    is called from the Recents tab rendering path for every row in
-    ``/api/pipeline/log`` — a single malformed historical row must
-    degrade to ``None`` (shown as unclassified) rather than 500 the
-    whole route.
+    ``msgspec.ValidationError`` on type drift. The typed import result is
+    read while rendering every row of ``/api/pipeline/log`` — a single
+    malformed historical row must degrade to the unclassified render
+    rather than 500 the whole route.
+
+    Each case renders the SAME blob twice: once with the type drift, once
+    with it repaired. The repaired twin is what proves the degraded render
+    really lost something, instead of asserting fields the world was never
+    going to populate.
     """
 
-    def test_malformed_dict_returns_none(self):
-        entry = _entry(import_result={
+    def _blob(self, exit_code: object) -> dict[str, object]:
+        return {
             "version": 2,
-            "exit_code": "not-an-int",  # declared int → ValidationError
+            "exit_code": exit_code,  # declared int → ValidationError on drift
             "decision": "import",
-        })
-        self.assertIsNone(_parse_import_result(entry))
+            "comparison_basis": {
+                "verdict": "better",
+                "branch": "rank",
+                "new_rank": "excellent",
+                "existing_rank": "good",
+                "new_metric": "avg",
+                "existing_metric": "avg",
+                "new_value_kbps": 288,
+                "existing_value_kbps": 196,
+                "new_format": "MP3",
+                "existing_format": "MP3",
+            },
+        }
 
-    def test_malformed_json_string_returns_none(self):
+    def test_malformed_dict_degrades_to_the_unclassified_render(self):
+        result = _classified(import_result=self._blob("not-an-int"))
+        self.assertIsNone(result["comparison_basis"])
+        self.assertIsNone(result["disambiguation_failure"])
+        self.assertEqual(result["bad_extensions"], [])
+        # The row still renders — degraded, not blank.
+        self.assertTrue(result["badge"])
+        repaired = _classified(import_result=self._blob(0))
+        self.assertIsNotNone(repaired["comparison_basis"])
+
+    def test_malformed_json_string_degrades_to_the_unclassified_render(self):
         import json as _json
-        entry = _entry(import_result=_json.dumps({
-            "version": 2,
-            "exit_code": "not-an-int",
-            "decision": "import",
-        }))
-        self.assertIsNone(_parse_import_result(entry))
+        result = _classified(
+            import_result=_json.dumps(self._blob("not-an-int")))
+        self.assertIsNone(result["comparison_basis"])
+        self.assertIsNone(result["disambiguation_failure"])
+        self.assertEqual(result["bad_extensions"], [])
+        self.assertTrue(result["badge"])
+        repaired = _classified(import_result=_json.dumps(self._blob(0)))
+        self.assertIsNotNone(repaired["comparison_basis"])
 
 
 # ============================================================================
-# classify_log_entry — persisted comparison basis (request 6039)
+# Recents render — persisted comparison basis (request 6039)
 # ============================================================================
 
 class TestClassifyComparisonBasis(unittest.TestCase):
@@ -2419,50 +2495,50 @@ class TestClassifyComparisonBasis(unittest.TestCase):
 
     def test_upgrade_verdict_renders_the_decision_story(self):
         basis = self._basis_dict(self._SAY_HELLO_NEW, self._SAY_HELLO_EXISTING)
-        entry = _entry(
+        row = _row(
             outcome="success",
             existing_min_bitrate=194,
             actual_min_bitrate=194,
             import_result={"version": 2, "decision": "import",
                            "comparison_basis": basis},
         )
-        c = classify_log_entry(entry)
-        self.assertEqual(c.badge, "Upgraded")
+        c = _render(row)
+        self.assertEqual(c["badge"], "Upgraded")
         self.assertEqual(
-            c.verdict,
+            c["verdict"],
             "Upgrade: MP3 avg 196k (good) → avg 288k (excellent)")
 
     def test_upgrade_verdict_is_never_a_tautology(self):
         """I6: with a basis, the two sides of a better-verdict always differ
         in at least one displayed component."""
         basis = self._basis_dict(self._SAY_HELLO_NEW, self._SAY_HELLO_EXISTING)
-        entry = _entry(
+        row = _row(
             outcome="success",
             existing_min_bitrate=194,
             actual_min_bitrate=194,
             import_result={"version": 2, "decision": "import",
                            "comparison_basis": basis},
         )
-        c = classify_log_entry(entry)
-        self.assertNotIn("MP3 V2 to MP3 V2", c.verdict)
+        c = _render(row)
+        self.assertNotIn("MP3 V2 to MP3 V2", _text(c, "verdict"))
 
     def test_upgrade_without_basis_keeps_legacy_labels(self):
-        entry = _entry(
+        row = _row(
             outcome="success",
             existing_min_bitrate=194,
             actual_min_bitrate=194,
             import_result={"version": 2, "decision": "import"},
         )
-        c = classify_log_entry(entry)
-        self.assertEqual(c.badge, "Upgraded")
-        self.assertEqual(c.verdict, "Upgrade: MP3 V2 to MP3 V2")
+        c = _render(row)
+        self.assertEqual(c["badge"], "Upgraded")
+        self.assertEqual(c["verdict"], "Upgrade: MP3 V2 to MP3 V2")
 
     def test_cross_format_upgrade_names_both_formats(self):
         basis = self._basis_dict(
             {"avg_bitrate_kbps": 192, "format": "aac"},
             {"avg_bitrate_kbps": 196, "format": "MP3"},
         )
-        entry = _entry(
+        row = _row(
             outcome="success",
             actual_filetype="aac",
             existing_min_bitrate=196,
@@ -2470,14 +2546,14 @@ class TestClassifyComparisonBasis(unittest.TestCase):
             import_result={"version": 2, "decision": "import",
                            "comparison_basis": basis},
         )
-        c = classify_log_entry(entry)
+        c = _render(row)
         self.assertEqual(
-            c.verdict,
+            c["verdict"],
             "Upgrade: MP3 avg 196k (good) → AAC avg 192k (transparent)")
 
     def test_downgrade_verdict_keeps_basis_in_evidence_contract(self):
         basis = self._basis_dict(self._SAY_HELLO_EXISTING, self._SAY_HELLO_NEW)
-        entry = _entry(
+        row = _row(
             outcome="rejected",
             beets_scenario="downgrade",
             existing_min_bitrate=194,
@@ -2485,18 +2561,18 @@ class TestClassifyComparisonBasis(unittest.TestCase):
             import_result={"version": 2, "decision": "downgrade",
                            "comparison_basis": basis},
         )
-        c = classify_log_entry(entry)
+        c = _render(row)
         self.assertEqual(
-            c.verdict,
+            c["verdict"],
             "Quality not better than on-disk copy; searching continues")
-        self.assertEqual(c.comparison_basis, basis)
+        self.assertEqual(c["comparison_basis"], basis)
 
     def test_equivalent_tiebreak_reject_keeps_tolerance_in_basis(self):
         basis = self._basis_dict(
             {"avg_bitrate_kbps": 250, "format": "MP3"},
             {"avg_bitrate_kbps": 248, "format": "MP3"},
         )
-        entry = _entry(
+        row = _row(
             outcome="rejected",
             beets_scenario="downgrade",
             existing_min_bitrate=248,
@@ -2504,13 +2580,14 @@ class TestClassifyComparisonBasis(unittest.TestCase):
             import_result={"version": 2, "decision": "downgrade",
                            "comparison_basis": basis},
         )
-        c = classify_log_entry(entry)
+        c = _render(row)
         self.assertEqual(
-            c.verdict,
+            c["verdict"],
             "Quality not better than on-disk copy; searching continues")
-        self.assertIsNotNone(c.comparison_basis)
-        assert c.comparison_basis is not None
-        self.assertEqual(c.comparison_basis["tolerance_kbps"], 5)
+        rendered_basis = c["comparison_basis"]
+        self.assertIsNotNone(rendered_basis)
+        assert is_str_object_dict(rendered_basis)
+        self.assertEqual(rendered_basis["tolerance_kbps"], 5)
 
     def test_spectral_tiebreak_upgrade_shows_clamped_values_not_raw(self):
         """Issue #813 Finding 1: the coarse "good" band buckets the 224 and
@@ -2533,17 +2610,17 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         )
         self.assertEqual(basis["branch"], "spectral_tiebreak")
         self.assertEqual(basis["verdict"], "better")
-        entry = _entry(
+        row = _row(
             outcome="success",
             existing_min_bitrate=235,
             actual_min_bitrate=1000,
             import_result={"version": 2, "decision": "import",
                            "comparison_basis": basis},
         )
-        c = classify_log_entry(entry)
-        self.assertEqual(c.verdict, "Upgrade: MP3 ~192k → ~224k (both good)")
-        self.assertNotIn("1000", c.verdict)
-        self.assertNotIn("235", c.verdict)
+        c = _render(row)
+        self.assertEqual(c["verdict"], "Upgrade: MP3 ~192k → ~224k (both good)")
+        self.assertNotIn("1000", _text(c, "verdict"))
+        self.assertNotIn("235", _text(c, "verdict"))
 
     def test_spectral_candidate_bound_clamps_only_the_candidate(self):
         """The candidate-side one-class branch preserves its provenance.
@@ -2674,7 +2751,7 @@ class TestClassifyComparisonBasis(unittest.TestCase):
                 )
 
     def test_spectral_candidate_bound_upgrade_reaches_the_log_renderer(self):
-        """The candidate-side branch through classify_log_entry's success path.
+        """The candidate-side branch through the render path's success branch.
 
         A bounded candidate whose class (256) really is a rank above the
         genuine HAVE imports, so this is the reachable entry shape where a
@@ -2691,20 +2768,20 @@ class TestClassifyComparisonBasis(unittest.TestCase):
                  "spectral_provenance": "measured"},
         )
         self.assertEqual(basis["branch"], "spectral_candidate_bound")
-        entry = _entry(
+        row = _row(
             outcome="success",
             existing_min_bitrate=172,
             actual_min_bitrate=290,
             import_result={"version": 2, "decision": "import",
                            "comparison_basis": basis},
         )
-        c = classify_log_entry(entry)
-        self.assertIn("~256k", c.verdict)
+        c = _render(row)
+        self.assertIn("~256k", _text(c, "verdict"))
         # The HAVE's 172 is a real measured average and keeps its label.
-        self.assertIn("avg 172k", c.verdict)
+        self.assertIn("avg 172k", _text(c, "verdict"))
         # The candidate's own container is 290; its class must never be
         # presented as a measured statistic of the file.
-        self.assertNotIn("avg 256k", c.verdict)
+        self.assertNotIn("avg 256k", _text(c, "verdict"))
 
     def test_verified_lossless_bypass_names_the_bypass(self):
         basis = self._bypass_basis_dict(
@@ -2712,16 +2789,16 @@ class TestClassifyComparisonBasis(unittest.TestCase):
             {"avg_bitrate_kbps": 248, "format": "MP3"},
         )
         self.assertTrue(basis["verified_lossless_bypass"])
-        entry = _entry(
+        row = _row(
             outcome="success",
             existing_min_bitrate=248,
             actual_min_bitrate=250,
             import_result={"version": 2, "decision": "import",
                            "comparison_basis": basis},
         )
-        c = classify_log_entry(entry)
+        c = _render(row)
         self.assertEqual(
-            c.verdict,
+            c["verdict"],
             "Proof upgrade: equivalent quality — MP3 vs MP3, "
             "verified lossless")
 
@@ -2734,7 +2811,7 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         )
         self.assertEqual(basis["verdict"], "equivalent")
         self.assertEqual(basis["existing_format"], "opus")
-        entry = _entry(
+        row = _row(
             outcome="success",
             was_converted=True,
             original_filetype="flac",
@@ -2748,17 +2825,17 @@ class TestClassifyComparisonBasis(unittest.TestCase):
                 "comparison_basis": basis,
             },
         )
-        result = classify_log_entry(entry)
-        self.assertEqual(result.badge, "Upgraded")
+        result = _render(row)
+        self.assertEqual(result["badge"], "Upgraded")
         self.assertEqual(
-            result.verdict,
+            result["verdict"],
             "Proof upgrade: equivalent quality — OPUS 128 vs OPUS, "
             "from FLAC, verified lossless",
         )
-        self.assertNotIn("MP3", result.verdict)
+        self.assertNotIn("MP3", _text(result, "verdict"))
 
     def test_schmotime_verified_lossless_upgrade_restores_concise_copy(self):
-        entry = _entry(
+        row = _row(
             outcome="success",
             was_converted=True,
             original_filetype="flac",
@@ -2787,10 +2864,10 @@ class TestClassifyComparisonBasis(unittest.TestCase):
                 },
             },
         )
-        result = classify_log_entry(entry)
-        self.assertEqual(result.badge, "Upgraded")
+        result = _render(row)
+        self.assertEqual(result["badge"], "Upgraded")
         self.assertEqual(
-            result.summary,
+            result["summary"],
             "Proof upgrade: equivalent quality — OPUS 128 vs MP3, "
             "from FLAC, verified lossless"
             " · trelospatrinos",
@@ -2801,20 +2878,20 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         and drops the proof claim: 'converted from FLAC and graded genuine'
         is not what the decider tests for."""
         basis = self._basis_dict(self._SAY_HELLO_NEW, self._SAY_HELLO_EXISTING)
-        entry = _entry(
+        row = _row(
             outcome="success",
             was_converted=True,
             original_filetype="flac",
             spectral_grade="genuine",
             existing_min_bitrate=194,
             actual_min_bitrate=194,
-            verified_lossless_classifier=None,
+            _evidence_verified_lossless_classifier=None,
             import_result={"version": 2, "decision": "import",
                            "comparison_basis": basis},
         )
-        c = classify_log_entry(entry)
+        c = _render(row)
         self.assertEqual(
-            c.verdict,
+            c["verdict"],
             "Upgrade: MP3 avg 196k (good) → avg 288k (excellent), "
             "from FLAC")
 
@@ -2822,37 +2899,38 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         """The must-still-work half: a row the decider DID prove still says
         so, through the same basis path."""
         basis = self._basis_dict(self._SAY_HELLO_NEW, self._SAY_HELLO_EXISTING)
-        entry = _entry(
+        row = _row(
             outcome="success",
             was_converted=True,
             original_filetype="flac",
             spectral_grade="genuine",
             existing_min_bitrate=194,
             actual_min_bitrate=194,
-            verified_lossless_classifier=_minted_proof_classifier(),
+            candidate_evidence_id=4711,
+            _evidence_verified_lossless_classifier=_minted_proof_classifier(),
             import_result={"version": 2, "decision": "import",
                            "comparison_basis": basis},
         )
-        c = classify_log_entry(entry)
+        c = _render(row)
         self.assertEqual(
-            c.verdict,
+            c["verdict"],
             "Upgrade: MP3 avg 196k (good) → avg 288k (excellent), "
             "from FLAC, verified lossless")
 
     def test_classified_entry_carries_basis_for_payloads(self):
         basis = self._basis_dict(self._SAY_HELLO_NEW, self._SAY_HELLO_EXISTING)
-        entry = _entry(
+        row = _row(
             outcome="success",
             existing_min_bitrate=194,
             import_result={"version": 2, "decision": "import",
                            "comparison_basis": basis},
         )
-        c = classify_log_entry(entry)
-        self.assertEqual(c.comparison_basis, basis)
+        c = _render(row)
+        self.assertEqual(c["comparison_basis"], basis)
 
     def test_classified_entry_basis_none_when_absent(self):
-        c = classify_log_entry(_entry(outcome="success"))
-        self.assertIsNone(c.comparison_basis)
+        c = _classified(outcome="success")
+        self.assertIsNone(c["comparison_basis"])
 
 
 if __name__ == "__main__":

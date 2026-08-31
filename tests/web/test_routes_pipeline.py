@@ -22,7 +22,8 @@ from unittest.mock import ANY, patch
 
 import msgspec
 
-from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
+from web.classify import ClassifiedEntry
+from web.download_history_view import build_recents_download_log_rows
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -279,24 +280,25 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(history_item["candidate_reference"], candidate_reference)
 
     def test_have_analysis_error_classification_survives_malformed_payload(self):
-        entry = LogEntry.from_row({
+        classified = build_recents_download_log_rows([{
             "outcome": "have_analysis_error",
             "download_path": "/library/current",
             "staged_path": "/incoming/candidate",
             "error_message": "analyser exited 9",
             "validation_result": "{malformed",
-        })
+        }])[0]
 
-        classified = classify_log_entry(entry)
-
-        self.assertEqual(classified.badge, "Environment failure")
-        self.assertEqual(classified.badge_class, "badge-warn")
-        self.assertEqual(classified.border_color, "#a86f20")
-        self.assertIsNone(classified.failure_category)
-        self.assertEqual(classified.analysis_error, "analyser exited 9")
-        self.assertEqual(classified.installed_path, "/library/current")
-        self.assertEqual(classified.candidate_reference, "/incoming/candidate")
-        self.assertIn("request lifecycle was preserved", classified.verdict)
+        self.assertEqual(classified["badge"], "Environment failure")
+        self.assertEqual(classified["badge_class"], "badge-warn")
+        self.assertEqual(classified["border_color"], "#a86f20")
+        self.assertIsNone(classified["failure_category"])
+        self.assertEqual(classified["analysis_error"], "analyser exited 9")
+        self.assertEqual(classified["installed_path"], "/library/current")
+        self.assertEqual(
+            classified["candidate_reference"], "/incoming/candidate")
+        verdict = classified["verdict"]
+        assert isinstance(verdict, str)
+        self.assertIn("request lifecycle was preserved", verdict)
 
     # --- Issue #1178 (post-correction): render-time track-length warning ---
     #
@@ -654,13 +656,15 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         )
 
     def test_have_analysis_error_copy_respects_operator_stop(self):
-        classified = classify_log_entry(LogEntry(
-            outcome="have_analysis_error",
-            request_status="unsearchable",
-        ))
+        classified = build_recents_download_log_rows([{
+            "outcome": "have_analysis_error",
+            "request_status": "unsearchable",
+        }])[0]
 
-        self.assertIn("Operator search stop remains in place", classified.verdict)
-        self.assertNotIn("future download", classified.verdict)
+        verdict = classified["verdict"]
+        assert isinstance(verdict, str)
+        self.assertIn("Operator search stop remains in place", verdict)
+        self.assertNotIn("future download", verdict)
 
     def test_have_analysis_branch_does_not_change_existing_outcomes(self):
         expected = {
@@ -671,10 +675,11 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         }
         for outcome, display in expected.items():
             with self.subTest(outcome=outcome):
-                classified = classify_log_entry(LogEntry(outcome=outcome))
+                classified = build_recents_download_log_rows(
+                    [{"outcome": outcome}])[0]
                 self.assertEqual(
-                    (classified.badge, classified.badge_class,
-                     classified.border_color),
+                    (classified["badge"], classified["badge_class"],
+                     classified["border_color"]),
                     display,
                 )
 
