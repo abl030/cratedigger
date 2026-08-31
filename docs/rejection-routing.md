@@ -312,10 +312,10 @@ producer_audit.py`'s registered producer files —
   registry flag, not a `job_type != 'force_import'` comparison, is the
   mechanism, and `force_import` is the only kind that sets it. So
   `_dismiss_successful_force_import` / `_cleanup_failed_force_import` are
-  no-ops for every local-import job regardless of outcome — there is no "original quarantine
-  folder" for this lane to consume; a local import's REAL source is the
-  operator's folder, which this lane never deletes, moves, or otherwise
-  mutates. `lib/pipeline_db/import_jobs.py::
+  no-ops for every local-import job regardless of outcome — there is no
+  "original quarantine folder" for this lane to consume; a local import's
+  REAL source is the operator's folder, which this lane never deletes,
+  moves, or otherwise mutates. `lib/pipeline_db/import_jobs.py::
   list_terminal_force_wrong_match_cleanup_jobs` (the D7 crash-recovery
   replay sweep) stays `job_type = 'force_import'`-only for the same reason —
   widening it would cost nothing functionally (the same no-op guard applies)

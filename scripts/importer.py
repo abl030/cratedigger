@@ -195,11 +195,13 @@ def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
 # One job-type decision deliberately stays OUTSIDE the registry:
 # ``_automation_claim_is_current``'s ``current.job_type ==
 # IMPORT_JOB_AUTOMATION`` is one clause of an exact-identity conjunction
-# over a re-read owner row (id, request_id, status, preview_status, launch
-# fence, lease, owner pointer), not a routing question. Restating it as an
-# authority-class comparison would weaken it, since two kinds may share an
-# authority class. The remaining ``job.job_type`` reads below are log
-# arguments and message interpolation, which are not decisions at all.
+# over the re-read owner job AND its request row — the job's id,
+# request_id, job_type, status, preview_status, launch fence and execution
+# lease, plus the request's status, owner pointer and active download
+# state — not a routing question. Restating it as an authority-class
+# comparison would weaken it, since two kinds may share an authority
+# class. The remaining ``job.job_type`` reads below are log arguments and
+# message interpolation, which are not decisions at all.
 #
 # The four lanes stay four: this is convergence of dispatch, never a fifth
 # Beets-mutation lane (CLAUDE.md § Decision architecture).

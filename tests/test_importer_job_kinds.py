@@ -345,12 +345,16 @@ class TestCommittedWrongMatchGateIsRead(unittest.TestCase):
     a non-None value passes ``success=False`` literally at the same
     construction (``lib/download_rejection.py`` twice,
     ``lib/dispatch/outcome_actions.py`` once, and this module's own replay
-    reconstructor); and the one production path that flips an existing
-    outcome's ``success`` to True — ``lib/dispatch/core.py``'s
-    ``_DispatchSettlement``, assembled by
+    reconstructor); and the one production path that flips a pending
+    settlement's ``success`` to True before the outcome is assembled —
+    ``lib/dispatch/core.py``'s ``_DispatchSettlement``, assembled by
     ``_dispatch_outcome_from_settlement`` — has no scenario field at all
-    and builds its ``DispatchOutcome`` without one. So the success site
-    always calls the helper with ``scenario=None``.
+    and builds its ``DispatchOutcome`` without one. (No ``DispatchOutcome``
+    ever has ``success`` flipped after construction: both ``replace()``
+    calls on a real outcome — ``lib/dispatch/entry_points.py``'s and this
+    module's own automation fallback — rewrite ``terminal_outcome`` and
+    nothing else.) So the success site always calls the helper with
+    ``scenario=None``.
 
     Measured, NOT assumed: ``scenario=None`` does not make the helper a
     no-op — ``rejection_scenario_is_wrong_match_candidate(None)`` is True,
