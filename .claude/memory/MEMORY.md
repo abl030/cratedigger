@@ -111,3 +111,4 @@
 - [Worktree-isolated git boundaries](feedback_worktree_isolated_git_boundaries.md) — no git outside own worktree for session+subagents; deploy from shared checkout; hash-proof mutant restoration
 - [#1278 pt5 classify render interface shipped](project_1278_pt5_classify_render_interface.md) — classify demoted private, composed render is the pinned interface; PR #1283 live
 - [#1278 items 2+3 shipped](project_1278_items_2_3_shipped.md) — surface-outcome convention + set-intent service + table sweep live 2026-08-31; residue on the issue
+- [#1278 pt4 beets child module shipped](project_1278_pt4_beets_child_shipped.md) — PRs #1282/#1287 live 2026-08-31; per-lane exit-code doctrine; beets_validate waiver stays; deferred debt on the issue
