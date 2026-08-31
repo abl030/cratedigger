@@ -115,3 +115,5 @@
 - [#1278 item 8 wire contract shipped](project_1278_item8_wire_contract.md) — key-set audit + required split live 2026-08-31; reader re-derived every required-field claim
 - [#1278 item 7 fake delegation shipped](project_1278_item7_fake_delegation.md) — PRs #1289/#1291/#1293 live 2026-08-31; extraction-vs-value-parity split; PG POWER overflow fixed; 8 mutant survivors pinned
 - [#1278 pt9 root-coverage rule shipped](project_1278_pt9_root_coverage_rule.md) — PR #1294 live 2026-08-31; audit self-vacation lesson: anchor scope columns externally; new fallback-backed entries need MASKABLE_ENTRY_PINS
+- [#1278 wx3 dashboard composer SHIPPED](project_1278_wx3_dashboard_composer.md) — PR #1296 live-verified 2026-08-31; composer takes (navHtml,data,el); 36 mutants killed; swept #1293-#1295
+- [Live means verified deploy](feedback_live_means_verified_deploy.md) — memory says "merged" until the deploy chain verifies; flake.lock pin is the authority
