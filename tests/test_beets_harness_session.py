@@ -227,8 +227,11 @@ def choose_match_line(
         "artist": "Artist",
         "album": "Album",
         "album_id": album_id,
+        "data_source": "MusicBrainz",
         "track_count": item_count,
         "albumstatus": "Official",
+        "tracks": [],
+        "extra_items": [],
         "extra_tracks": [
             {"title": f"Bonus {index}"} for index in range(extra_tracks)
         ],
@@ -249,6 +252,7 @@ def choose_match_line(
         "item_count": item_count,
         "items": items,
         "recommendation": "strong",
+        "candidate_count": 1,
         "candidates": [candidate],
     }).decode()
 

@@ -153,6 +153,7 @@ from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     handoff_automation_owner,
     make_album_quality_evidence,
+    make_candidate_summary,
     make_ctx_with_fake_db,
     make_grab_list_entry,
     make_request_row,
@@ -186,12 +187,12 @@ def candidate(
     extra_tracks: int = 0,
 ) -> CandidateSummary:
     """One beets candidate as the harness serializes it."""
-    return CandidateSummary(
+    return make_candidate_summary(
         mbid=mbid,
-        artist="DICE",
-        album="Midnight Zoo",
         distance=distance,
         extra_tracks=[HarnessTrackInfo() for _ in range(extra_tracks)],
+        artist="DICE",
+        album="Midnight Zoo",
     )
 
 

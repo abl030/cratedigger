@@ -21,6 +21,7 @@ from lib.quality import (
     HarnessTrackInfo,
     TrackMapping,
 )
+from tests.helpers import make_candidate_summary
 
 
 def _item(path: str, *, length: float = 0.0) -> HarnessItem:
@@ -42,7 +43,7 @@ def _candidate(
     duration_complete: bool = True,
     indexed_program_length: float = 408.0,
 ) -> CandidateSummary:
-    return CandidateSummary(
+    return make_candidate_summary(
         mbid="2823685",
         data_source="Discogs",
         mapping=[

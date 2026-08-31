@@ -19,6 +19,7 @@ from lib.quality import (
     TrackMapping,
     ValidationResult,
 )
+from tests.helpers import make_candidate_summary
 
 # ============================================================================
 # HarnessItem, HarnessTrackInfo, TrackMapping
@@ -26,12 +27,17 @@ from lib.quality import (
 
 class TestHarnessItem(unittest.TestCase):
 
-    def test_defaults(self) -> None:
-        item = HarnessItem()
-        self.assertEqual(item.path, "")
+    def test_audit_metadata_defaults(self) -> None:
+        """``path`` is required (#1278 item 8); the rest defaults."""
+        item = HarnessItem(path="01.flac")
+        self.assertEqual(item.path, "01.flac")
         self.assertEqual(item.title, "")
         self.assertIsNone(item.bitrate)
         self.assertEqual(item.format, "")
+
+    def test_path_is_required_at_construction(self) -> None:
+        with self.assertRaises(TypeError):
+            HarnessItem()  # pyright: ignore[reportCallIssue]
 
     def test_full(self) -> None:
         item = HarnessItem(
@@ -45,7 +51,7 @@ class TestHarnessItem(unittest.TestCase):
         self.assertEqual(item.format, "FLAC")
 
     def test_attribute_error_on_typo(self) -> None:
-        item = HarnessItem()
+        item = HarnessItem(path="01.flac")
         with self.assertRaises(AttributeError):
             _ = item.tilte  # type: ignore[attr-defined]
 
@@ -89,7 +95,7 @@ class TestTrackMapping(unittest.TestCase):
             track=HarnessTrackInfo(title="Track 1", track_id="t1", length=213.4),
         )
         vr = ValidationResult(
-            candidates=[CandidateSummary(
+            candidates=[make_candidate_summary(
                 mbid="abc", mapping=[m],
             )],
         )
@@ -109,8 +115,9 @@ class TestTrackMapping(unittest.TestCase):
 
 class TestCandidateSummary(unittest.TestCase):
 
-    def test_defaults(self) -> None:
-        c = CandidateSummary()
+    def test_audit_metadata_defaults(self) -> None:
+        """Only the audit metadata defaults; decision fields are required."""
+        c = make_candidate_summary(mbid="", distance=0.0, data_source="")
         self.assertEqual(c.mbid, "")
         self.assertEqual(c.artist, "")
         self.assertEqual(c.album, "")
@@ -122,14 +129,20 @@ class TestCandidateSummary(unittest.TestCase):
         self.assertEqual(c.extra_items, [])
         self.assertFalse(c.is_target)
 
+    def test_decision_fields_are_required_at_construction(self) -> None:
+        """#1278 item 8: the decision-consumed fields have no defaults."""
+        with self.assertRaises(TypeError):
+            CandidateSummary()  # pyright: ignore[reportCallIssue]
+
     def test_full_construction(self) -> None:
         c = CandidateSummary(
-            mbid="abc-123", artist="Ye", album="BULLY",
-            distance=0.45, track_count=12, year=2025,
-            country="US",
+            mbid="abc-123", distance=0.45, data_source="MusicBrainz",
+            tracks=[], mapping=[],
+            extra_items=[],
             extra_tracks=[HarnessTrackInfo(title="Bonus 1"),
                           HarnessTrackInfo(title="Bonus 2")],
-            extra_items=[],
+            artist="Ye", album="BULLY",
+            track_count=12, year=2025, country="US",
             is_target=True,
         )
         self.assertEqual(c.mbid, "abc-123")
@@ -175,7 +188,7 @@ class TestCandidateSummary(unittest.TestCase):
 
     def test_distance_breakdown(self) -> None:
         """CandidateSummary stores per-component distance weights."""
-        c = CandidateSummary(
+        c = make_candidate_summary(
             mbid="abc-123", distance=0.49,
             distance_breakdown={
                 "album": 0.0, "artist": 0.0, "tracks": 0.0,
@@ -189,7 +202,7 @@ class TestCandidateSummary(unittest.TestCase):
     def test_distance_breakdown_survives_json_round_trip(self) -> None:
         """Distance breakdown serializes through ValidationResult."""
         vr = ValidationResult(
-            candidates=[CandidateSummary(
+            candidates=[make_candidate_summary(
                 mbid="abc", distance=0.49, is_target=True,
                 distance_breakdown={"album": 0.0, "media": 0.25, "tracks": 0.15},
             )],
@@ -201,13 +214,13 @@ class TestCandidateSummary(unittest.TestCase):
         self.assertEqual(bd["tracks"], 0.15)
 
     def test_distance_breakdown_default_empty(self) -> None:
-        c = CandidateSummary()
+        c = make_candidate_summary()
         self.assertEqual(c.distance_breakdown, {})
 
     def test_tracks_survive_json_round_trip(self) -> None:
         """Track lists serialize and deserialize through ValidationResult."""
         vr = ValidationResult(
-            candidates=[CandidateSummary(
+            candidates=[make_candidate_summary(
                 mbid="abc", distance=0.02, is_target=True,
                 tracks=[
                     HarnessTrackInfo(title="Track 1", length=180.0, track_id="t1"),
@@ -226,6 +239,26 @@ class TestCandidateSummary(unittest.TestCase):
 # Strict-typed wire boundary — msgspec validates ID fields as `str`
 # ============================================================================
 
+def _wire_candidate(**overrides: object) -> dict[str, object]:
+    """A complete candidate as the harness spells it on the wire.
+
+    Every required key present (#1278 item 8) so each test below can
+    poison exactly one field and get the type error it names, not an
+    incidental missing-key error.
+    """
+    base: dict[str, object] = {
+        "album_id": "2085134",
+        "distance": 0.02,
+        "data_source": "MusicBrainz",
+        "tracks": [],
+        "mapping": [],
+        "extra_items": [],
+        "extra_tracks": [],
+    }
+    base.update(overrides)
+    return base
+
+
 class TestCandidateSummaryIdContract(unittest.TestCase):
     """CandidateSummary is a msgspec.Struct. Every ID field is typed `str`.
     The int-vs-str bug (every Discogs validation logging `mbid_not_found`)
@@ -243,14 +276,14 @@ class TestCandidateSummaryIdContract(unittest.TestCase):
     def test_str_album_id_accepted(self) -> None:
         """UUID album_id decodes into .mbid."""
         c = msgspec.convert(
-            {"album_id": "f100b6b0-6daa-4c9b-b33a-3e14c564cf58"},
+            _wire_candidate(album_id="f100b6b0-6daa-4c9b-b33a-3e14c564cf58"),
             type=CandidateSummary,
         )
         self.assertEqual(c.mbid, "f100b6b0-6daa-4c9b-b33a-3e14c564cf58")
 
     def test_numeric_str_album_id_accepted(self) -> None:
         """Discogs numeric ID-as-string decodes fine (harness emits this)."""
-        c = msgspec.convert({"album_id": "2085134"}, type=CandidateSummary)
+        c = msgspec.convert(_wire_candidate(), type=CandidateSummary)
         self.assertEqual(c.mbid, "2085134")
         self.assertIsInstance(c.mbid, str)
 
@@ -258,12 +291,14 @@ class TestCandidateSummaryIdContract(unittest.TestCase):
         """int album_id raises ValidationError — the whole point of the
         strict boundary. This is the exact shape of the bug PR #98 fixed."""
         with self.assertRaises(msgspec.ValidationError):
-            msgspec.convert({"album_id": 2085134}, type=CandidateSummary)
+            msgspec.convert(
+                _wire_candidate(album_id=2085134), type=CandidateSummary,
+            )
 
     def test_int_releasegroup_id_rejected(self) -> None:
         with self.assertRaises(msgspec.ValidationError):
             msgspec.convert(
-                {"album_id": "2085134", "releasegroup_id": 339103},
+                _wire_candidate(releasegroup_id=339103),
                 type=CandidateSummary,
             )
 
@@ -271,16 +306,16 @@ class TestCandidateSummaryIdContract(unittest.TestCase):
         """Discogs tracks with int track_ids trip at decode too."""
         with self.assertRaises(msgspec.ValidationError):
             msgspec.convert(
-                {"album_id": "2085134",
-                 "tracks": [{"title": "X", "track_id": 12345678}]},
+                _wire_candidate(tracks=[{"title": "X", "track_id": 12345678}]),
                 type=CandidateSummary,
             )
 
     def test_int_release_track_id_rejected(self) -> None:
         with self.assertRaises(msgspec.ValidationError):
             msgspec.convert(
-                {"album_id": "2085134",
-                 "tracks": [{"title": "X", "release_track_id": 87654321}]},
+                _wire_candidate(
+                    tracks=[{"title": "X", "release_track_id": 87654321}],
+                ),
                 type=CandidateSummary,
             )
 
@@ -289,7 +324,9 @@ class TestCandidateSummaryIdContract(unittest.TestCase):
         harness-side `_id_str` always emits `""` for falsy IDs, so null
         at the wire means something bypassed the harness."""
         with self.assertRaises(msgspec.ValidationError):
-            msgspec.convert({"album_id": None}, type=CandidateSummary)
+            msgspec.convert(
+                _wire_candidate(album_id=None), type=CandidateSummary,
+            )
 
     def test_int_nested_item_path_rejected(self) -> None:
         """HarnessItem.path is str too; int at wire = ValidationError."""
@@ -348,9 +385,10 @@ class TestValidationResultConstruction(unittest.TestCase):
             detail="distance=0.02", mbid_found=True,
             target_mbid="abc-123", candidate_count=3,
             candidates=[
-                CandidateSummary(mbid="abc-123", distance=0.02, is_target=True),
-                CandidateSummary(mbid="def-456", distance=0.15),
-                CandidateSummary(mbid="ghi-789", distance=0.45),
+                make_candidate_summary(mbid="abc-123", distance=0.02,
+                                       is_target=True),
+                make_candidate_summary(mbid="def-456", distance=0.15),
+                make_candidate_summary(mbid="ghi-789", distance=0.45),
             ],
         )
         self.assertTrue(vr.valid)
@@ -413,11 +451,13 @@ class TestValidationResultSerialization(unittest.TestCase):
             detail="distance=0.02", mbid_found=True,
             target_mbid="abc-123", candidate_count=2,
             candidates=[
-                CandidateSummary(mbid="abc-123", artist="A", album="B",
-                                  distance=0.02, track_count=10, year=2020,
-                                  country="US", is_target=True),
-                CandidateSummary(mbid="def-456", artist="A", album="B (Deluxe)",
-                                  distance=0.35, track_count=15),
+                make_candidate_summary(mbid="abc-123", distance=0.02,
+                                       artist="A", album="B", track_count=10,
+                                       year=2020, country="US",
+                                       is_target=True),
+                make_candidate_summary(mbid="def-456", distance=0.35,
+                                       artist="A", album="B (Deluxe)",
+                                       track_count=15),
             ],
             local_track_count=10,
             soulseek_username="gooduser",
@@ -466,8 +506,8 @@ class TestValidationResultSerialization(unittest.TestCase):
         """Candidate list serializes as list of dicts, deserializes back."""
         vr = ValidationResult(
             candidates=[
-                CandidateSummary(mbid="a", distance=0.1, is_target=True),
-                CandidateSummary(mbid="b", distance=0.5),
+                make_candidate_summary(mbid="a", distance=0.1, is_target=True),
+                make_candidate_summary(mbid="b", distance=0.5),
             ],
         )
         j = vr.to_json()
@@ -515,45 +555,38 @@ class TestValidationResultPre48914caCompat(unittest.TestCase):
 
     ``CandidateSummary`` is declared ``rename={"mbid": "album_id"}``.
     Rows written BEFORE commit 48914ca (PR #100) used the key ``mbid``;
-    rows written AFTER use ``album_id``. ``msgspec.convert``'s default
-    behaviour is to silently drop unknown keys, so decoding an old row
-    through ``ValidationResult.from_dict`` sets ``candidate.mbid = ""``
-    (the Struct default) instead of raising.
+    rows written AFTER use ``album_id``. ``msgspec.convert`` silently
+    drops unknown keys, and until #1278 item 8 the defaulted ``mbid``
+    field made an old row decode with ``candidate.mbid = ""`` — a silent
+    identity wipe. ``mbid`` is required now, so the same old row FAILS
+    LOUD at decode instead.
 
     The ``CandidateSummary`` docstring documents this as a forward-only
     format change and asserts that no production code round-trips old
     rows back through ``from_dict`` (web routes parse the raw dict).
     This test locks that contract so a future "helpful" refactor that
-    adds ``mbid`` as a secondary rename source (or swaps the rename to
-    forbid unknown fields) either deliberately changes this test or
-    gets caught by it.
+    adds ``mbid`` as a secondary rename source either deliberately
+    changes this test or gets caught by it.
     """
 
-    def test_pre_48914ca_mbid_key_is_silently_dropped(self) -> None:
+    def test_pre_48914ca_mbid_key_fails_loud(self) -> None:
         old_row = {
             "valid": True,
             "candidate_count": 1,
             "candidates": [{
                 # Pre-48914ca wire key. The Struct's rename target is
-                # ``album_id`` — ``mbid`` as a JSON key is unknown.
+                # ``album_id`` — ``mbid`` as a JSON key is unknown, so the
+                # required ``album_id`` is missing and decode raises.
                 "mbid": "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",
                 "artist": "Ye",
                 "album": "BULLY",
                 "distance": 0.05,
             }],
         }
-        vr = ValidationResult.from_dict(old_row)
-        self.assertEqual(len(vr.candidates), 1)
-        c = vr.candidates[0]
-        # Every other field decodes; mbid silently resets to "" because
-        # the wire key is unknown to the Struct's rename map.
-        self.assertEqual(c.artist, "Ye")
-        self.assertEqual(c.album, "BULLY")
-        self.assertEqual(c.distance, 0.05)
-        self.assertEqual(c.mbid, "",
-                         "pre-48914ca mbid-keyed row MUST silently drop — "
-                         "changing this behaviour breaks the documented "
-                         "forward-only format contract")
+        with self.assertRaisesRegex(
+            msgspec.ValidationError, "album_id",
+        ):
+            ValidationResult.from_dict(old_row)
 
 
 if __name__ == "__main__":
