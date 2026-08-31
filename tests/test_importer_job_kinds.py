@@ -17,10 +17,12 @@ asserted per kind rather than "some kind has it".
 
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import UTC, datetime
 from typing import ClassVar
 
+from lib.dispatch import DispatchOutcome, _record_rejection_and_maybe_requeue
 from lib.import_preview import ACTION_COPY_PREFIX_BY_JOB_TYPE
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
@@ -34,8 +36,17 @@ from lib.import_queue import (
     ImportJobPayload,
     LocalImportPayload,
     YoutubeImportPayload,
+    force_import_dedupe_key,
+    force_import_payload,
+    local_import_dedupe_key,
+    local_import_payload,
 )
+from lib.quality import DownloadInfo, ValidationResult
+from lib.terminal_outcomes import PendingImportTerminalOutcome
 from scripts import importer
+from tests.dispatch_helpers import claim_next_import_job, finalize_claimed_dispatch
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 
 _PAYLOADS: dict[str, ImportJobPayload] = {
     IMPORT_JOB_FORCE: ForceImportPayload(
@@ -280,6 +291,104 @@ class TestActionCopyLanes(unittest.TestCase):
         cfg = importer.CratediggerConfig(beets_distance_threshold=0.31)
         self.assertIsNone(importer._force_import_distance_threshold(cfg))
         self.assertEqual(importer._configured_distance_threshold(cfg), 0.31)
+
+
+class TestCommittedWrongMatchGateIsRead(unittest.TestCase):
+    """The gate flag decides a terminal side effect, not just a table row.
+
+    Force is the one kind that never reaches
+    ``_cleanup_committed_wrong_match_rejection``: the Wrong Matches row a
+    force job came FROM is the one its own terminal outcome consumes, and a
+    force rejection preserves the operator's quarantine folder rather than
+    triaging a NEW one (``docs/rejection-routing.md``). Reading the flag
+    only in the registry table would leave that documented invariant with
+    no behavioural guard at all — the pre-registry ``job.job_type !=
+    IMPORT_JOB_FORCE`` line had none either, and an ``if True:`` mutant at
+    both terminal sites survived all twelve modules
+    ``scripts/targeted_test_selection.py`` names for ``scripts/importer.py``
+    (662 tests, green).
+
+    The observable is ``validation_result.wrong_match_triage``, whose only
+    producer is the reducer the gate admits to
+    (``lib.wrong_match_cleanup_service.cleanup_wrong_match``, via
+    ``db.record_wrong_match_triage``) — measured rather than assumed: the
+    row's ``candidate_evidence_id`` does NOT discriminate, because the
+    rejection recorder already attributes it on both lanes.
+    """
+
+    _REQUEST_ID = 42
+    _EVIDENCE_ID = 777
+    #: Delete-eligible (issue #1077 D6), so the gate's admission is what
+    #: decides whether the reducer runs at all.
+    _SCENARIO = "high_distance"
+
+    def _post_commit_triage(self, job_type: str) -> object:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=self._REQUEST_ID, status="wanted", mb_release_id="mb-42",
+        ))
+        if job_type == IMPORT_JOB_FORCE:
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=self._REQUEST_ID,
+                dedupe_key=force_import_dedupe_key(7),
+                payload=force_import_payload(
+                    download_log_id=7,
+                    failed_path="/processing/albums/wrong_matches/Album",
+                ),
+            )
+        else:
+            job = db.enqueue_import_job(
+                IMPORT_JOB_LOCAL,
+                request_id=self._REQUEST_ID,
+                dedupe_key=local_import_dedupe_key(self._REQUEST_ID),
+                payload=local_import_payload(
+                    source_path="/operator/real/Album",
+                    request_id=self._REQUEST_ID,
+                ),
+            )
+        assert db.set_import_job_candidate_evidence(job.id, self._EVIDENCE_ID)
+        assert db.mark_import_job_preview_importable(
+            job.id, preview_result={"ready": True}, message="ready",
+        ) is not None
+        claimed = claim_next_import_job(db, worker_id="kind-gate")
+        assert claimed is not None and claimed.id == job.id
+
+        pending = _record_rejection_and_maybe_requeue(
+            db,
+            self._REQUEST_ID,
+            DownloadInfo(filetype="mp3", username="peer"),
+            f"rejected: {self._SCENARIO}",
+            None,
+            validation_result=ValidationResult(
+                valid=False,
+                distance=0.4,
+                scenario=self._SCENARIO,
+                detail=f"rejected: {self._SCENARIO}",
+                failed_path="/processing/albums/wrong_matches/Album",
+            ).to_json(),
+            requeue=True,
+            import_job_id=claimed.id,
+        )
+        assert isinstance(pending, PendingImportTerminalOutcome)
+        finalize_claimed_dispatch(db, claimed, DispatchOutcome(
+            success=False,
+            message=f"Rejected: {self._SCENARIO}",
+            terminal_outcome=pending,
+            post_commit_wrong_match_scenario=self._SCENARIO,
+        ))
+        persisted = db.download_logs[-1].validation_result
+        assert isinstance(persisted, str)
+        return json.loads(persisted).get("wrong_match_triage")
+
+    def test_a_declared_kind_reaches_the_post_commit_reducer(self) -> None:
+        triage = self._post_commit_triage(IMPORT_JOB_LOCAL)
+        self.assertIsInstance(triage, dict)
+        assert isinstance(triage, dict)
+        self.assertEqual(triage.get("outcome"), "skipped_missing_path")
+
+    def test_force_never_triages_a_new_wrong_match_row(self) -> None:
+        self.assertIsNone(self._post_commit_triage(IMPORT_JOB_FORCE))
 
 
 class TestUnroutedJobKind(unittest.TestCase):
