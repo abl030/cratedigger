@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -51,8 +50,12 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     error_message: str | None
     download_path: str | None
     staged_path: str | None
-    import_result: str | dict[str, object] | None
-    validation_result: str | dict[str, object] | None
+    # Both JSONB columns arrive as decoded dicts (or None) from every
+    # producer: psycopg2 decodes jsonb server-side and the fake mirrors
+    # that projection (lib/pipeline_db/rows.py types the row contract
+    # dict-only). No str arm — a text-JSONB row cannot reach this Struct.
+    import_result: dict[str, object] | None
+    validation_result: dict[str, object] | None
     filetype: str | None
     bitrate: int | None
     was_converted: bool | None
@@ -457,12 +460,12 @@ def build_download_history_row(
 
 
 def _apply_beets_distance(import_result: object) -> float | None:
-    """Read #863's persisted apply-time distance off the row's JSONB."""
-    if isinstance(import_result, str):
-        try:
-            import_result = json.loads(import_result)
-        except ValueError:
-            return None
+    """Read #863's persisted apply-time distance off the row's JSONB.
+
+    ``import_result`` is the already-decoded dict (or None) every
+    producer hands over; a text-JSONB value is unproducible here, so
+    there is no string-decode arm.
+    """
     value = json_dict(import_result).get("apply_beets_distance")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None

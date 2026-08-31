@@ -2499,8 +2499,10 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
     def test_apply_beets_distance_derivation_table(self):
         """Direct coverage of the tolerant JSONB read — the bool guard is
-        load-bearing (isinstance(True, int) is True) and the str branch
-        covers legacy text-JSONB rows."""
+        load-bearing (isinstance(True, int) is True). No str rows: every
+        producer hands the already-decoded dict (psycopg2 decodes jsonb;
+        the fake's ``_jsonb_column`` mirrors it), so the old text-JSONB
+        arm was unproducible and is gone (#1278 item-7 residual 1)."""
         from web.download_history_view import _apply_beets_distance
 
         cases = [
@@ -2508,8 +2510,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             ("dict with int", {"apply_beets_distance": 1}, 1.0),
             ("missing key", {"decision": "import_failed"}, None),
             ("bool must not coerce", {"apply_beets_distance": True}, None),
-            ("json string row", '{"apply_beets_distance": 0.25}', 0.25),
-            ("malformed json string", "{not json", None),
             ("null jsonb", None, None),
             ("non-dict json", [1, 2], None),
             ("string value", {"apply_beets_distance": "0.5"}, None),
