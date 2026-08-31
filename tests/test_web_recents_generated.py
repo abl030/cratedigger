@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import unittest
-from typing import Protocol
 
 import msgspec
 from hypothesis import example, given
@@ -24,8 +23,13 @@ from lib.quality.decisions import (
     UltrasonicProofLeg,
     mint_verified_lossless_proof,
 )
-from tests.test_web_recents import _entry
-from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
+from tests.test_web_recents import (
+    _classified,
+    _optional_text,
+    _render,
+    _row,
+    _text,
+)
 from web.download_history_view import (
     _project_current_library_have,
     _project_linked_import_evidence,
@@ -41,32 +45,25 @@ REJECT_SCENARIOS = (
 )
 
 
-class _CompositeTriageProjection(Protocol):
-    verdict: str
-    badge: str
-    badge_class: str
-    border_color: str
-    summary: str
-    actual_min_bitrate: int | None
-    source_min_bitrate: int | None
-    source_avg_bitrate: int | None
-    source_median_bitrate: int | None
-    spectral_grade: str | None
-    spectral_bitrate: int | None
-    v0_probe_kind: str | None
-    v0_probe_min_bitrate: int | None
-    v0_probe_avg_bitrate: int | None
-    v0_probe_median_bitrate: int | None
-    comparison_basis: dict[str, object] | None
-    downloaded_label: str
-    target_contract_format: str | None
-    materialized_format: str | None
-    materialized_min_bitrate: int | None
-    materialized_avg_bitrate: int | None
-    materialized_median_bitrate: int | None
-    existing_format: str | None
-    existing_min_bitrate: int | None
-    existing_avg_bitrate: int | None
+#: Every candidate-facing quality claim a corrupt input must not render.
+_CANDIDATE_QUALITY_CLAIM_FIELDS = (
+    "actual_min_bitrate",
+    "source_min_bitrate",
+    "source_avg_bitrate",
+    "source_median_bitrate",
+    "spectral_grade",
+    "spectral_bitrate",
+    "v0_probe_kind",
+    "v0_probe_min_bitrate",
+    "v0_probe_avg_bitrate",
+    "v0_probe_median_bitrate",
+    "comparison_basis",
+    "target_contract_format",
+    "materialized_format",
+    "materialized_min_bitrate",
+    "materialized_avg_bitrate",
+    "materialized_median_bitrate",
+)
 
 
 def assert_short_searching_verdict(verdict: str) -> None:
@@ -107,7 +104,7 @@ def assert_triaged_rejection_style(
 
 
 def assert_composite_triage_projection(
-    result: _CompositeTriageProjection,
+    result: dict[str, object],
     *,
     action: str,
     reason: str,
@@ -117,59 +114,56 @@ def assert_composite_triage_projection(
 ) -> None:
     """Check the compact contract for a persisted cleanup audit.
 
-    This intentionally patrols the server-owned classifier rather than the
-    Recents renderer: the exact same projection feeds list and history rows.
+    ``result`` is a row rendered by ``build_recents_download_log_rows`` —
+    the Recents surface only. The detail view's history panel shares the
+    classifier stage but stops before ``_project_current_library_have``
+    and ``_project_linked_import_evidence``, so a world carrying
+    ``_current_evidence_*`` aliases CAN render different ``existing_*``
+    values there (the overlay is gated on outcome and pre-attempt
+    provenance); this checker pins the Recents render.
     """
     expected_object = (
         "download deleted" if action.startswith("deleted_") else "download kept"
     )
     expected_reason = reason.replace("_", " ")
     expected_verdict = f"Wrong match (dist {distance:.3f})"
-    if result.verdict != expected_verdict:
+    summary = _text(result, "summary")
+    if _text(result, "verdict") != expected_verdict:
         raise AssertionError("cleanup replaced the original match verdict")
-    if expected_object not in result.badge:
+    if expected_object not in _text(result, "badge"):
         raise AssertionError("cleanup badge did not name the download object")
-    if expected_object not in result.summary or expected_reason not in result.summary:
+    if expected_object not in summary or expected_reason not in summary:
         raise AssertionError("compact summary hid cleanup disposition or reason")
-    if uploader not in result.summary:
+    if uploader not in summary:
         raise AssertionError("compact summary lost uploader provenance")
     assert_triaged_rejection_style(
-        action, result.badge, result.badge_class, result.border_color)
+        action,
+        _text(result, "badge"),
+        _text(result, "badge_class"),
+        _text(result, "border_color"),
+    )
     if reason == "audio_corrupt":
         assert_corrupt_candidate_display_is_codec_only(result, has_have=has_have)
 
 
 def assert_corrupt_candidate_display_is_codec_only(
-    result: _CompositeTriageProjection,
+    result: dict[str, object],
     *,
     has_have: bool,
 ) -> None:
     """A corrupt candidate may retain its codec, never quality claims."""
-    if any((
-        result.actual_min_bitrate is not None,
-        result.source_min_bitrate is not None,
-        result.source_avg_bitrate is not None,
-        result.source_median_bitrate is not None,
-        result.spectral_grade is not None,
-        result.spectral_bitrate is not None,
-        result.v0_probe_kind is not None,
-        result.v0_probe_min_bitrate is not None,
-        result.v0_probe_avg_bitrate is not None,
-        result.v0_probe_median_bitrate is not None,
-        result.comparison_basis is not None,
-        result.target_contract_format is not None,
-        result.materialized_format is not None,
-        result.materialized_min_bitrate is not None,
-        result.materialized_avg_bitrate is not None,
-        result.materialized_median_bitrate is not None,
-    )):
+    if any(
+        result[field] is not None
+        for field in _CANDIDATE_QUALITY_CLAIM_FIELDS
+    ):
         raise AssertionError("corrupt input leaked a candidate quality claim")
-    if result.downloaded_label != "FLAC":
+    if result["downloaded_label"] != "FLAC":
         raise AssertionError("corrupt input leaked a tier or conversion label")
     if has_have:
-        if result.existing_format != "MP3" or result.existing_min_bitrate != 192:
+        if (result["existing_format"] != "MP3"
+                or result["existing_min_bitrate"] != 192):
             raise AssertionError("corrupt projection erased point-in-time HAVE")
-        if result.existing_avg_bitrate != 224:
+        if result["existing_avg_bitrate"] != 224:
             raise AssertionError("corrupt projection changed point-in-time HAVE")
 
 
@@ -402,12 +396,12 @@ def _raw_download_log_row(
 
     The candidate-evidence aliases are the join's own names — the shape the
     read seam receives BEFORE ``_overlay_evidence_onto_download_log_row``
-    adjudicates them.
+    adjudicates them. ``candidate_evidence_id`` is the join key itself, so
+    it is non-NULL exactly when a lineage came back with it.
     """
-    entry = _entry(beets_scenario="strong_match", **columns)
     return {
-        **entry.to_json_dict(),
-        "verified_lossless_classifier": None,
+        **_row(beets_scenario="strong_match", **columns),
+        "candidate_evidence_id": None if lineage is None else 4711,
         "_request_mb_release_id": "generated-recents-release",
         "_evidence_mb_release_id": "generated-recents-release",
         "_evidence_lineage_version": lineage,
@@ -415,11 +409,16 @@ def _raw_download_log_row(
     }
 
 
-def render_through_the_read_seam(row: dict[str, object]) -> ClassifiedEntry:
-    """Raw joined row → production overlay → ``LogEntry`` → verdict."""
+def render_through_the_read_seam(row: dict[str, object]) -> dict[str, object]:
+    """Raw joined row → production overlay → the Recents render.
+
+    The defect this patrols lived in the COMPOSITION of the read seam's
+    proof gate and the render's copy, so both real halves run here. The
+    render half is the whole composed page renderer, not one stage of it.
+    """
     overlaid = _DownloadLogMixin._overlay_evidence_onto_download_log_row(
         dict(row))
-    return classify_log_entry(LogEntry.from_row(overlaid))
+    return _render(overlaid)
 
 
 def assert_minted_proof_is_reported(verdict: str) -> None:
@@ -453,7 +452,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         incoming: int,
         existing: int,
     ) -> None:
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected",
             beets_scenario=scenario,
             actual_min_bitrate=incoming,
@@ -463,8 +462,8 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             spectral_grade="suspect",
             v0_probe_avg_bitrate=incoming,
             existing_v0_probe_avg_bitrate=existing,
-        ))
-        assert_short_searching_verdict(result.verdict)
+        )
+        assert_short_searching_verdict(_text(result, "verdict"))
 
     def test_checker_rejects_the_old_measurement_heavy_grammar(self) -> None:
         with self.assertRaisesRegex(AssertionError, "measurement leaked"):
@@ -486,7 +485,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         for reason in reasons:
             for stage in stages:
                 with self.subTest(reason=reason, stage=stage):
-                    result = classify_log_entry(_entry(
+                    result = _classified(
                         outcome="rejected",
                         beets_scenario="high_distance",
                         validation_result={
@@ -502,19 +501,19 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
                                 ],
                             },
                         },
-                    ))
+                    )
                     self.assertEqual(
-                        result.badge,
+                        result["badge"],
                         "Triaged · download deleted",
                     )
                     assert_triaged_rejection_style(
                         "deleted_reject",
-                        result.badge,
-                        result.badge_class,
-                        result.border_color,
+                        _text(result, "badge"),
+                        _text(result, "badge_class"),
+                        _text(result, "border_color"),
                     )
                     assert_triage_summary_uses_persisted_reject(
-                        result.wrong_match_triage_summary or "",
+                        _optional_text(result, "wrong_match_triage_summary"),
                         reason,
                     )
 
@@ -587,48 +586,34 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         }
         if current is not None:
             audit["current_measurement"] = current
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected", beets_scenario="high_distance",
             beets_distance=distance, soulseek_username=uploader,
             actual_min_bitrate=0,
             validation_result={"wrong_match_triage": audit},
-        ))
+        )
         assert_composite_triage_projection(
             result, action=action, reason=reason, uploader=uploader,
             distance=distance, has_have=has_have,
         )
 
     def test_composite_triage_checker_rejects_hidden_cleanup_reason(self) -> None:
-        class OldProjection:
-            verdict: str = "Wrong match (dist 0.181)"
-            badge: str = "Triaged · download deleted"
-            badge_class: str = "badge-rejected"
-            border_color: str = "#a33"
-            summary: str = "Wrong match (dist 0.181) · Korveck"
-            actual_min_bitrate: int | None = None
-            source_min_bitrate: int | None = None
-            source_avg_bitrate: int | None = None
-            source_median_bitrate: int | None = None
-            spectral_grade: str | None = None
-            spectral_bitrate: int | None = None
-            v0_probe_kind: str | None = None
-            v0_probe_min_bitrate: int | None = None
-            v0_probe_avg_bitrate: int | None = None
-            v0_probe_median_bitrate: int | None = None
-            comparison_basis: dict[str, object] | None = None
-            downloaded_label: str = ""
-            target_contract_format: str | None = None
-            materialized_format: str | None = None
-            materialized_min_bitrate: int | None = None
-            materialized_avg_bitrate: int | None = None
-            materialized_median_bitrate: int | None = None
-            existing_format: str | None = None
-            existing_min_bitrate: int | None = None
-            existing_avg_bitrate: int | None = None
-
+        old_projection: dict[str, object] = {
+            **dict.fromkeys(_CANDIDATE_QUALITY_CLAIM_FIELDS),
+            "verdict": "Wrong match (dist 0.181)",
+            "badge": "Triaged · download deleted",
+            "badge_class": "badge-rejected",
+            "border_color": "#a33",
+            "summary": "Wrong match (dist 0.181) · Korveck",
+            "downloaded_label": "",
+            "existing_format": None,
+            "existing_min_bitrate": None,
+            "existing_avg_bitrate": None,
+        }
         with self.assertRaisesRegex(AssertionError, "hid cleanup"):
             assert_composite_triage_projection(
-                OldProjection(), action="deleted_reject", reason="spectral_reject",
+                old_projection, action="deleted_reject",
+                reason="spectral_reject",
                 uploader="Korveck", distance=0.181, has_have=False,
             )
 
@@ -671,10 +656,10 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
                             ),
                         }
                         if path == "direct":
-                            result = classify_log_entry(_entry(
+                            result = _classified(
                                 **common,
                                 beets_scenario="audio_corrupt",
-                            ))
+                            )
                         else:
                             audit: dict[str, object] = {
                                 "action": "deleted_reject",
@@ -706,45 +691,49 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
                             }
                             if current is not None:
                                 audit["current_measurement"] = current
-                            result = classify_log_entry(_entry(
+                            result = _classified(
                                 **common,
                                 beets_scenario="high_distance",
                                 beets_distance=0.181,
                                 validation_result={
                                     "wrong_match_triage": audit,
                                 },
-                            ))
+                            )
                         assert_corrupt_candidate_display_is_codec_only(
                             result,
                             has_have=has_have,
                         )
 
     def test_corrupt_projection_checker_rejects_candidate_leaks_and_erased_have(self) -> None:
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="rejected", beets_scenario="audio_corrupt",
             actual_min_bitrate=0, import_result=_corrupt_import_result("audio_corrupt"),
-        ))
-        leaked_v0 = msgspec.structs.replace(result, v0_probe_avg_bitrate=171)
+        )
+        leaked_v0 = {**result, "v0_probe_avg_bitrate": 171}
         with self.assertRaisesRegex(AssertionError, "candidate quality claim"):
             assert_corrupt_candidate_display_is_codec_only(leaked_v0, has_have=False)
-        leaked_label = msgspec.structs.replace(
-            result, downloaded_label="FLAC → OPUS 128",
-        )
+        leaked_label = {**result, "downloaded_label": "FLAC → OPUS 128"}
         with self.assertRaisesRegex(AssertionError, "tier or conversion label"):
             assert_corrupt_candidate_display_is_codec_only(leaked_label, has_have=False)
-        leaked_output = msgspec.structs.replace(
-            result, materialized_format="Opus", materialized_avg_bitrate=124,
-        )
+        leaked_output = {
+            **result,
+            "materialized_format": "Opus",
+            "materialized_avg_bitrate": 124,
+        }
         with self.assertRaisesRegex(AssertionError, "candidate quality claim"):
             assert_corrupt_candidate_display_is_codec_only(leaked_output, has_have=False)
-        with_have = msgspec.structs.replace(
-            result, existing_format="MP3", existing_min_bitrate=192,
-            existing_avg_bitrate=224,
-        )
-        erased_have = msgspec.structs.replace(
-            with_have, existing_format=None, existing_min_bitrate=None,
-            existing_avg_bitrate=None,
-        )
+        with_have = {
+            **result,
+            "existing_format": "MP3",
+            "existing_min_bitrate": 192,
+            "existing_avg_bitrate": 224,
+        }
+        erased_have = {
+            **with_have,
+            "existing_format": None,
+            "existing_min_bitrate": None,
+            "existing_avg_bitrate": None,
+        }
         with self.assertRaisesRegex(AssertionError, "erased point-in-time HAVE"):
             assert_corrupt_candidate_display_is_codec_only(erased_have, has_have=True)
 
@@ -758,7 +747,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         )
         for action in actions:
             with self.subTest(action=action):
-                result = classify_log_entry(_entry(
+                result = _classified(
                     outcome="rejected",
                     beets_scenario="high_distance",
                     validation_result={
@@ -771,12 +760,12 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
                             "stage_chain": ["stage2_import:import"],
                         },
                     },
-                ))
+                )
                 assert_triaged_rejection_style(
                     action,
-                    result.badge,
-                    result.badge_class,
-                    result.border_color,
+                    _text(result, "badge"),
+                    _text(result, "badge_class"),
+                    _text(result, "border_color"),
                 )
 
     @given(
@@ -1243,7 +1232,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         self.assertTrue(decision.basis.verified_lossless_bypass)
 
         actual_format = "opus" if target_format == "opus 128" else "mp3"
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success",
             was_converted=True,
             original_filetype="flac",
@@ -1256,9 +1245,9 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
                 "decision": "import",
                 "comparison_basis": msgspec.to_builtins(decision.basis),
             },
-        ))
+        )
         assert_verified_lossless_proof_upgrade_names_basis(
-            result.verdict, decision.basis)
+            _text(result, "verdict"), decision.basis)
 
     @staticmethod
     def _plain_basis(bypass: bool) -> dict[str, object] | None:
@@ -1348,7 +1337,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             None if basis_mode == "none"
             else self._plain_basis(basis_mode == "bypass")
         )
-        result = classify_log_entry(_entry(
+        result = _classified(
             outcome="success",
             beets_scenario="strong_match",
             was_converted=was_converted,
@@ -1358,21 +1347,25 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             actual_min_bitrate=actual_min_bitrate,
             existing_min_bitrate=existing_min_bitrate,
             search_filetype_override=search_filetype_override,
-            verified_lossless_classifier=classifier,
+            # The join key and its alias travel together, exactly as the
+            # read seam hands them over: a minted proof only ever reaches
+            # the renderer off a joined candidate-evidence row.
+            candidate_evidence_id=None if classifier is None else 4711,
+            _evidence_verified_lossless_classifier=classifier,
             import_result=(
                 None if basis is None
                 else {"version": 2, "decision": "import",
                       "comparison_basis": basis}
             ),
-        ))
+        )
         assert_verified_lossless_claim_is_minted(
-            result.verdict,
-            result.summary,
+            _text(result, "verdict"),
+            _text(result, "summary"),
             classifier=classifier,
             basis_bypass=basis_mode == "bypass",
         )
         if classifier is not None and basis_mode != "bypass":
-            assert_minted_proof_is_reported(result.verdict)
+            assert_minted_proof_is_reported(_text(result, "verdict"))
 
     def test_minted_proof_checker_rejects_the_retired_heuristic(self) -> None:
         """Known-bad: the pre-fix derivation, planted as its own output."""
@@ -1501,13 +1494,13 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         result = render_through_the_read_seam(row)
         proved = classifier is not None and lineage in (3, 4)
         assert_verified_lossless_claim_is_minted(
-            result.verdict,
-            result.summary,
+            _text(result, "verdict"),
+            _text(result, "summary"),
             classifier=classifier if proved else None,
             basis_bypass=False,
         )
         if proved:
-            assert_minted_proof_is_reported(result.verdict)
+            assert_minted_proof_is_reported(_text(result, "verdict"))
 
     def test_the_composed_checker_trips_on_the_ungated_render(self) -> None:
         """Known-bad: re-feed a cross-walked lineage-1 classifier.
@@ -1527,12 +1520,12 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             existing_min_bitrate=192,
             search_filetype_override=None,
         )
-        ungated = classify_log_entry(LogEntry.from_row(dict(row)))
-        self.assertIn("verified lossless", ungated.verdict.lower())
+        ungated = _render(dict(row))
+        self.assertIn("verified lossless", _text(ungated, "verdict").lower())
         with self.assertRaisesRegex(AssertionError, "no minted proof"):
             assert_verified_lossless_claim_is_minted(
-                ungated.verdict,
-                ungated.summary,
+                _text(ungated, "verdict"),
+                _text(ungated, "summary"),
                 classifier=None,
                 basis_bypass=False,
             )

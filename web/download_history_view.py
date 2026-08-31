@@ -14,7 +14,7 @@ from web.classify import (
     AccusationFlags,
     ClassifiedEntry,
     LogEntry,
-    classify_log_entry,
+    _classify_log_entry,
     evidence_column_accusation_flags,
     proof_gate_projection,
 )
@@ -201,7 +201,7 @@ def classify_download_log_row(
     """Build the shared typed classification for one raw download_log row.
 
     The proof-gate verdict (issue #829 Phase 5 PR4) is projected here
-    rather than inside ``classify_log_entry`` because it is derived from
+    rather than inside ``_classify_log_entry`` because it is derived from
     the candidate-evidence JOIN aliases, which live on the raw row and are
     deliberately not folded into ``LogEntry``'s legacy columns. Doing it at
     this one seam means every consumer of a classified row — the Recents
@@ -212,7 +212,7 @@ def classify_download_log_row(
     return ClassifiedDownloadLogRow(
         entry=entry,
         classified=msgspec.structs.replace(
-            classify_log_entry(entry),
+            _classify_log_entry(entry),
             **msgspec.structs.asdict(proof_gate_projection(row)),
         ),
     )

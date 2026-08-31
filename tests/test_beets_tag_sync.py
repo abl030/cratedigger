@@ -40,6 +40,7 @@ from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import patch
 
+from lib.beets_child import BeetsChildRun
 from lib.beets_db import (
     BeetsAlbumIdentityRow,
     BeetsDB,
@@ -60,7 +61,6 @@ from lib.beets_tag_sync import (
     RESULT_SYNCED,
     TAG_SYNC_HTTP_STATUS,
     TagSyncResult,
-    TagSyncWriteRun,
     run_beets_write_tags,
     sync_album_file_tags_from_borrowed_factory,
     sync_album_file_tags_from_factory,
@@ -172,7 +172,7 @@ class _RecordingWrite:
         self.locks_at_call: list[tuple[tuple[int, int], ...]] = []
         self.lock_db: FakePipelineDB | None = None
 
-    def __call__(self, query_tokens: tuple[str, str]) -> TagSyncWriteRun:
+    def __call__(self, query_tokens: tuple[str, str]) -> BeetsChildRun:
         self.calls.append(query_tokens)
         if self.lock_db is not None:
             self.locks_at_call.append(tuple(self.lock_db.advisory_lock_calls))
@@ -191,7 +191,7 @@ class _RecordingWrite:
                         self._beets.file_tags[path] = row.mb_albumid
         if self._raises is not None:
             raise self._raises
-        return TagSyncWriteRun(
+        return BeetsChildRun(
             returncode=self._returncode, stdout="", stderr="",
         )
 

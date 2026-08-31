@@ -94,6 +94,7 @@ from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from lib.beets_child import BeetsChildRun
 from lib.beets_db import (
     BeetsDB,
     CurrentBeetsAmbiguous,
@@ -107,7 +108,6 @@ from lib.beets_retag import (
     RETAG_READY_OUTCOMES,
     RETAG_RETAGGED,
     BeetsRetagResult,
-    ModifyRetagRun,
     RetagOutcome,
     retag_album_query,
     retag_assignment,
@@ -458,15 +458,15 @@ def _modify(
     result: str,
     apply_post_state: Callable[[], None],
     calls: list[tuple[tuple[str, str], str]],
-) -> Callable[[tuple[str, str], str], ModifyRetagRun]:
-    def run(query_tokens: tuple[str, str], assignment: str) -> ModifyRetagRun:
+) -> Callable[[tuple[str, str], str], BeetsChildRun]:
+    def run(query_tokens: tuple[str, str], assignment: str) -> BeetsChildRun:
         calls.append((query_tokens, assignment))
         apply_post_state()
         if result == "raises_timeout":
             raise sp.TimeoutExpired(cmd=["beets", "modify"], timeout=120)
         if result == "raises_oserror":
             raise OSError("No such file or directory: beets python")
-        return ModifyRetagRun(
+        return BeetsChildRun(
             returncode=0 if result == "exit_0" else 1, stdout="", stderr="",
         )
 

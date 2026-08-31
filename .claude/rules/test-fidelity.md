@@ -225,7 +225,8 @@ the production path. Both halves have failed in review:
   converse — no unwatched field may hold text at runtime — and fails
   closed if one does.
 - The render target must be the **whole** production render path, not its
-  first stage. Recents continues past `classify_log_entry` through
+  first stage. Recents continues past `web/classify.py`'s module-private
+  classifier (`_classify_log_entry`) through
   `_project_current_library_have` and `_project_linked_import_evidence`,
   which overwrite watched text fields on thousands of live rows. A target
   that stops early reports zeros measured against values production never
