@@ -131,8 +131,10 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.mock_cleanup = cleanup_patch.start()
         self.mock_manual_cleanup = manual_cleanup_patch.start()
         self.mock_manual_group_cleanup = manual_group_cleanup_patch.start()
+        # Both mocks are deliberately unbound: an assertion helper here
+        # would silently see only one of the two flows' observations.
         resolve_patch.start()
-        self.mock_observe_failed_path = view_resolve_patch.start()
+        view_resolve_patch.start()
         # Two tests need the REAL primitive against a REAL unreadable
         # directory — the #1063 defect WAS a fake answer from this seam.
         self._observe_patch_running = True
@@ -167,6 +169,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # Summary of the last successful import for the request — tells the
         # user what's actually on disk, not the most recent attempt.
         "latest_import",
+        # Active import jobs for the request — the JS renders queue chips
+        # from these (#1278 wx4 review: field content was unpinned).
+        "import_jobs",
     }
     ENTRY_REQUIRED_FIELDS: ClassVar = {
         "download_log_id", "soulseek_username", "failed_path", "files_exist",
@@ -190,6 +195,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # view of the broken world. The JS turns these into a badge, an
         # amber card, disabled actions, and an explanation.
         "path_unavailable", "path_unavailable_reason",
+        # This candidate's own active import job, or null (#1278 wx4
+        # review: field content was unpinned).
+        "import_job",
     }
     DELETE_RESULT_REQUIRED_FIELDS: ClassVar = {
         "status", "download_log_id", "outcome", "success", "request_id",

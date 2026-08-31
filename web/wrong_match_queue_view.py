@@ -82,8 +82,9 @@ def _row_presence(
 
 # Numeric rank for the per-entry sort. Higher = better quality. Mirrors
 # QualityRank's integer ordering but keeps the view layer free of an
-# enum import; quality_rank strings here come from
-# web.server.compute_library_rank which is the single producer.
+# enum import; quality_rank strings here come from the injected
+# compute_library_rank, which the route supplies from web.server —
+# still the single production producer.
 _RANK_SORT_ORDER: dict[str, int] = {
     "lossless":    7,
     "transparent": 6,

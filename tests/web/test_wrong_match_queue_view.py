@@ -88,6 +88,34 @@ class TestBuildWrongMatchGroupsInterface(unittest.TestCase):
         )
         self.assertTrue(entries[0]["files_exist"])
         self.assertFalse(entries[0]["path_unavailable"])
+        self.assertIsNone(entries[0]["import_job"])
+        self.assertEqual(group["import_jobs"], [])
+
+    def test_active_import_jobs_serialize_into_group_and_entry(self) -> None:
+        """The job payloads carry the real serialized job, not a husk.
+
+        Review survivor (#1278 wx4 mutant runner): nothing constrained
+        the ``import_jobs``/``import_job`` field CONTENT — a mutant
+        emitting ``{}`` at both sites outlived the whole suite.
+        """
+        seeded = seed_visible_wrong_match(self.db, self.root, request_id=7)
+        job = self.db.enqueue_import_job(
+            "force_import", request_id=7,
+            dedupe_key=f"force_import:download_log:{seeded.download_log_id}",
+            payload={"download_log_id": seeded.download_log_id,
+                     "failed_path": seeded.path},
+        )
+        group = self._build()[0]
+        jobs = group["import_jobs"]
+        assert isinstance(jobs, list)
+        self.assertEqual([j["id"] for j in jobs], [job.id])
+        self.assertEqual(jobs[0]["job_type"], "force_import")
+        entries = group["entries"]
+        assert isinstance(entries, list)
+        entry_job = entries[0]["import_job"]
+        assert isinstance(entry_job, dict)
+        self.assertEqual(entry_job["id"], job.id)
+        self.assertEqual(entry_job["job_type"], "force_import")
 
     def test_beets_lookup_receives_exactly_the_row_mbids(self) -> None:
         seed_visible_wrong_match(self.db, self.root, request_id=7)
