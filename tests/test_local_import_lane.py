@@ -413,9 +413,9 @@ class TestProcessClaimedJobForwardsPinnedSessionToLocal(unittest.TestCase):
 
 class TestRunOnceClaimsLocalImportCandidate(unittest.TestCase):
     """Issue #1211 PR3 — no test anywhere drove ``importer.run_once`` all
-    the way through the ``IMPORT_JOB_LOCAL`` claim branch (the
-    ``elif candidate.job_type == IMPORT_JOB_LOCAL:`` arm at ~importer.py:2318,
-    which calls ``_process_force_claim(..., claim_fn=_claim_local_import)``
+    the way through the ``IMPORT_JOB_LOCAL`` claim branch (since issue #1278
+    the local kind's own ``_claim_route_local_import``, which calls
+    ``_process_force_claim(..., claim_fn=_claim_local_import)``
     -> ``process_claimed_job``). #1210 covered ``process_claimed_job`` in
     isolation once already claimed; this proves the claim-loop wiring one
     level up actually reaches and claims a queued local-import candidate.

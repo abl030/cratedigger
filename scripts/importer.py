@@ -74,6 +74,7 @@ from lib.import_queue import (
     IMPORT_JOB_YOUTUBE,
     ForceImportPayload,
     ImportJob,
+    ImportJobPayload,
     LocalImportPayload,
     YoutubeImportPayload,
 )
@@ -179,6 +180,210 @@ def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
         # still have.
         "post_commit_wrong_match_scenario": outcome.post_commit_wrong_match_scenario,
     }
+
+
+# --- Per-kind import job adapters ------------------------------------------
+#
+# One registry answers "which import job kind is this" for every
+# job-type-dependent fact in this module: which executor runs the job, which
+# claim route ``run_once`` takes, which execution authority
+# ``process_claimed_job`` demands, whether the kind retains a job-scoped
+# private action copy, and which of the two Wrong Matches roles it plays.
+# Every consumer below reads the kind instead of re-deriving the answer from
+# ``job.job_type`` at its own point of use.
+#
+# The four lanes stay four: this is convergence of dispatch, never a fifth
+# Beets-mutation lane (CLAUDE.md § Decision architecture).
+
+#: ``process_claimed_job`` demands the exact automation execution lease AND a
+#: pinned owner session, and forwards all three to the executor.
+_AUTHORITY_AUTOMATION = "automation"
+#: A request-scoped pinned-IMPORT claim (force / local-import, issue #1176
+#: PR3): the cancellation token and pinned session are optional, must be
+#: PAIRED, and are forwarded to the executor whenever present.
+_AUTHORITY_PINNED_PAIR = "pinned_pair"
+#: No pinned session at all (youtube): the executor is called plainly.
+_AUTHORITY_PLAIN = "plain"
+
+
+@dataclass(frozen=True)
+class _ActionCopySource:
+    """The originating-source facts one action-copy lane hands dispatch."""
+
+    source_reference_path: str | None
+    source_username: str | None
+    source_dirs: list[str] | None
+    download_log_id: int | None
+
+
+def _force_action_copy_source(payload: ImportJobPayload) -> _ActionCopySource:
+    """Force-import exposes its originating Wrong Matches folder and peer."""
+    # Programmer-error invariant (the payload is already decoded/validated
+    # by job_type at read time), not a caller type error — mirrors every
+    # other "<job_type> payload type mismatch" AssertionError in this file
+    # and its sibling in scripts/import_preview_worker.py.
+    if not isinstance(payload, ForceImportPayload):
+        raise AssertionError("force_import payload type mismatch")  # noqa: TRY004
+    return _ActionCopySource(
+        source_reference_path=payload.failed_path,
+        source_username=payload.source_username,
+        source_dirs=(
+            [source_dir for source_dir in payload.source_dirs if source_dir]
+            or None
+        ),
+        download_log_id=payload.download_log_id,
+    )
+
+
+def _local_action_copy_source(payload: ImportJobPayload) -> _ActionCopySource:
+    """Local-import exposes no originating source to dispatch at all.
+
+    LOCAL delegates through the same ``dispatch_import_from_db`` entry point
+    as FORCE (issue #1176 PR3), differing in the 3 documented ways: no
+    operator-path audit exposure (``source_reference_path=None`` — CLAUDE.md
+    decision 2), the strict automation distance threshold instead of
+    ``FORCE_IMPORT_DISTANCE_THRESHOLD`` (decision 3), and its own attempt
+    scenario (decision 4). There is no Soulseek peer behind a local import,
+    so ``source_username``/``source_dirs`` stay unset — mirrors
+    ``youtube_import``, which never populates them either.
+    """
+    # Programmer-error invariant, exactly as in the force sibling above.
+    if not isinstance(payload, LocalImportPayload):
+        raise AssertionError("local_import payload type mismatch")  # noqa: TRY004
+    return _ActionCopySource(
+        source_reference_path=None,
+        source_username=None,
+        source_dirs=None,
+        download_log_id=None,
+    )
+
+
+def _force_import_distance_threshold(cfg: CratediggerConfig) -> float | None:
+    """Force import overrides the Beets distance instead of resolving one."""
+    del cfg
+    return None
+
+
+def _configured_distance_threshold(cfg: CratediggerConfig) -> float | None:
+    """The ordinary automation validation threshold."""
+    return cfg.beets_distance_threshold
+
+
+@dataclass(frozen=True)
+class _ActionCopyLane:
+    """Everything the shared action-copy dispatch body differs on per lane."""
+
+    job_type: str
+    lane_label: str
+    scenario: DownloadLogOutcome
+    distance_threshold_fn: Callable[[CratediggerConfig], float | None]
+    source_fn: Callable[[ImportJobPayload], _ActionCopySource]
+
+    def action_copy_prefix(self) -> str:
+        """Read this lane's prefix from the one table that owns it.
+
+        ``ACTION_COPY_PREFIX_BY_JOB_TYPE`` stays the single source for the
+        job-type-to-prefix mapping (issue #1176 PR3 F5): a wrong prefix
+        compares the retained copy against another job type's deterministic
+        name and raises ``FilesystemAuthorityError`` before ever touching
+        the filesystem.
+        """
+        from lib.import_preview import ACTION_COPY_PREFIX_BY_JOB_TYPE
+
+        return ACTION_COPY_PREFIX_BY_JOB_TYPE[self.job_type]
+
+
+_FORCE_ACTION_COPY_LANE = _ActionCopyLane(
+    job_type=IMPORT_JOB_FORCE,
+    lane_label="force",
+    scenario="force_import",
+    distance_threshold_fn=_force_import_distance_threshold,
+    source_fn=_force_action_copy_source,
+)
+
+_LOCAL_IMPORT_ACTION_COPY_LANE = _ActionCopyLane(
+    job_type=IMPORT_JOB_LOCAL,
+    lane_label="local-import",
+    scenario="local_import",
+    distance_threshold_fn=_configured_distance_threshold,
+    source_fn=_local_action_copy_source,
+)
+
+
+class _JobKindExecutor(Protocol):
+    """One kind's entry into its own execution lane.
+
+    Every kind takes the same complete argument set and ignores what its own
+    lane does not use, so ``execute_import_job`` hands the same call to all
+    of them rather than shaping one per type.
+    """
+
+    def __call__(
+        self,
+        db: PipelineDB,
+        job: ImportJob,
+        *,
+        request_id: int,
+        ctx: object,
+        execution_lease: ExecutionLeaseSnapshot | None,
+        cancellation_token: CancellationToken | None,
+        owner_session_identity: OwnerSessionIdentity | None,
+        force_dispatch_fn: Callable[..., DispatchOutcome] | None,
+        force_runtime_config: CratediggerConfig | None,
+    ) -> DispatchOutcome: ...
+
+
+@dataclass(frozen=True)
+class _ClaimAttempt:
+    """Everything a claim route needs for one candidate on one poll pass."""
+
+    db: PipelineDB
+    worker_id: str
+    ctx: object
+    execution_lease: ExecutionLeaseSnapshot | None
+    stage_db_factory: Callable[[str], object]
+    execute_fn: Callable[..., DispatchOutcome]
+    claim_state: _ClaimState
+
+    def dsn(self) -> str | None:
+        """The pinned-session routes each open a stage connection of their own."""
+        value = getattr(self.db, "dsn", None)
+        return str(value) if value else None
+
+
+class _JobKindClaimRoute(Protocol):
+    """How ``run_once`` claims and runs one candidate of a given kind."""
+
+    def __call__(
+        self,
+        candidate: ImportJob,
+        attempt: _ClaimAttempt,
+    ) -> ImportJob | None: ...
+
+
+@dataclass(frozen=True)
+class _ImportJobKind:
+    """One import job type's complete adapter."""
+
+    authority: str
+    #: Named ``execute_fn``, not ``execute``: ``tests/test_replaced_write_
+    #: audit.py``'s deliberately bounded grammar treats every ``.execute(...)``
+    #: call as a DB cursor executing SQL it must resolve statically, and a
+    #: registry-dispatched call cannot be. The name matches this module's own
+    #: ``execute_fn`` kwarg convention anyway.
+    execute_fn: _JobKindExecutor
+    claim_route: _JobKindClaimRoute
+    #: The job-scoped private action copy this lane retains, if any.
+    action_copy: _ActionCopyLane | None
+    #: Whether a terminal rejection this job produced converges a NEW Wrong
+    #: Matches row (``_cleanup_committed_wrong_match_rejection``). Force is
+    #: the exception: it never reaches that reducer at all — see
+    #: ``docs/rejection-routing.md``.
+    runs_committed_wrong_match_cleanup: bool
+    #: Whether this job's payload names an EXISTING Wrong Matches row that
+    #: its terminal outcome consumes (``_dismiss_successful_force_import`` /
+    #: ``_cleanup_failed_force_import``).
+    owns_wrong_match_source: bool
 
 
 class _AutomationCleanupDB(
@@ -436,7 +641,7 @@ def _complete_automation_processing_cleanup(
 
 
 def _force_job_wrong_match_payload(job: ImportJob) -> tuple[int, str | None] | None:
-    if job.job_type != IMPORT_JOB_FORCE:
+    if not _kind_for(job.job_type).owns_wrong_match_source:
         return None
     if not isinstance(job.payload, ForceImportPayload):
         raise TypeError("force_import payload type mismatch")
@@ -462,47 +667,51 @@ def _cleanup_terminal_force_action(job: ImportJob) -> dict[str, object] | None:
         return None
     try:
         from lib.config import read_runtime_config
-        from lib.import_preview import (
-            ACTION_COPY_PREFIX_BY_JOB_TYPE,
-            cleanup_force_action_copy_for_job,
-        )
+        from lib.import_preview import cleanup_force_action_copy_for_job
 
         cfg = read_runtime_config()
         # issue #1176 PR3 F5: this call used to hardcode force's own
         # "force-action-" prefix, so it compared every local-import action
         # path against the WRONG job type's deterministic name and raised
         # before ever touching the filesystem — the copy leaked forever and
-        # re-raised on every subsequent importer startup recovery sweep.
-        # ``ACTION_COPY_PREFIX_BY_JOB_TYPE`` is the same table
+        # re-raised on every subsequent importer startup recovery sweep. The
+        # kind's own action-copy lane resolves the prefix from
+        # ``ACTION_COPY_PREFIX_BY_JOB_TYPE``, the same table
         # scripts/import_preview_worker.py's sibling cleanup already uses.
-        # issue #1246 item 2: an unrecognized ``job.job_type`` now fails
-        # CLOSED (skips cleanup, returns ``None``) instead of silently
-        # defaulting to ``FORCE_ACTION_PREFIX`` — matching the sibling
+        # issue #1246 item 2: an unrecognized ``job.job_type`` fails CLOSED
+        # (skips cleanup, returns ``None``) instead of silently defaulting
+        # to ``FORCE_ACTION_PREFIX`` — matching the sibling
         # ``scripts/import_preview_worker.py::_cleanup_terminal_preview_
         # force_action``'s own ``prefix is None`` early return. The
         # fail-open default was left in place by issue #1211 PR1 as an
         # explicit open question; this closes it now that the prefix table
-        # is single-sourced. Both the old default and the new early return
-        # are dead today two independent ways: ``ImportJob.from_row`` runs
-        # ``validate_job_type``, so ``job.job_type`` can only ever be one of
-        # the four ``IMPORT_JOB_TYPES``; and of the two types this table
-        # omits (``automation_import``, ``youtube_import``), the small
-        # minority of live doc2 rows of either type that carry an
-        # ``action_path`` key AT ALL carry it as JSON ``null`` (not a
-        # string) -- most rows of both types have no such key, and none
-        # observed to date has a non-null one -- so ``_force_action_path``
-        # above already returns ``None`` and this function never reaches
-        # here for either. A live doc2 count is deliberately not
-        # reproduced here: the table grows continuously (rows accrued
-        # between successive measurements already differed), so a
-        # frozen number inside a permanent comment would only go stale.
+        # is single-sourced. Since issue #1278 the same fail-closed answer
+        # comes from the kind registry: a lane-less kind (automation,
+        # youtube) and an unregistered type alike carry
+        # ``action_copy is None``. Both the old default and the early
+        # return are dead today two independent ways:
+        # ``ImportJob.from_row`` runs ``validate_job_type``, so
+        # ``job.job_type`` can only ever be one of the four
+        # ``IMPORT_JOB_TYPES``; and of the two types with no lane
+        # (``automation_import``, ``youtube_import``), the small minority of
+        # live doc2 rows of either type that carry an ``action_path`` key AT
+        # ALL carry it as JSON ``null`` (not a string) -- most rows of both
+        # types have no such key, and none observed to date has a non-null
+        # one -- so ``_force_action_path`` above already returns ``None``
+        # and this function never reaches here for either. A live doc2 count
+        # is deliberately not reproduced here: the table grows continuously
+        # (rows accrued between successive measurements already differed),
+        # so a frozen number inside a permanent comment would only go stale.
         # Re-query ``import_jobs`` for the current counts if this needs
         # re-verifying.
-        prefix = ACTION_COPY_PREFIX_BY_JOB_TYPE.get(job.job_type)
-        if prefix is None:
+        lane = _kind_for(job.job_type).action_copy
+        if lane is None:
             return None
         cleanup_force_action_copy_for_job(
-            action_path, cfg, import_job_id=job.id, prefix=prefix,
+            action_path,
+            cfg,
+            import_job_id=job.id,
+            prefix=lane.action_copy_prefix(),
         )
         return {"action_path": action_path, "removed": True}
     except Exception as exc:
@@ -733,14 +942,8 @@ def _execute_action_copy_dispatch(
     db: PipelineDB,
     job: ImportJob,
     *,
+    lane: _ActionCopyLane,
     request_id: int,
-    action_prefix: str,
-    source_reference_path: str | None,
-    source_username: str | None,
-    source_dirs: list[str] | None,
-    download_log_id: int | None,
-    distance_threshold_fn: Callable[[CratediggerConfig], float | None],
-    scenario: DownloadLogOutcome,
     ctx: object,
     cancellation_token: CancellationToken | None,
     owner_session_identity: OwnerSessionIdentity | None,
@@ -756,12 +959,15 @@ def _execute_action_copy_dispatch(
     ``_dispatch_outcome_from_completion`` below. See that function's
     docstring (issue #510) for why this isn't unified further.
 
-    Every parameter that differs between force-import and local-import is
-    passed explicitly by the caller; everything else (resolve config,
-    verify the retained action copy is the job's own deterministic one,
-    the cancellation/session pairing, the two-shaped dispatch call) is
+    Everything that differs between force-import and local-import lives on
+    ``lane`` (issue #1278); everything else (resolve config, verify the
+    retained action copy is the job's own deterministic one, the
+    cancellation/session pairing, the two-shaped dispatch call) is
     identical and lives here once.
     """
+    source = lane.source_fn(job.payload)
+    action_prefix = lane.action_copy_prefix()
+
     from lib.dispatch import dispatch_import_from_db
     force_dispatch = force_dispatch_fn or dispatch_import_from_db
 
@@ -774,7 +980,7 @@ def _execute_action_copy_dispatch(
     # verbatim in the Recents crash audit
     # ("Executor crashed: ValueError: ...") via
     # _terminalize_non_automation_failure, the other is a requeue reason.
-    lane_label = "local-import" if job.job_type == IMPORT_JOB_LOCAL else "force"
+    lane_label = lane.lane_label
 
     if (cancellation_token is None) != (owner_session_identity is None):
         raise ValueError(
@@ -801,36 +1007,153 @@ def _execute_action_copy_dispatch(
             import_job_id=job.id,
             reason=f"{lane_label} action copy unavailable; preview must rebuild it",
         )
-    resolved_distance_threshold = distance_threshold_fn(runtime_config)
+    resolved_distance_threshold = lane.distance_threshold_fn(runtime_config)
     if cancellation_token is None:
         return force_dispatch(
             db,
             request_id=request_id,
             failed_path=action_path,
-            source_reference_path=source_reference_path,
-            source_username=source_username,
-            source_dirs=source_dirs,
+            source_reference_path=source.source_reference_path,
+            source_username=source.source_username,
+            source_dirs=source.source_dirs,
             import_job_id=job.id,
-            download_log_id=download_log_id,
+            download_log_id=source.download_log_id,
             cfg=runtime_config,
             distance_threshold=resolved_distance_threshold,
-            scenario=scenario,
+            scenario=lane.scenario,
         )
     assert owner_session_identity is not None
     return force_dispatch(
         db,
         request_id=request_id,
         failed_path=action_path,
-        source_reference_path=source_reference_path,
-        source_username=source_username,
-        source_dirs=source_dirs,
+        source_reference_path=source.source_reference_path,
+        source_username=source.source_username,
+        source_dirs=source.source_dirs,
         import_job_id=job.id,
-        download_log_id=download_log_id,
+        download_log_id=source.download_log_id,
         cancellation_token=cancellation_token,
         owner_session_identity=owner_session_identity,
         cfg=runtime_config,
         distance_threshold=resolved_distance_threshold,
-        scenario=scenario,
+        scenario=lane.scenario,
+    )
+
+
+def _execute_force_kind(
+    db: PipelineDB,
+    job: ImportJob,
+    *,
+    request_id: int,
+    ctx: object,
+    execution_lease: ExecutionLeaseSnapshot | None,
+    cancellation_token: CancellationToken | None,
+    owner_session_identity: OwnerSessionIdentity | None,
+    force_dispatch_fn: Callable[..., DispatchOutcome] | None,
+    force_runtime_config: CratediggerConfig | None,
+) -> DispatchOutcome:
+    """Run one force-import job through the shared action-copy lane."""
+    del execution_lease
+    return _execute_action_copy_dispatch(
+        db,
+        job,
+        lane=_FORCE_ACTION_COPY_LANE,
+        request_id=request_id,
+        ctx=ctx,
+        cancellation_token=cancellation_token,
+        owner_session_identity=owner_session_identity,
+        force_dispatch_fn=force_dispatch_fn,
+        force_runtime_config=force_runtime_config,
+    )
+
+
+def _execute_local_kind(
+    db: PipelineDB,
+    job: ImportJob,
+    *,
+    request_id: int,
+    ctx: object,
+    execution_lease: ExecutionLeaseSnapshot | None,
+    cancellation_token: CancellationToken | None,
+    owner_session_identity: OwnerSessionIdentity | None,
+    force_dispatch_fn: Callable[..., DispatchOutcome] | None,
+    force_runtime_config: CratediggerConfig | None,
+) -> DispatchOutcome:
+    """Run one local-import job through the shared action-copy lane."""
+    del execution_lease
+    return _execute_action_copy_dispatch(
+        db,
+        job,
+        lane=_LOCAL_IMPORT_ACTION_COPY_LANE,
+        request_id=request_id,
+        ctx=ctx,
+        cancellation_token=cancellation_token,
+        owner_session_identity=owner_session_identity,
+        force_dispatch_fn=force_dispatch_fn,
+        force_runtime_config=force_runtime_config,
+    )
+
+
+def _execute_automation_kind(
+    db: PipelineDB,
+    job: ImportJob,
+    *,
+    request_id: int,
+    ctx: object,
+    execution_lease: ExecutionLeaseSnapshot | None,
+    cancellation_token: CancellationToken | None,
+    owner_session_identity: OwnerSessionIdentity | None,
+    force_dispatch_fn: Callable[..., DispatchOutcome] | None,
+    force_runtime_config: CratediggerConfig | None,
+) -> DispatchOutcome:
+    """Run one automation job under its own exact execution authority."""
+    del request_id, force_dispatch_fn, force_runtime_config
+    return execute_automation_import_job(
+        db,
+        job,
+        ctx=ctx,
+        execution_lease=execution_lease,
+        cancellation_token=cancellation_token,
+        owner_session_identity=owner_session_identity,
+    )
+
+
+def _execute_youtube_kind(
+    db: PipelineDB,
+    job: ImportJob,
+    *,
+    request_id: int,
+    ctx: object,
+    execution_lease: ExecutionLeaseSnapshot | None,
+    cancellation_token: CancellationToken | None,
+    owner_session_identity: OwnerSessionIdentity | None,
+    force_dispatch_fn: Callable[..., DispatchOutcome] | None,
+    force_runtime_config: CratediggerConfig | None,
+) -> DispatchOutcome:
+    """Run one YouTube-rescue job; this lane pins no session at all."""
+    del request_id, execution_lease, cancellation_token
+    del owner_session_identity, force_dispatch_fn, force_runtime_config
+    return execute_youtube_import_job(db, job, ctx=ctx)
+
+
+def _execute_unsupported_kind(
+    db: PipelineDB,
+    job: ImportJob,
+    *,
+    request_id: int,
+    ctx: object,
+    execution_lease: ExecutionLeaseSnapshot | None,
+    cancellation_token: CancellationToken | None,
+    owner_session_identity: OwnerSessionIdentity | None,
+    force_dispatch_fn: Callable[..., DispatchOutcome] | None,
+    force_runtime_config: CratediggerConfig | None,
+) -> DispatchOutcome:
+    """Refuse a job type no adapter claims, exactly as the old fall-through did."""
+    del db, request_id, ctx, execution_lease, cancellation_token
+    del owner_session_identity, force_dispatch_fn, force_runtime_config
+    return DispatchOutcome(
+        success=False,
+        message=f"Unsupported import job type: {job.job_type}",
     )
 
 
@@ -852,82 +1175,16 @@ def execute_import_job(
             message="Import job has no request_id",
         )
 
-    if job.job_type == IMPORT_JOB_FORCE:
-        if not isinstance(job.payload, ForceImportPayload):
-            raise AssertionError("force_import payload type mismatch")
-        payload = job.payload
-        source_dirs = (
-            [source_dir for source_dir in payload.source_dirs if source_dir]
-            or None
-        )
-        from lib.import_preview import FORCE_ACTION_PREFIX
-
-        return _execute_action_copy_dispatch(
-            db,
-            job,
-            request_id=job.request_id,
-            action_prefix=FORCE_ACTION_PREFIX,
-            source_reference_path=payload.failed_path,
-            source_username=payload.source_username,
-            source_dirs=source_dirs,
-            download_log_id=payload.download_log_id,
-            distance_threshold_fn=lambda cfg: None,
-            scenario="force_import",
-            ctx=ctx,
-            cancellation_token=cancellation_token,
-            owner_session_identity=owner_session_identity,
-            force_dispatch_fn=force_dispatch_fn,
-            force_runtime_config=force_runtime_config,
-        )
-
-    if job.job_type == IMPORT_JOB_LOCAL:
-        # LOCAL delegates through the same dispatch_import_from_db entry
-        # point as FORCE (issue #1176 PR3), differing in the 3 documented
-        # ways: no operator-path audit exposure (source_reference_path=
-        # None — CLAUDE.md decision 2), the strict automation distance
-        # threshold instead of FORCE_IMPORT_DISTANCE_THRESHOLD (decision
-        # 3), and its own attempt scenario (decision 4). There is no
-        # Soulseek peer behind a local import, so source_username/
-        # source_dirs stay unset — mirrors youtube_import, which never
-        # populates them either.
-        if not isinstance(job.payload, LocalImportPayload):
-            raise AssertionError("local_import payload type mismatch")
-        from lib.import_preview import LOCAL_IMPORT_ACTION_PREFIX
-
-        return _execute_action_copy_dispatch(
-            db,
-            job,
-            request_id=job.request_id,
-            action_prefix=LOCAL_IMPORT_ACTION_PREFIX,
-            source_reference_path=None,
-            source_username=None,
-            source_dirs=None,
-            download_log_id=None,
-            distance_threshold_fn=lambda cfg: cfg.beets_distance_threshold,
-            scenario="local_import",
-            ctx=ctx,
-            cancellation_token=cancellation_token,
-            owner_session_identity=owner_session_identity,
-            force_dispatch_fn=force_dispatch_fn,
-            force_runtime_config=force_runtime_config,
-        )
-
-    if job.job_type == IMPORT_JOB_AUTOMATION:
-        return execute_automation_import_job(
-            db,
-            job,
-            ctx=ctx,
-            execution_lease=execution_lease,
-            cancellation_token=cancellation_token,
-            owner_session_identity=owner_session_identity,
-        )
-
-    if job.job_type == IMPORT_JOB_YOUTUBE:
-        return execute_youtube_import_job(db, job, ctx=ctx)
-
-    return DispatchOutcome(
-        success=False,
-        message=f"Unsupported import job type: {job.job_type}",
+    return _kind_for(job.job_type).execute_fn(
+        db,
+        job,
+        request_id=job.request_id,
+        ctx=ctx,
+        execution_lease=execution_lease,
+        cancellation_token=cancellation_token,
+        owner_session_identity=owner_session_identity,
+        force_dispatch_fn=force_dispatch_fn,
+        force_runtime_config=force_runtime_config,
     )
 
 
@@ -1772,14 +2029,14 @@ def _process_force_claim(
     stage_db_factory: Callable[[str], object],
     execute_fn: Callable[..., DispatchOutcome] = execute_import_job,
     claim_callback: Callable[[], None] | None = None,
-    claim_fn: Callable[..., ImportJob | None] = _claim_force_import,
+    claim_fn: Callable[..., ImportJob | None],
 ) -> ImportJob | None:
     """Claim and run force/local-import effects on one pinned IMPORT session.
 
-    ``claim_fn`` (issue #1176 PR3) defaults to force's own claim method so
-    every existing caller stays byte-identical; the local-import lane
-    passes ``_claim_local_import`` instead — the ONE difference between the
-    two claims.
+    ``claim_fn`` (issue #1176 PR3) is the ONE difference between the two
+    claims: ``_claim_force_import`` or ``_claim_local_import``. Each lane's
+    claim route names its own (issue #1278), so there is no default to fall
+    back to — a new lane must state which claim method owns its job type.
     """
     if candidate.request_id is None:
         return None
@@ -1865,16 +2122,19 @@ def process_claimed_job(
     gates pinned-session/cancellation handling for every job type claimed
     via ``_process_force_claim`` — which now includes local-import, since
     it claims through the SAME pinned-IMPORT-session helper as force (see
-    ``run_once``'s ``elif candidate.job_type == IMPORT_JOB_LOCAL:`` branch).
-    YouTube stays outside this flag: it claims through the plain
-    ``db.claim_import_job_candidate`` path with no pinned session at all,
-    exactly as before. Narrowing this check back to force-only would
-    silently drop local-import's pinned ``cancellation_token`` /
-    ``owner_session_identity`` on every real dispatch — the job would still
-    run, just without graceful-shutdown cancellation support.
+    ``_claim_route_local_import``). YouTube stays outside this flag: it
+    claims through the plain ``db.claim_import_job_candidate`` path with no
+    pinned session at all, exactly as before. Narrowing this check back to
+    force-only would silently drop local-import's pinned
+    ``cancellation_token`` / ``owner_session_identity`` on every real
+    dispatch — the job would still run, just without graceful-shutdown
+    cancellation support. Both flags now read one answer from the job's own
+    kind adapter (issue #1278) rather than re-deriving it from
+    ``job.job_type`` here.
     """
-    is_automation = job.job_type == IMPORT_JOB_AUTOMATION
-    is_force = job.job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL)
+    kind = _kind_for(job.job_type)
+    is_automation = kind.authority == _AUTHORITY_AUTOMATION
+    is_force = kind.authority == _AUTHORITY_PINNED_PAIR
     if is_automation and execution_lease is None:
         raise ValueError(
             "automation job processing requires exact execution authority"
@@ -2139,7 +2399,7 @@ def process_claimed_job(
                 )
                 if merged is not None:
                     terminal_job = merged
-            if job.job_type != IMPORT_JOB_FORCE:
+            if kind.runs_committed_wrong_match_cleanup:
                 _cleanup_committed_wrong_match_rejection(
                     db,
                     job,
@@ -2242,7 +2502,7 @@ def process_claimed_job(
             merged = db.merge_import_job_result(job.id, {"cleanup": cleanup})
             if merged is not None:
                 terminal_job = merged
-        if job.job_type != IMPORT_JOB_FORCE:
+        if kind.runs_committed_wrong_match_cleanup:
             _cleanup_committed_wrong_match_rejection(
                 db,
                 job,
@@ -2280,6 +2540,155 @@ def process_claimed_job(
     return _record_terminal_force_action_cleanup(db, job, terminal_job)
 
 
+def _claim_route_automation(
+    candidate: ImportJob,
+    attempt: _ClaimAttempt,
+) -> ImportJob | None:
+    """Claim one automation candidate on its own pinned IMPORT session.
+
+    Both misses below leave the claim unmarked, so ``run_once`` moves on to
+    the next candidate exactly as its old ``continue`` arms did: automation
+    stays invisible without a complete invocation lease, and every
+    pinned-session route needs a DSN of its own to open a stage connection.
+    """
+    if attempt.execution_lease is None:
+        return None
+    dsn = attempt.dsn()
+    if dsn is None:
+        return None
+    return _process_automation_claim(
+        candidate,
+        dsn=dsn,
+        worker_id=attempt.worker_id,
+        execution_lease=attempt.execution_lease,
+        ctx=attempt.ctx,
+        stage_db_factory=attempt.stage_db_factory,
+        execute_fn=attempt.execute_fn,
+        claim_callback=attempt.claim_state.mark,
+    )
+
+
+def _claim_request_scoped_pinned(
+    candidate: ImportJob,
+    attempt: _ClaimAttempt,
+    *,
+    claim_fn: Callable[..., ImportJob | None],
+) -> ImportJob | None:
+    """The force/local-import claim, differing only in ``claim_fn``."""
+    dsn = attempt.dsn()
+    if dsn is None:
+        return None
+    return _process_force_claim(
+        candidate,
+        dsn=dsn,
+        worker_id=attempt.worker_id,
+        ctx=attempt.ctx,
+        stage_db_factory=attempt.stage_db_factory,
+        execute_fn=attempt.execute_fn,
+        claim_callback=attempt.claim_state.mark,
+        claim_fn=claim_fn,
+    )
+
+
+def _claim_route_force_import(
+    candidate: ImportJob,
+    attempt: _ClaimAttempt,
+) -> ImportJob | None:
+    return _claim_request_scoped_pinned(
+        candidate, attempt, claim_fn=_claim_force_import,
+    )
+
+
+def _claim_route_local_import(
+    candidate: ImportJob,
+    attempt: _ClaimAttempt,
+) -> ImportJob | None:
+    return _claim_request_scoped_pinned(
+        candidate, attempt, claim_fn=_claim_local_import,
+    )
+
+
+def _claim_route_plain(
+    candidate: ImportJob,
+    attempt: _ClaimAttempt,
+) -> ImportJob | None:
+    """Claim one candidate on the queue connection, with no pinned session."""
+    job = attempt.db.claim_import_job_candidate(
+        candidate.id,
+        worker_id=attempt.worker_id,
+    )
+    if job is None:
+        return None
+    attempt.claim_state.mark()
+    logger.info("Claimed import job %s (%s)", job.id, job.job_type)
+    return process_claimed_job(
+        attempt.db,
+        job,
+        ctx=attempt.ctx,
+        execute_fn=attempt.execute_fn,
+    )
+
+
+#: The one place every job-type-dependent fact in this module is decided.
+_IMPORT_JOB_KINDS: dict[str, _ImportJobKind] = {
+    IMPORT_JOB_FORCE: _ImportJobKind(
+        authority=_AUTHORITY_PINNED_PAIR,
+        execute_fn=_execute_force_kind,
+        claim_route=_claim_route_force_import,
+        action_copy=_FORCE_ACTION_COPY_LANE,
+        # Force jobs never reach ``_cleanup_committed_wrong_match_rejection``
+        # at all: the row this job came FROM is the one it consumes below,
+        # and a force rejection preserves the operator's own quarantine
+        # folder (issue #1077 D7; docs/rejection-routing.md).
+        runs_committed_wrong_match_cleanup=False,
+        owns_wrong_match_source=True,
+    ),
+    IMPORT_JOB_LOCAL: _ImportJobKind(
+        authority=_AUTHORITY_PINNED_PAIR,
+        execute_fn=_execute_local_kind,
+        claim_route=_claim_route_local_import,
+        action_copy=_LOCAL_IMPORT_ACTION_COPY_LANE,
+        runs_committed_wrong_match_cleanup=True,
+        owns_wrong_match_source=False,
+    ),
+    IMPORT_JOB_AUTOMATION: _ImportJobKind(
+        authority=_AUTHORITY_AUTOMATION,
+        execute_fn=_execute_automation_kind,
+        claim_route=_claim_route_automation,
+        action_copy=None,
+        runs_committed_wrong_match_cleanup=True,
+        owns_wrong_match_source=False,
+    ),
+    IMPORT_JOB_YOUTUBE: _ImportJobKind(
+        authority=_AUTHORITY_PLAIN,
+        execute_fn=_execute_youtube_kind,
+        claim_route=_claim_route_plain,
+        action_copy=None,
+        runs_committed_wrong_match_cleanup=True,
+        owns_wrong_match_source=False,
+    ),
+}
+
+#: NOT a fifth lane: the exact shape the pre-registry ``else``/fall-through
+#: arms gave a ``job_type`` no adapter claims. ``ImportJob.from_row`` runs
+#: ``validate_job_type``, so nothing can reach it today (issue #1246) — it
+#: exists so an unvalidated type still fails closed at every consumer
+#: instead of each one inventing its own default.
+_UNROUTED_JOB_KIND = _ImportJobKind(
+    authority=_AUTHORITY_PLAIN,
+    execute_fn=_execute_unsupported_kind,
+    claim_route=_claim_route_plain,
+    action_copy=None,
+    runs_committed_wrong_match_cleanup=True,
+    owns_wrong_match_source=False,
+)
+
+
+def _kind_for(job_type: str) -> _ImportJobKind:
+    """Answer "which import job kind is this" once, for every consumer."""
+    return _IMPORT_JOB_KINDS.get(job_type, _UNROUTED_JOB_KIND)
+
+
 def run_once(
     db: PipelineDB,
     *,
@@ -2312,65 +2721,17 @@ def run_once(
         )
     for candidate in candidates:
         claim_state = _ClaimState()
+        attempt = _ClaimAttempt(
+            db=db,
+            worker_id=worker_id,
+            ctx=ctx,
+            execution_lease=execution_lease,
+            stage_db_factory=stage_db_factory or PipelineDB,
+            execute_fn=execute_fn,
+            claim_state=claim_state,
+        )
 
-        if candidate.job_type == IMPORT_JOB_AUTOMATION:
-            if execution_lease is None:
-                continue
-            dsn = getattr(db, "dsn", None)
-            if not dsn:
-                continue
-            result = _process_automation_claim(
-                candidate,
-                dsn=str(dsn),
-                worker_id=worker_id,
-                execution_lease=execution_lease,
-                ctx=ctx,
-                stage_db_factory=stage_db_factory or PipelineDB,
-                execute_fn=execute_fn,
-                claim_callback=claim_state.mark,
-            )
-        elif candidate.job_type == IMPORT_JOB_FORCE:
-            dsn = getattr(db, "dsn", None)
-            if not dsn:
-                continue
-            result = _process_force_claim(
-                candidate,
-                dsn=str(dsn),
-                worker_id=worker_id,
-                ctx=ctx,
-                stage_db_factory=stage_db_factory or PipelineDB,
-                execute_fn=execute_fn,
-                claim_callback=claim_state.mark,
-            )
-        elif candidate.job_type == IMPORT_JOB_LOCAL:
-            dsn = getattr(db, "dsn", None)
-            if not dsn:
-                continue
-            result = _process_force_claim(
-                candidate,
-                dsn=str(dsn),
-                worker_id=worker_id,
-                ctx=ctx,
-                stage_db_factory=stage_db_factory or PipelineDB,
-                execute_fn=execute_fn,
-                claim_callback=claim_state.mark,
-                claim_fn=_claim_local_import,
-            )
-        else:
-            job = db.claim_import_job_candidate(
-                candidate.id,
-                worker_id=worker_id,
-            )
-            if job is None:
-                continue
-            claim_state.mark()
-            logger.info("Claimed import job %s (%s)", job.id, job.job_type)
-            result = process_claimed_job(
-                db,
-                job,
-                ctx=ctx,
-                execute_fn=execute_fn,
-            )
+        result = _kind_for(candidate.job_type).claim_route(candidate, attempt)
 
         if not claim_state.claimed:
             continue

@@ -684,7 +684,11 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # each). Confirmed NOT killed: tests.test_import_preview,
     # tests.test_import_result, tests.test_beets_config_startup_
     # entrypoints.
+    # tests.test_importer_job_kinds (issue #1278) was added with the
+    # per-kind adapter registry it pins; the basename probe still resolves
+    # nothing for this path, so it is named here like every other neighbour.
     "scripts/importer.py": (
+        "tests.test_importer_job_kinds",
         "tests.test_import_dispatch",
         "tests.test_import_operation_fence",
         "tests.test_import_queue",
