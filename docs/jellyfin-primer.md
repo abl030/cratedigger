@@ -211,8 +211,10 @@ deliberate differences:
   pipeline first knew of its files. A genuinely-new album has no replaced
   albums and isn't in Jellyfin yet, so nothing is captured — the table
   self-selects upgrades.
-- **Reconcile** (`reconcile_jellyfin_date_created_pins`, each 5-min
-  cratedigger cycle): a pin is acted on only once the rescan is **observable**
+- **Reconcile** (`reconcile_jellyfin_date_created_pins`, driven each 5-min
+  cratedigger cycle by its registered Phase-0 step
+  `reconcile_jellyfin_date_created_pins_cycle`): a pin is acted on only once
+  the rescan is **observable**
   — an item id differs from the snapshot (a NULL snapshot matches any album:
   the floor-pin case) **or an Audio item's date becomes newer than the
   captured maximum**. An **absent album waits** rather than closing: after a

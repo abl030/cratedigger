@@ -35,22 +35,17 @@ def prune_transfer_ledger_cycle(ctx: CratediggerContext) -> int:
     Pending intent is bounded regardless of request status. Accepted evidence
     remains protected while its request is wanted or downloading.
 
-    Best-effort -- never raises for a DB failure; logs and returns 0 so
-    a prune hiccup never blocks the cycle (matching every other Phase 0
-    sweep's contract). Returns the number of rows removed (0 on failure
-    or when nothing qualified).
+    DB failures deliberately propagate to ``lib/convergence.py``: the registry
+    owns cycle-preserving failure isolation, so this step and any future step
+    retain the same behavior without local exception wrappers. Returns the
+    number of rows removed (0 when nothing qualified).
     """
     db = ctx.pipeline_db_source._get_db()
     cutoff = (
         datetime.now(UTC)
         - timedelta(days=TRANSFER_LEDGER_PRUNE_RETENTION_DAYS)
     )
-    try:
-        removed = db.prune_transfer_ledger(older_than=cutoff)
-    except Exception:
-        logger.warning(
-            "TRANSFER-LEDGER: prune failed", exc_info=True)
-        return 0
+    removed = db.prune_transfer_ledger(older_than=cutoff)
     if removed:
         logger.info("TRANSFER-LEDGER: pruned %d row(s) past retention", removed)
     return removed

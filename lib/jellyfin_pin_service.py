@@ -71,6 +71,7 @@ from lib.util import (
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
+    from lib.context import CratediggerContext
     from lib.pipeline_db import PipelineDB
 
 logger = logging.getLogger("cratedigger")
@@ -328,13 +329,10 @@ def reconcile_jellyfin_date_created_pins(
     if not _jellyfin_pin_enabled(cfg):
         return ReconcileResult()
     cutoff = now - timedelta(seconds=grace_seconds)
-    try:
-        pins = db.get_pending_jellyfin_date_created_pins(
-            captured_before=cutoff, limit=limit)
-    except Exception:
-        logger.warning("JELLYFIN PIN: reconcile fetch failed — non-fatal",
-                       exc_info=True)
-        return ReconcileResult()
+    # Fetch failures deliberately propagate: the registered cycle step's
+    # runner (lib/convergence.py) owns step-level failure isolation.
+    pins = db.get_pending_jellyfin_date_created_pins(
+        captured_before=cutoff, limit=limit)
 
     pinned = already = waiting = skipped = expired = errors = 0
     for pin in pins:
@@ -419,3 +417,18 @@ def reconcile_jellyfin_date_created_pins(
                 pin_id, path, exc_info=True)
             errors += 1
     return ReconcileResult(pinned, already, waiting, skipped, expired, errors)
+
+
+def reconcile_jellyfin_date_created_pins_cycle(
+    ctx: CratediggerContext,
+) -> ReconcileResult:
+    """Registered Phase-0 step: reconcile pending pins for one cycle.
+
+    Failures deliberately propagate to ``lib/convergence.py``: the registry
+    owns cycle-preserving failure isolation. Per-pin failures remain isolated
+    inside ``reconcile_jellyfin_date_created_pins`` itself.
+    """
+    result = reconcile_jellyfin_date_created_pins(
+        ctx.cfg, ctx.pipeline_db_source._get_db(), now=datetime.now(UTC))
+    logger.info(result.to_log_line())
+    return result

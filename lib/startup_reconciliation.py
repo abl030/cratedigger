@@ -60,6 +60,7 @@ from lib.search_plan_service import (
 )
 
 if TYPE_CHECKING:
+    from lib.context import CratediggerContext
     from lib.pipeline_db import (
         DryRunPlanClassification,
         PipelineDB,
@@ -154,6 +155,36 @@ class _DBProto(Protocol):
         self,
         request_ids: list[int],
     ) -> dict[int, DryRunPlanClassification]: ...
+
+
+def log_reconciliation_summary(summary: ReconciliationSummary) -> None:
+    """Log the canonical summary line plus the stop-the-deploy signal.
+
+    Shared by the registered cycle step below and ``cratedigger.main``'s
+    ``--reconcile-dry-run`` deploy-verification branch, so both modes surface
+    the same operator-facing lines.
+    """
+    logger.info(summary.to_log_line())
+    if summary.unclassified_no_plan > 0:
+        logger.error(
+            "search_plan_reconciliation: %d wanted row(s) lack "
+            "explainable plan state -- stop-the-deploy signal "
+            "(see prior ERROR lines for the request ids)",
+            summary.unclassified_no_plan,
+        )
+
+
+def reconcile_search_plans_cycle(ctx: CratediggerContext) -> ReconciliationSummary:
+    """Registered Phase-0 step: live-mode reconciliation for one cycle.
+
+    Failures deliberately propagate to ``lib/convergence.py``: the registry
+    owns cycle-preserving failure isolation, and the cycle continues with
+    whatever rows are already searchable.
+    """
+    db = ctx.pipeline_db_source._get_db()
+    summary = reconcile_search_plans(db, SearchPlanService(db, ctx.cfg))
+    log_reconciliation_summary(summary)
+    return summary
 
 
 def reconcile_search_plans(

@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
 from lib.pipeline_db.pin_status import PlexTerminalPinStatus
@@ -43,6 +43,7 @@ from lib.util import (
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
+    from lib.context import CratediggerContext
     from lib.pipeline_db import PipelineDB
 
 logger = logging.getLogger("cratedigger")
@@ -148,16 +149,15 @@ def reconcile_plex_added_at_pins(
     set_fn: SetFn = plex_set_added_at,
 ) -> ReconcileResult:
     """Process pending pins past the settle window: re-find each album and, if
-    Plex bumped its ``addedAt``, write the original back (locked). Best-effort —
-    per-pin failures are logged and counted, never raised."""
+    Plex bumped its ``addedAt``, write the original back (locked). Per-pin
+    failures are logged and counted, never raised; the pending-pin fetch
+    itself propagates to the registered cycle step's runner."""
     if not cfg.plex_url:
         return ReconcileResult()
     cutoff = now - timedelta(seconds=grace_seconds)
-    try:
-        pins = db.get_pending_plex_added_at_pins(captured_before=cutoff, limit=limit)
-    except Exception:
-        logger.warning("PLEX PIN: reconcile fetch failed — non-fatal", exc_info=True)
-        return ReconcileResult()
+    # Fetch failures deliberately propagate: the registered cycle step's
+    # runner (lib/convergence.py) owns step-level failure isolation.
+    pins = db.get_pending_plex_added_at_pins(captured_before=cutoff, limit=limit)
 
     pinned = already = skipped = errors = 0
     for pin in pins:
@@ -198,3 +198,16 @@ def reconcile_plex_added_at_pins(
                 pin_id, path, exc_info=True)
             errors += 1
     return ReconcileResult(pinned, already, skipped, errors)
+
+
+def reconcile_plex_added_at_pins_cycle(ctx: CratediggerContext) -> ReconcileResult:
+    """Registered Phase-0 step: reconcile pending pins for one cycle.
+
+    Failures deliberately propagate to ``lib/convergence.py``: the registry
+    owns cycle-preserving failure isolation. Per-pin failures remain isolated
+    inside ``reconcile_plex_added_at_pins`` itself.
+    """
+    result = reconcile_plex_added_at_pins(
+        ctx.cfg, ctx.pipeline_db_source._get_db(), now=datetime.now(UTC))
+    logger.info(result.to_log_line())
+    return result

@@ -400,7 +400,7 @@ stem>`/`tests.test_<stem>_generated` probes, which are keyed on basename only
 and so miss real coverage filed under the file's full path (e.g.
 `lib/dispatch/core.py`) — yields zero test modules, selection fails the same
 way unless the path is admitted in `LIB_MODULES_WITHOUT_SELECTION_COVERAGE`
-(measured fresh at 33 files on 2026-08-31,
+(measured fresh at 31 files on 2026-08-31,
 `tests/test_selection_coverage_audit.py`
 proves the registry exact in both directions: no stale admission, no
 unregistered zero-neighbour file). Unlike the tests/-side registry, an

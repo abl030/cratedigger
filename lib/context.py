@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from cratedigger import TrackRecord
     from lib.config import CratediggerConfig
     from lib.enqueue import ClaimedQueueKeysRegistry
@@ -131,6 +133,14 @@ class CratediggerContext:
     peers_browsed: int = 0
     peers_browsed_lazy: int = 0
     fanout_waves: int = 0
+
+    # --- Cycle wall-clock anchors. ---
+    # Set by main() as the cycle body starts; read by the registered
+    # end-of-cycle close-out steps (lib/cycle_summary.py) to derive elapsed
+    # time and the metrics row's started_at without main() threading the
+    # values through each call.
+    cycle_started_at: datetime | None = None
+    cycle_start: float = 0.0
 
     # --- Per-cycle search-watchdog firing count (issue #212).
     # Incremented once per `SearchResult` whose `watchdog_fired=True`.

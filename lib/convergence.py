@@ -74,6 +74,14 @@ def _lazy_step(
     )
 
 
+_COOLDOWNS_FAILURE = "COOLDOWNS: load failed; continuing with the cycle."
+_SEARCH_PLAN_RECONCILIATION_FAILURE = (
+    "Startup search-plan reconciliation failed; continuing "
+    "with whatever rows are already searchable.")
+_PLEX_PIN_FAILURE = (
+    "PLEX PIN: reconciliation failed; continuing with the cycle.")
+_JELLYFIN_PIN_FAILURE = (
+    "JELLYFIN PIN: reconciliation failed; continuing with the cycle.")
 _SLSKD_ORPHAN_FAILURE = (
     "SLSKD ORPHAN: convergence failed; continuing with the cycle.")
 _DISK_REAP_FAILURE = "DISK-REAP: sweep failed; continuing with the cycle."
@@ -87,6 +95,12 @@ _HARVEST_FAILURE = (
     "HARVEST: pre-purge evidence harvest failed; continuing with the cycle.")
 _COMPLETED_PURGE_FAILURE = (
     "COMPLETED-PURGE: sweep failed; continuing with the cycle.")
+_CYCLE_SUMMARY_FAILURE = (
+    "CYCLE-SUMMARY: render failed; continuing with the cycle.")
+_CYCLE_METRICS_FAILURE = (
+    "CYCLE-METRICS: persist failed; continuing with the cycle.")
+_PEER_OBSERVATIONS_FAILURE = (
+    "PEER-OBSERVATIONS: persist failed; continuing with the cycle.")
 
 
 # Ordering is policy data.  A new convergence step is one registration here
@@ -94,6 +108,10 @@ _COMPLETED_PURGE_FAILURE = (
 CONVERGENCE_STEPS: Mapping[ConvergenceGroup, tuple[ConvergenceStep, ...]] = (
     MappingProxyType({
         ConvergenceGroup.PHASE_ZERO: (
+            _lazy_step("lib.user_cooldowns", "load_user_cooldowns", _COOLDOWNS_FAILURE),
+            _lazy_step("lib.startup_reconciliation", "reconcile_search_plans_cycle", _SEARCH_PLAN_RECONCILIATION_FAILURE),
+            _lazy_step("lib.plex_pin_service", "reconcile_plex_added_at_pins_cycle", _PLEX_PIN_FAILURE),
+            _lazy_step("lib.jellyfin_pin_service", "reconcile_jellyfin_date_created_pins_cycle", _JELLYFIN_PIN_FAILURE),
             _lazy_step("lib.slskd_transfers", "converge_slskd_orphans", _SLSKD_ORPHAN_FAILURE),
             _lazy_step("lib.slskd_transfers", "reap_disk_orphans", _DISK_REAP_FAILURE),
             _lazy_step("lib.slskd_searches", "converge_slskd_searches", _SEARCH_LEDGER_FAILURE),
@@ -103,6 +121,9 @@ CONVERGENCE_STEPS: Mapping[ConvergenceGroup, tuple[ConvergenceStep, ...]] = (
         ConvergenceGroup.END_OF_CYCLE: (
             _lazy_step("lib.download", "harvest_terminal_transfer_evidence", _HARVEST_FAILURE),
             _lazy_step("lib.slskd_transfers", "purge_completed_transfers", _COMPLETED_PURGE_FAILURE),
+            _lazy_step("lib.cycle_summary", "log_cycle_summary", _CYCLE_SUMMARY_FAILURE),
+            _lazy_step("lib.cycle_summary", "record_cycle_metrics_cycle", _CYCLE_METRICS_FAILURE),
+            _lazy_step("lib.cycle_summary", "record_peer_observations_cycle", _PEER_OBSERVATIONS_FAILURE),
         ),
     })
 )

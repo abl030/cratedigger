@@ -16,10 +16,11 @@ from lib.config import CratediggerConfig
 from lib.jellyfin_pin_service import (
     capture_jellyfin_date_created_pin,
     reconcile_jellyfin_date_created_pins,
+    reconcile_jellyfin_date_created_pins_cycle,
 )
 from lib.util import JellyfinAlbumRef, JellyfinItemRef
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import make_ctx_with_fake_db, make_request_row
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
 ORIGINAL = "2026-04-26T18:31:04.4425337Z"
@@ -607,22 +608,38 @@ class TestReconcile(unittest.TestCase):
              res.expired, res.errors), (0, 0, 0, 0, 0, 0))
         self.assertEqual(called, [])
 
-    def test_pending_fetch_failure_returns_empty_result(self):
-        # A DB fetch failure aborts the pass with all-zero counters and
-        # touches nothing (best-effort, never raises).
+    def test_pending_fetch_failure_propagates_and_touches_nothing(self):
+        # A DB fetch failure propagates to the registered cycle step's
+        # runner (lib/convergence.py owns step-level isolation) and touches
+        # nothing: no Jellyfin call, pin left pending. It used to be
+        # swallowed here as a warning, which made the registry's
+        # JELLYFIN PIN failure message unreachable.
         class FailingDB(FakePipelineDB):
             def get_pending_jellyfin_date_created_pins(self, **kw):
                 raise RuntimeError("db down")
         db = FailingDB()
         pin_id = self._seed(db)
-        res = self._reconcile(
-            db, find_fn=lambda cfg, path: self.fail("must not reach Jellyfin"),
-            children_fn=lambda cfg, iid: [],
-            set_fn=lambda *a: True)
-        self.assertEqual(
-            (res.pinned, res.already_correct, res.skipped, res.waiting,
-             res.expired, res.errors), (0, 0, 0, 0, 0, 0))
+        with self.assertRaises(RuntimeError):
+            self._reconcile(
+                db,
+                find_fn=lambda cfg, path: self.fail(
+                    "must not reach Jellyfin"),
+                children_fn=lambda cfg, iid: [],
+                set_fn=lambda *a: True)
         self.assertEqual(self._pin(db, pin_id)["status"], "pending")
+
+
+class TestReconcileCycleStep(unittest.TestCase):
+    """The ctx-only registered step drives the reconciler and logs the line."""
+
+    def test_unconfigured_backend_reconciles_to_zero(self):
+        ctx = make_ctx_with_fake_db(FakePipelineDB(), cfg=CratediggerConfig())
+        with self.assertLogs("cratedigger", level="INFO") as captured:
+            result = reconcile_jellyfin_date_created_pins_cycle(ctx)
+        self.assertEqual(
+            (result.pinned, result.already_correct, result.skipped,
+             result.errors), (0, 0, 0, 0))
+        self.assertIn("JELLYFIN PIN reconcile:", captured.output[0])
 
 
 if __name__ == "__main__":

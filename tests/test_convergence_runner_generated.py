@@ -23,6 +23,7 @@ from hypothesis import strategies as st
 
 import cratedigger
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.convergence import (
     CONVERGENCE_STEPS,
@@ -31,6 +32,8 @@ from lib.convergence import (
     resolve_convergence_target,
     run_convergence_steps,
 )
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_ctx_with_fake_db
 
 
 def assert_all_steps_attempted_in_order(
@@ -60,9 +63,19 @@ class TestConvergenceRegistryPins(unittest.TestCase):
     """Ordering is pinned from registry data, never source inspection."""
 
     def test_phase_zero_order_is_explicit(self):
+        # The four pre-phase steps (cooldown load, search-plan
+        # reconciliation, media-server pin reconcilers) precede the slskd
+        # convergence sweeps in the order main() used to hand-roll them.
+        # load_user_cooldowns MUST stay ahead of Phase 1's submit:
+        # build_phase1_context forwards ctx.cooled_down_users by reference
+        # after the loader replaces the set.
         self.assertEqual(
             tuple(step.name for step in CONVERGENCE_STEPS[ConvergenceGroup.PHASE_ZERO]),
             (
+                "load_user_cooldowns",
+                "reconcile_search_plans_cycle",
+                "reconcile_plex_added_at_pins_cycle",
+                "reconcile_jellyfin_date_created_pins_cycle",
                 "converge_slskd_orphans",
                 "reap_disk_orphans",
                 "converge_slskd_searches",
@@ -72,6 +85,9 @@ class TestConvergenceRegistryPins(unittest.TestCase):
         )
 
     def test_end_of_cycle_harvest_precedes_purge(self):
+        # harvest-before-purge is the load-bearing ordering constraint; the
+        # three close-out steps (summary line, metrics row, peer roster)
+        # follow so a failed render can never block metrics persistence.
         self.assertEqual(
             tuple(
                 step.name
@@ -80,6 +96,9 @@ class TestConvergenceRegistryPins(unittest.TestCase):
             (
                 "harvest_terminal_transfer_evidence",
                 "purge_completed_transfers",
+                "log_cycle_summary",
+                "record_cycle_metrics_cycle",
+                "record_peer_observations_cycle",
             ),
         )
 
@@ -139,7 +158,7 @@ class TestConvergenceRegistryPins(unittest.TestCase):
             run_convergence_steps(
                 cast(CratediggerContext, object()), steps, log=MagicMock())
 
-        import_mock.assert_called_once_with("lib.slskd_transfers")
+        import_mock.assert_called_once_with("lib.user_cooldowns")
         assert_all_steps_attempted_in_order(
             ("after",), tuple(attempted))
 
@@ -155,7 +174,6 @@ class TestMainConvergenceWindows(unittest.TestCase):
         }
         phase1_start_lines: list[int] = []
         phase1_with_lines: list[tuple[int, int]] = []
-        summary_lines: list[int] = []
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
@@ -178,11 +196,6 @@ class TestMainConvergenceWindows(unittest.TestCase):
                     == "Starting Phase 1 (poll downloads) in background..."
                 ):
                     phase1_start_lines.append(node.lineno)
-                if (
-                    isinstance(node.func, ast.Name)
-                    and node.func.id == "format_cycle_summary"
-                ):
-                    summary_lines.append(node.lineno)
             if isinstance(node, ast.With) and any(
                 isinstance(child, ast.Name) and child.id == "phase1_future"
                 for child in ast.walk(node)
@@ -194,7 +207,6 @@ class TestMainConvergenceWindows(unittest.TestCase):
         self.assertEqual(len(group_lines["END_OF_CYCLE"]), 1)
         self.assertEqual(len(phase1_start_lines), 1)
         self.assertEqual(len(phase1_with_lines), 1)
-        self.assertEqual(len(summary_lines), 1)
 
         phase_zero_line = group_lines["PHASE_ZERO"][0]
         end_of_cycle_line = group_lines["END_OF_CYCLE"][0]
@@ -202,7 +214,6 @@ class TestMainConvergenceWindows(unittest.TestCase):
         self.assertLess(phase_zero_line, phase1_start_lines[0])
         self.assertLess(phase_zero_line, phase1_with_start)
         self.assertGreater(end_of_cycle_line, phase1_with_end)
-        self.assertLess(end_of_cycle_line, summary_lines[0])
 
 
 class TestMainContextWiring(unittest.TestCase):
@@ -311,6 +322,82 @@ class TestGeneratedConvergenceIsolation(unittest.TestCase):
 
         assert_all_steps_attempted_in_order(names, tuple(attempted))
         self.assertEqual(log.exception.call_count, sum(raises))
+
+
+def _registered_step(name: str) -> ConvergenceStep:
+    for steps in CONVERGENCE_STEPS.values():
+        for step in steps:
+            if step.name == name:
+                return step
+    raise AssertionError(f"no registered convergence step named {name!r}")
+
+
+def _raising_db(failing_method: str) -> FakePipelineDB:
+    """FakePipelineDB whose named method raises — the collaborator-down world."""
+    db = FakePipelineDB()
+
+    def _boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError(f"{failing_method} down")
+
+    setattr(db, failing_method, _boom)
+    return db
+
+
+class TestRegisteredStepFailureMessagesReachable(unittest.TestCase):
+    """Per-step proof that each registered failure message is reachable.
+
+    A step that swallows its own collaborator failure turns the registered
+    ``failure_message`` into dead copy and demotes the failure to a warning
+    (the pre-fix ``prune_transfer_ledger_cycle`` shape, plus the two pin
+    reconcilers' fetch-level catches). Each row builds the minimal world in
+    which the step's first collaborator touch raises, runs the REAL
+    registered step through the runner, and asserts the runner logged THAT
+    step's message.
+
+    Scope: the steps this series registered or corrected. The slskd
+    convergence sweeps (orphans, disk reap, search ledger, harvest, purge)
+    keep their own internal isolation contracts and belong to the
+    owned-key-module work (#1278 strong candidate 1), not this table.
+    """
+
+    def _ctx(self, failing_method: str):
+        return make_ctx_with_fake_db(
+            _raising_db(failing_method), cfg=CratediggerConfig())
+
+    def _cases(self):
+        plex_ctx = make_ctx_with_fake_db(
+            _raising_db("get_pending_plex_added_at_pins"),
+            cfg=CratediggerConfig(plex_url="http://plex:32400"))
+        jellyfin_ctx = make_ctx_with_fake_db(
+            _raising_db("get_pending_jellyfin_date_created_pins"),
+            cfg=CratediggerConfig(
+                jellyfin_url="http://jellyfin:8096", jellyfin_token="tok"))
+        summary_ctx = make_ctx_with_fake_db(
+            FakePipelineDB(), cfg=CratediggerConfig())
+        summary_ctx.cycle_start = None  # time.time() - None raises TypeError
+        observations_ctx = self._ctx("record_peer_observations")
+        observations_ctx.peer_observations = {"peer-a"}
+        return [
+            ("load_user_cooldowns", self._ctx("get_cooled_down_users")),
+            ("reconcile_search_plans_cycle",
+             self._ctx("list_wanted_for_plan_reconciliation")),
+            ("reconcile_plex_added_at_pins_cycle", plex_ctx),
+            ("reconcile_jellyfin_date_created_pins_cycle", jellyfin_ctx),
+            ("prune_transfer_ledger_cycle", self._ctx("prune_transfer_ledger")),
+            ("prune_terminal_pin_rows_cycle",
+             self._ctx("prune_terminal_plex_added_at_pins")),
+            ("log_cycle_summary", summary_ctx),
+            ("record_cycle_metrics_cycle", self._ctx("record_cycle_metrics")),
+            ("record_peer_observations_cycle", observations_ctx),
+        ]
+
+    def test_each_step_failure_logs_its_registered_message(self):
+        for name, ctx in self._cases():
+            with self.subTest(step=name):
+                step = _registered_step(name)
+                log = MagicMock()
+                run_convergence_steps(ctx, (step,), log=log)
+                log.exception.assert_called_once_with(step.failure_message)
 
 
 class TestConvergenceCheckerTripsOnViolations(unittest.TestCase):
