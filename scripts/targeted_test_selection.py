@@ -138,9 +138,9 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "scripts/run_targeted_tests.py": (
         "tests.test_targeted_test_selection",
     ),
-    "scripts/targeted_test_selection.py": (
-        "tests.test_targeted_test_selection",
-    ),
+    # scripts/targeted_test_selection.py needs no entry: its basename probe
+    # already resolves exactly tests.test_targeted_test_selection, which is
+    # all its deleted entry ever named (issue #1278 item 9, contract B).
     "scripts/test.sh": (
         "tests.test_targeted_test_selection",
     ),
@@ -181,18 +181,13 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_test_tmpfs",
         "tests.test_world_model_coordinator",
     ),
-    "scripts/test_tmpfs.sh": (
-        # Issue #1208 review D1: this file had NO entry at all — a solo
-        # producer-side edit here (the /proc field index, $$ vs $PPID, the
-        # marker filename/delimiter) selected nothing, so the two mutants
-        # review found surviving were also unreachable by targeted
-        # selection, not just by the test suite's own coverage.
-        # tests.test_test_tmpfs drives this file's real
-        # setup_cratedigger_test_tmpfs end to end, including the real
-        # ".owner" marker round-tripped through
-        # scripts.test_substrate._scratch_tree_owner_dead.
-        "tests.test_test_tmpfs",
-    ),
+    # scripts/test_tmpfs.sh needed a hand-written entry under issue #1208
+    # review D1, when a solo producer-side edit here (the /proc field index,
+    # $$ vs $PPID, the marker filename/delimiter) selected nothing at all.
+    # The .sh basename probe added in #1278 item 9 now resolves exactly the
+    # tests.test_test_tmpfs that entry named, so the entry was pure
+    # redundancy and is gone (contract B); the selection it produced is
+    # unchanged.
     # Shared tests/ infrastructure (issue #1081): none of these are
     # discoverable test modules themselves, so each needs an explicit
     # mapping to the test(s) that actually exercise it. tests/structural_audits/
@@ -1030,12 +1025,12 @@ SHARED_MODULES_WITHOUT_COVERAGE: dict[str, str] = {
 #: rule, or a newly-created tests.test_<stem> module) SELECTS them
 #: immediately, on its very next diff, with no code change here — but the
 #: registration itself goes stale the moment that happens and the entry
-#: must then be deleted, which tests/test_lib_selection_coverage_audit.py
+#: must then be deleted, which tests/test_selection_coverage_audit.py
 #: enforces (issue #1199 review F1: caught by adding a real test module for
 #: a registered path and observing the audit go RED demanding removal — a
 #: prior version of this comment claimed "no code change needed to un-admit
 #: it" at all, which was false; selection self-corrects, the registry does
-#: not). tests/test_lib_selection_coverage_audit.py proves both directions: a
+#: not). tests/test_selection_coverage_audit.py proves both directions: a
 #: registered path that now resolves neighbours (stale — must be removed),
 #: and a lib/**/*.py file with zero neighbours that is NOT registered here
 #: (must be added, or given real coverage). Population is a fresh
@@ -1232,7 +1227,7 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
 #: that later gains a real EXACT_PATH_NEIGHBOURS entry, prefix rule, or
 #: `tests.test_<stem>` module selects it immediately with no code change
 #: here, and the stale registration is what
-#: `tests/test_scripts_selection_coverage_audit.py` then demands be deleted.
+#: `tests/test_selection_coverage_audit.py` then demands be deleted.
 #:
 #: Population is a fresh measurement (driving the real resolution function
 #: plus a grep-and-read pass over every candidate test file to confirm REAL

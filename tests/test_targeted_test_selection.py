@@ -442,17 +442,6 @@ class TestTargetedTestSelection(unittest.TestCase):
         self.assertIn("tests.test_deploy_hold", selected)
         self.assertIn("tests.test_deploy_hold_generated", selected)
 
-    def test_registered_coverage_gaps_carry_a_non_empty_rationale(self) -> None:
-        """MUST FIX 6 part 2 (#1081 review round 2): a registration without a
-        reason is indistinguishable from a lazy bypass.
-        """
-        for path, rationale in SHARED_MODULES_WITHOUT_COVERAGE.items():
-            with self.subTest(path=path):
-                self.assertTrue(
-                    rationale.strip(),
-                    f"{path} is registered with an empty rationale",
-                )
-
     def test_the_two_registries_are_disjoint(self) -> None:
         """No path claims both a real mapping and an admitted coverage gap.
 
