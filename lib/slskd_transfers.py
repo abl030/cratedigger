@@ -684,8 +684,12 @@ def _match_transfer_all_history(
     exactly this function (then public as ``match_transfer``) being equally
     reachable from an attempt-evidence writer as the attempt-scoped
     matcher, so the un-narrowed choice read as the default. Renaming and
-    hiding it makes that shape unrepresentable rather than merely
-    tested-against; do not re-export or widen this back to public.
+    hiding it records that closed seam and gives review something to
+    catch a new caller on — a marker, not a wall, exactly as
+    ``_match_transfer_id``'s docstring says one function up
+    (``reportPrivateUsage`` is off and cross-module private imports are
+    the house convention, PR #775). Do not re-export or widen this back
+    to public.
     """
     candidates = _transfer_candidates(downloads, target_filename, username=username)
     if not candidates:
@@ -789,8 +793,12 @@ def converge_slskd_orphans(ctx: CratediggerContext) -> int:
     that may be a human's — and is NEVER cancelled, whatever its state or
     age. Pending write-ahead intents are deliberately absent from that set.
 
-    Best-effort: a snapshot failure skips the pass, a cancel failure is
-    logged and the remaining strays are still attempted. Returns the
+    Best-effort against slskd: a snapshot failure skips the pass, a
+    cancel failure is logged and the remaining strays are still
+    attempted. A pipeline-DB failure deliberately propagates to
+    ``lib/convergence.py``'s registered-step isolation instead (issue
+    #1312 settles the contract; pinned in
+    ``tests/test_slskd_sweep_exception_contracts.py``). Returns the
     number of transfers successfully cancelled.
     """
     from lib.repair import find_slskd_orphans
@@ -907,8 +915,11 @@ def purge_completed_transfers(ctx: CratediggerContext) -> CompletedPurgeSummary:
     harvests terminal state before this pass, and removing a transfer-history
     row does not remove its retained completion event.
 
-    Best-effort: a snapshot failure skips the pass, a per-id removal
-    failure is logged and the remaining removals are still attempted.
+    Best-effort against slskd: a snapshot failure skips the pass, a
+    per-id removal failure is logged and the remaining removals are
+    still attempted. A pipeline-DB failure deliberately propagates to
+    ``lib/convergence.py``'s registered-step isolation instead (issue
+    #1312; pinned in ``tests/test_slskd_sweep_exception_contracts.py``).
     Returns counts for the cycle summary line.
     """
     from lib.repair import find_completed_transfers_to_purge
@@ -1105,9 +1116,10 @@ def _owned_paths_from_ledger(
     ``DiskReapOwnershipError`` the way ``active_download_state``
     decoding is: there is no decode step here (the ledger's columns are
     read as-is), so a DB failure surfaces as an ordinary exception —
-    caught by ``reap_disk_orphans``'s own caller in ``cratedigger.py``,
-    which already treats a sweep failure as zero deletions for the
-    cycle.
+    propagating out of ``reap_disk_orphans`` to ``lib/convergence.py``'s
+    registered-step isolation, which already treats a sweep failure as
+    zero deletions for the cycle (pinned in
+    ``tests/test_slskd_sweep_exception_contracts.py``).
     """
     owned_files = {
         normalize_processing_path(p) for p in db.get_owned_local_paths()
@@ -1211,7 +1223,13 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
     Fail-closed: if ANY downloading row's ``active_download_state``
     can't be decoded, the whole sweep is skipped for the cycle (zero
     deletions, ``aborted=True``) — see
-    ``_protected_paths_for_downloading``. Best-effort otherwise, and
+    ``_protected_paths_for_downloading``. The other two DB seams carry
+    deliberately different contracts (issue #1312; pinned in
+    ``tests/test_slskd_sweep_exception_contracts.py``): the
+    ledger-ownership read propagates to ``lib/convergence.py``'s
+    registered-step isolation (see ``_owned_paths_from_ledger``), and a
+    failed abandoned-attempt read only degrades to the ordinary age
+    threshold. Best-effort otherwise, and
     silent unless it actually removed files or pruned directories —
     matching ``converge_slskd_orphans``'s Phase 0 contract.
     """

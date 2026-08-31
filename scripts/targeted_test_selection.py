@@ -118,9 +118,35 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "lib/slskd_transfer_ledger.py": (
         # Was an admitted zero-neighbour gap (issue #1199): no
         # tests.test_slskd_transfer_ledger. The registered cycle step's
-        # failure-reachability pin (the module's only direct test driver)
-        # lives with the convergence runner.
+        # failure-reachability pin lives with the convergence runner, and
+        # its DB-failure-propagation contract pin with the sweep
+        # exception contracts (issue #1312).
         "tests.test_convergence_runner_generated",
+        "tests.test_slskd_sweep_exception_contracts",
+    ),
+    "lib/slskd_transfers.py": (
+        # Was an admitted zero-neighbour gap (issue #1199): no
+        # tests.test_slskd_transfers, and the module's behavior is split
+        # across the sweeps' own test homes. Not a claim of full
+        # coverage — these are the deterministic and generated modules
+        # whose subjects a solo slskd_transfers.py diff most plausibly
+        # regresses: enqueue/orphan/purge pins (test_download), the
+        # disk reaper's invariants, cancel_and_delete's C3/C4 ownership
+        # properties, the completed-purge properties, and the five
+        # sweeps' settled exception contracts (issue #1312).
+        "tests.test_download",
+        "tests.test_disk_reaper_generated",
+        "tests.test_convergence_ledger_generated",
+        "tests.test_completed_purge_generated",
+        "tests.test_slskd_sweep_exception_contracts",
+    ),
+    "lib/slskd_searches.py": (
+        # The basename probe resolves tests.test_slskd_searches on its
+        # own; this entry adds the sweep-exception-contract module whose
+        # pins drive converge_slskd_searches's DB seams directly (issue
+        # #1312). Maskable — pinned in MASKABLE_ENTRY_PINS.
+        "tests.test_slskd_searches",
+        "tests.test_slskd_sweep_exception_contracts",
     ),
     "lib/startup_reconciliation.py": (
         # Was an admitted zero-neighbour gap (issue #1199, measured
@@ -1259,11 +1285,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "measured 2026-08-19: zero neighbours -- "
         "tests.test_search_plan_inspection does not exist and no "
         "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
-    ),
-    "lib/slskd_transfers.py": (
-        "measured 2026-08-19: zero neighbours -- "
-        "tests.test_slskd_transfers does not exist and no EXACT_PATH_"
-        "NEIGHBOURS/prefix rule covers it (issue #1199)"
     ),
     "lib/v0_probe.py": (
         "measured 2026-08-19: zero neighbours -- tests.test_v0_probe does "
