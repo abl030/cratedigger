@@ -1,6 +1,6 @@
 """album_requests CRUD, status state machine, and Replace/rescue."""
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -129,6 +129,43 @@ def _overlay_row_release_id(row: Mapping[str, object]) -> str:
     if fallback:
         return fallback
     raise ValueError("pipeline overlay row has no exact release identity")
+
+
+def collect_pipeline_overlays(
+    rows: Iterable[Mapping[str, object]],
+) -> dict[str, dict[str, object]]:
+    """Project matched request rows into the browse badge-overlay map.
+
+    ``rows`` carries the ``_CAPTURE_AND_EVIDENCE_SELECT`` aliases plus the
+    processing-owner join. One request identity may match several rows —
+    a modern Discogs row and its legacy twin that stores the same numeric
+    id in ``mb_release_id`` — so the dedicated-column match wins the key.
+
+    ``tests/fakes/pipeline_db.py`` builds the same raw rows and calls this,
+    so the two surfaces cannot disagree on precedence (issue #1278 item 7).
+    """
+    overlays: dict[str, dict[str, object]] = {}
+    for row in rows:
+        release_id = _overlay_row_release_id(row)
+        verified, provisional = _linked_current_evidence_facts(row)
+        projected: dict[str, object] = {
+            "id": row["id"],
+            "status": row["status"],
+            "search_filetype_override": row["search_filetype_override"],
+            "target_format": row["target_format"],
+            "min_bitrate": row["min_bitrate"],
+            "has_captured_history": row["has_captured_history"],
+            "verified_lossless": verified,
+            "provisional_lossless": provisional,
+            "processing_owner": processing_owner_payload(row),
+        }
+        existing = overlays.get(release_id)
+        dedicated_discogs_match = normalize_release_id(
+            row["discogs_release_id"]
+        ) == release_id
+        if existing is None or dedicated_discogs_match:
+            overlays[release_id] = projected
+    return overlays
 
 
 class AcquisitionPayload(TypedDict):
@@ -287,28 +324,7 @@ class _RequestsMixin(_PipelineDBBase):
             """,
             (musicbrainz_ids, discogs_ids),
         )
-        overlays: dict[str, dict[str, object]] = {}
-        for r in cur.fetchall():
-            release_id = _overlay_row_release_id(r)
-            verified, provisional = _linked_current_evidence_facts(r)
-            projected: dict[str, object] = {
-                "id": r["id"],
-                "status": r["status"],
-                "search_filetype_override": r["search_filetype_override"],
-                "target_format": r["target_format"],
-                "min_bitrate": r["min_bitrate"],
-                "has_captured_history": r["has_captured_history"],
-                "verified_lossless": verified,
-                "provisional_lossless": provisional,
-                "processing_owner": processing_owner_payload(r),
-            }
-            existing = overlays.get(release_id)
-            dedicated_discogs_match = normalize_release_id(
-                r["discogs_release_id"]
-            ) == release_id
-            if existing is None or dedicated_discogs_match:
-                overlays[release_id] = projected
-        return overlays
+        return collect_pipeline_overlays(cur.fetchall())
 
     def list_library_request_candidates(
         self,

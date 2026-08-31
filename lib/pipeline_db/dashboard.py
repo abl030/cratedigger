@@ -65,12 +65,18 @@ class UnfindableRunMetricsPresentation(TypedDict):
 
 
 #: Everything below this banner is a pure post-fetch derivation the real
-#: adapter and ``tests/fakes/pipeline_db.py`` BOTH call. The dashboard is a
-#: read-model whose SQL only ever fetches rows: every window, serializer,
-#: trend and envelope is Python over already-fetched values, so a fake that
-#: re-implemented them was mirroring by hand what it could delegate
-#: (issue #1278 item 7). Each adapter keeps only its own fetch + timezone
-#: normalization; the shapes live here, once.
+#: adapter and ``tests/fakes/pipeline_db.py`` BOTH call.
+#:
+#: Much of the dashboard IS computed in SQL — the search/cycle windows, the
+#: coverage summary and the match-rate series are all server-side
+#: aggregates, and the fake reimplements those in Python because it has no
+#: server. These functions are the other half: row serializers, the
+#: unfindable panel, the wanted-backlog trend arithmetic, and the envelope,
+#: which are already plain Python over already-fetched values on the
+#: production side too. A fake that re-implemented THOSE was mirroring by
+#: hand what it could simply call (issue #1278 item 7). Each adapter keeps
+#: only its own fetch and timezone normalization; these shapes live here,
+#: once.
 
 
 def serialize_unfindable_run_row(

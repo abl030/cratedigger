@@ -140,6 +140,7 @@ from lib.pipeline_db._shared import (
     CURRENT_EVIDENCE_PREFIX,
     DASHBOARD_WANTED_BACKLOG_STATUSES,
     DASHBOARD_WINDOWS,
+    _isoformat_or_none,
     processing_owner_payload,
     validate_request_metadata_fields,
 )
@@ -160,6 +161,10 @@ from lib.pipeline_db.import_jobs import (
     AutomationRecoveryEvidenceChanged,
     _default_force_action_copy_path,
     _recovery_owner_matches,
+)
+from lib.pipeline_db.requests import (
+    _linked_current_evidence_facts,
+    collect_pipeline_overlays,
 )
 from lib.pipeline_db.rows import ArtistRequestRow
 from lib.pipeline_db.terminal_outcomes import (
@@ -183,11 +188,7 @@ from lib.quality_evidence import (
     current_evidence_preserves_source_spectral,
     snapshot_fingerprint,
 )
-from lib.release_identity import (
-    ReleaseIdentity,
-    exact_request_evidence_identity_matches,
-    normalize_release_id,
-)
+from lib.release_identity import ReleaseIdentity, normalize_release_id
 from lib.search_scheduler import (
     NEW_REQUEST_PRIORITY_HOURS,
     search_cohort_slots,
@@ -2898,13 +2899,13 @@ class FakePipelineDB:
 
     # --- PipelineDB interface methods ---
 
-    def _request_presentation_copy(
-        self,
-        row,
-    ):
-        """Mirror the production pointer join without latest-job inference."""
-        projected = copy.deepcopy(dict(row))
-        owner_id = projected.get("active_automation_import_job_id")
+    def _processing_owner_join_aliases(
+        self, row: Mapping[str, object],
+    ) -> dict[str, object]:
+        """The three aliases production's ``LEFT JOIN import_jobs
+        processing_owner_job`` projects — the pointer join, with no
+        latest-job inference."""
+        owner_id = row.get("active_automation_import_job_id")
         owner = next(
             (
                 job for job in self._import_jobs
@@ -2912,15 +2913,25 @@ class FakePipelineDB:
             ),
             None,
         )
-        projected["_processing_owner_job_id"] = (
-            owner.get("id") if owner is not None else None
-        )
-        projected["_processing_owner_status"] = (
-            owner.get("status") if owner is not None else None
-        )
-        projected["_processing_owner_preview_status"] = (
-            owner.get("preview_status") if owner is not None else None
-        )
+        return {
+            "_processing_owner_job_id": (
+                owner.get("id") if owner is not None else None
+            ),
+            "_processing_owner_status": (
+                owner.get("status") if owner is not None else None
+            ),
+            "_processing_owner_preview_status": (
+                owner.get("preview_status") if owner is not None else None
+            ),
+        }
+
+    def _request_presentation_copy(
+        self,
+        row,
+    ):
+        """Mirror the production pointer join without latest-job inference."""
+        projected = copy.deepcopy(dict(row))
+        projected.update(self._processing_owner_join_aliases(projected))
         projected["processing_owner"] = processing_owner_payload(projected)
         projected.pop("_processing_owner_job_id")
         projected.pop("_processing_owner_status")
@@ -6494,47 +6505,40 @@ class FakePipelineDB:
                 discogs_ids.add(identity.release_id)
             else:
                 musicbrainz_ids.add(normalized)
-        out: dict[str, dict[str, Any]] = {}
+        # Only the WHERE clause is emulated here; the projection, identity
+        # key, and dedicated-Discogs-column precedence are production's own
+        # ``collect_pipeline_overlays``.
+        matched: list[dict[str, object]] = []
         for r in self._requests.values():
             identity = ReleaseIdentity.from_fields(
                 r.get("mb_release_id"),
                 r.get("discogs_release_id"),
             )
             if identity is not None:
-                release_id = identity.release_id
                 matches = (
-                    release_id in musicbrainz_ids
+                    identity.release_id in musicbrainz_ids
                     if identity.source == "musicbrainz"
-                    else release_id in discogs_ids
+                    else identity.release_id in discogs_ids
                 )
             else:
-                release_id = normalize_release_id(r.get("mb_release_id"))
-                matches = bool(
-                    release_id and release_id in musicbrainz_ids)
+                fallback = normalize_release_id(r.get("mb_release_id"))
+                matches = bool(fallback and fallback in musicbrainz_ids)
             if not matches:
                 continue
-            facts = self._capture_and_evidence_projection(r)
-            projected = {
+            matched.append({
+                **self._capture_and_evidence_select_aliases(r),
                 "id": r["id"],
                 "status": r.get("status"),
-                "search_filetype_override":
-                    r.get("search_filetype_override"),
+                "mb_release_id": r.get("mb_release_id"),
+                "discogs_release_id": r.get("discogs_release_id"),
+                "search_filetype_override": r.get("search_filetype_override"),
                 "target_format": r.get("target_format"),
                 "min_bitrate": r.get("min_bitrate"),
-                "has_captured_history": facts["has_captured_history"],
-                "verified_lossless": facts["verified_lossless"],
-                "provisional_lossless": facts["provisional_lossless"],
-                "processing_owner": self._request_presentation_copy(
-                    r
-                )["processing_owner"],
-            }
-            existing = out.get(release_id)
-            dedicated_discogs_match = normalize_release_id(
-                r.get("discogs_release_id")
-            ) == release_id
-            if existing is None or dedicated_discogs_match:
-                out[release_id] = projected
-        return out
+                "active_automation_import_job_id": r.get(
+                    "active_automation_import_job_id"),
+                **self._processing_owner_join_aliases(r),
+            })
+        return collect_pipeline_overlays(matched)
 
     def list_library_request_candidates(
         self,
@@ -6798,7 +6802,37 @@ class FakePipelineDB:
         self,
         row: Mapping[str, object],
     ) -> dict[str, object]:
-        """Mirror the two specialized request SELECTs' correlated facts."""
+        """The two specialized request SELECTs' facts, identity-gated.
+
+        The raw aliases come from ``_capture_and_evidence_select_aliases``;
+        gating the evidence pair on the request's exact pressing is
+        production's own ``_linked_current_evidence_facts``.
+        """
+        raw = self._capture_and_evidence_select_aliases(row)
+        verified_lossless, provisional_lossless = _linked_current_evidence_facts({
+            "mb_release_id": row.get("mb_release_id"),
+            "discogs_release_id": row.get("discogs_release_id"),
+            **raw,
+        })
+        return {
+            "has_captured_history": raw["has_captured_history"],
+            "verified_lossless": verified_lossless,
+            "provisional_lossless": provisional_lossless,
+        }
+
+    def _capture_and_evidence_select_aliases(
+        self,
+        row: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Mirror ``_CAPTURE_AND_EVIDENCE_SELECT`` (lib/pipeline_db/
+        requests.py) for one request row: the correlated capture EXISTS
+        plus the three current-evidence aliases, RAW.
+
+        The SQL computes the evidence trio off the LEFT-JOINed current
+        evidence with no identity predicate — gating them on the request's
+        exact pressing belongs to ``_linked_current_evidence_facts``, which
+        both this fake and production call.
+        """
         request_id = row.get("id")
         has_captured_history = row.get("status") == "imported"
         if isinstance(request_id, int) and not isinstance(request_id, bool):
@@ -6840,29 +6874,23 @@ class FakePipelineDB:
             )
 
         evidence = self._current_evidence_for_request(row)
-        if (
-            evidence is not None
-            and not exact_request_evidence_identity_matches(
-                row.get("mb_release_id"),
-                row.get("discogs_release_id"),
-                evidence.mb_release_id,
-            )
-        ):
-            evidence = None
-        verified_lossless = bool(
+        # ``COALESCE(current_evidence.verified_lossless, FALSE)``.
+        linked_verified_lossless = bool(
             evidence is not None
             and evidence.verified_lossless_proof is not None
         )
-        provisional_lossless = bool(
-            evidence is not None
-            and not verified_lossless
-            and evidence.v0_metric is not None
-            and evidence.v0_metric.subject == "source"
-        )
         return {
             "has_captured_history": has_captured_history,
-            "verified_lossless": verified_lossless,
-            "provisional_lossless": provisional_lossless,
+            "_linked_verified_lossless": linked_verified_lossless,
+            "_linked_evidence_release_id": (
+                evidence.mb_release_id if evidence is not None else None),
+            # ``COALESCE(v0_subject, '') = 'source' AND NOT verified_lossless``.
+            "provisional_lossless": bool(
+                not linked_verified_lossless
+                and evidence is not None
+                and evidence.v0_metric is not None
+                and evidence.v0_metric.subject == "source"
+            ),
         }
 
     def _long_tail_projection(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -7325,10 +7353,8 @@ class FakePipelineDB:
                     1 for row in rows
                     if row["last_seen_at"] >= now - timedelta(hours=24)
                 ),
-                "tracked_since": (
-                    min(row["first_seen_at"] for row in rows).isoformat()
-                    if rows
-                    else None
+                "tracked_since": _isoformat_or_none(
+                    min((row["first_seen_at"] for row in rows), default=None)
                 ),
             },
         }
@@ -7518,7 +7544,7 @@ class FakePipelineDB:
             bucket = hour_anchor - timedelta(hours=i)
             n = hourly_counts.get(bucket, 0)
             series_24h.append({
-                "bucket_start": bucket.isoformat(),
+                "bucket_start": _isoformat_or_none(bucket),
                 "matches": n,
                 "matches_per_hour": n,
             })
@@ -7527,7 +7553,7 @@ class FakePipelineDB:
             bucket = day_anchor - timedelta(days=i)
             n = daily_counts.get(bucket, 0)
             series_28d.append({
-                "bucket_start": bucket.isoformat(),
+                "bucket_start": _isoformat_or_none(bucket),
                 "matches": n,
                 "matches_per_day": n,
             })
@@ -7583,13 +7609,13 @@ class FakePipelineDB:
         top_10_searches = sum(r["searches_24h"] for r in suspects[:10])
         top_10_share = (top_10_searches / active_24h) if active_24h else 0
 
-        oldest = None
+        oldest: str | None = None
         searched_ats = [
             rollup[rid]["last_search_at"] for rid in backlog
             if rid in rollup and rollup[rid]["last_search_at"] is not None
         ]
         if searched_ats:
-            oldest = min(searched_ats).isoformat()
+            oldest = _isoformat_or_none(min(searched_ats))
 
         return {
             "wanted_total": len(backlog),
@@ -7733,8 +7759,9 @@ class FakePipelineDB:
 
         Walks ``self._requests`` + ``self.search_plans`` to bucket each
         wanted row exactly once. See the live implementation in
-        ``lib/pipeline_db.py`` for bucket precedence; both must agree on
-        every transition or the dashboard contract breaks silently.
+        ``lib/pipeline_db/search_plan.py`` for bucket precedence; both must
+        agree on every transition or the dashboard contract breaks
+        silently.
         """
         wanted_total = 0
         wanted_searchable = 0
@@ -7791,9 +7818,11 @@ class FakePipelineDB:
 
     def _download_log_base_dict(self,
                                 entry: DownloadLogRow) -> dict[str, Any]:
-        """The bare ``SELECT dl.*`` projection plus the origin join.
+        """The ``SELECT dl.*`` projection plus the origin join.
 
-        Exactly what ``PipelineDB.get_linked_import_logs`` returns: that
+        The shape ``PipelineDB.get_linked_import_logs`` returns: every
+        ``download_log`` column (the auxiliary ones ``log_download`` parks
+        in ``entry.extra`` included) and ``original_beets_distance``. That
         query has NO ``album_quality_evidence`` join, so nothing here may
         recover an evidence-derived measurement (issue #1278 item 7 — the
         fake used to fold evidence in here and hand linked-import rows
