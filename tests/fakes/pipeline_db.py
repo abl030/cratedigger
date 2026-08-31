@@ -135,10 +135,22 @@ from lib.pipeline_db import (
 from lib.pipeline_db._core import OwnerSessionLost, ReadOnlyQueryCursor
 from lib.pipeline_db._shared import (
     ACQUISITION_REQUEST_STATUSES,
+    CACHE_ATTRIBUTION_CYCLE_ONLY,
     CANDIDATE_EVIDENCE_PREFIX,
     CURRENT_EVIDENCE_PREFIX,
+    DASHBOARD_WANTED_BACKLOG_STATUSES,
+    DASHBOARD_WINDOWS,
     processing_owner_payload,
     validate_request_metadata_fields,
+)
+from lib.pipeline_db.dashboard import (
+    dashboard_envelope,
+    serialize_dashboard_cycle_row,
+    serialize_dashboard_heavy_query_row,
+    serialize_dashboard_request_row,
+    serialize_unfindable_run_row,
+    unfindable_panel,
+    wanted_trend_panel,
 )
 from lib.pipeline_db.download_log import (
     overlay_evidence_onto_download_log_row,
@@ -7131,8 +7143,7 @@ class FakePipelineDB:
 
     def _current_wanted_total(self) -> int:
         return sum(1 for req in self._requests.values()
-                   if req.get("status") in (
-                       "wanted", "downloading", "processing"))
+                   if req.get("status") in DASHBOARD_WANTED_BACKLOG_STATUSES)
 
     # --- Unfindable-detection run telemetry (#1112) ---
 
@@ -7219,137 +7230,30 @@ class FakePipelineDB:
     def _dashboard_unfindable(
         self,
     ) -> dict[str, list[UnfindableRunMetricsPresentation] | dict[str, object]]:
-        rows = [
-            self._serialize_unfindable_run_row(r)
+        return unfindable_panel([
+            serialize_unfindable_run_row(r)
             for r in self.get_unfindable_run_metrics(limit=14)
-        ]
-        chronological = list(reversed(rows))
-        series: list[dict[str, object]] = [
-            {
-                "sampled_at": r["created_at"],
-                "due_backlog_at_start": r["due_backlog_at_start"],
-                "candidates_processed": r["candidates_processed"],
-            }
-            for r in chronological
-        ]
-        latest = rows[0] if rows else None
-        return {
-            "recent_runs": rows,
-            "backlog_trend": {
-                "current_backlog": (
-                    latest["due_backlog_at_start"] if latest else None
-                ),
-                "latest_sample_at": latest["created_at"] if latest else None,
-                "series": series,
-            },
-        }
+        ])
 
-    def _serialize_unfindable_run_row(
-        self, row: UnfindableRunMetricsRow,
-    ) -> UnfindableRunMetricsPresentation:
-        return UnfindableRunMetricsPresentation(
-            id=row["id"],
-            created_at=row["created_at"].isoformat(),
-            cohort_total=row["cohort_total"],
-            due_backlog_at_start=row["due_backlog_at_start"],
-            batch_limit=row["batch_limit"],
-            candidates_processed=row["candidates_processed"],
-            probes_attempted=row["probes_attempted"],
-            categorised_count=row["categorised_count"],
-            downgraded_count=row["downgraded_count"],
-            no_change_count=row["no_change_count"],
-            probe_failed_count=row["probe_failed_count"],
-            not_due_count=row["not_due_count"],
-            request_not_found_count=row["request_not_found_count"],
-            breaker_tripped=row["breaker_tripped"],
-            duration_seconds=row["duration_seconds"],
-        )
+    def _dashboard_wanted_trend(self, current_wanted: int) -> dict[str, object]:
+        """Collect the 7-day sample series, then delegate the arithmetic.
 
-    def _dashboard_wanted_trend(self, current_wanted: int) -> dict[str, Any]:
+        Production fetches the same series with a ``WHERE created_at >=
+        NOW() - INTERVAL '7 days'`` + ``ORDER BY created_at ASC`` query;
+        this walks seeded ``cycle_metrics`` instead. Everything after the
+        sample list — windows, deltas, drain rates, ETA — is
+        ``wanted_trend_panel``, shared with the real adapter.
+        """
         now = _utcnow()
         samples: list[tuple[datetime, int]] = []
         for row in sorted(self.cycle_metrics, key=lambda r: r["created_at"]):
             if row.get("wanted_total") is None:
                 continue
-            created_at = row["created_at"]
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=UTC)
-            else:
-                created_at = created_at.astimezone(UTC)
+            created_at = self._as_utc(row["created_at"])
             if created_at >= now - timedelta(days=7):
                 samples.append((created_at, int(row["wanted_total"])))
-
-        def _window(label: str, hours: int) -> dict[str, Any]:
-            window_start = now - timedelta(hours=hours)
-            window_samples = [
-                (at, wanted) for at, wanted in samples
-                if at >= window_start
-            ]
-            if not window_samples:
-                return {
-                    "label": label,
-                    "hours": hours,
-                    "sample_count": 0,
-                    "start_sample_at": None,
-                    "end_sample_at": now.isoformat(),
-                    "start_wanted": None,
-                    "end_wanted": current_wanted,
-                    "delta": None,
-                    "delta_per_hour": None,
-                    "drain_per_hour": None,
-                    "eta_hours": None,
-                    "trend": "unknown",
-                }
-            start_at, start_wanted = window_samples[0]
-            elapsed_hours = (now - start_at).total_seconds() / 3600
-            delta = current_wanted - start_wanted
-            if elapsed_hours <= 0:
-                delta_per_hour = None
-                drain_per_hour = None
-                eta_hours = None
-                trend = "unknown"
-            else:
-                delta_per_hour = delta / elapsed_hours
-                drain_per_hour = max(-delta_per_hour, 0.0)
-                eta_hours = (
-                    current_wanted / drain_per_hour
-                    if drain_per_hour > 0 and current_wanted > 0
-                    else None
-                )
-                trend = "down" if delta < 0 else "up" if delta > 0 else "flat"
-            return {
-                "label": label,
-                "hours": hours,
-                "sample_count": len(window_samples),
-                "start_sample_at": start_at.isoformat(),
-                "end_sample_at": now.isoformat(),
-                "start_wanted": start_wanted,
-                "end_wanted": current_wanted,
-                "delta": delta,
-                "delta_per_hour": delta_per_hour,
-                "drain_per_hour": drain_per_hour,
-                "eta_hours": eta_hours,
-                "trend": trend,
-            }
-
-        return {
-            "current_wanted": current_wanted,
-            "latest_sample_at": samples[-1][0].isoformat() if samples else None,
-            "series_24h": [
-                {"sampled_at": at.isoformat(), "wanted_total": wanted}
-                for at, wanted in samples
-                if at >= now - timedelta(hours=24)
-            ] + [{
-                "sampled_at": now.isoformat(),
-                "wanted_total": current_wanted,
-                "synthetic": True,
-            }],
-            "windows": [
-                _window("6h", 6),
-                _window("24h", 24),
-                _window("7d", 24 * 7),
-            ],
-        }
+        return wanted_trend_panel(
+            samples, current_wanted=current_wanted, now=now)
 
     def record_peer_observations(
         self,
@@ -7437,7 +7341,7 @@ class FakePipelineDB:
 
     def _dashboard_search_window(
         self, label: str, hours: int, now: datetime,
-    ) -> dict[str, Any]:
+    ) -> dict[str, object]:
         cutoff = now - timedelta(hours=hours)
         rows = [e for e in self.search_logs
                 if self._as_utc(e.created_at) >= cutoff]
@@ -7480,12 +7384,12 @@ class FakePipelineDB:
                 1 for e in rows if e.cursor_update_status == "stale"),
             "non_consuming": sum(
                 1 for e in rows if e.attempt_consumed is False),
-            "cache_attribution_level": "cycle_only",
+            "cache_attribution_level": CACHE_ATTRIBUTION_CYCLE_ONLY,
         }
 
     def _dashboard_cycle_window(
         self, label: str, hours: int, now: datetime,
-    ) -> dict[str, Any]:
+    ) -> dict[str, object]:
         cutoff = now - timedelta(hours=hours)
         rows = [r for r in self.cycle_metrics
                 if self._as_utc(r["created_at"]) >= cutoff]
@@ -7523,35 +7427,7 @@ class FakePipelineDB:
             "fanout_waves": sum(int(r["fanout_waves"]) for r in rows),
         }
 
-    def _dashboard_cycle_row(self, row: dict[str, Any]) -> dict[str, Any]:
-        """Mirror ``PipelineDB._serialize_dashboard_cycle_row`` exactly:
-        fixed key set, ``cycle_searches_watchdog_killed`` renamed to
-        ``watchdog_kills``, cache hit/miss + wanted_total columns NOT
-        emitted, timestamps isoformatted."""
-        def _iso(value: Any) -> str | None:
-            return value.isoformat() if isinstance(value, datetime) else value
-        return {
-            "id": int(row["id"]),
-            "started_at": _iso(row.get("started_at")),
-            "created_at": _iso(row.get("created_at")),
-            "cycle_total_s": float(row["cycle_total_s"]),
-            "browse_time_s": float(row["browse_time_s"]),
-            "match_time_s": float(row["match_time_s"]),
-            "search_time_s": float(row["search_time_s"]),
-            "watchdog_kills": int(row["cycle_searches_watchdog_killed"]),
-            "find_download_queued": int(row["find_download_queued"]),
-            "find_download_completed": int(row["find_download_completed"]),
-            "find_download_drain_time_s": float(
-                row["find_download_drain_time_s"]),
-            "cache_errors": int(row["cache_errors"]),
-            "cache_write_errors": int(row["cache_write_errors"]),
-            "cache_fuse_tripped": int(row["cache_fuse_tripped"]),
-            "peers_browsed": int(row["peers_browsed"]),
-            "peers_browsed_lazy": int(row["peers_browsed_lazy"]),
-            "fanout_waves": int(row["fanout_waves"]),
-        }
-
-    def _dashboard_coverage(self, now: datetime) -> dict[str, Any]:
+    def _dashboard_coverage(self, now: datetime) -> dict[str, object]:
         """Mirror the production coverage CTEs: backlog = wanted +
         downloading + processing; suspects = searched-in-24h rows ordered
         (searches_24h DESC, searches_6h DESC, id ASC) LIMIT 12 with
@@ -7565,7 +7441,7 @@ class FakePipelineDB:
         found rows exist."""
         backlog = {
             int(r["id"]): r for r in self._requests.values()
-            if r.get("status") in ("wanted", "downloading", "processing")
+            if r.get("status") in DASHBOARD_WANTED_BACKLOG_STATUSES
         }
 
         # One pass over search_log per request: rollup of windowed
@@ -7657,23 +7533,24 @@ class FakePipelineDB:
             })
 
         def _request_row(rid: int) -> dict[str, Any]:
+            """The raw joined row the production suspect/stale SELECTs
+            return, handed to production's own serializer."""
             req = backlog[rid]
             r = rollup.get(rid, {})
-            at = r.get("last_search_at")
-            return {
+            return serialize_dashboard_request_row({
                 "request_id": rid,
                 "artist_name": req.get("artist_name"),
                 "album_title": req.get("album_title"),
                 "status": req.get("status"),
-                "last_search_at": at.isoformat() if at else None,
-                "searches_24h": int(r.get("searches_24h", 0)),
-                "searches_6h": int(r.get("searches_6h", 0)),
-                "found_24h": int(r.get("found_24h", 0)),
-                "no_match_24h": int(r.get("no_match_24h", 0)),
-                "no_results_24h": int(r.get("no_results_24h", 0)),
-                "reset_24h": int(r.get("reset_24h", 0)),
-                "problem_24h": int(r.get("problem_24h", 0)),
-            }
+                "last_search_at": r.get("last_search_at"),
+                "searches_24h": r.get("searches_24h", 0),
+                "searches_6h": r.get("searches_6h", 0),
+                "found_24h": r.get("found_24h", 0),
+                "no_match_24h": r.get("no_match_24h", 0),
+                "no_results_24h": r.get("no_results_24h", 0),
+                "reset_24h": r.get("reset_24h", 0),
+                "problem_24h": r.get("problem_24h", 0),
+            })
 
         suspects = [
             _request_row(rid)
@@ -7739,12 +7616,12 @@ class FakePipelineDB:
             "stale_wanted": stale,
         }
 
-    def _dashboard_heavy_queries(self, now: datetime) -> list[dict[str, Any]]:
-        """Mirror ``_dashboard_peer_browse_heavy_queries``: rows with
-        (peers_browsed + peers_browsed_lazy) > 0 in the last 24h,
+    def _dashboard_heavy_queries(self, now: datetime) -> list[dict[str, object]]:
+        """Mirror ``_dashboard_peer_browse_heavy_queries``' selection: rows
+        with (peers_browsed + peers_browsed_lazy) > 0 in the last 24h,
         ordered (peer_dirs DESC, fanout_waves DESC, created_at DESC,
-        id DESC), LIMIT 12, with the production serializer's int/float
-        coercions (result_count never None)."""
+        id DESC), LIMIT 12. The row SHAPE — every int/float coercion and
+        the isoformatted timestamp — is production's own serializer."""
         cutoff = now - timedelta(hours=24)
         rows = [e for e in self.search_logs
                 if self._as_utc(e.created_at) >= cutoff
@@ -7755,31 +7632,29 @@ class FakePipelineDB:
             -self._as_utc(e.created_at).timestamp(),
             -e.id,
         ))
-        out: list[dict[str, Any]] = []
+        out: list[dict[str, object]] = []
         for e in rows[:12]:
             req = self._requests.get(e.request_id, {})
-            out.append({
+            out.append(serialize_dashboard_heavy_query_row({
                 "search_log_id": e.id,
                 "request_id": e.request_id,
                 "mb_release_id": req.get("mb_release_id"),
                 "artist_name": req.get("artist_name"),
                 "album_title": req.get("album_title"),
                 "status": req.get("status"),
-                "created_at": self._as_utc(e.created_at).isoformat(),
+                "created_at": self._as_utc(e.created_at),
                 "query": e.query,
                 "variant": e.variant,
                 "outcome": e.outcome,
-                "result_count": int(e.result_count or 0),
-                "elapsed_s": float(e.elapsed_s)
-                if e.elapsed_s is not None else None,
-                "browse_time_s": float(e.browse_time_s or 0.0),
-                "match_time_s": float(e.match_time_s or 0.0),
-                "peers_browsed": int(e.peers_browsed or 0),
-                "peers_browsed_lazy": int(e.peers_browsed_lazy or 0),
-                "peer_dirs": int(
-                    (e.peers_browsed or 0) + (e.peers_browsed_lazy or 0)),
-                "fanout_waves": int(e.fanout_waves or 0),
-            })
+                "result_count": e.result_count,
+                "elapsed_s": e.elapsed_s,
+                "browse_time_s": e.browse_time_s,
+                "match_time_s": e.match_time_s,
+                "peers_browsed": e.peers_browsed,
+                "peers_browsed_lazy": e.peers_browsed_lazy,
+                "peer_dirs": (e.peers_browsed or 0) + (e.peers_browsed_lazy or 0),
+                "fanout_waves": e.fanout_waves,
+            }))
         return out
 
     def get_pipeline_dashboard_metrics(
@@ -7805,54 +7680,50 @@ class FakePipelineDB:
         peers = self.get_peer_metrics()
         peers["heavy_queries"] = self._dashboard_heavy_queries(now)
         peers["heavy_query_hours"] = 24
-        return {
-            "generated_at": now.isoformat(),
-            "searches": {
-                "windows": [
-                    self._dashboard_search_window("24h", 24, now),
-                    self._dashboard_search_window("6h", 6, now),
-                ],
-            },
-            "cycles": {
-                "windows": [
-                    self._dashboard_cycle_window("24h", 24, now),
-                    self._dashboard_cycle_window("6h", 6, now),
-                ],
-                # Production: ORDER BY created_at DESC, id DESC LIMIT 12 — NOT
-                # insertion order (rows seeded with explicit
-                # completed_at values must sort by their timestamps).
-                "recent": [
-                    self._dashboard_cycle_row(r)
-                    for r in sorted(
-                        self.cycle_metrics,
-                        key=lambda row: (
-                            self._as_utc(row["created_at"]),
-                            int(row["id"]),
-                        ),
-                        reverse=True,
-                    )[:12]
-                ],
-                # Production restricts outliers to the last 24 hours and
-                # orders by cycle_total_s DESC, id DESC.
-                "outliers": [
-                    self._dashboard_cycle_row(r)
-                    for r in sorted(
-                        (row for row in self.cycle_metrics
-                         if self._as_utc(row["created_at"])
-                         >= now - timedelta(hours=24)),
-                        key=lambda row: (
-                            float(row["cycle_total_s"]),
-                            int(row["id"]),
-                        ),
-                        reverse=True,
-                    )[:8]
-                ],
-            },
-            "coverage": self._dashboard_coverage(now),
-            "peers": peers,
-            "plan_readiness": self.get_search_plan_readiness(plan_generator_id),
-            "unfindable": self._dashboard_unfindable(),
-        }
+        return dashboard_envelope(
+            generated_at=now,
+            search_windows=[
+                self._dashboard_search_window(label, hours, now)
+                for label, hours in DASHBOARD_WINDOWS
+            ],
+            cycle_windows=[
+                self._dashboard_cycle_window(label, hours, now)
+                for label, hours in DASHBOARD_WINDOWS
+            ],
+            # Production: ORDER BY created_at DESC, id DESC LIMIT 12 — NOT
+            # insertion order (rows seeded with explicit completed_at
+            # values must sort by their timestamps).
+            recent_cycles=[
+                serialize_dashboard_cycle_row(r)
+                for r in sorted(
+                    self.cycle_metrics,
+                    key=lambda row: (
+                        self._as_utc(row["created_at"]),
+                        int(row["id"]),
+                    ),
+                    reverse=True,
+                )[:12]
+            ],
+            # Production restricts outliers to the last 24 hours and
+            # orders by cycle_total_s DESC, id DESC.
+            outlier_cycles=[
+                serialize_dashboard_cycle_row(r)
+                for r in sorted(
+                    (row for row in self.cycle_metrics
+                     if self._as_utc(row["created_at"])
+                     >= now - timedelta(hours=24)),
+                    key=lambda row: (
+                        float(row["cycle_total_s"]),
+                        int(row["id"]),
+                    ),
+                    reverse=True,
+                )[:8]
+            ],
+            coverage=self._dashboard_coverage(now),
+            peers=peers,
+            plan_readiness=self.get_search_plan_readiness(plan_generator_id),
+            unfindable=self._dashboard_unfindable(),
+        )
 
     def get_search_plan_readiness(
         self,

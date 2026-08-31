@@ -57,6 +57,7 @@ from lib.pipeline_db import (
     TransferLedgerRow,
 )
 from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
+from lib.pipeline_db.dashboard import wanted_trend_panel
 from lib.quality import (
     CURRENT_EVIDENCE_LINEAGE_VERSION,
     ActiveDownloadState,
@@ -6035,6 +6036,89 @@ class TestGetSearchHistoryPage(unittest.TestCase):
                     "cursor_update_status", "stale_reason",
                     "plan_cycle_snapshot", "created_at"):
             self.assertIn(col, row, f"missing column {col!r}")
+
+
+class TestWantedTrendPanel(unittest.TestCase):
+    """Direct unit coverage for the wanted-backlog trend arithmetic.
+
+    ``wanted_trend_panel`` / ``wanted_trend_window`` are the pure half both
+    ``PipelineDB._dashboard_wanted_trend`` and ``FakePipelineDB``'s own
+    sample walk delegate to (issue #1278 item 7). The populated and empty
+    window shapes are exercised end to end by
+    ``TestPipelineDashboardMetrics`` and ``TestFakeDashboardMirror``; the
+    zero-elapsed branch is reachable only by handing the function a sample
+    stamped exactly ``now``, which no adapter's fetch can produce.
+    """
+
+    NOW = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
+
+    def test_zero_elapsed_window_reports_unknown_without_dividing(self):
+        panel = wanted_trend_panel(
+            [(self.NOW, 500)], current_wanted=400, now=self.NOW)
+        window = panel["windows"][0]
+        self.assertEqual(window["sample_count"], 1)
+        self.assertEqual(window["start_wanted"], 500)
+        self.assertEqual(window["end_wanted"], 400)
+        self.assertEqual(window["delta"], -100)
+        self.assertEqual(window["trend"], "unknown")
+        for key in ("delta_per_hour", "drain_per_hour", "eta_hours"):
+            self.assertIsNone(window[key], key)
+
+    def test_growing_backlog_reports_up_with_no_eta(self):
+        panel = wanted_trend_panel(
+            [(self.NOW - timedelta(hours=2), 100)],
+            current_wanted=140, now=self.NOW)
+        window = panel["windows"][0]
+        self.assertEqual(window["trend"], "up")
+        self.assertEqual(window["delta_per_hour"], 20.0)
+        self.assertEqual(window["drain_per_hour"], 0.0)
+        self.assertIsNone(window["eta_hours"])
+
+    def test_draining_backlog_reports_eta_from_the_drain_rate(self):
+        panel = wanted_trend_panel(
+            [(self.NOW - timedelta(hours=4), 200)],
+            current_wanted=160, now=self.NOW)
+        window = panel["windows"][0]
+        self.assertEqual(window["trend"], "down")
+        self.assertEqual(window["drain_per_hour"], 10.0)
+        self.assertEqual(window["eta_hours"], 16.0)
+
+    def test_series_24h_drops_older_samples_and_appends_the_synthetic_now(self):
+        panel = wanted_trend_panel(
+            [
+                (self.NOW - timedelta(hours=30), 900),
+                (self.NOW - timedelta(hours=3), 800),
+            ],
+            current_wanted=700, now=self.NOW,
+        )
+        self.assertEqual(
+            [(point["wanted_total"], point.get("synthetic"))
+             for point in panel["series_24h"]],
+            [(800, None), (700, True)],
+        )
+        # ``latest_sample_at`` names the newest REAL sample, never the
+        # synthetic point the series ends with.
+        self.assertEqual(
+            panel["latest_sample_at"],
+            (self.NOW - timedelta(hours=3)).isoformat())
+        self.assertEqual(
+            [w["label"] for w in panel["windows"]], ["6h", "24h", "7d"])
+        # The 7d window still sees the 30h-old sample the series dropped.
+        self.assertEqual(panel["windows"][2]["start_wanted"], 900)
+
+    def test_empty_samples_yield_unknown_windows_and_only_the_synthetic_point(self):
+        panel = wanted_trend_panel([], current_wanted=42, now=self.NOW)
+        self.assertIsNone(panel["latest_sample_at"])
+        self.assertEqual(panel["series_24h"], [{
+            "sampled_at": self.NOW.isoformat(),
+            "wanted_total": 42,
+            "synthetic": True,
+        }])
+        for window in panel["windows"]:
+            self.assertEqual(window["sample_count"], 0)
+            self.assertEqual(window["trend"], "unknown")
+            self.assertIsNone(window["start_wanted"])
+            self.assertEqual(window["end_wanted"], 42)
 
 
 @requires_postgres

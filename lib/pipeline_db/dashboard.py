@@ -1,5 +1,5 @@
 """Pipeline dashboard metrics, cycle telemetry, peer roster counters."""
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, TypedDict
 
@@ -62,6 +62,277 @@ class UnfindableRunMetricsPresentation(TypedDict):
     request_not_found_count: int
     breaker_tripped: bool
     duration_seconds: float
+
+
+#: Everything below this banner is a pure post-fetch derivation the real
+#: adapter and ``tests/fakes/pipeline_db.py`` BOTH call. The dashboard is a
+#: read-model whose SQL only ever fetches rows: every window, serializer,
+#: trend and envelope is Python over already-fetched values, so a fake that
+#: re-implemented them was mirroring by hand what it could delegate
+#: (issue #1278 item 7). Each adapter keeps only its own fetch + timezone
+#: normalization; the shapes live here, once.
+
+
+def serialize_unfindable_run_row(
+    row: UnfindableRunMetricsRow,
+) -> UnfindableRunMetricsPresentation:
+    """JSON-safe rendering of one unfindable-detection run row."""
+    return UnfindableRunMetricsPresentation(
+        id=row["id"],
+        created_at=_isoformat_or_none(row["created_at"]),
+        cohort_total=row["cohort_total"],
+        due_backlog_at_start=row["due_backlog_at_start"],
+        batch_limit=row["batch_limit"],
+        candidates_processed=row["candidates_processed"],
+        probes_attempted=row["probes_attempted"],
+        categorised_count=row["categorised_count"],
+        downgraded_count=row["downgraded_count"],
+        no_change_count=row["no_change_count"],
+        probe_failed_count=row["probe_failed_count"],
+        not_due_count=row["not_due_count"],
+        request_not_found_count=row["request_not_found_count"],
+        breaker_tripped=row["breaker_tripped"],
+        duration_seconds=row["duration_seconds"],
+    )
+
+
+def unfindable_panel(
+    rows: list[UnfindableRunMetricsPresentation],
+) -> dict[str, list[UnfindableRunMetricsPresentation] | dict[str, object]]:
+    """Recent unfindable-detection run health + backlog trend (#1112).
+
+    ``rows`` arrives newest-first. ``recent_runs`` gives latest-run-first
+    operator facts (when, attempted, per-outcome counts, breaker).
+    ``backlog_trend`` is the due-backlog/probes series across those same
+    runs, shaped like the ``wanted_trend_panel`` idiom (a ``current_*``
+    snapshot, a ``latest_sample_at``, and a chronological ``series``) but
+    at the daily run grain rather than a live-computed window/ETA — the
+    detection job fires once a day, so there is no "last 6h" signal to
+    bucket.
+    """
+    chronological = list(reversed(rows))
+    series: list[dict[str, object]] = [
+        {
+            "sampled_at": r["created_at"],
+            "due_backlog_at_start": r["due_backlog_at_start"],
+            # candidates_processed, not probes_attempted (review round
+            # 2, R nit): the truer per-run capacity number -- every
+            # candidate the batch actually touched, not just the
+            # subset that fired a probe.
+            "candidates_processed": r["candidates_processed"],
+        }
+        for r in chronological
+    ]
+    latest = rows[0] if rows else None
+    return {
+        "recent_runs": rows,
+        "backlog_trend": {
+            "current_backlog": (
+                latest["due_backlog_at_start"] if latest else None
+            ),
+            "latest_sample_at": latest["created_at"] if latest else None,
+            "series": series,
+        },
+    }
+
+
+def serialize_dashboard_heavy_query_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One peer-browse heavy-query row, JSON-safe."""
+    return {
+        "search_log_id": int(row["search_log_id"]),
+        "request_id": int(row["request_id"]),
+        "mb_release_id": row.get("mb_release_id"),
+        "artist_name": row.get("artist_name"),
+        "album_title": row.get("album_title"),
+        "status": row.get("status"),
+        "created_at": _isoformat_or_none(row.get("created_at")),
+        "query": row.get("query"),
+        "variant": row.get("variant"),
+        "outcome": row.get("outcome"),
+        "result_count": int(row.get("result_count") or 0),
+        "elapsed_s": _float_or_none(row.get("elapsed_s")),
+        "browse_time_s": float(row.get("browse_time_s") or 0.0),
+        "match_time_s": float(row.get("match_time_s") or 0.0),
+        "peers_browsed": int(row.get("peers_browsed") or 0),
+        "peers_browsed_lazy": int(row.get("peers_browsed_lazy") or 0),
+        "peer_dirs": int(row.get("peer_dirs") or 0),
+        "fanout_waves": int(row.get("fanout_waves") or 0),
+    }
+
+
+def serialize_dashboard_cycle_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One ``cycle_metrics`` row, JSON-safe.
+
+    ``cycle_searches_watchdog_killed`` is renamed to ``watchdog_kills``,
+    the cache hit/miss and ``wanted_total`` columns are deliberately NOT
+    emitted, and both timestamps are isoformatted.
+    """
+    return {
+        "id": int(row["id"]),
+        "started_at": _isoformat_or_none(row.get("started_at")),
+        "created_at": _isoformat_or_none(row.get("created_at")),
+        "cycle_total_s": float(row["cycle_total_s"]),
+        "browse_time_s": float(row["browse_time_s"]),
+        "match_time_s": float(row["match_time_s"]),
+        "search_time_s": float(row["search_time_s"]),
+        "watchdog_kills": int(row["cycle_searches_watchdog_killed"]),
+        "find_download_queued": int(row["find_download_queued"]),
+        "find_download_completed": int(row["find_download_completed"]),
+        "find_download_drain_time_s": float(row["find_download_drain_time_s"]),
+        "cache_errors": int(row["cache_errors"]),
+        "cache_write_errors": int(row["cache_write_errors"]),
+        "cache_fuse_tripped": int(row["cache_fuse_tripped"]),
+        "peers_browsed": int(row["peers_browsed"]),
+        "peers_browsed_lazy": int(row["peers_browsed_lazy"]),
+        "fanout_waves": int(row["fanout_waves"]),
+    }
+
+
+def serialize_dashboard_request_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One backlog request row for the loop-suspect / stale-wanted panels."""
+    return {
+        "request_id": int(row["request_id"]),
+        "artist_name": row["artist_name"],
+        "album_title": row["album_title"],
+        "status": row["status"],
+        "last_search_at": _isoformat_or_none(row.get("last_search_at")),
+        "searches_24h": int(row.get("searches_24h") or 0),
+        "searches_6h": int(row.get("searches_6h") or 0),
+        "found_24h": int(row.get("found_24h") or 0),
+        "no_match_24h": int(row.get("no_match_24h") or 0),
+        "no_results_24h": int(row.get("no_results_24h") or 0),
+        "reset_24h": int(row.get("reset_24h") or 0),
+        "problem_24h": int(row.get("problem_24h") or 0),
+    }
+
+
+def wanted_trend_window(
+    label: str,
+    hours: int,
+    *,
+    samples: list[tuple[datetime, int]],
+    now: datetime,
+    current_wanted: int,
+) -> dict[str, object]:
+    """Delta / drain-rate / ETA for one wanted-backlog trend window."""
+    window_start = now - timedelta(hours=hours)
+    window_samples = [(at, wanted) for at, wanted in samples if at >= window_start]
+    if not window_samples:
+        return {
+            "label": label,
+            "hours": hours,
+            "sample_count": 0,
+            "start_sample_at": None,
+            "end_sample_at": now.isoformat(),
+            "start_wanted": None,
+            "end_wanted": current_wanted,
+            "delta": None,
+            "delta_per_hour": None,
+            "drain_per_hour": None,
+            "eta_hours": None,
+            "trend": "unknown",
+        }
+
+    start_at, start_wanted = window_samples[0]
+    elapsed_hours = (now - start_at).total_seconds() / 3600
+    delta = current_wanted - start_wanted
+    if elapsed_hours <= 0:
+        delta_per_hour = None
+        drain_per_hour = None
+        eta_hours = None
+        trend = "unknown"
+    else:
+        delta_per_hour = delta / elapsed_hours
+        drain_per_hour = max(-delta_per_hour, 0.0)
+        eta_hours = (
+            current_wanted / drain_per_hour
+            if drain_per_hour > 0 and current_wanted > 0
+            else None
+        )
+        trend = "down" if delta < 0 else "up" if delta > 0 else "flat"
+
+    return {
+        "label": label,
+        "hours": hours,
+        "sample_count": len(window_samples),
+        "start_sample_at": start_at.isoformat(),
+        "end_sample_at": now.isoformat(),
+        "start_wanted": start_wanted,
+        "end_wanted": current_wanted,
+        "delta": delta,
+        "delta_per_hour": delta_per_hour,
+        "drain_per_hour": drain_per_hour,
+        "eta_hours": eta_hours,
+        "trend": trend,
+    }
+
+
+def wanted_trend_panel(
+    samples: list[tuple[datetime, int]],
+    *,
+    current_wanted: int,
+    now: datetime,
+) -> dict[str, Any]:
+    """The wanted-backlog trend panel over ``samples``.
+
+    ``samples`` is the ``(created_at, wanted_total)`` series from the last
+    7 days of ``cycle_metrics``, chronological and already normalized to
+    UTC by the caller — each adapter owns its own fetch and timezone
+    handling; the arithmetic lives here.
+    """
+    series_24h: list[dict[str, Any]] = [
+        {"sampled_at": sample_at.isoformat(), "wanted_total": wanted}
+        for sample_at, wanted in samples
+        if sample_at >= now - timedelta(hours=24)
+    ]
+    series_24h.append({
+        "sampled_at": now.isoformat(),
+        "wanted_total": current_wanted,
+        "synthetic": True,
+    })
+    return {
+        "current_wanted": current_wanted,
+        "latest_sample_at": samples[-1][0].isoformat() if samples else None,
+        "series_24h": series_24h,
+        "windows": [
+            wanted_trend_window(
+                label,
+                hours,
+                samples=samples,
+                now=now,
+                current_wanted=current_wanted,
+            )
+            for label, hours in DASHBOARD_WANTED_TREND_WINDOWS
+        ],
+    }
+
+
+def dashboard_envelope(
+    *,
+    generated_at: datetime,
+    search_windows: Sequence[Mapping[str, object]],
+    cycle_windows: Sequence[Mapping[str, object]],
+    recent_cycles: Sequence[Mapping[str, object]],
+    outlier_cycles: Sequence[Mapping[str, object]],
+    coverage: Mapping[str, object],
+    peers: Mapping[str, object],
+    plan_readiness: Mapping[str, object],
+    unfindable: Mapping[str, object],
+) -> dict[str, object]:
+    """Assemble the Pipeline dashboard payload from its computed panels."""
+    return {
+        "generated_at": generated_at.isoformat(),
+        "searches": {"windows": search_windows},
+        "cycles": {
+            "windows": cycle_windows,
+            "recent": recent_cycles,
+            "outliers": outlier_cycles,
+        },
+        "coverage": coverage,
+        "peers": peers,
+        "plan_readiness": plan_readiness,
+        "unfindable": unfindable,
+    }
 
 
 class _DashboardMixin(_PipelineDBBase):
@@ -245,67 +516,11 @@ class _DashboardMixin(_PipelineDBBase):
     def _dashboard_unfindable(
         self,
     ) -> dict[str, list[UnfindableRunMetricsPresentation] | dict[str, object]]:
-        """Recent unfindable-detection run health + backlog trend (#1112).
-
-        ``recent_runs`` gives latest-run-first operator facts (when,
-        attempted, per-outcome counts, breaker). ``backlog_trend`` is the
-        due-backlog/probes series across those same runs, shaped like the
-        ``_dashboard_wanted_trend`` idiom (a ``current_*`` snapshot, a
-        ``latest_sample_at``, and a chronological ``series``) but at the
-        daily run grain rather than a live-computed window/ETA — the
-        detection job fires once a day, so there is no "last 6h" signal
-        to bucket.
-        """
-        rows = [
-            self._serialize_unfindable_run_row(r)
+        """Recent unfindable-detection run health + backlog trend (#1112)."""
+        return unfindable_panel([
+            serialize_unfindable_run_row(r)
             for r in self.get_unfindable_run_metrics(limit=14)
-        ]
-        chronological = list(reversed(rows))
-        series: list[dict[str, object]] = [
-            {
-                "sampled_at": r["created_at"],
-                "due_backlog_at_start": r["due_backlog_at_start"],
-                # candidates_processed, not probes_attempted (review round
-                # 2, R nit): the truer per-run capacity number -- every
-                # candidate the batch actually touched, not just the
-                # subset that fired a probe.
-                "candidates_processed": r["candidates_processed"],
-            }
-            for r in chronological
-        ]
-        latest = rows[0] if rows else None
-        return {
-            "recent_runs": rows,
-            "backlog_trend": {
-                "current_backlog": (
-                    latest["due_backlog_at_start"] if latest else None
-                ),
-                "latest_sample_at": latest["created_at"] if latest else None,
-                "series": series,
-            },
-        }
-
-
-    def _serialize_unfindable_run_row(
-        self, row: UnfindableRunMetricsRow,
-    ) -> UnfindableRunMetricsPresentation:
-        return UnfindableRunMetricsPresentation(
-            id=row["id"],
-            created_at=_isoformat_or_none(row["created_at"]),
-            cohort_total=row["cohort_total"],
-            due_backlog_at_start=row["due_backlog_at_start"],
-            batch_limit=row["batch_limit"],
-            candidates_processed=row["candidates_processed"],
-            probes_attempted=row["probes_attempted"],
-            categorised_count=row["categorised_count"],
-            downgraded_count=row["downgraded_count"],
-            no_change_count=row["no_change_count"],
-            probe_failed_count=row["probe_failed_count"],
-            not_due_count=row["not_due_count"],
-            request_not_found_count=row["request_not_found_count"],
-            breaker_tripped=row["breaker_tripped"],
-            duration_seconds=row["duration_seconds"],
-        )
+        ])
 
 
     def record_peer_observations(
@@ -478,24 +693,19 @@ class _DashboardMixin(_PipelineDBBase):
         peers = self.get_peer_metrics()
         peers["heavy_queries"] = self._dashboard_peer_browse_heavy_queries()
         peers["heavy_query_hours"] = 24
-        plan_readiness = self.get_search_plan_readiness(plan_generator_id)
-        return {
-            "generated_at": datetime.now(UTC).isoformat(),
-            "searches": {
-                "windows": [self._dashboard_search_window(label, hours)
+        return dashboard_envelope(
+            generated_at=datetime.now(UTC),
+            search_windows=[self._dashboard_search_window(label, hours)
                             for label, hours in DASHBOARD_WINDOWS],
-            },
-            "cycles": {
-                "windows": [self._dashboard_cycle_window(label, hours)
-                            for label, hours in DASHBOARD_WINDOWS],
-                "recent": self._dashboard_cycle_rows(outliers=False, limit=12),
-                "outliers": self._dashboard_cycle_rows(outliers=True, limit=8),
-            },
-            "coverage": self._dashboard_coverage(),
-            "peers": peers,
-            "plan_readiness": plan_readiness,
-            "unfindable": self._dashboard_unfindable(),
-        }
+            cycle_windows=[self._dashboard_cycle_window(label, hours)
+                           for label, hours in DASHBOARD_WINDOWS],
+            recent_cycles=self._dashboard_cycle_rows(outliers=False, limit=12),
+            outlier_cycles=self._dashboard_cycle_rows(outliers=True, limit=8),
+            coverage=self._dashboard_coverage(),
+            peers=peers,
+            plan_readiness=self.get_search_plan_readiness(plan_generator_id),
+            unfindable=self._dashboard_unfindable(),
+        )
 
 
     def _dashboard_peer_browse_heavy_queries(
@@ -539,35 +749,9 @@ class _DashboardMixin(_PipelineDBBase):
             LIMIT %s
         """, (f"{clamped_hours} hours", clamped_limit))
         return [
-            self._serialize_dashboard_heavy_query_row(dict(row))
+            serialize_dashboard_heavy_query_row(dict(row))
             for row in cur.fetchall()
         ]
-
-
-    def _serialize_dashboard_heavy_query_row(
-        self,
-        row: dict[str, Any],
-    ) -> dict[str, Any]:
-        return {
-            "search_log_id": int(row["search_log_id"]),
-            "request_id": int(row["request_id"]),
-            "mb_release_id": row.get("mb_release_id"),
-            "artist_name": row.get("artist_name"),
-            "album_title": row.get("album_title"),
-            "status": row.get("status"),
-            "created_at": _isoformat_or_none(row.get("created_at")),
-            "query": row.get("query"),
-            "variant": row.get("variant"),
-            "outcome": row.get("outcome"),
-            "result_count": int(row.get("result_count") or 0),
-            "elapsed_s": _float_or_none(row.get("elapsed_s")),
-            "browse_time_s": float(row.get("browse_time_s") or 0.0),
-            "match_time_s": float(row.get("match_time_s") or 0.0),
-            "peers_browsed": int(row.get("peers_browsed") or 0),
-            "peers_browsed_lazy": int(row.get("peers_browsed_lazy") or 0),
-            "peer_dirs": int(row.get("peer_dirs") or 0),
-            "fanout_waves": int(row.get("fanout_waves") or 0),
-        }
 
 
     def _dashboard_search_window(self, label: str, hours: int) -> dict[str, Any]:
@@ -709,30 +893,8 @@ class _DashboardMixin(_PipelineDBBase):
                 id DESC
             LIMIT %s
         """, (outliers, outliers, outliers, limit))
-        return [self._serialize_dashboard_cycle_row(dict(row))
+        return [serialize_dashboard_cycle_row(dict(row))
                 for row in cur.fetchall()]
-
-
-    def _serialize_dashboard_cycle_row(self, row: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "id": int(row["id"]),
-            "started_at": _isoformat_or_none(row.get("started_at")),
-            "created_at": _isoformat_or_none(row.get("created_at")),
-            "cycle_total_s": float(row["cycle_total_s"]),
-            "browse_time_s": float(row["browse_time_s"]),
-            "match_time_s": float(row["match_time_s"]),
-            "search_time_s": float(row["search_time_s"]),
-            "watchdog_kills": int(row["cycle_searches_watchdog_killed"]),
-            "find_download_queued": int(row["find_download_queued"]),
-            "find_download_completed": int(row["find_download_completed"]),
-            "find_download_drain_time_s": float(row["find_download_drain_time_s"]),
-            "cache_errors": int(row["cache_errors"]),
-            "cache_write_errors": int(row["cache_write_errors"]),
-            "cache_fuse_tripped": int(row["cache_fuse_tripped"]),
-            "peers_browsed": int(row["peers_browsed"]),
-            "peers_browsed_lazy": int(row["peers_browsed_lazy"]),
-            "fanout_waves": int(row["fanout_waves"]),
-        }
 
 
     def _dashboard_coverage(self) -> dict[str, Any]:
@@ -757,7 +919,6 @@ class _DashboardMixin(_PipelineDBBase):
 
 
     def _dashboard_wanted_trend(self, current_wanted: int) -> dict[str, Any]:
-        now = datetime.now(UTC)
         cur = self._execute("""
             SELECT created_at, wanted_total
             FROM cycle_metrics
@@ -775,105 +936,8 @@ class _DashboardMixin(_PipelineDBBase):
             else:
                 created_at = created_at.astimezone(UTC)
             samples.append((created_at, int(row.get("wanted_total") or 0)))
-
-        series_24h = [
-            self._serialize_wanted_trend_sample(sample_at, wanted)
-            for sample_at, wanted in samples
-            if sample_at >= now - timedelta(hours=24)
-        ]
-        series_24h.append({
-            "sampled_at": now.isoformat(),
-            "wanted_total": current_wanted,
-            "synthetic": True,
-        })
-        latest_sample_at = samples[-1][0].isoformat() if samples else None
-        return {
-            "current_wanted": current_wanted,
-            "latest_sample_at": latest_sample_at,
-            "series_24h": series_24h,
-            "windows": [
-                self._dashboard_wanted_trend_window(
-                    label,
-                    hours,
-                    samples=samples,
-                    now=now,
-                    current_wanted=current_wanted,
-                )
-                for label, hours in DASHBOARD_WANTED_TREND_WINDOWS
-            ],
-        }
-
-
-    def _dashboard_wanted_trend_window(
-        self,
-        label: str,
-        hours: int,
-        *,
-        samples: list[tuple[datetime, int]],
-        now: datetime,
-        current_wanted: int,
-    ) -> dict[str, Any]:
-        window_start = now - timedelta(hours=hours)
-        window_samples = [(at, wanted) for at, wanted in samples if at >= window_start]
-        if not window_samples:
-            return {
-                "label": label,
-                "hours": hours,
-                "sample_count": 0,
-                "start_sample_at": None,
-                "end_sample_at": now.isoformat(),
-                "start_wanted": None,
-                "end_wanted": current_wanted,
-                "delta": None,
-                "delta_per_hour": None,
-                "drain_per_hour": None,
-                "eta_hours": None,
-                "trend": "unknown",
-            }
-
-        start_at, start_wanted = window_samples[0]
-        elapsed_hours = (now - start_at).total_seconds() / 3600
-        delta = current_wanted - start_wanted
-        if elapsed_hours <= 0:
-            delta_per_hour = None
-            drain_per_hour = None
-            eta_hours = None
-            trend = "unknown"
-        else:
-            delta_per_hour = delta / elapsed_hours
-            drain_per_hour = max(-delta_per_hour, 0.0)
-            eta_hours = (
-                current_wanted / drain_per_hour
-                if drain_per_hour > 0 and current_wanted > 0
-                else None
-            )
-            trend = "down" if delta < 0 else "up" if delta > 0 else "flat"
-
-        return {
-            "label": label,
-            "hours": hours,
-            "sample_count": len(window_samples),
-            "start_sample_at": start_at.isoformat(),
-            "end_sample_at": now.isoformat(),
-            "start_wanted": start_wanted,
-            "end_wanted": current_wanted,
-            "delta": delta,
-            "delta_per_hour": delta_per_hour,
-            "drain_per_hour": drain_per_hour,
-            "eta_hours": eta_hours,
-            "trend": trend,
-        }
-
-
-    def _serialize_wanted_trend_sample(
-        self,
-        sample_at: datetime,
-        wanted_total: int,
-    ) -> dict[str, Any]:
-        return {
-            "sampled_at": sample_at.isoformat(),
-            "wanted_total": wanted_total,
-        }
+        return wanted_trend_panel(
+            samples, current_wanted=current_wanted, now=datetime.now(UTC))
 
 
     def _dashboard_match_rate_series(self, hours: int) -> list[dict[str, Any]]:
@@ -1094,7 +1158,7 @@ class _DashboardMixin(_PipelineDBBase):
             ORDER BY pr.searches_24h DESC, pr.searches_6h DESC, w.id ASC
             LIMIT 12
         """, (list(DASHBOARD_WANTED_BACKLOG_STATUSES),))
-        return [self._serialize_dashboard_request_row(dict(row))
+        return [serialize_dashboard_request_row(dict(row))
                 for row in cur.fetchall()]
 
 
@@ -1134,25 +1198,8 @@ class _DashboardMixin(_PipelineDBBase):
         """, (list(DASHBOARD_WANTED_BACKLOG_STATUSES),))
         return [
             {
-                **self._serialize_dashboard_request_row(dict(row)),
+                **serialize_dashboard_request_row(dict(row)),
                 "hours_since_search": _float_or_none(row["hours_since_search"]),
             }
             for row in cur.fetchall()
         ]
-
-
-    def _serialize_dashboard_request_row(self, row: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "request_id": int(row["request_id"]),
-            "artist_name": row["artist_name"],
-            "album_title": row["album_title"],
-            "status": row["status"],
-            "last_search_at": _isoformat_or_none(row.get("last_search_at")),
-            "searches_24h": int(row.get("searches_24h") or 0),
-            "searches_6h": int(row.get("searches_6h") or 0),
-            "found_24h": int(row.get("found_24h") or 0),
-            "no_match_24h": int(row.get("no_match_24h") or 0),
-            "no_results_24h": int(row.get("no_results_24h") or 0),
-            "reset_24h": int(row.get("reset_24h") or 0),
-            "problem_24h": int(row.get("problem_24h") or 0),
-        }

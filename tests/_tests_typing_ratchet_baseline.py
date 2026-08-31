@@ -21,7 +21,7 @@ TESTS_TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "tests/fakes/deploy_cycle.py": {"any": 2},
     "tests/fakes/deploy_pin.py": {"any": 4},
     "tests/fakes/lookups.py": {"any": 9},
-    "tests/fakes/pipeline_db.py": {"any": 157, "cast": 23, "type_ignore": 1},
+    "tests/fakes/pipeline_db.py": {"any": 147, "cast": 23, "type_ignore": 1},
     "tests/fakes/rows.py": {"any": 6},
     "tests/fakes/slskd.py": {"any": 48},
     "tests/fakes/ytmusic.py": {"any": 13},
