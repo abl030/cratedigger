@@ -117,11 +117,13 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     ),
     "scripts/run_final_gate.sh": (
         # Issue #1278 item 6: this file is now a thin wrapper that execs
-        # scripts/test_substrate.py's `final-gate` subcommand, and nothing
-        # resolves neighbours for a .sh path by basename — so before this
-        # entry, editing the wrapper (or deleting the exec line outright)
-        # selected no test at all. tests.test_final_gate_receipt drives the
-        # real wrapper end to end with a fake `nix` on PATH.
+        # scripts/test_substrate.py's `final-gate` subcommand, and before
+        # this entry, editing the wrapper (or deleting the exec line
+        # outright) selected no test at all. The .sh basename probe added
+        # in item 9 does not rescue it either — there is no
+        # tests/test_run_final_gate.py; the module that drives the real
+        # wrapper end to end with a fake `nix` on PATH is named for the
+        # receipt, not the file.
         "tests.test_final_gate_receipt",
     ),
     "scripts/run_pyright_checks.py": (
@@ -899,6 +901,87 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_pipeline_cli",
         "tests.test_pipeline_cli_api_mutations",
     ),
+    # scripts/**/*.sh (issue #1278 item 9). Sixteen shell wrappers had no
+    # fail-closed selection story at all: `_direct_test_candidates` only
+    # ever probed .py paths, so every one of them resolved zero neighbours
+    # SILENTLY -- scripts/run_final_gate.sh is the measured instance (it
+    # had no entry until item 6, so wrapper edits selected nothing). The
+    # scripts/ root rule now polices `.sh` too, and the same basename probe
+    # resolves five of them (daily_beets_tip_update, daily_flake_update,
+    # daily_resource_monitor, fuzz_burst, world_model_burst -- each has a
+    # real tests/test_<stem>.py). The six below need an explicit entry, and
+    # scripts/lint.sh + scripts/mcp-playwright.sh are admitted gaps in
+    # SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE.
+    #
+    # Every entry was verified by READING the referencing test, never by
+    # grepping the filename: for each, the named module either executes the
+    # wrapper as a real subprocess or reads its source and asserts against
+    # its content. A filename in a comment, docstring, or an assertion on
+    # some OTHER file's command string does not qualify -- which is why
+    # tests.test_final_gate_receipt is absent from the run_tests.sh entry
+    # (it asserts the literal "bash scripts/run_tests.sh" as the GATE's
+    # argv, never reading this file), and tests.test_suite_coordinator is
+    # absent from find_dead_code.sh / run_ruff.sh (it likewise pins only
+    # the coordinator's own command tuples).
+    "scripts/find_dead_code.sh": (
+        # tests.test_unused_import_audit's run_full_dead_code_gate and
+        # run_vulture_freshness_world both `subprocess.run(["bash",
+        # <this file>])` for real, and two of its tests read this file's
+        # source and plant mutants in it (the freshness-wiring call, the
+        # --make-whitelist invocation).
+        "tests.test_unused_import_audit",
+    ),
+    "scripts/pin_nixosconfig.sh": (
+        # Both modules run the real script through the deploy-pin fake
+        # command harness, which `subprocess.run([str(script), ...])`s the
+        # path it is handed -- `SCRIPT = REPO_ROOT/"scripts"/
+        # "pin_nixosconfig.sh"`, then `fake.run(SCRIPT)` / `fake.popen(
+        # SCRIPT)` at dozens of sites. The deterministic module also reads
+        # this file's own source for its shell-contract audit (shebang,
+        # zero contract violations, `flock 9` before `worktree add`).
+        "tests.test_deploy_pin_script",
+        "tests.test_deploy_pin_generated",
+    ),
+    "scripts/run_js_checks.sh": (
+        # tests.test_js_suite_audit parses this file's source to prove
+        # every tests/test_js_*.mjs suite is actually reached.
+        # tests.test_suite_coordinator executes it for real in both modes
+        # (`[str(JS_HELPER), mode]`), against a fake node and once against
+        # the real one.
+        "tests.test_js_suite_audit",
+        "tests.test_suite_coordinator",
+    ),
+    "scripts/run_ruff.sh": (
+        # tests.test_unused_import_audit runs `bash scripts/run_ruff.sh`
+        # for real (ruff_findings, run_ruff_gate, the TID251 stdin
+        # control) and plants a non-enforcing mutant in a copy of its
+        # source.
+        "tests.test_unused_import_audit",
+    ),
+    "scripts/run_tests.sh": (
+        # All three read this file's source and pin a distinct property of
+        # it: test_js_suite_audit that it still reaches the coordinator,
+        # test_parallel_test_runner the exact `exec python3
+        # scripts/run_test_suite.py` line, test_world_model_burst that the
+        # standard suite runs neither burst script nor the world-model
+        # module directly. tests.test_unused_import_audit pins the same
+        # coordinator line the first two already cover and is excluded for
+        # cost (it runs real Ruff and Vulture subprocesses).
+        "tests.test_js_suite_audit",
+        "tests.test_parallel_test_runner",
+        "tests.test_world_model_burst",
+    ),
+    "scripts/verify_cratedigger_cycle.sh": (
+        # Both modules run the real verifier through the deploy-cycle fake
+        # command harness, which `subprocess.run([str(script), *args])`s
+        # the path it is handed (`fake.run(SCRIPT, "capture-migrate")`,
+        # `fake.run(SCRIPT, "verify-migrate-ran", ...)`, ...). Neither
+        # reads this file's source -- their only `pinned_source` calls
+        # target the deploy SKILL, not the verifier -- so the coverage
+        # here is real execution, nothing else.
+        "tests.test_deploy_cycle_verifier",
+        "tests.test_deploy_cycle_verifier_generated",
+    ),
 }
 
 #: Shared tests/ modules with NO real consuming test today — an admitted,
@@ -1130,10 +1213,13 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
 }
 
 
-#: Changed `scripts/**/*.py` files whose full neighbour resolution
+#: Changed `scripts/**/*.py` and `scripts/**/*.sh` files whose full
+#: neighbour resolution
 #: (EXACT_PATH_NEIGHBOURS + prefix rules + direct candidates that actually
 #: exist) yields ZERO test modules -- the scripts/ twin of
-#: LIB_MODULES_WITHOUT_SELECTION_COVERAGE (issue #1248).
+#: LIB_MODULES_WITHOUT_SELECTION_COVERAGE (issue #1248; the `.sh` half
+#: joined in #1278 item 9, when the shell wrappers gained the same
+#: fail-closed treatment their `.py` siblings already had).
 #: `_direct_test_candidates` probes only `tests.test_<basename>` for a
 #: scripts/ path (no `_generated` sibling probe, unlike lib/), so a
 #: script whose real coverage
@@ -1188,6 +1274,25 @@ SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "name (script-mode-only entry shim, the #445 sys.path[0] hazard), "
         "so no dotted-import test module can drive its bootstrap or its "
         "delegation into scripts.pipeline_cli.cli.main (issue #1248)"
+    ),
+    "scripts/lint.sh": (
+        "measured 2026-08-31: zero neighbours -- tests.test_lint does not "
+        "exist, and a repository-wide grep for the string 'lint.sh' finds "
+        "no reference anywhere outside the file itself: no test, no doc, "
+        "no Nix module, no other script. It is a bare developer "
+        "convenience wrapper around `nix-shell --run pyright` on a "
+        "hand-typed file list; the canonical typing contracts run through "
+        "scripts/run_pyright_checks.py instead (issue #1278 item 9)"
+    ),
+    "scripts/mcp-playwright.sh": (
+        "measured 2026-08-31: zero neighbours -- tests.test_mcp-playwright "
+        "is not even a legal module name, and nothing under tests/ "
+        "mentions this file. Its consumers are .mcp.json's `command` "
+        "string, .claude/agents/playwright.md, and docs/playwright-mcp.md "
+        "-- all of which name the wrapper's PATH, never its contents, so "
+        "the binary-name resolution and CDP/headless mode selection inside "
+        "it are exercised only by really launching an MCP server "
+        "(issue #1278 item 9)"
     ),
 }
 
@@ -1271,7 +1376,13 @@ ROOT_COVERAGE_RULES: tuple[RootCoverageRule, ...] = (
     ),
     RootCoverageRule(
         root="scripts",
-        suffixes=(".py",),
+        # ``.sh`` joined this row in issue #1278 item 9: the shell wrappers
+        # are entry points with no fail-closed selection story at all until
+        # then — scripts/run_final_gate.sh had NO entry through the whole of
+        # item 6, so every wrapper edit selected nothing and no audit
+        # noticed. ``lib/`` and ``tests/`` hold no ``.sh`` files, so the
+        # suffix stays on this row rather than becoming a global default.
+        suffixes=(".py", ".sh"),
         registry=SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE,
         registry_name="SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE",
         admitted_selects_nothing=False,
@@ -1382,9 +1493,20 @@ def ambient_test_modules(repo_root: Path) -> tuple[str, ...]:
 
 
 def _direct_test_candidates(path: PurePosixPath) -> tuple[str, ...]:
+    stem = path.stem
+    if path.parts[:1] == ("scripts",) and path.suffix == ".sh":
+        # The same mechanical basename-only probe every .py root gets, for
+        # the shell wrappers under scripts/ (issue #1278 item 9). Five of
+        # the sixteen already have a tests/test_<stem>.py that drives them;
+        # before this, a .sh path resolved nothing by basename at all, so
+        # scripts/run_final_gate.sh needed a hand-written entry for
+        # coverage a probe can find. The caller still checks the candidate
+        # really exists via _existing_module, so this claims nothing: it is
+        # a naming convention, not evidence that the matched module
+        # executes or reads the wrapper.
+        return (f"tests.test_{stem}",)
     if path.suffix != ".py":
         return ()
-    stem = path.stem
     if path.parts[:1] == ("lib",):
         # tests.test_<stem>_generated is the same mechanical basename-only
         # probe as tests.test_<stem> above, just for the generated sibling

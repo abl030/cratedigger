@@ -123,12 +123,13 @@ class TestTargetedTestSelection(unittest.TestCase):
     def test_final_gate_wrapper_change_selects_the_gate_contract_tests(
         self,
     ) -> None:
-        """The wrapper is a `.sh` file, so nothing resolves a neighbour for
-        it by basename the way `_direct_test_candidates` does for Python
-        modules -- before its EXACT_PATH_NEIGHBOURS entry, deleting the one
-        `exec` line that reaches the real gate selected nothing at all, and
-        no coverage audit noticed (the scripts/ registry audits only
-        `scripts/**/*.py`).
+        """Before its EXACT_PATH_NEIGHBOURS entry, deleting the one `exec`
+        line that reaches the real gate selected nothing at all, and no
+        coverage audit noticed -- the scripts/ registry policed only
+        `scripts/**/*.py` until issue #1278 item 9 put `.sh` on the same
+        rule. The basename probe item 9 added does not cover this file
+        either: there is no tests/test_run_final_gate.py, so the entry is
+        still what selects the gate's real contract tests.
         """
         selected = expand_test_selection(
             (),
@@ -137,6 +138,36 @@ class TestTargetedTestSelection(unittest.TestCase):
         )
 
         self.assertIn("tests.test_final_gate_receipt", selected)
+
+    def test_unmapped_shell_wrapper_fails_closed_with_its_name(self) -> None:
+        """Issue #1278 item 9: a `scripts/**/*.sh` wrapper that resolves no
+        neighbour must fail closed exactly as its `.py` siblings do. Until
+        the scripts/ root rule policed `.sh`, thirteen of the sixteen real
+        wrappers selected nothing at all and nothing said so.
+
+        The probe path need not exist on disk -- `_changed_path_neighbours`
+        never stats its own target, only candidate test modules.
+        """
+        with self.assertRaisesRegex(
+            ValueError,
+            r"scripts/_totally_unmapped_probe\.sh",
+        ):
+            _changed_path_neighbours(
+                "scripts/_totally_unmapped_probe.sh", REPO_ROOT
+            )
+
+    def test_shell_wrapper_resolves_its_basename_test_module(self) -> None:
+        """The `.sh` basename probe is the same mechanical convention the
+        `.py` roots already had: `scripts/fuzz_burst.sh` resolves
+        `tests.test_fuzz_burst` with no hand-written entry of its own.
+        """
+        selected = expand_test_selection(
+            (),
+            changed_paths=("scripts/fuzz_burst.sh",),
+            repo_root=REPO_ROOT,
+        )
+
+        self.assertIn("tests.test_fuzz_burst", selected)
 
     def test_pipeline_db_change_adds_shared_boundary_contracts(self) -> None:
         selected = expand_test_selection(
