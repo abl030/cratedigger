@@ -98,6 +98,16 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_pipeline_db_decisions",
         "tests.test_pipeline_db_decisions_generated",
     ),
+    "lib/startup_reconciliation.py": (
+        # Was an admitted zero-neighbour gap (issue #1199, measured
+        # 2026-08-19): there is no tests.test_startup_reconciliation, so
+        # the basename probes found nothing. Its real coverage has always
+        # lived in TestStartupReconciliationSlice, which drives
+        # reconcile_search_plans end to end against FakePipelineDB plus
+        # the real SearchPlanService — including the dry-run bucket
+        # classifier this file's #1278 item 7 change delegates.
+        "tests.test_integration_slices",
+    ),
     "pyrightconfig.json": (
         "tests.test_pyright_checks",
     ),
@@ -1084,11 +1094,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "measured 2026-08-19: zero neighbours -- "
         "tests.test_slskd_transfers does not exist and no EXACT_PATH_"
         "NEIGHBOURS/prefix rule covers it (issue #1199)"
-    ),
-    "lib/startup_reconciliation.py": (
-        "measured 2026-08-19: zero neighbours -- "
-        "tests.test_startup_reconciliation does not exist and no "
-        "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
     ),
     "lib/v0_probe.py": (
         "measured 2026-08-19: zero neighbours -- tests.test_v0_probe does "
