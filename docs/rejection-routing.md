@@ -307,10 +307,12 @@ producer_audit.py`'s registered producer files —
   the audit naming the unmoved path, exactly as it did before this fix.
 - **Never consumes a Wrong Matches source on success or failure** — unlike
   force's D7 routing above. `scripts/importer.py::
-  _force_job_wrong_match_payload` returns `None` for any job whose
-  `job_type != 'force_import'` BY CONSTRUCTION, so `_dismiss_successful_
-  force_import` / `_cleanup_failed_force_import` are no-ops for every
-  local-import job regardless of outcome — there is no "original quarantine
+  _force_job_wrong_match_payload` returns `None` for any job whose kind
+  adapter does not set `owns_wrong_match_source` — since issue #1278 that
+  registry flag, not a `job_type != 'force_import'` comparison, is the
+  mechanism, and `force_import` is the only kind that sets it. So
+  `_dismiss_successful_force_import` / `_cleanup_failed_force_import` are
+  no-ops for every local-import job regardless of outcome — there is no "original quarantine
   folder" for this lane to consume; a local import's REAL source is the
   operator's folder, which this lane never deletes, moves, or otherwise
   mutates. `lib/pipeline_db/import_jobs.py::

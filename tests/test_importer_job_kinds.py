@@ -145,6 +145,30 @@ class TestImportJobKindRegistry(unittest.TestCase):
                     importer._kind_for(job_type).authority, authority,
                 )
 
+    def test_the_three_authority_classes_have_distinct_values(self) -> None:
+        """Equal values would silently merge two authority classes.
+
+        ``process_claimed_job`` derives ``is_automation``/``is_force`` by
+        comparing ``kind.authority`` against these constants, so colliding
+        two of their VALUES makes one class answer for the other while
+        every per-kind assertion above still passes. Traced inert in
+        production today — collapsing ``_AUTHORITY_PLAIN`` into
+        ``_AUTHORITY_PINNED_PAIR`` changes nothing observable, because both
+        kinds holding it (youtube, and the unrouted kind) claim via
+        ``_claim_route_plain``, which passes neither a cancellation token
+        nor a pinned session; with both ``None`` the paired check does not
+        trip and every ``is_force`` branch is skipped, so the flipped flag
+        has nothing to forward. A future pinned-session route for such a
+        kind would make it live, which is why the guard is here rather than
+        waiting for the second ingredient.
+        """
+        authorities = (
+            importer._AUTHORITY_AUTOMATION,
+            importer._AUTHORITY_PINNED_PAIR,
+            importer._AUTHORITY_PLAIN,
+        )
+        self.assertEqual(len(set(authorities)), len(authorities))
+
     # (job_type, runs the committed wrong-match rejection convergence,
     #  owns an originating Wrong Matches source row)
     WRONG_MATCH_ROLES: ClassVar[list[tuple[str, bool, bool]]] = [
@@ -308,8 +332,44 @@ class TestCommittedWrongMatchGateIsRead(unittest.TestCase):
     ``scripts/targeted_test_selection.py`` names for ``scripts/importer.py``
     (662 tests, green).
 
-    The observable is ``validation_result.wrong_match_triage``, whose only
-    producer is the reducer the gate admits to
+    **Scope, per site.** ``process_claimed_job`` reads the flag at two
+    places. This class drives ``DispatchOutcome(success=False, ...)``, so it
+    constrains the terminal-FAILURE site only. The terminal-SUCCESS site
+    (inside ``if outcome.success:`` / ``if outcome.terminal_outcome is not
+    None:``) stays unpinned here, and an ``if True:``/``if False:`` mutant
+    at that site alone survives this module.
+
+    That site is reachable — an ordinary accepted force/local/youtube import
+    with a terminal bundle — but it can never carry a wrong-match scenario.
+    Every production site that sets ``post_commit_wrong_match_scenario`` to
+    a non-None value passes ``success=False`` literally at the same
+    construction (``lib/download_rejection.py`` twice,
+    ``lib/dispatch/outcome_actions.py`` once, and this module's own replay
+    reconstructor); and the one production path that flips an existing
+    outcome's ``success`` to True — ``lib/dispatch/core.py``'s
+    ``_DispatchSettlement``, assembled by
+    ``_dispatch_outcome_from_settlement`` — has no scenario field at all
+    and builds its ``DispatchOutcome`` without one. So the success site
+    always calls the helper with ``scenario=None``.
+
+    Measured, NOT assumed: ``scenario=None`` does not make the helper a
+    no-op — ``rejection_scenario_is_wrong_match_candidate(None)`` is True,
+    so it still performs the candidate-evidence attribution and only then
+    returns at the delete-eligibility guard, never reaching the reducer.
+    The success site therefore decides exactly one thing: whether an
+    accepted job's candidate evidence is attributed onto its download_log
+    row. Pinning THAT needs a success-shaped
+    ``PendingImportTerminalOutcome`` for a force job and a local job. Its
+    real producers are ``lib/dispatch/outcome_actions.py``'s accept path
+    and ``lib/download.py::_local_completion_terminal_outcome`` (the
+    automation-completion builder, which neither of these two lanes uses),
+    so reaching one honestly costs an integration-slice-sized fixture.
+    Hand-building the bundle instead would be the Rule C literal this file
+    must not write, so the success site is a stated residual, unchanged in
+    kind from before the refactor.
+
+    The observable below is ``validation_result.wrong_match_triage``, whose
+    only producer is the reducer the gate admits to
     (``lib.wrong_match_cleanup_service.cleanup_wrong_match``, via
     ``db.record_wrong_match_triage``) — measured rather than assumed: the
     row's ``candidate_evidence_id`` does NOT discriminate, because the

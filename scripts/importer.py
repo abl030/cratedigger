@@ -185,12 +185,21 @@ def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
 # --- Per-kind import job adapters ------------------------------------------
 #
 # One registry answers "which import job kind is this" for every
-# job-type-dependent fact in this module: which executor runs the job, which
-# claim route ``run_once`` takes, which execution authority
+# job-type-DISPATCH decision in this module: which executor runs the job,
+# which claim route ``run_once`` takes, which execution authority
 # ``process_claimed_job`` demands, whether the kind retains a job-scoped
 # private action copy, and which of the two Wrong Matches roles it plays.
-# Every consumer below reads the kind instead of re-deriving the answer from
-# ``job.job_type`` at its own point of use.
+# Every such consumer below reads the kind instead of re-deriving the answer
+# from ``job.job_type`` at its own point of use.
+#
+# One job-type decision deliberately stays OUTSIDE the registry:
+# ``_automation_claim_is_current``'s ``current.job_type ==
+# IMPORT_JOB_AUTOMATION`` is one clause of an exact-identity conjunction
+# over a re-read owner row (id, request_id, status, preview_status, launch
+# fence, lease, owner pointer), not a routing question. Restating it as an
+# authority-class comparison would weaken it, since two kinds may share an
+# authority class. The remaining ``job.job_type`` reads below are log
+# arguments and message interpolation, which are not decisions at all.
 #
 # The four lanes stay four: this is convergence of dispatch, never a fifth
 # Beets-mutation lane (CLAUDE.md § Decision architecture).
@@ -370,7 +379,12 @@ class _ImportJobKind:
     #: audit.py``'s deliberately bounded grammar treats every ``.execute(...)``
     #: call as a DB cursor executing SQL it must resolve statically, and a
     #: registry-dispatched call cannot be. The name matches this module's own
-    #: ``execute_fn`` kwarg convention anyway.
+    #: ``execute_fn`` kwarg convention anyway. Note the module now spells
+    #: ``execute_fn`` for two different things: THIS is the fixed per-kind
+    #: adapter, chosen by job type and never injected, whereas
+    #: ``run_once``/``process_claimed_job``/``_ClaimAttempt``'s ``execute_fn``
+    #: is the injectable executor seam (default ``execute_import_job``) that a
+    #: caller may replace. The registry selects; the seam substitutes.
     execute_fn: _JobKindExecutor
     claim_route: _JobKindClaimRoute
     #: The job-scoped private action copy this lane retains, if any.
@@ -2629,7 +2643,10 @@ def _claim_route_plain(
     )
 
 
-#: The one place every job-type-dependent fact in this module is decided.
+#: The one place every job-type-DISPATCH decision in this module is made.
+#: ``_automation_claim_is_current``'s identity conjunction is the one
+#: job-type decision that stays outside it, deliberately — see the section
+#: comment above ``_AUTHORITY_AUTOMATION``.
 _IMPORT_JOB_KINDS: dict[str, _ImportJobKind] = {
     IMPORT_JOB_FORCE: _ImportJobKind(
         authority=_AUTHORITY_PINNED_PAIR,
