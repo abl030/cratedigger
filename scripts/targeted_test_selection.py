@@ -896,15 +896,17 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_pipeline_cli",
         "tests.test_pipeline_cli_api_mutations",
     ),
-    # scripts/**/*.sh (issue #1278 item 9). Sixteen shell wrappers had no
-    # fail-closed selection story at all: `_direct_test_candidates` only
-    # ever probed .py paths, so every one of them resolved zero neighbours
-    # SILENTLY -- scripts/run_final_gate.sh is the measured instance (it
-    # had no entry until item 6, so wrapper edits selected nothing). The
-    # scripts/ root rule now polices `.sh` too, and the same basename probe
-    # resolves five of them (daily_beets_tip_update, daily_flake_update,
-    # daily_resource_monitor, fuzz_burst, world_model_burst -- each has a
-    # real tests/test_<stem>.py). The six below need an explicit entry, and
+    # scripts/**/*.sh (issue #1278 item 9). The sixteen shell wrappers had
+    # no fail-closed selection story at all: `_direct_test_candidates` only
+    # ever probed .py paths, so any wrapper without a hand-written entry
+    # resolved zero neighbours SILENTLY -- thirteen of the sixteen,
+    # measured 2026-08-31. scripts/run_final_gate.sh is the instance that
+    # was actually paid for: it had no entry through the whole of item 6,
+    # so every wrapper edit selected nothing. The scripts/ root rule now
+    # polices `.sh` too, and the same basename probe resolves five of them
+    # (daily_beets_tip_update, daily_flake_update, daily_resource_monitor,
+    # fuzz_burst, world_model_burst -- each has a real
+    # tests/test_<stem>.py). The six below need an explicit entry, and
     # scripts/lint.sh + scripts/mcp-playwright.sh are admitted gaps in
     # SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE.
     #
@@ -1293,8 +1295,8 @@ SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
 
 
 #: The stderr line a registered, genuinely zero-neighbour path logs instead
-#: of raising. One template for every non-early-returning rule below, so the
-#: two registries that use it cannot drift in wording.
+#: of raising. One template for every non-early-returning rule below, so
+#: the rules that use it cannot drift in wording.
 ADMITTED_GAP_MESSAGE = (
     "admitted selection gap: {path} resolves zero test neighbours "
     "({rationale})"
@@ -1492,13 +1494,14 @@ def _direct_test_candidates(path: PurePosixPath) -> tuple[str, ...]:
     if path.parts[:1] == ("scripts",) and path.suffix == ".sh":
         # The same mechanical basename-only probe every .py root gets, for
         # the shell wrappers under scripts/ (issue #1278 item 9). Five of
-        # the sixteen already have a tests/test_<stem>.py that drives them;
-        # before this, a .sh path resolved nothing by basename at all, so
-        # scripts/run_final_gate.sh needed a hand-written entry for
-        # coverage a probe can find. The caller still checks the candidate
-        # really exists via _existing_module, so this claims nothing: it is
-        # a naming convention, not evidence that the matched module
-        # executes or reads the wrapper.
+        # the sixteen already have a tests/test_<stem>.py that drives them
+        # and needed no entry once this probe existed; scripts/test_tmpfs.sh
+        # had a hand-written entry naming exactly the module this probe now
+        # finds, and it was deleted as redundant in the same change. The
+        # caller still checks the candidate really exists via
+        # _existing_module, so this claims nothing: it is a naming
+        # convention, not evidence that the matched module executes or
+        # reads the wrapper.
         return (f"tests.test_{stem}",)
     if path.suffix != ".py":
         return ()
