@@ -5389,7 +5389,7 @@ class TestDownloadLog(unittest.TestCase):
     def test_staged_path_failures_round_trip_to_neutral_history_copy(self):
         """The real writer/read projections feed the real history presenters."""
         from lib.failure_presentation import FailureEvidence, present_failure
-        from web.classify import LogEntry, classify_log_entry
+        from web.download_history_view import build_recents_download_log_rows
 
         cases = (
             (
@@ -5438,12 +5438,12 @@ class TestDownloadLog(unittest.TestCase):
                     row for row in self.db.get_log(limit=10)
                     if row["id"] == log_id
                 )
-                entry = LogEntry.from_row(dict(recent_row))
-                classified = classify_log_entry(entry)
-                self.assertIsNone(entry.soulseek_username)
-                self.assertEqual(entry.outcome, "failed")
-                self.assertEqual(classified.verdict, expected)
-                self.assertEqual(classified.summary, expected)
+                classified = build_recents_download_log_rows(
+                    [dict(recent_row)])[0]
+                self.assertIsNone(classified["soulseek_username"])
+                self.assertEqual(classified["outcome"], "failed")
+                self.assertEqual(classified["verdict"], expected)
+                self.assertEqual(classified["summary"], expected)
 
     def test_log_download_round_trip_preserves_transfer_detail(self):
         """Rule A (test-fidelity.md): migration 043's transfer_detail

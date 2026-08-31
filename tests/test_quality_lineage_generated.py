@@ -71,7 +71,7 @@ from tests.helpers import (
     make_audio_corrupt_validation_report,
     make_request_row,
 )
-from web.classify import LogEntry, classify_log_entry
+from web.download_history_view import build_recents_download_log_rows
 
 _LABEL_WHITESPACE = st.text(
     alphabet=(" ", "\t", "\n", "\r", "\v", "\f", "\u00a0", "\u2003"),
@@ -951,37 +951,37 @@ class TestQualityLineagePins(unittest.TestCase):
             current_evidence=current,
         )
         audit = _cleanup_audit_payload(outcome)
-        classified = classify_log_entry(LogEntry(
-            outcome="rejected",
-            validation_result={
+        classified = build_recents_download_log_rows([{
+            "outcome": "rejected",
+            "validation_result": {
                 "scenario": "wrong_match",
                 "wrong_match_triage": msgspec.to_builtins(audit),
             },
-        ))
+        }])[0]
 
         self.assertEqual(
-            classified.source_format,
+            classified["source_format"],
             "MP3" if candidate_lineage == 3 else None,
         )
         self.assertEqual(
-            classified.source_avg_bitrate,
+            classified["source_avg_bitrate"],
             candidate_avg if candidate_lineage == 3 else None,
         )
         self.assertEqual(
-            classified.existing_format,
+            classified["existing_format"],
             "Opus" if current_lineage == 3 else None,
         )
         self.assertEqual(
-            classified.existing_min_bitrate,
+            classified["existing_min_bitrate"],
             current_avg if current_lineage == 3 else None,
         )
-        self.assertEqual(classified.spectral_bitrate, candidate_spectral)
+        self.assertEqual(classified["spectral_bitrate"], candidate_spectral)
         self.assertEqual(
-            classified.existing_spectral_bitrate, current_spectral)
-        self.assertEqual(classified.v0_probe_avg_bitrate, 259)
-        self.assertEqual(classified.existing_v0_probe_avg_bitrate, 260)
+            classified["existing_spectral_bitrate"], current_spectral)
+        self.assertEqual(classified["v0_probe_avg_bitrate"], 259)
+        self.assertEqual(classified["existing_v0_probe_avg_bitrate"], 260)
         self.assertEqual(
-            classified.comparison_basis is not None,
+            classified["comparison_basis"] is not None,
             candidate_lineage == 3 and current_lineage == 3,
         )
 
