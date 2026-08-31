@@ -12,14 +12,16 @@ on.
 
 **Standard library only, deliberately.** Every OTHER Python consumer runs
 inside the Nix dev shell, where third-party dependencies are on the path.
-This module does not: ``scripts/run_final_gate.sh`` is a thin wrapper that
-execs ``final-gate`` here with a bare interpreter, OUTSIDE that shell — the
-gate is what launches ``nix develop --command`` in the first place — and
-``scripts/test_tmpfs.sh`` execs ``write-owner-marker`` here from its shell
-hook, before the shell it is setting up exists. Both shell files used to
-carry their own copies of the ``/proc`` start-ticks read (and the gate, of
-the whole receipt format); folding them onto this one module is only
-possible while it imports nothing but the standard library.
+This module cannot assume that: ``scripts/run_final_gate.sh`` is a thin
+wrapper that execs ``final-gate`` here with whatever bare interpreter is on
+PATH, OUTSIDE any dev shell — the gate is what launches
+``nix develop --command`` in the first place. (``scripts/test_tmpfs.sh``
+runs ``write-owner-marker`` as a subprocess of its shell hook, so THAT
+caller's ``python3`` is the dev shell's own; it is the gate that fixes this
+constraint, not the marker.) Both shell files used to carry their own copies
+of the ``/proc`` start-ticks read (and the gate, of the whole receipt
+format); folding them onto this one module is only possible while it imports
+nothing but the standard library.
 ``tests/test_test_substrate.py`` pins that from both sides: an AST audit of
 this file's imports, and a real subprocess import with third-party
 ``site-packages`` stripped from ``sys.path``. Do not import ``msgspec``,
@@ -33,7 +35,7 @@ Subcommands (each has exactly one caller; do not add a speculative verb):
     ``scripts/run_final_gate.sh``, whose operator interface is unchanged.
 ``write-owner-marker DIRECTORY PID``
     Write the ``.owner`` scratch-tree ownership marker
-    ``_scratch_tree_owner_dead`` reads back. Reached through
+    ``_scratch_tree_owner_dead`` reads back. Run as a subprocess by
     ``scripts/test_tmpfs.sh``'s shell hook. Best-effort: every failure
     exits 0 silently, because a lost marker leaves a tree unreaped
     forever, never wrongly reaped.
@@ -390,8 +392,9 @@ def acquire_suite_admission(
 
 
 #: Name of the typed summary ``scripts/run_test_suite.py::_publish_summary``
-#: writes at the top level of a check bundle, as its very last act. Spelled
-#: once in PRODUCTION code (issue #1278 item 6) because three separate
+#: writes at the top level of a check bundle, in its final publication step
+#: (first of the two files that step writes; ``summary.md`` follows it).
+#: Spelled once in PRODUCTION code (issue #1278 item 6) because three separate
 #: readers depend on it meaning the same file: that writer, this module's own
 #: ``_bundle_last_activity`` (which keys a bundle's staleness on its mtime),
 #: and ``_record_suite_bundle`` below (which refuses to record a bundle
@@ -419,8 +422,9 @@ def _scratch_tree_last_activity(tree: Path) -> float:
 
     ``_bundle_last_activity`` (above) is right for a ``run_suite`` check
     bundle: ``run_suite`` is the bundle's only writer, and it writes
-    ``summary.json`` at the top level as its very last act, so the bundle's
-    own dirent set is exactly what changes as work happens.
+    ``summary.json`` at the top level in its final publication step (with
+    ``summary.md`` written immediately after), so the bundle's own dirent
+    set is exactly what changes as work happens.
 
     A dev-shell scratch tree (``SCRATCH_TREE_PREFIX``) has no such shape
     (issue #1208 review D3). Its own top-level directory mtime is bumped
@@ -1068,12 +1072,17 @@ def check_suite_headroom(runtime: Path, *, minimum_bytes: int) -> None:
 
 
 #: The one command a final-gate receipt may record, and the only thing the
-#: gate ever launches. Spelled once in PRODUCTION code (issue #1278 item 6):
-#: ``scripts/run_test_suite.py`` imports it as its own default ``command``,
-#: ``_run_gate`` writes it into the receipt, and ``_status_receipt`` compares
-#: a receipt's recorded command against it. It was previously spelled in both
-#: that coordinator and ``scripts/run_final_gate.sh``, where a drift would
-#: have made every existing receipt read as non-canonical.
+#: gate ever launches. One spelling for every reader that COMPARES it (issue
+#: #1278 item 6): ``scripts/run_test_suite.py`` imports it as its own default
+#: ``command``, ``_run_gate`` writes it into the receipt, and
+#: ``_status_receipt`` checks a receipt's recorded command against it. It was
+#: previously spelled in both that coordinator and
+#: ``scripts/run_final_gate.sh``, where a drift would silently have made
+#: every existing receipt read as non-canonical. Not an absolute claim about
+#: the repository: ``scripts/daily_flake_update.sh`` and
+#: ``scripts/daily_beets_tip_update.sh`` each spell the same command in their
+#: own dev-shell invocation, where nothing compares it to a receipt and a
+#: drift would fail loudly (a missing script) rather than silently.
 CANONICAL_COMMAND = "bash scripts/run_tests.sh"
 
 #: Operator interface of ``scripts/run_final_gate.sh``, which is now a thin
@@ -1162,10 +1171,15 @@ def _record_suite_bundle(receipt: Path, output_path: Path) -> bool:
     """Validate the bundle path the suite announced and record it.
 
     False means no bundle was recorded; the caller decides whether that is
-    fatal (a PASSING suite owes one) or merely noted. Every rejection
-    reason is reported on stderr as it happens, so a failed validation is
-    never silent — except the no-announcement case, which is the ordinary
-    shape of a suite that died before publishing anything.
+    fatal (a PASSING suite owes one) or merely noted. Every VALIDATION
+    rejection is reported on stderr as it happens, so a bundle rejected on
+    its merits is never rejected silently. Three paths return False without
+    a word, all of them cases where there is nothing to report ON: no
+    announcement at all (the ordinary shape of a suite that died before
+    publishing anything), an unreadable ``output.log``, and a bundle whose
+    resolve/stat raises between the ``lstat`` above and the check below —
+    a directory disappearing mid-validation, which the caller's own
+    "published no valid bundle" message then covers.
     """
     try:
         lines = output_path.read_text(errors="replace").splitlines()
@@ -1223,12 +1237,22 @@ def _record_suite_bundle(receipt: Path, output_path: Path) -> bool:
 def _leave_incomplete_receipt(_signum: int, _frame: FrameType | None) -> None:
     """Exit 128 without publishing a terminal verdict.
 
-    ``os._exit`` rather than ``sys.exit``: the launched suite is a real
-    child of this process and must SURVIVE the helper's own death exactly
-    as it did under the shell's ``trap 'exit 128'`` — an interpreter
-    shutdown here would be the only thing that could disturb it. The
-    receipt line is already flushed by this point, and nothing else has
-    been buffered.
+    ``os._exit`` rather than ``sys.exit``, because it is the exact analog of
+    the shell's ``trap 'exit 128'``: the process is gone at the moment the
+    signal is handled, with no interpreter teardown in between and nothing
+    that can intercept it. A ``SystemExit`` instead only takes effect when
+    the interrupted call returns to the interpreter, and unwinds through
+    every ``finally`` and ``atexit`` handler on the way — any of which could
+    alter this exit status or touch the receipt this handler exists to leave
+    untouched and incomplete.
+
+    NOT for the child's safety, and not to suppress output — both were
+    measured, and neither is a reason: CPython's shutdown does not kill a
+    ``Popen`` child (the suite survives either way, for the same reason it
+    did under bash — nothing signals it), and a ``SystemExit`` raised from
+    this handler exits 128 with an empty stderr, no ``ResourceWarning``
+    among it. Skipping the buffer flush costs nothing here either: the
+    receipt line was flushed explicitly and nothing else has been buffered.
     """
     os._exit(_SIGNAL_EXIT_STATUS)
 
@@ -1282,6 +1306,26 @@ def _await_suite(receipt: Path, output_path: Path) -> int:
     if returncode < 0:
         return _SIGNAL_EXIT_STATUS - returncode
     return returncode
+
+
+def _publish_terminal_verdict(receipt: Path, status: int) -> None:
+    """Land the run's verdict under ``terminal``, atomically.
+
+    Written in full under the staging name and then RENAMED into place, so
+    no reader — a concurrent ``status``, or ``_receipt_is_retirable``'s own
+    existence check — can ever observe a half-written verdict, or a
+    ``terminal`` file that exists before its content does.
+
+    Its own function so that contract is directly drivable: a test can hand
+    it a receipt whose staging name is blocked and prove the verdict never
+    lands, which is exactly what a direct write to ``terminal`` would break
+    while leaving the whole gate suite green.
+    """
+    staging = receipt / RECEIPT_TERMINAL_STAGING_FIELD
+    staging.write_text(
+        f"{_TERMINAL_PASS}\n" if status == 0 else f"fail {status}\n", encoding="utf-8"
+    )
+    staging.replace(receipt / RECEIPT_TERMINAL_FIELD)
 
 
 def _run_gate() -> int:
@@ -1342,11 +1386,7 @@ def _run_gate() -> int:
             file=sys.stderr,
         )
         return 2
-    staging = receipt / RECEIPT_TERMINAL_STAGING_FIELD
-    staging.write_text(
-        f"{_TERMINAL_PASS}\n" if status == 0 else f"fail {status}\n", encoding="utf-8"
-    )
-    staging.replace(receipt / RECEIPT_TERMINAL_FIELD)
+    _publish_terminal_verdict(receipt, status)
     for gate_signal in _GATE_SIGNALS:
         signal.signal(gate_signal, signal.SIG_DFL)
     if status == 0:

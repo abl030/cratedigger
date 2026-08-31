@@ -469,13 +469,16 @@ never by a bash copy). Since the shellHook's own
 entry-time headroom check (`scripts/test_tmpfs.sh`) runs BEFORE this lock is
 even reached, a naive second suite would still die at shell entry under
 contention with the old unnamed message instead of queueing — so every
-automated launcher of the canonical suite (`scripts/test.sh`,
-`scripts/run_final_gate.sh`, `scripts/daily_flake_update.sh`'s
+automated launcher of the canonical suite (`scripts/test.sh`, the final
+gate behind `scripts/run_final_gate.sh` — which since #1278 item 6 sets the
+var in the environment of the `nix develop` child it launches from Python
+rather than shelling out through an `env` prefix,
+`scripts/daily_flake_update.sh`'s
 `deterministic_suite` stage, and `scripts/daily_beets_tip_update.sh`, which
 runs the same suite through `nix develop .#tip` — grep for BOTH
 `nix-shell --run` and `nix develop`, since only the daily-gate stages still
 enter the shell the legacy way) sets
-`CRATEDIGGER_SUITE_OWNS_HEADROOM=1` before its own shell invocation,
+`CRATEDIGGER_SUITE_OWNS_HEADROOM=1` for the dev-shell entry it drives,
 which tells that shellHook check to skip only its free-bytes refusal
 (everything else in `setup_cratedigger_test_tmpfs` still runs); `run_suite`'s
 own post-lock headroom precondition is then the single enforcement point for
@@ -506,7 +509,7 @@ a full Nix evaluation per call for zero additional capability. The six
 calls now invoke `sys.executable` directly, so no test currently spawns a
 NESTED `nix-shell` — but this is not dead machinery: the top-level
 free-bytes skip itself is taken on EVERY suite run launched by
-`scripts/test.sh`, `scripts/run_final_gate.sh`,
+`scripts/test.sh`, the final gate behind `scripts/run_final_gate.sh`,
 `scripts/daily_flake_update.sh`, and `scripts/daily_beets_tip_update.sh`,
 and is pinned by
 `tests/test_test_tmpfs.py::test_suite_owns_headroom_skips_only_the_free_bytes_refusal`.
@@ -541,9 +544,12 @@ much in use, so mtime cannot distinguish "abandoned" from "just idle". A
 prior attempt reaped this prefix on mtime alone and was reverted after
 review found it reaping LIVE trees. The shipped design instead requires
 `_scratch_tree_owner_dead` to PROVE the owning shell process is gone before
-the age gate ever applies to a `cratedigger-tests.*` entry: `test_tmpfs.sh`
-writes a `.owner` marker (`"<pid> <ticks>\n"`, same content shape as the
-admission-lock holder identity below) immediately after `mktemp`, and
+the age gate ever applies to a `cratedigger-tests.*` entry:
+`test_tmpfs.sh`'s shell hook has the marker written immediately after
+`mktemp` (since #1278 item 6 by calling `scripts/test_substrate.py`'s
+`write-owner-marker`, so the `.owner` format — `"<pid> <ticks>\n"`, the same
+content shape as the admission-lock holder identity below — and the `/proc`
+read behind it are spelled beside the reader, not in bash), and
 `_scratch_tree_owner_dead` verifies it with the same pid-reuse-safe
 `_proc_start_ticks` comparison. A live owner is never touched regardless of
 age; a missing or malformed marker fails closed (treated as "unknown,

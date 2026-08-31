@@ -19,8 +19,8 @@ nix-shell --run "python3 -c '...'"                     # one-off
 NEVER run `python3` outside nix-shell in this repo.
 
 `nix develop --command <cmd>` is an exact equivalent and is what
-`scripts/test.sh` and `scripts/run_final_gate.sh` use internally (issue
-#1229): `flake.nix`'s `devShells.default` IS `./nix/shell.nix`, the same
+`scripts/test.sh` runs internally, and what the final gate behind
+`scripts/run_final_gate.sh` launches as its own child (issue #1229): `flake.nix`'s `devShells.default` IS `./nix/shell.nix`, the same
 derivation `shell.nix` delegates to, so the environment — store paths,
 `CRATEDIGGER_BEETS_PYTHON`, and the `scripts/test_tmpfs.sh` shellHook that
 allocates `TMPDIR` — is identical. It is preferred for anything scripted

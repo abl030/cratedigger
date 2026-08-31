@@ -60,6 +60,7 @@ def run_tmpfs_setup_and_print_tmpdir(
 def run_tmpfs_setup_and_hold(
     *,
     env: Mapping[str, str] | None = None,
+    cwd: Path = REPO_ROOT,
 ) -> subprocess.Popen[str]:
     """Drive the real shell helper and keep the owning shell alive, blocked
     on stdin, until the caller lets it proceed.
@@ -75,10 +76,15 @@ def run_tmpfs_setup_and_hold(
     either release it (closing stdin lets `read` return and the script
     exit normally, EXIT trap fires) or SIGKILL it (trap skipped, matching
     the founding incident).
+
+    ``cwd`` is the shell's own working directory, which is a real variable
+    of the world this hook runs in — a dev shell can be entered from
+    anywhere — and is what the marker call's repo-root resolution has to
+    survive (issue #1278 item 6).
     """
     return subprocess.Popen(
         ["bash", "-c", TMPFS_SETUP_AND_HOLD, "bash", str(TMPFS_SETUP)],
-        cwd=REPO_ROOT,
+        cwd=cwd,
         env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -105,10 +111,10 @@ def low_headroom_environment(
     """Force the helper's real default tmpfs root below the headroom gate.
 
     Explicitly clears CRATEDIGGER_SUITE_OWNS_HEADROOM: when this test suite
-    itself runs via scripts/test.sh or run_final_gate.sh, THAT wrapper sets
-    the var in the ambient environment for its whole nix-shell invocation
-    (issue #1111 review M2), so a naive dict(os.environ) copy here would
-    silently inherit the skip and defeat the very refusal this fixture
+    itself runs via scripts/test.sh or the final gate, THAT launcher sets
+    the var in the ambient environment of the whole dev-shell invocation it
+    drives (issue #1111 review M2), so a naive dict(os.environ) copy here
+    would silently inherit the skip and defeat the very refusal this fixture
     exists to force.
     """
     env = dict(os.environ)
@@ -176,9 +182,9 @@ class TestTmpfsSetup(unittest.TestCase):
         )
 
     def test_suite_owns_headroom_skips_only_the_free_bytes_refusal(self) -> None:
-        """Issue #1111 review M2: scripts/test.sh and run_final_gate.sh set
-        CRATEDIGGER_SUITE_OWNS_HEADROOM=1 before their own nix-shell
-        invocation so run_suite()'s own post-lock headroom precondition is
+        """Issue #1111 review M2: scripts/test.sh and the final gate set
+        CRATEDIGGER_SUITE_OWNS_HEADROOM=1 for the dev-shell invocation each
+        drives, so run_suite()'s own post-lock headroom precondition is
         the single enforcement point for suite runs — this proves the skip
         applies to the free-bytes check specifically (setup still runs,
         allocating a real TMPDIR) rather than disabling the guard wholesale.
@@ -415,46 +421,20 @@ class ScratchTreeOwnershipMarkerTestCase(unittest.TestCase):
             if tree is not None:
                 shutil.rmtree(tree, ignore_errors=True)
 
-    def test_owner_marker_write_failure_does_not_leak_a_stray_diagnostic(
+    def test_marker_is_written_when_the_shell_is_entered_from_elsewhere(
         self,
     ) -> None:
-        """Issue #1208 review D5: bash redirections apply LEFT TO RIGHT,
-        so a naive ``>file 2>/dev/null`` order does NOT suppress a failed
-        OPEN of ``file`` — the diagnostic prints on the still-live
-        original stderr before ``2>/dev/null`` is even installed.
-        Overrides ``mktemp`` to chmod the real scratch tree read-only the
-        instant it is created, forcing the real ``.owner`` write inside
-        ``setup_cratedigger_test_tmpfs`` to fail exactly the way a
-        full/permission-denied tmpfs does — reproduced against the real
-        function, not a snippet in isolation. Uses the same held-shell
-        pattern as the round-trip test above (not a plain
-        ``subprocess.run``): the EXIT trap removes the read-only-but-empty
-        tree the instant the script would otherwise exit, so the marker's
-        absence can only be observed while the shell is still genuinely
-        alive and deliberately blocked before that point."""
-        override_mktemp_readonly = (
-            "mktemp() {\n"
-            "    local real_dir\n"
-            '    real_dir=$(command mktemp "$@") || return 1\n'
-            '    chmod 500 "$real_dir"\n'
-            '    printf "%s\\n" "$real_dir"\n'
-            "}\n"
-            "export -f mktemp\n"
-        )
-        proc = subprocess.Popen(
-            [
-                "bash",
-                "-c",
-                override_mktemp_readonly + TMPFS_SETUP_AND_HOLD,
-                "bash",
-                str(TMPFS_SETUP),
-            ],
-            cwd=REPO_ROOT,
-            env=allocation_environment(),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        """A dev shell's working directory is not guaranteed to be the
+        repository root — `nix develop <path>`, or entry from any
+        subdirectory — and the marker call must still find the substrate
+        (issue #1278 item 6). Resolving it relative to $PWD writes NO
+        marker here, silently re-opening the leak the marker exists to
+        close, which is why nix/shell.nix already anchors its own two GC
+        roots at the repo top level (issue #1208 item 3). Drives the real
+        hook from a real subdirectory and proves the marker landed by
+        feeding it to the real reader."""
+        proc = run_tmpfs_setup_and_hold(
+            env=allocation_environment(), cwd=REPO_ROOT / "scripts"
         )
         tree: Path | None = None
         try:
@@ -467,34 +447,114 @@ class ScratchTreeOwnershipMarkerTestCase(unittest.TestCase):
                 )
             tree = Path(tmpdir_line.strip())
 
-            # The shell is still blocked at `read` here — genuinely alive
-            # and holding the read-only tree open — so this observes the
-            # write's real outcome, not the EXIT trap's aftermath.
+            marker = tree / SCRATCH_TREE_OWNER_MARKER_NAME
+            deadline = time.monotonic() + 5.0
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+
+            self.assertTrue(
+                marker.exists(),
+                "a shell entered outside the repository root wrote no "
+                "ownership marker, so its scratch tree can never be reaped",
+            )
+            self.assertFalse(_scratch_tree_owner_dead(tree))
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
+            if tree is not None:
+                shutil.rmtree(tree, ignore_errors=True)
+
+    def test_a_failing_marker_command_leaks_nothing_into_shell_entry(
+        self,
+    ) -> None:
+        """The marker call must be silent on BOTH streams even when the
+        command itself fails before the CLI can be silent for us.
+
+        Issue #1278 item 6 replaced the inline ``.owner`` write (whose
+        failure mode was a bash redirection-ordering hazard, issue #1208
+        review D5) with a subprocess call, which moves the exposure: the
+        CLI exits 0 and says nothing by construction, but the COMMAND can
+        still fail before that — no ``python3`` on PATH, an interpreter
+        that cannot start — and then it is bash's own diagnostic, or the
+        child's output, that would land on the shell hook's streams. Both
+        matter: stdout is how this hook's caller reads TMPDIR, and stderr
+        is what an operator sees at every dev-shell entry.
+
+        Drives the REAL ``setup_cratedigger_test_tmpfs`` with a ``python3``
+        on PATH that fails loudly on both streams — a broken interpreter,
+        which is what a GC'd store path or a stripped PATH really looks
+        like here. Uses the held-shell pattern (not a plain
+        ``subprocess.run``) so the marker's absence is observed while the
+        owning shell is still genuinely alive, before its EXIT trap
+        removes the tree."""
+        failing_python = Path(tempfile.mkdtemp(prefix="cratedigger-fake-python3-"))
+        self.addCleanup(shutil.rmtree, failing_python, True)
+        shim = failing_python / "python3"
+        shim.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'marker stdout noise\\n'\n"
+            "printf 'marker stderr noise\\n' >&2\n"
+            "exit 1\n"
+        )
+        shim.chmod(0o755)
+        env = allocation_environment()
+        env["PATH"] = f"{failing_python}:{env['PATH']}"
+
+        proc = run_tmpfs_setup_and_hold(env=env)
+        tree: Path | None = None
+        try:
+            assert proc.stdout is not None
+            tmpdir_line = proc.stdout.readline()
+            if not tmpdir_line:
+                self.fail(
+                    "no TMPDIR line from the real setup function; "
+                    f"stderr={proc.stderr.read() if proc.stderr else ''!r}"
+                )
+            tree = Path(tmpdir_line.strip())
+
+            # The first stdout line must be the TMPDIR itself, not the
+            # child's noise: a lost `>/dev/null` would put "marker stdout
+            # noise" here instead, breaking every caller that reads TMPDIR
+            # from this stream.
+            self.assertTrue(tree.name.startswith(SCRATCH_TREE_PREFIX), tmpdir_line)
+            # Still blocked at `read`, so this is the marker call's real
+            # outcome rather than the EXIT trap's aftermath.
             self.assertTrue(tree.exists())
             self.assertFalse(
                 (tree / SCRATCH_TREE_OWNER_MARKER_NAME).exists(),
-                "the marker write should have failed on the read-only tree",
+                "the failing interpreter should have written no marker",
             )
 
             # A blank line, not a bare close: bash's `read` returns
             # non-zero on EOF-without-a-line, which the EXIT trap would
             # then propagate as this script's own exit status — nothing
-            # to do with the diagnostic-suppression fix under test, but a
-            # real newline lets `read` succeed normally so the script's
-            # actual exit code reflects the setup itself, not this
-            # release mechanism's own plumbing.
+            # to do with the suppression under test, but a real newline
+            # lets `read` succeed normally so the script's actual exit
+            # code reflects the setup itself, not this release
+            # mechanism's own plumbing.
             assert proc.stdin is not None
             proc.stdin.write("\n")
             proc.stdin.close()
             stderr_output = proc.stderr.read() if proc.stderr else ""
+            remaining_stdout = proc.stdout.read()
             proc.wait(timeout=5)
 
             self.assertEqual(proc.returncode, 0, stderr_output)
             self.assertEqual(
                 stderr_output,
                 "",
-                "the failed .owner write leaked a diagnostic instead of "
+                "the failed marker command leaked a diagnostic instead of "
                 "being silently suppressed",
+            )
+            self.assertEqual(
+                remaining_stdout,
+                "",
+                "the failed marker command leaked output onto the stream "
+                "this hook's caller reads TMPDIR from",
             )
         finally:
             if proc.poll() is None:
@@ -503,8 +563,7 @@ class ScratchTreeOwnershipMarkerTestCase(unittest.TestCase):
             for pipe in (proc.stdin, proc.stdout, proc.stderr):
                 if pipe is not None:
                     pipe.close()
-            if tree is not None and tree.exists():
-                tree.chmod(0o700)
+            if tree is not None:
                 shutil.rmtree(tree, ignore_errors=True)
 
 
@@ -553,6 +612,15 @@ class OwnerMarkerCliTestCase(unittest.TestCase):
         owner = subprocess.Popen(["sleep", "60"])
         self.addCleanup(owner.wait)
         self.addCleanup(owner.kill)
+        # Start ticks have 10ms resolution (USER_HZ=100), so a CLI child
+        # spawned immediately after the owner usually lands in the SAME
+        # bucket — and a mutant that records the CLI's OWN ticks instead of
+        # the requested pid's then writes a coincidentally matching value
+        # and survives (measured: killed ~40% of runs). Two full tick
+        # boundaries of separation makes the two processes' start times
+        # differ by construction, so this test's verdict depends on which
+        # pid was read rather than on scheduling luck.
+        time.sleep(0.05)
 
         completed = self._write_marker(tree, owner.pid)
 
