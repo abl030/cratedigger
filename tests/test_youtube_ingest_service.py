@@ -179,7 +179,12 @@ class TestOutcomeMapsAreComplete(unittest.TestCase):
     in ``tests/test_surface_outcomes.py``."""
 
     def test_every_submit_outcome_has_an_entry(self) -> None:
-        """Every value in the ``SubmitOutcome`` Literal must map."""
+        """Both maps cover the hand-pinned expected vocabulary.
+
+        (The Literal↔map agreement itself is the central audit's job —
+        this pin is deliberately a hand-typed set, so changing the
+        vocabulary requires touching two places on purpose.)
+        """
         expected = {
             "accepted",
             "request_not_found",
@@ -191,6 +196,29 @@ class TestOutcomeMapsAreComplete(unittest.TestCase):
         }
         self.assertEqual(set(OUTCOME_HTTP_STATUS), expected)
         self.assertEqual(set(OUTCOME_EXIT_CODE), expected)
+
+    def test_outcome_values_pin_the_status_and_exit_code(self) -> None:
+        """Full value pins for both maps (mutant-runner finding on the
+        founding PR: this module had key-set coverage only, so a
+        remapped status died nowhere locally)."""
+        self.assertEqual(OUTCOME_HTTP_STATUS, {
+            "accepted": 200,
+            "request_not_found": 404,
+            "wrong_state": 409,
+            "in_flight": 409,
+            "no_resolver_mapping": 422,
+            "track_count_precheck_failed": 422,
+            "transient": 503,
+        })
+        self.assertEqual(OUTCOME_EXIT_CODE, {
+            "accepted": 0,
+            "request_not_found": 2,
+            "wrong_state": 4,
+            "in_flight": 4,
+            "no_resolver_mapping": 3,
+            "track_count_precheck_failed": 3,
+            "transient": 5,
+        })
 
 
 # ---------------------------------------------------------------------------

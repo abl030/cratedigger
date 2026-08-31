@@ -95,11 +95,18 @@ _MAP_ATTR_RE = re.compile(r"[A-Z0-9_]*(_HTTP_STATUS|_EXIT_CODES?)$")
 
 
 def _outcome_map_attrs(module_name: str) -> set[str]:
-    """Names of module-level str→int dicts spelled like outcome maps."""
+    """Names of module-level str→int dicts spelled like outcome maps.
+
+    Leading-underscore names are NOT skipped (mutant-runner finding E3 on
+    the founding PR: a private rename dodged the sweep entirely). The
+    grammar itself stays the bound — a dict named outside the
+    ``*_HTTP_STATUS`` / ``*_EXIT_CODE(S)`` suffixes is invisible here, as
+    the module docstring states.
+    """
     module = importlib.import_module(module_name)
     found: set[str] = set()
     for name, value in vars(module).items():
-        if name.startswith("_") or not _MAP_ATTR_RE.fullmatch(name):
+        if not _MAP_ATTR_RE.fullmatch(name.lstrip("_")):
             continue
         if isinstance(value, dict) and all(
             isinstance(k, str) and isinstance(v, int) for k, v in value.items()
@@ -190,6 +197,13 @@ class TestExitCodeForHttpStatus(unittest.TestCase):
     def test_exit_overrides_pin_exact_statuses_only(self) -> None:
         self.assertEqual(exit_code_for_http_status(410, {410: 4}), 4)
         self.assertEqual(exit_code_for_http_status(404, {410: 4}), 2)
+
+    def test_exit_overrides_take_precedence_over_the_default_table(self) -> None:
+        # Mutant-runner finding A2 on the founding PR: both production
+        # override dicts happen to use statuses the default table never
+        # maps (410/500), so only this pin holds the documented contract —
+        # an override wins even for an in-table status.
+        self.assertEqual(exit_code_for_http_status(409, {409: 3}), 3)
 
     def test_known_statuses_are_the_documented_vocabulary(self) -> None:
         self.assertEqual(
