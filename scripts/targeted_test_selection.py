@@ -6,6 +6,7 @@ import subprocess
 import sys
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 ALWAYS_AMBIENT_TESTS = (
@@ -1191,6 +1192,98 @@ SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
 }
 
 
+#: The stderr line a registered, genuinely zero-neighbour path logs instead
+#: of raising. One template for every non-early-returning rule below, so the
+#: two registries that use it cannot drift in wording.
+ADMITTED_GAP_MESSAGE = (
+    "admitted selection gap: {path} resolves zero test neighbours "
+    "({rationale})"
+)
+
+
+@dataclass(frozen=True)
+class RootCoverageRule:
+    """One repository root's fail-closed zero-neighbour contract.
+
+    The three roots that police under-selection (`tests/`, `lib/`,
+    `scripts/`) had three structurally identical branches in
+    `_changed_path_neighbours`, each with its own registry and its own
+    error string (issue #1278 item 9). This is that shape as data: a root,
+    the file suffixes it polices, its admitted-gap registry, and the exact
+    message an unmapped path raises. The registries themselves stay
+    hand-maintained data — nothing here infers coverage from an import
+    graph.
+
+    `admitted_selects_nothing` is the one real behavioural difference
+    between the rows. The `tests/` registry early-returns BEFORE resolution
+    (a registration must not be a lookalike neighbour set — issue #1081),
+    so a registered `tests/` path never reaches the post-resolution branch
+    at all. The `lib/` and `scripts/` registries do not early-return: full
+    resolution runs first, and a registered path merely logs
+    `ADMITTED_GAP_MESSAGE` on the way out, so a path that later gains real
+    coverage selects it immediately (issues #1199, #1248).
+    """
+
+    root: str
+    suffixes: tuple[str, ...]
+    registry: Mapping[str, str]
+    registry_name: str
+    admitted_selects_nothing: bool
+    unmapped_message: str
+
+    def covers(self, path: PurePosixPath) -> bool:
+        """True when this rule polices ``path``'s root and file suffix."""
+        return path.parts[:1] == (self.root,) and path.suffix in self.suffixes
+
+
+#: Root → admitted-gap registry → fail-closed behaviour, one row per root.
+#: `_changed_path_neighbours` and the import-time double-registration guard
+#: both loop this table, and
+#: `tests/test_selection_coverage_audit.py` parameterizes over it rather
+#: than naming roots by hand.
+ROOT_COVERAGE_RULES: tuple[RootCoverageRule, ...] = (
+    RootCoverageRule(
+        root="tests",
+        suffixes=(".py",),
+        registry=SHARED_MODULES_WITHOUT_COVERAGE,
+        registry_name="SHARED_MODULES_WITHOUT_COVERAGE",
+        admitted_selects_nothing=True,
+        # Names only the real mapping mechanisms — never advertises the
+        # admitted-gap registry as the easy way out (a registration there
+        # is a reviewed admission, issue #1081).
+        unmapped_message=(
+            "unmapped shared test module: {path} — add an "
+            "EXACT_PATH_NEIGHBOURS entry or a prefix rule for it in "
+            "scripts/targeted_test_selection.py"
+        ),
+    ),
+    RootCoverageRule(
+        root="lib",
+        suffixes=(".py",),
+        registry=LIB_MODULES_WITHOUT_SELECTION_COVERAGE,
+        registry_name="LIB_MODULES_WITHOUT_SELECTION_COVERAGE",
+        admitted_selects_nothing=False,
+        unmapped_message=(
+            "unmapped lib module: {path} resolves zero test "
+            "neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
+            "prefix rule for it in scripts/targeted_test_selection.py"
+        ),
+    ),
+    RootCoverageRule(
+        root="scripts",
+        suffixes=(".py",),
+        registry=SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE,
+        registry_name="SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE",
+        admitted_selects_nothing=False,
+        unmapped_message=(
+            "unmapped scripts module: {path} resolves zero "
+            "test neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
+            "prefix rule for it in scripts/targeted_test_selection.py"
+        ),
+    ),
+)
+
+
 def _assert_no_double_registration(
     exact_path_neighbours: Mapping[str, tuple[str, ...]],
     admitted_gap_registry: Mapping[str, str],
@@ -1223,17 +1316,12 @@ def _assert_no_double_registration(
         )
 
 
-_assert_no_double_registration(EXACT_PATH_NEIGHBOURS, SHARED_MODULES_WITHOUT_COVERAGE)
-_assert_no_double_registration(
-    EXACT_PATH_NEIGHBOURS,
-    LIB_MODULES_WITHOUT_SELECTION_COVERAGE,
-    gap_registry_name="LIB_MODULES_WITHOUT_SELECTION_COVERAGE",
-)
-_assert_no_double_registration(
-    EXACT_PATH_NEIGHBOURS,
-    SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE,
-    gap_registry_name="SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE",
-)
+for _rule in ROOT_COVERAGE_RULES:
+    _assert_no_double_registration(
+        EXACT_PATH_NEIGHBOURS,
+        _rule.registry,
+        gap_registry_name=_rule.registry_name,
+    )
 
 
 def _module_path(module: str, repo_root: Path) -> Path:
@@ -1318,16 +1406,25 @@ def _resolve_neighbours(
     relative_path: str,
     path: PurePosixPath,
     repo_root: Path,
+    *,
+    exact_path_neighbours: Mapping[str, tuple[str, ...]] = EXACT_PATH_NEIGHBOURS,
 ) -> list[str]:
     """The full EXACT_PATH_NEIGHBOURS + self-selector + direct-candidate +
-    prefix-rule resolution, with NEITHER admitted-gap registry's fail-closed
-    check applied yet. Split out of _changed_path_neighbours so both the
-    tests/ and lib/ fail-closed checks can run against the SAME raw result,
-    and so a one-off measurement (issue #1199 item 1's registry population)
-    can call this directly without tripping the fail-closed raise for every
+    prefix-rule resolution, with NO admitted-gap registry's fail-closed check
+    applied yet. Split out of _changed_path_neighbours so every root rule's
+    fail-closed check can run against the SAME raw result, and so a one-off
+    measurement (issue #1199 item 1's registry population) can call this
+    directly without tripping the fail-closed raise for every
     still-unregistered zero-neighbour file.
+
+    ``exact_path_neighbours`` is a kwarg-DI seam (issue #1278 item 9): pass
+    an empty mapping to measure what a path resolves WITHOUT its
+    hand-authored entry — the "would deleting this entry be visible?"
+    question tests/test_selection_coverage_audit.py's maskable-entry pins
+    exist to answer. It is a definition-time default, so a replacement must
+    be passed explicitly; patching the module binding does not reach it.
     """
-    neighbours: list[str] = list(EXACT_PATH_NEIGHBOURS.get(relative_path, ()))
+    neighbours: list[str] = list(exact_path_neighbours.get(relative_path, ()))
     module = _path_module(path)
     if module is not None and module.startswith("tests."):
         neighbours.append(module)
@@ -1371,79 +1468,42 @@ def _changed_path_neighbours(
     relative_path: str,
     repo_root: Path,
 ) -> tuple[str, ...]:
-    if relative_path in SHARED_MODULES_WITHOUT_COVERAGE:
-        # An admitted gap always selects nothing beyond ambient, regardless
-        # of what a prefix rule below would otherwise contribute — a
-        # registration must not be a lookalike neighbour set (issue #1081
-        # review round: mirror_harness.py was registered but the
-        # tests/world_model/ prefix rule below would still have populated
-        # WORLD_MODEL_NEIGHBOURS for it).
-        return ()
     path = PurePosixPath(relative_path)
+    for rule in ROOT_COVERAGE_RULES:
+        if rule.admitted_selects_nothing and relative_path in rule.registry:
+            # An admitted gap on such a rule always selects nothing beyond
+            # ambient, regardless of what a prefix rule would otherwise
+            # contribute — a registration must not be a lookalike neighbour
+            # set (issue #1081 review round: mirror_harness.py was
+            # registered but the tests/world_model/ prefix rule would still
+            # have populated WORLD_MODEL_NEIGHBOURS for it).
+            return ()
     neighbours = _resolve_neighbours(relative_path, path, repo_root)
-    if path.suffix == ".py" and path.parts[:1] == ("tests",) and not neighbours:
-        # A non-test .py file under tests/ with no direct self-selector, no
-        # EXACT_PATH_NEIGHBOURS entry, and no matching prefix rule is shared
-        # test infrastructure nobody has mapped to a consuming test. Silently
-        # dropping it under-selects — the more dangerous failure for a test
-        # selector, since the run reports green having exercised nothing
-        # relevant to the change (issue #1081). Fail closed and name the
-        # file so whoever touches it adds the mapping — or, if it genuinely
-        # has none, registers it in SHARED_MODULES_WITHOUT_COVERAGE (that
-        # registration is a reviewed admission, not something this error
-        # should advertise as the easy way out).
-        raise ValueError(
-            f"unmapped shared test module: {relative_path} — add an "
-            "EXACT_PATH_NEIGHBOURS entry or a prefix rule for it in "
-            "scripts/targeted_test_selection.py"
-        )
-    if path.suffix == ".py" and path.parts[:1] == ("lib",) and not neighbours:
-        # The lib/ twin of the tests/-side check above (issue #1199 item 1,
-        # the durable fix behind #1196 item 4): a changed lib/**/*.py file
-        # that resolves zero test neighbours under-selects silently unless
-        # it is an admitted, reviewed gap. Unlike the tests/ case, an
-        # admitted lib/ gap does not return early above — it reaches here
-        # having already tried every real mechanism — so selection proceeds
-        # (ambient gates still run) but logs loudly naming the admitted gap;
-        # no silent caps.
-        if relative_path in LIB_MODULES_WITHOUT_SELECTION_COVERAGE:
+    if not neighbours:
+        for rule in ROOT_COVERAGE_RULES:
+            # A file this rule polices that resolves zero test neighbours
+            # under-selects — the more dangerous failure for a test
+            # selector, since the run reports green having exercised
+            # nothing relevant to the change (issue #1081). Fail closed and
+            # name the file, unless it is an admitted, reviewed gap.
+            if not rule.covers(path):
+                continue
+            rationale = rule.registry.get(relative_path)
+            if rationale is None:
+                raise ValueError(
+                    rule.unmapped_message.format(path=relative_path)
+                )
+            # Reachable only for a rule that does NOT early-return its
+            # admitted gaps (lib/, scripts/): selection proceeds — ambient
+            # gates still run — but logs loudly naming the gap, so a
+            # registration that later gains real coverage selects it with
+            # no code change here. An admitted_selects_nothing rule's
+            # registered paths returned () above and never reach this.
             print(
-                "admitted selection gap: "
-                f"{relative_path} resolves zero test neighbours "
-                f"({LIB_MODULES_WITHOUT_SELECTION_COVERAGE[relative_path]})",
+                ADMITTED_GAP_MESSAGE.format(
+                    path=relative_path, rationale=rationale
+                ),
                 file=sys.stderr,
-            )
-        else:
-            # Mirrors the tests/-side raise above: names only the real
-            # mapping mechanisms, never advertises the admitted-gap
-            # registry as an easy way out (issue #1199 review F6) — a
-            # registration there is a reviewed admission, made by touching
-            # LIB_MODULES_WITHOUT_SELECTION_COVERAGE directly, not something
-            # this error should suggest as equivalent to real coverage.
-            raise ValueError(
-                f"unmapped lib module: {relative_path} resolves zero test "
-                "neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
-                "prefix rule for it in scripts/targeted_test_selection.py"
-            )
-    if path.suffix == ".py" and path.parts[:1] == ("scripts",) and not neighbours:
-        # The scripts/ twin of the lib/ check above (issue #1248): a changed
-        # scripts/**/*.py file that resolves zero test neighbours
-        # under-selects silently unless it is an admitted, reviewed gap.
-        # Same non-early-return shape as the lib/ branch: selection proceeds
-        # (ambient gates still run) either way, only the stderr/raise
-        # differs.
-        if relative_path in SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE:
-            print(
-                "admitted selection gap: "
-                f"{relative_path} resolves zero test neighbours "
-                f"({SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE[relative_path]})",
-                file=sys.stderr,
-            )
-        else:
-            raise ValueError(
-                f"unmapped scripts module: {relative_path} resolves zero "
-                "test neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
-                "prefix rule for it in scripts/targeted_test_selection.py"
             )
     return tuple(neighbours)
 
