@@ -3259,6 +3259,110 @@ if TYPE_CHECKING:
     _fake_db_satisfies_preview_protocol: _PreviewDB = cast("FakePipelineDB", None)
 
 
+class TestBadHashGateReachesPreviewLanes(unittest.TestCase):
+    """The curator bad-rip hash gate must fire through BOTH preview lanes.
+
+    Composition pin (widest-boundary rule): the gate's unit tests in
+    ``tests/test_measurement.py`` drive ``_check_bad_audio_hashes`` with a
+    live DB handle, but production's only ``measure_preimport_state``
+    callers are the two preview lanes — so the lanes must actually pass
+    their DB handle through as the bad-hash port. The pre-fix world passed
+    ``db=None`` from both lanes, leaving 48 curator-reported hashes
+    unreachable (0 matches ever recorded in live evidence/download_log).
+    """
+
+    def _seeded_world(self) -> tuple[FakePipelineDB, str, int]:
+        """Request 42 + a source album whose track bytes are a reported rip."""
+        from pathlib import Path
+
+        from lib.audio_hash import hash_audio_content
+        from lib.pipeline_db import BadAudioHashInput
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-42",
+            artist_name="Artist",
+            album_title="Album",
+        ))
+        fixture = os.path.join(
+            os.path.dirname(__file__), "fixtures", "audio_hash",
+            "sine_440.mp3",
+        )
+        digest = hash_audio_content(Path(fixture), "mp3")
+        bad_hash_id = db.add_bad_audio_hashes(
+            request_id=42,
+            reported_username="curator",
+            reason="exemplar bad rip",
+            hashes=[BadAudioHashInput(hash_value=digest, audio_format="mp3")],
+        )
+        self.assertEqual(bad_hash_id, 1)
+        source = tempfile.mkdtemp(dir=_PREVIEW_SOURCE_ROOT)
+        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
+        shutil.copy(fixture, os.path.join(source, "01 - Track.mp3"))
+        return db, source, 1
+
+    def _single_evidence_row(self, db: FakePipelineDB):
+        rows = list(db.album_quality_evidence.values())
+        self.assertEqual(len(rows), 1)
+        return rows[0]
+
+    def test_measure_and_persist_lane_rejects_matching_hash(self):
+        from lib.measurement import ExistingSpectralAuditLookup
+
+        db, source, bad_hash_id = self._seeded_world()
+        download_log_id = db.log_download(42, outcome="rejected")
+        with patch(
+            "lib.config.read_runtime_config",
+            return_value=_preview_runtime_config(pipeline_db_enabled=True),
+        ), patch(
+            "lib.beets_db.BeetsDB", lambda **_kwargs: FakeBeetsDB()
+        ), patch("lib.import_preview.run_import_one") as mock_run:
+            preview = measure_and_persist_candidate_evidence(
+                db,
+                request_id=42,
+                path=source,
+                download_log_id=download_log_id,
+                spectral_detail_analyzer=lambda _path: SpectralAnalysisDetail(
+                    attempted=True, grade="genuine", bitrate_kbps=320,
+                    spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+                ),
+                existing_spectral_resolver=(
+                    lambda _release_id: ExistingSpectralAuditLookup()
+                ),
+            )
+
+        self.assertEqual(preview.verdict, "evidence_ready")
+        self.assertEqual(preview.decision, "bad_audio_hash")
+        mock_run.assert_not_called()
+        evidence = self._single_evidence_row(db)
+        self.assertEqual(evidence.matched_bad_audio_hash_id, bad_hash_id)
+        assert evidence.matched_bad_audio_hash_path is not None
+        self.assertTrue(
+            evidence.matched_bad_audio_hash_path.endswith("01 - Track.mp3"))
+
+    def test_classify_lane_rejects_matching_hash(self):
+        db, source, bad_hash_id = self._seeded_world()
+        with patch(
+            "lib.config.read_runtime_config",
+            return_value=_preview_runtime_config(pipeline_db_enabled=True),
+        ), patch(
+            "lib.beets_db.BeetsDB", lambda **_kwargs: FakeBeetsDB()
+        ), patch("lib.import_preview.run_import_one") as mock_run:
+            preview = preview_import_from_path(
+                db,
+                request_id=42,
+                path=source,
+            )
+
+        self.assertEqual(preview.verdict, "confident_reject")
+        self.assertEqual(preview.decision, "bad_audio_hash")
+        self.assertTrue(preview.cleanup_eligible)
+        assert preview.detail is not None
+        self.assertIn(f"bad_audio_hash id={bad_hash_id}", preview.detail)
+        mock_run.assert_not_called()
+
+
 class TestOwnedProcessingNormalization(unittest.TestCase):
     """Issue #853: repair belongs after private processing publication."""
 

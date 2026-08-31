@@ -113,7 +113,6 @@ from lib.pipeline_db import (
     PlexTerminalPinStatus,
     ProcessingCleanupJournalRow,
     ReplacedRequestMutationError,
-    RequestSpectralStateUpdate,
     SearchPlanInspection,
     SearchPlanItemInput,
     SearchPlanItemProvenance,
@@ -5091,12 +5090,6 @@ class FakePipelineDB:
             "dominant_rejection_reason": dominant,
             "last_search_at": last_search,
         }
-
-    def update_spectral_state(self, request_id: int,
-                              update: RequestSpectralStateUpdate) -> bool:
-        return self.update_request_fields(
-            request_id, **update.as_update_fields(),
-        )
 
     @staticmethod
     def _assert_album_quality_evidence_constraints(

@@ -107,10 +107,11 @@ ALLOWLIST: dict[str, str] = {
     # (permanent — NOT a TODO; #382 Layer 1 analysis):
     "update_request_fields":
         "dynamic field=value writer -- caller-determined column set, no fixed "
-        "payload to round-trip. Its typed caller (update_spectral_state) and "
-        "the importer's RequestV0ProbeStateUpdate fields (which reach the row "
-        "via finalize_request -> mark_imported_with_rescue/update_status) ARE "
-        "column-checked by tests/test_pipeline_db_column_contract.py.",
+        "payload to round-trip. Its typed payloads (the importer's "
+        "RequestSpectralStateUpdate / RequestV0ProbeStateUpdate fields, which "
+        "reach the row via finalize_request -> mark_imported_with_rescue/"
+        "update_status) ARE column-checked by "
+        "tests/test_pipeline_db_column_contract.py.",
     "update_track_artists":
         "positional list[str|None] driving a single-scalar-column UPDATE; no "
         "column-list payload to round-trip.",
@@ -134,9 +135,6 @@ ALLOWLIST: dict[str, str] = {
         "(#1196 item 2). The auto-detector's derived read candidates "
         "(get_consumed_search_attempt / list_consumed_search_attempt) "
         "don't match the real reader, get_search_history.",
-    "update_spectral_state":
-        "real-PG round-trip via get_request in "
-        "TestSpectralColumns::test_update_spectral_state_updates_both_pairs",
     "upsert_album_quality_evidence":
         "real-PG round-trip via find_album_quality_evidence in "
         "TestAlbumQualityEvidenceStorage::test_upsert_then_find_by_content_address_round_trips",

@@ -28,6 +28,7 @@ import msgspec
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
+    from lib.pipeline_db import BadAudioHashRow
     from lib.pipeline_db.rows import DownloadLogWithEvidenceRow
 
 from lib.dispatch import run_import_one
@@ -789,11 +790,23 @@ class ImportPreviewDB(QualityEvidenceDB, Protocol):
     Extends ``QualityEvidenceDB`` because the handle is forwarded into the
     evidence persisters. Parity tests live in
     ``tests/test_import_preview.py``.
+
+    The two bad-hash members exist because both preview lanes forward this
+    handle into ``measure_preimport_state`` as its ``BadHashGateDB`` port —
+    the curator bad-rip gate fires during preview measurement or not at all.
     """
 
     def get_download_log_entry(
         self, log_id: int,
     ) -> DownloadLogWithEvidenceRow | None: ...
+
+    def has_any_bad_audio_hashes(self) -> bool: ...
+
+    def lookup_bad_audio_hash(
+        self,
+        hash_value: bytes,
+        audio_format: str,
+    ) -> BadAudioHashRow | None: ...
 
     def persist_current_spectral_measurement(
         self,
@@ -2124,9 +2137,12 @@ def measure_and_persist_candidate_evidence(
          dir (matches existing preview behavior).
       4. Inspect the temp copy for filetype / bitrate / vbr hints.
       5. Call ``measure_preimport_state`` (the pure measurement helper — no
-         denylist writes, no decision branches). This runs the audio integrity
-         gate, bad-hash gate, spectral gate, and persists on-disk spectral
-         state to ``album_requests`` per issue #90 propagation.
+         denylist writes, no decision branches, no DB writes). This runs the
+         audio integrity gate, the curator bad-hash gate (via this lane's DB
+         handle as the ``BadHashGateDB`` port), and the spectral gate; the
+         measured HAVE spectral is persisted afterwards via
+         ``persist_exact_current_spectral_from_attempt`` (issue #90
+         propagation, evidence-row addressed).
       6. If the measurement carries an importer-rejecting fact (audio_corrupt,
          bad_audio_hash, nested layout, empty fileset), persist evidence
          straight from the measurement (no harness call) and return
@@ -2297,11 +2313,11 @@ def measure_and_persist_candidate_evidence(
                 download_min_bitrate_bps=inspection.min_bitrate_bps,
                 download_is_vbr=inspection.is_vbr,
                 cfg=cfg,
-                # db=None / request_id=None: HAVE spectral state is persisted
-                # later via the content-addressed AlbumQualityEvidence row that
-                # the importer reads. Preview is a pure measurement surface.
-                db=None,
-                request_id=None,
+                # The lanes' only DB handoff into measurement: the read-only
+                # curator bad-hash gate. HAVE spectral state is persisted
+                # later via the content-addressed AlbumQualityEvidence row
+                # that the importer reads; measurement itself never writes.
+                bad_hash_db=db,
                 existing_spectral_evidence=existing_spectral_evidence,
                 reuse_existing_spectral_evidence=reuse_have_evidence,
                 preserve_existing_source_spectral=preserve_have_source,
@@ -3027,9 +3043,10 @@ def preview_import_from_path(
         # pattern: collect facts via ``measure_preimport_state`` (no denylist
         # writes, no decision branches), then surface the five folder/audio-
         # integrity facts as a confident reject for the CLI/triage UI.
-        # ``db=None`` / ``request_id=None``: HAVE spectral state belongs to the
-        # persisted ``AlbumQualityEvidence`` row that the importer reads —
-        # preview is a pure measurement surface.
+        # ``bad_hash_db`` is the lanes' only DB handoff into measurement —
+        # the read-only curator bad-hash gate. HAVE spectral state belongs
+        # to the persisted ``AlbumQualityEvidence`` row that the importer
+        # reads; measurement itself never writes.
         try:
             _checkpoint(cancellation_token)
             measurement = measure_preimport_state(
@@ -3040,8 +3057,7 @@ def preview_import_from_path(
                 download_min_bitrate_bps=inspection.min_bitrate_bps,
                 download_is_vbr=inspection.is_vbr,
                 cfg=cfg,
-                db=None,
-                request_id=None,
+                bad_hash_db=db,
                 existing_spectral_evidence=(
                     existing_spectral_evidence
                 ),

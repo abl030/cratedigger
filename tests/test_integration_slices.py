@@ -1407,8 +1407,6 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         from lib.measurement import measure_preimport_state
         from lib.quality import SpectralAnalysisDetail
 
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
         beets_info = AlbumInfo(
             album_id=1,
             track_count=10,
@@ -1443,8 +1441,6 @@ class TestSpectralPropagationSlice(unittest.TestCase):
                 download_min_bitrate_bps=320_000,
                 download_is_vbr=False,
                 cfg=cfg,
-                db=db,  # type: ignore[arg-type]
-                request_id=42,
                 existing_spectral_evidence=SpectralAnalysisDetail(
                     attempted=True,
                     grade="suspect",
@@ -1456,15 +1452,14 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         # importer's evidence pipeline owns the accept/reject decision.
         self.assertFalse(measurement.audio_corrupt)
         self.assertIsNone(measurement.matched_bad_hash_id)
-        self.assertEqual(len(db.denylist), 0,
-                         "preimport measurement must not denylist")
 
-        # Spectral state for the *existing* album was persisted so the
-        # importer's evidence pipeline can compare spectral-to-spectral on
-        # the next attempt.
-        row = db.request(42)
-        self.assertEqual(row["current_spectral_grade"], "genuine")
-        self.assertEqual(row["current_spectral_bitrate"], 320)
+        # The *existing* album's fresh audit is exposed as the measurement's
+        # HAVE state, which ``persist_exact_current_spectral_from_attempt``
+        # then persists to the evidence row so the importer can compare
+        # spectral-to-spectral on the next attempt.
+        assert measurement.existing_spectral is not None
+        self.assertEqual(measurement.existing_spectral.grade, "genuine")
+        self.assertEqual(measurement.existing_spectral.bitrate_kbps, 320)
 
     def test_stale_album_path_bails_without_adopting_candidate(self):
         """Issue #815 (supersedes the #90 self-compare pin): when BeetsDB
@@ -1484,8 +1479,6 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
 
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
         # Album metadata present in beets...
         beets_info = AlbumInfo(
             album_id=1,
@@ -1516,16 +1509,11 @@ class TestSpectralPropagationSlice(unittest.TestCase):
                 download_min_bitrate_bps=320_000,
                 download_is_vbr=False,
                 cfg=cfg,
-                db=db,  # type: ignore[arg-type]
-                request_id=42,
             )
 
         # No on-disk (HAVE) measurement, and the candidate's spectral is never
-        # adopted as the request's current on-disk state.
+        # exposed as the measurement's HAVE state.
         self.assertIsNone(measurement.existing_spectral)
-        row = db.request(42)
-        self.assertIsNone(row.get("current_spectral_grade"))
-        self.assertIsNone(row.get("current_spectral_bitrate"))
         # The container bitrate remains the HAVE comparison fallback.
         self.assertEqual(measurement.existing_min_bitrate, 320)
 
@@ -1541,8 +1529,6 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
 
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
         beets_info = AlbumInfo(
             album_id=1,
             track_count=10,
@@ -1572,75 +1558,38 @@ class TestSpectralPropagationSlice(unittest.TestCase):
                 download_min_bitrate_bps=280_000,
                 download_is_vbr=False,
                 cfg=cfg,
-                db=db,  # type: ignore[arg-type]
-                request_id=42,
             )
 
         # Measurement is fact-only — accept/reject lives in the importer.
         self.assertFalse(measurement.audio_corrupt)
+        # BAIL: the candidate's spectral is never exposed as HAVE state.
         self.assertIsNone(measurement.existing_spectral)
-        # BAIL: the candidate's spectral is never written as on-disk state.
-        row = db.request(42)
-        self.assertIsNone(row.get("current_spectral_grade"))
-        self.assertIsNone(row.get("current_spectral_bitrate"))
         # The container bitrate remains the HAVE comparison fallback.
         self.assertEqual(measurement.existing_min_bitrate, 256)
 
 
 class TestSpectralPropagationOnAccept(unittest.TestCase):
-    """U3 guard: ``_persist_spectral_state`` must fire on accept decisions too.
+    """U3/#90 guard: the existing audit runs regardless of the decision.
 
-    The U3 refactor moved spectral state persistence out of the
-    decision-conditional code path and into the measurement helper. The
-    invariant: every measurement that runs spectral analysis writes
-    ``album_requests.current_spectral_*``, regardless of whether the
-    downstream decision is accept or reject.
-
-    This guards against the issue #90 regression: if propagation only fired
-    on reject branches, the next attempt would have stale comparison data and
-    a follow-up suspect-grade-upgrade or import_no_exist would compare against
-    a phantom existing measurement.
+    The invariant: every measurement that runs spectral analysis exposes the
+    REAL existing album's fresh audit as ``existing_spectral``, regardless
+    of whether the downstream decision is accept or reject. Both preview
+    lanes hand exactly that output to
+    ``persist_exact_current_spectral_from_attempt`` before any harness run,
+    so decision-conditional propagation (the issue #90 regression: reject
+    branches propagated, accepts silently didn't, so the next attempt
+    compared against a phantom existing measurement) cannot recur.
     """
 
-    def test_replaced_request_spectral_noop_is_reported_as_not_persisted(self):
-        from lib.measurement import _persist_spectral_state
-        from lib.quality import SpectralMeasurement
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="replaced",
-            current_spectral_grade=None,
-            current_spectral_bitrate=None,
-        ))
-        before = db.request(42)
-
-        persisted = _persist_spectral_state(
-            db=db,  # type: ignore[arg-type]
-            request_id=42,
-            existing_spectral=SpectralMeasurement(
-                grade="genuine",
-                bitrate_kbps=320,
-            ),
-        )
-
-        self.assertIsNone(persisted)
-        self.assertEqual(db.request(42), before)
-
-    def test_accept_suspect_upgrade_still_persists_spectral(self):
+    def test_accept_suspect_upgrade_still_exposes_existing_spectral(self):
         """Accept (suspect grade but bitrate upgrades existing) → the REAL
-        measured existing spectral state is still persisted (must-still-work
-        for #815: a genuine on-disk measurement IS written; only candidate
+        measured existing spectral state is still exposed (must-still-work
+        for #815: a genuine on-disk measurement IS surfaced; only candidate
         adoption is removed)."""
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
         from lib.quality import SpectralAnalysisDetail
 
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42, status="downloading",
-            current_spectral_grade=None, current_spectral_bitrate=None,
-        ))
         beets_info = AlbumInfo(
             album_id=1,
             track_count=10,
@@ -1675,8 +1624,6 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
                 download_min_bitrate_bps=256_000,
                 download_is_vbr=False,
                 cfg=cfg,
-                db=db,  # type: ignore[arg-type]
-                request_id=42,
                 existing_spectral_evidence=SpectralAnalysisDetail(
                     attempted=True,
                     grade="genuine",
@@ -1687,27 +1634,21 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
         # Measurement is fact-only; the importer's evidence pipeline owns
         # the accept/reject for the suspect-upgrade case.
         self.assertFalse(measurement.audio_corrupt)
-        # Crucial: the existing-album spectral state propagated during the
+        # Crucial: the existing-album fresh audit is exposed during the
         # measurement so the importer can compare evidence-to-evidence.
-        row = db.request(42)
+        assert measurement.existing_spectral is not None
         self.assertEqual(
-            row["current_spectral_grade"], "likely_transcode",
-            "existing spectral measurement must be persisted")
-        self.assertEqual(row["current_spectral_bitrate"], 96)
-        # Measurement never writes denylist.
-        self.assertEqual(len(db.denylist), 0)
+            measurement.existing_spectral.grade, "likely_transcode",
+            "existing spectral measurement must be exposed")
+        self.assertEqual(measurement.existing_spectral.bitrate_kbps, 96)
 
-    def test_accept_import_no_exist_writes_no_have_state(self):
-        """Accept (suspect grade, no existing on disk) → no on-disk spectral is
-        written; the candidate's spectral is never adopted as HAVE state (#815)."""
+    def test_accept_import_no_exist_exposes_no_have_state(self):
+        """Accept (suspect grade, no existing on disk) → no on-disk spectral
+        is exposed; the candidate's spectral is never adopted as HAVE state
+        (#815)."""
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
 
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42, status="downloading", min_bitrate=None,
-            current_spectral_grade=None, current_spectral_bitrate=None,
-        ))
         cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch(
@@ -1728,18 +1669,12 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
                 download_min_bitrate_bps=192_000,
                 download_is_vbr=False,
                 cfg=cfg,
-                db=db,  # type: ignore[arg-type]
-                request_id=42,
             )
 
         # Measurement is fact-only; no existing album means no on-disk
-        # measurement. Per ``_persist_spectral_state`` semantics, when
-        # existing_spectral is None nothing is persisted — the candidate's
-        # spectral is never adopted (#815).
+        # measurement — the candidate's spectral is never adopted (#815).
         self.assertFalse(measurement.audio_corrupt)
-        row = db.request(42)
-        self.assertIsNone(row.get("current_spectral_grade"))
-        self.assertEqual(len(db.denylist), 0)
+        self.assertIsNone(measurement.existing_spectral)
 
 
 class TestLosslessSourceLockedSlice(unittest.TestCase):
@@ -4496,8 +4431,7 @@ class TestBadAudioHashSlice(unittest.TestCase):
             download_min_bitrate_bps=320_000,
             download_is_vbr=False,
             cfg=cfg,
-            db=db,  # type: ignore[arg-type]
-            request_id=42,
+            bad_hash_db=db,
         )
 
         # 1. Measurement surfaced the bad-hash match facts.
@@ -4537,8 +4471,7 @@ class TestBadAudioHashSlice(unittest.TestCase):
                 download_min_bitrate_bps=320_000,
                 download_is_vbr=False,
                 cfg=cfg,
-                db=db,  # type: ignore[arg-type]
-                request_id=42,
+                bad_hash_db=db,
             )
 
         self.assertFalse(measurement.audio_corrupt)
