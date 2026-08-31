@@ -51,46 +51,11 @@ class _SearchPlanShowDB(Protocol):
     ) -> SearchPlanStats: ...
 
 
-def _search_plan_exit_code(outcome: str) -> int:
-    """CLI ⇄ API exit-code mapping for search-plan read/advance subcommands.
-
-    Per CLAUDE.md § "CLI ⇄ API surface symmetry":
-    0=success, 2=not_found, 3=input_validation, 4=wrong_state, 5=transient.
-
-    Covers the outcome strings emitted by ``dry_run_for_request``,
-    ``saturation_for_request``, ``advance_for_request`` and
-    ``history_for_request``. Regenerate has its own ladder
-    (``failed_transient`` → 4 there, predating this convention).
-    """
-    from lib.search_plan_service import (
-        RESULT_ADVANCED,
-        RESULT_DRY_RUN_GENERATION_FAILED,
-        RESULT_DRY_RUN_SUCCESS,
-        RESULT_FAILED_TRANSIENT,
-        RESULT_HISTORY_PAGE_INPUT_INVALID,
-        RESULT_HISTORY_PAGE_SUCCESS,
-        RESULT_INVALID_TARGET,
-        RESULT_NO_ACTIVE_PLAN,
-        RESULT_REQUEST_NOT_FOUND,
-        RESULT_REQUEST_REPLACED,
-        RESULT_SATURATION_INPUT_INVALID,
-        RESULT_SATURATION_SUCCESS,
-    )
-    mapping: dict[str, int] = {
-        RESULT_DRY_RUN_SUCCESS: 0,
-        RESULT_DRY_RUN_GENERATION_FAILED: 0,
-        RESULT_SATURATION_SUCCESS: 0,
-        RESULT_ADVANCED: 0,
-        RESULT_HISTORY_PAGE_SUCCESS: 0,
-        RESULT_REQUEST_NOT_FOUND: 2,
-        RESULT_REQUEST_REPLACED: 4,
-        RESULT_SATURATION_INPUT_INVALID: 3,
-        RESULT_INVALID_TARGET: 3,
-        RESULT_HISTORY_PAGE_INPUT_INVALID: 3,
-        RESULT_NO_ACTIVE_PLAN: 4,
-        RESULT_FAILED_TRANSIENT: 5,
-    }
-    return mapping.get(outcome, 1)
+# Search-plan exit codes come from the per-action tables in
+# ``lib.search_plan_service`` (SEARCH_PLAN_*_EXIT_CODES, derived from each
+# action's HTTP map through the repository convention in
+# ``lib/surface_outcomes.py``); each command looks its table up with a
+# defensive ``.get(outcome, 1)`` for unknown future strings.
 
 
 def cmd_search_plan_show(
@@ -142,25 +107,17 @@ def cmd_search_plan_regenerate(
     successful active plan are executable. Replaced audit ancestors
     reject regeneration.
 
-    Exit codes:
-      * 0 — ``RESULT_SUCCESS`` or ``RESULT_NOOP_ACTIVE_PLAN_EXISTS``
-        (the latter only when called without ``--regenerate``-style
-        force; the service treats explicit regeneration as always
-        attempting).
-      * 2 — ``RESULT_REQUEST_NOT_FOUND`` (matches search-plan show).
-      * 3 — ``RESULT_FAILED_DETERMINISTIC`` (sticky failure; old
-        active plan preserved).
-      * 4 — ``RESULT_REQUEST_REPLACED`` or ``RESULT_FAILED_TRANSIENT``
-        (the latter is retryable; old active plan preserved).
+    Exit codes come from ``SEARCH_PLAN_REGENERATE_EXIT_CODES``
+    (``lib/search_plan_service.py``), derived from the action's HTTP map
+    through the repository convention: 0 success/noop, 2 not_found,
+    3 failed_deterministic, 4 replaced, 5 failed_transient (issue #1278 —
+    this was 4 for ``failed_transient`` before the convention table; the
+    route has always answered 503).
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
-        RESULT_FAILED_DETERMINISTIC,
-        RESULT_FAILED_TRANSIENT,
-        RESULT_NOOP_ACTIVE_PLAN_EXISTS,
-        RESULT_REQUEST_NOT_FOUND,
-        RESULT_REQUEST_REPLACED,
         RESULT_SUCCESS,
+        SEARCH_PLAN_REGENERATE_EXIT_CODES,
         SearchPlanService,
     )
 
@@ -213,20 +170,8 @@ def cmd_search_plan_regenerate(
             print("  Note: only `wanted` requests run searches; the new "
                   "plan is recorded but will not be executed for this status.")
 
-    if result.outcome == RESULT_SUCCESS:
-        return 0
-    if result.outcome == RESULT_NOOP_ACTIVE_PLAN_EXISTS:
-        return 0
-    if result.outcome == RESULT_REQUEST_NOT_FOUND:
-        return 2
-    if result.outcome == RESULT_REQUEST_REPLACED:
-        return 4
-    if result.outcome == RESULT_FAILED_DETERMINISTIC:
-        return 3
-    if result.outcome == RESULT_FAILED_TRANSIENT:
-        return 4
-    # Defensive fallback for any future outcome string.
-    return 1
+    # Defensive .get: any future outcome string exits 1 until mapped.
+    return SEARCH_PLAN_REGENERATE_EXIT_CODES.get(result.outcome, 1)
 
 
 def cmd_search_plan_dry_run(
@@ -246,16 +191,14 @@ def cmd_search_plan_dry_run(
     generator output matches expectations before bumping
     ``SEARCH_PLAN_GENERATOR_ID``.
 
-    Exit codes:
-      * 0 — ``RESULT_DRY_RUN_SUCCESS`` or
-        ``RESULT_DRY_RUN_GENERATION_FAILED`` (generator returned a
-        deterministic generation failure — informational, not a CLI
-        error; the operator still wants to see ``failure_reason`` and
-        provenance).
-      * 2 — ``RESULT_REQUEST_NOT_FOUND``.
+    Exit codes come from ``SEARCH_PLAN_DRY_RUN_EXIT_CODES``
+    (``lib/search_plan_service.py``). ``generation_failed`` is a success
+    exit — informational, not a CLI error; the operator still wants to
+    see ``failure_reason`` and provenance.
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
+        SEARCH_PLAN_DRY_RUN_EXIT_CODES,
         SearchPlanService,
         dry_run_payload,
     )
@@ -339,7 +282,7 @@ def cmd_search_plan_dry_run(
                     else:
                         print(f"    {pkey}: {pvalue}")
 
-    return _search_plan_exit_code(result.outcome)
+    return SEARCH_PLAN_DRY_RUN_EXIT_CODES.get(result.outcome, 1)
 
 
 def cmd_search_plan_saturation(
@@ -355,17 +298,15 @@ def cmd_search_plan_saturation(
     wrap ``SearchPlanService.saturation_for_request`` — keep them in
     sync (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
 
-    Exit codes:
-      * 0 — ``RESULT_SATURATION_SUCCESS`` (zeros are still success —
-        the request exists, the window is just quiet)
-      * 2 — ``RESULT_REQUEST_NOT_FOUND``
-      * 3 — ``RESULT_SATURATION_INPUT_INVALID`` (argparse normally
-        bounds this; the branch is defensive parity with the API's
-        400)
+    Exit codes come from ``SEARCH_PLAN_SATURATION_EXIT_CODES``
+    (``lib/search_plan_service.py``). Zeros are still success — the
+    request exists, the window is just quiet; ``input_invalid`` is
+    defensive parity with the API's 400 (argparse normally bounds it).
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
         SATURATION_WINDOW_DEFAULT_DAYS,
+        SEARCH_PLAN_SATURATION_EXIT_CODES,
         SearchPlanService,
         saturation_payload,
     )
@@ -403,7 +344,7 @@ def cmd_search_plan_saturation(
         if payload.get("error_message"):
             print(f"  Error message:          {payload['error_message']}")
 
-    return _search_plan_exit_code(result.outcome)
+    return SEARCH_PLAN_SATURATION_EXIT_CODES.get(result.outcome, 1)
 
 
 def cmd_search_plan_advance(
@@ -415,16 +356,14 @@ def cmd_search_plan_advance(
     surfaces wrap ``SearchPlanService.advance_for_request`` — keep them
     in sync (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
 
-    Exit codes:
-      * 0 — ``RESULT_ADVANCED``
-      * 2 — ``RESULT_REQUEST_NOT_FOUND``
-      * 3 — ``RESULT_INVALID_TARGET`` (out of range, would go backward,
-        no slot matches strategy, or both/neither flag given)
-      * 4 — ``RESULT_NO_ACTIVE_PLAN`` or ``RESULT_REQUEST_REPLACED``
-      * 5 — ``RESULT_FAILED_TRANSIENT`` (lock contention)
+    Exit codes come from ``SEARCH_PLAN_ADVANCE_EXIT_CODES``
+    (``lib/search_plan_service.py``); ``invalid_target`` covers out of
+    range, would-go-backward, no slot matching the strategy, and
+    both/neither flag given; ``failed_transient`` is lock contention.
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
+        SEARCH_PLAN_ADVANCE_EXIT_CODES,
         SearchPlanService,
     )
 
@@ -465,7 +404,7 @@ def cmd_search_plan_advance(
         if result.error_message:
             print(f"  Error message:     {result.error_message}")
 
-    return _search_plan_exit_code(result.outcome)
+    return SEARCH_PLAN_ADVANCE_EXIT_CODES.get(result.outcome, 1)
 
 
 def cmd_search_plan_history(
@@ -481,16 +420,15 @@ def cmd_search_plan_history(
     ``--before-id <id>`` to read the next page. JSON mode returns the
     same payload as the API (``request_id`` / ``rows`` / ``next_before_id``).
 
-    Exit codes:
-      * 0 — ``RESULT_HISTORY_PAGE_SUCCESS``
-      * 2 — ``RESULT_REQUEST_NOT_FOUND``
-      * 3 — ``RESULT_HISTORY_PAGE_INPUT_INVALID`` (limit out of bounds,
-        before_id < 1)
+    Exit codes come from ``SEARCH_PLAN_HISTORY_EXIT_CODES``
+    (``lib/search_plan_service.py``); ``input_invalid`` covers a limit
+    out of bounds or ``before_id < 1``.
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
         HISTORY_PAGE_DEFAULT_LIMIT,
         RESULT_HISTORY_PAGE_SUCCESS,
+        SEARCH_PLAN_HISTORY_EXIT_CODES,
         SearchPlanService,
     )
 
@@ -551,7 +489,7 @@ def cmd_search_plan_history(
         if result.error_message:
             print(f"  Error message:     {result.error_message}")
 
-    return _search_plan_exit_code(result.outcome)
+    return SEARCH_PLAN_HISTORY_EXIT_CODES.get(result.outcome, 1)
 
 
 def add_search_plan_subparser(

@@ -5052,6 +5052,31 @@ class TestCmdSearchPlanRegenerate(unittest.TestCase):
         self.assertEqual(db.request(rid), before)
         self.assertEqual(db.search_plans, plans_before)
 
+    def test_regenerate_transient_failure_returns_5(self):
+        """Adapter pin for this series' deliberate change (#1278): a
+        transient regenerate failure exits 5 per the convention table —
+        historically 4 — driven through the real command via advisory
+        lock contention, a genuine transient producer."""
+        from contextlib import contextmanager
+
+        from tests.fakes import FakePipelineDB
+
+        class ContendedDB(FakePipelineDB):
+            @contextmanager
+            def advisory_lock(self, namespace: int, key: int):
+                del namespace, key
+                yield False
+
+        db = ContendedDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            status="wanted",
+        )
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 5)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "failed_transient")
+
     def test_regenerate_deterministic_failure_returns_3_preserves_old_plan(self):
         from lib.pipeline_db import SearchPlanItemInput
         from lib.search import SEARCH_PLAN_GENERATOR_ID
@@ -5127,6 +5152,16 @@ class TestCmdSearchPlanDryRun(unittest.TestCase):
             mock_cfg.return_value = CratediggerConfig.from_ini(cp)
             rc = pipeline_cli.cmd_search_plan_dry_run(db, args)
         return rc, stdout.getvalue()
+
+    def test_dry_run_generation_failure_is_informational_exit_0(self):
+        """`generation_failed` is a success exit through the real command
+        (PR3 mutant-runner M14: the dry-run table's one distinguishing
+        key had no adapter coverage on either surface)."""
+        db, rid = self._seed_request(artist="", title="", tracks=[])
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "generation_failed")
 
     def test_dry_run_happy_path_prints_plan_items_without_persisting(self):
         db, rid = self._seed_request()

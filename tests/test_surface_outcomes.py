@@ -90,6 +90,41 @@ REGISTRY: tuple[RegisteredOutcomeMaps, ...] = (
         "SET_INTENT_EXIT_CODES",
         "SetIntentOutcome",
     ),
+    RegisteredOutcomeMaps(
+        "lib.convergence_service",
+        "STOP_CONVERGED_SEARCH_HTTP_STATUS",
+        "STOP_CONVERGED_SEARCH_EXIT_CODES",
+        "StopConvergenceOutcome",
+    ),
+    # Search-plan is five actions whose outcome strings collide, so each
+    # owns its own table (issue #1278 item 3); the module has no per-action
+    # Literal — the per-action key sets are pinned in
+    # tests/test_search_plan_service.py.
+    RegisteredOutcomeMaps(
+        "lib.search_plan_service",
+        "SEARCH_PLAN_REGENERATE_HTTP_STATUS",
+        "SEARCH_PLAN_REGENERATE_EXIT_CODES",
+    ),
+    RegisteredOutcomeMaps(
+        "lib.search_plan_service",
+        "SEARCH_PLAN_DRY_RUN_HTTP_STATUS",
+        "SEARCH_PLAN_DRY_RUN_EXIT_CODES",
+    ),
+    RegisteredOutcomeMaps(
+        "lib.search_plan_service",
+        "SEARCH_PLAN_SATURATION_HTTP_STATUS",
+        "SEARCH_PLAN_SATURATION_EXIT_CODES",
+    ),
+    RegisteredOutcomeMaps(
+        "lib.search_plan_service",
+        "SEARCH_PLAN_ADVANCE_HTTP_STATUS",
+        "SEARCH_PLAN_ADVANCE_EXIT_CODES",
+    ),
+    RegisteredOutcomeMaps(
+        "lib.search_plan_service",
+        "SEARCH_PLAN_HISTORY_HTTP_STATUS",
+        "SEARCH_PLAN_HISTORY_EXIT_CODES",
+    ),
     RegisteredOutcomeMaps("lib.force_import_service", "FORCE_IMPORT_HTTP_STATUS"),
     RegisteredOutcomeMaps("lib.local_import_service", "LOCAL_IMPORT_HTTP_STATUS"),
     RegisteredOutcomeMaps("lib.merge_rekey_service", "MERGE_REKEY_HTTP_STATUS"),

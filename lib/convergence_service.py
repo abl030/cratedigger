@@ -17,6 +17,8 @@ from typing import Literal, Protocol
 import msgspec
 import psycopg2
 
+from lib.surface_outcomes import exit_codes_from_http
+
 CLIFF_BIN_HZ = 500
 MIN_DISTINCT_PEERS = 5
 MIN_QUALIFYING_OBSERVATIONS = 5
@@ -59,6 +61,25 @@ StopConvergenceOutcome = Literal[
     "stopped", "not_found", "wrong_state", "stale", "not_converged",
     "unavailable",
 ]
+
+#: Outcome → HTTP status (issue #1278 item 3). ``stale`` and
+#: ``wrong_state`` are both wrong-state refusals; ``not_converged`` is the
+#: semantic refusal (the derived signal does not support stopping).
+STOP_CONVERGED_SEARCH_HTTP_STATUS: dict[str, int] = {
+    "stopped": 200,
+    "not_found": 404,
+    "wrong_state": 409,
+    "stale": 409,
+    "not_converged": 422,
+    "unavailable": 503,
+}
+
+#: Outcome → ``pipeline-cli`` exit code, derived branch for branch from
+#: the HTTP map (``lib/surface_outcomes.py``). Audited by
+#: ``tests/test_surface_outcomes.py``.
+STOP_CONVERGED_SEARCH_EXIT_CODES: dict[str, int] = exit_codes_from_http(
+    STOP_CONVERGED_SEARCH_HTTP_STATUS
+)
 
 
 class StopConvergedSearchResult(msgspec.Struct, frozen=True):
