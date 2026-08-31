@@ -2911,28 +2911,22 @@ class TestCmdSetIntent(unittest.TestCase):
         self.assertEqual(db.update_request_fields_calls, [(1, {"target_format": None})])
 
     @patch("builtins.print")
-    @patch("scripts.pipeline_cli.album_requests.finalize_request")
-    def test_set_lossless_on_imported_requeues(self, mock_finalize, _mock_print):
+    def test_set_lossless_on_imported_requeues(self, _mock_print):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=2, status="imported", artist_name="A", album_title="B",
             min_bitrate=245,
         ))
         args = MagicMock(id=2, intent="lossless")
-        mock_finalize.side_effect = (
-            pipeline_cli_album_requests.transitions.finalize_request
-        )
         result = pipeline_cli.cmd_set_intent(db, args)
         self.assertEqual(result, 0)
-        called_db, request_id, transition = mock_finalize.call_args.args
-        self.assertIs(called_db, db)
-        self.assertEqual(request_id, 2)
-        self.assertEqual(transition.target_status, "wanted")
-        self.assertEqual(transition.from_status, "imported")
-        self.assertEqual(
-            transition.fields,
-            {"search_filetype_override": "lossless", "min_bitrate": 245},
-        )
+        # The transition seam itself is proven in
+        # tests/test_set_intent_service.py; the wrapper test asserts the
+        # domain outcome the real path produced.
+        row = db.request(2)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["search_filetype_override"], "lossless")
+        self.assertEqual(row["min_bitrate"], 245)
         self.assertEqual(db.update_request_fields_calls, [(2, {"target_format": "lossless"})])
 
     @patch("builtins.print")
@@ -3001,22 +2995,40 @@ class TestCmdSetIntent(unittest.TestCase):
             4, {"target_format": None, "search_filetype_override": None})])
 
     @patch("builtins.print")
-    def test_set_intent_refuses_downloading(self, _mock_print):
+    def test_set_intent_refuses_downloading_exit_4(self, _mock_print):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=3, status="downloading", artist_name="A", album_title="B",
         ))
         args = MagicMock(id=3, intent="lossless")
-        pipeline_cli.cmd_set_intent(db, args)
+        # Wrong-state refusal: 409/exit 4 by the repository convention
+        # (issue #1278 — this used to exit 1 while the route answered 400).
+        self.assertEqual(pipeline_cli.cmd_set_intent(db, args), 4)
         self.assertEqual(db.update_request_fields_calls, [])
 
     @patch("builtins.print")
-    def test_set_intent_not_found(self, _mock_print):
+    def test_set_intent_not_found_exit_2(self, _mock_print):
         db = FakePipelineDB()
         # no rows seeded → get_request returns None
         args = MagicMock(id=99, intent="lossless")
-        pipeline_cli.cmd_set_intent(db, args)
+        self.assertEqual(pipeline_cli.cmd_set_intent(db, args), 2)
         self.assertEqual(db.update_request_fields_calls, [])
+
+    def test_set_intent_replaced_reports_frozen_conflict_exit_4(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=11, status="replaced", artist_name="A", album_title="B",
+        ))
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            result = pipeline_cli.cmd_set_intent(
+                db, MagicMock(id=11, intent="lossless"),
+            )
+        self.assertEqual(result, 4)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["error"], "transition_conflict")
+        self.assertEqual(payload["reason"], "invalid_edge")
+        self.assertEqual(db.request(11)["status"], "replaced")
 
 
 class TestCmdRepairSpectral(unittest.TestCase):

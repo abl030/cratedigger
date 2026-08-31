@@ -221,6 +221,48 @@ def processing_locked_conflict(
     )
 
 
+def transition_conflict_http_status(conflict: TransitionConflict) -> int:
+    """Map one lifecycle conflict onto its HTTP status.
+
+    Shared by the HTTP conflict adapters and the CLI (whose exit code is
+    derived from this status through the repository convention in
+    ``lib/surface_outcomes.py``), so both surfaces classify a conflict
+    identically: a vanished row is not-found, everything else wrong-state.
+    """
+    return 404 if conflict.kind is TransitionConflictKind.not_found else 409
+
+
+def request_fields_cas_conflict(
+    db: TransitionsDB,
+    request_id: int,
+    *,
+    expected_status: str,
+) -> TransitionConflict:
+    """Explain one metadata compare-and-set miss through the transition contract.
+
+    ``update_request_fields`` returns only ``applied``; when it misses, this
+    re-read names why — the exact processing owner, a vanished row, or a
+    concurrent lifecycle change — identically for every operator surface.
+    """
+    row = db.get_request(request_id)
+    return processing_locked_conflict(
+        row,
+        request_id,
+        expected_status,
+        expected_status=expected_status,
+    ) or TransitionConflict(
+        request_id=request_id,
+        target_status=expected_status,
+        kind=(
+            TransitionConflictKind.not_found
+            if row is None
+            else TransitionConflictKind.stale_source
+        ),
+        expected_status=expected_status,
+        actual_status=None if row is None else str(row["status"]),
+    )
+
+
 def publish_initialized_request(
     db: TransitionsDB,
     request_id: int,

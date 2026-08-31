@@ -1123,6 +1123,56 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data, self.SET_INTENT_REQUIRED_FIELDS,
                                 "pipeline set-intent response")
 
+    def test_pipeline_set_intent_not_found_404(self):
+        status, data = self._post(
+            "/api/pipeline/set-intent", {"id": 99999, "intent": "lossless"},
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(data["error"], "Not found")
+
+    def test_pipeline_set_intent_downloading_409(self):
+        # Wrong-state refusal: 409 by the repository convention
+        # (issue #1278 — this used to answer 400 while the CLI exited 1).
+        self.db.seed_request(make_request_row(
+            id=794, status="downloading", mb_release_id="downloading-intent",
+        ))
+        status, data = self._post(
+            "/api/pipeline/set-intent", {"id": 794, "intent": "lossless"},
+        )
+        self.assertEqual(status, 409)
+        self.assertIn("downloading", str(data["error"]))
+        row = self.db.get_request(794)
+        assert row is not None
+        self.assertIsNone(row["target_format"])
+
+    def test_pipeline_set_intent_replaced_reports_frozen_conflict(self):
+        self.db.seed_request(make_request_row(
+            id=795, status="replaced", mb_release_id="replaced-intent",
+        ))
+        status, data = self._post(
+            "/api/pipeline/set-intent", {"id": 795, "intent": "lossless"},
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "transition_conflict")
+        self.assertEqual(data["reason"], "invalid_edge")
+
+    def test_pipeline_set_intent_imported_lossless_requeues(self):
+        self.db.seed_request(make_request_row(
+            id=796, status="imported", mb_release_id="imported-intent",
+            min_bitrate=245,
+        ))
+        status, data = self._post(
+            "/api/pipeline/set-intent", {"id": 796, "intent": "lossless"},
+        )
+        self.assertEqual(status, 200)
+        self.assertIs(data["requeued"], True)
+        row = self.db.get_request(796)
+        assert row is not None
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["target_format"], "lossless")
+        self.assertEqual(row["search_filetype_override"], "lossless")
+        self.assertEqual(row["min_bitrate"], 245)
+
     def test_pipeline_set_intent_rejects_initializing_request(self):
         self.db.seed_request(make_request_row(
             id=793, status="initializing", mb_release_id="initializing-intent",

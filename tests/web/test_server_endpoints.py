@@ -814,12 +814,14 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         self.assertEqual(data["status"], "ok")
         self.assertEqual(data["intent"], "lossless")
 
-    def test_post_set_intent_backward_compat(self):
-        """Old 'flac_only' intent is aliased to 'lossless'."""
+    def test_post_set_intent_rejects_retired_aliases(self):
+        """The compat aliases (flac/flac_only/best_effort/upgrade) are gone
+        (issue #1278): no caller ever sent them, so they now 400 like any
+        other unknown intent."""
         status, data = self._post("/api/pipeline/set-intent",
                                   {"id": 100, "intent": "flac_only"})
-        self.assertEqual(status, 200)
-        self.assertEqual(data["intent"], "lossless")
+        self.assertEqual(status, 400)
+        self.assertIn("Invalid intent", str(data["error"]))
 
     def test_post_force_import_passes_source_username(self):
         from lib.import_queue import (

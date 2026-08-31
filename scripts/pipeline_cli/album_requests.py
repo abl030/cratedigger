@@ -14,7 +14,7 @@ import sys
 import urllib.error
 import urllib.request
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import msgspec
 
@@ -313,36 +313,6 @@ def _transition_applied_or_report(
     print(json.dumps(transitions.transition_conflict_payload(result)))
     return False
 
-
-def _request_fields_applied_or_report(
-    db: _AlbumRequestsDB,
-    request_id: int,
-    *,
-    expected_status: str,
-    applied: bool,
-) -> bool:
-    """Map a metadata compare-and-set miss through the transition contract."""
-    if applied:
-        return True
-    row = db.get_request(request_id)
-    processing_locked = transitions.processing_locked_conflict(
-        row,
-        request_id,
-        expected_status,
-        expected_status=expected_status,
-    )
-    conflict = processing_locked or transitions.TransitionConflict(
-        request_id=request_id,
-        target_status=expected_status,
-        kind=(
-            transitions.TransitionConflictKind.not_found
-            if row is None
-            else transitions.TransitionConflictKind.stale_source
-        ),
-        expected_status=expected_status,
-        actual_status=None if row is None else str(row["status"]),
-    )
-    return _transition_applied_or_report(conflict)
 
 VALID_STATUSES = ["wanted", "imported", "unsearchable"]
 
@@ -687,83 +657,41 @@ def cmd_set_intent(db: _AlbumRequestsDB, args: argparse.Namespace) -> int:
 
     'lossless' — keep lossless on disk (overrides global verified_lossless_target)
     'default'  — pipeline decides (uses global verified_lossless_target)
+
+    Thin adapter over ``lib.set_intent_service.set_lossless_intent``
+    (issue #1278): the exit code is the service table's, and lifecycle
+    conflicts print the shared conflict payload with the exit derived
+    from the conflict's own HTTP classification.
     """
-    from lib.quality import QUALITY_LOSSLESS, should_clear_lossless_search_override
+    from lib.set_intent_service import SET_INTENT_EXIT_CODES, set_lossless_intent
+    from lib.surface_outcomes import exit_code_for_http_status
 
-    target_format = QUALITY_LOSSLESS if args.intent == "lossless" else None
-
-    req = db.get_request(args.id)
-    if not req:
-        print(f"  Request {args.id} not found.")
-        return 2
-    if req["status"] == "initializing":
-        print("  Request is still initializing; retry the original add or upgrade.")
-        return 4
-    if req["status"] == "downloading":
-        print("  Cannot set intent while album is downloading.")
-        return 1
-    if req["status"] == "replaced":
-        result = finalize_request(
-            db,
-            args.id,
-            transitions.RequestTransition.to_wanted(from_status="replaced"),
-        )
+    intent: Literal["lossless", "default"] = (
+        "lossless" if args.intent == "lossless" else "default"
+    )
+    result = set_lossless_intent(db, args.id, intent=intent)
+    if isinstance(result, transitions.TransitionConflict):
         _transition_applied_or_report(result)
-        return 4
-    old_target = req.get("target_format")
-    label = f"{req['artist_name']} - {req['album_title']}"
-
-    if req["status"] == "imported" and target_format:
-        # Re-queue to search for lossless source
-        min_br = req.get("min_bitrate")
-        result = finalize_request(
-            db,
-            args.id,
-            transitions.RequestTransition.to_wanted(
-                from_status="imported",
-                search_filetype_override=QUALITY_LOSSLESS,
-                min_bitrate=min_br,
-            ),
+        return exit_code_for_http_status(
+            transitions.transition_conflict_http_status(result)
         )
-        if not _transition_applied_or_report(result):
-            return 4
-        applied = db.update_request_fields(
-            args.id,
-            expected_status="wanted",
-            target_format=target_format,
-        )
-        if not _request_fields_applied_or_report(
-            db,
-            args.id,
-            expected_status="wanted",
-            applied=applied,
-        ):
-            return 4
-        print(f"  [{args.id}] {label}: lossless on disk, re-queued for search")
-    else:
-        update_fields: dict[str, object] = {"target_format": target_format}
-        if should_clear_lossless_search_override(
-            new_target_format=target_format,
-            old_target_format=old_target,
-            search_filetype_override=req.get("search_filetype_override"),
-        ):
-            update_fields["search_filetype_override"] = None
-        applied = db.update_request_fields(
-            args.id,
-            expected_status=str(req["status"]),
-            **update_fields,
-        )
-        if not _request_fields_applied_or_report(
-            db,
-            args.id,
-            expected_status=str(req["status"]),
-            applied=applied,
-        ):
-            return 4
-        action = "lossless on disk" if target_format else "default (pipeline decides)"
-        print(f"  [{args.id}] {label}: {action} "
-              f"(target_format: {old_target} → {target_format})")
-    return 0
+    label = f"{result.artist_name} - {result.album_title}"
+    action = (
+        "lossless on disk" if result.target_format
+        else "default (pipeline decides)"
+    )
+    messages = {
+        "not_found": f"  Request {args.id} not found.",
+        "initializing":
+            "  Request is still initializing; retry the original add or upgrade.",
+        "downloading": "  Cannot set intent while album is downloading.",
+        "requeued": f"  [{args.id}] {label}: lossless on disk, re-queued for search",
+        "updated": f"  [{args.id}] {label}: {action} "
+                   f"(target_format: {result.old_target_format} → "
+                   f"{result.target_format})",
+    }
+    print(messages[result.outcome])
+    return SET_INTENT_EXIT_CODES[result.outcome]
 
 
 def add_album_requests_subparsers(

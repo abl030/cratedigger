@@ -67,12 +67,11 @@ from lib.pipeline_delete_service import (
     delete_pipeline_request,
 )
 from lib.quality import (
-    QUALITY_LOSSLESS,
     QUALITY_UPGRADE_TIERS,
     resolve_user_requeue_override,
-    should_clear_lossless_search_override,
 )
 from lib.release_identity import detect_release_source, normalize_release_id
+from lib.set_intent_service import SET_INTENT_HTTP_STATUS, set_lossless_intent
 from web import discogs as discogs_api
 from web import mb as mb_api
 
@@ -123,12 +122,10 @@ def _transition_applied_or_respond(
     """Map lifecycle CAS conflicts identically for every HTTP adapter."""
     if not isinstance(result, transitions.TransitionConflict):
         return True
-    status = (
-        404
-        if result.kind is transitions.TransitionConflictKind.not_found
-        else 409
+    h._json(
+        transitions.transition_conflict_payload(result),
+        status=transitions.transition_conflict_http_status(result),
     )
-    h._json(transitions.transition_conflict_payload(result), status=status)
     return False
 
 
@@ -143,36 +140,32 @@ def _request_fields_applied_or_respond(
     """Map a metadata compare-and-set miss through the HTTP CAS contract."""
     if applied:
         return True
-    row = db.get_request(request_id)
-    processing_locked = transitions.processing_locked_conflict(
-        row,
-        request_id,
-        expected_status,
-        expected_status=expected_status,
-    )
-    conflict = processing_locked or transitions.TransitionConflict(
-        request_id=request_id,
-        target_status=expected_status,
-        kind=(
-            transitions.TransitionConflictKind.not_found
-            if row is None
-            else transitions.TransitionConflictKind.stale_source
+    return _transition_applied_or_respond(
+        h,
+        transitions.request_fields_cas_conflict(
+            db,
+            request_id,
+            expected_status=expected_status,
         ),
-        expected_status=expected_status,
-        actual_status=None if row is None else str(row["status"]),
     )
-    return _transition_applied_or_respond(h, conflict)
+
+
+def _respond_initialization_incomplete(
+    h: RouteHandler, request_id: object,
+) -> None:
+    """The one payload for generic mutations refused during initialization."""
+    h._json({
+        "error": "initialization_incomplete",
+        "id": request_id,
+        "detail": "retry the original add or upgrade to resume initialization",
+    }, status=409)
 
 
 def _initializing_mutation_rejected(h: RouteHandler, req: Mapping[str, object]) -> bool:
     """Keep generic operator mutations out of service-owned initialization."""
     if req["status"] != "initializing":
         return False
-    h._json({
-        "error": "initialization_incomplete",
-        "id": req["id"],
-        "detail": "retry the original add or upgrade to resume initialization",
-    }, status=409)
+    _respond_initialization_incomplete(h, req["id"])
     return True
 
 
@@ -709,10 +702,9 @@ def post_pipeline_set_quality(h: RouteHandler, body: dict[str, object]) -> None:
 class PipelineSetIntentRequest(BaseModel):
     """HTTP body for ``POST /api/pipeline/set-intent``.
 
-    ``intent`` aliases (``flac``/``flac_only`` → ``lossless``,
-    ``best_effort``/``upgrade`` → ``default``) are normalised inside the
-    handler, not the model — the model accepts any string and the
-    handler validates against the canonical set after the alias swap.
+    The model accepts any string and the handler validates against the
+    canonical ``lossless`` / ``default`` set, so an unknown intent gets
+    the route's structured 400 rather than a bare validation error.
     """
 
     id: int = Field(gt=0)
@@ -722,109 +714,45 @@ class PipelineSetIntentRequest(BaseModel):
 def post_pipeline_set_intent(h: RouteHandler, body: dict[str, object]) -> None:
     """Toggle lossless-on-disk intent for a pipeline request.
 
-    Accepts intent: "lossless" (keep lossless on disk) or "default" (pipeline decides).
-    Backward compat: "flac", "flac_only" → "lossless"; "best_effort" → "default".
+    Accepts intent: "lossless" (keep lossless on disk) or "default"
+    (pipeline decides). Thin adapter over
+    ``lib.set_intent_service.set_lossless_intent`` (issue #1278): statuses
+    come from the service table; lifecycle conflicts render through the
+    shared conflict adapter.
     """
     req_body = parse_body(h, body, PipelineSetIntentRequest)
     if req_body is None:
         return
     s = _server()
-    req_id = req_body.id
     intent_str = req_body.intent.strip()
-
-    # Normalize to toggle: lossless or default
-    _ALIASES = {"flac": "lossless", "flac_only": "lossless",
-                "best_effort": "default", "upgrade": "default"}
-    intent_str = _ALIASES.get(intent_str, intent_str)
     if intent_str not in ("lossless", "default"):
         h._error(f"Invalid intent: {intent_str!r}. Valid: lossless, default")
         return
+    intent: Literal["lossless", "default"] = (
+        "lossless" if intent_str == "lossless" else "default"
+    )
 
-    target_format = QUALITY_LOSSLESS if intent_str == "lossless" else None
-
-    req = s._db().get_request(int(req_id))
-    if not req:
-        h._error("Not found", 404)
-        return
-    if _initializing_mutation_rejected(h, req):
-        return
-
-    if req["status"] == "downloading":
-        h._error("Cannot set intent while album is downloading")
-        return
-
-    if req["status"] == "replaced":
-        result = finalize_request(
-            s._db(),
-            int(req_id),
-            transitions.RequestTransition.to_wanted(from_status="replaced"),
-        )
+    result = set_lossless_intent(s._db(), req_body.id, intent=intent)
+    if isinstance(result, transitions.TransitionConflict):
         _transition_applied_or_respond(h, result)
         return
-
-    if req["status"] == "imported" and target_format:
-        # Re-queue to search for lossless source
-        min_br = req.get("min_bitrate")
-        result = finalize_request(
-            s._db(),
-            int(req_id),
-            transitions.RequestTransition.to_wanted(
-                from_status="imported",
-                search_filetype_override=QUALITY_LOSSLESS,
-                min_bitrate=min_br,
-            ),
-        )
-        if not _transition_applied_or_respond(h, result):
-            return
-        applied = s._db().update_request_fields(
-            int(req_id),
-            expected_status="wanted",
-            target_format=target_format,
-        )
-        if not _request_fields_applied_or_respond(
-            h,
-            s._db(),
-            int(req_id),
-            expected_status="wanted",
-            applied=applied,
-        ):
-            return
-        h._json({
-            "status": "ok",
-            "id": int(req_id),
-            "intent": intent_str,
-            "target_format": target_format,
-            "requeued": True,
-        })
-    else:
-        # Just update the persistent intent for the next search or resume.
-        update_fields = {"target_format": target_format}
-        if should_clear_lossless_search_override(
-            new_target_format=target_format,
-            old_target_format=req.get("target_format"),
-            search_filetype_override=req.get("search_filetype_override"),
-        ):
-            update_fields["search_filetype_override"] = None
-        applied = s._db().update_request_fields(
-            int(req_id),
-            expected_status=str(req["status"]),
-            **update_fields,
-        )
-        if not _request_fields_applied_or_respond(
-            h,
-            s._db(),
-            int(req_id),
-            expected_status=str(req["status"]),
-            applied=applied,
-        ):
-            return
-        h._json({
-            "status": "ok",
-            "id": int(req_id),
-            "intent": intent_str,
-            "target_format": target_format,
-            "requeued": False,
-        })
+    status = SET_INTENT_HTTP_STATUS[result.outcome]
+    if result.outcome == "not_found":
+        h._error("Not found", status)
+        return
+    if result.outcome == "initializing":
+        _respond_initialization_incomplete(h, result.request_id)
+        return
+    if result.outcome == "downloading":
+        h._error("Cannot set intent while album is downloading", status)
+        return
+    h._json({
+        "status": "ok",
+        "id": result.request_id,
+        "intent": intent,
+        "target_format": result.target_format,
+        "requeued": result.outcome == "requeued",
+    })
 
 
 class PipelineBanSourceRequest(BaseModel):
