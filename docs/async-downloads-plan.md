@@ -277,10 +277,14 @@ This function is pure (no I/O) — easy to test. Transfer ID re-derivation is se
 
 > **Names in this section are as-planned, not as-shipped.** What shipped lives
 > in `lib/slskd_transfers.py`, and the function sketched below is now the
-> module-private `_match_transfer_id` — same job, but it grew a `username`
-> argument, then an attempt-scoping `not_before` (issue #822), and finally the
-> leading underscore in #1278, its only production callers being inside that
-> module. Grep
+> module-private `_match_transfer_id`. Same job, but neither the signature nor
+> the selection survived intact: it grew a `username` argument, then an
+> attempt-scoping `not_before` (issue #822), and finally the leading underscore
+> in #1278, its only production callers being inside that module. Its selection
+> also stopped being the sketch's first filename match — the shipped path
+> gathers every candidate snapshot and ranks them with `_transfer_priority`
+> (added in `3adcb128`), which prefers an active transfer over a terminal one,
+> then a success over a cancel/error, then the newest lifecycle timestamp. Grep
 > `_match_transfer_id`, not `match_transfer_id`.
 
 **Tests first** (RED): `tests/test_download.py`

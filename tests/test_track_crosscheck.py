@@ -137,7 +137,7 @@ class TestCrossCheckPass(unittest.TestCase):
         assert _track_titles_cross_check(tracks, files) == True
 
     def test_slight_title_variation(self):
-        """One track has a slightly different title — should still pass (tolerance)."""
+        """One file is renamed, yet every expected title still finds a match."""
         tracks = make_tracks([
             "Track One", "Track Two", "Track Three",
             "Track Four", "Track Five",
@@ -150,7 +150,11 @@ class TestCrossCheckPass(unittest.TestCase):
             "06 - Track Six.mp3", "07 - Track Seven.mp3", "08 - Track Eight.mp3",
             "09 - Track Nine.mp3", "10 - Completely Different Name.mp3",
         ])
-        # 1/10 mismatch = 10% < 20% threshold → should pass
+        # NOT a tolerance case, despite the renamed file: 0 mismatches
+        # (measured — "track ten" still matches "track three" at 0.80, well
+        # over the 0.5 bar, because these titles are mutually similar). This
+        # is another all-match pass case; the tolerance divisor itself is
+        # pinned by TestCrossCheckToleranceBoundary.
         assert _track_titles_cross_check(tracks, files) == True
 
     def test_bff_correct_bsides(self):
