@@ -534,10 +534,10 @@ class TestServiceOutcomeContract(unittest.TestCase):
     }
 
     def test_outcome_set_is_stable(self) -> None:
-        # Adapters branch on outcome and look up in both dicts; the two
+        # Adapters branch on outcome and look up in both dicts. The two
         # dicts agree on keys by construction (the exit map is derived —
-        # ``lib/surface_outcomes.py``), so pinning ONE against the
-        # expected vocabulary covers both.
+        # ``lib/surface_outcomes.py``); both are still pinned against the
+        # expected vocabulary so each lookup's domain stays explicit.
         self.assertEqual(set(OUTCOME_HTTP_STATUS), self.EXPECTED_OUTCOMES)
         self.assertEqual(set(OUTCOME_EXIT_CODE), self.EXPECTED_OUTCOMES)
 

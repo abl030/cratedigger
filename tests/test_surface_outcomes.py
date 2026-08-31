@@ -5,12 +5,15 @@ convention. Services own exactly one outcome table — the outcome →
 HTTP-status map — and derive their CLI exit-code map through the shared
 convention, so the two surfaces agree branch for branch by construction.
 
-The registry audit here patrols every outcome-map-owning module: statuses
-stay inside the documented vocabulary, exit maps agree with the convention,
-and a declared outcome ``Literal`` matches its map's domain. The discovery
-sweep keeps the registry exact in both directions across ``lib/*_service.py``
-(plus the explicitly registered non-service modules), so a new outcome map
-cannot ship unaudited.
+The registry audit here patrols every registered outcome-map-owning
+module: statuses stay inside the documented vocabulary, exit maps agree
+with the convention, and a declared outcome ``Literal`` matches its map's
+domain. The discovery sweep keeps the registry exact in both directions
+across ``lib/*_service.py`` plus ``EXTRA_SWEPT_MODULES``, so a new
+service-owned outcome map cannot ship unaudited. Route-side maps,
+function-local dicts, and names outside the ``*_HTTP_STATUS`` /
+``*_EXIT_CODE(S)`` grammar are outside this bounded sweep — the remaining
+#1278 item-3 ladders live there until they move behind service tables.
 """
 
 from __future__ import annotations
@@ -54,6 +57,14 @@ class RegisteredOutcomeMaps:
     exit_attr: str | None = None
     outcome_literal: str | None = None
 
+
+#: Non-service modules that own outcome maps. The discovery sweep unions
+#: these with the ``lib/*_service.py`` glob INDEPENDENTLY of the registry:
+#: deriving the swept set from the registry would let deleting a
+#: registration also delete its module from the sweep, silently opting the
+#: module out of the "no unregistered map" direction (reader finding R3 on
+#: the founding PR).
+EXTRA_SWEPT_MODULES: tuple[str, ...] = ("lib.beets_tag_sync",)
 
 REGISTRY: tuple[RegisteredOutcomeMaps, ...] = (
     RegisteredOutcomeMaps(
@@ -100,6 +111,16 @@ def _outcome_map_attrs(module_name: str) -> set[str]:
 # ---------------------------------------------------------------------------
 # Checker — module-level and accumulating, so every clause evaluates and the
 # self-tests below can drive each clause directly.
+#
+# Honesty note (reader finding R4 on the founding PR): for a registry whose
+# exit maps are all DERIVED via ``exit_codes_from_http``, the key-agreement
+# and exit-convention clauses cannot fire through registered worlds — both
+# sides of those comparisons move together. They are fail-closed
+# legislation for a future hand-written exit map; the self-tests below
+# prove each clause trips when driven directly, and the clauses with
+# present-day teeth are the undocumented-status and outcome-``Literal``
+# ones. The convention function itself is guarded by
+# ``TestExitCodeForHttpStatus`` and the per-service value pins.
 # ---------------------------------------------------------------------------
 
 
@@ -221,12 +242,25 @@ class TestRegisteredOutcomeMapsConform(unittest.TestCase):
             self.fail("\n".join(violations))
 
     def test_registry_matches_discovered_maps_exactly(self) -> None:
-        """Both directions fail closed: no unregistered map, no stale entry."""
+        """Both directions fail closed: no unregistered map, no stale entry.
+
+        The swept set never derives from the registry (see
+        ``EXTRA_SWEPT_MODULES``), and every registered module must sit
+        inside it — otherwise a registration outside the sweep would make
+        the stale-entry direction unfalsifiable for that module.
+        """
         service_modules = {
             f"lib.{path.stem}"
             for path in (REPO_ROOT / "lib").glob("*_service.py")
         }
-        swept = sorted(service_modules | {entry.module for entry in REGISTRY})
+        swept = sorted(service_modules | set(EXTRA_SWEPT_MODULES))
+        registered_modules = {entry.module for entry in REGISTRY}
+        self.assertLessEqual(
+            registered_modules,
+            set(swept),
+            "registered module outside the discovery sweep — add it to "
+            "EXTRA_SWEPT_MODULES so both audit directions can see it",
+        )
         discovered = {
             f"{module_name}.{attr}"
             for module_name in swept

@@ -19,9 +19,11 @@ KNOWN_HTTP_STATUSES: Final[frozenset[int]] = frozenset(
     {200, 202, 400, 404, 409, 422, 503}
 )
 """Statuses a service outcome map may use; :func:`exit_codes_from_http`
-refuses anything else. Relay-time ``exit_overrides`` (e.g. a routed
-command's 410 or 500) are deliberately outside this vocabulary — they pin
-wire statuses, not service outcomes."""
+refuses anything else. Some route-side outcome tables deliberately use
+statuses outside this vocabulary (e.g. beets-distance's 410/500); their
+CLI adapters pin those commands' historical exits through
+``exit_overrides`` precisely because the convention maps no exit code
+for them."""
 
 
 def exit_code_for_http_status(

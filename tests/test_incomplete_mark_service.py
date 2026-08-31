@@ -87,11 +87,24 @@ class TestOutcomeMapsAgree(unittest.TestCase):
     values below pin the convention semantics this action relies on."""
 
     def test_convention_codes(self) -> None:
-        # 404/2 not found, 409/4 wrong state — the repository convention.
-        self.assertEqual(INCOMPLETE_MARK_EXIT_CODES["not_found"], 2)
-        self.assertEqual(INCOMPLETE_MARK_HTTP_STATUS["not_found"], 404)
-        self.assertEqual(INCOMPLETE_MARK_EXIT_CODES["replaced"], 4)
-        self.assertEqual(INCOMPLETE_MARK_HTTP_STATUS["replaced"], 409)
+        # Full value pins for both maps — the derived exit map's output is
+        # behavior, not implementation detail.
+        self.assertEqual(INCOMPLETE_MARK_HTTP_STATUS, {
+            "marked": 200,
+            "cleared": 200,
+            "already_marked": 200,
+            "already_clear": 200,
+            "not_found": 404,
+            "replaced": 409,
+        })
+        self.assertEqual(INCOMPLETE_MARK_EXIT_CODES, {
+            "marked": 0,
+            "cleared": 0,
+            "already_marked": 0,
+            "already_clear": 0,
+            "not_found": 2,
+            "replaced": 4,
+        })
 
 
 if __name__ == "__main__":
