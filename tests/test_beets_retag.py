@@ -99,6 +99,7 @@ from beets.dbcore.query import CollectionQuery, MatchQuery, RegexpQuery
 from beets.library.queries import parse_query_parts
 from beets.ui.commands.modify import modify_parse_args
 
+from lib.beets_child import BeetsChildRun
 from lib.beets_db import (
     BeetsDB,
     CurrentBeetsMissing,
@@ -114,7 +115,6 @@ from lib.beets_retag import (
     RETAG_RETAGGED,
     RETAG_TIMEOUT_SECONDS,
     BeetsRetagResult,
-    ModifyRetagRun,
     RetagModifyFn,
     retag_album_query,
     retag_assignment,
@@ -175,13 +175,13 @@ class RecordingModify:
 
     def __call__(
         self, query_tokens: tuple[str, str], assignment: str,
-    ) -> ModifyRetagRun:
+    ) -> BeetsChildRun:
         self.calls.append((query_tokens, assignment))
         if self.raises is not None:
             raise self.raises
         if self.on_run is not None:
             self.on_run()
-        return ModifyRetagRun(returncode=self.returncode, stdout="", stderr="")
+        return BeetsChildRun(returncode=self.returncode, stdout="", stderr="")
 
 
 def moves_library_to_survivor(beets: FakeBeetsDB, album_id: int = 7) -> Callable[[], None]:
@@ -963,7 +963,7 @@ class TestRunBeetsModifyRetagSeam(unittest.TestCase):
         )
         self.assertEqual(kwargs["timeout"], RETAG_TIMEOUT_SECONDS)
         self.assertIs(kwargs["capture_output"], True)
-        self.assertEqual(run, ModifyRetagRun(0, "Modifying 1 albums.\n", ""))
+        self.assertEqual(run, BeetsChildRun(0, "Modifying 1 albums.\n", ""))
 
     def test_an_unconfigured_interpreter_raises(self) -> None:
         def runner(argv: list[str], **kwargs: object) -> sp.CompletedProcess[bytes]:
@@ -1186,7 +1186,7 @@ def _seed_real_modify_world(
 
 def _run_modify_without_album_flag(
     query_tokens: tuple[str, str], assignment: str,
-) -> ModifyRetagRun:
+) -> BeetsChildRun:
     """The criterion-4 mutant: the exact primitive minus ``-a``.
 
     Run for real, against the real library — not a hand-constructed
@@ -1207,7 +1207,7 @@ def _run_modify_without_album_flag(
         env=env,
         check=False,
     )
-    return ModifyRetagRun(
+    return BeetsChildRun(
         returncode=proc.returncode,
         stdout=proc.stdout.decode("utf-8", errors="replace"),
         stderr=proc.stderr.decode("utf-8", errors="replace"),
@@ -1216,7 +1216,7 @@ def _run_modify_without_album_flag(
 
 def _run_modify_without_nowrite_flag(
     query_tokens: tuple[str, str], assignment: str,
-) -> ModifyRetagRun:
+) -> BeetsChildRun:
     """The F5a mutant: the exact primitive minus ``-W``.
 
     Run for real, against a real TAGGABLE library file (never the
@@ -1239,7 +1239,7 @@ def _run_modify_without_nowrite_flag(
         env=env,
         check=False,
     )
-    return ModifyRetagRun(
+    return BeetsChildRun(
         returncode=proc.returncode,
         stdout=proc.stdout.decode("utf-8", errors="replace"),
         stderr=proc.stderr.decode("utf-8", errors="replace"),
@@ -1248,7 +1248,7 @@ def _run_modify_without_nowrite_flag(
 
 def _run_modify_without_nomove_flag(
     query_tokens: tuple[str, str], assignment: str,
-) -> ModifyRetagRun:
+) -> BeetsChildRun:
     """The item-4 mutant (#1093): the exact primitive minus ``-M``.
 
     Run for real, against a real library whose path template makes
@@ -1271,7 +1271,7 @@ def _run_modify_without_nomove_flag(
         env=env,
         check=False,
     )
-    return ModifyRetagRun(
+    return BeetsChildRun(
         returncode=proc.returncode,
         stdout=proc.stdout.decode("utf-8", errors="replace"),
         stderr=proc.stderr.decode("utf-8", errors="replace"),

@@ -92,6 +92,7 @@ from typing import Final, Protocol
 
 import msgspec
 
+from lib.beets_child import BeetsChildRun, SubprocessRunFn, run_pinned_beets_child
 from lib.beets_db import (
     CurrentBeetsAmbiguous,
     CurrentBeetsMissing,
@@ -164,25 +165,13 @@ TAG_SYNC_HTTP_STATUS: Final[dict[str, int]] = {
 _CONVERGED_ALBUM_CLASSES: Final = frozenset({"agrees", "empty"})
 
 
-class TagSyncWriteRun(msgspec.Struct, frozen=True):
-    """What one ``beet write`` invocation reported — diagnostic detail
-    only. ``returncode`` is deliberately NOT a decision input: a query
-    matching nothing exits 1, a matching query that changes nothing exits
-    0, and either way the re-read file tags are the only evidence of the
-    end state (the ``lib/beets_retag.py`` doctrine, at the file layer)."""
-
-    returncode: int
-    stdout: str
-    stderr: str
-
-
 #: The injected ``beet write`` runner — ``query_tokens`` is
 #: :func:`tag_sync_query`'s compound item query, as SEPARATE argv elements.
 #: A definition-time default on the sync entry points; tests inject a
-#: replacement and never patch the module binding.
-type TagSyncWriteFn = Callable[[tuple[str, str]], TagSyncWriteRun]
-
-type SubprocessRunFn = Callable[..., sp.CompletedProcess[bytes]]
+#: replacement and never patch the module binding. The run record is
+#: diagnostic detail only: the re-read file tags are the only evidence of
+#: the end state (the ``lib/beets_retag.py`` doctrine, at the file layer).
+type TagSyncWriteFn = Callable[[tuple[str, str]], BeetsChildRun]
 
 
 class TagSyncResult(msgspec.Struct, frozen=True):
@@ -262,36 +251,27 @@ def run_beets_write_tags(
     *,
     runner: SubprocessRunFn = sp.run,
     timeout: int = TAG_SYNC_TIMEOUT_SECONDS,
-) -> TagSyncWriteRun:
+) -> BeetsChildRun:
     """Run ``beet write`` for the compound item query in the
     deployment-supplied Beets runtime.
 
     Invoked as ``<beets python> -m beets write <album_id-token>
     <mb_albumid-token>`` — no flags: ``write`` has no interactive prompt,
-    never moves files, and takes no ``-y``. The interpreter and
-    environment come from ``lib/util.py::beets_subprocess_env`` — the
-    single source of truth for how a beets subprocess finds its config.
+    never moves files, and takes no ``-y``. The spawn goes through
+    ``lib/beets_child.py::run_pinned_beets_child``, which resolves the
+    interpreter and environment from ``lib/util.py::beets_subprocess_env``
+    — the single source of truth for how a beets subprocess finds its
+    config.
 
     Raises on a launch/timeout failure; the caller converts that into a
     diagnostic note and lets the re-read files decide the outcome.
     """
-    from lib.util import beets_subprocess_env
-
-    env = beets_subprocess_env()
-    python = env.get("CRATEDIGGER_BEETS_PYTHON", "")
-    if not python:
-        raise RuntimeError("CRATEDIGGER_BEETS_PYTHON is not configured")
-    proc = runner(
-        [python, "-m", "beets", "write", *query_tokens],
-        capture_output=True,
+    proc = run_pinned_beets_child(
+        ["-m", "beets", "write", *query_tokens],
         timeout=timeout,
-        env=env,
+        runner=runner,
     )
-    return TagSyncWriteRun(
-        returncode=proc.returncode,
-        stdout=proc.stdout.decode("utf-8", errors="replace"),
-        stderr=proc.stderr.decode("utf-8", errors="replace"),
-    )
+    return BeetsChildRun.from_completed(proc)
 
 
 def _refusal(
@@ -666,7 +646,6 @@ __all__ = [
     "TagSyncLockDB",
     "TagSyncResult",
     "TagSyncWriteFn",
-    "TagSyncWriteRun",
     "run_beets_write_tags",
     "sync_album_file_tags",
     "sync_album_file_tags_from_borrowed_factory",

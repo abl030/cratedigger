@@ -38,6 +38,7 @@ from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from lib.beets_child import BeetsChildRun
 from lib.beets_tag_sync import (
     RESULT_ALREADY_SYNCED,
     RESULT_BEETS_UNAVAILABLE,
@@ -45,7 +46,6 @@ from lib.beets_tag_sync import (
     RESULT_SYNCED,
     TAG_SYNC_HTTP_STATUS,
     TagSyncResult,
-    TagSyncWriteRun,
     sync_album_file_tags_from_factory,
 )
 from lib.config import CratediggerConfig
@@ -147,7 +147,7 @@ def run_sync_world(world: SyncWorld) -> SyncRun:
 
     write_calls: list[tuple[str, str]] = []
 
-    def run_write(query_tokens: tuple[str, str]) -> TagSyncWriteRun:
+    def run_write(query_tokens: tuple[str, str]) -> BeetsChildRun:
         write_calls.append(query_tokens)
         if world.write_mode == "raise":
             raise RuntimeError("write exploded before touching anything")
@@ -167,7 +167,7 @@ def run_sync_world(world: SyncWorld) -> SyncRun:
         # OTHER direction: the write landed AND the subprocess reported
         # failure (#1260 reader suspect 3).
         returncode = 2 if world.write_mode == "applies_nonzero" else 0
-        return TagSyncWriteRun(returncode=returncode, stdout="", stderr="")
+        return BeetsChildRun(returncode=returncode, stdout="", stderr="")
 
     lock_db = FakePipelineDB()
     lock_db.set_advisory_lock_result(world.lock_granted)

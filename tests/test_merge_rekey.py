@@ -94,6 +94,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from unittest.mock import patch
 
+from lib.beets_child import BeetsChildRun
 from lib.beets_db import AlbumInfo
 from lib.beets_retag import (
     RETAG_ALREADY_CURRENT,
@@ -102,7 +103,6 @@ from lib.beets_retag import (
     RETAG_NOT_HELD,
     RETAG_READY_OUTCOMES,
     BeetsRetagResult,
-    ModifyRetagRun,
     RetagOutcome,
     retag_merged_album,
 )
@@ -307,12 +307,12 @@ def real_retag_over(
     library exactly as the real command mutates the real one.
     """
 
-    def run_modify(query_tokens: tuple[str, str], assignment: str) -> ModifyRetagRun:
+    def run_modify(query_tokens: tuple[str, str], assignment: str) -> BeetsChildRun:
         del query_tokens, assignment
         if moves:
             beets.set_album_ids_for_release(MERGED, [])
             beets.set_album_ids_for_release(SURVIVOR, [7])
-        return ModifyRetagRun(returncode=0, stdout="", stderr="")
+        return BeetsChildRun(returncode=0, stdout="", stderr="")
 
     def retag(
         cfg: CratediggerConfig,

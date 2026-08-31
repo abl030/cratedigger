@@ -146,6 +146,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal, Protocol
 
+from lib.beets_child import BeetsChildRun, SubprocessRunFn, run_pinned_beets_child
 from lib.beets_db import (
     CurrentBeetsAmbiguous,
     CurrentBeetsMissing,
@@ -223,23 +224,6 @@ RETAG_READY_OUTCOMES: Final = frozenset({
 
 
 @dataclass(frozen=True)
-class ModifyRetagRun:
-    """What one ``beet modify`` retag invocation reported.
-
-    Kept for the diagnostic detail only. ``returncode`` is deliberately NOT a
-    decision input: a query matching nothing exits 1 (``UserError``), but a
-    query that MATCHES and produces no field change still prints "No changes
-    to make." and exits 0 — and either way, an exit code read against a
-    shared SQLite file another process can concurrently mutate is not itself
-    evidence of the end state.
-    """
-
-    returncode: int
-    stdout: str
-    stderr: str
-
-
-@dataclass(frozen=True)
 class BeetsRetagResult:
     """The one typed answer this module gives, plus operator-facing detail."""
 
@@ -255,9 +239,7 @@ class BeetsRetagResult:
 #: replacement explicitly and never patch the module binding — patching
 #: does not replace a captured default (`.claude/rules/code-quality.md` §
 #: mocks, strategy 2).
-type RetagModifyFn = Callable[[tuple[str, str], str], ModifyRetagRun]
-
-type SubprocessRunFn = Callable[..., sp.CompletedProcess[bytes]]
+type RetagModifyFn = Callable[[tuple[str, str], str], BeetsChildRun]
 
 
 class MergeRetagFn(Protocol):
@@ -386,7 +368,7 @@ def run_beets_modify_retag(
     *,
     runner: SubprocessRunFn = sp.run,
     timeout: int = RETAG_TIMEOUT_SECONDS,
-) -> ModifyRetagRun:
+) -> BeetsChildRun:
     """Run ``beet modify -a -M -W -y`` for the compound query in the
     deployment-supplied Beets runtime.
 
@@ -397,9 +379,11 @@ def run_beets_modify_retag(
     one malformed token instead. ``python -m beets`` is a valid entry point
     in the pinned 2.13.1, and depending on a ``beet`` binary being on this
     process's PATH would silently pick up whatever beets the invoking user
-    happens to have. The interpreter and environment come from
-    ``lib/util.py::beets_subprocess_env`` — the single source of truth for
-    how a beets subprocess finds its config and interpreter.
+    happens to have. The spawn goes through
+    ``lib/beets_child.py::run_pinned_beets_child``, which resolves the
+    interpreter and environment from ``lib/util.py::beets_subprocess_env``
+    — the single source of truth for how a beets subprocess finds its
+    config and interpreter.
 
     Every flag here is load-bearing; see the module docstring for why. This
     command makes no network call and needs no candidate mapping, unlike the
@@ -408,27 +392,16 @@ def run_beets_modify_retag(
     Raises on a launch/timeout failure; :func:`retag_merged_album` turns that
     into a typed outcome after re-reading the library.
     """
-    from lib.util import beets_subprocess_env
-
-    env = beets_subprocess_env()
-    python = env.get("CRATEDIGGER_BEETS_PYTHON", "")
-    if not python:
-        raise RuntimeError("CRATEDIGGER_BEETS_PYTHON is not configured")
-    proc = runner(
+    proc = run_pinned_beets_child(
         [
-            python, "-m", "beets", "modify",
+            "-m", "beets", "modify",
             RETAG_ALBUM_FLAG, RETAG_NOMOVE_FLAG, RETAG_NOWRITE_FLAG,
             RETAG_YES_FLAG, *query_tokens, assignment,
         ],
-        capture_output=True,
         timeout=timeout,
-        env=env,
+        runner=runner,
     )
-    return ModifyRetagRun(
-        returncode=proc.returncode,
-        stdout=proc.stdout.decode("utf-8", errors="replace"),
-        stderr=proc.stderr.decode("utf-8", errors="replace"),
-    )
+    return BeetsChildRun.from_completed(proc)
 
 
 def _describe(resolution: CurrentBeetsResolution) -> str:
@@ -693,7 +666,6 @@ __all__ = [
     "BeetsRetagResult",
     "CurrentReleaseResolver",
     "MergeRetagFn",
-    "ModifyRetagRun",
     "RetagModifyFn",
     "RetagOutcome",
     "retag_album_query",
