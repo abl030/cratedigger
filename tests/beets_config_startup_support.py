@@ -257,7 +257,6 @@ def _exercise_real_rejection_and_restart(
     from web import cache
 
     world = BeetsContractWorld(role=case.role)
-    prior_main_config = cratedigger.cfg
     saved_umask = os.umask(0o027) if case.role == "main" else None
     prior_web_globals = (
         (
@@ -315,8 +314,6 @@ def _exercise_real_rejection_and_restart(
             )
             test.assertEqual(os.environ.get("BEETSDIR"), prior_beetsdir)
             test.assertIsNone(runtime_config_module._admitted_runtime_config)
-            if case.role == "main":
-                test.assertIs(cratedigger.cfg, prior_main_config)
             if case.role == "web":
                 if redis_constructor is None:
                     raise AssertionError("web cache constructor was not observed")
@@ -365,7 +362,6 @@ def _exercise_real_rejection_and_restart(
     finally:
         if saved_umask is not None:
             os.umask(saved_umask)
-        cratedigger.cfg = prior_main_config
         if prior_web_globals is not None:
             from beets import config as active_beets_config
 

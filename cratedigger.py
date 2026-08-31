@@ -10,15 +10,22 @@ import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, NotRequired, Protocol, TypedDict
+from typing import TYPE_CHECKING, NotRequired, Protocol, TypedDict
 
 from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 from lib.config import resolve_startup_config_paths
 
 # Unified slskd search lifecycle (issue #466).
+# _SlskdClient/_SlskdJson are lib/search_exec.py's shared untyped-boundary
+# aliases (= Any under the hood). Using them here relocates this module's
+# slskd-facing Any tokens behind that one accounted definition — it does NOT
+# retype the boundary; lib/search_exec.py's honest-accounting note and #468
+# own that.
 from lib.search_exec import (
     SearchSubmitError,
     SearchSubmitRetryPolicy,
+    _SlskdClient,
+    _SlskdJson,
     execute_search,
     submit_search_with_retry,
 )
@@ -73,11 +80,6 @@ class SlskdDirectory(TypedDict):
     files: list[SlskdFile]
 
 
-# === Typed Config (populated in main() via CratediggerConfig.from_ini()) ===
-cfg: CratediggerConfig | None = None  # Set in main()
-
-# === API Clients & Logging ===
-slskd: SlskdClient | None = None  # Set in main()
 logger = logging.getLogger("cratedigger")
 
 
@@ -112,15 +114,6 @@ def _warn_if_verified_lossless_target_below_transparent(
 # unified ``execute_search`` lifecycle they govern (issue #466). Imported at
 # the top of this module.
 
-# === API client instances (set in main()) ===
-pipeline_db_source: DatabaseSource | None = None  # Set in main()
-
-# === Runtime context (populated in main()) ===
-# Module-level reference for thin wrappers that can't receive ctx as a parameter.
-# All matching/search functions receive ctx explicitly.
-_module_ctx: Any = None  # CratediggerContext — set in main()
-
-
 def _create_slskd_client(client_cfg: CratediggerConfig) -> SlskdClient:
     """Create the slskd client with a pool sized for the pipeline width."""
     return SlskdClient(
@@ -142,7 +135,7 @@ from lib.quality import top_candidates_with_skip_split
 
 
 def _build_search_cache(
-    search_results: list[dict[str, Any]],
+    search_results: list[_SlskdJson],
     filter_specs: list[tuple[str, AudioFileSpec]],
 ) -> tuple[dict[str, dict[str, list[str]]], dict[str, int], dict[str, dict[str, int]]]:
     """Build cache dicts from raw slskd search results.
@@ -480,10 +473,11 @@ def _submit_plan_search(
     query: str,
     strategy_tag: str,
     search_cfg: CratediggerConfig,
-    # ``Any`` -- mirrors ``lib.context.CratediggerContext.slskd``: tests wire
+    # ``_SlskdClient`` -- lib.search_exec's shared untyped-boundary alias
+    # (mirrors ``lib.context.CratediggerContext.slskd``: tests wire
     # ``FakeSlskdAPI`` in place of the real ``SlskdClient``, and the two are
-    # not nominally related.
-    slskd_client: Any,
+    # not nominally related; #468 owns the real retyping).
+    slskd_client: _SlskdClient,
     db: _SearchPlanExecutorDB,
 ):
     """Submit a plan-item search to slskd and return ``(search_id, query, album_id, tag)``.
@@ -575,8 +569,8 @@ def _collect_search_results(
     query: str,
     album_id: int,
     search_cfg: CratediggerConfig,
-    # ``Any`` -- see the matching note on ``_submit_plan_search``.
-    slskd_client: Any,
+    # ``_SlskdClient`` -- see the matching note on ``_submit_plan_search``.
+    slskd_client: _SlskdClient,
     variant_tag: str | None = None,
     clock_fn: Callable[[], float] = time.monotonic,
 ) -> SearchResult:
@@ -1427,9 +1421,7 @@ def build_phase1_context(
     )
 
 
-
-
-def grab_most_wanted(albums: list[AlbumRecord]) -> int:
+def grab_most_wanted(albums: list[AlbumRecord], ctx: CratediggerContext) -> int:
     # A nested ``def`` (not a lambda) so ``albs`` can carry an explicit
     # annotation -- Python lambdas cannot be annotated, and
     # ``_grab_most_wanted_impl``'s ``search_and_queue: Callable[..., ...]``
@@ -1437,21 +1429,170 @@ def grab_most_wanted(albums: list[AlbumRecord]) -> int:
     def _search_and_queue_fn(
         albs: list[AlbumRecord],
     ) -> tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]]:
-        return search_and_queue(albs, _module_ctx)
+        return search_and_queue(albs, ctx)
 
-    return _grab_most_wanted_impl(albums, _search_and_queue_fn, _module_ctx)
+    return _grab_most_wanted_impl(albums, _search_and_queue_fn, ctx)
+
+
+def _default_phase1_source(cfg: CratediggerConfig) -> DatabaseSource:
+    from album_source import DatabaseSource
+    from web.api_bases import mb_ws2_base
+    return DatabaseSource(
+        cfg.pipeline_db_dsn,
+        musicbrainz_ws2_base=mb_ws2_base(cfg.musicbrainz_api_base),
+        discogs_api_base=cfg.discogs_api_base,
+    )
+
+
+def _run_phase1(
+    ctx: CratediggerContext,
+    phase1_source_factory: Callable[[CratediggerConfig], PipelineDBSource],
+) -> None:
+    """Run Phase 1 in a background thread with its own DB connection.
+
+    Phase 1 gets its own source because psycopg2 connections are not
+    thread-safe; the factory is the kwarg-DI seam ``run_cycle`` forwards so
+    tests can drive a complete cycle without a live PostgreSQL.
+    """
+    from lib.download import poll_active_downloads
+
+    phase1_source = phase1_source_factory(ctx.cfg)
+    phase1_ctx = build_phase1_context(
+        cfg=ctx.cfg,
+        slskd=ctx.slskd,
+        pipeline_db_source=phase1_source,
+        owner_ctx=ctx,
+    )
+    try:
+        poll_active_downloads(phase1_ctx)
+    finally:
+        phase1_source.close()
+
+
+def _reconcile_dry_run(pipeline_db_source: PipelineDBSource) -> int:
+    """Deploy-verification mode: read-only reconciliation only, then exit.
+
+    Runs BEFORE any convergence step, Phase 1, or Phase 2 — the position pin
+    in tests/test_convergence_runner_generated.py holds the dry-run gate
+    ahead of main()'s run_cycle hand-off. No plans are generated and nothing
+    is mutated; only classification counts are emitted.
+    """
+    from lib.startup_reconciliation import (
+        log_reconciliation_summary,
+        reconcile_search_plans,
+    )
+    try:
+        log_reconciliation_summary(reconcile_search_plans(
+            pipeline_db_source._get_db(), None, dry_run=True))
+    except Exception:
+        logger.exception(
+            "--reconcile-dry-run: search-plan reconciliation failed; "
+            "no summary produced.")
+    logger.info(
+        "--reconcile-dry-run set; skipping Phase 1 + Phase 2 "
+        "search execution.")
+    return 0
+
+
+def run_cycle(
+    ctx: CratediggerContext,
+    *,
+    phase1_source_factory: Callable[
+        [CratediggerConfig], PipelineDBSource] = _default_phase1_source,
+) -> None:
+    """Run one complete pipeline cycle over an already-constructed context.
+
+    ``main()`` owns argv, config, the startup gates, locking, collaborator
+    construction, and teardown; everything cyclical lives here so a test can
+    execute a whole cycle against fakes. The only non-context collaborator is
+    the Phase 1 source factory above.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from lib.convergence import ConvergenceGroup, run_convergence_group
+    from lib.search import SEARCH_PLAN_GENERATOR_ID
+
+    # Wall-clock anchors for the registered end-of-cycle close-out steps
+    # (lib/cycle_summary.py). Set before any cycle work runs.
+    ctx.cycle_started_at = datetime.now(UTC)
+    ctx.cycle_start = time.time()
+    # Per-cycle watchdog counter (issue #212). Reset at cycle start;
+    # incremented by `_log_search_result` for every SearchResult whose
+    # `watchdog_fired=True`.
+    ctx.cycle_searches_watchdog_killed = 0
+
+    # --- Phase 0 convergence ---
+    # Run the ordered pre-phase steps (cooldown load, search-plan
+    # reconciliation, media-server pin reconcilers) and the transfer
+    # convergence / reaper / ledger sweeps while the loop is quiescent,
+    # before Phase 1/Phase 2 can race their ownership snapshots.  The
+    # registry's runner isolates every step so no best-effort step can
+    # abort the cycle.  The cooldown loader stays ahead of Phase 1's
+    # submit below so the roster is loaded before either phase reads it;
+    # the loader mutates ctx.cooled_down_users IN PLACE, so every alias
+    # (including build_phase1_context's by-reference forward) stays
+    # coherent regardless of when it was captured.
+    run_convergence_group(ctx, ConvergenceGroup.PHASE_ZERO)
+
+    # --- Phase 1 + Phase 2 run concurrently ---
+    # Phase 1 (poll downloads) operates on status='downloading' rows.
+    # Phase 2 (search + enqueue) operates on status='wanted' rows.
+    # Disjoint status buckets — the set_downloading() guard prevents
+    # Phase 2 from overwriting Phase 1's transitions.
+    logger.info("Starting Phase 1 (poll downloads) in background...")
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="phase1") as pool:
+        phase1_future = pool.submit(_run_phase1, ctx, phase1_source_factory)
+
+        # --- Phase 2: Search and enqueue new downloads (main thread) ---
+        #
+        # Use ``get_wanted_searchable`` so only rows with a
+        # current-generator active plan execute searches. A row
+        # requeued to wanted by Phase 1 mid-cycle is excluded until
+        # the NEXT reconciliation pass repairs it -- the active-plan
+        # FK is the gate.
+        logger.info("Getting wanted records from pipeline DB...")
+        wanted_records = ctx.pipeline_db_source.get_wanted_searchable(
+            SEARCH_PLAN_GENERATOR_ID,
+            limit=ctx.cfg.page_size,
+            title_blacklist=ctx.cfg.title_blacklist,
+        )
+        logger.info(f"Pipeline DB: {len(wanted_records)} wanted record(s)")
+
+        if len(wanted_records) > 0:
+            failed = 0
+            try:
+                failed = grab_most_wanted(wanted_records, ctx)
+            except Exception:
+                logger.exception("Fatal error in search phase!")
+            if failed == 0:
+                logger.info("Cratedigger finished. Exiting...")
+            else:
+                logger.info(f"{failed}: releases failed to find a match in the search results and are still wanted.")
+        else:
+            logger.info("No releases wanted. Exiting...")
+
+        # Wait for Phase 1 to finish before cleanup
+        try:
+            phase1_future.result()
+            logger.info("Phase 1 (poll downloads) completed.")
+        except Exception:
+            logger.exception("Phase 1 (poll downloads) failed — continuing to cleanup")
+
+    # --- End-of-cycle convergence ---
+    # The registry pins harvest-before-purge as ordering data: terminal
+    # transfer evidence must land in active_download_state before the
+    # ledger-owned completed records are removed.  The close-out steps
+    # (summary line, cycle-metrics row, browsed-peer roster) follow in
+    # the same registry.  Failure isolation is per step, so a failed
+    # harvest still cannot block the purge, and a failed summary render
+    # cannot block metrics persistence.
+    run_convergence_group(ctx, ConvergenceGroup.END_OF_CYCLE)
 
 
 from lib.util import setup_logging
 
 
 def main() -> int:
-    global \
-        cfg, \
-        slskd, \
-        pipeline_db_source, \
-        _module_ctx
-
     parser = argparse.ArgumentParser(description="Cratedigger music download pipeline")
     parser.add_argument("-c", "--config-dir", default=None,
                         help="Config directory (default: cwd)")
@@ -1529,6 +1670,7 @@ def main() -> int:
         logger.info("Cratedigger instance is already running.")
         return 1
 
+    pipeline_db_source: DatabaseSource | None = None
     try:
         if not args.no_lock_file:
             with open(lock_file_path, "w") as f:
@@ -1586,7 +1728,7 @@ def main() -> int:
         from lib.context import CratediggerContext
         from lib.download_ownership import DownloadOwnershipWriter
         from lib.enqueue import ClaimedQueueKeysRegistry
-        _module_ctx = CratediggerContext(
+        ctx = CratediggerContext(
             cfg=cfg,
             slskd=slskd,
             pipeline_db_source=pipeline_db_source,
@@ -1597,132 +1739,12 @@ def main() -> int:
             claimed_queue_keys_registry=ClaimedQueueKeysRegistry(),
         )
         from lib.peer_cache import connect_from_config
-        _module_ctx.peer_cache = connect_from_config(cfg)
-
-        # Wall-clock anchors for the registered end-of-cycle close-out steps
-        # (lib/cycle_summary.py). Set before any cycle work runs.
-        _module_ctx.cycle_started_at = datetime.now(UTC)
-        _module_ctx.cycle_start = time.time()
-        # Per-cycle watchdog counter (issue #212). Reset at cycle start;
-        # incremented by `_log_search_result` for every SearchResult whose
-        # `watchdog_fired=True`.
-        _module_ctx.cycle_searches_watchdog_killed = 0
-
-        # --- Phase 1 + Phase 2 run concurrently ---
-        # Phase 1 (poll downloads) operates on status='downloading' rows.
-        # Phase 2 (search + enqueue) operates on status='wanted' rows.
-        # Disjoint status buckets — the set_downloading() guard prevents
-        # Phase 2 from overwriting Phase 1's transitions.
-        # Phase 1 gets its own DatabaseSource (psycopg2 is not thread-safe).
-        from concurrent.futures import ThreadPoolExecutor
-
-        from lib.download import poll_active_downloads as _poll_impl
-
-        # Closure locals: narrowing on the module globals doesn't reach into
-        # a nested function, so capture the already-assigned values here.
-        main_cfg = cfg
-        main_slskd = slskd
-
-        def _run_phase1():
-            """Run Phase 1 in a background thread with its own DB connection."""
-            phase1_source = DatabaseSource(
-                main_cfg.pipeline_db_dsn,
-                musicbrainz_ws2_base=mb_ws2_base(main_cfg.musicbrainz_api_base),
-                discogs_api_base=main_cfg.discogs_api_base,
-            )
-            phase1_ctx = build_phase1_context(
-                cfg=main_cfg,
-                slskd=main_slskd,
-                pipeline_db_source=phase1_source,
-                owner_ctx=_module_ctx,
-            )
-            try:
-                _poll_impl(phase1_ctx)
-            finally:
-                phase1_source.close()
-
-        from lib.search import SEARCH_PLAN_GENERATOR_ID
+        ctx.peer_cache = connect_from_config(cfg)
 
         if args.reconcile_dry_run:
-            # Dry-run mode is a deploy-verification tool: run ONLY the
-            # startup search-plan reconciliation, read-only, then exit --
-            # no convergence steps, no Phase 1, no search traffic.
-            from lib.startup_reconciliation import (
-                log_reconciliation_summary,
-                reconcile_search_plans,
-            )
-            try:
-                log_reconciliation_summary(reconcile_search_plans(
-                    pipeline_db_source._get_db(), None, dry_run=True))
-            except Exception:
-                logger.exception(
-                    "Startup search-plan reconciliation failed; continuing "
-                    "with whatever rows are already searchable.")
-            logger.info(
-                "--reconcile-dry-run set; skipping Phase 1 + Phase 2 "
-                "search execution.")
-            return 0
+            return _reconcile_dry_run(pipeline_db_source)
 
-        # --- Phase 0 convergence ---
-        # Run the ordered pre-phase steps (cooldown load, search-plan
-        # reconciliation, media-server pin reconcilers) and the transfer
-        # convergence / reaper / ledger sweeps while the loop is quiescent,
-        # before Phase 1/Phase 2 can race their ownership snapshots.  The
-        # registry's runner isolates every step so no best-effort step can
-        # abort the cycle.  The cooldown loader must stay ahead of Phase 1's
-        # submit below: build_phase1_context forwards ctx.cooled_down_users
-        # by reference after the loader replaces it.
-        from lib.convergence import ConvergenceGroup, run_convergence_group
-        run_convergence_group(_module_ctx, ConvergenceGroup.PHASE_ZERO)
-
-        logger.info("Starting Phase 1 (poll downloads) in background...")
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="phase1") as pool:
-            phase1_future = pool.submit(_run_phase1)
-
-            # --- Phase 2: Search and enqueue new downloads (main thread) ---
-            #
-            # Use ``get_wanted_searchable`` so only rows with a
-            # current-generator active plan execute searches. A row
-            # requeued to wanted by Phase 1 mid-cycle is excluded until
-            # the NEXT reconciliation pass repairs it -- the active-plan
-            # FK is the gate.
-            logger.info("Getting wanted records from pipeline DB...")
-            wanted_records = pipeline_db_source.get_wanted_searchable(
-                SEARCH_PLAN_GENERATOR_ID,
-                limit=cfg.page_size,
-                title_blacklist=cfg.title_blacklist,
-            )
-            logger.info(f"Pipeline DB: {len(wanted_records)} wanted record(s)")
-
-            failed = 0
-            if len(wanted_records) > 0:
-                try:
-                    failed = grab_most_wanted(wanted_records)
-                except Exception:
-                    logger.exception("Fatal error in search phase!")
-                if failed == 0:
-                    logger.info("Cratedigger finished. Exiting...")
-                else:
-                    logger.info(f"{failed}: releases failed to find a match in the search results and are still wanted.")
-            else:
-                logger.info("No releases wanted. Exiting...")
-
-            # Wait for Phase 1 to finish before cleanup
-            try:
-                phase1_future.result()
-                logger.info("Phase 1 (poll downloads) completed.")
-            except Exception:
-                logger.exception("Phase 1 (poll downloads) failed — continuing to cleanup")
-
-        # --- End-of-cycle convergence ---
-        # The registry pins harvest-before-purge as ordering data: terminal
-        # transfer evidence must land in active_download_state before the
-        # ledger-owned completed records are removed.  The close-out steps
-        # (summary line, cycle-metrics row, browsed-peer roster) follow in
-        # the same registry.  Failure isolation is per step, so a failed
-        # harvest still cannot block the purge, and a failed summary render
-        # cannot block metrics persistence.
-        run_convergence_group(_module_ctx, ConvergenceGroup.END_OF_CYCLE)
+        run_cycle(ctx)
 
     finally:
         # Clean up pipeline DB connection

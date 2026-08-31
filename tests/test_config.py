@@ -900,7 +900,6 @@ class TestMainCLIParsing(unittest.TestCase):
     """Test the CLI argument parsing and config loading path in main()."""
 
     def setUp(self):
-        import cratedigger
         from lib import config as runtime_config_module
 
         # cratedigger.main() calls reset_umask() (sets umask to 0o002 for the
@@ -912,7 +911,6 @@ class TestMainCLIParsing(unittest.TestCase):
         prior_runtime_config = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
         prior_beetsdir = os.environ.get("BEETSDIR")
         prior_admitted = runtime_config_module._admitted_runtime_config
-        prior_main_config = cratedigger.cfg
 
         def restore_runtime_config() -> None:
             if prior_runtime_config is None:
@@ -924,7 +922,6 @@ class TestMainCLIParsing(unittest.TestCase):
             else:
                 os.environ["BEETSDIR"] = prior_beetsdir
             runtime_config_module._admitted_runtime_config = prior_admitted
-            cratedigger.cfg = prior_main_config
 
         self.addCleanup(restore_runtime_config)
 
@@ -954,10 +951,6 @@ class TestMainCLIParsing(unittest.TestCase):
 
     def _run_main_until_config_parse(self, argv: list[str], callback) -> None:
         import cratedigger
-
-        cratedigger.cfg = None
-        cratedigger.pipeline_db_source = None
-        cratedigger._module_ctx = None
 
         def fake_from_ini(config, config_dir=".", var_dir="."):
             callback(config, config_dir, var_dir)

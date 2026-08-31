@@ -80,20 +80,10 @@ class TestSearchMaxInflightPipelineLog(unittest.TestCase):
     """The pipeline log line must report the configured value, not the
     legacy hard-coded 2."""
 
-    def setUp(self) -> None:
-        self._orig_cfg = cratedigger.cfg
-        self._orig_slskd = cratedigger.slskd
-
-    def tearDown(self) -> None:
-        cratedigger.cfg = self._orig_cfg
-        cratedigger.slskd = self._orig_slskd
-
     def _run_with(self, cfg: CratediggerConfig) -> str:
         """Run _search_and_queue_parallel with an empty album list, return
         the captured "Pipelined search" log line."""
-        cratedigger.cfg = cfg
         slskd = FakeSlskdAPI()
-        cratedigger.slskd = slskd
         ctx = CratediggerContext(
             cfg=cfg, slskd=slskd, pipeline_db_source=FakePipelineDBSource(),
         )

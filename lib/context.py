@@ -70,7 +70,7 @@ class CratediggerContext:
     slskd: Any  # lib.slskd_client.SlskdClient — Any so tests can wire FakeSlskdAPI
     pipeline_db_source: PipelineDBSource
     download_ownership: Any = None
-    # One instance is constructed per cycle (cratedigger.py's _module_ctx)
+    # One instance is constructed per cycle (main()'s owner ctx)
     # and threaded into every find-download worker context by reference,
     # the same pattern as download_ownership above (issue #1178 PR2 review
     # F7 -- was a module-global dict). Real-typed via the TYPE_CHECKING
@@ -135,10 +135,10 @@ class CratediggerContext:
     fanout_waves: int = 0
 
     # --- Cycle wall-clock anchors. ---
-    # Set by main() as the cycle body starts; read by the registered
+    # Set by run_cycle() as the cycle body starts; read by the registered
     # end-of-cycle close-out steps (lib/cycle_summary.py) to derive elapsed
-    # time and the metrics row's started_at without main() threading the
-    # values through each call.
+    # time and the metrics row's started_at without the cycle body threading
+    # the values through each call.
     cycle_started_at: datetime | None = None
     cycle_start: float = 0.0
 

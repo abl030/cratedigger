@@ -19,11 +19,13 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from types import SimpleNamespace
-from typing import Any, Never, Self, cast
+from typing import Any, Never, Self
 from unittest.mock import MagicMock, patch
 
 import psycopg2
 
+import cratedigger
+from cratedigger import TrackRecord
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
@@ -446,10 +448,9 @@ class TestDownloadOwnershipPreclaimRecoverySlice(unittest.TestCase):
             db_factory=lambda: db,
         )
         file_dir = "Music\\u00\\Album"
-        tracks = cast(
-            Any,
-            [{"albumId": 1, "title": "Track 1", "mediumNumber": 1}],
-        )
+        tracks: list[TrackRecord] = [
+            {"albumId": 1, "title": "Track 1", "mediumNumber": 1},
+        ]
         results = {"u00": {"flac": [file_dir]}}
         match = MatchResult(
             matched=True,
@@ -540,8 +541,9 @@ class TestAmbiguousEnqueueReasonPropagationSlice(unittest.TestCase):
             db_factory=lambda: db,
         )
         file_dir = "Music\\u00\\Album"
-        tracks = cast(
-            Any, [{"albumId": 1, "title": "Track 1", "mediumNumber": 1}])
+        tracks: list[TrackRecord] = [
+            {"albumId": 1, "title": "Track 1", "mediumNumber": 1},
+        ]
         results = {"u00": {"flac": [file_dir]}}
         match = MatchResult(
             matched=True,
@@ -668,9 +670,9 @@ class TestPeerOnlineProbeAtEnqueueSlice(unittest.TestCase):
             "offline_peer": {"flac": ["Music\\offline_peer\\Album"]},
             "online_peer": {"flac": ["Music\\online_peer\\Album"]},
         }
-        tracks = cast(
-            Any, [{"albumId": 1, "title": "Track 1", "mediumNumber": 1}],
-        )
+        tracks: list[TrackRecord] = [
+            {"albumId": 1, "title": "Track 1", "mediumNumber": 1},
+        ]
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
              patch("time.sleep"):
@@ -706,9 +708,9 @@ class TestPeerOnlineProbeAtEnqueueSlice(unittest.TestCase):
             "u00": {"flac": ["Music\\u00\\Album"]},
             "u01": {"flac": ["Music\\u01\\Album"]},
         }
-        tracks = cast(
-            Any, [{"albumId": 1, "title": "Track 1", "mediumNumber": 1}],
-        )
+        tracks: list[TrackRecord] = [
+            {"albumId": 1, "title": "Track 1", "mediumNumber": 1},
+        ]
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
              patch("time.sleep"):
@@ -738,9 +740,9 @@ class TestPeerOnlineProbeAtEnqueueSlice(unittest.TestCase):
         slskd.transfers.enqueue_error = self._build_offline_http_error()
         ctx = self._setup_ctx(db, slskd, speeds={"pooyork": 10_000})
         results = {"pooyork": {"flac": ["Music\\pooyork\\Album"]}}
-        tracks = cast(
-            Any, [{"albumId": 1, "title": "Track 1", "mediumNumber": 1}],
-        )
+        tracks: list[TrackRecord] = [
+            {"albumId": 1, "title": "Track 1", "mediumNumber": 1},
+        ]
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
              patch("time.sleep"):
@@ -4491,20 +4493,6 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
     truncation, exhaustion short-circuit, and Discogs-source parity.
     """
 
-    def setUp(self):
-        import cratedigger
-        self._cratedigger = cratedigger
-        self._orig_cfg = cratedigger.cfg
-        self._orig_slskd = cratedigger.slskd
-        self._orig_pdb = cratedigger.pipeline_db_source
-        self._orig_module_ctx = cratedigger._module_ctx
-
-    def tearDown(self):
-        self._cratedigger.cfg = self._orig_cfg
-        self._cratedigger.slskd = self._orig_slskd
-        self._cratedigger.pipeline_db_source = self._orig_pdb
-        self._cratedigger._module_ctx = self._orig_module_ctx
-
     def _make_cfg(self, **overrides):
         """Build CratediggerConfig via from_ini, then apply overrides.
 
@@ -4571,20 +4559,15 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         track_<idx>).
         """
         from lib.context import CratediggerContext
-        cratedigger = self._cratedigger
-        cratedigger.cfg = cfg
-        cratedigger.slskd = slskd
         # FakePipelineDBSource's get_tracks already mirrors the production
         # negative-ID transform (request_id * -1), so the previous explicit
         # ``source.get_tracks.side_effect = _get_tracks`` override is no
         # longer needed — the fake exposes the same shape.
         source = FakePipelineDBSource(db)
 
-        cratedigger.pipeline_db_source = source
         ctx = CratediggerContext(
             cfg=cfg, slskd=slskd, pipeline_db_source=source,
         )
-        cratedigger._module_ctx = ctx
         # search_for_album / find_download read the album from the cache.
         ctx.current_album_cache[album.id] = album
         return ctx
@@ -4682,15 +4665,15 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         with patch("lib.enqueue.slskd_do_enqueue", return_value=[
             MagicMock(),
         ]):
-            result = self._cratedigger.search_for_album(album, ctx)
+            result = cratedigger.search_for_album(album, ctx)
             grab_list: dict[Any, Any] = {}
             from lib.enqueue import find_download
             find_result = find_download(album, ctx)
             self.assertEqual(grab_list, {})
-            self._cratedigger._apply_find_download_result(
+            cratedigger._apply_find_download_result(
                 album, result, find_result, [], grab_list, ctx)
             self.assertIn(album.id, grab_list)
-            self._cratedigger._log_search_result(album, result, ctx)
+            cratedigger._log_search_result(album, result, ctx)
 
         # responseLimit was forwarded to slskd at the wire boundary.
         call = slskd.searches.search_text_calls[0]
@@ -4753,8 +4736,8 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         ])
         ctx = self._wire(cfg, slskd, db, album)
 
-        result = self._cratedigger.search_for_album(album, ctx)
-        self._cratedigger._log_search_result(album, result, ctx)
+        result = cratedigger.search_for_album(album, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         self.assertEqual(result.variant_tag, "unwild")
         call = slskd.searches.search_text_calls[0]
@@ -4786,8 +4769,8 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         ])
         ctx = self._wire(cfg, slskd, db, album)
 
-        result = self._cratedigger.search_for_album(album, ctx)
-        self._cratedigger._log_search_result(album, result, ctx)
+        result = cratedigger.search_for_album(album, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         self.assertEqual(result.variant_tag, "unwild_year")
         call = slskd.searches.search_text_calls[0]
@@ -4840,8 +4823,8 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         ], cursor_ordinal=1, cycle_count=3)
         ctx = self._wire(cfg, slskd, db, album)
 
-        result = self._cratedigger.search_for_album(album, ctx)
-        self._cratedigger._log_search_result(album, result, ctx)
+        result = cratedigger.search_for_album(album, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         # slskd was hit; outcome=no_results (consumed slot).
         self.assertEqual(result.outcome, "no_results")
@@ -4886,8 +4869,8 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self._seed_plan(db, rid)
         ctx = self._wire(cfg, slskd, db, album)
 
-        result = self._cratedigger.search_for_album(album, ctx)
-        self._cratedigger._log_search_result(album, result, ctx)
+        result = cratedigger.search_for_album(album, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         self.assertEqual(result.outcome, "no_results")
         self.assertEqual(result.final_state, "ResponseLimitReached")
@@ -4954,7 +4937,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             plan_execution=plan_exec,
         )
         album = self._make_album(request_id=rid)
-        self._cratedigger._log_search_result(album, result, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         row = db.search_logs[0]
         assert row.candidates is not None
@@ -5004,14 +4987,14 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self._seed_plan(db, rid, items=[("default", "*isco Disco")])
         ctx = self._wire(cfg, slskd, db, album)
 
-        result = self._cratedigger.search_for_album(album, ctx)
+        result = cratedigger.search_for_album(album, ctx)
         grab_list: dict[Any, Any] = {}
         from lib.enqueue import find_download
         with patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]):
             find_result = find_download(album, ctx)
-        self._cratedigger._apply_find_download_result(
+        cratedigger._apply_find_download_result(
             album, result, find_result, [], grab_list, ctx)
-        self._cratedigger._log_search_result(album, result, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         # Same blob shape regardless of MB-vs-Discogs origin.
         row = db.search_logs[0]
@@ -5038,7 +5021,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
 
         album = self._make_album(request_id=1, mb_release_id="mbid-p")
 
-        submit = self._cratedigger._submit_plan_search(
+        submit = cratedigger._submit_plan_search(
             album, "Wiggles Album", "default", cfg, slskd, FakePipelineDB(),
         )
         self.assertIsNotNone(submit)
@@ -5084,8 +5067,8 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         ])
         ctx = self._wire(cfg, slskd, db, album)
 
-        result = self._cratedigger.search_for_album(album, ctx)
-        self._cratedigger._log_search_result(album, result, ctx)
+        result = cratedigger.search_for_album(album, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         self.assertEqual(result.variant_tag, "track_0")
         self.assertEqual(len(slskd.searches.search_text_calls), 1)
@@ -5121,8 +5104,8 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         ])
         ctx = self._wire(cfg, slskd, db, album)
 
-        result = self._cratedigger.search_for_album(album, ctx)
-        self._cratedigger._log_search_result(album, result, ctx)
+        result = cratedigger.search_for_album(album, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         self.assertEqual(result.outcome, "error")
         row = db.search_logs[0]
@@ -5165,8 +5148,8 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         self._seed_plan(db, rid, items=[("default", "*iggles Album")])
         ctx = self._wire(cfg, slskd, db, album)
 
-        result = self._cratedigger.search_for_album(album, ctx)
-        self._cratedigger._log_search_result(album, result, ctx)
+        result = cratedigger.search_for_album(album, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         self.assertEqual(result.outcome, "error")
         self.assertEqual(result.final_state, "collection_crash")
@@ -5218,7 +5201,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
             cross_request_conflict_ids=(8781, 8846),
         )
 
-        self._cratedigger._log_search_result(album, result, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         marker = db.search_logs[0].cross_request_conflict_request_ids
         assert marker is not None
@@ -5302,12 +5285,12 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         ctx.download_ownership = DownloadOwnershipWriter(db_factory=lambda: db)
         ctx.claimed_queue_keys_registry = ClaimedQueueKeysRegistry()
 
-        result = self._cratedigger.search_for_album(album, ctx)
+        result = cratedigger.search_for_album(album, ctx)
         find_result = find_download(album, ctx)
         grab_list: dict[int, GrabListEntry] = {}
-        self._cratedigger._apply_find_download_result(
+        cratedigger._apply_find_download_result(
             album, result, find_result, [], grab_list, ctx)
-        self._cratedigger._log_search_result(album, result, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         # The guard actually fired: the candidate never matched, and the
         # owner is named.
@@ -5333,26 +5316,16 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
       unsearchable→wanted) clears ``search_attempts``.
     """
 
-    def setUp(self):
-        import cratedigger
-        self._cratedigger = cratedigger
-        self._orig_pdb = cratedigger.pipeline_db_source
-        self._orig_module_ctx = cratedigger._module_ctx
-
-    def tearDown(self):
-        self._cratedigger.pipeline_db_source = self._orig_pdb
-        self._cratedigger._module_ctx = self._orig_module_ctx
-
     def _ctx_with_db(self, db):
+        import configparser
+
         from lib.config import CratediggerConfig
         from lib.context import CratediggerContext
         source = FakePipelineDBSource(db)
-        self._cratedigger.pipeline_db_source = source
         ctx = CratediggerContext(
-            cfg=cast(CratediggerConfig, self._cratedigger.cfg),
+            cfg=CratediggerConfig.from_ini(configparser.ConfigParser()),
             pipeline_db_source=source, slskd=MagicMock(),
         )
-        self._cratedigger._module_ctx = ctx
         return ctx
 
     def _make_album(self, request_id):
@@ -5395,7 +5368,7 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
         ctx = self._ctx_with_db(db)
         result = self._make_exhausted_result(album_id=-rid)
 
-        self._cratedigger._log_search_result(album, result, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         # Recorded as a non-consuming pre-attempt row -- the executor
         # never emits ``exhausted`` post-U5 anyway, but if some legacy
@@ -5418,9 +5391,6 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
 
     def test_requeue_via_apply_transition_clears_state(self):
         """Operator re-queue via the single-seam transition resets state."""
-        from typing import cast
-
-        from lib.pipeline_db import PipelineDB
         from lib.transitions import apply_transition
         from tests.fakes import FakePipelineDB
 
@@ -5432,11 +5402,10 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
         db.update_request_fields(rid, search_attempts=7)
 
         # The web UI button / pipeline-cli requeue / importer requeue all
-        # funnel through apply_transition('unsearchable' -> 'wanted'). Cast to
-        # the concrete type — FakePipelineDB is duck-typed for the
-        # methods apply_transition uses (get_request, reset_to_wanted).
+        # funnel through apply_transition('unsearchable' -> 'wanted');
+        # FakePipelineDB satisfies the TransitionsDB Protocol structurally.
         apply_transition(
-            cast(PipelineDB, db), rid, "wanted", from_status="unsearchable")
+            db, rid, "wanted", from_status="unsearchable")
 
         row = db.request(rid)
         self.assertEqual(row["status"], "wanted")
@@ -6134,20 +6103,6 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
     on enqueue / download ownership / status transitions.
     """
 
-    def setUp(self):
-        import cratedigger
-        self._cratedigger = cratedigger
-        self._orig_cfg = cratedigger.cfg
-        self._orig_slskd = cratedigger.slskd
-        self._orig_pdb = cratedigger.pipeline_db_source
-        self._orig_module_ctx = cratedigger._module_ctx
-
-    def tearDown(self):
-        self._cratedigger.cfg = self._orig_cfg
-        self._cratedigger.slskd = self._orig_slskd
-        self._cratedigger.pipeline_db_source = self._orig_pdb
-        self._cratedigger._module_ctx = self._orig_module_ctx
-
     def _make_cfg(self, **overrides):
         import configparser
         from dataclasses import replace as _replace
@@ -6188,15 +6143,10 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
 
     def _wire(self, cfg, slskd, db):
         from lib.context import CratediggerContext
-        cratedigger = self._cratedigger
-        cratedigger.cfg = cfg
-        cratedigger.slskd = slskd
         source = FakePipelineDBSource(db)
-        cratedigger.pipeline_db_source = source
         ctx = CratediggerContext(
             cfg=cfg, slskd=slskd, pipeline_db_source=source,
         )
-        cratedigger._module_ctx = ctx
         return ctx
 
     def _seed_two_item_plan(self, db, rid):
@@ -6235,8 +6185,8 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
         ctx = self._wire(cfg, slskd, db)
         ctx.current_album_cache[album.id] = album
 
-        result = self._cratedigger.search_for_album(album, ctx)
-        self._cratedigger._log_search_result(album, result, ctx)
+        result = cratedigger.search_for_album(album, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         self.assertEqual(result.outcome, "no_results")
         log = db.search_logs[-1]
@@ -6265,8 +6215,8 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
         ctx = self._wire(cfg, slskd, db)
         ctx.current_album_cache[album.id] = album
 
-        result = self._cratedigger.search_for_album(album, ctx)
-        self._cratedigger._log_search_result(album, result, ctx)
+        result = cratedigger.search_for_album(album, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         log = db.search_logs[-1]
         self.assertEqual(log.execution_stage, "pre_attempt")
@@ -6300,8 +6250,8 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
         ctx = self._wire(cfg, slskd, db)
         ctx.current_album_cache[album.id] = album
 
-        result = self._cratedigger.search_for_album(album, ctx)
-        self._cratedigger._log_search_result(album, result, ctx)
+        result = cratedigger.search_for_album(album, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         # Positive: cycle incremented, cursor wrapped.
         row = db.request(rid)
@@ -6361,7 +6311,7 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
         )
         album = self._make_album(request_id=rid)
         ctx = self._wire(cfg, MagicMock(), db)
-        self._cratedigger._log_search_result(album, result, ctx)
+        cratedigger._log_search_result(album, result, ctx)
 
         # Stale-log row written against the executed OLD plan.
         log = db.search_logs[-1]
@@ -6514,16 +6464,6 @@ class TestU5RegressionExecutorDoesNotUseLegacyVariantPicker(unittest.TestCase):
     through the persisted plan -- ``select_variant`` and ``search_attempts``
     must NOT determine the next runnable query."""
 
-    def setUp(self):
-        import cratedigger
-        self._cratedigger = cratedigger
-        self._orig_cfg = cratedigger.cfg
-        self._orig_slskd = cratedigger.slskd
-
-    def tearDown(self):
-        self._cratedigger.cfg = self._orig_cfg
-        self._cratedigger.slskd = self._orig_slskd
-
     def test_executor_uses_plan_strategy_not_search_attempts_ladder(self):
         """A request with search_attempts=99 (ladder past exhaustion) but
         whose active plan-item is strategy='unwild' MUST issue an unwild
@@ -6576,15 +6516,13 @@ class TestU5RegressionExecutorDoesNotUseLegacyVariantPicker(unittest.TestCase):
             db_mb_release_id="mbid",
             db_search_filetype_override=None, db_target_format=None,
         )
-        self._cratedigger.cfg = cfg
-        self._cratedigger.slskd = slskd
         source = FakePipelineDBSource(db)
         ctx = CratediggerContext(
             cfg=cfg, slskd=slskd, pipeline_db_source=source,
         )
         ctx.current_album_cache[album.id] = album
 
-        result = self._cratedigger.search_for_album(album, ctx)
+        result = cratedigger.search_for_album(album, ctx)
         # Plan-driven query was issued.
         self.assertEqual(len(slskd.searches.search_text_calls), 1)
         self.assertEqual(
@@ -6785,7 +6723,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     beets_harness_path=_HARNESS, pipeline_db_enabled=True),
             ):
                 outcome = dispatch_import_from_db(
-                    cast(Any, db), 42, source,
+                    db, 42, source,
                     source_username="alice", import_job_id=import_claimed.id,
                     download_log_id=log_id,
                     quality_gate_fn=noop_quality_gate,
@@ -6898,7 +6836,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 side_effect=_sentinel_materialize,
             ):
                 updated = import_preview_worker.process_claimed_preview_job(
-                    cast(Any, db),
+                    db,
                     claimed,
                     spectral_detail_analyzer=analyze,
                     execution_lease=lease,
@@ -6984,7 +6922,7 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
             with patch_dispatch_externals() as ext, \
                  patch("lib.config.read_runtime_config", return_value=cfg):
                 outcome = dispatch_import_from_db(
-                    cast(Any, db),
+                    db,
                     request_id=42,
                     failed_path=source,
                     import_job_id=job.id,
@@ -7127,7 +7065,7 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
         )
 
         _record_preview_measurement_failed(
-            cast(Any, db),
+            db,
             request_id=42,
             import_job_id=job.id,
             payload=payload,
@@ -7196,7 +7134,7 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
             source_path=source_path,
         )
         _record_preview_measurement_failed(
-            cast(Any, db),
+            db,
             request_id=7,
             import_job_id=job.id,
             payload=payload,
@@ -7234,7 +7172,7 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
         db.seed_request(make_request_row(id=99, status="downloading"))
 
         _record_rejection_and_maybe_requeue(
-            cast(Any, db),
+            db,
             99,
             DownloadInfo(username="alice", filetype="mp3", bitrate=192_000),
             detail="bitrate too low",
@@ -7337,11 +7275,11 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
             return_value=preview_result,
         ):
             updated = import_preview_worker.process_claimed_preview_job(
-                cast(Any, db),
+                db,
                 claimed,
                 preview_fn=lambda _db, _job: (
                     import_preview_worker.measure_and_persist_candidate_evidence(
-                        cast(Any, _db),
+                        _db,
                         request_id=42,
                         path="/tmp/u5-vanished",
                     )
@@ -7395,11 +7333,11 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
             return_value=preview_result,
         ):
             updated = import_preview_worker.process_claimed_preview_job(
-                cast(Any, db),
+                db,
                 claimed,
                 preview_fn=lambda _db, _job: (
                     import_preview_worker.measure_and_persist_candidate_evidence(
-                        cast(Any, _db),
+                        _db,
                         request_id=43,
                         path="/tmp/u5-vanished",
                     )
@@ -7573,11 +7511,11 @@ class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
                 side_effect=fake_preview,
             ):
                 updated = import_preview_worker.process_claimed_preview_job(
-                    cast(Any, db),
+                    db,
                     claimed,
                     preview_fn=lambda preview_db, _preview_job: (
                         import_preview_worker.measure_and_persist_candidate_evidence(
-                            cast(Any, preview_db),
+                            preview_db,
                             request_id=42,
                             path=action_path,
                         )

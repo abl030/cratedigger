@@ -23,20 +23,22 @@ class TestLoadUserCooldowns(unittest.TestCase):
         self.assertEqual(loaded, {"slowpeer"})
         self.assertEqual(ctx.cooled_down_users, {"slowpeer"})
 
-    def test_replaces_the_context_set_rather_than_mutating(self):
-        # build_phase1_context forwards ctx.cooled_down_users by reference
-        # AFTER Phase 0 runs, so the loader may replace the object — but a
-        # stale pre-load alias must not keep feeding Phase 2 workers.
+    def test_updates_the_context_set_in_place(self):
+        # build_phase1_context forwards ctx.cooled_down_users by reference,
+        # so the loader must mutate the SAME object (clear + update): every
+        # alias, whenever captured, sees the loaded roster and never a
+        # stale ghost. Replacing the object would strand pre-load aliases.
         db = FakePipelineDB()
         ctx = make_ctx_with_fake_db(db)
-        stale_alias = ctx.cooled_down_users
-        stale_alias.add("ghost")
+        alias = ctx.cooled_down_users
+        alias.add("ghost")
 
         loaded = load_user_cooldowns(ctx)
 
         self.assertEqual(loaded, set())
         self.assertEqual(ctx.cooled_down_users, set())
-        self.assertIsNot(ctx.cooled_down_users, stale_alias)
+        self.assertIs(ctx.cooled_down_users, alias)
+        self.assertEqual(alias, set())
 
     def test_expired_cooldowns_are_not_loaded(self):
         db = FakePipelineDB()

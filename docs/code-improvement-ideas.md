@@ -59,11 +59,11 @@ Or simpler: have `process_completed_album` always set status, even in the no-bee
 
 ## 4. Extract cratedigger.py globals into a proper entry point
 
-**Problem**: `cratedigger.py` uses module-level globals (`slskd`, `cfg`, `pipeline_db_source`, `search_cache`, `folder_cache`, `broken_user`) and thin closure wrappers (`_make_ctx()`, `cancel_and_delete()`, `grab_most_wanted()`) to bridge between the global state and `lib/` functions that take `CratediggerContext`. Adding `poll_active_downloads` to `main()` required understanding which globals were initialized at which point.
-
-**Fix**: Build `CratediggerContext` once at the top of `main()` after all initialization is complete. Thread it through explicitly. Kill the closure wrappers. The search caches could live on `CratediggerContext` or a new `SearchState` dataclass.
-
-This would also make integration testing the full `main()` flow possible — currently you can't test `main()` without mocking module globals.
+**SOLVED (issue #1278 item 2, 2026-08-31)**: the module globals and closure
+wrappers are gone — `main()` builds one `CratediggerContext` and hands off to
+`run_cycle(ctx, *, phase1_source_factory=...)`, and
+`tests/test_convergence_runner_generated.py::TestRunCycleExecutable` is
+exactly the full-cycle integration test this item said was impossible.
 
 ## 5. Configurable/injectable `time.sleep` in `slskd_do_enqueue`
 

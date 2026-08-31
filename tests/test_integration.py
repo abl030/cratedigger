@@ -305,63 +305,47 @@ class TestRawDictBoundary(unittest.TestCase):
 
     def test_album_track_num_with_raw_dicts(self):
         """album_track_num receives raw directory dicts."""
-        orig_cfg = cratedigger.cfg
-        cratedigger.cfg = _make_matching_cfg(allowed_filetypes=("flac", "mp3"))
-        try:
-            directory = make_directory("Music\\Album", [
-                {"filename": "01 - Track.flac", "size": 100},
-                {"filename": "02 - Track.flac", "size": 100},
-                {"filename": "cover.jpg", "size": 50},
-            ])
-            result = matching_module.album_track_num(directory, cratedigger.cfg)
-            self.assertEqual(result["count"], 2)
-            self.assertEqual(result["filetype"], "flac")
-        finally:
-            cratedigger.cfg = orig_cfg
+        cfg = _make_matching_cfg(allowed_filetypes=("flac", "mp3"))
+        directory = make_directory("Music\\Album", [
+            {"filename": "01 - Track.flac", "size": 100},
+            {"filename": "02 - Track.flac", "size": 100},
+            {"filename": "cover.jpg", "size": 50},
+        ])
+        result = matching_module.album_track_num(directory, cfg)
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["filetype"], "flac")
 
     def test_download_filter_with_raw_dicts(self):
         """download_filter returns a new dict without mutating the input."""
-        orig_cfg = cratedigger.cfg
-        cratedigger.cfg = _make_matching_cfg(
+        cfg = _make_matching_cfg(
             download_filtering=True,
             use_extension_whitelist=True,
             extensions_whitelist=("jpg", "txt"),
         )
-        try:
-            directory = make_directory("Music\\Album", [
-                {"filename": "01 - Track.flac", "size": 100},
-                {"filename": "cover.jpg", "size": 50},
-                {"filename": "info.nfo", "size": 10},
-            ])
-            filtered = browse_module.download_filter("flac", directory, cratedigger.cfg)
-            filenames = [f["filename"] for f in filtered["files"]]
-            self.assertIn("01 - Track.flac", filenames)
-            self.assertIn("cover.jpg", filenames)
-            self.assertNotIn("info.nfo", filenames)
-            # Original should be unchanged
-            self.assertEqual(len(directory["files"]), 3)
-        finally:
-            cratedigger.cfg = orig_cfg
+        directory = make_directory("Music\\Album", [
+            {"filename": "01 - Track.flac", "size": 100},
+            {"filename": "cover.jpg", "size": 50},
+            {"filename": "info.nfo", "size": 10},
+        ])
+        filtered = browse_module.download_filter("flac", directory, cfg)
+        filenames = [f["filename"] for f in filtered["files"]]
+        self.assertIn("01 - Track.flac", filenames)
+        self.assertIn("cover.jpg", filenames)
+        self.assertNotIn("info.nfo", filenames)
+        # Original should be unchanged
+        self.assertEqual(len(directory["files"]), 3)
 
 
 class TestContextDependencyPropagation(unittest.TestCase):
-    """Verify matching/enqueue helpers use ctx dependencies, not module globals."""
+    """Verify matching/enqueue helpers use ctx dependencies.
 
-    def setUp(self):
-        self._orig_cfg = cratedigger.cfg
-        self._orig_pdb = cratedigger.pipeline_db_source
-
-    def tearDown(self):
-        cratedigger.cfg = self._orig_cfg
-        cratedigger.pipeline_db_source = self._orig_pdb
+    These used to plant poisoned module globals and assert ctx won; the
+    globals are gone (run_cycle extraction), so the ctx path is the only
+    path and the tests keep the behavioral half.
+    """
 
     def test_check_for_match_uses_ctx_cfg(self):
-        """Matching should read config from ctx, not the module-level cfg."""
-        cratedigger.cfg = _make_matching_cfg(
-            allowed_filetypes=("mp3",),
-            minimum_match_ratio=0.99,
-            ignored_users=("user1",),
-        )
+        """Matching should read config from ctx."""
         ctx_cfg = _make_matching_cfg(
             allowed_filetypes=("flac",),
             minimum_match_ratio=0.5,
@@ -393,17 +377,10 @@ class TestContextDependencyPropagation(unittest.TestCase):
         ctx_source._get_db.return_value = ctx_db
         ctx = _make_ctx(pipeline_db_source=ctx_source)
 
-        global_source = MagicMock()
-        global_db = MagicMock()
-        global_db.get_denylisted_users.return_value = [{"username": "wrong"}]
-        global_source._get_db.return_value = global_db
-        cratedigger.pipeline_db_source = global_source
-
         denied = enqueue_module._get_denied_users(12, ctx)
 
         self.assertEqual(denied, {"baduser"})
         ctx_source._get_db.assert_called_once()
-        global_source._get_db.assert_not_called()
 
     def test_get_album_tracks_uses_ctx_pipeline_db_source(self):
         """Track lookups should use ctx.pipeline_db_source."""
@@ -413,15 +390,10 @@ class TestContextDependencyPropagation(unittest.TestCase):
         ctx_source.get_tracks.return_value = expected_tracks
         ctx = _make_ctx(pipeline_db_source=ctx_source)
 
-        global_source = MagicMock()
-        global_source.get_tracks.return_value = []
-        cratedigger.pipeline_db_source = global_source
-
         tracks = enqueue_module.get_album_tracks(album, ctx)
 
         self.assertEqual(tracks, expected_tracks)
         ctx_source.get_tracks.assert_called_once_with(album)
-        global_source.get_tracks.assert_not_called()
 
 
 class TestSlskdDoEnqueue(unittest.TestCase):
@@ -623,12 +595,7 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
     """Verify try_multi_enqueue works without deepcopy on results."""
 
     def setUp(self):
-        self._orig_cfg = cratedigger.cfg
-        self._orig_slskd = cratedigger.slskd
-        self._orig_pdb = cratedigger.pipeline_db_source
-
         mock_cfg = _make_matching_cfg()
-        cratedigger.cfg = mock_cfg
 
         slskd = FakeSlskdAPI()
         slskd.users.set_directory("user1", "Music\\Disc1", [
@@ -637,18 +604,11 @@ class TestMultiEnqueueNoDeepCopy(unittest.TestCase):
             ])
         ])
         self.slskd = slskd
-        cratedigger.slskd = slskd
 
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
-        cratedigger.pipeline_db_source = mock_pdb
 
         self.ctx = _make_ctx(cfg=mock_cfg, slskd=slskd, pipeline_db_source=mock_pdb)
-
-    def tearDown(self):
-        cratedigger.cfg = self._orig_cfg
-        cratedigger.slskd = self._orig_slskd
-        cratedigger.pipeline_db_source = self._orig_pdb
 
     def test_results_dict_not_mutated(self):
         """try_multi_enqueue should not mutate the results dict."""
@@ -813,30 +773,18 @@ class TestDeepcopyDeferredToMatch(unittest.TestCase):
     """Verify successful matches do not corrupt cached directory data."""
 
     def setUp(self):
-        self._orig_cfg = cratedigger.cfg
-        self._orig_slskd = cratedigger.slskd
-        self._orig_pdb = cratedigger.pipeline_db_source
-
         mock_cfg = _make_matching_cfg(
             download_filtering=True,
             use_extension_whitelist=True,
             extensions_whitelist=("jpg",),
         )
-        cratedigger.cfg = mock_cfg
 
         slskd = FakeSlskdAPI()
-        cratedigger.slskd = slskd
 
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
-        cratedigger.pipeline_db_source = mock_pdb
 
         self.ctx = _make_ctx(cfg=mock_cfg, slskd=slskd, pipeline_db_source=mock_pdb)
-
-    def tearDown(self):
-        cratedigger.cfg = self._orig_cfg
-        cratedigger.slskd = self._orig_slskd
-        cratedigger.pipeline_db_source = self._orig_pdb
 
     def test_folder_cache_not_corrupted_after_download_filter(self):
         """download_filter returns a new dict — folder_cache should be intact."""
@@ -936,19 +884,14 @@ class TestSingleEnqueuePathPrefixing(unittest.TestCase):
     """Verify try_enqueue prefixes file paths without mutating the source directory."""
 
     def setUp(self):
-        self._orig_cfg = cratedigger.cfg
-        cratedigger.cfg = _make_matching_cfg()
         self.slskd = FakeSlskdAPI()
         self.ctx = _make_ctx(
-            cfg=cratedigger.cfg,
+            cfg=_make_matching_cfg(),
             slskd=self.slskd,
             pipeline_db_source=FakePipelineDBSource(),
         )
         self.ctx.current_album_cache[1] = MagicMock(title="Album", artist_name="Artist")
         self.ctx.user_upload_speed["user1"] = 10
-
-    def tearDown(self):
-        cratedigger.cfg = self._orig_cfg
 
     def test_try_enqueue_builds_prefixed_file_copies(self):
         directory = make_directory("Music\\Album", [
@@ -1048,12 +991,10 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
         import configparser
 
         from lib.config import CratediggerConfig
-        self._orig_cfg = cratedigger.cfg
-        cratedigger.cfg = CratediggerConfig.from_ini(configparser.ConfigParser())
-        cratedigger.cfg = replace(cratedigger.cfg, parallel_searches=1)
-
-    def tearDown(self):
-        cratedigger.cfg = self._orig_cfg
+        self.cfg = replace(
+            CratediggerConfig.from_ini(configparser.ConfigParser()),
+            parallel_searches=1,
+        )
 
     def test_log_search_result_routes_pre_attempt_error_through_non_consuming(self):
         """Plan §U5: error without final_state and without plan_execution
@@ -1188,7 +1129,7 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
         slskd = FakeSlskdAPI()
         slskd.transfers.enqueue_result = False
         ctx = _make_ctx(
-            cfg=cratedigger.cfg,
+            cfg=self.cfg,
             slskd=slskd,
             pipeline_db_source=FakePipelineDBSource(),
         )
@@ -1225,26 +1166,14 @@ class TestNegativeMatchCache(unittest.TestCase):
     """Verify negative match cache prevents re-evaluating known mismatches."""
 
     def setUp(self):
-        self._orig_cfg = cratedigger.cfg
-        self._orig_slskd = cratedigger.slskd
-        self._orig_pdb = cratedigger.pipeline_db_source
-
         mock_cfg = _make_matching_cfg()
-        cratedigger.cfg = mock_cfg
 
         slskd = FakeSlskdAPI()
-        cratedigger.slskd = slskd
 
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
-        cratedigger.pipeline_db_source = mock_pdb
 
         self.ctx = _make_ctx(cfg=mock_cfg, slskd=slskd, pipeline_db_source=mock_pdb)
-
-    def tearDown(self):
-        cratedigger.cfg = self._orig_cfg
-        cratedigger.slskd = self._orig_slskd
-        cratedigger.pipeline_db_source = self._orig_pdb
 
     def test_same_dir_same_track_count_skipped(self):
         """A dir that failed matching should be skipped on retry with same track count."""
@@ -1326,26 +1255,14 @@ class TestSearchResultPreFiltering(unittest.TestCase):
     """Verify directories with wrong audio file count are skipped before browsing."""
 
     def setUp(self):
-        self._orig_cfg = cratedigger.cfg
-        self._orig_slskd = cratedigger.slskd
-        self._orig_pdb = cratedigger.pipeline_db_source
-
         mock_cfg = _make_matching_cfg()
-        cratedigger.cfg = mock_cfg
 
         self.slskd = FakeSlskdAPI()
-        cratedigger.slskd = self.slskd
 
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
-        cratedigger.pipeline_db_source = mock_pdb
 
         self.ctx = _make_ctx(cfg=mock_cfg, slskd=self.slskd, pipeline_db_source=mock_pdb)
-
-    def tearDown(self):
-        cratedigger.cfg = self._orig_cfg
-        cratedigger.slskd = self._orig_slskd
-        cratedigger.pipeline_db_source = self._orig_pdb
 
     def test_dir_with_junk_count_skipped_before_browse(self):
         """Junk-dir guard: ``search_count > 2 * track_num`` skips pre-browse.
@@ -1516,26 +1433,14 @@ class TestParallelDirectoryBrowsing(unittest.TestCase):
     """Verify parallel directory browsing populates folder_cache correctly."""
 
     def setUp(self):
-        self._orig_cfg = cratedigger.cfg
-        self._orig_slskd = cratedigger.slskd
-        self._orig_pdb = cratedigger.pipeline_db_source
-
         mock_cfg = _make_matching_cfg()
-        cratedigger.cfg = mock_cfg
 
         self.slskd = FakeSlskdAPI()
-        cratedigger.slskd = self.slskd
 
         mock_pdb = MagicMock()
         mock_pdb.get_denied_users.return_value = []
-        cratedigger.pipeline_db_source = mock_pdb
 
         self.ctx = _make_ctx(cfg=mock_cfg, slskd=self.slskd, pipeline_db_source=mock_pdb)
-
-    def tearDown(self):
-        cratedigger.cfg = self._orig_cfg
-        cratedigger.slskd = self._orig_slskd
-        cratedigger.pipeline_db_source = self._orig_pdb
 
     def test_parallel_browse_populates_cache(self):
         """_browse_directories should populate folder_cache for all dirs."""
