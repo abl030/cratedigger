@@ -57,6 +57,14 @@ from lib.pipeline_db import (
     TransferLedgerRow,
 )
 from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
+from lib.pipeline_db.dashboard import (
+    UnfindableRunMetricsRow,
+    serialize_dashboard_cycle_row,
+    serialize_dashboard_heavy_query_row,
+    serialize_dashboard_request_row,
+    serialize_unfindable_run_row,
+    wanted_trend_panel,
+)
 from lib.quality import (
     CURRENT_EVIDENCE_LINEAGE_VERSION,
     ActiveDownloadState,
@@ -6035,6 +6043,284 @@ class TestGetSearchHistoryPage(unittest.TestCase):
                     "cursor_update_status", "stale_reason",
                     "plan_cycle_snapshot", "created_at"):
             self.assertIn(col, row, f"missing column {col!r}")
+
+
+class TestDashboardRowSerializers(unittest.TestCase):
+    """Every dashboard row serializer maps each output key from the RIGHT
+    input column.
+
+    These four are flat rename-and-coerce functions, which makes them
+    blind to exactly one mutation class: a single output key silently
+    reading a sibling field. Shape tests (key sets), presence-only route
+    contracts (``REQUIRED_FIELDS``), and the fake-vs-real parity tests
+    that deliberately compare structure rather than values all survive
+    such a swap; so does the one real ``watchdog_kills`` value pin, which
+    checks the SQL window aggregate rather than this path. A follow-up
+    mutant proved it: pointing ``watchdog_kills`` at
+    ``find_download_queued`` in ``serialize_dashboard_cycle_row`` passed
+    the entire suite.
+
+    The pattern below is the general kill, not a patch for that one
+    mutant: drive each serializer with a row whose every source field
+    holds a DISTINCT sentinel, then assert the whole output-to-input
+    mapping. Any single-field swap changes a value, and the exact key-set
+    assertion stops a new output key from appearing unmapped. This is the
+    #1110 / #1241 value-inversion class.
+
+    Sentinel discipline: numeric sentinels start at 2 so none can collide
+    with ``True``/``False`` (``True == 1`` in Python) where a serializer
+    also carries a boolean, and none is falsy, so an ``or 0`` fallback
+    firing wrongly is visible.
+    """
+
+    #: ``output key -> source column``. Identity everywhere except the one
+    #: deliberate rename, which is the mutant's own target.
+    CYCLE_ROW_FIELDS: ClassVar = {
+        "id": "id",
+        "started_at": "started_at",
+        "created_at": "created_at",
+        "cycle_total_s": "cycle_total_s",
+        "browse_time_s": "browse_time_s",
+        "match_time_s": "match_time_s",
+        "search_time_s": "search_time_s",
+        "watchdog_kills": "cycle_searches_watchdog_killed",
+        "find_download_queued": "find_download_queued",
+        "find_download_completed": "find_download_completed",
+        "find_download_drain_time_s": "find_download_drain_time_s",
+        "cache_errors": "cache_errors",
+        "cache_write_errors": "cache_write_errors",
+        "cache_fuse_tripped": "cache_fuse_tripped",
+        "peers_browsed": "peers_browsed",
+        "peers_browsed_lazy": "peers_browsed_lazy",
+        "fanout_waves": "fanout_waves",
+    }
+
+    HEAVY_QUERY_FIELDS: ClassVar = {
+        key: key
+        for key in (
+            "search_log_id", "request_id", "mb_release_id", "artist_name",
+            "album_title", "status", "created_at", "query", "variant",
+            "outcome", "result_count", "elapsed_s", "browse_time_s",
+            "match_time_s", "peers_browsed", "peers_browsed_lazy",
+            "peer_dirs", "fanout_waves",
+        )
+    }
+
+    REQUEST_ROW_FIELDS: ClassVar = {
+        key: key
+        for key in (
+            "request_id", "artist_name", "album_title", "status",
+            "last_search_at", "searches_24h", "searches_6h", "found_24h",
+            "no_match_24h", "no_results_24h", "reset_24h", "problem_24h",
+        )
+    }
+
+    UNFINDABLE_RUN_FIELDS: ClassVar = {
+        key: key
+        for key in (
+            "id", "created_at", "cohort_total", "due_backlog_at_start",
+            "batch_limit", "candidates_processed", "probes_attempted",
+            "categorised_count", "downgraded_count", "no_change_count",
+            "probe_failed_count", "not_due_count", "request_not_found_count",
+            "breaker_tripped", "duration_seconds",
+        )
+    }
+
+    def _assert_field_mapping(self, rendered, source, field_map):
+        """Each output key equals its own source column, and no other."""
+        self.assertEqual(
+            set(rendered), set(field_map),
+            "serializer output keys drifted from the pinned mapping — add "
+            "the new key to the map with the column it must read",
+        )
+        for out_key, source_key in field_map.items():
+            expected = source[source_key]
+            if isinstance(expected, datetime):
+                expected = expected.isoformat()
+            self.assertEqual(
+                rendered[out_key], expected,
+                f"{out_key!r} must be rendered from {source_key!r}",
+            )
+
+    def _distinct_row(self, numeric_keys, *, text_keys=(), datetime_keys=(),
+                      bool_keys=()):
+        """One row per source column, every value distinct.
+
+        Distinctness is the property the whole pattern rests on — two
+        columns sharing a sentinel would make a swap between them
+        invisible — so it is asserted here rather than assumed.
+        """
+        row: dict[str, object] = {}
+        for offset, key in enumerate(numeric_keys):
+            row[key] = 2 + offset
+        for key in text_keys:
+            row[key] = f"sentinel-{key}"
+        for offset, key in enumerate(datetime_keys):
+            row[key] = datetime(2026, 3, 1, tzinfo=UTC) + timedelta(
+                minutes=offset + 1)
+        for key in bool_keys:
+            row[key] = True
+        values = list(row.values())
+        self.assertEqual(
+            len(values), len({repr(value) for value in values}),
+            "sentinel collision: a swap between two columns sharing a value "
+            "would be invisible to this pin",
+        )
+        return row
+
+    def test_cycle_row_maps_every_output_from_its_own_column(self):
+        source = self._distinct_row(
+            [
+                "id", "cycle_total_s", "browse_time_s", "match_time_s",
+                "search_time_s", "cycle_searches_watchdog_killed",
+                "find_download_queued", "find_download_completed",
+                "find_download_drain_time_s", "cache_errors",
+                "cache_write_errors", "cache_fuse_tripped", "peers_browsed",
+                "peers_browsed_lazy", "fanout_waves",
+            ],
+            datetime_keys=("started_at", "created_at"),
+        )
+        self._assert_field_mapping(
+            serialize_dashboard_cycle_row(source), source,
+            self.CYCLE_ROW_FIELDS)
+
+    def test_heavy_query_row_maps_every_output_from_its_own_column(self):
+        source = self._distinct_row(
+            [
+                "search_log_id", "request_id", "result_count", "elapsed_s",
+                "browse_time_s", "match_time_s", "peers_browsed",
+                "peers_browsed_lazy", "peer_dirs", "fanout_waves",
+            ],
+            text_keys=(
+                "mb_release_id", "artist_name", "album_title", "status",
+                "query", "variant", "outcome",
+            ),
+            datetime_keys=("created_at",),
+        )
+        self._assert_field_mapping(
+            serialize_dashboard_heavy_query_row(source), source,
+            self.HEAVY_QUERY_FIELDS)
+
+    def test_request_row_maps_every_output_from_its_own_column(self):
+        source = self._distinct_row(
+            [
+                "request_id", "searches_24h", "searches_6h", "found_24h",
+                "no_match_24h", "no_results_24h", "reset_24h", "problem_24h",
+            ],
+            text_keys=("artist_name", "album_title", "status"),
+            datetime_keys=("last_search_at",),
+        )
+        self._assert_field_mapping(
+            serialize_dashboard_request_row(source), source,
+            self.REQUEST_ROW_FIELDS)
+
+    def test_unfindable_run_row_maps_every_output_from_its_own_column(self):
+        source = self._distinct_row(
+            [
+                "id", "cohort_total", "due_backlog_at_start", "batch_limit",
+                "candidates_processed", "probes_attempted",
+                "categorised_count", "downgraded_count", "no_change_count",
+                "probe_failed_count", "not_due_count",
+                "request_not_found_count", "duration_seconds",
+            ],
+            datetime_keys=("created_at",),
+            bool_keys=("breaker_tripped",),
+        )
+        # A real typed conversion, not a cast: it also proves the sentinels
+        # satisfy the row's declared column types.
+        typed = msgspec.convert(source, type=UnfindableRunMetricsRow)
+        self._assert_field_mapping(
+            serialize_unfindable_run_row(typed), source,
+            self.UNFINDABLE_RUN_FIELDS)
+
+
+class TestWantedTrendPanel(unittest.TestCase):
+    """Direct unit coverage for the wanted-backlog trend arithmetic.
+
+    ``wanted_trend_panel`` / ``wanted_trend_window`` are the pure half both
+    ``PipelineDB._dashboard_wanted_trend`` and ``FakePipelineDB``'s own
+    sample walk delegate to (issue #1278 item 7). The populated and empty
+    window shapes are exercised end to end by
+    ``TestPipelineDashboardMetrics`` and ``TestFakeDashboardMirror``.
+
+    The zero-elapsed branch needs a sample stamped at or after the
+    captured ``now``. Neither fetch excludes one — both select on a lower
+    bound only — so what makes it awkward to reach end to end is the
+    WRITERS: ``record_cycle_metrics`` stamps ``created_at`` from the real
+    completion time, so through either adapter it takes clock skew or a
+    caller deliberately passing a future ``completed_at``. Driving the
+    function directly is the honest way to pin it.
+    """
+
+    NOW = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
+
+    def test_zero_elapsed_window_reports_unknown_without_dividing(self):
+        panel = wanted_trend_panel(
+            [(self.NOW, 500)], current_wanted=400, now=self.NOW)
+        window = panel["windows"][0]
+        self.assertEqual(window["sample_count"], 1)
+        self.assertEqual(window["start_wanted"], 500)
+        self.assertEqual(window["end_wanted"], 400)
+        self.assertEqual(window["delta"], -100)
+        self.assertEqual(window["trend"], "unknown")
+        for key in ("delta_per_hour", "drain_per_hour", "eta_hours"):
+            self.assertIsNone(window[key], key)
+
+    def test_growing_backlog_reports_up_with_no_eta(self):
+        panel = wanted_trend_panel(
+            [(self.NOW - timedelta(hours=2), 100)],
+            current_wanted=140, now=self.NOW)
+        window = panel["windows"][0]
+        self.assertEqual(window["trend"], "up")
+        self.assertEqual(window["delta_per_hour"], 20.0)
+        self.assertEqual(window["drain_per_hour"], 0.0)
+        self.assertIsNone(window["eta_hours"])
+
+    def test_draining_backlog_reports_eta_from_the_drain_rate(self):
+        panel = wanted_trend_panel(
+            [(self.NOW - timedelta(hours=4), 200)],
+            current_wanted=160, now=self.NOW)
+        window = panel["windows"][0]
+        self.assertEqual(window["trend"], "down")
+        self.assertEqual(window["drain_per_hour"], 10.0)
+        self.assertEqual(window["eta_hours"], 16.0)
+
+    def test_series_24h_drops_older_samples_and_appends_the_synthetic_now(self):
+        panel = wanted_trend_panel(
+            [
+                (self.NOW - timedelta(hours=30), 900),
+                (self.NOW - timedelta(hours=3), 800),
+            ],
+            current_wanted=700, now=self.NOW,
+        )
+        self.assertEqual(
+            [(point["wanted_total"], point.get("synthetic"))
+             for point in panel["series_24h"]],
+            [(800, None), (700, True)],
+        )
+        # ``latest_sample_at`` names the newest REAL sample, never the
+        # synthetic point the series ends with.
+        self.assertEqual(
+            panel["latest_sample_at"],
+            (self.NOW - timedelta(hours=3)).isoformat())
+        self.assertEqual(
+            [w["label"] for w in panel["windows"]], ["6h", "24h", "7d"])
+        # The 7d window still sees the 30h-old sample the series dropped.
+        self.assertEqual(panel["windows"][2]["start_wanted"], 900)
+
+    def test_empty_samples_yield_unknown_windows_and_only_the_synthetic_point(self):
+        panel = wanted_trend_panel([], current_wanted=42, now=self.NOW)
+        self.assertIsNone(panel["latest_sample_at"])
+        self.assertEqual(panel["series_24h"], [{
+            "sampled_at": self.NOW.isoformat(),
+            "wanted_total": 42,
+            "synthetic": True,
+        }])
+        for window in panel["windows"]:
+            self.assertEqual(window["sample_count"], 0)
+            self.assertEqual(window["trend"], "unknown")
+            self.assertIsNone(window["start_wanted"])
+            self.assertEqual(window["end_wanted"], 42)
 
 
 @requires_postgres

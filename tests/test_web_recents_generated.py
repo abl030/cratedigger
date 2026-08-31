@@ -9,7 +9,9 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from lib.pipeline_db.download_log import _DownloadLogMixin
+from lib.pipeline_db.download_log import (
+    overlay_evidence_onto_download_log_row,
+)
 from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
@@ -395,7 +397,7 @@ def _raw_download_log_row(
     """One joined ``download_log`` row exactly as ``get_log`` hands it over.
 
     The candidate-evidence aliases are the join's own names — the shape the
-    read seam receives BEFORE ``_overlay_evidence_onto_download_log_row``
+    read seam receives BEFORE ``overlay_evidence_onto_download_log_row``
     adjudicates them. ``candidate_evidence_id`` is the join key itself, so
     it is non-NULL exactly when a lineage came back with it.
     """
@@ -416,7 +418,7 @@ def render_through_the_read_seam(row: dict[str, object]) -> dict[str, object]:
     proof gate and the render's copy, so both real halves run here. The
     render half is the whole composed page renderer, not one stage of it.
     """
-    overlaid = _DownloadLogMixin._overlay_evidence_onto_download_log_row(
+    overlaid = overlay_evidence_onto_download_log_row(
         dict(row))
     return _render(overlaid)
 

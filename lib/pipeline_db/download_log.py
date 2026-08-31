@@ -1,7 +1,7 @@
 """download_log audit rows and wrong-match bookkeeping."""
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar, Literal, TypedDict, get_args
+from typing import Any, Literal, TypedDict, get_args
 
 import msgspec
 import psycopg2
@@ -81,7 +81,7 @@ class LatestDownloadSummary(TypedDict):
 #: ``scope.md`` says to fix rather than extend.
 #:
 #: The first eleven aliases are folded into their legacy ``download_log``
-#: columns by ``_overlay_evidence_onto_download_log_row``. The PR4 aliases
+#: columns by ``overlay_evidence_onto_download_log_row``. The PR4 aliases
 #: below them have no legacy counterpart, so they reach the renderer under
 #: these names and are declared on ``DownloadLogWithEvidenceRow``.
 #: ``_evidence_verified_lossless_classifier`` is the one of those the overlay
@@ -206,6 +206,180 @@ _LOG_OUTCOME_FILTERS: dict[str, str] = {
 }
 
 
+# Evidence-overlay extension applied to every download_log read seam
+# (single entry / per-request history / batch). The legacy denorm
+# spectral / V0 columns on download_log are NULL whenever the
+# candidate was rejected before the dispatch path could backfill
+# them — every wrong-match reject hits this. The canonical
+# measurement lives on album_quality_evidence, addressed via
+# download_log.candidate_evidence_id. We LEFT JOIN it here and let
+# the Python overlay step COALESCE evidence over the denorm columns
+# before handing the row dict to downstream consumers (LogEntry,
+# build_download_history_row, the wrong-match route, ...). Doing it
+# at the read seam means there's exactly one place to maintain the
+# mapping, and downstream code keeps using the existing field names.
+#
+# ``dl.*`` automatically projects ``source`` and ``youtube_metadata``
+# (migration 037) onto every consumer; no additional column list
+# change is needed here.
+# Evidence stores lineage as ``lossless_source`` / ``native_lossy_research``;
+# download_log.v0_probe_kind stores the wire-shaped kind
+# ``lossless_source_v0`` / ``native_lossy_research_v0`` (constrained by
+# migration 007). When we overlay evidence lineage into the kind slot, we
+# have to translate, or the renderer (history.js::formatV0Probe) won't
+# recognize the value and will fall through to the raw-kind branch.
+_EVIDENCE_LINEAGE_TO_PROBE_KIND: dict[str, str] = {
+    "source":    "lossless_source_v0",
+    "installed": "native_lossy_research_v0",
+    "lossless_source": "lossless_source_v0",
+    "native_lossy_research": "native_lossy_research_v0",
+    "on_disk_research": "on_disk_research_v0",
+}
+
+#: The aliases the overlay consumes as its own gate inputs and pops
+#: before any renderer sees the row. Named here so the SELECT-block
+#: partition in ``tests/test_pipeline_db_column_contract.py`` derives
+#: them from production rather than restating them.
+_EVIDENCE_LINEAGE_ALIAS = "_evidence_lineage_version"
+_EVIDENCE_IDENTITY_ALIAS = "_evidence_mb_release_id"
+_REQUEST_IDENTITY_ALIAS = "_request_mb_release_id"
+_CURRENT_EVIDENCE_IDENTITY_ALIAS = "_current_evidence_mb_release_id"
+_EVIDENCE_GATE_INPUT_ALIASES: tuple[str, ...] = (
+    _EVIDENCE_LINEAGE_ALIAS,
+    _EVIDENCE_IDENTITY_ALIAS,
+)
+
+#: ``(legacy download_log key, candidate-evidence alias, gated)`` — the
+#: aliases this overlay CONSUMES, folding each into the legacy column
+#: downstream code already reads. Hoisted out of the function body so
+#: ``tests/test_pipeline_db_column_contract.py::TestRenderAliasMap`` can
+#: partition the SELECT block by what actually happens to each alias
+#: instead of restating the list.
+_EVIDENCE_OVERLAY_FOLD: tuple[tuple[str, str, bool], ...] = (
+    ("source_format",          "_evidence_source_format", True),
+    ("source_min_bitrate",     "_evidence_source_min_bitrate", True),
+    ("source_avg_bitrate",     "_evidence_source_avg_bitrate", True),
+    ("source_median_bitrate",  "_evidence_source_median_bitrate", True),
+    ("spectral_grade",       "_evidence_spectral_grade", False),
+    ("spectral_bitrate",     "_evidence_spectral_bitrate", False),
+    ("v0_probe_kind",        "_evidence_v0_probe_kind", False),
+    ("v0_probe_min_bitrate", "_evidence_v0_probe_min_bitrate", False),
+    ("v0_probe_avg_bitrate", "_evidence_v0_probe_avg_bitrate", False),
+    ("v0_probe_median_bitrate", "_evidence_v0_probe_median_bitrate", False),
+)
+
+#: The aliases with no legacy column to fold into, so they are gated IN
+#: PLACE by exact release identity and ``evidence_is_source_semantic``.
+#: These are the two attribution predicates shared with
+#: ``pipeline-cli quality`` so the surfaces cannot state different proofs
+#: for the same album.
+#:
+#: ``candidate_evidence_id`` does not always name evidence measured from
+#: THIS attempt's bytes: migration 021 §6b cross-walked pre-content-
+#: addressing rows onto whichever content-addressed row their release
+#: already had, so a legacy-lineage attempt can point at a sibling
+#: attempt's snapshot. That is exactly why the ``source_*`` fold is gated
+#: on lineage 3/4, and the minted proof is the same kind of fact — a
+#: conclusion about the measured source bytes. Ungated it lent a proof to
+#: 5,014 live rows and put "verified lossless" in 281 live verdicts, 250
+#: of which point at an evidence row another attempt also claims and 109
+#: of which converted nothing at all — a plain MP3 import rendering
+#: "MP3 320, verified lossless" off its FLAC sibling's snapshot.
+_EVIDENCE_ATTRIBUTABLE_PROOF_ALIASES: tuple[str, ...] = (
+    "_evidence_verified_lossless_classifier",
+    "_evidence_cd_rip_verification",
+)
+
+
+def overlay_evidence_onto_download_log_row(
+    row: dict[str, object],
+) -> dict[str, object]:
+    """Fold the candidate-evidence join onto one raw ``download_log`` row.
+
+    The single owner of the read-seam evidence overlay. ``row`` is the
+    pre-overlay shape the SQL SELECT produces: the ``download_log``
+    columns plus the ``_CANDIDATE_EVIDENCE_COLUMNS`` aliases, the
+    ``_request_mb_release_id`` gate input, and (for ``get_log``) the
+    ``_current_evidence_*`` aliases. Mutates and returns ``row``.
+
+    ``tests/fakes/pipeline_db.py`` builds that same raw shape and calls
+    this function, so the fake cannot be more permissive than production
+    about the GATING this function owns — which evidence facts survive
+    the identity and lineage predicates (issue #1278 item 7). It is not a
+    claim about the whole row shape: production runs one more step the
+    fake does not, converting to a typed row in ``lib/pipeline_db/rows.py``
+    which silently drops any key the TypedDict does not declare, where the
+    fake casts the overlaid dict as-is. The two key sets were measured
+    equal when this was written, but only the gating above is shared
+    machinery holding them that way.
+    """
+    request_identity = row.pop(
+        _REQUEST_IDENTITY_ALIAS, row.get("mb_release_id")
+    )
+    evidence_identity = row.pop(_EVIDENCE_IDENTITY_ALIAS, None)
+    evidence_attributable = exact_release_identity_matches(
+        request_identity, evidence_identity
+    )
+    # Migration 050 deliberately marks historical evidence as lineage v1:
+    # its measurement format/bitrates may be a projected target rather
+    # than facts about the downloaded source. Only v3 proves those fields
+    # source-semantic. Spectral and V0 facts were never target projections,
+    # so they remain safe to recover from either lineage.
+    evidence_lineage = row.pop(_EVIDENCE_LINEAGE_ALIAS, None)
+    source_semantic = (
+        evidence_attributable
+        and evidence_is_source_semantic(evidence_lineage)
+    )
+    for alias in _EVIDENCE_ATTRIBUTABLE_PROOF_ALIASES:
+        # Same stable-shape contract as the ``source_*`` keys: always
+        # present, NULL when this row's evidence cannot speak for this
+        # attempt's source bytes.
+        row.setdefault(alias, None)
+        if not source_semantic:
+            row[alias] = None
+    for legacy, overlay, requires_source_semantic in _EVIDENCE_OVERLAY_FOLD:
+        evidence_value = row.pop(overlay, None)
+        if not evidence_attributable:
+            if requires_source_semantic:
+                row.setdefault(legacy, None)
+            continue
+        if requires_source_semantic:
+            # The four ``source_*`` legacy keys are NOT real
+            # ``download_log`` columns — this overlay is their SOLE
+            # producer (issue #784's DownloadLogWithEvidenceRow), so
+            # they must always end up present (nullable) for a
+            # stable row shape, never silently absent depending on
+            # whether candidate evidence happened to exist.
+            row.setdefault(legacy, None)
+            if not source_semantic:
+                continue
+        if row.get(legacy) is None and evidence_value is not None:
+            if legacy == "v0_probe_kind" and isinstance(evidence_value, str):
+                evidence_value = _EVIDENCE_LINEAGE_TO_PROBE_KIND.get(
+                    evidence_value, evidence_value
+                )
+            row[legacy] = evidence_value
+
+    # Candidate aliases without legacy columns flow directly into the
+    # renderer. A foreign exact pressing must therefore null every one,
+    # not only proof fields: classifier, spectral, bitrate, codec, and
+    # container facts all describe the sibling evidence row's bytes.
+    if not evidence_attributable:
+        for key in row:
+            if key.startswith("_evidence_"):
+                row[key] = None
+
+    current_identity = row.pop(_CURRENT_EVIDENCE_IDENTITY_ALIAS, None)
+    current_attributable = exact_release_identity_matches(
+        request_identity, current_identity
+    )
+    if not current_attributable:
+        for key in row:
+            if key.startswith("_current_evidence_"):
+                row[key] = None
+    return row
+
+
 class _DownloadLogMixin(_PipelineDBBase):
     """download_log audit rows and wrong-match bookkeeping."""
 
@@ -306,7 +480,7 @@ class _DownloadLogMixin(_PipelineDBBase):
         cur = self._execute(query, (limit,))
         return [
             download_log_with_request_row(
-                self._overlay_evidence_onto_download_log_row(dict(r))
+                overlay_evidence_onto_download_log_row(dict(r))
             )
             for r in cur.fetchall()
         ]
@@ -477,165 +651,6 @@ class _DownloadLogMixin(_PipelineDBBase):
         return int(row["id"])
 
 
-    # Evidence-overlay extension applied to every download_log read seam
-    # (single entry / per-request history / batch). The legacy denorm
-    # spectral / V0 columns on download_log are NULL whenever the
-    # candidate was rejected before the dispatch path could backfill
-    # them — every wrong-match reject hits this. The canonical
-    # measurement lives on album_quality_evidence, addressed via
-    # download_log.candidate_evidence_id. We LEFT JOIN it here and let
-    # the Python overlay step COALESCE evidence over the denorm columns
-    # before handing the row dict to downstream consumers (LogEntry,
-    # build_download_history_row, the wrong-match route, ...). Doing it
-    # at the read seam means there's exactly one place to maintain the
-    # mapping, and downstream code keeps using the existing field names.
-    #
-    # ``dl.*`` automatically projects ``source`` and ``youtube_metadata``
-    # (migration 037) onto every consumer; no additional column list
-    # change is needed here.
-    # Evidence stores lineage as ``lossless_source`` / ``native_lossy_research``;
-    # download_log.v0_probe_kind stores the wire-shaped kind
-    # ``lossless_source_v0`` / ``native_lossy_research_v0`` (constrained by
-    # migration 007). When we overlay evidence lineage into the kind slot, we
-    # have to translate, or the renderer (history.js::formatV0Probe) won't
-    # recognize the value and will fall through to the raw-kind branch.
-    _EVIDENCE_LINEAGE_TO_PROBE_KIND: ClassVar = {
-        "source":    "lossless_source_v0",
-        "installed": "native_lossy_research_v0",
-        "lossless_source": "lossless_source_v0",
-        "native_lossy_research": "native_lossy_research_v0",
-        "on_disk_research": "on_disk_research_v0",
-    }
-
-    #: The aliases the overlay consumes as its own gate inputs and pops
-    #: before any renderer sees the row. Named here so the SELECT-block
-    #: partition in ``tests/test_pipeline_db_column_contract.py`` derives
-    #: them from production rather than restating them.
-    _EVIDENCE_LINEAGE_ALIAS: ClassVar = "_evidence_lineage_version"
-    _EVIDENCE_IDENTITY_ALIAS: ClassVar = "_evidence_mb_release_id"
-    _REQUEST_IDENTITY_ALIAS: ClassVar = "_request_mb_release_id"
-    _CURRENT_EVIDENCE_IDENTITY_ALIAS: ClassVar = (
-        "_current_evidence_mb_release_id"
-    )
-    _EVIDENCE_GATE_INPUT_ALIASES: ClassVar = (
-        _EVIDENCE_LINEAGE_ALIAS,
-        _EVIDENCE_IDENTITY_ALIAS,
-    )
-
-    #: ``(legacy download_log key, candidate-evidence alias, gated)`` — the
-    #: aliases this overlay CONSUMES, folding each into the legacy column
-    #: downstream code already reads. Hoisted out of the method body so
-    #: ``tests/test_pipeline_db_column_contract.py::TestRenderAliasMap`` can
-    #: partition the SELECT block by what actually happens to each alias
-    #: instead of restating the list.
-    _EVIDENCE_OVERLAY_FOLD: ClassVar = (
-        ("source_format",          "_evidence_source_format", True),
-        ("source_min_bitrate",     "_evidence_source_min_bitrate", True),
-        ("source_avg_bitrate",     "_evidence_source_avg_bitrate", True),
-        ("source_median_bitrate",  "_evidence_source_median_bitrate", True),
-        ("spectral_grade",       "_evidence_spectral_grade", False),
-        ("spectral_bitrate",     "_evidence_spectral_bitrate", False),
-        ("v0_probe_kind",        "_evidence_v0_probe_kind", False),
-        ("v0_probe_min_bitrate", "_evidence_v0_probe_min_bitrate", False),
-        ("v0_probe_avg_bitrate", "_evidence_v0_probe_avg_bitrate", False),
-        ("v0_probe_median_bitrate", "_evidence_v0_probe_median_bitrate", False),
-    )
-
-    #: The aliases with no legacy column to fold into, so they are gated IN
-    #: PLACE by exact release identity and ``evidence_is_source_semantic``.
-    #: These are the two attribution predicates shared with
-    #: ``pipeline-cli quality`` so the surfaces cannot state different proofs
-    #: for the same album.
-    #:
-    #: ``candidate_evidence_id`` does not always name evidence measured from
-    #: THIS attempt's bytes: migration 021 §6b cross-walked pre-content-
-    #: addressing rows onto whichever content-addressed row their release
-    #: already had, so a legacy-lineage attempt can point at a sibling
-    #: attempt's snapshot. That is exactly why the ``source_*`` fold is gated
-    #: on lineage 3/4, and the minted proof is the same kind of fact — a
-    #: conclusion about the measured source bytes. Ungated it lent a proof to
-    #: 5,014 live rows and put "verified lossless" in 281 live verdicts, 250
-    #: of which point at an evidence row another attempt also claims and 109
-    #: of which converted nothing at all — a plain MP3 import rendering
-    #: "MP3 320, verified lossless" off its FLAC sibling's snapshot.
-    _EVIDENCE_ATTRIBUTABLE_PROOF_ALIASES: ClassVar = (
-        "_evidence_verified_lossless_classifier",
-        "_evidence_cd_rip_verification",
-    )
-
-    @classmethod
-    def _overlay_evidence_onto_download_log_row(
-        cls, row: dict[str, object]
-    ) -> dict[str, object]:
-        request_identity = row.pop(
-            cls._REQUEST_IDENTITY_ALIAS, row.get("mb_release_id")
-        )
-        evidence_identity = row.pop(cls._EVIDENCE_IDENTITY_ALIAS, None)
-        evidence_attributable = exact_release_identity_matches(
-            request_identity, evidence_identity
-        )
-        # Migration 050 deliberately marks historical evidence as lineage v1:
-        # its measurement format/bitrates may be a projected target rather
-        # than facts about the downloaded source. Only v3 proves those fields
-        # source-semantic. Spectral and V0 facts were never target projections,
-        # so they remain safe to recover from either lineage.
-        evidence_lineage = row.pop(cls._EVIDENCE_LINEAGE_ALIAS, None)
-        source_semantic = (
-            evidence_attributable
-            and evidence_is_source_semantic(evidence_lineage)
-        )
-        for alias in cls._EVIDENCE_ATTRIBUTABLE_PROOF_ALIASES:
-            # Same stable-shape contract as the ``source_*`` keys: always
-            # present, NULL when this row's evidence cannot speak for this
-            # attempt's source bytes.
-            row.setdefault(alias, None)
-            if not source_semantic:
-                row[alias] = None
-        for legacy, overlay, requires_source_semantic in cls._EVIDENCE_OVERLAY_FOLD:
-            evidence_value = row.pop(overlay, None)
-            if not evidence_attributable:
-                if requires_source_semantic:
-                    row.setdefault(legacy, None)
-                continue
-            if requires_source_semantic:
-                # The four ``source_*`` legacy keys are NOT real
-                # ``download_log`` columns — this overlay is their SOLE
-                # producer (issue #784's DownloadLogWithEvidenceRow), so
-                # they must always end up present (nullable) for a
-                # stable row shape, never silently absent depending on
-                # whether candidate evidence happened to exist.
-                row.setdefault(legacy, None)
-                if not source_semantic:
-                    continue
-            if row.get(legacy) is None and evidence_value is not None:
-                if legacy == "v0_probe_kind" and isinstance(evidence_value, str):
-                    evidence_value = cls._EVIDENCE_LINEAGE_TO_PROBE_KIND.get(
-                        evidence_value, evidence_value
-                    )
-                row[legacy] = evidence_value
-
-        # Candidate aliases without legacy columns flow directly into the
-        # renderer. A foreign exact pressing must therefore null every one,
-        # not only proof fields: classifier, spectral, bitrate, codec, and
-        # container facts all describe the sibling evidence row's bytes.
-        if not evidence_attributable:
-            for key in row:
-                if key.startswith("_evidence_"):
-                    row[key] = None
-
-        current_identity = row.pop(
-            cls._CURRENT_EVIDENCE_IDENTITY_ALIAS, None
-        )
-        current_attributable = exact_release_identity_matches(
-            request_identity, current_identity
-        )
-        if not current_attributable:
-            for key in row:
-                if key.startswith("_current_evidence_"):
-                    row[key] = None
-        return row
-
-
     def get_download_log_entry(
         self, log_id: int,
     ) -> DownloadLogWithEvidenceRow | None:
@@ -658,7 +673,7 @@ class _DownloadLogMixin(_PipelineDBBase):
         )
         row = cur.fetchone()
         return download_log_with_evidence_row(
-            self._overlay_evidence_onto_download_log_row(dict(row))
+            overlay_evidence_onto_download_log_row(dict(row))
         ) if row else None
 
 
@@ -684,7 +699,7 @@ class _DownloadLogMixin(_PipelineDBBase):
         )
         return [
             download_log_with_evidence_row(
-                self._overlay_evidence_onto_download_log_row(dict(r))
+                overlay_evidence_onto_download_log_row(dict(r))
             )
             for r in cur.fetchall()
         ]
@@ -719,7 +734,7 @@ class _DownloadLogMixin(_PipelineDBBase):
         result: dict[int, list[DownloadLogWithEvidenceRow]] = {}
         for row in cur.fetchall():
             r = download_log_with_evidence_row(
-                self._overlay_evidence_onto_download_log_row(dict(row))
+                overlay_evidence_onto_download_log_row(dict(row))
             )
             rid = r["request_id"]
             if rid not in result:
@@ -766,7 +781,7 @@ class _DownloadLogMixin(_PipelineDBBase):
         result: dict[int, LatestDownloadSummary] = {}
         for row in latest_cur.fetchall():
             r = download_log_with_evidence_row(
-                self._overlay_evidence_onto_download_log_row(dict(row))
+                overlay_evidence_onto_download_log_row(dict(row))
             )
             result[int(r["request_id"])] = {"latest": r, "count": 0}
 

@@ -53,7 +53,6 @@ from lib.automation_recovery_debris import (
     RecoveryDebrisReport,
     remove_recovery_debris,
 )
-from lib.beets_db import exact_release_identity_matches
 from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
@@ -136,16 +135,36 @@ from lib.pipeline_db import (
 from lib.pipeline_db._core import OwnerSessionLost, ReadOnlyQueryCursor
 from lib.pipeline_db._shared import (
     ACQUISITION_REQUEST_STATUSES,
+    CACHE_ATTRIBUTION_CYCLE_ONLY,
     CANDIDATE_EVIDENCE_PREFIX,
     CURRENT_EVIDENCE_PREFIX,
+    DASHBOARD_WANTED_BACKLOG_STATUSES,
+    DASHBOARD_WINDOWS,
+    _isoformat_or_none,
     processing_owner_payload,
     validate_request_metadata_fields,
+)
+from lib.pipeline_db.dashboard import (
+    dashboard_envelope,
+    serialize_dashboard_cycle_row,
+    serialize_dashboard_heavy_query_row,
+    serialize_dashboard_request_row,
+    serialize_unfindable_run_row,
+    unfindable_panel,
+    wanted_trend_panel,
+)
+from lib.pipeline_db.download_log import (
+    overlay_evidence_onto_download_log_row,
 )
 from lib.pipeline_db.import_jobs import (
     AutomationRecoveryCAS,
     AutomationRecoveryEvidenceChanged,
     _default_force_action_copy_path,
     _recovery_owner_matches,
+)
+from lib.pipeline_db.requests import (
+    _linked_current_evidence_facts,
+    collect_pipeline_overlays,
 )
 from lib.pipeline_db.rows import ArtistRequestRow
 from lib.pipeline_db.terminal_outcomes import (
@@ -163,18 +182,13 @@ from lib.quality import (
     AlbumQualityV0Metric,
     CodecFamily,
     CooldownConfig,
-    evidence_is_source_semantic,
 )
 from lib.quality_evidence import (
     SpectralWriteIntent,
     current_evidence_preserves_source_spectral,
     snapshot_fingerprint,
 )
-from lib.release_identity import (
-    ReleaseIdentity,
-    exact_request_evidence_identity_matches,
-    normalize_release_id,
-)
+from lib.release_identity import ReleaseIdentity, normalize_release_id
 from lib.search_scheduler import (
     NEW_REQUEST_PRIORITY_HOURS,
     search_cohort_slots,
@@ -2885,13 +2899,13 @@ class FakePipelineDB:
 
     # --- PipelineDB interface methods ---
 
-    def _request_presentation_copy(
-        self,
-        row,
-    ):
-        """Mirror the production pointer join without latest-job inference."""
-        projected = copy.deepcopy(dict(row))
-        owner_id = projected.get("active_automation_import_job_id")
+    def _processing_owner_join_aliases(
+        self, row: Mapping[str, object],
+    ) -> dict[str, object]:
+        """The three aliases production's ``LEFT JOIN import_jobs
+        processing_owner_job`` projects — the pointer join, with no
+        latest-job inference."""
+        owner_id = row.get("active_automation_import_job_id")
         owner = next(
             (
                 job for job in self._import_jobs
@@ -2899,15 +2913,25 @@ class FakePipelineDB:
             ),
             None,
         )
-        projected["_processing_owner_job_id"] = (
-            owner.get("id") if owner is not None else None
-        )
-        projected["_processing_owner_status"] = (
-            owner.get("status") if owner is not None else None
-        )
-        projected["_processing_owner_preview_status"] = (
-            owner.get("preview_status") if owner is not None else None
-        )
+        return {
+            "_processing_owner_job_id": (
+                owner.get("id") if owner is not None else None
+            ),
+            "_processing_owner_status": (
+                owner.get("status") if owner is not None else None
+            ),
+            "_processing_owner_preview_status": (
+                owner.get("preview_status") if owner is not None else None
+            ),
+        }
+
+    def _request_presentation_copy(
+        self,
+        row,
+    ):
+        """Mirror the production pointer join without latest-job inference."""
+        projected = copy.deepcopy(dict(row))
+        projected.update(self._processing_owner_join_aliases(projected))
         projected["processing_owner"] = processing_owner_payload(projected)
         projected.pop("_processing_owner_job_id")
         projected.pop("_processing_owner_status")
@@ -6481,47 +6505,40 @@ class FakePipelineDB:
                 discogs_ids.add(identity.release_id)
             else:
                 musicbrainz_ids.add(normalized)
-        out: dict[str, dict[str, Any]] = {}
+        # Only the WHERE clause is emulated here; the projection, identity
+        # key, and dedicated-Discogs-column precedence are production's own
+        # ``collect_pipeline_overlays``.
+        matched: list[dict[str, object]] = []
         for r in self._requests.values():
             identity = ReleaseIdentity.from_fields(
                 r.get("mb_release_id"),
                 r.get("discogs_release_id"),
             )
             if identity is not None:
-                release_id = identity.release_id
                 matches = (
-                    release_id in musicbrainz_ids
+                    identity.release_id in musicbrainz_ids
                     if identity.source == "musicbrainz"
-                    else release_id in discogs_ids
+                    else identity.release_id in discogs_ids
                 )
             else:
-                release_id = normalize_release_id(r.get("mb_release_id"))
-                matches = bool(
-                    release_id and release_id in musicbrainz_ids)
+                fallback = normalize_release_id(r.get("mb_release_id"))
+                matches = bool(fallback and fallback in musicbrainz_ids)
             if not matches:
                 continue
-            facts = self._capture_and_evidence_projection(r)
-            projected = {
+            matched.append({
+                **self._capture_and_evidence_select_aliases(r),
                 "id": r["id"],
                 "status": r.get("status"),
-                "search_filetype_override":
-                    r.get("search_filetype_override"),
+                "mb_release_id": r.get("mb_release_id"),
+                "discogs_release_id": r.get("discogs_release_id"),
+                "search_filetype_override": r.get("search_filetype_override"),
                 "target_format": r.get("target_format"),
                 "min_bitrate": r.get("min_bitrate"),
-                "has_captured_history": facts["has_captured_history"],
-                "verified_lossless": facts["verified_lossless"],
-                "provisional_lossless": facts["provisional_lossless"],
-                "processing_owner": self._request_presentation_copy(
-                    r
-                )["processing_owner"],
-            }
-            existing = out.get(release_id)
-            dedicated_discogs_match = normalize_release_id(
-                r.get("discogs_release_id")
-            ) == release_id
-            if existing is None or dedicated_discogs_match:
-                out[release_id] = projected
-        return out
+                "active_automation_import_job_id": r.get(
+                    "active_automation_import_job_id"),
+                **self._processing_owner_join_aliases(r),
+            })
+        return collect_pipeline_overlays(matched)
 
     def list_library_request_candidates(
         self,
@@ -6566,7 +6583,8 @@ class FakePipelineDB:
             # (bitrate, actual_filetype, spectral_grade, final_format,
             # etc.). Dropping them here would silently mis-classify rows
             # in callers that feed ``get_log`` into LogEntry.from_row.
-            joined: dict[str, object] = self._download_log_evidence_dict(entry)
+            joined: dict[str, object] = self._download_log_raw_evidence_row(
+                entry)
             joined.update({
                 # Joined request columns.
                 "album_title": req.get("album_title"),
@@ -6581,18 +6599,16 @@ class FakePipelineDB:
                     "search_filetype_override"),
                 "request_source": req.get("source"),
             })
+            # ``get_log`` is the one reader whose SQL also LEFT JOINs the
+            # request's CURRENT evidence. Project those aliases RAW — the
+            # identity gate below them belongs to the shared overlay, which
+            # NULLs the whole ``_current_evidence_*`` family when
+            # ``_current_evidence_mb_release_id`` names another pressing.
             current_evidence_id = req.get("current_evidence_id")
             current_evidence = (
                 self._evidence_by_id.get(int(current_evidence_id))
                 if current_evidence_id is not None else None
             )
-            if (
-                current_evidence is not None
-                and not exact_release_identity_matches(
-                    req.get("mb_release_id"), current_evidence.mb_release_id
-                )
-            ):
-                current_evidence = None
             current_measurement = (
                 current_evidence.measurement
                 if current_evidence is not None else None
@@ -6604,6 +6620,10 @@ class FakePipelineDB:
             joined.update({
                 "_current_evidence_id": (
                     current_evidence.id if current_evidence is not None else None
+                ),
+                "_current_evidence_mb_release_id": (
+                    current_evidence.mb_release_id
+                    if current_evidence is not None else None
                 ),
                 "_current_evidence_is_pre_attempt": (
                     current_evidence.measured_at <= entry.created_at
@@ -6641,7 +6661,7 @@ class FakePipelineDB:
                     current_v0.median_bitrate_kbps if current_v0 is not None else None
                 ),
             })
-            rows.append(joined)
+            rows.append(overlay_evidence_onto_download_log_row(joined))
             if len(rows) >= limit:
                 break
         return cast("list[DownloadLogWithRequestRow]", rows)
@@ -6652,7 +6672,7 @@ class FakePipelineDB:
     ) -> list[DownloadLogWithOriginRow]:
         wanted = {int(log_id) for log_id in source_log_ids}
         return cast("list[DownloadLogWithOriginRow]", [
-            self._download_log_to_dict(entry)
+            self._download_log_base_dict(entry)
             for entry in reversed(self.download_logs)
             if entry.source_download_log_id in wanted
             and entry.outcome in (
@@ -6782,7 +6802,37 @@ class FakePipelineDB:
         self,
         row: Mapping[str, object],
     ) -> dict[str, object]:
-        """Mirror the two specialized request SELECTs' correlated facts."""
+        """The two specialized request SELECTs' facts, identity-gated.
+
+        The raw aliases come from ``_capture_and_evidence_select_aliases``;
+        gating the evidence pair on the request's exact pressing is
+        production's own ``_linked_current_evidence_facts``.
+        """
+        raw = self._capture_and_evidence_select_aliases(row)
+        verified_lossless, provisional_lossless = _linked_current_evidence_facts({
+            "mb_release_id": row.get("mb_release_id"),
+            "discogs_release_id": row.get("discogs_release_id"),
+            **raw,
+        })
+        return {
+            "has_captured_history": raw["has_captured_history"],
+            "verified_lossless": verified_lossless,
+            "provisional_lossless": provisional_lossless,
+        }
+
+    def _capture_and_evidence_select_aliases(
+        self,
+        row: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Mirror ``_CAPTURE_AND_EVIDENCE_SELECT`` (lib/pipeline_db/
+        requests.py) for one request row: the correlated capture EXISTS
+        plus the three current-evidence aliases, RAW.
+
+        The SQL computes the evidence trio off the LEFT-JOINed current
+        evidence with no identity predicate — gating them on the request's
+        exact pressing belongs to ``_linked_current_evidence_facts``, which
+        both this fake and production call.
+        """
         request_id = row.get("id")
         has_captured_history = row.get("status") == "imported"
         if isinstance(request_id, int) and not isinstance(request_id, bool):
@@ -6824,29 +6874,23 @@ class FakePipelineDB:
             )
 
         evidence = self._current_evidence_for_request(row)
-        if (
-            evidence is not None
-            and not exact_request_evidence_identity_matches(
-                row.get("mb_release_id"),
-                row.get("discogs_release_id"),
-                evidence.mb_release_id,
-            )
-        ):
-            evidence = None
-        verified_lossless = bool(
+        # ``COALESCE(current_evidence.verified_lossless, FALSE)``.
+        linked_verified_lossless = bool(
             evidence is not None
             and evidence.verified_lossless_proof is not None
         )
-        provisional_lossless = bool(
-            evidence is not None
-            and not verified_lossless
-            and evidence.v0_metric is not None
-            and evidence.v0_metric.subject == "source"
-        )
         return {
             "has_captured_history": has_captured_history,
-            "verified_lossless": verified_lossless,
-            "provisional_lossless": provisional_lossless,
+            "_linked_verified_lossless": linked_verified_lossless,
+            "_linked_evidence_release_id": (
+                evidence.mb_release_id if evidence is not None else None),
+            # ``COALESCE(v0_subject, '') = 'source' AND NOT verified_lossless``.
+            "provisional_lossless": bool(
+                not linked_verified_lossless
+                and evidence is not None
+                and evidence.v0_metric is not None
+                and evidence.v0_metric.subject == "source"
+            ),
         }
 
     def _long_tail_projection(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -7127,8 +7171,7 @@ class FakePipelineDB:
 
     def _current_wanted_total(self) -> int:
         return sum(1 for req in self._requests.values()
-                   if req.get("status") in (
-                       "wanted", "downloading", "processing"))
+                   if req.get("status") in DASHBOARD_WANTED_BACKLOG_STATUSES)
 
     # --- Unfindable-detection run telemetry (#1112) ---
 
@@ -7215,137 +7258,30 @@ class FakePipelineDB:
     def _dashboard_unfindable(
         self,
     ) -> dict[str, list[UnfindableRunMetricsPresentation] | dict[str, object]]:
-        rows = [
-            self._serialize_unfindable_run_row(r)
+        return unfindable_panel([
+            serialize_unfindable_run_row(r)
             for r in self.get_unfindable_run_metrics(limit=14)
-        ]
-        chronological = list(reversed(rows))
-        series: list[dict[str, object]] = [
-            {
-                "sampled_at": r["created_at"],
-                "due_backlog_at_start": r["due_backlog_at_start"],
-                "candidates_processed": r["candidates_processed"],
-            }
-            for r in chronological
-        ]
-        latest = rows[0] if rows else None
-        return {
-            "recent_runs": rows,
-            "backlog_trend": {
-                "current_backlog": (
-                    latest["due_backlog_at_start"] if latest else None
-                ),
-                "latest_sample_at": latest["created_at"] if latest else None,
-                "series": series,
-            },
-        }
+        ])
 
-    def _serialize_unfindable_run_row(
-        self, row: UnfindableRunMetricsRow,
-    ) -> UnfindableRunMetricsPresentation:
-        return UnfindableRunMetricsPresentation(
-            id=row["id"],
-            created_at=row["created_at"].isoformat(),
-            cohort_total=row["cohort_total"],
-            due_backlog_at_start=row["due_backlog_at_start"],
-            batch_limit=row["batch_limit"],
-            candidates_processed=row["candidates_processed"],
-            probes_attempted=row["probes_attempted"],
-            categorised_count=row["categorised_count"],
-            downgraded_count=row["downgraded_count"],
-            no_change_count=row["no_change_count"],
-            probe_failed_count=row["probe_failed_count"],
-            not_due_count=row["not_due_count"],
-            request_not_found_count=row["request_not_found_count"],
-            breaker_tripped=row["breaker_tripped"],
-            duration_seconds=row["duration_seconds"],
-        )
+    def _dashboard_wanted_trend(self, current_wanted: int) -> dict[str, object]:
+        """Collect the 7-day sample series, then delegate the arithmetic.
 
-    def _dashboard_wanted_trend(self, current_wanted: int) -> dict[str, Any]:
+        Production fetches the same series with a ``WHERE created_at >=
+        NOW() - INTERVAL '7 days'`` + ``ORDER BY created_at ASC`` query;
+        this walks seeded ``cycle_metrics`` instead. Everything after the
+        sample list — windows, deltas, drain rates, ETA — is
+        ``wanted_trend_panel``, shared with the real adapter.
+        """
         now = _utcnow()
         samples: list[tuple[datetime, int]] = []
         for row in sorted(self.cycle_metrics, key=lambda r: r["created_at"]):
             if row.get("wanted_total") is None:
                 continue
-            created_at = row["created_at"]
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=UTC)
-            else:
-                created_at = created_at.astimezone(UTC)
+            created_at = self._as_utc(row["created_at"])
             if created_at >= now - timedelta(days=7):
                 samples.append((created_at, int(row["wanted_total"])))
-
-        def _window(label: str, hours: int) -> dict[str, Any]:
-            window_start = now - timedelta(hours=hours)
-            window_samples = [
-                (at, wanted) for at, wanted in samples
-                if at >= window_start
-            ]
-            if not window_samples:
-                return {
-                    "label": label,
-                    "hours": hours,
-                    "sample_count": 0,
-                    "start_sample_at": None,
-                    "end_sample_at": now.isoformat(),
-                    "start_wanted": None,
-                    "end_wanted": current_wanted,
-                    "delta": None,
-                    "delta_per_hour": None,
-                    "drain_per_hour": None,
-                    "eta_hours": None,
-                    "trend": "unknown",
-                }
-            start_at, start_wanted = window_samples[0]
-            elapsed_hours = (now - start_at).total_seconds() / 3600
-            delta = current_wanted - start_wanted
-            if elapsed_hours <= 0:
-                delta_per_hour = None
-                drain_per_hour = None
-                eta_hours = None
-                trend = "unknown"
-            else:
-                delta_per_hour = delta / elapsed_hours
-                drain_per_hour = max(-delta_per_hour, 0.0)
-                eta_hours = (
-                    current_wanted / drain_per_hour
-                    if drain_per_hour > 0 and current_wanted > 0
-                    else None
-                )
-                trend = "down" if delta < 0 else "up" if delta > 0 else "flat"
-            return {
-                "label": label,
-                "hours": hours,
-                "sample_count": len(window_samples),
-                "start_sample_at": start_at.isoformat(),
-                "end_sample_at": now.isoformat(),
-                "start_wanted": start_wanted,
-                "end_wanted": current_wanted,
-                "delta": delta,
-                "delta_per_hour": delta_per_hour,
-                "drain_per_hour": drain_per_hour,
-                "eta_hours": eta_hours,
-                "trend": trend,
-            }
-
-        return {
-            "current_wanted": current_wanted,
-            "latest_sample_at": samples[-1][0].isoformat() if samples else None,
-            "series_24h": [
-                {"sampled_at": at.isoformat(), "wanted_total": wanted}
-                for at, wanted in samples
-                if at >= now - timedelta(hours=24)
-            ] + [{
-                "sampled_at": now.isoformat(),
-                "wanted_total": current_wanted,
-                "synthetic": True,
-            }],
-            "windows": [
-                _window("6h", 6),
-                _window("24h", 24),
-                _window("7d", 24 * 7),
-            ],
-        }
+        return wanted_trend_panel(
+            samples, current_wanted=current_wanted, now=now)
 
     def record_peer_observations(
         self,
@@ -7417,10 +7353,8 @@ class FakePipelineDB:
                     1 for row in rows
                     if row["last_seen_at"] >= now - timedelta(hours=24)
                 ),
-                "tracked_since": (
-                    min(row["first_seen_at"] for row in rows).isoformat()
-                    if rows
-                    else None
+                "tracked_since": _isoformat_or_none(
+                    min((row["first_seen_at"] for row in rows), default=None)
                 ),
             },
         }
@@ -7433,7 +7367,7 @@ class FakePipelineDB:
 
     def _dashboard_search_window(
         self, label: str, hours: int, now: datetime,
-    ) -> dict[str, Any]:
+    ) -> dict[str, object]:
         cutoff = now - timedelta(hours=hours)
         rows = [e for e in self.search_logs
                 if self._as_utc(e.created_at) >= cutoff]
@@ -7476,12 +7410,12 @@ class FakePipelineDB:
                 1 for e in rows if e.cursor_update_status == "stale"),
             "non_consuming": sum(
                 1 for e in rows if e.attempt_consumed is False),
-            "cache_attribution_level": "cycle_only",
+            "cache_attribution_level": CACHE_ATTRIBUTION_CYCLE_ONLY,
         }
 
     def _dashboard_cycle_window(
         self, label: str, hours: int, now: datetime,
-    ) -> dict[str, Any]:
+    ) -> dict[str, object]:
         cutoff = now - timedelta(hours=hours)
         rows = [r for r in self.cycle_metrics
                 if self._as_utc(r["created_at"]) >= cutoff]
@@ -7519,35 +7453,7 @@ class FakePipelineDB:
             "fanout_waves": sum(int(r["fanout_waves"]) for r in rows),
         }
 
-    def _dashboard_cycle_row(self, row: dict[str, Any]) -> dict[str, Any]:
-        """Mirror ``PipelineDB._serialize_dashboard_cycle_row`` exactly:
-        fixed key set, ``cycle_searches_watchdog_killed`` renamed to
-        ``watchdog_kills``, cache hit/miss + wanted_total columns NOT
-        emitted, timestamps isoformatted."""
-        def _iso(value: Any) -> str | None:
-            return value.isoformat() if isinstance(value, datetime) else value
-        return {
-            "id": int(row["id"]),
-            "started_at": _iso(row.get("started_at")),
-            "created_at": _iso(row.get("created_at")),
-            "cycle_total_s": float(row["cycle_total_s"]),
-            "browse_time_s": float(row["browse_time_s"]),
-            "match_time_s": float(row["match_time_s"]),
-            "search_time_s": float(row["search_time_s"]),
-            "watchdog_kills": int(row["cycle_searches_watchdog_killed"]),
-            "find_download_queued": int(row["find_download_queued"]),
-            "find_download_completed": int(row["find_download_completed"]),
-            "find_download_drain_time_s": float(
-                row["find_download_drain_time_s"]),
-            "cache_errors": int(row["cache_errors"]),
-            "cache_write_errors": int(row["cache_write_errors"]),
-            "cache_fuse_tripped": int(row["cache_fuse_tripped"]),
-            "peers_browsed": int(row["peers_browsed"]),
-            "peers_browsed_lazy": int(row["peers_browsed_lazy"]),
-            "fanout_waves": int(row["fanout_waves"]),
-        }
-
-    def _dashboard_coverage(self, now: datetime) -> dict[str, Any]:
+    def _dashboard_coverage(self, now: datetime) -> dict[str, object]:
         """Mirror the production coverage CTEs: backlog = wanted +
         downloading + processing; suspects = searched-in-24h rows ordered
         (searches_24h DESC, searches_6h DESC, id ASC) LIMIT 12 with
@@ -7561,7 +7467,7 @@ class FakePipelineDB:
         found rows exist."""
         backlog = {
             int(r["id"]): r for r in self._requests.values()
-            if r.get("status") in ("wanted", "downloading", "processing")
+            if r.get("status") in DASHBOARD_WANTED_BACKLOG_STATUSES
         }
 
         # One pass over search_log per request: rollup of windowed
@@ -7638,7 +7544,7 @@ class FakePipelineDB:
             bucket = hour_anchor - timedelta(hours=i)
             n = hourly_counts.get(bucket, 0)
             series_24h.append({
-                "bucket_start": bucket.isoformat(),
+                "bucket_start": _isoformat_or_none(bucket),
                 "matches": n,
                 "matches_per_hour": n,
             })
@@ -7647,29 +7553,30 @@ class FakePipelineDB:
             bucket = day_anchor - timedelta(days=i)
             n = daily_counts.get(bucket, 0)
             series_28d.append({
-                "bucket_start": bucket.isoformat(),
+                "bucket_start": _isoformat_or_none(bucket),
                 "matches": n,
                 "matches_per_day": n,
             })
 
         def _request_row(rid: int) -> dict[str, Any]:
+            """The raw joined row the production suspect/stale SELECTs
+            return, handed to production's own serializer."""
             req = backlog[rid]
             r = rollup.get(rid, {})
-            at = r.get("last_search_at")
-            return {
+            return serialize_dashboard_request_row({
                 "request_id": rid,
                 "artist_name": req.get("artist_name"),
                 "album_title": req.get("album_title"),
                 "status": req.get("status"),
-                "last_search_at": at.isoformat() if at else None,
-                "searches_24h": int(r.get("searches_24h", 0)),
-                "searches_6h": int(r.get("searches_6h", 0)),
-                "found_24h": int(r.get("found_24h", 0)),
-                "no_match_24h": int(r.get("no_match_24h", 0)),
-                "no_results_24h": int(r.get("no_results_24h", 0)),
-                "reset_24h": int(r.get("reset_24h", 0)),
-                "problem_24h": int(r.get("problem_24h", 0)),
-            }
+                "last_search_at": r.get("last_search_at"),
+                "searches_24h": r.get("searches_24h", 0),
+                "searches_6h": r.get("searches_6h", 0),
+                "found_24h": r.get("found_24h", 0),
+                "no_match_24h": r.get("no_match_24h", 0),
+                "no_results_24h": r.get("no_results_24h", 0),
+                "reset_24h": r.get("reset_24h", 0),
+                "problem_24h": r.get("problem_24h", 0),
+            })
 
         suspects = [
             _request_row(rid)
@@ -7702,13 +7609,13 @@ class FakePipelineDB:
         top_10_searches = sum(r["searches_24h"] for r in suspects[:10])
         top_10_share = (top_10_searches / active_24h) if active_24h else 0
 
-        oldest = None
+        oldest: str | None = None
         searched_ats = [
             rollup[rid]["last_search_at"] for rid in backlog
             if rid in rollup and rollup[rid]["last_search_at"] is not None
         ]
         if searched_ats:
-            oldest = min(searched_ats).isoformat()
+            oldest = _isoformat_or_none(min(searched_ats))
 
         return {
             "wanted_total": len(backlog),
@@ -7735,12 +7642,12 @@ class FakePipelineDB:
             "stale_wanted": stale,
         }
 
-    def _dashboard_heavy_queries(self, now: datetime) -> list[dict[str, Any]]:
-        """Mirror ``_dashboard_peer_browse_heavy_queries``: rows with
-        (peers_browsed + peers_browsed_lazy) > 0 in the last 24h,
+    def _dashboard_heavy_queries(self, now: datetime) -> list[dict[str, object]]:
+        """Mirror ``_dashboard_peer_browse_heavy_queries``' selection: rows
+        with (peers_browsed + peers_browsed_lazy) > 0 in the last 24h,
         ordered (peer_dirs DESC, fanout_waves DESC, created_at DESC,
-        id DESC), LIMIT 12, with the production serializer's int/float
-        coercions (result_count never None)."""
+        id DESC), LIMIT 12. The row SHAPE — every int/float coercion and
+        the isoformatted timestamp — is production's own serializer."""
         cutoff = now - timedelta(hours=24)
         rows = [e for e in self.search_logs
                 if self._as_utc(e.created_at) >= cutoff
@@ -7751,31 +7658,29 @@ class FakePipelineDB:
             -self._as_utc(e.created_at).timestamp(),
             -e.id,
         ))
-        out: list[dict[str, Any]] = []
+        out: list[dict[str, object]] = []
         for e in rows[:12]:
             req = self._requests.get(e.request_id, {})
-            out.append({
+            out.append(serialize_dashboard_heavy_query_row({
                 "search_log_id": e.id,
                 "request_id": e.request_id,
                 "mb_release_id": req.get("mb_release_id"),
                 "artist_name": req.get("artist_name"),
                 "album_title": req.get("album_title"),
                 "status": req.get("status"),
-                "created_at": self._as_utc(e.created_at).isoformat(),
+                "created_at": self._as_utc(e.created_at),
                 "query": e.query,
                 "variant": e.variant,
                 "outcome": e.outcome,
-                "result_count": int(e.result_count or 0),
-                "elapsed_s": float(e.elapsed_s)
-                if e.elapsed_s is not None else None,
-                "browse_time_s": float(e.browse_time_s or 0.0),
-                "match_time_s": float(e.match_time_s or 0.0),
-                "peers_browsed": int(e.peers_browsed or 0),
-                "peers_browsed_lazy": int(e.peers_browsed_lazy or 0),
-                "peer_dirs": int(
-                    (e.peers_browsed or 0) + (e.peers_browsed_lazy or 0)),
-                "fanout_waves": int(e.fanout_waves or 0),
-            })
+                "result_count": e.result_count,
+                "elapsed_s": e.elapsed_s,
+                "browse_time_s": e.browse_time_s,
+                "match_time_s": e.match_time_s,
+                "peers_browsed": e.peers_browsed,
+                "peers_browsed_lazy": e.peers_browsed_lazy,
+                "peer_dirs": (e.peers_browsed or 0) + (e.peers_browsed_lazy or 0),
+                "fanout_waves": e.fanout_waves,
+            }))
         return out
 
     def get_pipeline_dashboard_metrics(
@@ -7801,54 +7706,50 @@ class FakePipelineDB:
         peers = self.get_peer_metrics()
         peers["heavy_queries"] = self._dashboard_heavy_queries(now)
         peers["heavy_query_hours"] = 24
-        return {
-            "generated_at": now.isoformat(),
-            "searches": {
-                "windows": [
-                    self._dashboard_search_window("24h", 24, now),
-                    self._dashboard_search_window("6h", 6, now),
-                ],
-            },
-            "cycles": {
-                "windows": [
-                    self._dashboard_cycle_window("24h", 24, now),
-                    self._dashboard_cycle_window("6h", 6, now),
-                ],
-                # Production: ORDER BY created_at DESC, id DESC LIMIT 12 — NOT
-                # insertion order (rows seeded with explicit
-                # completed_at values must sort by their timestamps).
-                "recent": [
-                    self._dashboard_cycle_row(r)
-                    for r in sorted(
-                        self.cycle_metrics,
-                        key=lambda row: (
-                            self._as_utc(row["created_at"]),
-                            int(row["id"]),
-                        ),
-                        reverse=True,
-                    )[:12]
-                ],
-                # Production restricts outliers to the last 24 hours and
-                # orders by cycle_total_s DESC, id DESC.
-                "outliers": [
-                    self._dashboard_cycle_row(r)
-                    for r in sorted(
-                        (row for row in self.cycle_metrics
-                         if self._as_utc(row["created_at"])
-                         >= now - timedelta(hours=24)),
-                        key=lambda row: (
-                            float(row["cycle_total_s"]),
-                            int(row["id"]),
-                        ),
-                        reverse=True,
-                    )[:8]
-                ],
-            },
-            "coverage": self._dashboard_coverage(now),
-            "peers": peers,
-            "plan_readiness": self.get_search_plan_readiness(plan_generator_id),
-            "unfindable": self._dashboard_unfindable(),
-        }
+        return dashboard_envelope(
+            generated_at=now,
+            search_windows=[
+                self._dashboard_search_window(label, hours, now)
+                for label, hours in DASHBOARD_WINDOWS
+            ],
+            cycle_windows=[
+                self._dashboard_cycle_window(label, hours, now)
+                for label, hours in DASHBOARD_WINDOWS
+            ],
+            # Production: ORDER BY created_at DESC, id DESC LIMIT 12 — NOT
+            # insertion order (rows seeded with explicit completed_at
+            # values must sort by their timestamps).
+            recent_cycles=[
+                serialize_dashboard_cycle_row(r)
+                for r in sorted(
+                    self.cycle_metrics,
+                    key=lambda row: (
+                        self._as_utc(row["created_at"]),
+                        int(row["id"]),
+                    ),
+                    reverse=True,
+                )[:12]
+            ],
+            # Production restricts outliers to the last 24 hours and
+            # orders by cycle_total_s DESC, id DESC.
+            outlier_cycles=[
+                serialize_dashboard_cycle_row(r)
+                for r in sorted(
+                    (row for row in self.cycle_metrics
+                     if self._as_utc(row["created_at"])
+                     >= now - timedelta(hours=24)),
+                    key=lambda row: (
+                        float(row["cycle_total_s"]),
+                        int(row["id"]),
+                    ),
+                    reverse=True,
+                )[:8]
+            ],
+            coverage=self._dashboard_coverage(now),
+            peers=peers,
+            plan_readiness=self.get_search_plan_readiness(plan_generator_id),
+            unfindable=self._dashboard_unfindable(),
+        )
 
     def get_search_plan_readiness(
         self,
@@ -7858,8 +7759,9 @@ class FakePipelineDB:
 
         Walks ``self._requests`` + ``self.search_plans`` to bucket each
         wanted row exactly once. See the live implementation in
-        ``lib/pipeline_db.py`` for bucket precedence; both must agree on
-        every transition or the dashboard contract breaks silently.
+        ``lib/pipeline_db/search_plan.py`` for bucket precedence; both must
+        agree on every transition or the dashboard contract breaks
+        silently.
         """
         wanted_total = 0
         wanted_searchable = 0
@@ -7914,8 +7816,18 @@ class FakePipelineDB:
             "wanted_no_plan": wanted_no_plan,
         }
 
-    def _download_log_to_dict(self,
-                              entry: DownloadLogRow) -> dict[str, Any]:
+    def _download_log_base_dict(self,
+                                entry: DownloadLogRow) -> dict[str, Any]:
+        """The ``SELECT dl.*`` projection plus the origin join.
+
+        The shape ``PipelineDB.get_linked_import_logs`` returns: every
+        ``download_log`` column (the auxiliary ones ``log_download`` parks
+        in ``entry.extra`` included) and ``original_beets_distance``. That
+        query has NO ``album_quality_evidence`` join, so nothing here may
+        recover an evidence-derived measurement (issue #1278 item 7 — the
+        fake used to fold evidence in here and hand linked-import rows
+        spectral/V0 facts production never returns).
+        """
         row: dict[str, Any] = {
             "id": entry.id,
             "request_id": entry.request_id,
@@ -7957,162 +7869,134 @@ class FakePipelineDB:
             if entry.youtube_metadata is not None else None,
         }
         row.update(entry.extra)
-        # Mirror the real LEFT JOIN to album_quality_evidence: prefer
-        # evidence-derived measurements over legacy denorm columns when
-        # the denorm value is missing. Same semantics as
-        # PipelineDB._overlay_evidence_onto_download_log_row.
-        ev = self._evidence_by_id.get(entry.candidate_evidence_id) \
-            if entry.candidate_evidence_id is not None else None
-        request = self._requests.get(entry.request_id)
-        if ev is not None and not exact_release_identity_matches(
-            request.get("mb_release_id") if request is not None else None,
-            ev.mb_release_id,
-        ):
-            ev = None
-        if ev is not None:
-            ev_m = ev.measurement
-            ev_v0 = ev.v0_metric
-            # Delegate: production's own predicate, never a copy of the
-            # version tuple. Issue #1145 added lineage 5 and a hand-copied
-            # ``(3, 4)`` here would have silently stopped projecting every
-            # rebuilt row's source facts.
-            source_semantic = evidence_is_source_semantic(
-                ev.lineage_version)
-            if source_semantic \
-                    and row.get("source_format") is None \
-                    and ev_m.format is not None:
-                row["source_format"] = ev_m.format
-            if source_semantic \
-                    and row.get("source_min_bitrate") is None \
-                    and ev_m.min_bitrate_kbps is not None:
-                row["source_min_bitrate"] = ev_m.min_bitrate_kbps
-            if source_semantic \
-                    and row.get("source_avg_bitrate") is None \
-                    and ev_m.avg_bitrate_kbps is not None:
-                row["source_avg_bitrate"] = ev_m.avg_bitrate_kbps
-            if source_semantic \
-                    and row.get("source_median_bitrate") is None \
-                    and ev_m.median_bitrate_kbps is not None:
-                row["source_median_bitrate"] = ev_m.median_bitrate_kbps
-            if row.get("spectral_grade") is None \
-                    and ev_m is not None and ev_m.spectral_grade is not None:
-                row["spectral_grade"] = ev_m.spectral_grade
-            if row.get("spectral_bitrate") is None \
-                    and ev_m is not None \
-                    and ev_m.spectral_bitrate_kbps is not None:
-                row["spectral_bitrate"] = ev_m.spectral_bitrate_kbps
-            if row.get("v0_probe_kind") is None \
-                    and ev_v0 is not None:
-                row["v0_probe_kind"] = {
-                    EVIDENCE_SUBJECT_SOURCE: V0_PROBE_LOSSLESS_SOURCE,
-                    EVIDENCE_SUBJECT_INSTALLED: V0_PROBE_NATIVE_LOSSY_RESEARCH,
-                }[ev_v0.subject]
-            if row.get("v0_probe_min_bitrate") is None \
-                    and ev_v0 is not None \
-                    and ev_v0.min_bitrate_kbps is not None:
-                row["v0_probe_min_bitrate"] = ev_v0.min_bitrate_kbps
-            if row.get("v0_probe_avg_bitrate") is None \
-                    and ev_v0 is not None \
-                    and ev_v0.avg_bitrate_kbps is not None:
-                row["v0_probe_avg_bitrate"] = ev_v0.avg_bitrate_kbps
-            if row.get("v0_probe_median_bitrate") is None \
-                    and ev_v0 is not None \
-                    and ev_v0.median_bitrate_kbps is not None:
-                row["v0_probe_median_bitrate"] = ev_v0.median_bitrate_kbps
         return row
 
-    def _download_log_evidence_dict(self, entry: DownloadLogRow) -> dict[str, Any]:
-        """``_download_log_to_dict`` plus the guaranteed-present ``source_*``
-        keys the real evidence overlay always stamps (issue #784's
-        ``DownloadLogWithEvidenceRow`` — these four are NOT real
-        ``download_log`` columns, so production keeps them
-        always-present-but-nullable rather than conditionally absent).
-        Used by every reader that joins ``album_quality_evidence``
-        (``get_log``, ``get_download_log_entry``, ``get_download_history``,
-        ``get_download_history_batch``, ``get_latest_download_summaries``).
-        ``get_linked_import_logs`` has no evidence join in production and
-        must call the bare ``_download_log_to_dict`` instead."""
-        row = self._download_log_to_dict(entry)
-        row.setdefault("source_format", None)
-        row.setdefault("source_min_bitrate", None)
-        row.setdefault("source_avg_bitrate", None)
-        row.setdefault("source_median_bitrate", None)
-        # issue #829 Phase 5 PR4 — the candidate-evidence columns the
-        # proof-gate verdict derivation reads
-        # (``_CANDIDATE_EVIDENCE_COLUMNS``). Sourced from the SEEDED
-        # evidence row, never invented: a fake that stamped None here
-        # would hide every verdict the render path is supposed to show.
+    def _candidate_evidence_alias_projection(
+        self,
+        evidence: AlbumQualityEvidence | None,
+    ) -> dict[str, object]:
+        """Mirror ``_CANDIDATE_EVIDENCE_COLUMNS`` for one candidate join.
+
+        Raw, ungated column values — the LEFT JOIN alone, before
+        ``overlay_evidence_onto_download_log_row`` adjudicates identity
+        and lineage. An unmatched join is all-NULL.
+
+        Nine of the aliases are the accusation block that
+        ``accusation_evidence_columns`` generates on the production side,
+        so they come from ``_accusation_alias_projection`` — the same
+        helper ``get_log`` already uses for the current-evidence prefix,
+        and the owner of the candidate-prefix
+        ``was_converted_from`` -> NULL carve-out. Spelling them a second
+        time here would leave a tenth alias free to drift between the two
+        copies.
+        """
+        measurement = evidence.measurement if evidence is not None else None
+        v0 = evidence.v0_metric if evidence is not None else None
+        lattice = evidence.aac_lattice if evidence is not None else None
+        proof = (
+            evidence.verified_lossless_proof if evidence is not None else None
+        )
+        return {
+            **self._accusation_alias_projection(
+                evidence, CANDIDATE_EVIDENCE_PREFIX),
+            "_evidence_mb_release_id": (
+                evidence.mb_release_id if evidence is not None else None),
+            "_evidence_source_format": (
+                measurement.format if measurement is not None else None),
+            "_evidence_source_min_bitrate": (
+                measurement.min_bitrate_kbps
+                if measurement is not None else None),
+            "_evidence_source_avg_bitrate": (
+                measurement.avg_bitrate_kbps
+                if measurement is not None else None),
+            "_evidence_source_median_bitrate": (
+                measurement.median_bitrate_kbps
+                if measurement is not None else None),
+            "_evidence_lineage_version": (
+                evidence.lineage_version if evidence is not None else None),
+            # ``e.v0_subject`` raw — the overlay owns the subject →
+            # wire-kind translation (a five-key map applied with ``.get``,
+            # so an unmapped subject passes through rather than raising).
+            "_evidence_v0_probe_kind": (
+                v0.subject if v0 is not None else None),
+            "_evidence_v0_probe_min_bitrate": (
+                v0.min_bitrate_kbps if v0 is not None else None),
+            "_evidence_v0_probe_avg_bitrate": (
+                v0.avg_bitrate_kbps if v0 is not None else None),
+            "_evidence_v0_probe_median_bitrate": (
+                v0.median_bitrate_kbps if v0 is not None else None),
+            "_evidence_ultrasonic_deficit_db": (
+                measurement.ultrasonic_deficit_db
+                if measurement is not None else None),
+            "_evidence_spectral_measurement_version": (
+                measurement.spectral_measurement_version
+                if measurement is not None else None),
+            "_evidence_aac_lattice_modal_count": (
+                lattice.modal_count if lattice is not None else None),
+            "_evidence_aac_lattice_scored_tracks": (
+                lattice.scored_tracks if lattice is not None else None),
+            "_evidence_aac_lattice_max_z": (
+                lattice.max_z if lattice is not None else None),
+            # Both proof aliases are raw here; the overlay NULLs them on a
+            # non-source-semantic lineage. The fake used to lineage-gate
+            # cd_rip_verification by hand and leave the classifier ungated
+            # — the exact asymmetry issue #1278 item 7 removed.
+            "_evidence_verified_lossless_classifier": (
+                proof.classifier if proof is not None else None),
+            "_evidence_cd_rip_verification": (
+                msgspec.to_builtins(evidence.cd_rip_verification)
+                if evidence is not None
+                and evidence.cd_rip_verification is not None
+                else None),
+            "_evidence_container_extensions": (
+                sorted({file.extension for file in evidence.files})
+                if evidence is not None and evidence.files
+                else None),
+        }
+
+    def _download_log_raw_evidence_row(
+        self, entry: DownloadLogRow,
+    ) -> dict[str, object]:
+        """The PRE-overlay row an evidence-joined reader's SQL produces.
+
+        ``dl.*`` + the candidate-evidence aliases + the request identity
+        gate input. The LEFT JOIN is keyed on ``candidate_evidence_id``
+        alone — no identity filter here, because adjudicating identity is
+        the overlay's job, not the join's.
+        """
+        row = self._download_log_base_dict(entry)
         evidence = (
             self._evidence_by_id.get(entry.candidate_evidence_id)
             if entry.candidate_evidence_id is not None
             else None
         )
+        row.update(self._candidate_evidence_alias_projection(evidence))
         request = self._requests.get(entry.request_id)
-        if evidence is not None and not exact_release_identity_matches(
-            request.get("mb_release_id") if request is not None else None,
-            evidence.mb_release_id,
-        ):
-            evidence = None
-        measurement = evidence.measurement if evidence is not None else None
-        lattice = evidence.aac_lattice if evidence is not None else None
-        proof = (
-            evidence.verified_lossless_proof if evidence is not None else None
+        row["_request_mb_release_id"] = (
+            request.get("mb_release_id") if request is not None else None
         )
-        row.update({
-            "_evidence_format": (
-                measurement.format if measurement is not None else None
-            ),
-            "_evidence_codec_family": (
-                measurement.codec_family if measurement is not None else None
-            ),
-            "_evidence_cliff_hz": (
-                measurement.cliff_hz if measurement is not None else None
-            ),
-            "_evidence_storage_format": (
-                evidence.storage_format if evidence is not None else None
-            ),
-            "_evidence_filetype_band": (
-                evidence.filetype_band if evidence is not None else None
-            ),
-            "_evidence_spectral_subject": (
-                measurement.spectral_subject
-                if measurement is not None else None
-            ),
-            "_evidence_was_converted_from": None,
-            "_evidence_ultrasonic_deficit_db": (
-                measurement.ultrasonic_deficit_db
-                if measurement is not None else None
-            ),
-            "_evidence_spectral_measurement_version": (
-                measurement.spectral_measurement_version
-                if measurement is not None else None
-            ),
-            "_evidence_aac_lattice_modal_count": (
-                lattice.modal_count if lattice is not None else None
-            ),
-            "_evidence_aac_lattice_scored_tracks": (
-                lattice.scored_tracks if lattice is not None else None
-            ),
-            "_evidence_aac_lattice_max_z": (
-                lattice.max_z if lattice is not None else None
-            ),
-            "_evidence_verified_lossless_classifier": (
-                proof.classifier if proof is not None else None
-            ),
-            "_evidence_cd_rip_verification": (
-                msgspec.to_builtins(evidence.cd_rip_verification)
-                if evidence is not None
-                and evidence_is_source_semantic(evidence.lineage_version)
-                and evidence.cd_rip_verification is not None
-                else None
-            ),
-            "_evidence_container_extensions": (
-                sorted({file.extension for file in evidence.files})
-                if evidence is not None and evidence.files
-                else None
-            ),
-        })
         return row
+
+    def _download_log_evidence_dict(self, entry: DownloadLogRow) -> dict[str, Any]:
+        """One evidence-joined ``download_log`` row, overlaid by production.
+
+        Delegates the whole identity/lineage adjudication — including the
+        guaranteed-present ``source_*`` keys of issue #784's
+        ``DownloadLogWithEvidenceRow`` — to
+        ``overlay_evidence_onto_download_log_row``, so the fake cannot be
+        more permissive than production about which evidence facts a
+        reader recovers.
+
+        Used by every reader that joins ``album_quality_evidence``
+        (``get_download_log_entry``, ``get_download_history``,
+        ``get_download_history_batch``, ``get_latest_download_summaries``;
+        ``get_log`` builds its own raw row so the current-evidence aliases
+        reach the same single overlay call). ``get_linked_import_logs``
+        has no evidence join in production and must call the bare
+        ``_download_log_base_dict`` instead.
+        """
+        return overlay_evidence_onto_download_log_row(
+            self._download_log_raw_evidence_row(entry))
 
     # --- Wrong-match review queue ---
 
