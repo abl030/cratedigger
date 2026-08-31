@@ -25,6 +25,7 @@ from typing import Any, Literal
 
 import msgspec
 
+from lib.beets_child import SubprocessRunFn, run_pinned_beets_child
 from lib.release_identity import ReleaseIdentity
 
 log = logging.getLogger("cratedigger")
@@ -91,7 +92,6 @@ class BeetsDeleteFailed(
 
 
 type BeetsDeleteOutcome = BeetsDeleteCompleted | BeetsDeleteFailed
-SubprocessRunFn = Callable[..., sp.CompletedProcess[bytes]]
 
 
 class _OwnedPath(msgspec.Struct, frozen=True):
@@ -716,20 +716,13 @@ def run_beets_delete(
     runner: SubprocessRunFn = sp.run,
 ) -> BeetsDeleteOutcome:
     """Run :func:`execute_pinned_beets_delete` in the pinned Beets Python."""
-    from lib.util import beets_subprocess_env
-
     try:
-        env = beets_subprocess_env()
-        python = env.get("CRATEDIGGER_BEETS_PYTHON", "")
-        if not python:
-            raise RuntimeError("CRATEDIGGER_BEETS_PYTHON is not configured")
         harness = Path(__file__).resolve().parent.parent / "harness" / "delete_album.py"
-        proc = runner(
-            [python, str(harness)],
-            input=msgspec.json.encode(request),
-            capture_output=True,
+        proc = run_pinned_beets_child(
+            [str(harness)],
+            input_bytes=msgspec.json.encode(request),
             timeout=DELETE_TIMEOUT_SECONDS,
-            env=env,
+            runner=runner,
         )
     except (OSError, RuntimeError, sp.TimeoutExpired) as exc:
         return BeetsDeleteFailed(

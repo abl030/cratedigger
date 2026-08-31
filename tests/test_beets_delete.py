@@ -214,6 +214,7 @@ class TestPinnedBeetsDelete(_PinnedBeetsFixture, unittest.TestCase):
         self.assertEqual(result.reason, "protocol_error")
         self.assertEqual(len(calls), 1)
         argv, kwargs = calls[0]
+        self.assertEqual(len(argv), 2)
         self.assertEqual(argv[0], sys.executable)
         self.assertTrue(argv[1].endswith("/harness/delete_album.py"))
         self.assertEqual(
@@ -225,6 +226,113 @@ class TestPinnedBeetsDelete(_PinnedBeetsFixture, unittest.TestCase):
                 library_root=str(self.root),
             )),
         )
+
+    def _request(self, album_id: int = 7) -> BeetsDeleteRequest:
+        return BeetsDeleteRequest(
+            album_id=album_id,
+            expected_release_id=RELEASE,
+            library_db_path=str(self.db_path),
+            library_root=str(self.root),
+        )
+
+    def test_launch_failures_are_typed_subprocess_errors(self) -> None:
+        """The failure-conversion arm the review round proved unconstrained
+        (mutant-runner survivors D3/D5): the REAL launch/timeout exceptions
+        a child runner can raise each map to
+        ``BeetsDeleteFailed(subprocess_error)`` with the album still
+        present — never an escape, never a completed claim."""
+
+        def timing_out(
+            argv: list[str], **kwargs: object,
+        ) -> sp.CompletedProcess[bytes]:
+            raise sp.TimeoutExpired(cmd=argv, timeout=60)
+
+        def unlaunchable(
+            argv: list[str], **kwargs: object,
+        ) -> sp.CompletedProcess[bytes]:
+            raise OSError("No such file or directory")
+
+        for desc, runner in (("timeout", timing_out), ("launch", unlaunchable)):
+            with self.subTest(desc=desc):
+                with patch.dict(os.environ, {
+                    "CRATEDIGGER_RUNTIME_CONFIG": str(self.runtime_config),
+                }):
+                    result = run_beets_delete(self._request(), runner=runner)
+                self.assertIsInstance(result, BeetsDeleteFailed)
+                assert isinstance(result, BeetsDeleteFailed)
+                self.assertEqual(result.reason, "subprocess_error")
+                self.assertTrue(result.album_still_present)
+
+    def test_an_unconfigured_interpreter_is_a_typed_subprocess_error(
+        self,
+    ) -> None:
+        """The interpreter refusal now lives in ``lib/beets_child.py`` — a
+        cross-module contract with ``run_beets_delete``'s except tuple that
+        previously had zero delete-side coverage (mutant-runner survivor M8's
+        complement): the ``RuntimeError`` must be caught, typed, and named,
+        with the runner never invoked."""
+
+        def runner(
+            argv: list[str], **kwargs: object,
+        ) -> sp.CompletedProcess[bytes]:
+            raise AssertionError("must not launch without a pinned interpreter")
+
+        no_python_config = Path(self.tmp.name) / "config-no-python.ini"
+        no_python_config.write_text(
+            "[Beets]\n"
+            f"directory = {self.root}\n"
+            f"config_dir = {self.config_dir}\n",
+            encoding="utf-8",
+        )
+        stripped = {
+            key: value
+            for key, value in os.environ.items()
+            if key != "CRATEDIGGER_BEETS_PYTHON"
+        }
+        stripped["CRATEDIGGER_RUNTIME_CONFIG"] = str(no_python_config)
+        with patch.dict(os.environ, stripped, clear=True):
+            result = run_beets_delete(self._request(), runner=runner)
+
+        self.assertIsInstance(result, BeetsDeleteFailed)
+        assert isinstance(result, BeetsDeleteFailed)
+        self.assertEqual(result.reason, "subprocess_error")
+        self.assertTrue(result.album_still_present)
+        self.assertIn("CRATEDIGGER_BEETS_PYTHON", result.detail)
+
+    def test_a_nonzero_exit_is_refused_even_with_a_valid_outcome_frame(
+        self,
+    ) -> None:
+        """Mutant-runner survivor D4's discriminating world: nonzero exit
+        WITH a valid outcome frame on stdout. The returncode branch must
+        win — a child that died after printing a frame is a refusal, never
+        that frame. (The exit code here is refusal evidence, deliberately:
+        this lane's child is our own ``delete_album.py``, not the beets
+        CLI — see ``lib/beets_child.py``'s doctrine paragraph.)"""
+        frame = msgspec.json.encode(BeetsDeleteCompleted(
+            album_id=7,
+            album_name="Album",
+            artist_name="Artist",
+            former_album_path="/x",
+            deleted_tracks=1,
+            deleted_artifacts=0,
+            preserved_paths=(),
+        ))
+
+        def runner(
+            argv: list[str], **kwargs: object,
+        ) -> sp.CompletedProcess[bytes]:
+            return sp.CompletedProcess(argv, 23, stdout=frame, stderr=b"boom")
+
+        with patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(self.runtime_config),
+        }):
+            result = run_beets_delete(self._request(), runner=runner)
+
+        self.assertIsInstance(result, BeetsDeleteFailed)
+        assert isinstance(result, BeetsDeleteFailed)
+        self.assertEqual(result.reason, "subprocess_error")
+        self.assertIn("rc=23", result.detail)
+        self.assertTrue(result.album_still_present)
 
     def test_metadata_kill_equivalent_rolls_back_album_items_and_flex_rows(
         self,

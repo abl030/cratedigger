@@ -500,7 +500,7 @@ def legacy_floor_quality_label(fmt: str, min_bitrate_kbps: int) -> str:
 # Classification
 # ---------------------------------------------------------------------------
 
-def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
+def _classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     """Classify a download_log entry for display.
 
     Returns a ClassifiedEntry with badge, verdict, summary, and downloaded_label.

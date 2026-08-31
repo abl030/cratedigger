@@ -10977,8 +10977,14 @@ class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):
         db: FakePipelineDB,
         claimed: ImportJob,
     ) -> None:
-        """The failure contract is the real Recents classifier, not a job row."""
-        from web.classify import LogEntry, classify_log_entry
+        """The failure contract is the real Recents render, not a job row.
+
+        The row comes from ``get_download_log_entry`` — the detail-view
+        SELECT, which carries no ``_current_evidence_*`` aliases — so the
+        HAVE projection is structurally inert here; the pin is on the
+        classifier's badge/verdict as the composed renderer emits them.
+        """
+        from web.download_history_view import build_recents_download_log_rows
 
         assert isinstance(claimed.payload, ForceImportPayload)
         failed_rows = [
@@ -10989,9 +10995,11 @@ class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):
         self.assertEqual(len(failed_rows), 1)
         audit = db.get_download_log_entry(failed_rows[0].id)
         assert audit is not None
-        rendered = classify_log_entry(LogEntry.from_row(dict(audit)))
-        self.assertEqual(rendered.badge, "Failed")
-        self.assertTrue(rendered.verdict.startswith("Force import attempt failed:"))
+        rendered = build_recents_download_log_rows([dict(audit)])[0]
+        self.assertEqual(rendered["badge"], "Failed")
+        verdict = rendered["verdict"]
+        assert isinstance(verdict, str)
+        self.assertTrue(verdict.startswith("Force import attempt failed:"))
 
     def _run(
         self,
