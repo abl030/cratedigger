@@ -915,10 +915,12 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # added its entry is item 6's PR2 (0c3bae8e), the same commit that made
     # it a wrapper -- so through item 6's PR1 and everything earlier, an
     # edit to that file selected nothing. The scripts/ root rule now
-    # polices `.sh` too, and the same basename probe resolves five of them
-    # (daily_beets_tip_update, daily_flake_update, daily_resource_monitor,
-    # fuzz_burst, world_model_burst -- each has a real
-    # tests/test_<stem>.py). The six below need an explicit entry, and
+    # polices `.sh` too, and the same basename probe resolves five of those
+    # thirteen (daily_beets_tip_update, daily_flake_update,
+    # daily_resource_monitor, fuzz_burst, world_model_burst -- each has a
+    # real tests/test_<stem>.py; test_tmpfs.sh is a sixth probe-resolved
+    # wrapper, but it had an entry and so was never among the thirteen).
+    # The six below need an explicit entry, and
     # scripts/lint.sh + scripts/mcp-playwright.sh are admitted gaps in
     # SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE.
     #
@@ -1287,8 +1289,8 @@ SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
     "scripts/lint.sh": (
         "measured 2026-08-31: zero neighbours -- tests.test_lint does not "
         "exist, and a repository-wide grep for the string 'lint.sh' "
-        "matches nothing outside this registry entry: no test, no doc, no "
-        "Nix module, no other script, and not the file itself either. "
+        "matches nothing outside this file: no test, no doc, no Nix "
+        "module, no other script, and not the wrapper itself either. "
         "It is a "
         "bare developer convenience wrapper around `nix-shell --run "
         "pyright` on a hand-typed file list; the canonical typing "
@@ -1298,13 +1300,16 @@ SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
     "scripts/mcp-playwright.sh": (
         "measured 2026-08-31: zero neighbours -- tests.test_mcp-playwright "
         "is not even a legal module name, and nothing under tests/ "
-        "mentions this file. Its consumers name the wrapper's PATH, never "
-        "its contents -- including .mcp.json's `command` string and the "
-        "generated .codex/config.toml / .codex/agents/playwright.toml "
-        "beside it, .claude/agents/playwright.md, docs/playwright-mcp.md, "
-        "and two .claude/memory notes -- so the binary-name resolution and "
-        "CDP/headless mode selection inside it are exercised only by "
-        "really launching an MCP server (issue #1278 item 9)"
+        "mentions this file at all, so no test depends on its contents. "
+        "Its consumers are agent/docs surfaces -- .mcp.json's `command` "
+        "string and the generated .codex/config.toml / "
+        ".codex/agents/playwright.toml beside it, "
+        ".claude/agents/playwright.md, docs/playwright-mcp.md, and two "
+        ".claude/memory notes -- which invoke it by PATH, describe its "
+        "behaviour in prose, or both; none of them is a selectable test, "
+        "so the binary-name resolution and CDP/headless mode selection "
+        "inside it are exercised only by really launching an MCP server "
+        "(issue #1278 item 9)"
     ),
 }
 
@@ -1331,10 +1336,16 @@ class RootCoverageRule:
     hand-maintained data — nothing here infers coverage from an import
     graph.
 
-    Two columns are behavioural, not descriptive: `suffixes` decides which
-    files a root polices at all (`.sh` joined the `scripts/` row in item 9),
-    and `admitted_selects_nothing` decides WHEN a registered path is
-    honoured. The `tests/` registry early-returns BEFORE resolution
+    Every column is behavioural — this is a table production reads, not
+    documentation. Two of them decide this table's own SCOPE, which is why
+    `tests/test_selection_coverage_audit.py` anchors both against values
+    held outside the table (`EXPECTED_SUFFIXES`,
+    `EXPECTED_ADMITTED_SELECTS_NOTHING`): `suffixes` decides which files a
+    root polices at all (`.sh` joined the `scripts/` row in item 9), and
+    `admitted_selects_nothing` decides WHEN a registered path is honoured
+    AND which rows that audit examines — so without the anchors a table
+    edit could quietly vacate its own policing.
+    The `tests/` registry early-returns BEFORE resolution
     (a registration must not be a lookalike neighbour set — issue #1081),
     so a registered `tests/` path never reaches the post-resolution branch
     at all. The `lib/` and `scripts/` registries do not early-return: full

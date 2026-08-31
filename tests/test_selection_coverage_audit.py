@@ -14,10 +14,11 @@ a fourth row is audited the moment it is added.
 Four registry contracts, all driving the REAL resolution functions rather
 than a reimplementation:
 
-0. the table's own scope-deciding columns match an anchor held OUTSIDE the
-   table (`EXPECTED_ADMITTED_SELECTS_NOTHING`, `registry_name` against the
-   object it labels) — every other contract here derives its rows from that
-   table, so a column that decides scope cannot also be its own authority;
+0. the table's own scope-deciding columns match anchors held OUTSIDE the
+   table (`EXPECTED_SUFFIXES`, `EXPECTED_ADMITTED_SELECTS_NOTHING`, and
+   `registry_name` against the object it labels) — every other contract
+   here derives its rows from that table, so a column that decides scope
+   cannot also be its own authority;
 1. every registered path still resolves zero neighbours (else it is a STALE
    admission and must be removed);
 2. every real file under a rule's root, with one of its suffixes, either
@@ -28,8 +29,10 @@ than a reimplementation:
    that still exists on disk.
 
 Contracts 1 and 2 run over `AUDITED_RULES` only — the `lib/` and
-`scripts/` rows. `SHARED_MODULES_WITHOUT_COVERAGE` gets contracts 0 and 3
-here and nothing more; its own both-directions exactness lives in
+`scripts/` rows. `SHARED_MODULES_WITHOUT_COVERAGE` gets contracts 0 and 3,
+and its ROW additionally drives the three known-bad self-tests that iterate
+the whole table (both unmapped-path probes and the no-false-admission
+probe); its own both-directions exactness lives in
 `tests/test_targeted_test_selection.py`'s tree walk plus
 `tests/test_negative_coverage_audit.py`.
 
@@ -91,6 +94,21 @@ EXPECTED_ADMITTED_SELECTS_NOTHING: dict[str, bool] = {
     "tests": True,
     "lib": False,
     "scripts": False,
+}
+
+#: The other scope-deciding column, anchored the same way and for the same
+#: reason: `suffixes` decides which files a row polices AT ALL, so dropping
+#: `.sh` from the scripts row un-polices all sixteen shell wrappers at once
+#: — none of them would fail closed again. Before this anchor that edit was
+#: caught by the behaviour pin in tests/test_targeted_test_selection.py
+#: and, incidentally, by contract C's pin population noticing two entries
+#: (run_final_gate.sh, test.sh) had become maskable — but nothing in this
+#: module named the column itself. Keyed by root, so a new row with no
+#: entry here fails with a KeyError rather than being unconstrained.
+EXPECTED_SUFFIXES: dict[str, tuple[str, ...]] = {
+    "tests": (".py",),
+    "lib": (".py",),
+    "scripts": (".py", ".sh"),
 }
 
 #: The rows whose admitted gaps do NOT early-return: full resolution runs
@@ -415,6 +433,17 @@ class TestRootCoverageTableIsWellFormed(unittest.TestCase):
                     f"{rule.root}: flipping this column silently changes "
                     "which rows this module audits AND when production "
                     "honours a registered gap",
+                )
+
+    def test_every_row_polices_its_expected_suffixes(self) -> None:
+        for rule in ROOT_COVERAGE_RULES:
+            with self.subTest(root=rule.root):
+                self.assertEqual(
+                    rule.suffixes,
+                    EXPECTED_SUFFIXES[rule.root],
+                    f"{rule.root}: this column decides which files the row "
+                    "polices at all — narrowing it silently un-polices "
+                    "every file with the dropped suffix",
                 )
 
     def test_the_audited_row_set_is_not_empty(self) -> None:
@@ -818,20 +847,27 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
         registered must never get one (review M42): a mutant printing it
         with a fabricated rationale right before the raise was otherwise
         green — operator-facing copy asserting an admission nobody made.
+
+        Iterates every suffix each row polices, like the two sibling
+        unmapped-path pins. Probing only `suffixes[0]` left a narrower
+        mutant alive: one gating that fabricated note on
+        `relative_path.endswith(".sh")` survived the whole suite, because
+        the scripts row's first suffix is `.py`.
         """
         marker = "admitted selection gap"
         self.assertIn(marker, ADMITTED_GAP_MESSAGE)
 
         for rule in ROOT_COVERAGE_RULES:
-            probe = f"{rule.root}/_unregistered_probe{rule.suffixes[0]}"
-            buffer = io.StringIO()
-            with self.subTest(root=rule.root):
-                with (
-                    contextlib.redirect_stderr(buffer),
-                    self.assertRaises(ValueError),
-                ):
-                    _changed_path_neighbours(probe, REPO_ROOT)
-                self.assertNotIn(marker, buffer.getvalue())
+            for suffix in rule.suffixes:
+                probe = f"{rule.root}/_unregistered_probe{suffix}"
+                buffer = io.StringIO()
+                with self.subTest(root=rule.root, suffix=suffix):
+                    with (
+                        contextlib.redirect_stderr(buffer),
+                        self.assertRaises(ValueError),
+                    ):
+                        _changed_path_neighbours(probe, REPO_ROOT)
+                    self.assertNotIn(marker, buffer.getvalue())
 
     def test_shell_probe_is_scoped_to_the_scripts_root(self) -> None:
         """The `.sh` basename probe is deliberately scripts-only, and that
