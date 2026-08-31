@@ -10,6 +10,7 @@ around them through the same typed worlds defined here.
 
 from __future__ import annotations
 
+import sys
 import unittest
 from dataclasses import dataclass, replace
 from typing import ClassVar
@@ -39,11 +40,17 @@ from lib.pipeline_db.decisions import (
     search_backoff_minutes,
 )
 
-#: Largest exponent PostgreSQL's ``double precision`` ``POWER(2, n)`` can
-#: represent. ``POWER(2, 1024)`` raises ``value out of range: overflow``,
-#: which is what the exponent clamp exists to keep out of the retry-pacing
-#: writers. Measured against the live database on 2026-08-31.
-PG_DOUBLE_PRECISION_POWER_OF_TWO_LIMIT = 1023
+#: Largest exponent the retry-pacing SQL can evaluate. The expression that
+#: has to stay representable is the whole ``BACKOFF_BASE_MINUTES * POWER(2,
+#: n)`` product, NOT ``POWER(2, n)`` alone — with a base of 30 the product
+#: overflows ``double precision`` four exponents before the power does, so
+#: guarding the power would be fail-open by exactly those four. Measured
+#: against the live database on 2026-08-31: ``LEAST(30 * POWER(2, 1019),
+#: 240)`` returns 240.0 and ``LEAST(30 * POWER(2, 1020), 240)`` raises
+#: ``value out of range: overflow``. (Bare ``POWER(2, n)`` survives to
+#: 1023; that is the number this constant used to hold, and the reason the
+#: assertion below is written against the product instead.)
+PG_RETRY_PACING_MAX_EXPONENT = 1019
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +172,11 @@ class TestSearchBackoffMinutes(unittest.TestCase):
         _BackoffCase("three prior attempts reach the cap exactly", 3, 240),
         _BackoffCase("four prior attempts stay capped", 4, 240),
         _BackoffCase("the live 2026-08-31 worst counter stays capped", 407, 240),
-        _BackoffCase("the PostgreSQL overflow point stays capped", 1024, 240),
+        # 1020 is where the SQL twin's ``30 * POWER(2, n)`` first overflows
+        # double precision (base-dependent: it is the smallest n with
+        # BACKOFF_BASE_MINUTES * 2**n > DBL_MAX, not a property of POWER
+        # alone, which survives to 1023).
+        _BackoffCase("the SQL product's overflow point stays capped", 1020, 240),
         _BackoffCase("an absurd counter stays capped", 100_000, 240),
     )
 
@@ -189,11 +200,25 @@ class TestSearchBackoffMinutes(unittest.TestCase):
             BACKOFF_MAX_MINUTES,
         )
 
-    def test_clamped_exponent_stays_inside_double_precision(self):
-        """The bound handed to SQL must itself be representable there."""
+    def test_clamped_product_stays_inside_double_precision(self):
+        """The SQL evaluates ``base * 2**exponent``, so guard the product.
+
+        Guarding ``2 ** SEARCH_BACKOFF_MAX_EXPONENT`` alone would be
+        fail-open: with ``BACKOFF_BASE_MINUTES = 30`` the product overflows
+        at exponent 1020 while the bare power survives to 1023.
+        """
+        self.assertLess(
+            float(BACKOFF_BASE_MINUTES) * (2.0 ** SEARCH_BACKOFF_MAX_EXPONENT),
+            sys.float_info.max,
+        )
+        # ...and the live-measured ceiling agrees with that arithmetic.
         self.assertLessEqual(
-            SEARCH_BACKOFF_MAX_EXPONENT,
-            PG_DOUBLE_PRECISION_POWER_OF_TWO_LIMIT,
+            SEARCH_BACKOFF_MAX_EXPONENT, PG_RETRY_PACING_MAX_EXPONENT,
+        )
+        self.assertLess(
+            float(BACKOFF_BASE_MINUTES)
+            * (2.0 ** PG_RETRY_PACING_MAX_EXPONENT),
+            sys.float_info.max,
         )
 
     def test_clamped_and_unclamped_agree_below_the_overflow_point(self):

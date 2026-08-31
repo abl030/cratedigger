@@ -5,13 +5,28 @@ in-memory twin used to spell separately. Extracting them makes the rules
 directly patrollable, so each ships a property here alongside its
 deterministic table in ``tests/test_pipeline_db_decisions.py``.
 
-Every checker accumulates a ``list[str]`` of violations rather than raising
-at the first one, so a world that breaks several clauses reports all of
-them and clause ordering cannot mask a defect. Some clauses are genuinely
-coupled — a run whose values disagree with the formula usually also breaks
-the range or monotonicity clause — so the known-bad self-tests below assert
-that the named clause trips and state the exact set of clauses that trip
-with it, rather than pretending each can fire alone.
+Every checker accumulates a ``list[str]`` of violations rather than raising,
+so a failure names every clause it can rather than only the first. That is
+NOT the same as "clause ordering cannot mask a defect", and two of the four
+checkers do not accumulate unconditionally:
+
+* ``backoff_violations`` and ``saturation_violations`` evaluate every clause
+  on every call — nothing there can be masked by ordering.
+* ``cursor_violations`` and ``readiness_violations`` have GUARDED early
+  returns plus ``if``/``elif`` chains. An unrecognised status or an
+  unregistered bucket returns immediately, because no later clause has a
+  defined meaning for such a value; the stale arm returns before the live
+  arm; and the wrap/advance and deterministic/transient/no-plan ladders are
+  mutually exclusive by construction. So a world CAN fall through a
+  disabled clause and be reported by a different clause instead. The
+  message-asserting self-tests below are what closes that: each names the
+  exact clause it exercises, so a fallthrough fails the assertion rather
+  than passing as a generic error.
+
+Some clauses are also genuinely coupled — a run whose values disagree with
+the formula usually breaks the range or monotonicity clause too — so each
+self-test states the exact number of clauses its world trips rather than
+pretending every clause can fire alone.
 """
 
 from __future__ import annotations

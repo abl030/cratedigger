@@ -7081,11 +7081,20 @@ class TestSearchBackoffSqlParity(unittest.TestCase):
 class TestSharedOutcomeVocabularies(unittest.TestCase):
     """Every exported outcome vocabulary matches the SQL it describes.
 
-    Issue #1278 item 7 exported these four tuples so the in-memory twin
+    Issue #1278 item 7 exported six vocabulary tuples so the in-memory twin
     stops hand-copying them. The SQL keeps its own literals, so each tuple
-    is bound to its query by round-tripping the WHOLE canonical outcome
-    taxonomy through real PostgreSQL and asserting the query admits
-    exactly the members — a drift in either direction fails here.
+    is bound to its query by round-tripping a vocabulary through real
+    PostgreSQL and asserting the query admits exactly the members — a drift
+    in either direction fails here.
+
+    The four ``download_log.outcome`` tuples are driven against the WHOLE
+    canonical taxonomy (``get_args(DownloadLogOutcome)``, itself pinned to
+    the CHECK constraint by ``tests/test_migrator.py``), and the job-type
+    tuple against the whole ``IMPORT_JOB_TYPES`` frozenset. The
+    ``search_log.outcome`` case is the exception: that column has no
+    Python-side taxonomy constant to derive from, so its probe list is
+    written out here and is only as complete as this list — see that
+    test's own docstring.
     """
 
     def setUp(self):
@@ -7165,6 +7174,17 @@ class TestSharedOutcomeVocabularies(unittest.TestCase):
         self.assertEqual(admitted, set(CAPTURE_IMPORT_JOB_TYPES))
 
     def test_search_error_outcomes_match_both_dashboard_panels(self):
+        """Both panels count exactly ``SEARCH_ERROR_OUTCOMES`` as errors.
+
+        Unlike the ``download_log`` cases above, this probe list is
+        hand-written: ``search_log.outcome`` has no Python-side taxonomy
+        constant to derive from — its vocabulary lives only in
+        ``search_log_outcome_check`` (migration 010). The list below happens
+        to be that constraint's full seven values today, but nothing
+        enforces that, so this test proves the two panels admit exactly the
+        exported error tuple OUT OF THE OUTCOMES IT PROBES, not that no
+        other outcome could ever be miscounted.
+        """
         request_id = self._request("search-errors")
         for outcome in (
             "found", "no_match", "no_results", "exhausted",

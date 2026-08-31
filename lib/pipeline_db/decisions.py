@@ -38,19 +38,26 @@ def _search_backoff_max_exponent() -> int:
     Past this exponent the ``min()`` cap is unconditional, so clamping the
     exponent cannot change any returned value. Python does not need the
     clamp (its ints are arbitrary precision) — PostgreSQL does: ``POWER``
-    resolves to ``double precision``, and ``LEAST(30 * POWER(2, 1024), 240)``
-    raises ``value out of range: overflow`` rather than capping (measured
-    against the live database, 2026-08-31). The worst live attempt counter
-    the same day was 407, and the 4-hour cap admits at most six attempts a
-    day per unfound request — so the unclamped expression was months from
-    erroring, not structurally unreachable.
+    resolves to ``double precision``, and it is the whole ``base * POWER``
+    PRODUCT that overflows first. Measured against the live database
+    2026-08-31: ``LEAST(30 * POWER(2, 1019), 240)`` returns 240.0 and
+    ``LEAST(30 * POWER(2, 1020), 240)`` raises ``value out of range:
+    overflow``. That threshold is base-dependent — bare ``POWER(2, n)``
+    survives to 1023 — which is why the clamp bounds the exponent rather
+    than anything trying to reason about the power alone. The worst live
+    attempt counter the same day was 407, and the 4-hour cap admits at most
+    six attempts a day per unfound request, so the unclamped expression was
+    months from erroring, not structurally unreachable.
 
     ``lib/import_queue.py::_import_preview_requeue_max_exponent`` derives
     its own cap the same way for the preview-requeue family. The two are
     deliberately not shared: they carry different constants and units, and
-    ``lib.import_queue`` cannot import from ``lib.pipeline_db`` (every
-    pipeline-DB mixin already imports ``lib.import_queue``, so the edge
-    would close an import cycle).
+    ``lib.import_queue`` cannot import from ``lib.pipeline_db`` — several
+    pipeline-DB modules (this one's siblings ``requests``, ``search_plan``,
+    ``terminal_outcomes``, ``import_jobs``, ``youtube``) already import
+    ``lib.import_queue``, and importing any ``lib.pipeline_db`` submodule
+    runs the package ``__init__``, which pulls all of them in. The reverse
+    edge would therefore close an import cycle.
     """
     if BACKOFF_MAX_MINUTES <= BACKOFF_BASE_MINUTES:
         return 0

@@ -371,11 +371,14 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "real SQL change: the doubling exponent is now clamped by a bound "
             "``SEARCH_BACKOFF_MAX_EXPONENT`` placeholder "
             "(``POWER(2, LEAST(COALESCE(col, 0), %s))``) because PostgreSQL "
-            "resolves POWER to double precision and raised "
-            "``value out of range: overflow`` once a counter reached 1024. The "
-            "clamp changes no value below that point — the surrounding LEAST "
-            "already capped every exponent past 3 — and the WHERE guard, the "
-            "placeholder discipline, and the counter vocabulary are untouched"
+            "resolves POWER to double precision and the whole "
+            "``30 * POWER(2, counter)`` product raised "
+            "``value out of range: overflow`` once a counter reached 1020 "
+            "(measured live 2026-08-31; 1020 is base-dependent — bare "
+            "POWER(2, n) survives to 1023). The clamp changes no value below "
+            "that point — the surrounding LEAST already capped every exponent "
+            "past 3 — and the WHERE guard, the placeholder discipline, and "
+            "the counter vocabulary are untouched"
         ),
     ),
     ("lib/pipeline_db/terminal_outcomes.py", "c4d426397b1774f9"): (
