@@ -3,39 +3,61 @@
 One home for everything every test-runtime coordinator needs from the shared
 RAM root before it may run: the private runtime tmpfs, the exclusive
 admission lock and its holder identity, ``/proc`` process-liveness reads,
-the headroom precondition, the scratch/bundle/receipt reapers, and every
-on-disk name those formats are spelled with (issue #1278 item 6). Extracted
-verbatim from ``scripts/run_test_suite.py``, which now imports what it still
-uses from here: the suite coordinator owns phases, markers, and the bundle
-report; this module owns the substrate they all sit on.
+the headroom precondition, the scratch/bundle/receipt reapers, the final
+gate itself, and every on-disk name those formats are spelled with (issue
+#1278 item 6). Extracted verbatim from ``scripts/run_test_suite.py``, which
+now imports what it still uses from here: the suite coordinator owns phases,
+markers, and the bundle report; this module owns the substrate they all sit
+on.
 
-**Standard library only, deliberately.** Every Python consumer today runs
+**Standard library only, deliberately.** Every OTHER Python consumer runs
 inside the Nix dev shell, where third-party dependencies are on the path.
-The shell-side re-implementations of these same facts do not:
-``scripts/run_final_gate.sh`` runs OUTSIDE that shell — it launches
-``nix develop --command`` itself — and carries its own copies of the
-``/proc`` start-ticks read and the receipt field names, while
-``scripts/test_tmpfs.sh`` carries its own start-ticks read, headroom
-threshold, and ``.owner`` marker write at shell entry. Folding those copies
-back onto this one module (issue #1278 item 6, the follow-up PR) is only
-possible while it imports nothing but the standard library.
+This module cannot assume that: ``scripts/run_final_gate.sh`` is a thin
+wrapper that execs ``final-gate`` here with whatever bare interpreter is on
+PATH, OUTSIDE any dev shell — the gate is what launches
+``nix develop --command`` in the first place. (``scripts/test_tmpfs.sh``
+runs ``write-owner-marker`` as a subprocess of its shell hook, so THAT
+caller's ``python3`` is the dev shell's own; it is the gate that fixes this
+constraint, not the marker.) Both shell files used to carry their own copies
+of the ``/proc`` start-ticks read (and the gate, of the whole receipt
+format); folding them onto this one module is only possible while it imports
+nothing but the standard library.
 ``tests/test_test_substrate.py`` pins that from both sides: an AST audit of
 this file's imports, and a real subprocess import with third-party
 ``site-packages`` stripped from ``sys.path``. Do not import ``msgspec``,
 ``lib/``, or ``tests/`` from this file.
+
+Subcommands (each has exactly one caller; do not add a speculative verb):
+
+``final-gate [status RECEIPT]``
+    Run the canonical suite on a committed clean tree and publish a
+    receipt, or report an existing receipt's state. Reached through
+    ``scripts/run_final_gate.sh``, whose operator interface is unchanged.
+``write-owner-marker DIRECTORY PID``
+    Write the ``.owner`` scratch-tree ownership marker
+    ``_scratch_tree_owner_dead`` reads back. Run as a subprocess by
+    ``scripts/test_tmpfs.sh``'s shell hook. Best-effort: every failure
+    exits 0 silently, because a lost marker leaves a tree unreaped
+    forever, never wrongly reaped.
 """
 
 from __future__ import annotations
 
+import argparse
 import fcntl
 import os
+import re
 import shutil
+import signal
 import stat
 import subprocess
+import sys
+import tempfile
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
+from types import FrameType
 from typing import TextIO
 
 
@@ -93,11 +115,11 @@ DEFAULT_MIN_HEADROOM_BYTES = 1_073_741_824
 
 #: A completed check bundle survives at least this long before admission-time
 #: reaping may remove it. This protects the bundle's DETAILED EVIDENCE (the
-#: per-phase logs and summary.md a run_final_gate.sh receipt points at), not
+#: per-phase logs and summary.md a final-gate receipt points at), not
 #: receipt reuse itself: `run_final_gate.sh status` only confirms the
 #: receipt's own `terminal` and `bundle` FILE exist (a path string) — a
 #: `pass` receipt's verdict outlives its bundle regardless of this floor.
-#: `status_receipt` separately stats the bundle path and fails visibly when
+#: `_status_receipt` separately stats the bundle path and fails visibly when
 #: it is gone (issue #1111 review). The floor's real job is keeping that
 #: detailed evidence around for one ordinary session (CLAUDE.md "Running
 #: tests"), not proving the receipt itself is still trustworthy. Reaping
@@ -217,7 +239,7 @@ def _proc_stat_start_ticks(
 
 
 def _proc_start_ticks(pid: int) -> str | None:
-    """Field 22 of /proc/<pid>/stat — mirrors run_final_gate.sh's proc_start_ticks.
+    """Field 22 of /proc/<pid>/stat — the one process-liveness read here.
 
     A thin wrapper over ``_proc_stat_start_ticks`` that collapses "confirmed
     gone" and "cannot verify" into the same ``None`` — see that function's
@@ -231,7 +253,7 @@ def _proc_start_ticks(pid: int) -> str | None:
 def _write_lock_holder_identity(descriptor: int) -> None:
     """Best-effort holder identity a waiter's progress message can read.
 
-    Mirrors run_final_gate.sh's own pid+start-ticks identity precedent
+    Same shape as the final gate's own pid+start-ticks receipt identities
     (helper_pid/helper_start_ticks, gate_pid/gate_start_ticks): a bare pid is
     ambiguous across process reuse, start ticks disambiguate it. This write
     can itself be lost to the very exhaustion this PR exists for (the
@@ -270,8 +292,8 @@ def _read_lock_holder_identity(lock_path: Path) -> str | None:
     """The lock's live holder identity, or None if stale/malformed/unreadable.
 
     A stored pid+ticks pair is trusted only after an explicit liveness
-    check (``_proc_start_ticks(pid) == ticks``, the same ``same_process``
-    precedent ``run_final_gate.sh`` uses) — never on readability alone.
+    check (``_proc_start_ticks(pid) == ticks``, the same comparison
+    ``_receipt_process_field_live`` makes) — never on readability alone.
     Without it, a lingering write from a process that has since released or
     died (a write the release path failed to clear, or a write the current
     holder's own ``except OSError: pass`` swallowed) would be reported as
@@ -369,9 +391,22 @@ def acquire_suite_admission(
                 os.close(descriptor)
 
 
+#: Name of the typed summary ``scripts/run_test_suite.py::_publish_summary``
+#: writes at the top level of a check bundle, in its final publication step
+#: (first of the two files that step writes; ``summary.md`` follows it).
+#: Spelled once in PRODUCTION code (issue #1278 item 6) because three separate
+#: readers depend on it meaning the same file: that writer, this module's own
+#: ``_bundle_last_activity`` (which keys a bundle's staleness on its mtime),
+#: and ``_record_suite_bundle`` below (which refuses to record a bundle
+#: without one). Tests keep their own hand-typed copies on purpose — a
+#: fixture re-deriving the name from this constant could never detect a
+#: rename.
+SUMMARY_JSON_NAME = "summary.json"
+
+
 def _bundle_last_activity(bundle: Path) -> float:
     """The bundle's most recent evidence write, or its own mtime as a fallback."""
-    summary_path = bundle / "summary.json"
+    summary_path = bundle / SUMMARY_JSON_NAME
     try:
         return summary_path.stat().st_mtime
     except OSError:
@@ -387,8 +422,9 @@ def _scratch_tree_last_activity(tree: Path) -> float:
 
     ``_bundle_last_activity`` (above) is right for a ``run_suite`` check
     bundle: ``run_suite`` is the bundle's only writer, and it writes
-    ``summary.json`` at the top level as its very last act, so the bundle's
-    own dirent set is exactly what changes as work happens.
+    ``summary.json`` at the top level in its final publication step (with
+    ``summary.md`` written immediately after), so the bundle's own dirent
+    set is exactly what changes as work happens.
 
     A dev-shell scratch tree (``SCRATCH_TREE_PREFIX``) has no such shape
     (issue #1208 review D3). Its own top-level directory mtime is bumped
@@ -470,7 +506,7 @@ def _scratch_tree_last_activity(tree: Path) -> float:
 #: ``reap_stale_check_bundles`` requires ``_scratch_tree_owner_dead`` to
 #: PROVE the owning shell process is gone (pid+start-ticks, same
 #: pid-reuse-safe ``_proc_start_ticks`` precedent as the admission-lock
-#: holder identity and ``run_final_gate.sh``'s own helper/gate identity)
+#: holder identity and the final gate's own helper/gate identity)
 #: before the age gate ever applies to a ``cratedigger-tests.*`` entry —
 #: a live owner is never touched regardless of age, and a missing or
 #: malformed marker fails closed (treated as "unknown, never reap", not
@@ -553,12 +589,10 @@ def _scratch_tree_owner_dead(
     return current_ticks != ticks
 
 
-#: On-disk shape of one ``scripts/run_final_gate.sh`` receipt directory,
-#: spelled once here for every Python reader below (issue #1278 item 6).
-#: This is the one home for the PYTHON reading side only: the gate script
-#: itself both WRITES these files and READS them back in bash (its
-#: ``status_receipt`` checks ``terminal``/``bundle`` and both process
-#: identities), carrying its own copies until a later PR ports them.
+#: On-disk shape of one final-gate receipt directory, spelled exactly once
+#: (issue #1278 item 6). Both sides now live here: ``_run_gate`` below WRITES
+#: these files, ``_status_receipt`` and the reapers above READ them back, and
+#: ``scripts/run_final_gate.sh`` is a wrapper that spells none of them.
 FINAL_GATE_RECEIPT_PREFIX = "cratedigger-final-gate."
 RECEIPT_TERMINAL_FIELD = "terminal"
 RECEIPT_BUNDLE_FIELD = "bundle"
@@ -566,10 +600,19 @@ RECEIPT_HELPER_PID_FIELD = "helper_pid"
 RECEIPT_HELPER_START_TICKS_FIELD = "helper_start_ticks"
 RECEIPT_GATE_PID_FIELD = "gate_pid"
 RECEIPT_GATE_START_TICKS_FIELD = "gate_start_ticks"
+RECEIPT_REPO_ROOT_FIELD = "repo_root"
+RECEIPT_HEAD_FIELD = "head"
+RECEIPT_CLEAN_FIELD = "clean"
+RECEIPT_COMMAND_FIELD = "command"
+RECEIPT_OUTPUT_LOG_FIELD = "output.log"
+#: Staging name for the atomic terminal publication: written in full, then
+#: renamed over ``RECEIPT_TERMINAL_FIELD``, so no reader ever observes a
+#: half-written verdict.
+RECEIPT_TERMINAL_STAGING_FIELD = ".terminal"
 
 
 def _receipt_protected_bundles(runtime: Path) -> frozenset[Path]:
-    """Bundle paths a run_final_gate.sh receipt still references.
+    """Bundle paths a final-gate receipt still references.
 
     ``cratedigger-final-gate.*`` receipts are not in ``_REAPABLE_PREFIXES``
     (a different prefix, not reaped by this function) — they have their own
@@ -600,7 +643,7 @@ def _receipt_protected_bundles(runtime: Path) -> frozenset[Path]:
     return frozenset(protected)
 
 
-#: A run_final_gate.sh receipt survives at least this long before admission-
+#: A final-gate receipt survives at least this long before admission-
 #: time retirement may remove it (issue #1208 item 4) — well past any
 #: realistic review horizon. Unlike ``DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS``
 #: this is a fixed constant, not an env-overridable knob: shrinking receipt
@@ -615,8 +658,8 @@ DEFAULT_RECEIPT_RETIREMENT_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 def _receipt_last_activity(receipt: Path) -> float:
     """The receipt's most recent completion evidence, or its own mtime.
 
-    Mirrors ``_bundle_last_activity``'s shape. ``run_final_gate.sh``'s
-    ``run_gate`` writes ``terminal`` LAST, only after the suite itself has
+    Mirrors ``_bundle_last_activity``'s shape. ``_run_gate`` below writes
+    ``terminal`` LAST, only after the suite itself has
     finished and the tree-match check has passed — so its mtime is the true
     "this receipt became final" timestamp for a completed run. A receipt
     that never reached that point (crashed, interrupted) falls back to the
@@ -644,12 +687,22 @@ def _receipt_process_field_live(
 ) -> bool:
     """True only when the named pid+ticks pair names a process still alive.
 
-    Same shape ``run_final_gate.sh``'s own ``status_receipt`` uses
-    (``_proc_start_ticks(pid) == ticks``, defined above). A missing,
-    unreadable, or malformed identity is never treated as live — it is not
-    evidence a process is running, so it cannot block retirement either;
-    it is exactly the same "unverified is not live" posture
-    ``_read_lock_holder_identity`` already takes for the admission lock.
+    The one receipt-identity liveness read (issue #1278 item 6): receipt
+    retirement above and ``_status_receipt``'s own ``exact-active`` verdict
+    below both call it, where the status side used to be a separate
+    ``same_process`` function in bash. A missing, unreadable, or malformed
+    identity is never treated as live — it is not evidence a process is
+    running, so it cannot block retirement, and it cannot earn
+    ``exact-active`` either; it is exactly the same "unverified is not
+    live" posture ``_read_lock_holder_identity`` already takes for the
+    admission lock.
+
+    The missing-file case is real, not defensive: the gate announces its
+    receipt BEFORE it can know the suite child's pid, so a helper killed in
+    that window leaves a receipt with no gate identity at all
+    (``tests/test_final_gate_receipt.py``'s hard-interruption scenario
+    reproduces it). "Incomplete" is the honest verdict for such a receipt —
+    it is unfinished, not malformed.
     """
     try:
         pid_text = (receipt / pid_field).read_text(errors="replace").strip()
@@ -666,13 +719,13 @@ def _receipt_process_field_live(
 def _receipt_is_retirable(receipt: Path) -> bool:
     """A receipt's lifecycle is provably over — the age gate decides the rest.
 
-    A ``terminal`` file is ``run_final_gate.sh``'s own completion marker,
-    written last; its mere presence is definitive, exactly as
-    ``status_receipt`` treats it (it never re-checks process liveness once
-    ``terminal`` exists). Without a ``terminal`` file the receipt is either
-    still an in-progress run or one that crashed before finishing —
-    retirement is safe only when BOTH its recorded helper
-    (``run_final_gate.sh`` itself) and gate (the ``nix-shell`` suite child)
+    A ``terminal`` file is ``_run_gate``'s own completion marker, written
+    last; its mere presence is definitive, exactly as ``_status_receipt``
+    treats it (it never re-checks process liveness once ``terminal``
+    exists). Without a ``terminal`` file the receipt is either still an
+    in-progress run or one that crashed before finishing — retirement is
+    safe only when BOTH its recorded helper (the gate process itself) and
+    gate (the ``nix develop`` suite child)
     process identities are conclusively not live. Either one still live
     blocks retirement (issue #1208 item 4).
     """
@@ -694,7 +747,7 @@ def reap_stale_final_gate_receipts(
     max_age_seconds: float = DEFAULT_RECEIPT_RETIREMENT_MAX_AGE_SECONDS,
     reference_time: float | None = None,
 ) -> tuple[Path, ...]:
-    """Age-gated retirement of run_final_gate.sh receipts (issue #1208 item 4).
+    """Age-gated retirement of final-gate receipts (issue #1208 item 4).
 
     Only ever called from ``run_suite``, while holding
     ``acquire_suite_admission`` exclusively, and BEFORE
@@ -1016,3 +1069,487 @@ def check_suite_headroom(runtime: Path, *, minimum_bytes: int) -> None:
             f"{TEST_RAM_ROOT_EXHAUSTED}: {target} has {available} bytes "
             f"free, needs {minimum_bytes}"
         )
+
+
+#: The one command a final-gate receipt may record, and the only thing the
+#: gate ever launches. One spelling for every reader that COMPARES it (issue
+#: #1278 item 6): ``scripts/run_test_suite.py`` imports it as its own default
+#: ``command``, ``_run_gate`` writes it into the receipt, and
+#: ``_status_receipt`` checks a receipt's recorded command against it. It was
+#: previously spelled in both that coordinator and
+#: ``scripts/run_final_gate.sh``, where a drift would silently have made
+#: every existing receipt read as non-canonical. Not an absolute claim about
+#: the repository: ``scripts/daily_flake_update.sh`` and
+#: ``scripts/daily_beets_tip_update.sh`` each spell the same command in their
+#: own dev-shell invocation, where nothing compares it to a receipt and a
+#: drift would fail loudly (a missing script) rather than silently.
+CANONICAL_COMMAND = "bash scripts/run_tests.sh"
+
+#: Operator interface of ``scripts/run_final_gate.sh``, which is now a thin
+#: wrapper around ``final-gate`` here. Named for the wrapper, not for this
+#: module: the wrapper is what an operator (and `.claude/skills/check`) types.
+FINAL_GATE_USAGE = "usage: run_final_gate.sh [status RECEIPT]"
+
+#: Marker the suite prints on stdout to publish its bundle path; the gate
+#: harvests it out of the captured child output. Spelled once in PRODUCTION
+#: code (issue #1278 item 6) because it is a contract between two processes:
+#: ``scripts/run_test_suite.py::_terminal_summary`` WRITES it and
+#: ``_record_suite_bundle`` below PARSES it, so a drift would silently make
+#: every passing gate report "published no valid bundle" instead.
+BUNDLE_ANNOUNCEMENT_PREFIX = "bundle: "
+
+#: A signal is not command completion. Each of these leaves the receipt
+#: inspectable-but-incomplete and exits with this status, which is also the
+#: floor a child's own signal death is reported at (128 + signal number).
+_SIGNAL_EXIT_STATUS = 128
+_GATE_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+
+_TERMINAL_PASS = "pass 0"
+_TERMINAL_FAIL_PATTERN = re.compile(r"fail [1-9][0-9]*")
+
+
+class FinalGateError(RuntimeError):
+    """A gate refusal: its message goes to stderr and the CLI exits 2."""
+
+
+def _receipt_field(receipt: Path, field: str) -> str:
+    """One receipt field, or a refusal naming the field that is missing.
+
+    Trailing newlines are stripped exactly as the shell's ``$(cat …)`` did,
+    so every recorded value compares as it was written.
+    """
+    path = receipt / field
+    if not path.is_file():
+        raise FinalGateError(f"receipt is missing {field}: {receipt}")
+    try:
+        return path.read_text(errors="replace").rstrip("\n")
+    except OSError as exc:
+        raise FinalGateError(f"receipt is missing {field}: {receipt}") from exc
+
+
+def _write_receipt_field(receipt: Path, field: str, content: str) -> None:
+    (receipt / field).write_text(content, encoding="utf-8")
+
+
+def _git(*arguments: str) -> tuple[bool, str]:
+    """(succeeded, stdout without trailing newlines) for one git command.
+
+    Runs in the caller's own working directory — the gate deliberately never
+    changes it, so the receipt is bound to the worktree the operator ran it
+    from, not to wherever this file happens to live.
+    """
+    completed = subprocess.run(
+        ["git", *arguments], text=True, capture_output=True, check=False
+    )
+    return completed.returncode == 0, completed.stdout.rstrip("\n")
+
+
+def _tree_mismatch_reason(receipt: Path) -> str | None:
+    """Why ``receipt`` is not bound to the current committed clean tree.
+
+    ``None`` means it is. One implementation for both callers: the status
+    ladder raises the returned reason as a refusal, while ``_run_gate``
+    only needs the yes/no before it publishes a terminal verdict.
+    """
+    repo_root = _receipt_field(receipt, RECEIPT_REPO_ROOT_FIELD)
+    head = _receipt_field(receipt, RECEIPT_HEAD_FIELD)
+    if _receipt_field(receipt, RECEIPT_CLEAN_FIELD) != "true":
+        return f"receipt is not bound to a clean tree: {receipt}"
+    in_worktree, current_root = _git("rev-parse", "--show-toplevel")
+    if not in_worktree:
+        return "status must run from a git worktree"
+    head_resolved, current_head = _git("rev-parse", "HEAD")
+    if not head_resolved:
+        return "status cannot resolve HEAD"
+    _succeeded, dirty = _git("status", "--porcelain", "--untracked-files=all")
+    if current_root != repo_root or current_head != head or dirty:
+        return f"receipt is not for this committed clean tree: {receipt}"
+    return None
+
+
+def _record_suite_bundle(receipt: Path, output_path: Path) -> bool:
+    """Validate the bundle path the suite announced and record it.
+
+    False means no bundle was recorded; the caller decides whether that is
+    fatal (a PASSING suite owes one) or merely noted. Every VALIDATION
+    rejection is reported on stderr as it happens, so a bundle rejected on
+    its merits is never rejected silently. Three paths return False without
+    a word, all of them cases where there is nothing to report ON: no
+    announcement at all (the ordinary shape of a suite that died before
+    publishing anything), an unreadable ``output.log``, and a bundle whose
+    resolve/stat raises between the ``lstat`` above and the check below —
+    a directory disappearing mid-validation, which the caller's own
+    "published no valid bundle" message then covers.
+    """
+    try:
+        lines = output_path.read_text(errors="replace").splitlines()
+    except OSError:
+        return False
+    announced = [
+        line.removeprefix(BUNDLE_ANNOUNCEMENT_PREFIX)
+        for line in lines
+        if line.startswith(BUNDLE_ANNOUNCEMENT_PREFIX)
+    ]
+    if not announced:
+        return False
+    if len(announced) != 1:
+        print("test gate published multiple bundle paths", file=sys.stderr)
+        return False
+    runtime = private_runtime_dir()
+    bundle = announced[0]
+    try:
+        info = Path(bundle).lstat()
+    except OSError:
+        print(f"test gate bundle is unavailable: {bundle}", file=sys.stderr)
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        print(f"test gate bundle is unavailable: {bundle}", file=sys.stderr)
+        return False
+    try:
+        resolved = Path(bundle).resolve(strict=True)
+        mode = stat.S_IMODE(resolved.stat().st_mode)
+    except OSError:
+        return False
+    if resolved.parent != runtime or mode != 0o700:
+        print(
+            f"test gate bundle is not a private runtime directory: {bundle}",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        summary = (resolved / SUMMARY_JSON_NAME).lstat()
+    except OSError:
+        print(
+            f"test gate bundle is missing {SUMMARY_JSON_NAME}: {bundle}",
+            file=sys.stderr,
+        )
+        return False
+    if stat.S_ISLNK(summary.st_mode) or not stat.S_ISREG(summary.st_mode):
+        print(
+            f"test gate bundle is missing {SUMMARY_JSON_NAME}: {bundle}",
+            file=sys.stderr,
+        )
+        return False
+    _write_receipt_field(receipt, RECEIPT_BUNDLE_FIELD, f"{resolved}\n")
+    return True
+
+
+def _leave_incomplete_receipt(_signum: int, _frame: FrameType | None) -> None:
+    """Exit 128 without publishing a terminal verdict.
+
+    ``os._exit`` rather than ``sys.exit``, because it is the exact analog of
+    the shell's ``trap 'exit 128'``: the process is gone at the moment the
+    signal is handled, with no interpreter teardown in between and nothing
+    that can intercept it. A ``SystemExit`` instead only takes effect when
+    the interrupted call returns to the interpreter, and unwinds through
+    every ``finally`` and ``atexit`` handler on the way — any of which could
+    alter this exit status or touch the receipt this handler exists to leave
+    untouched and incomplete.
+
+    NOT for the child's safety, and not to suppress output — both were
+    measured, and neither is a reason: CPython's shutdown does not kill a
+    ``Popen`` child (the suite survives either way, for the same reason it
+    did under bash — nothing signals it), and a ``SystemExit`` raised from
+    this handler exits 128 with an empty stderr, no ``ResourceWarning``
+    among it. Skipping the buffer flush costs nothing here either: the
+    receipt line was flushed explicitly and nothing else has been buffered.
+    """
+    os._exit(_SIGNAL_EXIT_STATUS)
+
+
+def _committed_clean_tree() -> bool:
+    """No unstaged, staged, or untracked change in the current worktree."""
+    unstaged_clean, _ = _git("diff", "--quiet")
+    if not unstaged_clean:
+        return False
+    staged_clean, _ = _git("diff", "--cached", "--quiet")
+    if not staged_clean:
+        return False
+    _succeeded, untracked = _git("ls-files", "--others", "--exclude-standard")
+    return not untracked
+
+
+def _await_suite(receipt: Path, output_path: Path) -> int:
+    """Launch the one canonical command, record its identity, and wait.
+
+    Returns the child's status the way the shell's ``wait`` reported it:
+    an ordinary exit code, or ``128 + signal`` for a signal death.
+    ``Popen.wait`` reports the latter as a NEGATIVE return code, so the
+    translation happens exactly here, once.
+
+    ``CRATEDIGGER_SUITE_OWNS_HEADROOM`` goes into the child's environment
+    (never its argv): ``run_suite``'s own post-lock headroom precondition
+    is the single enforcement point for suite runs, so the dev-shell
+    shellHook entry guard defers to it here (issue #1111 M2).
+    ``nix develop`` rather than ``nix-shell`` for the eval-cache reason
+    documented in full at ``scripts/test.sh`` (issue #1229). The gate is
+    the best case for it: it already refuses to run on anything but a
+    committed clean tree, which is exactly the state whose flake
+    fingerprint Nix can cache — ~4.7s off every gate invocation.
+    ``CANONICAL_COMMAND`` is unchanged, so the receipt still records the
+    same canonical command and ``status`` still compares it the same way;
+    only the launcher around it moved.
+    """
+    environment = dict(os.environ)
+    environment["CRATEDIGGER_SUITE_OWNS_HEADROOM"] = "1"
+    with output_path.open("wb") as log:
+        child = subprocess.Popen(
+            ["nix", "develop", "--command", "bash", "-c", CANONICAL_COMMAND],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=environment,
+        )
+    gate_ticks = _proc_start_ticks(child.pid) or ""
+    _write_receipt_field(receipt, RECEIPT_GATE_PID_FIELD, f"{child.pid}\n")
+    _write_receipt_field(receipt, RECEIPT_GATE_START_TICKS_FIELD, f"{gate_ticks}\n")
+    returncode = child.wait()
+    if returncode < 0:
+        return _SIGNAL_EXIT_STATUS - returncode
+    return returncode
+
+
+def _publish_terminal_verdict(receipt: Path, status: int) -> None:
+    """Land the run's verdict under ``terminal``, atomically.
+
+    Written in full under the staging name and then RENAMED into place, so
+    no reader — a concurrent ``status``, or ``_receipt_is_retirable``'s own
+    existence check — can ever observe a half-written verdict, or a
+    ``terminal`` file that exists before its content does.
+
+    Its own function so that contract is directly drivable: a test can hand
+    it a receipt whose staging name is blocked and prove the verdict never
+    lands, which is exactly what a direct write to ``terminal`` would break
+    while leaving the whole gate suite green.
+    """
+    staging = receipt / RECEIPT_TERMINAL_STAGING_FIELD
+    staging.write_text(
+        f"{_TERMINAL_PASS}\n" if status == 0 else f"fail {status}\n", encoding="utf-8"
+    )
+    staging.replace(receipt / RECEIPT_TERMINAL_FIELD)
+
+
+def _run_gate() -> int:
+    """Run the canonical suite once on a committed clean tree, with a receipt."""
+    runtime = private_runtime_dir()
+    try:
+        receipt = Path(tempfile.mkdtemp(prefix=FINAL_GATE_RECEIPT_PREFIX, dir=runtime))
+    except OSError as exc:
+        raise FinalGateError(
+            f"cannot create final-gate receipt beneath {runtime}"
+        ) from exc
+    try:
+        receipt.chmod(0o700)
+    except OSError as exc:
+        raise FinalGateError(f"cannot secure receipt directory: {receipt}") from exc
+
+    in_worktree, repo_root = _git("rev-parse", "--show-toplevel")
+    if not in_worktree:
+        raise FinalGateError("final gate must run from a git worktree")
+    _write_receipt_field(receipt, RECEIPT_REPO_ROOT_FIELD, f"{repo_root}\n")
+    if not _committed_clean_tree():
+        raise FinalGateError("final gate requires a committed clean tree")
+    _head_resolved, head = _git("rev-parse", "HEAD")
+    _write_receipt_field(receipt, RECEIPT_HEAD_FIELD, f"{head}\n")
+    _write_receipt_field(receipt, RECEIPT_CLEAN_FIELD, "true\n")
+    _write_receipt_field(receipt, RECEIPT_COMMAND_FIELD, f"{CANONICAL_COMMAND}\n")
+    _write_receipt_field(receipt, RECEIPT_HELPER_PID_FIELD, f"{os.getpid()}\n")
+    helper_ticks = _proc_start_ticks(os.getpid())
+    if helper_ticks is None:
+        raise FinalGateError("cannot record helper process identity")
+    _write_receipt_field(
+        receipt, RECEIPT_HELPER_START_TICKS_FIELD, f"{helper_ticks}\n"
+    )
+    output_path = receipt / RECEIPT_OUTPUT_LOG_FIELD
+    output_path.write_text("", encoding="utf-8")
+
+    print(f"receipt: {receipt}", flush=True)
+    for gate_signal in _GATE_SIGNALS:
+        signal.signal(gate_signal, _leave_incomplete_receipt)
+
+    status = _await_suite(receipt, output_path)
+    if status >= _SIGNAL_EXIT_STATUS:
+        print(
+            f"final gate: incomplete (signal-shaped exit {status})", file=sys.stderr
+        )
+        return status
+    if not _record_suite_bundle(receipt, output_path):
+        if status == 0:
+            print(
+                "final gate: incomplete (passing suite published no valid bundle)",
+                file=sys.stderr,
+            )
+            return 2
+        print("final gate: bundle unavailable for failed suite", file=sys.stderr)
+    if _tree_mismatch_reason(receipt) is not None:
+        print(
+            "final gate: incomplete (tree changed before terminal receipt)",
+            file=sys.stderr,
+        )
+        return 2
+    _publish_terminal_verdict(receipt, status)
+    for gate_signal in _GATE_SIGNALS:
+        signal.signal(gate_signal, signal.SIG_DFL)
+    if status == 0:
+        print("final gate: pass (exit 0)")
+    else:
+        print(f"final gate: fail (exit {status})")
+    return status
+
+
+def _status_receipt(argument: str) -> int:
+    """Report one receipt's state: pass, fail, exact-active, or incomplete.
+
+    Every refusal on the way is a distinct message naming what failed, so a
+    receipt that cannot be trusted is never silently reported as a verdict.
+    One deliberate exception: a MISSING process-identity field is not a
+    refusal but part of the ``incomplete`` verdict itself — see
+    ``_receipt_process_field_live`` for the window that produces one.
+    """
+    runtime = private_runtime_dir()
+    candidate = Path(argument)
+    try:
+        info = candidate.lstat()
+    except OSError as exc:
+        raise FinalGateError(f"receipt directory is unavailable: {argument}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise FinalGateError(f"receipt directory is unavailable: {argument}")
+    try:
+        receipt = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise FinalGateError(f"receipt directory is unavailable: {argument}") from exc
+    if receipt.parent != runtime:
+        raise FinalGateError(
+            "receipt is not directly beneath the private runtime directory: "
+            f"{receipt}"
+        )
+    if stat.S_IMODE(receipt.stat().st_mode) != 0o700:
+        raise FinalGateError(f"receipt is not mode 0700: {receipt}")
+    mismatch = _tree_mismatch_reason(receipt)
+    if mismatch is not None:
+        raise FinalGateError(mismatch)
+    if not (receipt / RECEIPT_OUTPUT_LOG_FIELD).is_file() or not (
+        receipt / RECEIPT_COMMAND_FIELD
+    ).is_file():
+        raise FinalGateError(f"receipt metadata is incomplete: {receipt}")
+    if _receipt_field(receipt, RECEIPT_COMMAND_FIELD) != CANONICAL_COMMAND:
+        raise FinalGateError(f"receipt command is not canonical: {receipt}")
+
+    terminal_path = receipt / RECEIPT_TERMINAL_FIELD
+    bundle_path = receipt / RECEIPT_BUNDLE_FIELD
+    terminal = (
+        terminal_path.read_text(errors="replace").rstrip("\n")
+        if terminal_path.is_file()
+        else None
+    )
+    if terminal == _TERMINAL_PASS and not bundle_path.is_file():
+        raise FinalGateError(
+            f"passing receipt is missing its suite bundle path: {receipt}"
+        )
+    # A receipt's own terminal/bundle FILE surviving is not evidence the
+    # bundle DIRECTORY it names still exists — admission-time reaping
+    # (``reap_stale_check_bundles`` above) can remove an idle one out from
+    # under an old receipt. One stat check, fail-visible, rather than
+    # silently reporting "pass" over evidence that is gone (issue #1111
+    # review m5).
+    if bundle_path.is_file():
+        recorded = bundle_path.read_text(errors="replace").rstrip("\n")
+        if not Path(recorded).is_dir():
+            raise FinalGateError(
+                f"receipt's suite bundle no longer exists (likely reaped): {recorded}"
+            )
+
+    if terminal is not None:
+        if terminal == _TERMINAL_PASS:
+            print("pass")
+        elif _TERMINAL_FAIL_PATTERN.fullmatch(terminal):
+            print("fail")
+        else:
+            raise FinalGateError(f"receipt has an invalid terminal state: {receipt}")
+        return 0
+
+    helper_live = _receipt_process_field_live(
+        receipt, RECEIPT_HELPER_PID_FIELD, RECEIPT_HELPER_START_TICKS_FIELD
+    )
+    gate_live = _receipt_process_field_live(
+        receipt, RECEIPT_GATE_PID_FIELD, RECEIPT_GATE_START_TICKS_FIELD
+    )
+    print("exact-active" if helper_live and gate_live else "incomplete")
+    return 0
+
+
+def _final_gate(arguments: Sequence[str]) -> int:
+    """``run_final_gate.sh``'s own argv contract, unchanged by the port."""
+    if not arguments:
+        return _run_gate()
+    if arguments[0] == "status":
+        if len(arguments) != 2:
+            raise FinalGateError(FINAL_GATE_USAGE)
+        return _status_receipt(arguments[1])
+    raise FinalGateError(FINAL_GATE_USAGE)
+
+
+def _write_owner_marker(directory: str, pid_text: str) -> int:
+    """Write ``directory``'s ``.owner`` marker for ``pid_text``, best-effort.
+
+    Exits 0 for every failure it can meet — a malformed pid, a ``/proc``
+    entry it cannot read, an unwritable tree. The marker contract is
+    fail-closed on the READER side
+    (``_scratch_tree_owner_dead`` treats a missing or malformed marker as
+    "unknown, never reap"), so a lost write leaves a scratch tree unreaped
+    forever rather than wrongly reaped while its owner is alive — which is
+    exactly why this must not turn a failed write into a failed shell
+    entry. Skips the write entirely when the pid's start ticks cannot be
+    read, rather than recording an identity that could never match.
+    """
+    try:
+        pid = int(pid_text)
+        ticks = _proc_start_ticks(pid)
+        if ticks is None:
+            return 0
+        marker = Path(directory) / SCRATCH_TREE_OWNER_MARKER_NAME
+        marker.write_text(f"{pid} {ticks}\n", encoding="utf-8")
+    except (OSError, ValueError):
+        return 0
+    return 0
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="test_substrate.py",
+        description="Shared test-runtime substrate commands.",
+    )
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    gate = subcommands.add_parser(
+        "final-gate",
+        help="Run the canonical suite with a receipt, or inspect one.",
+    )
+    gate.add_argument(
+        "arguments",
+        nargs="*",
+        help="nothing to run the gate, or `status RECEIPT` to inspect one",
+    )
+    marker = subcommands.add_parser(
+        "write-owner-marker",
+        help="Write a scratch tree's ownership marker (best-effort).",
+    )
+    marker.add_argument("directory", help="scratch tree to mark")
+    marker.add_argument("pid", help="owning process id")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parsed = _parser().parse_args(argv)
+    try:
+        if parsed.command == "final-gate":
+            arguments: list[str] = list(parsed.arguments)
+            return _final_gate(arguments)
+        directory: str = parsed.directory
+        pid_text: str = parsed.pid
+        return _write_owner_marker(directory, pid_text)
+    except (RuntimeError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

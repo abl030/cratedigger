@@ -31,9 +31,11 @@ before returning its aggregate status. Investigate every indexed failure; do
 not carry a chat-era "known issue" exemption forward without current repository
 evidence.
 
-2. The helper prints a mode-0700 receipt path under the private runtime tmpfs
-before launching the one canonical underlying command
-(`env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 nix develop --command bash -c "bash scripts/run_tests.sh"`
+2. The helper (a thin wrapper over `scripts/test_substrate.py`'s `final-gate`
+subcommand since issue #1278) prints a mode-0700 receipt path under the private
+runtime tmpfs before launching the one canonical underlying command
+(`nix develop --command bash -c "bash scripts/run_tests.sh"`, with
+`CRATEDIGGER_SUITE_OWNS_HEADROOM=1` in its environment,
 since issue #1229 — the receipt's recorded `command` file still holds
 `bash scripts/run_tests.sh`, so `status` compares it unchanged; only the
 launcher around it moved). It saves complete output in

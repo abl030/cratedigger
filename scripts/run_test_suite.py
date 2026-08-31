@@ -27,11 +27,14 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.test_substrate import (
+    BUNDLE_ANNOUNCEMENT_PREFIX,
+    CANONICAL_COMMAND,
     CHECK_BUNDLE_PREFIX,
     DEFAULT_ADMISSION_POLL_SECONDS,
     DEFAULT_ADMISSION_PROGRESS_INTERVAL_SECONDS,
     DEFAULT_ADMISSION_TIMEOUT_SECONDS,
     DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS,
+    SUMMARY_JSON_NAME,
     acquire_suite_admission,
     check_suite_headroom,
     default_min_headroom_bytes,
@@ -42,7 +45,6 @@ from scripts.test_substrate import (
 
 SCHEMA_VERSION = 1
 RUNNER_VERSION = "1"
-CANONICAL_COMMAND = "bash scripts/run_tests.sh"
 FAILURE_MARKER_PREFIX = "CRATEDIGGER_CHECK_FAILURE "
 METRICS_MARKER_PREFIX = "CRATEDIGGER_CHECK_METRICS "
 
@@ -321,7 +323,7 @@ def _summary_markdown(summary: CheckSummary) -> str:
 
 
 def _publish_summary(bundle: Path, summary: CheckSummary) -> None:
-    _write_private(bundle / "summary.json", msgspec.json.encode(summary))
+    _write_private(bundle / SUMMARY_JSON_NAME, msgspec.json.encode(summary))
     _write_private(
         bundle / "summary.md",
         _summary_markdown(summary).encode(),
@@ -651,7 +653,7 @@ def _terminal_summary(summary: CheckSummary, stream: TextIO) -> None:
         )
     else:
         stream.write(f"INTERRUPTED: signal {summary.interruption_signal}\n")
-    stream.write(f"bundle: {summary.bundle}\n")
+    stream.write(f"{BUNDLE_ANNOUNCEMENT_PREFIX}{summary.bundle}\n")
     stream.writelines(
         (
             f"{phase.name}: {failure.identity} | "

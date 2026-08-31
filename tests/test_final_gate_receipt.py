@@ -11,6 +11,13 @@ import time
 import unittest
 from pathlib import Path
 
+from scripts.test_substrate import (
+    RECEIPT_TERMINAL_FIELD,
+    RECEIPT_TERMINAL_STAGING_FIELD,
+    _publish_terminal_verdict,
+)
+from tests._source_pins import pinned_source
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HELPER = REPO_ROOT / "scripts" / "run_final_gate.sh"
 
@@ -30,6 +37,7 @@ case "$FAKE_NIX_MODE" in
     term) kill -TERM "$$" ;;
     kill) kill -KILL "$$" ;;
     dirty) touch "$FAKE_NIX_REPO/dirty" ;;
+    double-bundle) printf 'bundle: %s\\n' "$FAKE_NIX_BUNDLE" ;;
     head-change) git -C "$FAKE_NIX_REPO" commit --allow-empty -qm changed ;;
     *) exit 126 ;;
 esac
@@ -80,12 +88,13 @@ class FinalGateReceiptTestCase(unittest.TestCase):
 
     def _env(self, mode: str = "exit", exit_code: int = 0) -> dict[str, str]:
         # Explicitly cleared, not just left to os.environ: if this test's
-        # OWN suite run was itself launched via scripts/test.sh or
-        # run_final_gate.sh, the ambient environment already carries
-        # CRATEDIGGER_SUITE_OWNS_HEADROOM=1 from THAT wrapper — inheriting
-        # it here would let the MAJOR-3 pin below pass even if
-        # run_final_gate.sh's own `env` prefix were deleted, exactly the
-        # leakage class issue #1111 review M2 already caught once
+        # OWN suite run was itself launched via scripts/test.sh or the
+        # final gate, the ambient environment already carries
+        # CRATEDIGGER_SUITE_OWNS_HEADROOM=1 from THAT launcher — inheriting
+        # it here would let the MAJOR-3 pin below pass even if the gate's
+        # own environment assignment (scripts/test_substrate.py's
+        # `_await_suite`) were deleted, exactly the leakage class issue
+        # #1111 review M2 already caught once
         # (tests/test_test_tmpfs.py::low_headroom_environment).
         env = dict(os.environ)
         env.pop("CRATEDIGGER_SUITE_OWNS_HEADROOM", None)
@@ -166,12 +175,13 @@ class FinalGateReceiptTestCase(unittest.TestCase):
 
     def test_gate_sets_the_suite_owns_headroom_env_var(self) -> None:
         """Issue #1111 review MAJOR-3: the M2 producer side is otherwise
-        unpinned — deleting `env CRATEDIGGER_SUITE_OWNS_HEADROOM=1` from
-        run_final_gate.sh's own dev-shell invocation would leave every
-        other test green while M2 silently reverts. The fake `nix`
-        records the var's value from its OWN received environment, not the
-        argv (an `env VAR=val cmd` prefix doesn't change `cmd`'s argv at
-        all, only its environment)."""
+        unpinned — deleting the `CRATEDIGGER_SUITE_OWNS_HEADROOM = "1"`
+        assignment from the child environment `_await_suite` builds
+        (scripts/test_substrate.py) would leave every other test green
+        while M2 silently reverts. The fake `nix` records the var's value
+        from its OWN received environment, not the argv — the gate passes
+        it as the child's environment, so it never appears in argv at
+        all."""
         process = self._launch()
         self._receipt_from(process)
         process.communicate(timeout=10)
@@ -307,6 +317,77 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         self.assertEqual(process.returncode, 2, stderr)
         self.assertFalse((receipt / "terminal").exists())
 
+    def test_two_bundle_announcements_are_refused_as_ambiguous(self) -> None:
+        """The bundle ladder's "exactly one announcement" clause: a suite
+        that published two paths gives the gate no way to know which run's
+        evidence the receipt would be pointing at, so it records neither
+        and refuses to publish a terminal verdict at all — even though the
+        suite itself exited 0."""
+        process = self._launch(mode="double-bundle")
+        receipt = self._receipt_from(process)
+        _stdout, stderr = process.communicate(timeout=10)
+
+        self.assertEqual(process.returncode, 2, stderr)
+        self.assertIn("published multiple bundle paths", stderr)
+        self.assertIn("published no valid bundle", stderr)
+        self.assertFalse((receipt / "terminal").exists())
+        self.assertFalse((receipt / "bundle").exists())
+
+    def test_status_rejects_a_receipt_outside_the_private_runtime_dir(self) -> None:
+        """Tamper guard: a receipt is only trustworthy where only this user
+        can have created it. A real directory somewhere else is refused by
+        location, before any of its contents are read."""
+        result = subprocess.run(
+            [str(HELPER), "status", self.repo.name],
+            cwd=self.repo.name,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not directly beneath the private runtime directory", result.stderr)
+
+    def test_status_rejects_a_receipt_whose_mode_was_widened(self) -> None:
+        """Tamper guard: 0700 is what makes the receipt this user's alone.
+        A widened mode means someone else could have written its verdict."""
+        process = self._launch()
+        receipt = self._receipt_from(process)
+        process.communicate(timeout=10)
+        receipt.chmod(0o755)
+
+        result = subprocess.run(
+            [str(HELPER), "status", str(receipt)],
+            cwd=self.repo.name,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not mode 0700", result.stderr)
+
+    def test_status_rejects_a_receipt_not_bound_to_a_clean_tree(self) -> None:
+        """Tamper guard: the `clean` file is the receipt's own claim that
+        it was taken on a committed clean tree. Anything but `true` makes
+        every later HEAD comparison meaningless, so it is refused rather
+        than compared."""
+        process = self._launch()
+        receipt = self._receipt_from(process)
+        process.communicate(timeout=10)
+        (receipt / "clean").write_text("false\n")
+
+        result = subprocess.run(
+            [str(HELPER), "status", str(receipt)],
+            cwd=self.repo.name,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not bound to a clean tree", result.stderr)
+
     def test_status_rejects_substituted_command(self) -> None:
         process = self._launch()
         receipt = self._receipt_from(process)
@@ -331,3 +412,110 @@ class FinalGateReceiptTestCase(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("usage", result.stderr)
+
+
+class FinalGateWrapperTestCase(unittest.TestCase):
+    """The gate is Python; the ``.sh`` is a wrapper (issue #1278 item 6).
+
+    Every other test in this file drives the wrapper as a black box and so
+    passes whether the logic behind it is bash or Python. These two name
+    the split itself: one canonical implementation, reached by an ``exec``,
+    with no second copy of the gate left behind in shell. Same shape as
+    ``scripts/run_tests.sh``'s own wrapper pin
+    (``tests/test_parallel_test_runner.py::TestRunTestsWiring``).
+    """
+
+    def test_the_wrapper_execs_the_substrate_cli(self) -> None:
+        self.assertIn(
+            'exec python3 "$here/test_substrate.py" final-gate "$@"',
+            pinned_source(HELPER),
+        )
+
+    def test_the_wrapper_keeps_no_copy_of_the_gate_it_delegates(self) -> None:
+        """A BOUNDED spelling list, not a proof of absence.
+
+        This rejects the specific vocabulary the ported bash carried — its
+        function names, its receipt field names, the `/proc` path and
+        receipt-directory prefix it spelled, and the commands it ran
+        (`awk` included) — so re-growing a copy in the recognisable shape
+        goes red here. It cannot decide that no second implementation
+        exists under different names; a semantic scanner that tried would
+        be the prohibited shape (`.claude/rules/code-quality.md`, "Semantic
+        source scanners are prohibited"), so review owns the general case
+        and this list owns the regression.
+
+        Read through ``pinned_source``, so a spelling that survives only
+        inside a comment is correctly ignored — a comment naming
+        ``nix develop`` is documentation, while a command running it is a
+        second implementation.
+        """
+        source = pinned_source(HELPER)
+
+        for spelling in (
+            "/proc/",
+            "awk",
+            "bash scripts/run_tests.sh",
+            "cratedigger-final-gate.",
+            "gate_start_ticks",
+            "helper_start_ticks",
+            "nix develop",
+            "proc_start_ticks",
+            "receipt_field",
+            "same_process",
+        ):
+            with self.subTest(spelling=spelling):
+                self.assertNotIn(spelling, source)
+
+
+class TerminalVerdictPublicationTestCase(unittest.TestCase):
+    """The verdict lands atomically, or it does not land.
+
+    Nothing else in this file can see the difference: a direct write to
+    ``terminal`` produces byte-identical receipts and leaves every
+    process-level test above green, while breaking the guarantee
+    ``_publish_terminal_verdict`` documents — that no reader (a concurrent
+    ``status``, or ``_receipt_is_retirable``'s own existence check) can
+    observe a ``terminal`` file that exists before its content does. These
+    drive the real publication function over a real directory and make the
+    staging step observable by blocking it.
+    """
+
+    def _receipt(self) -> Path:
+        receipt = Path(tempfile.mkdtemp(prefix="cratedigger-terminal-publication-"))
+        self.addCleanup(shutil.rmtree, receipt, True)
+        return receipt
+
+    def test_the_verdict_is_staged_before_it_is_named_terminal(self) -> None:
+        """Known-bad world for the staging step: with the staging name
+        occupied by a directory, the write that must come first cannot
+        happen — so the verdict must not land at all. A publication that
+        wrote ``terminal`` directly would sail past this untouched."""
+        receipt = self._receipt()
+        (receipt / RECEIPT_TERMINAL_STAGING_FIELD).mkdir()
+
+        with self.assertRaises(IsADirectoryError):
+            _publish_terminal_verdict(receipt, 0)
+
+        self.assertFalse((receipt / RECEIPT_TERMINAL_FIELD).exists())
+
+    def test_publication_moves_the_staged_file_rather_than_copying_it(self) -> None:
+        """Must-still-work, plus the second half of atomicity: the verdict
+        is correct AND the staging name is gone afterwards. A copy would
+        leave it behind; a rename cannot."""
+        receipt = self._receipt()
+
+        _publish_terminal_verdict(receipt, 0)
+
+        self.assertEqual(
+            (receipt / RECEIPT_TERMINAL_FIELD).read_text(), "pass 0\n"
+        )
+        self.assertFalse((receipt / RECEIPT_TERMINAL_STAGING_FIELD).exists())
+
+    def test_a_failing_run_publishes_its_own_exit_status(self) -> None:
+        receipt = self._receipt()
+
+        _publish_terminal_verdict(receipt, 23)
+
+        self.assertEqual(
+            (receipt / RECEIPT_TERMINAL_FIELD).read_text(), "fail 23\n"
+        )
