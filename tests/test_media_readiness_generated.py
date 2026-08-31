@@ -12,12 +12,34 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.media_readiness import (
+    MediaReadinessError,
     average_bitrate_kbps_from_frames,
     flac_total_samples_only_changed,
+    normalize_media_metadata,
     prepare_media_readiness,
 )
 from tests.audio_fixtures import make_test_flac
 from tests.test_media_readiness import _streaminfo_span, _zero_flac_duration_metadata
+
+
+class TestUnprobeableMediaClassificationProperty(unittest.TestCase):
+    """Every non-empty zero-byte audio manifest is source corruption."""
+
+    @given(
+        file_count=st.integers(min_value=1, max_value=6),
+        extension=st.sampled_from(("mp3", "flac", "m4a", "ogg", "wav", "wma")),
+    )
+    def test_zero_byte_audio_is_never_a_measurement_failure(
+        self, *, file_count: int, extension: str,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for ordinal in range(1, file_count + 1):
+                (Path(tmp) / f"{ordinal:02d}.{extension}").write_bytes(b"")
+
+            with self.assertRaises(MediaReadinessError) as raised:
+                normalize_media_metadata(tmp)
+
+            self.assertEqual(raised.exception.kind, "audio_corrupt")
 
 
 class TestFlacMetadataMutationProperty(unittest.TestCase):

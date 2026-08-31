@@ -16,7 +16,7 @@ from lib.download import build_active_download_state
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.matching import MatchResult, check_for_match, get_album_by_id
 from lib.processing_paths import attempt_fingerprint_or_none
-from lib.quality import CandidateScore
+from lib.quality import AUDIO_EXTENSIONS, CandidateScore
 from lib.slskd_transfers import (
     SlskdEnqueueOutcome,
     cancel_and_delete,
@@ -417,7 +417,30 @@ def _prefixed_directory_files(
     directory: SlskdDirectory,
     file_dir: str,
 ) -> list[dict[str, Any]]:
-    """Build enqueue payloads without mutating cached browse results."""
+    """Build admitted enqueue payloads without mutating browse results.
+
+    A selected audio manifest is indivisible: if slskd did not advertise a
+    positive size for every audio file, reject the candidate rather than
+    silently dropping tracks or claiming download ownership for known-empty
+    material. Import-time validation remains authoritative for the bytes that
+    do arrive.
+    """
+    invalid_audio: list[str] = []
+    for file in directory["files"]:
+        filename = file["filename"]
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if ext not in AUDIO_EXTENSIONS:
+            continue
+        size = file.get("size")
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            invalid_audio.append(filename)
+    if invalid_audio:
+        logger.warning(
+            "Rejecting candidate with missing/non-positive advertised audio "
+            "sizes: %s",
+            invalid_audio[:3],
+        )
+        return []
     return [
         {**file, "filename": file_dir + "\\" + file["filename"]}
         for file in directory["files"]
@@ -1394,8 +1417,8 @@ def _try_enqueue_impl(
         files_to_enqueue = _prefixed_directory_files(directory, match_result.file_dir)
         if not files_to_enqueue:
             logger.warning(
-                "Matched %s - %s from %s at %s, but no files remained after "
-                "download filtering; skipping candidate",
+                "Matched %s - %s from %s at %s, but no enqueueable files "
+                "remained after filtering and admission; skipping candidate",
                 artist_name,
                 album_name,
                 username,
@@ -1695,7 +1718,7 @@ def _try_multi_enqueue_impl(
         if not files_to_enqueue:
             logger.warning(
                 "Matched %s - %s disc %s from %s at %s, but no files "
-                "remained after download filtering; aborting multi-disc "
+                "remained after filtering and admission; aborting multi-disc "
                 "candidate",
                 artist_name,
                 album_name,
@@ -1745,7 +1768,7 @@ def _try_multi_enqueue_impl(
             if not files_to_enqueue:
                 logger.warning(
                     "Matched %s - %s disc %s from %s at %s, but no files "
-                    "remained after download filtering; aborting multi-disc "
+                    "remained after filtering and admission; aborting multi-disc "
                     "candidate",
                     artist_name,
                     album_name,
