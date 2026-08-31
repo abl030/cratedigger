@@ -49,7 +49,7 @@ from lib.validation_envelope import decode_validation_envelope
 #: Candidate-evidence SELECT aliases that reach ``LogEntry`` under a different
 #: name. ``lib/pipeline_db/download_log.py::_CANDIDATE_EVIDENCE_COLUMNS`` folds
 #: most of its aliases into legacy ``download_log`` columns inside
-#: ``_overlay_evidence_onto_download_log_row``; the proof classifier has no
+#: ``overlay_evidence_onto_download_log_row``; the proof classifier has no
 #: legacy counterpart, so it arrives under its own alias and was silently
 #: dropped by ``from_row``'s unknown-key filter — which is precisely how the
 #: render path came to re-derive "verified lossless" from container and
@@ -139,7 +139,7 @@ class LogEntry:
     # The model that MINTED this candidate's verified-lossless proof, read
     # straight off the candidate-evidence join under its SELECT alias (see
     # ``_ROW_FIELD_ALIASES``), and NULLed by
-    # ``_overlay_evidence_onto_download_log_row`` when that join's lineage is
+    # ``overlay_evidence_onto_download_log_row`` when that join's lineage is
     # not source-semantic — a cross-walked ``candidate_evidence_id``
     # (migration 021 §6b) names a sibling attempt's snapshot, and a proof
     # minted from other bytes says nothing about this attempt's.

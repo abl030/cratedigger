@@ -39,7 +39,9 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from lib.pipeline_db.download_log import _DownloadLogMixin
+from lib.pipeline_db.download_log import (
+    overlay_evidence_onto_download_log_row,
+)
 from lib.quality import AudioQualityMeasurement, ImportResult
 from scripts.render_differential import (
     ClassifyRenderTarget,
@@ -579,7 +581,7 @@ class TestRealRenderPathConverse(unittest.TestCase):
         successor["id"] = int(str(origin["id"])) + 100000
         rows = [origin, successor]
         overlaid = [
-            _DownloadLogMixin._overlay_evidence_onto_download_log_row(
+            overlay_evidence_onto_download_log_row(
                 dict(row)
             )
             for row in rows

@@ -64,8 +64,11 @@ from lib.pipeline_db._shared import (
 )
 from lib.pipeline_db.download_log import (
     _CANDIDATE_EVIDENCE_COLUMNS,
+    _EVIDENCE_ATTRIBUTABLE_PROOF_ALIASES,
+    _EVIDENCE_GATE_INPUT_ALIASES,
+    _EVIDENCE_OVERLAY_FOLD,
     _LOG_QUERY_TEMPLATE,
-    _DownloadLogMixin,
+    overlay_evidence_onto_download_log_row,
 )
 from lib.pipeline_db.requests import _RequestsMixin
 from lib.quality import (
@@ -951,7 +954,7 @@ class TestRenderAliasMap(unittest.TestCase):
     """Every candidate-evidence alias has a consumer, and the map is exact.
 
     Most candidate-evidence aliases are folded into legacy ``download_log``
-    keys by ``_overlay_evidence_onto_download_log_row``. The rest reach the
+    keys by ``overlay_evidence_onto_download_log_row``. The rest reach the
     render path under their own alias — some read straight off the row dict
     by ``proof_gate_projection``, one renamed into ``LogEntry`` by
     ``_ROW_FIELD_ALIASES``. Every consumer drops what it does not recognise
@@ -975,7 +978,7 @@ class TestRenderAliasMap(unittest.TestCase):
     def _folded() -> set[str]:
         return {
             alias
-            for _legacy, alias, _gated in _DownloadLogMixin._EVIDENCE_OVERLAY_FOLD
+            for _legacy, alias, _gated in _EVIDENCE_OVERLAY_FOLD
         }
 
     @classmethod
@@ -1018,7 +1021,7 @@ class TestRenderAliasMap(unittest.TestCase):
             unclassified_candidate_aliases(
                 _CANDIDATE_EVIDENCE_COLUMNS,
                 folded=self._folded(),
-                gate_input=set(_DownloadLogMixin._EVIDENCE_GATE_INPUT_ALIASES),
+                gate_input=set(_EVIDENCE_GATE_INPUT_ALIASES),
                 projection_read=self._projection_read(),
                 alias_mapped=set(_ROW_FIELD_ALIASES),
                 registered_unused={},
@@ -1037,7 +1040,7 @@ class TestRenderAliasMap(unittest.TestCase):
         Folding it would defeat the gate: the legacy key it folded into
         would be read by a renderer that never learns the lineage.
         """
-        gated = set(_DownloadLogMixin._EVIDENCE_ATTRIBUTABLE_PROOF_ALIASES)
+        gated = set(_EVIDENCE_ATTRIBUTABLE_PROOF_ALIASES)
         self.assertLessEqual(
             gated, self._aliases(_CANDIDATE_EVIDENCE_COLUMNS))
         self.assertEqual(gated & self._folded(), set())
@@ -1049,12 +1052,12 @@ class TestRenderAliasMap(unittest.TestCase):
         fails the attribution closed for every row; one that survives the
         overlay would reach a renderer as an undeclared key.
         """
-        gate_inputs = set(_DownloadLogMixin._EVIDENCE_GATE_INPUT_ALIASES)
+        gate_inputs = set(_EVIDENCE_GATE_INPUT_ALIASES)
         self.assertLessEqual(
             gate_inputs, self._aliases(_CANDIDATE_EVIDENCE_COLUMNS),
             "a gate input the candidate block never projects",
         )
-        overlaid = _DownloadLogMixin._overlay_evidence_onto_download_log_row(
+        overlaid = overlay_evidence_onto_download_log_row(
             dict.fromkeys(gate_inputs, "measured"))
         self.assertEqual(
             gate_inputs & set(overlaid), set(),
@@ -1075,7 +1078,7 @@ class TestRenderAliasMap(unittest.TestCase):
             "_evidence_lineage_version": 4,
         })
 
-        overlaid = _DownloadLogMixin._overlay_evidence_onto_download_log_row(
+        overlaid = overlay_evidence_onto_download_log_row(
             row
         )
 
@@ -1102,7 +1105,7 @@ class TestRenderAliasMap(unittest.TestCase):
             "_current_evidence_mb_release_id": "sibling-release",
         })
 
-        overlaid = _DownloadLogMixin._overlay_evidence_onto_download_log_row(
+        overlaid = overlay_evidence_onto_download_log_row(
             row
         )
 
@@ -1129,7 +1132,7 @@ class TestRenderAliasMap(unittest.TestCase):
             unclassified_candidate_aliases(
                 widened,
                 folded=self._folded(),
-                gate_input=set(_DownloadLogMixin._EVIDENCE_GATE_INPUT_ALIASES),
+                gate_input=set(_EVIDENCE_GATE_INPUT_ALIASES),
                 projection_read=self._projection_read(),
                 alias_mapped=set(_ROW_FIELD_ALIASES),
                 registered_unused={},
@@ -1148,7 +1151,7 @@ class TestRenderAliasMap(unittest.TestCase):
             unclassified_candidate_aliases(
                 widened,
                 folded=self._folded(),
-                gate_input=set(_DownloadLogMixin._EVIDENCE_GATE_INPUT_ALIASES),
+                gate_input=set(_EVIDENCE_GATE_INPUT_ALIASES),
                 projection_read=self._projection_read(),
                 alias_mapped=set(_ROW_FIELD_ALIASES),
                 registered_unused={

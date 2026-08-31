@@ -82,7 +82,9 @@ from lib.pipeline_db._shared import (
     CANDIDATE_EVIDENCE_PREFIX,
     CURRENT_EVIDENCE_PREFIX,
 )
-from lib.pipeline_db.download_log import _DownloadLogMixin
+from lib.pipeline_db.download_log import (
+    overlay_evidence_onto_download_log_row,
+)
 from lib.quality import (
     EVIDENCE_PROVENANCE_CARRIED,
     EVIDENCE_PROVENANCE_MEASURED,
@@ -547,7 +549,7 @@ def recents_states_a_proof(evidence: AlbumQualityEvidence) -> bool:
     """Whether the Recents card renders a proof generation for the same row.
 
     Goes through the production read seam
-    (``_overlay_evidence_onto_download_log_row``) exactly as ``get_log``
+    (``overlay_evidence_onto_download_log_row``) exactly as ``get_log``
     does, because that seam is where Recents' half of the attribution rule
     is applied.
     """
@@ -560,7 +562,7 @@ def recents_states_a_proof(evidence: AlbumQualityEvidence) -> bool:
         "_evidence_verified_lossless_classifier": (
             proof.classifier if proof is not None else None),
     }
-    overlaid = _DownloadLogMixin._overlay_evidence_onto_download_log_row(row)
+    overlaid = overlay_evidence_onto_download_log_row(row)
     projection = proof_gate_projection(overlaid)
     return projection.verified_lossless_generation is not None
 

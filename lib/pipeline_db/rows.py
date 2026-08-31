@@ -48,7 +48,7 @@ type that INHERITS ``DownloadLogRow`` and declares the join extras:
   interchangeable one.
 
 All three row types are the shape AFTER
-``_DownloadLogMixin._overlay_evidence_onto_download_log_row`` runs, where
+``overlay_evidence_onto_download_log_row`` runs, where
 applicable — that step POPS the transient ``_evidence_*``/
 ``_evidence_lineage_version`` keys off the raw joined row once it folds
 their values into the legacy ``dl.*`` columns (and the four synthetic
@@ -261,7 +261,7 @@ class DownloadLogWithEvidenceRow(DownloadLogRow):
     ``source_min_bitrate`` / ``source_avg_bitrate`` / ``source_median_bitrate``
     are NOT real ``download_log`` columns — the evidence overlay is their
     sole producer, kept always-present-but-nullable by
-    ``_overlay_evidence_onto_download_log_row`` rather than conditionally
+    ``overlay_evidence_onto_download_log_row`` rather than conditionally
     absent (see the module docstring)."""
 
     original_beets_distance: float | None
@@ -300,7 +300,7 @@ def download_log_with_evidence_row(
     """Convert a post-overlay evidence-joined row (no ``album_requests``
     join) into its typed projection.
 
-    Callers run ``_overlay_evidence_onto_download_log_row`` on the raw
+    Callers run ``overlay_evidence_onto_download_log_row`` on the raw
     joined row FIRST (folding candidate-evidence facts into the legacy
     ``dl.*`` columns / the synthetic ``source_*`` keys, and popping the
     transient ``_evidence_*`` keys) — this adapter only validates/detaches

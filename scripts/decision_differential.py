@@ -327,7 +327,7 @@ def _evidence_from_corpus_row(
     ``files`` carries the snapshot rows the DB read joins in. The decoder
     is a ``@staticmethod`` for exactly this reason — the same shape
     ``render_differential`` uses for
-    ``_overlay_evidence_onto_download_log_row``.
+    ``overlay_evidence_onto_download_log_row``.
     """
     payload = dict(row)
     # Corpus pairing is an outer grammar, not evidence state.  Remove its

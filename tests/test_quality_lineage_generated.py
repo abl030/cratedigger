@@ -31,7 +31,9 @@ from lib.import_preview import (
 )
 from lib.measurement import PreimportMeasurement
 from lib.media_readiness import kbps_from_bps
-from lib.pipeline_db.download_log import _DownloadLogMixin
+from lib.pipeline_db.download_log import (
+    overlay_evidence_onto_download_log_row,
+)
 from lib.quality import (
     CURRENT_EVIDENCE_LINEAGE_VERSION,
     IMPORT_RESULT_SENTINEL,
@@ -836,7 +838,7 @@ class TestQualityLineagePins(unittest.TestCase):
         spectral_bitrate: int,
         v0_avg: int,
     ) -> None:
-        row = _DownloadLogMixin._overlay_evidence_onto_download_log_row({
+        row = overlay_evidence_onto_download_log_row({
             "_request_mb_release_id": "lineage-overlay-release",
             "_evidence_mb_release_id": "lineage-overlay-release",
             "_evidence_lineage_version": 1,

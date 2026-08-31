@@ -49,7 +49,9 @@ import msgspec
 import msgspec.inspect
 
 from lib.json_narrow import is_object_list, is_str_object_dict
-from lib.pipeline_db.download_log import _DownloadLogMixin
+from lib.pipeline_db.download_log import (
+    overlay_evidence_onto_download_log_row,
+)
 from web.classify import ClassifiedEntry
 from web.download_history_view import build_recents_download_log_rows
 
@@ -267,7 +269,7 @@ class ClassifyRenderTarget:
 
     def prepare(self, rows: Iterable[Mapping[str, object]]) -> None:
         overlaid = [
-            _DownloadLogMixin._overlay_evidence_onto_download_log_row(
+            overlay_evidence_onto_download_log_row(
                 dict(row)
             )
             for row in rows

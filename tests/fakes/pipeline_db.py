@@ -53,7 +53,6 @@ from lib.automation_recovery_debris import (
     RecoveryDebrisReport,
     remove_recovery_debris,
 )
-from lib.beets_db import exact_release_identity_matches
 from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
@@ -141,6 +140,9 @@ from lib.pipeline_db._shared import (
     processing_owner_payload,
     validate_request_metadata_fields,
 )
+from lib.pipeline_db.download_log import (
+    overlay_evidence_onto_download_log_row,
+)
 from lib.pipeline_db.import_jobs import (
     AutomationRecoveryCAS,
     AutomationRecoveryEvidenceChanged,
@@ -163,7 +165,6 @@ from lib.quality import (
     AlbumQualityV0Metric,
     CodecFamily,
     CooldownConfig,
-    evidence_is_source_semantic,
 )
 from lib.quality_evidence import (
     SpectralWriteIntent,
@@ -6566,7 +6567,8 @@ class FakePipelineDB:
             # (bitrate, actual_filetype, spectral_grade, final_format,
             # etc.). Dropping them here would silently mis-classify rows
             # in callers that feed ``get_log`` into LogEntry.from_row.
-            joined: dict[str, object] = self._download_log_evidence_dict(entry)
+            joined: dict[str, object] = self._download_log_raw_evidence_row(
+                entry)
             joined.update({
                 # Joined request columns.
                 "album_title": req.get("album_title"),
@@ -6581,18 +6583,16 @@ class FakePipelineDB:
                     "search_filetype_override"),
                 "request_source": req.get("source"),
             })
+            # ``get_log`` is the one reader whose SQL also LEFT JOINs the
+            # request's CURRENT evidence. Project those aliases RAW — the
+            # identity gate below them belongs to the shared overlay, which
+            # NULLs the whole ``_current_evidence_*`` family when
+            # ``_current_evidence_mb_release_id`` names another pressing.
             current_evidence_id = req.get("current_evidence_id")
             current_evidence = (
                 self._evidence_by_id.get(int(current_evidence_id))
                 if current_evidence_id is not None else None
             )
-            if (
-                current_evidence is not None
-                and not exact_release_identity_matches(
-                    req.get("mb_release_id"), current_evidence.mb_release_id
-                )
-            ):
-                current_evidence = None
             current_measurement = (
                 current_evidence.measurement
                 if current_evidence is not None else None
@@ -6604,6 +6604,10 @@ class FakePipelineDB:
             joined.update({
                 "_current_evidence_id": (
                     current_evidence.id if current_evidence is not None else None
+                ),
+                "_current_evidence_mb_release_id": (
+                    current_evidence.mb_release_id
+                    if current_evidence is not None else None
                 ),
                 "_current_evidence_is_pre_attempt": (
                     current_evidence.measured_at <= entry.created_at
@@ -6641,7 +6645,7 @@ class FakePipelineDB:
                     current_v0.median_bitrate_kbps if current_v0 is not None else None
                 ),
             })
-            rows.append(joined)
+            rows.append(overlay_evidence_onto_download_log_row(joined))
             if len(rows) >= limit:
                 break
         return cast("list[DownloadLogWithRequestRow]", rows)
@@ -6652,7 +6656,7 @@ class FakePipelineDB:
     ) -> list[DownloadLogWithOriginRow]:
         wanted = {int(log_id) for log_id in source_log_ids}
         return cast("list[DownloadLogWithOriginRow]", [
-            self._download_log_to_dict(entry)
+            self._download_log_base_dict(entry)
             for entry in reversed(self.download_logs)
             if entry.source_download_log_id in wanted
             and entry.outcome in (
@@ -7914,8 +7918,16 @@ class FakePipelineDB:
             "wanted_no_plan": wanted_no_plan,
         }
 
-    def _download_log_to_dict(self,
-                              entry: DownloadLogRow) -> dict[str, Any]:
+    def _download_log_base_dict(self,
+                                entry: DownloadLogRow) -> dict[str, Any]:
+        """The bare ``SELECT dl.*`` projection plus the origin join.
+
+        Exactly what ``PipelineDB.get_linked_import_logs`` returns: that
+        query has NO ``album_quality_evidence`` join, so nothing here may
+        recover an evidence-derived measurement (issue #1278 item 7 — the
+        fake used to fold evidence in here and hand linked-import rows
+        spectral/V0 facts production never returns).
+        """
         row: dict[str, Any] = {
             "id": entry.id,
             "request_id": entry.request_id,
@@ -7957,162 +7969,145 @@ class FakePipelineDB:
             if entry.youtube_metadata is not None else None,
         }
         row.update(entry.extra)
-        # Mirror the real LEFT JOIN to album_quality_evidence: prefer
-        # evidence-derived measurements over legacy denorm columns when
-        # the denorm value is missing. Same semantics as
-        # PipelineDB._overlay_evidence_onto_download_log_row.
-        ev = self._evidence_by_id.get(entry.candidate_evidence_id) \
-            if entry.candidate_evidence_id is not None else None
-        request = self._requests.get(entry.request_id)
-        if ev is not None and not exact_release_identity_matches(
-            request.get("mb_release_id") if request is not None else None,
-            ev.mb_release_id,
-        ):
-            ev = None
-        if ev is not None:
-            ev_m = ev.measurement
-            ev_v0 = ev.v0_metric
-            # Delegate: production's own predicate, never a copy of the
-            # version tuple. Issue #1145 added lineage 5 and a hand-copied
-            # ``(3, 4)`` here would have silently stopped projecting every
-            # rebuilt row's source facts.
-            source_semantic = evidence_is_source_semantic(
-                ev.lineage_version)
-            if source_semantic \
-                    and row.get("source_format") is None \
-                    and ev_m.format is not None:
-                row["source_format"] = ev_m.format
-            if source_semantic \
-                    and row.get("source_min_bitrate") is None \
-                    and ev_m.min_bitrate_kbps is not None:
-                row["source_min_bitrate"] = ev_m.min_bitrate_kbps
-            if source_semantic \
-                    and row.get("source_avg_bitrate") is None \
-                    and ev_m.avg_bitrate_kbps is not None:
-                row["source_avg_bitrate"] = ev_m.avg_bitrate_kbps
-            if source_semantic \
-                    and row.get("source_median_bitrate") is None \
-                    and ev_m.median_bitrate_kbps is not None:
-                row["source_median_bitrate"] = ev_m.median_bitrate_kbps
-            if row.get("spectral_grade") is None \
-                    and ev_m is not None and ev_m.spectral_grade is not None:
-                row["spectral_grade"] = ev_m.spectral_grade
-            if row.get("spectral_bitrate") is None \
-                    and ev_m is not None \
-                    and ev_m.spectral_bitrate_kbps is not None:
-                row["spectral_bitrate"] = ev_m.spectral_bitrate_kbps
-            if row.get("v0_probe_kind") is None \
-                    and ev_v0 is not None:
-                row["v0_probe_kind"] = {
-                    EVIDENCE_SUBJECT_SOURCE: V0_PROBE_LOSSLESS_SOURCE,
-                    EVIDENCE_SUBJECT_INSTALLED: V0_PROBE_NATIVE_LOSSY_RESEARCH,
-                }[ev_v0.subject]
-            if row.get("v0_probe_min_bitrate") is None \
-                    and ev_v0 is not None \
-                    and ev_v0.min_bitrate_kbps is not None:
-                row["v0_probe_min_bitrate"] = ev_v0.min_bitrate_kbps
-            if row.get("v0_probe_avg_bitrate") is None \
-                    and ev_v0 is not None \
-                    and ev_v0.avg_bitrate_kbps is not None:
-                row["v0_probe_avg_bitrate"] = ev_v0.avg_bitrate_kbps
-            if row.get("v0_probe_median_bitrate") is None \
-                    and ev_v0 is not None \
-                    and ev_v0.median_bitrate_kbps is not None:
-                row["v0_probe_median_bitrate"] = ev_v0.median_bitrate_kbps
         return row
 
-    def _download_log_evidence_dict(self, entry: DownloadLogRow) -> dict[str, Any]:
-        """``_download_log_to_dict`` plus the guaranteed-present ``source_*``
-        keys the real evidence overlay always stamps (issue #784's
-        ``DownloadLogWithEvidenceRow`` — these four are NOT real
-        ``download_log`` columns, so production keeps them
-        always-present-but-nullable rather than conditionally absent).
-        Used by every reader that joins ``album_quality_evidence``
-        (``get_log``, ``get_download_log_entry``, ``get_download_history``,
-        ``get_download_history_batch``, ``get_latest_download_summaries``).
-        ``get_linked_import_logs`` has no evidence join in production and
-        must call the bare ``_download_log_to_dict`` instead."""
-        row = self._download_log_to_dict(entry)
-        row.setdefault("source_format", None)
-        row.setdefault("source_min_bitrate", None)
-        row.setdefault("source_avg_bitrate", None)
-        row.setdefault("source_median_bitrate", None)
-        # issue #829 Phase 5 PR4 — the candidate-evidence columns the
-        # proof-gate verdict derivation reads
-        # (``_CANDIDATE_EVIDENCE_COLUMNS``). Sourced from the SEEDED
-        # evidence row, never invented: a fake that stamped None here
-        # would hide every verdict the render path is supposed to show.
+    @staticmethod
+    def _candidate_evidence_alias_projection(
+        evidence: AlbumQualityEvidence | None,
+    ) -> dict[str, object]:
+        """Mirror ``_CANDIDATE_EVIDENCE_COLUMNS`` for one candidate join.
+
+        Raw, ungated column values — the LEFT JOIN alone, before
+        ``overlay_evidence_onto_download_log_row`` adjudicates identity
+        and lineage. An unmatched join is all-NULL.
+        """
+        measurement = evidence.measurement if evidence is not None else None
+        v0 = evidence.v0_metric if evidence is not None else None
+        lattice = evidence.aac_lattice if evidence is not None else None
+        proof = (
+            evidence.verified_lossless_proof if evidence is not None else None
+        )
+        return {
+            "_evidence_mb_release_id": (
+                evidence.mb_release_id if evidence is not None else None),
+            "_evidence_source_format": (
+                measurement.format if measurement is not None else None),
+            "_evidence_source_min_bitrate": (
+                measurement.min_bitrate_kbps
+                if measurement is not None else None),
+            "_evidence_source_avg_bitrate": (
+                measurement.avg_bitrate_kbps
+                if measurement is not None else None),
+            "_evidence_source_median_bitrate": (
+                measurement.median_bitrate_kbps
+                if measurement is not None else None),
+            "_evidence_lineage_version": (
+                evidence.lineage_version if evidence is not None else None),
+            "_evidence_spectral_grade": (
+                measurement.spectral_grade
+                if measurement is not None else None),
+            "_evidence_spectral_bitrate": (
+                measurement.spectral_bitrate_kbps
+                if measurement is not None else None),
+            # ``e.v0_subject`` raw — the overlay owns the subject →
+            # wire-kind translation (a five-key map applied with ``.get``,
+            # so an unmapped subject passes through rather than raising).
+            "_evidence_v0_probe_kind": (
+                v0.subject if v0 is not None else None),
+            "_evidence_v0_probe_min_bitrate": (
+                v0.min_bitrate_kbps if v0 is not None else None),
+            "_evidence_v0_probe_avg_bitrate": (
+                v0.avg_bitrate_kbps if v0 is not None else None),
+            "_evidence_v0_probe_median_bitrate": (
+                v0.median_bitrate_kbps if v0 is not None else None),
+            "_evidence_format": (
+                measurement.format if measurement is not None else None),
+            "_evidence_codec_family": (
+                measurement.codec_family if measurement is not None else None),
+            "_evidence_cliff_hz": (
+                measurement.cliff_hz if measurement is not None else None),
+            "_evidence_storage_format": (
+                evidence.storage_format if evidence is not None else None),
+            "_evidence_filetype_band": (
+                evidence.filetype_band if evidence is not None else None),
+            "_evidence_spectral_subject": (
+                measurement.spectral_subject
+                if measurement is not None else None),
+            # ``NULL::text`` in the production SELECT: this projection is
+            # always candidate source semantics.
+            "_evidence_was_converted_from": None,
+            "_evidence_ultrasonic_deficit_db": (
+                measurement.ultrasonic_deficit_db
+                if measurement is not None else None),
+            "_evidence_spectral_measurement_version": (
+                measurement.spectral_measurement_version
+                if measurement is not None else None),
+            "_evidence_aac_lattice_modal_count": (
+                lattice.modal_count if lattice is not None else None),
+            "_evidence_aac_lattice_scored_tracks": (
+                lattice.scored_tracks if lattice is not None else None),
+            "_evidence_aac_lattice_max_z": (
+                lattice.max_z if lattice is not None else None),
+            # Both proof aliases are raw here; the overlay NULLs them on a
+            # non-source-semantic lineage. The fake used to lineage-gate
+            # cd_rip_verification by hand and leave the classifier ungated
+            # — the exact asymmetry issue #1278 item 7 removed.
+            "_evidence_verified_lossless_classifier": (
+                proof.classifier if proof is not None else None),
+            "_evidence_cd_rip_verification": (
+                msgspec.to_builtins(evidence.cd_rip_verification)
+                if evidence is not None
+                and evidence.cd_rip_verification is not None
+                else None),
+            "_evidence_container_extensions": (
+                sorted({file.extension for file in evidence.files})
+                if evidence is not None and evidence.files
+                else None),
+        }
+
+    def _download_log_raw_evidence_row(
+        self, entry: DownloadLogRow,
+    ) -> dict[str, object]:
+        """The PRE-overlay row an evidence-joined reader's SQL produces.
+
+        ``dl.*`` + the candidate-evidence aliases + the request identity
+        gate input. The LEFT JOIN is keyed on ``candidate_evidence_id``
+        alone — no identity filter here, because adjudicating identity is
+        the overlay's job, not the join's.
+        """
+        row = self._download_log_base_dict(entry)
         evidence = (
             self._evidence_by_id.get(entry.candidate_evidence_id)
             if entry.candidate_evidence_id is not None
             else None
         )
+        row.update(self._candidate_evidence_alias_projection(evidence))
         request = self._requests.get(entry.request_id)
-        if evidence is not None and not exact_release_identity_matches(
-            request.get("mb_release_id") if request is not None else None,
-            evidence.mb_release_id,
-        ):
-            evidence = None
-        measurement = evidence.measurement if evidence is not None else None
-        lattice = evidence.aac_lattice if evidence is not None else None
-        proof = (
-            evidence.verified_lossless_proof if evidence is not None else None
+        row["_request_mb_release_id"] = (
+            request.get("mb_release_id") if request is not None else None
         )
-        row.update({
-            "_evidence_format": (
-                measurement.format if measurement is not None else None
-            ),
-            "_evidence_codec_family": (
-                measurement.codec_family if measurement is not None else None
-            ),
-            "_evidence_cliff_hz": (
-                measurement.cliff_hz if measurement is not None else None
-            ),
-            "_evidence_storage_format": (
-                evidence.storage_format if evidence is not None else None
-            ),
-            "_evidence_filetype_band": (
-                evidence.filetype_band if evidence is not None else None
-            ),
-            "_evidence_spectral_subject": (
-                measurement.spectral_subject
-                if measurement is not None else None
-            ),
-            "_evidence_was_converted_from": None,
-            "_evidence_ultrasonic_deficit_db": (
-                measurement.ultrasonic_deficit_db
-                if measurement is not None else None
-            ),
-            "_evidence_spectral_measurement_version": (
-                measurement.spectral_measurement_version
-                if measurement is not None else None
-            ),
-            "_evidence_aac_lattice_modal_count": (
-                lattice.modal_count if lattice is not None else None
-            ),
-            "_evidence_aac_lattice_scored_tracks": (
-                lattice.scored_tracks if lattice is not None else None
-            ),
-            "_evidence_aac_lattice_max_z": (
-                lattice.max_z if lattice is not None else None
-            ),
-            "_evidence_verified_lossless_classifier": (
-                proof.classifier if proof is not None else None
-            ),
-            "_evidence_cd_rip_verification": (
-                msgspec.to_builtins(evidence.cd_rip_verification)
-                if evidence is not None
-                and evidence_is_source_semantic(evidence.lineage_version)
-                and evidence.cd_rip_verification is not None
-                else None
-            ),
-            "_evidence_container_extensions": (
-                sorted({file.extension for file in evidence.files})
-                if evidence is not None and evidence.files
-                else None
-            ),
-        })
         return row
+
+    def _download_log_evidence_dict(self, entry: DownloadLogRow) -> dict[str, Any]:
+        """One evidence-joined ``download_log`` row, overlaid by production.
+
+        Delegates the whole identity/lineage adjudication — including the
+        guaranteed-present ``source_*`` keys of issue #784's
+        ``DownloadLogWithEvidenceRow`` — to
+        ``overlay_evidence_onto_download_log_row``, so the fake cannot be
+        more permissive than production about which evidence facts a
+        reader recovers.
+
+        Used by every reader that joins ``album_quality_evidence``
+        (``get_download_log_entry``, ``get_download_history``,
+        ``get_download_history_batch``, ``get_latest_download_summaries``;
+        ``get_log`` builds its own raw row so the current-evidence aliases
+        reach the same single overlay call). ``get_linked_import_logs``
+        has no evidence join in production and must call the bare
+        ``_download_log_base_dict`` instead.
+        """
+        return overlay_evidence_onto_download_log_row(
+            self._download_log_raw_evidence_row(entry))
 
     # --- Wrong-match review queue ---
 
