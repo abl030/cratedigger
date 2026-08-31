@@ -3375,6 +3375,558 @@ class TestBadHashGateReachesPreviewLanes(unittest.TestCase):
         mock_run.assert_not_called()
 
 
+class TestMeasurementCollaboratorBoundary(unittest.TestCase):
+    """A broken measurement collaborator maps to ``measurement_failed``.
+
+    Pins the cd-rip verifier's lazy import staying INSIDE
+    ``_measure_lane_world``'s collaborator-failure envelope: a broken
+    world (numpy/verifier import failure) must surface as a
+    ``measurement_failed`` result the caller re-derives from — never an
+    exception escaping the lane (invariant 11). The skeleton extraction
+    briefly moved this import outside the envelope; this is the pin the
+    correction shipped without.
+    """
+
+    def test_verifier_import_failure_maps_to_measurement_failed(self):
+        import types
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-42",
+            artist_name="Artist",
+            album_title="Album",
+        ))
+        fixture = os.path.join(
+            os.path.dirname(__file__), "fixtures", "audio_hash",
+            "sine_440.mp3",
+        )
+        source = tempfile.mkdtemp(dir=_PREVIEW_SOURCE_ROOT)
+        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
+        shutil.copy(fixture, os.path.join(source, "01 - Track.mp3"))
+
+        broken = types.ModuleType("lib.cd_rip_verifier")
+        with patch(
+            "lib.config.read_runtime_config",
+            return_value=_preview_runtime_config(pipeline_db_enabled=True),
+        ), patch(
+            "lib.beets_db.BeetsDB", lambda **_kwargs: FakeBeetsDB()
+        ), patch.dict(
+            "sys.modules", {"lib.cd_rip_verifier": broken}
+        ), patch("lib.import_preview.run_import_one") as mock_run:
+            preview = measure_and_persist_candidate_evidence(
+                db,
+                request_id=42,
+                path=source,
+            )
+
+        self.assertEqual(preview.verdict, "measurement_failed")
+        self.assertEqual(preview.decision, "measurement_crashed")
+        assert preview.detail is not None
+        self.assertTrue(preview.detail.startswith("ImportError"))
+        mock_run.assert_not_called()
+
+
+class TestLanePolicySeam(unittest.TestCase):
+    """Seam pins for the extracted lane skeleton's policy split (#1278).
+
+    The mutant-runner round on the skeleton extraction proved most of the
+    lane policy was constrained by nothing — the split existed only in
+    prose. These are seam/adapter tests: they pin the exact arguments each
+    lane hands the shared stages, so a wiring mutant (dropping a capture
+    fn, swapping a loader, widening the injected seam's call shape) fails
+    here instead of shipping green. Everything is driven through the
+    sanctioned kwarg-DI seams (``measure_fn``, ``run_import_fn``,
+    ``current_evidence_loader``) — no owned-function patches.
+    """
+
+    def _world(self) -> tuple[FakePipelineDB, str]:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="mbid-42",
+            artist_name="Artist",
+            album_title="Album",
+        ))
+        fixture = os.path.join(
+            os.path.dirname(__file__), "fixtures", "audio_hash",
+            "sine_440.mp3",
+        )
+        source = tempfile.mkdtemp(dir=_PREVIEW_SOURCE_ROOT)
+        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
+        shutil.copy(fixture, os.path.join(source, "01 - Track.mp3"))
+        return db, source
+
+    def _installed_album(self) -> str:
+        """A separate installed-album dir so HAVE evidence is content-
+        addressed apart from the candidate source (a shared fingerprint
+        would let candidate persistence write over the HAVE row and
+        satisfy refresh assertions for the wrong reason)."""
+        fixture = os.path.join(
+            os.path.dirname(__file__), "fixtures", "audio_hash",
+            "sine_440.ogg",
+        )
+        installed = tempfile.mkdtemp(dir=_PREVIEW_SOURCE_ROOT)
+        self.addCleanup(shutil.rmtree, installed, ignore_errors=True)
+        shutil.copy(fixture, os.path.join(installed, "01 - Track.ogg"))
+        return installed
+
+    def _benign_measurement(self, **overrides: object) -> PreimportMeasurement:
+        import msgspec
+
+        base = PreimportMeasurement(
+            audio_file_count=1,
+            filetype_band="mp3",
+            min_bitrate_kbps=320,
+            is_vbr=False,
+            spectral_audit=SpectralDetail(
+                candidate=SpectralAnalysisDetail(
+                    attempted=True, grade="genuine", bitrate_kbps=320,
+                    spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+                ),
+                existing=SpectralAnalysisDetail(attempted=False),
+            ),
+        )
+        if not overrides:
+            return base
+        return msgspec.structs.replace(base, **overrides)
+
+    def _rejecting_measurement(
+        self, **overrides: object,
+    ) -> PreimportMeasurement:
+        return self._benign_measurement(
+            audio_corrupt=True,
+            corrupt_files=["01 - Track.mp3"],
+            audio_validation=make_audio_corrupt_validation_report(
+                "01 - Track.mp3", detail="decode error",
+            ),
+            audio_error="decode error",
+            **overrides,
+        )
+
+    def _harness_must_not_run(self, **_kwargs: object) -> ImportOneRun:
+        self.fail("the dry-run harness must not run in this world")
+
+    def test_lane_measurement_policy_kwargs(self):
+        """Each lane hands measurement exactly its documented policy."""
+        from lib.cd_rip_verifier import verify_cd_rip
+        from lib.measurement import ExistingSpectralAuditLookup, measure_aac_lattice
+
+        def analyzer(_path: str) -> SpectralAnalysisDetail:
+            return SpectralAnalysisDetail(
+                attempted=True, grade="genuine", bitrate_kbps=320,
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+            )
+
+        def resolver(_release_id: str) -> ExistingSpectralAuditLookup:
+            return ExistingSpectralAuditLookup()
+
+        rejecting = self._rejecting_measurement()
+        for lane in ("worker", "classify"):
+            with self.subTest(lane=lane):
+                db, source = self._world()
+                # Stale linked HAVE evidence with a real persisted grade,
+                # while beets holds no album: the loader answers
+                # ``empty_current`` and the lanes must RESET the stale
+                # persisted detail to attempted=False rather than letting
+                # it leak into measurement (mutant-runner survivor C).
+                installed = self._installed_album()
+                stale = make_album_quality_evidence(
+                    mb_release_id="mbid-42",
+                    source_path=installed,
+                    files=snapshot_audio_files(installed),
+                    measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=96, avg_bitrate_kbps=96,
+                        median_bitrate_kbps=96, format="MP3",
+                        spectral_grade="suspect", spectral_bitrate_kbps=96,
+                    ),
+                )
+                db.upsert_album_quality_evidence(stale)
+                stored_stale = db.find_album_quality_evidence(
+                    mb_release_id=stale.mb_release_id,
+                    snapshot_fingerprint=stale.snapshot_fingerprint,
+                )
+                assert stored_stale is not None and stored_stale.id is not None
+                db.set_request_current_evidence(42, stored_stale.id)
+                download_log_id = db.log_download(42, outcome="rejected")
+                recorded: dict[str, object] = {}
+
+                def record_measure(
+                    _sink: dict[str, object] = recorded,
+                    **kwargs: object,
+                ) -> PreimportMeasurement:
+                    _sink.clear()
+                    _sink.update(kwargs)
+                    return rejecting
+
+                with patch(
+                    "lib.config.read_runtime_config",
+                    return_value=_preview_runtime_config(
+                        pipeline_db_enabled=True),
+                ), patch(
+                    "lib.beets_db.BeetsDB", lambda **_kwargs: FakeBeetsDB()
+                ):
+                    if lane == "worker":
+                        measure_and_persist_candidate_evidence(
+                            db,
+                            request_id=42,
+                            path=source,
+                            download_log_id=download_log_id,
+                            spectral_detail_analyzer=analyzer,
+                            existing_spectral_resolver=resolver,
+                            measure_fn=record_measure,
+                            run_import_fn=self._harness_must_not_run,
+                        )
+                    else:
+                        preview_import_from_path(
+                            db, request_id=42, path=source,
+                            measure_fn=record_measure,
+                        )
+
+                self.assertIs(recorded["bad_hash_db"], db)
+                self.assertEqual(
+                    recorded["existing_spectral_evidence"],
+                    SpectralAnalysisDetail(attempted=False),
+                    "empty-current world must reset stale persisted detail",
+                )
+                self.assertIs(recorded["reuse_existing_spectral_evidence"], False)
+                self.assertIs(
+                    recorded["preserve_existing_source_spectral"], False)
+                self.assertIsNotNone(recorded["precomputed_inspection"])
+                if lane == "worker":
+                    self.assertIs(recorded["spectral_detail_analyzer"], analyzer)
+                    self.assertIs(recorded["existing_spectral_resolver"], resolver)
+                    self.assertIs(
+                        recorded["aac_lattice_measure_fn"], measure_aac_lattice)
+                    self.assertIs(recorded["cd_rip_verify_fn"], verify_cd_rip)
+                else:
+                    self.assertIsNone(recorded["spectral_detail_analyzer"])
+                    self.assertIsNone(recorded["existing_spectral_resolver"])
+                    self.assertIsNone(recorded["aac_lattice_measure_fn"])
+                    self.assertIsNone(recorded["cd_rip_verify_fn"])
+
+    def test_reusable_current_evidence_sets_the_reuse_flag(self):
+        """A decision-usable current-generation HAVE grade reaches
+        measurement as ``reuse_existing_spectral_evidence=True`` (the
+        re-project-without-rescanning wiring; mutant-runner survivor #2)."""
+        db, source = self._world()
+        installed = self._installed_album()
+        evidence = make_album_quality_evidence(
+            mb_release_id="mbid-42",
+            source_path=installed,
+            files=snapshot_audio_files(installed),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=96, avg_bitrate_kbps=96,
+                median_bitrate_kbps=96, format="MP3",
+                spectral_grade="suspect", spectral_bitrate_kbps=96,
+            ),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        db.set_request_current_evidence(42, stored.id)
+        beets = FakeBeetsDB(library_root=installed)
+        from lib.beets_db import AlbumInfo
+        beets.set_album_info("mbid-42", AlbumInfo(
+            album_id=1, track_count=1, min_bitrate_kbps=320,
+            avg_bitrate_kbps=320, is_cbr=True,
+            album_path=installed, format="MP3",
+        ))
+        recorded: dict[str, object] = {}
+
+        def record_measure(**kwargs: object) -> PreimportMeasurement:
+            recorded.update(kwargs)
+            return self._rejecting_measurement()
+
+        with patch(
+            "lib.config.read_runtime_config",
+            return_value=_preview_runtime_config(pipeline_db_enabled=True),
+        ), patch(
+            "lib.beets_db.BeetsDB", lambda _b=beets, **_kwargs: _b
+        ):
+            preview_import_from_path(
+                db, request_id=42, path=source, measure_fn=record_measure,
+            )
+
+        self.assertIs(recorded["reuse_existing_spectral_evidence"], True)
+        reused = recorded["existing_spectral_evidence"]
+        assert isinstance(reused, SpectralAnalysisDetail)
+        self.assertEqual(reused.grade, "suspect")
+
+    def test_worker_lane_failure_source_path_mapping(self):
+        """AudioValidation failure reports the raw path; generic reports the
+        operator-facing display path (the preserved lane A asymmetry)."""
+        from lib.quality import AudioValidationMeasurementError
+
+        report = AudioValidationReport(
+            outcome="measurement_failed",
+            diagnostics=[AudioToolDiagnostic(
+                category="decode_timeout",
+                relative_path="01 - Track.mp3",
+            )],
+        )
+        cases = [
+            (
+                AudioValidationMeasurementError(report),
+                "raw",
+            ),
+            (RuntimeError("collaborator failed"), "display"),
+        ]
+        for exc, expected in cases:
+            with self.subTest(exc=type(exc).__name__):
+                db, source = self._world()
+
+                def raise_exc(
+                    _exc: BaseException = exc, **_kwargs: object,
+                ) -> PreimportMeasurement:
+                    raise _exc
+
+                with patch(
+                    "lib.config.read_runtime_config",
+                    return_value=_preview_runtime_config(
+                        pipeline_db_enabled=True),
+                ), patch(
+                    "lib.beets_db.BeetsDB", lambda **_kwargs: FakeBeetsDB()
+                ):
+                    preview = measure_and_persist_candidate_evidence(
+                        db,
+                        request_id=42,
+                        path=source,
+                        source_display_path="/audit/display-path",
+                        measure_fn=raise_exc,
+                        run_import_fn=self._harness_must_not_run,
+                    )
+                self.assertEqual(preview.verdict, "measurement_failed")
+                self.assertEqual(
+                    preview.source_path,
+                    source if expected == "raw" else "/audit/display-path",
+                )
+
+    def test_worker_lane_harness_argument_seam(self):
+        """The dry-run harness receives the lane's real decision inputs, and
+        the injected seam keeps its historical no-token call shape."""
+        from lib.quality import EVIDENCE_SUBJECT_SOURCE, AlbumQualityV0Metric
+
+        db, source = self._world()
+        download_log_id = db.log_download(42, outcome="rejected")
+        installed = self._installed_album()
+        evidence = make_album_quality_evidence(
+            mb_release_id="mbid-42",
+            source_path=installed,
+            files=snapshot_audio_files(installed),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=317,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=187,
+                avg_bitrate_kbps=213,
+                median_bitrate_kbps=210,
+                subject=EVIDENCE_SUBJECT_SOURCE,
+                provenance="carried",
+            ),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None
+
+        def loader(_db: object, **_kwargs: object) -> EvidenceBuildResult:
+            return EvidenceBuildResult(
+                stored, "ready", None, current_album_path=installed,
+            )
+
+        recorded: dict[str, object] = {}
+
+        def run_import_fn(**kwargs: object) -> ImportOneRun:
+            recorded.update(kwargs)
+            return ImportOneRun(
+                command=("import_one",), returncode=0, stdout="", stderr="",
+                import_result=ImportResult(
+                    decision="import",
+                    source_measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=320, avg_bitrate_kbps=320,
+                        median_bitrate_kbps=320, format="MP3",
+                    ),
+                ),
+            )
+
+        with patch(
+            "lib.beets_db.BeetsDB", lambda **_kwargs: FakeBeetsDB()
+        ):
+            preview = measure_and_persist_candidate_evidence(
+                db,
+                request_id=42,
+                path=source,
+                force=False,
+                download_log_id=download_log_id,
+                run_import_fn=run_import_fn,
+                current_evidence_loader=loader,
+                measure_fn=lambda **_kwargs: self._benign_measurement(),
+                runtime_config=_preview_runtime_config(
+                    pipeline_db_enabled=True),
+            )
+
+        self.assertEqual(preview.verdict, "evidence_ready")
+        self.assertIs(recorded["force"], False)
+        self.assertEqual(recorded["override_min_bitrate"], 317)
+        self.assertIsNotNone(
+            recorded["existing_v0_probe"],
+            "a current evidence row with a V0 metric must reach the harness",
+        )
+        # quality_evidence_action_file is None for a lossy world by design;
+        # the lossless sidecar handoff is patrolled by
+        # tests/test_preview_manifest_generated.py (#859).
+        self.assertIn("quality_evidence_action_file", recorded)
+        self.assertNotIn(
+            "cancellation_token", recorded,
+            "the injected seam keeps its historical no-token call shape",
+        )
+
+    def test_classify_lane_skips_enrichment_but_refreshes_have(self):
+        """The loader split, pinned in both directions: classify never runs
+        V0 enrichment, yet still refreshes exact-current HAVE spectral."""
+        from lib.import_preview import load_current_evidence_for_preview
+        from lib.quality import SpectralMeasurement
+
+        fresh_existing = SpectralAnalysisDetail(
+            attempted=True, grade="genuine", bitrate_kbps=320,
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+        )
+        for lane in ("classify", "worker"):
+            with self.subTest(lane=lane):
+                db, source = self._world()
+                installed = self._installed_album()
+                # Seed a stale persisted grade at a STALE analyzer
+                # generation so it is not reusable and the fresh-audit
+                # refresh is both required and observable — the builder's
+                # defaults (grade "genuine", current generation) made an
+                # earlier version of this assertion vacuous
+                # (mutant-runner survivor #12).
+                evidence = make_album_quality_evidence(
+                    mb_release_id="mbid-42",
+                    source_path=installed,
+                    files=snapshot_audio_files(installed),
+                    measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=96, avg_bitrate_kbps=96,
+                        median_bitrate_kbps=96, format="MP3",
+                        spectral_grade="suspect", spectral_bitrate_kbps=96,
+                        spectral_measurement_version=(
+                            SPECTRAL_MEASUREMENT_VERSION - 1
+                        ),
+                    ),
+                    preserve_spectral_measurement_version=True,
+                )
+                db.upsert_album_quality_evidence(evidence)
+                stored = db.find_album_quality_evidence(
+                    mb_release_id=evidence.mb_release_id,
+                    snapshot_fingerprint=evidence.snapshot_fingerprint,
+                )
+                assert stored is not None and stored.id is not None
+                db.set_request_current_evidence(42, stored.id)
+                beets = FakeBeetsDB(library_root=installed)
+                from lib.beets_db import AlbumInfo
+                beets.set_album_info("mbid-42", AlbumInfo(
+                    album_id=1, track_count=1, min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320, is_cbr=True,
+                    album_path=installed, format="MP3",
+                ))
+                measurement = self._rejecting_measurement(
+                    existing_spectral=SpectralMeasurement(
+                        grade="genuine", bitrate_kbps=320),
+                    existing_spectral_path=installed,
+                    spectral_audit=SpectralDetail(
+                        candidate=SpectralAnalysisDetail(
+                            attempted=True, grade="genuine",
+                            bitrate_kbps=320,
+                            spectral_measurement_version=(
+                                SPECTRAL_MEASUREMENT_VERSION
+                            ),
+                        ),
+                        existing=fresh_existing,
+                    ),
+                )
+                enrich_calls: list[int] = []
+                stored_ready = EvidenceBuildResult(
+                    stored, "ready", None, current_album_path=installed,
+                )
+
+                def record_enrich(
+                    *_args: object,
+                    _calls: list[int] = enrich_calls,
+                    _ready: EvidenceBuildResult = stored_ready,
+                    **_kwargs: object,
+                ) -> EvidenceBuildResult:
+                    _calls.append(1)
+                    return _ready
+
+                def enriching_loader(
+                    inner_db: FakePipelineDB,
+                    *,
+                    request_id: int,
+                    mb_release_id: str,
+                    quality_ranks: QualityRankConfig,
+                    beets_library_root: str,
+                    preloaded_evidence: object,
+                ) -> EvidenceBuildResult:
+                    del preloaded_evidence
+                    return load_current_evidence_for_preview(
+                        inner_db,
+                        request_id=request_id,
+                        mb_release_id=mb_release_id,
+                        quality_ranks=quality_ranks,
+                        beets_library_root=beets_library_root,
+                        preloaded_evidence=None,
+                        enrich_current_fn=record_enrich,
+                    )
+
+                with patch(
+                    "lib.config.read_runtime_config",
+                    return_value=_preview_runtime_config(
+                        pipeline_db_enabled=True),
+                ), patch(
+                    "lib.beets_db.BeetsDB", lambda _b=beets, **_kwargs: _b
+                ):
+                    if lane == "classify":
+                        preview_import_from_path(
+                            db, request_id=42, path=source,
+                            measure_fn=lambda _m=measurement, **_kwargs: _m,
+                        )
+                    else:
+                        measure_and_persist_candidate_evidence(
+                            db,
+                            request_id=42,
+                            path=source,
+                            download_log_id=db.log_download(
+                                42, outcome="rejected"),
+                            measure_fn=lambda _m=measurement, **_kwargs: _m,
+                            current_evidence_loader=enriching_loader,
+                            run_import_fn=self._harness_must_not_run,
+                        )
+                refreshed = db.load_album_quality_evidence_by_id(stored.id)
+                assert refreshed is not None
+                if lane == "classify":
+                    # Authorize-only: enrichment's research claim never
+                    # fires, so the claim's own durable mark stays clear.
+                    self.assertFalse(
+                        refreshed.on_disk_v0_research_attempted,
+                        "classify lane must not run V0 enrichment",
+                    )
+                else:
+                    self.assertEqual(enrich_calls, [1])
+                self.assertEqual(
+                    refreshed.measurement.spectral_grade, "genuine",
+                    f"{lane} lane must refresh exact-current HAVE spectral",
+                )
+
+
 class TestOwnedProcessingNormalization(unittest.TestCase):
     """Issue #853: repair belongs after private processing publication."""
 

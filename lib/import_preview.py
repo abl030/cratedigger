@@ -2194,27 +2194,30 @@ def _measure_lane_world(
     existing_spectral_resolver: ExistingSpectralResolver | None = None,
     aac_lattice_measure_fn: AacLatticeMeasureFn | None = None,
     capture_cd_rip_verification: bool = False,
+    measure_fn: Callable[..., PreimportMeasurement] | None = None,
 ) -> _MeasuredLaneWorld | ImportPreviewResult:
     """Run the pure measurement and refresh exact-current spectral state.
 
-    Shared skeleton stage for both preview lanes; the whole behavioural
-    difference between them lives in the four trailing keyword arguments,
-    all defaulting to "measure nothing extra":
+    Shared skeleton stage for both preview lanes. The lane policy split
+    lives in the four trailing keyword arguments, all defaulting to
+    "measure nothing extra":
 
-    - the measure-and-persist lane supplies ``aac_lattice_measure_fn`` and
-      sets ``capture_cd_rip_verification`` (tens of seconds of CPU per
-      track — every producer of persisted candidate evidence pays it)
+    - the measure-and-persist lane supplies ``aac_lattice_measure_fn``
+      (tens of seconds of CPU per track — every producer of persisted
+      candidate evidence pays it) and sets ``capture_cd_rip_verification``
+      (album-scoped, wall-clock-bounded in ``lib/cd_rip_verifier.py``),
       plus its test injection seams for the analyzer and existing
       resolver;
     - the classify lane (CLI inspector, wrong-match triage UI) supplies
       none of them — a synchronous operator surface must not block on the
       expensive captures.
 
-    ``raw_path`` vs ``audit_path``: an ``AudioValidationMeasurementError``
-    reports the measured path itself while other collaborator failures
-    report the operator-facing audit path, mirroring each lane's
-    historical behaviour exactly (for the classify lane the two are the
-    same string).
+    ``raw_path`` vs ``audit_path`` is the lanes' remaining audit-provenance
+    difference: an ``AudioValidationMeasurementError`` reports the lane's
+    raw input ``path`` while other collaborator failures report the
+    operator-facing display path (``source_display_path`` when set),
+    mirroring each lane's historical behaviour exactly (for the classify
+    lane the two are the same string).
     """
     current_evidence = lane_evidence.current_evidence
     try:
@@ -2229,7 +2232,10 @@ def _measure_lane_world(
 
             cd_rip_verify_fn = verify_cd_rip
         _checkpoint(cancellation_token)
-        measurement = measure_preimport_state(
+        # ``measure_fn`` is the sanctioned kwarg-DI seam for tests that
+        # need to observe or stub the measurement call; resolved at call
+        # time so the module attribute stays patchable for legacy tests.
+        measurement = (measure_fn or measure_preimport_state)(
             path=preview_path,
             mb_release_id=mb_release_id,
             label=label,
@@ -2397,6 +2403,7 @@ def measure_and_persist_candidate_evidence(
     repair_fn: HeaderRepairFn | None = None,
     cancellation_token: CancellationToken | None = None,
     aac_lattice_measure_fn: AacLatticeMeasureFn | None = measure_aac_lattice,
+    measure_fn: Callable[..., PreimportMeasurement] | None = None,
 ) -> ImportPreviewResult:
     """Measure a source folder and persist candidate evidence; never decide.
 
@@ -2581,6 +2588,7 @@ def measure_and_persist_candidate_evidence(
             existing_spectral_resolver=existing_spectral_resolver,
             aac_lattice_measure_fn=aac_lattice_measure_fn,
             capture_cd_rip_verification=True,
+            measure_fn=measure_fn,
         )
         if isinstance(measured, ImportPreviewResult):
             return measured
@@ -3006,6 +3014,7 @@ def preview_import_from_path(
     persist_candidate_evidence: bool = False,
     _already_isolated: bool = False,
     cancellation_token: CancellationToken | None = None,
+    measure_fn: Callable[..., PreimportMeasurement] | None = None,
 ) -> ImportPreviewResult:
     """Classify a real source folder without mutating source files or beets.
 
@@ -3207,6 +3216,7 @@ def preview_import_from_path(
             raw_path=path,
             download_log_id=download_log_id,
             cancellation_token=cancellation_token,
+            measure_fn=measure_fn,
         )
         if isinstance(measured, ImportPreviewResult):
             return measured
