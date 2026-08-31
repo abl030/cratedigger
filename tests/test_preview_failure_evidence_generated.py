@@ -226,15 +226,18 @@ def assert_preview_failure_have_contract(
     audit = observation.audit
     if audit is None:
         raise AssertionError("request-owned preview failure lost its terminal audit")
-    raw_validation = audit.get("validation_result")
-    if not isinstance(raw_validation, str):
+    # ``download_log.validation_result`` is JSONB: whatever the writer
+    # handed it (production writers pass a JSON string), every read of the
+    # terminal audit row returns parsed JSON. Requiring a ``str`` here
+    # described a shape no real read produces (issue #1278 item 7).
+    validation = audit.get("validation_result")
+    if not isinstance(validation, dict):
         raise AssertionError(  # noqa: TRY004 - generated invariant failure
             "terminal audit lost the typed failure payload"
         )
-    detail = json.loads(raw_validation).get("detail")
+    detail = validation.get("detail")
     if not isinstance(detail, str) or not detail:
         raise AssertionError("terminal audit lost the diagnostic detail")
-    validation = json.loads(raw_validation)
     if validation.get("source_path") != observation.expected_failure_source_path:
         raise AssertionError("terminal audit lost the authoritative source path")
     if observation.expected_payload_failed_path is not None:
@@ -861,10 +864,11 @@ class TestPreviewFailureEvidenceCheckerKnownBad(unittest.TestCase):
                 },
             },
             "audit": {
-                "validation_result": json.dumps({
+                # Parsed JSON, the shape a JSONB read returns.
+                "validation_result": {
                     "detail": "decoder failed",
                     "source_path": "/candidate",
-                }),
+                },
                 "beets_detail": "decoder failed",
                 "error_message": "decoder failed",
                 "_current_evidence_id": 7,
@@ -886,16 +890,35 @@ class TestPreviewFailureEvidenceCheckerKnownBad(unittest.TestCase):
         base.update(overrides)
         return PreviewFailureObservation(**base)
 
+    def test_trips_when_the_typed_failure_payload_is_missing(self) -> None:
+        """Known-bad self-test for the payload clause (#1278 item 7).
+
+        The clause used to demand a ``str``, which no JSONB read returns;
+        it now demands the parsed object. Both the absent case and the
+        old string shape must trip it — otherwise the tightening would be
+        a clause that cannot fail.
+        """
+        observed_audit = self._observation().audit
+        assert observed_audit is not None
+        audit = dict(observed_audit)
+        for bad in (None, json.dumps({"detail": "d", "source_path": "/c"})):
+            with self.subTest(validation_result=bad), self.assertRaisesRegex(
+                AssertionError, "typed failure payload",
+            ):
+                assert_preview_failure_have_contract(self._observation(
+                    audit={**audit, "validation_result": bad},
+                ))
+
     def test_trips_when_installed_release_has_no_current_evidence(self) -> None:
         with self.assertRaisesRegex(AssertionError, "without linked HAVE"):
             assert_preview_failure_have_contract(self._observation(
                 after_current_id=None,
                 current_evidence=None,
                 audit={
-                    "validation_result": json.dumps({
+                    "validation_result": {
                         "detail": "decoder failed",
                         "source_path": "/candidate",
-                    }),
+                    },
                     "beets_detail": "decoder failed",
                     "error_message": "decoder failed",
                     "_current_evidence_id": None,
@@ -925,10 +948,10 @@ class TestPreviewFailureEvidenceCheckerKnownBad(unittest.TestCase):
             assert_preview_failure_have_contract(self._observation(
                 audit={
                     **audit,
-                    "validation_result": json.dumps({
+                    "validation_result": {
                         "detail": "decoder failed",
                         "source_path": "",
-                    }),
+                    },
                 },
             ))
 
@@ -953,10 +976,10 @@ class TestPreviewFailureEvidenceCheckerKnownBad(unittest.TestCase):
                 },
                 audit={
                     **audit,
-                    "validation_result": json.dumps({
+                    "validation_result": {
                         "detail": "decoder failed",
                         "source_path": source_path,
-                    }),
+                    },
                 },
             ))
 
