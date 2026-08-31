@@ -7871,8 +7871,8 @@ class FakePipelineDB:
         row.update(entry.extra)
         return row
 
-    @staticmethod
     def _candidate_evidence_alias_projection(
+        self,
         evidence: AlbumQualityEvidence | None,
     ) -> dict[str, object]:
         """Mirror ``_CANDIDATE_EVIDENCE_COLUMNS`` for one candidate join.
@@ -7880,6 +7880,15 @@ class FakePipelineDB:
         Raw, ungated column values — the LEFT JOIN alone, before
         ``overlay_evidence_onto_download_log_row`` adjudicates identity
         and lineage. An unmatched join is all-NULL.
+
+        Nine of the aliases are the accusation block that
+        ``accusation_evidence_columns`` generates on the production side,
+        so they come from ``_accusation_alias_projection`` — the same
+        helper ``get_log`` already uses for the current-evidence prefix,
+        and the owner of the candidate-prefix
+        ``was_converted_from`` -> NULL carve-out. Spelling them a second
+        time here would leave a tenth alias free to drift between the two
+        copies.
         """
         measurement = evidence.measurement if evidence is not None else None
         v0 = evidence.v0_metric if evidence is not None else None
@@ -7888,6 +7897,8 @@ class FakePipelineDB:
             evidence.verified_lossless_proof if evidence is not None else None
         )
         return {
+            **self._accusation_alias_projection(
+                evidence, CANDIDATE_EVIDENCE_PREFIX),
             "_evidence_mb_release_id": (
                 evidence.mb_release_id if evidence is not None else None),
             "_evidence_source_format": (
@@ -7903,12 +7914,6 @@ class FakePipelineDB:
                 if measurement is not None else None),
             "_evidence_lineage_version": (
                 evidence.lineage_version if evidence is not None else None),
-            "_evidence_spectral_grade": (
-                measurement.spectral_grade
-                if measurement is not None else None),
-            "_evidence_spectral_bitrate": (
-                measurement.spectral_bitrate_kbps
-                if measurement is not None else None),
             # ``e.v0_subject`` raw — the overlay owns the subject →
             # wire-kind translation (a five-key map applied with ``.get``,
             # so an unmapped subject passes through rather than raising).
@@ -7920,22 +7925,6 @@ class FakePipelineDB:
                 v0.avg_bitrate_kbps if v0 is not None else None),
             "_evidence_v0_probe_median_bitrate": (
                 v0.median_bitrate_kbps if v0 is not None else None),
-            "_evidence_format": (
-                measurement.format if measurement is not None else None),
-            "_evidence_codec_family": (
-                measurement.codec_family if measurement is not None else None),
-            "_evidence_cliff_hz": (
-                measurement.cliff_hz if measurement is not None else None),
-            "_evidence_storage_format": (
-                evidence.storage_format if evidence is not None else None),
-            "_evidence_filetype_band": (
-                evidence.filetype_band if evidence is not None else None),
-            "_evidence_spectral_subject": (
-                measurement.spectral_subject
-                if measurement is not None else None),
-            # ``NULL::text`` in the production SELECT: this projection is
-            # always candidate source semantics.
-            "_evidence_was_converted_from": None,
             "_evidence_ultrasonic_deficit_db": (
                 measurement.ultrasonic_deficit_db
                 if measurement is not None else None),

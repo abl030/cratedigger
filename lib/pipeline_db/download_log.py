@@ -304,7 +304,14 @@ def overlay_evidence_onto_download_log_row(
 
     ``tests/fakes/pipeline_db.py`` builds that same raw shape and calls
     this function, so the fake cannot be more permissive than production
-    about which evidence facts a reader may recover (issue #1278 item 7).
+    about the GATING this function owns — which evidence facts survive
+    the identity and lineage predicates (issue #1278 item 7). It is not a
+    claim about the whole row shape: production runs one more step the
+    fake does not, converting to a typed row in ``lib/pipeline_db/rows.py``
+    which silently drops any key the TypedDict does not declare, where the
+    fake casts the overlaid dict as-is. The two key sets were measured
+    equal when this was written, but only the gating above is shared
+    machinery holding them that way.
     """
     request_identity = row.pop(
         _REQUEST_IDENTITY_ALIAS, row.get("mb_release_id")

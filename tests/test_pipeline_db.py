@@ -6045,9 +6045,15 @@ class TestWantedTrendPanel(unittest.TestCase):
     ``PipelineDB._dashboard_wanted_trend`` and ``FakePipelineDB``'s own
     sample walk delegate to (issue #1278 item 7). The populated and empty
     window shapes are exercised end to end by
-    ``TestPipelineDashboardMetrics`` and ``TestFakeDashboardMirror``; the
-    zero-elapsed branch is reachable only by handing the function a sample
-    stamped exactly ``now``, which no adapter's fetch can produce.
+    ``TestPipelineDashboardMetrics`` and ``TestFakeDashboardMirror``.
+
+    The zero-elapsed branch needs a sample stamped at or after the
+    captured ``now``. Neither fetch excludes one — both select on a lower
+    bound only — so what makes it awkward to reach end to end is the
+    WRITERS: ``record_cycle_metrics`` stamps ``created_at`` from the real
+    completion time, so through either adapter it takes clock skew or a
+    caller deliberately passing a future ``completed_at``. Driving the
+    function directly is the honest way to pin it.
     """
 
     NOW = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
