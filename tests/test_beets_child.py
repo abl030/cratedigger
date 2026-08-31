@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 from lib.beets_child import BeetsChildRun, run_pinned_beets_child
+from lib.util import beets_subprocess_env
 
 FAKE_PYTHON = "/nix/store/fake-beets/bin/python3"
 CONFIG_INI = (
@@ -71,6 +72,7 @@ class TestRunPinnedBeetsChild(unittest.TestCase):
             sp.CompletedProcess([], 0, b"wrote 3 items\n", b""),
         )
         with runtime_config():
+            expected_env = beets_subprocess_env()
             proc = run_pinned_beets_child(
                 ["-m", "beets", "write", "album_id:=7", "mb_albumid:=x"],
                 timeout=42,
@@ -85,6 +87,11 @@ class TestRunPinnedBeetsChild(unittest.TestCase):
         assert isinstance(env, dict)
         self.assertEqual(env["BEETSDIR"], "/var/lib/cratedigger/beets")
         self.assertEqual(env["CRATEDIGGER_BEETS_PYTHON"], FAKE_PYTHON)
+        # The WHOLE resolved environment, not just the two beets keys — a
+        # spawner that filters PATH/HOME/BEETS_DB out would satisfy the two
+        # key pins while breaking every lane at once (review round, reader
+        # finding 5).
+        self.assertEqual(env, expected_env)
         self.assertEqual(kwargs["timeout"], 42)
         self.assertIs(kwargs["capture_output"], True)
         self.assertNotIn("input", kwargs)
@@ -95,7 +102,7 @@ class TestRunPinnedBeetsChild(unittest.TestCase):
         with runtime_config():
             run_pinned_beets_child(
                 ["/repo/harness/delete_album.py"],
-                timeout=600,
+                timeout=60,
                 input_bytes=b'{"album_id": 7}',
                 runner=runner,
             )

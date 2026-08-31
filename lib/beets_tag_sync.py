@@ -250,7 +250,6 @@ def run_beets_write_tags(
     query_tokens: tuple[str, str],
     *,
     runner: SubprocessRunFn = sp.run,
-    timeout: int = TAG_SYNC_TIMEOUT_SECONDS,
 ) -> BeetsChildRun:
     """Run ``beet write`` for the compound item query in the
     deployment-supplied Beets runtime.
@@ -268,7 +267,7 @@ def run_beets_write_tags(
     """
     proc = run_pinned_beets_child(
         ["-m", "beets", "write", *query_tokens],
-        timeout=timeout,
+        timeout=TAG_SYNC_TIMEOUT_SECONDS,
         runner=runner,
     )
     return BeetsChildRun.from_completed(proc)

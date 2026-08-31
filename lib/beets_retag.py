@@ -367,7 +367,6 @@ def run_beets_modify_retag(
     assignment: str,
     *,
     runner: SubprocessRunFn = sp.run,
-    timeout: int = RETAG_TIMEOUT_SECONDS,
 ) -> BeetsChildRun:
     """Run ``beet modify -a -M -W -y`` for the compound query in the
     deployment-supplied Beets runtime.
@@ -398,7 +397,7 @@ def run_beets_modify_retag(
             RETAG_ALBUM_FLAG, RETAG_NOMOVE_FLAG, RETAG_NOWRITE_FLAG,
             RETAG_YES_FLAG, *query_tokens, assignment,
         ],
-        timeout=timeout,
+        timeout=RETAG_TIMEOUT_SECONDS,
         runner=runner,
     )
     return BeetsChildRun.from_completed(proc)

@@ -89,8 +89,9 @@ children among them (Lanes 2–4) share one spawner,
 `lib/beets_child.py::run_pinned_beets_child` — interpreter/env resolution
 via `beets_subprocess_env`, `[<beets python>, *argv_tail]`, captured output,
 lane-supplied timeout — while each lane keeps its own argv tail and its own
-"did the mutation land" evidence (the exit code is never evidence; see that
-module's docstring). Lane 1's interactive harness session spawns
+"did the mutation land" evidence (an exit code is never SUCCESS evidence;
+the per-lane mechanisms, including the delete child's exit-as-refusal, are
+in that module's docstring). Lane 1's interactive harness session spawns
 `run_beets_harness.sh` instead.
 
 The lanes:

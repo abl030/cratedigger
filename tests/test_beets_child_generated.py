@@ -21,6 +21,7 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.beets_child import run_pinned_beets_child
+from lib.util import beets_subprocess_env
 from tests.test_beets_child import FAKE_PYTHON, _RecordingRunner, runtime_config
 
 #: Tokens a lane could plausibly (or implausibly) put in an argv tail —
@@ -39,6 +40,7 @@ def token_integrity_violations(
     tail: list[str],
     timeout: int,
     payload: bytes | None,
+    expected_env: dict[str, str],
 ) -> list[str]:
     """Accumulating checker: every clause evaluates, ordering cannot mask
     one (`.claude/rules/code-quality.md` § known-bad self-tests)."""
@@ -51,12 +53,11 @@ def token_integrity_violations(
         violations.append("the lane's timeout was not forwarded")
     if kwargs.get("capture_output") is not True:
         violations.append("output is not captured")
-    env = kwargs.get("env")
-    if not (
-        isinstance(env, dict)
-        and env.get("CRATEDIGGER_BEETS_PYTHON") == FAKE_PYTHON
-        and env.get("BEETSDIR")
-    ):
+    # Full equality with beets_subprocess_env()'s own result — a spawner
+    # that filters or rebuilds the env (dropping PATH/HOME/BEETS_DB) would
+    # satisfy any key-subset check while breaking every lane at once
+    # (review round, reader finding 5).
+    if kwargs.get("env") != expected_env:
         violations.append("the resolved beets environment was not forwarded")
     if payload is None:
         if "input" in kwargs:
@@ -89,13 +90,14 @@ class TestTokenIntegrity(unittest.TestCase):
     @example(
         tail=["/repo/harness/delete_album.py"],
         payload=b'{"album_id": 7}',
-        timeout=600,
+        timeout=60,
     )
     def test_runner_receives_the_lane_argv_unchanged(
         self, tail: list[str], payload: bytes | None, timeout: int,
     ) -> None:
         runner = _RecordingRunner()
         with runtime_config():
+            expected_env = beets_subprocess_env()
             run_pinned_beets_child(
                 tail, timeout=timeout, input_bytes=payload, runner=runner,
             )
@@ -104,6 +106,7 @@ class TestTokenIntegrity(unittest.TestCase):
         self.assertEqual(
             token_integrity_violations(
                 argv, dict(kwargs), tail=tail, timeout=timeout, payload=payload,
+                expected_env=expected_env,
             ),
             [],
         )
@@ -115,7 +118,9 @@ class TestTokenIntegrityCheckerTripsOnViolations(unittest.TestCase):
 
     _GOOD_TAIL: ClassVar[list[str]] = ["-m", "beets", "write", "album_id:=7"]
 
-    def _good_call(self) -> tuple[list[str], dict[str, object]]:
+    def _good_call(
+        self,
+    ) -> tuple[list[str], dict[str, object], dict[str, str]]:
         env: dict[str, str] = {
             "CRATEDIGGER_BEETS_PYTHON": FAKE_PYTHON,
             "BEETSDIR": "/var/lib/cratedigger/beets",
@@ -123,7 +128,7 @@ class TestTokenIntegrityCheckerTripsOnViolations(unittest.TestCase):
         kwargs: dict[str, object] = {
             "capture_output": True, "timeout": 42, "env": env,
         }
-        return [FAKE_PYTHON, *self._GOOD_TAIL], kwargs
+        return [FAKE_PYTHON, *self._GOOD_TAIL], kwargs, env
 
     def _assert_single_violation(
         self,
@@ -131,70 +136,91 @@ class TestTokenIntegrityCheckerTripsOnViolations(unittest.TestCase):
         argv: list[str],
         kwargs: dict[str, object],
         *,
+        expected_env: dict[str, str],
         payload: bytes | None = None,
     ) -> None:
         self.assertEqual(
             token_integrity_violations(
                 argv, kwargs, tail=self._GOOD_TAIL, timeout=42, payload=payload,
+                expected_env=expected_env,
             ),
             [message],
         )
 
     def test_a_wrong_interpreter_trips_only_the_prefix_clause(self) -> None:
-        argv, kwargs = self._good_call()
+        argv, kwargs, env = self._good_call()
         argv[0] = "/usr/bin/python3"
         self._assert_single_violation(
             "argv does not begin with the pinned interpreter", argv, kwargs,
+            expected_env=env,
         )
 
     def test_joined_tokens_trip_only_the_tail_clause(self) -> None:
-        argv, kwargs = self._good_call()
+        argv, kwargs, env = self._good_call()
         argv[1:] = [" ".join(self._GOOD_TAIL)]
         self._assert_single_violation(
             "argv tail was not forwarded verbatim", argv, kwargs,
+            expected_env=env,
         )
 
     def test_a_dropped_timeout_trips_only_the_timeout_clause(self) -> None:
-        argv, kwargs = self._good_call()
+        argv, kwargs, env = self._good_call()
         del kwargs["timeout"]
         self._assert_single_violation(
             "the lane's timeout was not forwarded", argv, kwargs,
+            expected_env=env,
         )
 
     def test_uncaptured_output_trips_only_the_capture_clause(self) -> None:
-        argv, kwargs = self._good_call()
+        argv, kwargs, env = self._good_call()
         kwargs["capture_output"] = False
-        self._assert_single_violation("output is not captured", argv, kwargs)
+        self._assert_single_violation(
+            "output is not captured", argv, kwargs, expected_env=env,
+        )
 
     def test_a_missing_env_trips_only_the_environment_clause(self) -> None:
-        argv, kwargs = self._good_call()
+        argv, kwargs, env = self._good_call()
         del kwargs["env"]
         self._assert_single_violation(
             "the resolved beets environment was not forwarded", argv, kwargs,
+            expected_env=env,
+        )
+
+    def test_a_filtered_env_trips_only_the_environment_clause(self) -> None:
+        """A spawner that rebuilds the env from the two beets keys alone
+        (dropping PATH/HOME/BEETS_DB) is a violation — the exact mutant a
+        key-subset check tolerated (review round, reader finding 5)."""
+        argv, kwargs, env = self._good_call()
+        expected = {**env, "PATH": "/usr/bin", "HOME": "/home/op"}
+        self._assert_single_violation(
+            "the resolved beets environment was not forwarded", argv, kwargs,
+            expected_env=expected,
         )
 
     def test_an_uninvited_stdin_payload_trips_only_the_absence_clause(
         self,
     ) -> None:
-        argv, kwargs = self._good_call()
+        argv, kwargs, env = self._good_call()
         kwargs["input"] = b"{}"
         self._assert_single_violation(
             "a stdin payload appeared from nowhere", argv, kwargs,
+            expected_env=env,
         )
 
     def test_a_mutated_stdin_payload_trips_only_the_payload_clause(self) -> None:
-        argv, kwargs = self._good_call()
+        argv, kwargs, env = self._good_call()
         kwargs["input"] = b"tampered"
         self._assert_single_violation(
             "the stdin payload was not forwarded unchanged",
-            argv, kwargs, payload=b'{"album_id": 7}',
+            argv, kwargs, payload=b'{"album_id": 7}', expected_env=env,
         )
 
     def test_the_checker_accepts_the_faithful_call(self) -> None:
-        argv, kwargs = self._good_call()
+        argv, kwargs, env = self._good_call()
         self.assertEqual(
             token_integrity_violations(
                 argv, kwargs, tail=self._GOOD_TAIL, timeout=42, payload=None,
+                expected_env=env,
             ),
             [],
         )
