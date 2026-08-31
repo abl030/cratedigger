@@ -396,6 +396,36 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
         self.assertEqual(outcome.exit_code, 2)
         self.assertIn("readonly database", "\n".join(outcome.beets_lines))
 
+    @patch("harness.import_one.select.select")
+    @patch("harness.import_one.subprocess.Popen")
+    def test_matched_candidate_schema_violation_fails_with_exit_2(
+            self, mock_popen, mock_select):
+        """A matched candidate the strict decode refuses is a failed import.
+
+        The target matches by raw ``album_id``, so the strict
+        ``ChooseMatchMessage`` convert is reached; with a required wire
+        key missing (#1278 item 8) it must surface as exit 2 with the
+        schema violation named — never be swallowed as a skip-and-continue
+        (that mutant survived the whole suite before this pin existed).
+        """
+        from harness import import_one
+
+        message = _choose_match()
+        del message["candidates"][0]["data_source"]
+        proc = _make_harness_proc([message])
+        mock_popen.return_value = proc
+        mock_select.return_value = ([99], [], [])
+
+        outcome = import_one.run_import("/tmp/test", TARGET_MBID)
+
+        self.assertEqual(outcome.exit_code, 2)
+        assert outcome.failure_reason is not None
+        self.assertIn("schema violation", outcome.failure_reason)
+        self.assertIn("data_source", outcome.failure_reason)
+        writes = "".join(
+            call.args[0] for call in proc.stdin.write.call_args_list)
+        self.assertIn('"skip"', writes)
+
 
 class TestHarnessDuplicateRemoveGuard(unittest.TestCase):
     """Invariant: ``remove`` crosses the wire only for one exact duplicate."""

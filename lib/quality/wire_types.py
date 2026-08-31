@@ -47,11 +47,15 @@ import msgspec
 class HarnessItem(msgspec.Struct):
     """Local file as seen by the beets harness during matching.
 
-    Every field stays defaulted (#1278 item 8): ``harness/import_one.py``'s
-    filesystem fallback legitimately constructs path-only items, and the
-    wire key set is audited in ``tests/test_harness_wire_contract_audit.py``.
+    ``path`` is required (#1278 item 8): ``candidate_audio_coverage``
+    keys every coverage decision on it, and every constructor — including
+    ``harness/import_one.py``'s path-only filesystem fallback — supplies
+    it. The rest stays defaulted (``length`` is consulted only inside the
+    coalesced-composite check, like ``HarnessTrackInfo.length`` below);
+    the wire key set is audited in
+    ``tests/test_harness_wire_contract_audit.py``.
     """
-    path: str = ""
+    path: str
     title: str = ""
     artist: str = ""
     album: str = ""
@@ -71,9 +75,13 @@ class HarnessTrackInfo(msgspec.Struct):
     ValidationError if beets leaks an int through (regression guard for
     the PR #98 bug).
 
-    Every field stays defaulted (#1278 item 8): the two Discogs fields
-    below carry documented semantic defaults, and the wire key set is
-    audited in ``tests/test_harness_wire_contract_audit.py``.
+    Every field stays defaulted (#1278 item 8). The two Discogs fields
+    below carry documented semantic defaults. ``length`` IS a decision
+    input, but only for coalesced Discogs components — where
+    ``discogs_indexed_component_count`` (default 1, the no-coalescing
+    semantics) gates the check — so its 0.0 default is inert outside that
+    path, and a dropped key is caught by the key-set audit in
+    ``tests/test_harness_wire_contract_audit.py`` rather than at decode.
     """
     title: str = ""
     artist: str = ""
@@ -134,9 +142,11 @@ class CandidateSummary(msgspec.Struct, rename={"mbid": "album_id"}):
     raises ``msgspec.ValidationError`` at decode instead of silently
     filling a default — `mbid` is release identity (the PR #98 incident
     class), `distance` the accept gate, `data_source` the Discogs
-    second-pass decision in ``lib/beets.py``, and the four track/item
-    lists feed the `extra_tracks` validity scenario and
-    ``candidate_audio_coverage``. The audit-only metadata keeps defaults;
+    second-pass decision in ``lib/beets.py``, `extra_tracks` the validity
+    scenario in ``apply_candidate_scenario``, and `mapping`/`extra_items`
+    (with `extra_tracks` again) the ``candidate_audio_coverage`` inputs.
+    `tracks` and the rest of the metadata are audit-only — no production
+    decision reads them — and keep defaults.
     ``tests/test_harness_wire_contract_audit.py`` pins both the split and
     the key-set equality with the harness serializers.
     """
@@ -144,15 +154,18 @@ class CandidateSummary(msgspec.Struct, rename={"mbid": "album_id"}):
     mbid: str
     distance: float
     data_source: str
-    tracks: list[HarnessTrackInfo]
     mapping: list[TrackMapping]
     extra_items: list[HarnessItem]
     extra_tracks: list[HarnessTrackInfo]
     # Audit metadata — defaulted.
+    tracks: list[HarnessTrackInfo] = []
     artist: str = ""
     album: str = ""
     distance_breakdown: dict[str, float] = {}
-    # Lib-side annotation stamped after decode, never on the wire.
+    # Lib-side annotation stamped after decode — never on the HARNESS
+    # wire (the audit carves it out there), but it IS persisted in
+    # ValidationResult JSONB and read back by web/classify.py and
+    # web/wrong_match_file_service.py. Do not drop or omit-default it.
     is_target: bool = False
     albumdisambig: str = ""
     year: int | None = None

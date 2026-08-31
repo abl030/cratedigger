@@ -27,12 +27,17 @@ from tests.helpers import make_candidate_summary
 
 class TestHarnessItem(unittest.TestCase):
 
-    def test_defaults(self) -> None:
-        item = HarnessItem()
-        self.assertEqual(item.path, "")
+    def test_audit_metadata_defaults(self) -> None:
+        """``path`` is required (#1278 item 8); the rest defaults."""
+        item = HarnessItem(path="01.flac")
+        self.assertEqual(item.path, "01.flac")
         self.assertEqual(item.title, "")
         self.assertIsNone(item.bitrate)
         self.assertEqual(item.format, "")
+
+    def test_path_is_required_at_construction(self) -> None:
+        with self.assertRaises(TypeError):
+            HarnessItem()  # pyright: ignore[reportCallIssue]
 
     def test_full(self) -> None:
         item = HarnessItem(
@@ -46,7 +51,7 @@ class TestHarnessItem(unittest.TestCase):
         self.assertEqual(item.format, "FLAC")
 
     def test_attribute_error_on_typo(self) -> None:
-        item = HarnessItem()
+        item = HarnessItem(path="01.flac")
         with self.assertRaises(AttributeError):
             _ = item.tilte  # type: ignore[attr-defined]
 

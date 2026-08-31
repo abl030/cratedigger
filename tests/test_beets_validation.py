@@ -80,12 +80,11 @@ def complete_msg(candidates: list[dict[str, object]], **overrides: object) -> st
     return json.dumps(base)
 
 
-def make_choose_match_msg(mb_release_id, distance, extra_candidates=None):
+def make_choose_match_msg(mb_release_id, distance):
     """Build a choose_match JSON message with the given MBID and distance."""
-    candidates = [complete_candidate(album_id=mb_release_id, distance=distance)]
-    if extra_candidates:
-        candidates.extend(extra_candidates)
-    return complete_msg(candidates)
+    return complete_msg(
+        [complete_candidate(album_id=mb_release_id, distance=distance)],
+    )
 
 
 def make_session_end():

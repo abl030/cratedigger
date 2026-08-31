@@ -43,7 +43,6 @@ import sys
 import unittest
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar
-from unittest.mock import MagicMock
 
 import msgspec
 
@@ -54,7 +53,7 @@ from lib.quality import (
     HarnessTrackInfo,
     TrackMapping,
 )
-from tests.harness_test_support import isolated_beets_harness, legacy_import_task_stub
+from tests.harness_test_support import beets_module_mocks, isolated_beets_harness
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -81,28 +80,9 @@ class _Distance:
         return [("album", 0.0123), ("tracks", 0.0198)]
 
 
-# Mocked beets modules, mirroring tests/test_harness_serialization.py; the
-# real-beets import + API contract is tests/test_harness_beets2_contract.py.
-_beets_mocks = {
-    "beets": MagicMock(),
-    "beets.config": MagicMock(),
-    "beets.library": MagicMock(),
-    "beets.plugins": MagicMock(),
-    "beets.ui": MagicMock(),
-    "beets.importer": MagicMock(),
-    "beets.importer.actions": MagicMock(),
-    "beets.importer.session": MagicMock(),
-    "beets.importer.tasks": MagicMock(),
-    "beets.autotag": MagicMock(),
-    "beets.dbcore": MagicMock(),
-    "beets.util": MagicMock(),
-}
-_beets_mocks["beets.ui"].get_path_formats = None
-_beets_mocks["beets.ui"].get_replacements = None
-_beets_mocks["beets.importer.session"].ImportSession = type(
-    "ImportSession", (object,), {"resolve_duplicate": lambda *_args: None},
-)
-_beets_mocks["beets.importer.tasks"].ImportTask = legacy_import_task_stub()
+# Mocked beets modules from the shared factory; the real-beets import +
+# API contract is tests/test_harness_beets2_contract.py.
+_beets_mocks = beets_module_mocks()
 # choose_match asserts isinstance against this exact name at serialize time.
 _beets_mocks["beets.autotag"].AlbumMatch = _AlbumMatch
 
@@ -303,11 +283,15 @@ def _nested(message: dict[str, object], *steps: str | int) -> dict[str, object]:
 #: Carve-out rationale — each is a named, deliberate divergence:
 #: - ``type``: message-routing key, consumed by both controllers before the
 #:   typed decode (``lib/beets.py``, ``harness/import_one.py``).
-#: - ``index``: emitted per candidate for raw-transcript debugging; both
-#:   controllers select candidates positionally after matching by
-#:   ``album_id`` (critical rule 3), and the Struct deliberately omits it.
+#: - ``index``: emitted per candidate for raw-transcript debugging; no
+#:   production code reads it — ``lib/beets.py`` matches candidates by
+#:   ``cand.mbid`` directly, and ``harness/import_one.py`` matches by
+#:   ``album_id`` then indexes the list positionally (critical rule 3
+#:   either way). The Struct deliberately omits it.
 #: - ``is_target``: lib-side annotation stamped AFTER decode
-#:   (``lib/beets.py::apply_candidate_scenario``); never on the wire.
+#:   (``lib/beets.py::apply_candidate_scenario``); never on the HARNESS
+#:   wire. It IS persisted in ValidationResult JSONB and read back by
+#:   web-side consumers — the carve-out is inbound-only.
 AUDITED_SURFACES: list[
     tuple[str, tuple[str | int, ...], type, frozenset[str], frozenset[str]]
 ] = [
@@ -465,15 +449,20 @@ class TestRequiredFieldDeclarations(unittest.TestCase):
       ``items`` silently reading as empty is the worst drift shape.
     - ``CandidateSummary``: ``album_id`` (release identity — the #98
       incident class), ``distance`` (the accept gate), ``data_source``
-      (the Discogs second-pass decision in ``lib/beets.py``), ``tracks``/
-      ``mapping``/``extra_items``/``extra_tracks`` (``extra_tracks``
-      validity + ``candidate_audio_coverage`` inputs).
+      (the Discogs second-pass decision in ``lib/beets.py``),
+      ``extra_tracks`` (the validity scenario), ``mapping`` and
+      ``extra_items`` (``candidate_audio_coverage`` inputs). ``tracks``
+      is audit-only — no production decision reads it — and stays
+      defaulted.
     - ``TrackMapping``: both halves; an empty default mapping entry is
       meaningless.
-    - ``HarnessItem`` keeps every default: ``harness/import_one.py``'s
-      filesystem fallback legitimately constructs path-only items.
-    - ``HarnessTrackInfo`` keeps every default: its #1183 fields carry
-      documented semantic defaults, and its key set is audited above.
+    - ``HarnessItem``: ``path`` only — the one field
+      ``candidate_audio_coverage`` decides on; every constructor,
+      including ``harness/import_one.py``'s path-only filesystem
+      fallback, supplies it. The audit metadata stays defaulted.
+    - ``HarnessTrackInfo`` keeps every default: ``length`` is consulted
+      only for coalesced Discogs components, gated by the #1183 fields'
+      documented semantic defaults, and the key set is audited above.
     """
 
     EXPECTED_REQUIRED: ClassVar[list[tuple[type, frozenset[str]]]] = [
@@ -497,14 +486,13 @@ class TestRequiredFieldDeclarations(unittest.TestCase):
                 "album_id",
                 "distance",
                 "data_source",
-                "tracks",
                 "mapping",
                 "extra_items",
                 "extra_tracks",
             }),
         ),
         (TrackMapping, frozenset({"item", "track"})),
-        (HarnessItem, frozenset()),
+        (HarnessItem, frozenset({"path"})),
         (HarnessTrackInfo, frozenset()),
     ]
 

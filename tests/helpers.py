@@ -1722,7 +1722,6 @@ def make_grab_list_entry(
     )
 
 
-
 def make_candidate_summary(
     mbid: str = "",
     distance: float = 0.05,
@@ -1733,13 +1732,18 @@ def make_candidate_summary(
     extra_tracks: list[HarnessTrackInfo] | None = None,
     **audit_overrides: object,
 ) -> CandidateSummary:
-    """Build a CandidateSummary with the required wire fields filled.
+    """Build a wire-valid CandidateSummary with the required fields filled.
 
     The decision-consumed fields are required on the Struct (#1278 item
     8), so every test construction has to supply them; this builder gives
     them producible defaults. Audit metadata rides in ``audit_overrides``
     and is applied by ``setattr`` — msgspec Structs are slotted, so a
-    mistyped field name raises ``AttributeError`` instead of vanishing.
+    mistyped field NAME raises ``AttributeError`` instead of vanishing —
+    and the result is then round-tripped through ``msgspec.convert`` so a
+    mistyped field VALUE (``year="2020"``) raises ``ValidationError``
+    instead of building a shape the harness could never emit. Tests that
+    need a deliberately wire-invalid candidate use a raw dict, never this
+    builder.
     """
     summary = CandidateSummary(
         mbid=mbid,
@@ -1752,7 +1756,9 @@ def make_candidate_summary(
     )
     for name, value in audit_overrides.items():
         setattr(summary, name, value)
-    return summary
+    return msgspec.convert(
+        msgspec.to_builtins(summary), type=CandidateSummary,
+    )
 
 
 def make_validation_result(**overrides: Any) -> ValidationResult:

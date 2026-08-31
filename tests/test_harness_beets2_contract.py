@@ -327,6 +327,9 @@ import os
 import subprocess
 import tempfile
 
+import msgspec
+
+from lib.quality import ChooseMatchMessage
 from tests.harness_test_support import (
     CANDIDATE_INJECTION_ALBUM,
     CANDIDATE_INJECTION_ALBUM_ID,
@@ -420,6 +423,12 @@ with tempfile.TemporaryDirectory(prefix="cratedigger-pretend-purity-") as root:
             assert message["candidates"][0]["album_id"] == CANDIDATE_INJECTION_ALBUM_ID, message
             assert message["cur_artist"] == CANDIDATE_INJECTION_ARTIST, message
             assert message["cur_album"] == CANDIDATE_INJECTION_ALBUM, message
+            # #1278 item 8: the strict wire contract holds against REAL
+            # deployment-Beets output, not only the mocked-beets capture in
+            # tests/test_harness_wire_contract_audit.py — every required
+            # key must be present and correctly typed or this raises.
+            typed = msgspec.convert(message, type=ChooseMatchMessage)
+            assert typed.candidates[0].mbid == CANDIDATE_INJECTION_ALBUM_ID, message
             proc.stdin.write(json.dumps({"action": "skip"}) + "\n")
             proc.stdin.flush()
         elif message["type"] == "session_end":

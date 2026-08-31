@@ -507,6 +507,16 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "harness/import_one.py": (
         "tests.test_disambiguation",
     ),
+    # lib/quality/wire_types.py holds the harness wire Structs (#1278
+    # item 8). The lib/quality/ prefix rule selects only the quality
+    # decision tests; the required/optional split's construction pins and
+    # the decode-boundary consumers live in these three (the key-set audit
+    # itself is ambient — test_*_audit discovery — and needs no entry).
+    "lib/quality/wire_types.py": (
+        "tests.test_validation_result",
+        "tests.test_beets_validation",
+        "tests.test_beets_harness_session",
+    ),
     # lib/surface_outcomes.py is the repository-wide status/exit
     # convention (#1278): a change to it must run the services whose exit
     # maps derive from it and the CLI relay adapters, not only its own
