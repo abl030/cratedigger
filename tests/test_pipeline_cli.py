@@ -590,6 +590,31 @@ class TestCmdSet(unittest.TestCase):
         self.assertEqual(rc, 4)
         self.assertEqual(db.request(8)["status"], "imported")
 
+    def test_vanished_row_conflict_exits_2(self):
+        """A row deleted mid-command classifies not_found: the route twin
+        answers 404, so cmd_set exits 2 (#1278 review F2 — it used to
+        blanket-exit 4 for every conflict kind)."""
+        class VanishingDB(FakePipelineDB):
+            def __init__(self) -> None:
+                super().__init__()
+                self._reads = 0
+
+            def get_request(self, request_id: int):
+                row = super().get_request(request_id)
+                self._reads += 1
+                if self._reads == 1:
+                    self._requests.pop(request_id, None)
+                return row
+
+        db = VanishingDB()
+        db.seed_request(make_request_row(id=12, status="unsearchable"))
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_set(db, MagicMock(id=12, status="wanted"))
+        self.assertEqual(rc, 2)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["reason"], "not_found")
+
     def test_processing_status_change_reports_exact_owner_exit_4(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
