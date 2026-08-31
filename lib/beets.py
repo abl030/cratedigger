@@ -12,6 +12,11 @@ from typing import Final
 import msgspec
 
 from lib.beets_candidate_coverage import candidate_audio_coverage
+from lib.beets_child import (
+    HarnessSpawnFn,
+    harness_session_argv,
+    spawn_harness_session,
+)
 from lib.quality import (
     CandidateSummary,
     ChooseMatchMessage,
@@ -19,7 +24,6 @@ from lib.quality import (
     HarnessSessionEvidence,
     ValidationResult,
 )
-from lib.util import beets_subprocess_env
 
 logger = logging.getLogger("cratedigger")
 
@@ -221,6 +225,7 @@ def _beets_validate_once(
     distance_threshold: float = 0.15,
     *,
     preserve_discogs_flat_subtracks: bool = False,
+    spawn: HarnessSpawnFn = spawn_harness_session,
 ) -> ValidationResult:
     """Dry-run beets import with specific MBID. Returns ValidationResult.
 
@@ -243,10 +248,13 @@ def _beets_validate_once(
     The last two carry ``harness_session`` evidence. Callers rely on the
     invariant and must not invent a placeholder scenario of their own.
     """
-    cmd = [harness_path, "--pretend", "--noincremental"]
-    if preserve_discogs_flat_subtracks:
-        cmd.append("--preserve-discogs-flat-subtracks")
-    cmd.extend(["--search-id", mb_release_id, album_path])
+    cmd = harness_session_argv(
+        harness_path,
+        mb_release_id=mb_release_id,
+        album_path=album_path,
+        pretend=True,
+        preserve_discogs_flat_subtracks=preserve_discogs_flat_subtracks,
+    )
     result = ValidationResult(target_mbid=mb_release_id)
 
     logger.info(f"BEETS_VALIDATE: path={album_path}, target_mbid={mb_release_id}, "
@@ -260,9 +268,7 @@ def _beets_validate_once(
     session_end_seen = False
 
     try:
-        proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE,
-                        text=True, errors="replace",
-                        env=beets_subprocess_env())
+        proc = spawn(cmd)
     except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         result.error = f"Failed to start harness: {e}"
         logger.error(f"BEETS_VALIDATE: {result.error}")
@@ -420,6 +426,8 @@ def beets_validate(
     album_path: str,
     mb_release_id: str,
     distance_threshold: float = 0.15,
+    *,
+    spawn: HarnessSpawnFn = spawn_harness_session,
 ) -> ValidationResult:
     """Validate one exact release, preserving split Discogs audio if needed.
 
@@ -428,6 +436,10 @@ def beets_validate(
     composite earns one second, still-observational harness pass that keeps
     flat indexed subtracks separate. The second result is final: distance and
     every coverage rule are evaluated again, including for force imports.
+
+    ``spawn`` is a definition-time default (tests inject a replacement and
+    never patch a module binding); both harness passes go through the one
+    injected spawner.
     """
 
     result = _beets_validate_once(
@@ -435,6 +447,7 @@ def beets_validate(
         album_path,
         mb_release_id,
         distance_threshold,
+        spawn=spawn,
     )
     if result.scenario != "unmapped_audio":
         return result
@@ -459,4 +472,5 @@ def beets_validate(
         mb_release_id,
         distance_threshold,
         preserve_discogs_flat_subtracks=True,
+        spawn=spawn,
     )

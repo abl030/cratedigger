@@ -4,13 +4,15 @@ Since cratedigger.py has heavy external dependencies (slskd_api, music_tag),
 we mock at the module level before importing, or test via subprocess simulation.
 """
 
+import inspect
 import json
 import os
 import shutil
 import sys
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from collections.abc import Iterator
+from unittest.mock import MagicMock
 
 # Heavy third-party deps (``requests``, ``music_tag``, ``slskd_api``)
 # used to be mocked here at module-discovery time, before the dev shell
@@ -21,7 +23,8 @@ from unittest.mock import MagicMock, patch
 # (e.g. ``lib.youtube_album_service``) that uses real
 # ``requests.Timeout`` / ``ConnectionError`` exception classes.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from lib.beets import apply_candidate_scenario, beets_validate
+from lib.beets import _beets_validate_once, apply_candidate_scenario, beets_validate
+from lib.beets_child import spawn_harness_session
 from lib.grab_list import GrabListEntry
 from lib.processing_paths import stage_to_ai_path
 from lib.quality import (
@@ -141,33 +144,102 @@ def make_coverage_choose_match_msg(
     })
 
 
-def make_validation_proc(message: str) -> MagicMock:
-    proc = MagicMock()
-    proc.stdout = iter([message + "\n", make_session_end() + "\n"])
-    proc.stdin = MagicMock()
-    proc.wait.return_value = 0
-    proc.stderr.read.return_value = ""
-    return proc
+class FakeHarnessStdin:
+    """Typed stand-in for the session's decision pipe; records writes."""
+
+    def __init__(self) -> None:
+        self.written: list[str] = []
+
+    def write(self, data: str, /) -> int:
+        self.written.append(data)
+        return len(data)
+
+    def flush(self) -> None:
+        return None
+
+
+class FakeHarnessStderr:
+    def __init__(self, text: str = "") -> None:
+        self._text = text
+
+    def read(self) -> str:
+        return self._text
+
+
+class FakeHarnessSession:
+    """Typed ``lib.beets_child.HarnessSession`` fake — replaces the
+    MagicMock procs the retired ``lib.beets.sp.Popen`` module-attribute
+    patches used to feed past the seam."""
+
+    stdin: FakeHarnessStdin
+    stdout: Iterator[str]
+    stderr: FakeHarnessStderr
+
+    def __init__(
+        self,
+        lines: list[str],
+        *,
+        stderr: str = "",
+        returncode: int = 0,
+    ) -> None:
+        self.stdin = FakeHarnessStdin()
+        self.stdout = iter(lines)
+        self.stderr = FakeHarnessStderr(stderr)
+        self._returncode = returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self._returncode
+
+    def terminate(self) -> None:
+        return None
+
+    def kill(self) -> None:
+        return None
+
+
+class RecordingSpawn:
+    """Injected ``spawn`` seam: queued sessions plus recorded argv."""
+
+    def __init__(
+        self,
+        *sessions: FakeHarnessSession,
+        raises: Exception | None = None,
+    ) -> None:
+        self._sessions = list(sessions)
+        self._raises = raises
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: list[str]) -> FakeHarnessSession:
+        self.calls.append(list(argv))
+        if self._raises is not None:
+            raise self._raises
+        return self._sessions.pop(0)
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
+
+
+def make_validation_proc(message: str) -> FakeHarnessSession:
+    return FakeHarnessSession([message + "\n", make_session_end() + "\n"])
 
 
 class TestBeetsValidate(unittest.TestCase):
-    """Test beets_validate() function with mocked subprocess.
+    """Test beets_validate() through the injected ``spawn`` seam.
 
-    Every mocked proc sets ``stderr.read.return_value`` to a real string:
-    since issue #888 ``beets_validate`` PERSISTS what that call returns into
-    ``validation_result.harness_session``, so a bare ``MagicMock`` would feed
-    a mock object into a JSONB audit field — test infrastructure more
-    permissive than production (``.claude/rules/test-fidelity.md`` Rule B).
-    The pins that drive a REAL harness subprocess over that boundary live in
+    Every fake session's ``stderr.read()`` returns a real string: since
+    issue #888 ``beets_validate`` PERSISTS what that call returns into
+    ``validation_result.harness_session``, so a mock object there would feed
+    into a JSONB audit field — test infrastructure more permissive than
+    production (``.claude/rules/test-fidelity.md`` Rule B). The pins that
+    drive a REAL harness subprocess over that boundary live in
     ``tests/test_beets_harness_session.py``.
     """
 
     HARNESS = "/fake/harness.sh"
 
-    @patch("lib.beets.sp.Popen")
     def test_discogs_bowie_retries_flat_subtracks_for_complete_mapping(
         self,
-        mock_popen,
     ):
         release_id = "2823685"
         default = make_validation_proc(make_coverage_choose_match_msg(
@@ -190,21 +262,20 @@ class TestBeetsValidate(unittest.TestCase):
             ],
             extra_paths=[],
         ))
-        mock_popen.side_effect = [default, expanded]
+        spawn = RecordingSpawn(default, expanded)
 
-        result = beets_validate(self.HARNESS, "/test/album", release_id, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", release_id, 0.15, spawn=spawn,
+        )
 
         self.assertTrue(result.valid)
         self.assertEqual(result.scenario, "strong_match")
         self.assertEqual(len(result.candidates[0].mapping), 3)
-        self.assertEqual(mock_popen.call_count, 2)
-        second_cmd = mock_popen.call_args_list[1].args[0]
-        self.assertIn("--preserve-discogs-flat-subtracks", second_cmd)
+        self.assertEqual(spawn.call_count, 2)
+        self.assertIn("--preserve-discogs-flat-subtracks", spawn.calls[1])
 
-    @patch("lib.beets.sp.Popen")
     def test_unkle_style_unmapped_file_with_no_reported_extra_retries_flat(
         self,
-        mock_popen,
     ):
         """Issue #1237's second confirmation shape: 13 admitted files, one
         genuinely UNMAPPED with zero ``extra_items`` reported (unlike Bowie's
@@ -230,21 +301,20 @@ class TestBeetsValidate(unittest.TestCase):
             mapped_paths=item_paths,
             extra_paths=[],
         ))
-        mock_popen.side_effect = [default, expanded]
+        spawn = RecordingSpawn(default, expanded)
 
-        result = beets_validate(self.HARNESS, "/test/album", release_id, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", release_id, 0.15, spawn=spawn,
+        )
 
         self.assertTrue(result.valid)
         self.assertEqual(result.scenario, "strong_match")
         self.assertEqual(len(result.candidates[0].mapping), 13)
-        self.assertEqual(mock_popen.call_count, 2)
-        second_cmd = mock_popen.call_args_list[1].args[0]
-        self.assertIn("--preserve-discogs-flat-subtracks", second_cmd)
+        self.assertEqual(spawn.call_count, 2)
+        self.assertIn("--preserve-discogs-flat-subtracks", spawn.calls[1])
 
-    @patch("lib.beets.sp.Popen")
     def test_overlapping_composite_validates_without_retry_and_carries_evidence(
         self,
-        mock_popen,
     ):
         """Issue #1237: a composite duration disagreement with an otherwise
         COMPLETE mapping (no unmapped/extra audio) must validate on the
@@ -265,22 +335,22 @@ class TestBeetsValidate(unittest.TestCase):
             composite_local_length=579.7,
             composite_program_length=781.0,
         ))
-        mock_popen.return_value = proc
+        spawn = RecordingSpawn(proc)
 
-        result = beets_validate(self.HARNESS, "/test/album", release_id, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", release_id, 0.15, spawn=spawn,
+        )
 
         self.assertTrue(result.valid, result.to_json())
         self.assertEqual(result.scenario, "strong_match")
-        self.assertEqual(mock_popen.call_count, 1)
+        self.assertEqual(spawn.call_count, 1)
         self.assertEqual(
             result.incomplete_composite_paths,
             [f"{composite_path} (local=579.7s, indexed_program=781.0s)"],
         )
 
-    @patch("lib.beets.sp.Popen")
     def test_force_distance_override_cannot_bypass_incomplete_mapping(
         self,
-        mock_popen,
     ):
         release_id = "2823685"
         default = make_validation_proc(make_coverage_choose_match_msg(
@@ -305,18 +375,18 @@ class TestBeetsValidate(unittest.TestCase):
             composite_local_length=369.0,
             composite_program_length=408.0,
         ))
-        mock_popen.side_effect = [default, still_incomplete]
+        spawn = RecordingSpawn(default, still_incomplete)
 
-        result = beets_validate(self.HARNESS, "/test/album", release_id, 999.0)
+        result = beets_validate(
+            self.HARNESS, "/test/album", release_id, 999.0, spawn=spawn,
+        )
 
         self.assertFalse(result.valid)
         self.assertEqual(result.scenario, "unmapped_audio")
         self.assertIn("Don't Sit Down", result.detail or "")
 
-    @patch("lib.beets.sp.Popen")
     def test_complete_composite_plus_extra_audio_does_not_retry_flat(
         self,
-        mock_popen,
     ):
         release_id = "2823685"
         proc = make_validation_proc(make_coverage_choose_match_msg(
@@ -330,17 +400,18 @@ class TestBeetsValidate(unittest.TestCase):
             composite_local_length=408.0,
             composite_program_length=408.0,
         ))
-        mock_popen.return_value = proc
+        spawn = RecordingSpawn(proc)
 
-        result = beets_validate(self.HARNESS, "/test/album", release_id, 999.0)
+        result = beets_validate(
+            self.HARNESS, "/test/album", release_id, 999.0, spawn=spawn,
+        )
 
         self.assertFalse(result.valid)
         self.assertEqual(result.scenario, "unmapped_audio")
         self.assertIn("beets extra_items", result.detail or "")
-        self.assertEqual(mock_popen.call_count, 1)
+        self.assertEqual(spawn.call_count, 1)
 
-    @patch("lib.beets.sp.Popen")
-    def test_non_discogs_incomplete_mapping_fails_without_retry(self, mock_popen):
+    def test_non_discogs_incomplete_mapping_fails_without_retry(self):
         release_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         proc = make_validation_proc(make_coverage_choose_match_msg(
             release_id,
@@ -351,29 +422,25 @@ class TestBeetsValidate(unittest.TestCase):
             extra_paths=["03 Don't Sit Down.flac"],
             data_source="MusicBrainz",
         ))
-        mock_popen.return_value = proc
+        spawn = RecordingSpawn(proc)
 
-        result = beets_validate(self.HARNESS, "/test/album", release_id, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", release_id, 0.15, spawn=spawn,
+        )
 
         self.assertFalse(result.valid)
         self.assertEqual(result.scenario, "unmapped_audio")
-        self.assertEqual(mock_popen.call_count, 1)
+        self.assertEqual(spawn.call_count, 1)
 
-    @patch("lib.beets.sp.Popen")
-    def test_good_match(self, mock_popen):
+    def test_good_match(self):
         """Distance 0.05 with threshold 0.15 → valid=True."""
         mbid = "12345678-1234-1234-1234-123456789abc"
-        proc = MagicMock()
-        proc.stdout = iter([
-            make_choose_match_msg(mbid, 0.05) + "\n",
-            make_session_end() + "\n",
-        ])
-        proc.stdin = MagicMock()
-        proc.wait.return_value = 0
-        proc.stderr.read.return_value = ""
-        mock_popen.return_value = proc
+        proc = make_validation_proc(make_choose_match_msg(mbid, 0.05))
+        spawn = RecordingSpawn(proc)
 
-        result = beets_validate(self.HARNESS, "/test/album", mbid, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", mbid, 0.15, spawn=spawn,
+        )
 
         self.assertTrue(result.valid)
         self.assertTrue(result.mbid_found)
@@ -381,86 +448,69 @@ class TestBeetsValidate(unittest.TestCase):
         self.assertAlmostEqual(result.distance, 0.05)
         self.assertIsNone(result.error)
         # Verify skip was sent (dry-run)
-        proc.stdin.write.assert_called_with('{"action":"skip"}\n')
+        self.assertEqual(proc.stdin.written[-1], '{"action":"skip"}\n')
 
-    @patch("lib.beets.sp.Popen")
-    def test_high_distance(self, mock_popen):
+    def test_high_distance(self):
         """Distance 0.30 with threshold 0.15 → valid=False."""
         mbid = "12345678-1234-1234-1234-123456789abc"
-        proc = MagicMock()
-        proc.stdout = iter([
-            make_choose_match_msg(mbid, 0.30) + "\n",
-            make_session_end() + "\n",
-        ])
-        proc.stdin = MagicMock()
-        proc.wait.return_value = 0
-        proc.stderr.read.return_value = ""
-        mock_popen.return_value = proc
+        spawn = RecordingSpawn(
+            make_validation_proc(make_choose_match_msg(mbid, 0.30)),
+        )
 
-        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", mbid, 0.15, spawn=spawn,
+        )
 
         self.assertFalse(result.valid)
         self.assertTrue(result.mbid_found)
         assert result.distance is not None
         self.assertAlmostEqual(result.distance, 0.30)
 
-    @patch("lib.beets.sp.Popen")
-    def test_mbid_not_found(self, mock_popen):
+    def test_mbid_not_found(self):
         """Target MBID not in candidates → valid=False, mbid_found=False."""
         target_mbid = "aaaaaaaa-1111-2222-3333-444444444444"
         wrong_mbid = "bbbbbbbb-1111-2222-3333-444444444444"
-        proc = MagicMock()
-        proc.stdout = iter([
-            make_choose_match_msg(wrong_mbid, 0.05) + "\n",
-            make_session_end() + "\n",
-        ])
-        proc.stdin = MagicMock()
-        proc.wait.return_value = 0
-        proc.stderr.read.return_value = ""
-        mock_popen.return_value = proc
+        spawn = RecordingSpawn(
+            make_validation_proc(make_choose_match_msg(wrong_mbid, 0.05)),
+        )
 
-        result = beets_validate(self.HARNESS,"/test/album", target_mbid, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", target_mbid, 0.15, spawn=spawn,
+        )
 
         self.assertFalse(result.valid)
         self.assertFalse(result.mbid_found)
         self.assertIsNone(result.distance)
 
-    @patch("lib.beets.sp.Popen")
-    def test_no_candidates(self, mock_popen):
+    def test_no_candidates(self):
         """Empty candidates list → valid=False."""
-        proc = MagicMock()
-        proc.stdout = iter([
-            json.dumps({
-                "type": "choose_match",
-                "task_id": 0,
-                "path": "/test",
-                "candidates": [],
-            }) + "\n",
-            make_session_end() + "\n",
-        ])
-        proc.stdin = MagicMock()
-        proc.wait.return_value = 0
-        proc.stderr.read.return_value = ""
-        mock_popen.return_value = proc
+        spawn = RecordingSpawn(make_validation_proc(json.dumps({
+            "type": "choose_match",
+            "task_id": 0,
+            "path": "/test",
+            "candidates": [],
+        })))
 
-        result = beets_validate(self.HARNESS,"/test/album", "some-mbid", 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", "some-mbid", 0.15, spawn=spawn,
+        )
 
         self.assertFalse(result.valid)
         self.assertFalse(result.mbid_found)
 
-    @patch("lib.beets.sp.Popen")
-    def test_subprocess_start_failure(self, mock_popen):
+    def test_subprocess_start_failure(self):
         """Harness fails to start → valid=False, error set."""
-        mock_popen.side_effect = FileNotFoundError("No such file")
+        spawn = RecordingSpawn(raises=FileNotFoundError("No such file"))
 
-        result = beets_validate(self.HARNESS,"/test/album", "some-mbid", 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", "some-mbid", 0.15, spawn=spawn,
+        )
 
         self.assertFalse(result.valid)
         assert result.error is not None
         self.assertIn("Failed to start harness", result.error)
 
-    @patch("lib.beets.sp.Popen")
-    def test_long_stderr_logged_in_full(self, mock_popen):
+    def test_long_stderr_logged_in_full(self):
         """A multi-frame Python traceback in harness stderr must be logged
         in full, not silently truncated. Without the full text, operators
         cannot diagnose ``library.Library()`` crashes (or any other harness
@@ -484,15 +534,12 @@ class TestBeetsValidate(unittest.TestCase):
                            "test fixture must exceed the old [:500] slice")
 
         mbid = "12345678-1234-1234-1234-123456789abc"
-        proc = MagicMock()
-        proc.stdout = iter([])  # harness crashed before sending any JSON
-        proc.stderr.read.return_value = long_stderr
-        proc.stdin = MagicMock()
-        proc.wait.return_value = 1
-        mock_popen.return_value = proc
+        # Harness crashed before sending any JSON: no stdout lines.
+        proc = FakeHarnessSession([], stderr=long_stderr, returncode=1)
+        spawn = RecordingSpawn(proc)
 
         with self.assertLogs("cratedigger", level="WARNING") as cm:
-            beets_validate(self.HARNESS, "/test/album", mbid, 0.15)
+            beets_validate(self.HARNESS, "/test/album", mbid, 0.15, spawn=spawn)
 
         stderr_logs = [r for r in cm.output if "stderr" in r]
         self.assertTrue(stderr_logs,
@@ -506,129 +553,104 @@ class TestBeetsValidate(unittest.TestCase):
                       joined,
                       "the actual exception line was truncated away")
 
-    @patch("lib.beets.sp.Popen")
-    def test_launches_harness_with_beets_subprocess_env(self, mock_popen):
-        """Regression guard: the harness subprocess MUST receive the beets
-        env (HOME override). When cratedigger runs as the systemd service (root,
-        HOME=/root) without this, beets' Discogs plugin can't find its
-        config at `~/.config/beets/` and returns 0 candidates for every
-        --search-id — scenario=mbid_not_found on every Discogs validation.
-
-        Live failures: download_log ids 3604, 3607, 3610, 3611, 3613, 3615,
-        3616 for request ids 1710, 1711 (Blueline Medic - The Apology Wars).
-        """
-        from lib.util import beets_subprocess_env
+    def test_validation_session_argv_is_the_pretend_shape(self) -> None:
+        """Validation must NEVER run a real-import session: the spawned
+        argv is exactly the ``--pretend`` dry-run shape, with the target
+        release and album path as the final tokens
+        (``lib/beets_child.py::harness_session_argv`` owns the shape)."""
         mbid = "12345678-1234-1234-1234-123456789abc"
-        proc = MagicMock()
-        proc.stdout = iter([
-            make_choose_match_msg(mbid, 0.05) + "\n",
-            make_session_end() + "\n",
+        spawn = RecordingSpawn(
+            make_validation_proc(make_choose_match_msg(mbid, 0.05)),
+        )
+
+        beets_validate(self.HARNESS, "/test/album", mbid, 0.15, spawn=spawn)
+
+        self.assertEqual(spawn.calls[0], [
+            self.HARNESS, "--pretend", "--noincremental",
+            "--search-id", mbid, "/test/album",
         ])
-        proc.stdin = MagicMock()
-        proc.wait.return_value = 0
-        proc.stderr.read.return_value = ""
-        mock_popen.return_value = proc
 
-        beets_validate(self.HARNESS, "/test/album", mbid, 0.15)
+    def test_production_spawner_is_the_captured_default(self) -> None:
+        """Regression guard for the Blueline Medic 0-candidates incident
+        class (download_log ids 3604-3616, requests 1710/1711): a harness
+        child resolving beets config from the wrong environment returns 0
+        candidates for every ``--search-id``. Every test here injects
+        ``spawn``, so the one thing no test exercises is that production
+        still gets the real spawner — a definition-time default patching
+        could never replace. ``spawn_harness_session``'s own env/pipes/text
+        behavior is proven against a REAL child in
+        ``tests/test_beets_child.py``; the historical hardcoded
+        ``HOME=/home/abl030`` assertion described the deleted Home-Manager
+        impersonation (tier-2 plan R6) and only ever passed host-dependently.
+        """
+        for fn in (beets_validate, _beets_validate_once):
+            with self.subTest(fn=fn.__name__):
+                default = inspect.signature(fn).parameters["spawn"].default
+                self.assertIs(default, spawn_harness_session)
 
-        # Inspect the kwargs passed to sp.Popen
-        self.assertTrue(mock_popen.called, "sp.Popen was never called")
-        _, kwargs = mock_popen.call_args
-        self.assertIn("env", kwargs,
-                      "Popen called without env=; Discogs plugin will fail "
-                      "under the systemd service (HOME=/root)")
-        env = kwargs["env"]
-        self.assertEqual(
-            env.get("HOME"), "/home/abl030",
-            "HOME must point to the Home Manager profile where beets config "
-            "lives; see lib.util.beets_subprocess_env()")
-        # Should be the exact env shape used elsewhere — single source of
-        # truth lives in lib.util.beets_subprocess_env().
-        self.assertEqual(env.get("HOME"), beets_subprocess_env()["HOME"])
-
-    @patch("lib.beets.sp.Popen")
-    def test_handles_should_resume_then_choose_match(self, mock_popen):
+    def test_handles_should_resume_then_choose_match(self):
         """should_resume followed by choose_match → handles both correctly."""
         mbid = "12345678-1234-1234-1234-123456789abc"
-        proc = MagicMock()
-        proc.stdout = iter([
+        proc = FakeHarnessSession([
             make_should_resume() + "\n",
             make_choose_match_msg(mbid, 0.03) + "\n",
             make_session_end() + "\n",
         ])
-        proc.stdin = MagicMock()
-        proc.wait.return_value = 0
-        proc.stderr.read.return_value = ""
-        mock_popen.return_value = proc
+        spawn = RecordingSpawn(proc)
 
-        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", mbid, 0.15, spawn=spawn,
+        )
 
         self.assertTrue(result.valid)
         # Two skip calls: one for should_resume, one for choose_match
-        self.assertEqual(proc.stdin.write.call_count, 2)
+        self.assertEqual(len(proc.stdin.written), 2)
 
-    @patch("lib.beets.sp.Popen")
-    def test_exact_threshold(self, mock_popen):
+    def test_exact_threshold(self):
         """Distance exactly at threshold → valid=True."""
         mbid = "12345678-1234-1234-1234-123456789abc"
-        proc = MagicMock()
-        proc.stdout = iter([
-            make_choose_match_msg(mbid, 0.15) + "\n",
-            make_session_end() + "\n",
-        ])
-        proc.stdin = MagicMock()
-        proc.wait.return_value = 0
-        proc.stderr.read.return_value = ""
-        mock_popen.return_value = proc
+        spawn = RecordingSpawn(
+            make_validation_proc(make_choose_match_msg(mbid, 0.15)),
+        )
 
-        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", mbid, 0.15, spawn=spawn,
+        )
 
         self.assertTrue(result.valid)  # <= threshold
 
-    @patch("lib.beets.sp.Popen")
-    def test_just_above_threshold(self, mock_popen):
+    def test_just_above_threshold(self):
         """Distance 0.1501 is above 0.15 → valid=False."""
         mbid = "12345678-1234-1234-1234-123456789abc"
-        proc = MagicMock()
-        proc.stdout = iter([
-            make_choose_match_msg(mbid, 0.1501) + "\n",
-            make_session_end() + "\n",
-        ])
-        proc.stdin = MagicMock()
-        proc.wait.return_value = 0
-        proc.stderr.read.return_value = ""
-        mock_popen.return_value = proc
+        spawn = RecordingSpawn(
+            make_validation_proc(make_choose_match_msg(mbid, 0.1501)),
+        )
 
-        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", mbid, 0.15, spawn=spawn,
+        )
 
         self.assertFalse(result.valid)
         self.assertEqual(result.scenario, "high_distance")
 
-    @patch("lib.beets.sp.Popen")
-    def test_above_hard_limit(self, mock_popen):
+    def test_above_hard_limit(self):
         """Distance above 0.30 hard limit → valid=False."""
         mbid = "12345678-1234-1234-1234-123456789abc"
-        proc = MagicMock()
-        proc.stdout = iter([
-            make_choose_match_msg(mbid, 0.35) + "\n",
-            make_session_end() + "\n",
-        ])
-        proc.stdin = MagicMock()
-        proc.wait.return_value = 0
-        proc.stderr.read.return_value = ""
-        mock_popen.return_value = proc
+        spawn = RecordingSpawn(
+            make_validation_proc(make_choose_match_msg(mbid, 0.35)),
+        )
 
-        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", mbid, 0.15, spawn=spawn,
+        )
 
         self.assertFalse(result.valid)
         self.assertEqual(result.scenario, "high_distance")
 
 
-    @patch("lib.beets.sp.Popen")
-    def test_extra_tracks_rejected(self, mock_popen):
+    def test_extra_tracks_rejected(self):
         """MB has more tracks than local files → valid=False even at low distance."""
         mbid = "12345678-1234-1234-1234-123456789abc"
-        proc = MagicMock()
         candidates = [{
             "index": 0, "distance": 0.02, "artist": "Test Artist",
             "album": "Test Album", "album_id": mbid, "year": 2020,
@@ -641,22 +663,18 @@ class TestBeetsValidate(unittest.TestCase):
             "cur_artist": "Test Artist", "cur_album": "Test Album",
             "item_count": 10, "candidates": candidates,
         })
-        proc.stdout = iter([msg + "\n", make_session_end() + "\n"])
-        proc.stdin = MagicMock()
-        proc.wait.return_value = 0
-        proc.stderr.read.return_value = ""
-        mock_popen.return_value = proc
+        spawn = RecordingSpawn(make_validation_proc(msg))
 
-        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", mbid, 0.15, spawn=spawn,
+        )
 
         self.assertFalse(result.valid)
         self.assertEqual(result.scenario, "extra_tracks")
 
-    @patch("lib.beets.sp.Popen")
-    def test_non_official_accepted_if_match(self, mock_popen):
+    def test_non_official_accepted_if_match(self):
         """Non-official release (bootleg/promo) with good match → valid=True."""
         mbid = "12345678-1234-1234-1234-123456789abc"
-        proc = MagicMock()
         candidates = [{
             "index": 0, "distance": 0.05, "artist": "Test Artist",
             "album": "Test Album", "album_id": mbid, "year": 2020,
@@ -667,18 +685,15 @@ class TestBeetsValidate(unittest.TestCase):
             "cur_artist": "Test Artist", "cur_album": "Test Album",
             "item_count": 10, "candidates": candidates,
         })
-        proc.stdout = iter([msg + "\n", make_session_end() + "\n"])
-        proc.stdin = MagicMock()
-        proc.wait.return_value = 0
-        proc.stderr.read.return_value = ""
-        mock_popen.return_value = proc
+        spawn = RecordingSpawn(make_validation_proc(msg))
 
-        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", mbid, 0.15, spawn=spawn,
+        )
 
         self.assertTrue(result.valid)
 
-    @patch("lib.beets.sp.Popen")
-    def test_discogs_numeric_str_album_id_matches(self, mock_popen):
+    def test_discogs_numeric_str_album_id_matches(self):
         """Harness-emitted numeric-str album_id matches str target_mbid.
 
         This is the happy path for Discogs: beets' plugin returns
@@ -688,7 +703,6 @@ class TestBeetsValidate(unittest.TestCase):
         has already done its job.
         """
         target_mbid = "2085134"  # numeric Discogs ID stored as str in DB
-        proc = MagicMock()
         candidates = [{
             "index": 0, "distance": 0.05, "artist": "Blueline Medic",
             "album": "The Apology Wars",
@@ -701,13 +715,11 @@ class TestBeetsValidate(unittest.TestCase):
             "cur_artist": "Blueline Medic", "cur_album": "The Apology Wars",
             "item_count": 11, "candidates": candidates,
         })
-        proc.stdout = iter([msg + "\n", make_session_end() + "\n"])
-        proc.stdin = MagicMock()
-        proc.wait.return_value = 0
-        proc.stderr.read.return_value = ""
-        mock_popen.return_value = proc
+        spawn = RecordingSpawn(make_validation_proc(msg))
 
-        result = beets_validate(self.HARNESS, "/test/album", target_mbid, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", target_mbid, 0.15, spawn=spawn,
+        )
 
         self.assertTrue(result.mbid_found)
         self.assertTrue(result.valid)
@@ -718,8 +730,7 @@ class TestBeetsValidate(unittest.TestCase):
         self.assertEqual(result.candidates[0].mbid, "2085134")
         self.assertIsNone(result.error)
 
-    @patch("lib.beets.sp.Popen")
-    def test_int_album_id_trips_msgspec_boundary(self, mock_popen):
+    def test_int_album_id_trips_msgspec_boundary(self):
         """Regression guard for PR #98: an int album_id on the wire
         should never reach downstream consumers. msgspec.convert raises
         ValidationError, beets_validate surfaces it as result.error,
@@ -731,7 +742,6 @@ class TestBeetsValidate(unittest.TestCase):
         has regressed and we want to know immediately.
         """
         target_mbid = "2085134"
-        proc = MagicMock()
         # int album_id — the shape of the live bug
         candidates = [{
             "index": 0, "distance": 0.05, "artist": "X",
@@ -743,13 +753,11 @@ class TestBeetsValidate(unittest.TestCase):
             "cur_artist": "X", "cur_album": "Y",
             "item_count": 11, "candidates": candidates,
         })
-        proc.stdout = iter([msg + "\n", make_session_end() + "\n"])
-        proc.stdin = MagicMock()
-        proc.wait.return_value = 0
-        proc.stderr.read.return_value = ""
-        mock_popen.return_value = proc
+        spawn = RecordingSpawn(make_validation_proc(msg))
 
-        result = beets_validate(self.HARNESS, "/test/album", target_mbid, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", target_mbid, 0.15, spawn=spawn,
+        )
 
         self.assertFalse(result.valid)
         self.assertFalse(result.mbid_found)
@@ -759,11 +767,9 @@ class TestBeetsValidate(unittest.TestCase):
         assert result.error is not None  # for pyright
         self.assertIn("album_id", result.error)
 
-    @patch("lib.beets.sp.Popen")
-    def test_artist_collab_match(self, mock_popen):
+    def test_artist_collab_match(self):
         """Collab credit — MBID matches and distance is good → valid=True."""
         mbid = "12345678-1234-1234-1234-123456789abc"
-        proc = MagicMock()
         candidates = [{
             "index": 0, "distance": 0.06, "artist": "Action Bronson & Party Supplies",
             "album": "Blue Chips", "album_id": mbid, "year": 2012,
@@ -774,13 +780,11 @@ class TestBeetsValidate(unittest.TestCase):
             "cur_artist": "Action Bronson", "cur_album": "Blue Chips",
             "item_count": 16, "candidates": candidates,
         })
-        proc.stdout = iter([msg + "\n", make_session_end() + "\n"])
-        proc.stdin = MagicMock()
-        proc.wait.return_value = 0
-        proc.stderr.read.return_value = ""
-        mock_popen.return_value = proc
+        spawn = RecordingSpawn(make_validation_proc(msg))
 
-        result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
+        result = beets_validate(
+            self.HARNESS, "/test/album", mbid, 0.15, spawn=spawn,
+        )
 
         self.assertTrue(result.valid)
         self.assertEqual(result.scenario, "strong_match")

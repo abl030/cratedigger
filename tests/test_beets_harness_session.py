@@ -102,12 +102,26 @@ VALIDATION_ERROR_VERDICT_PREFIX = (
 #: ``exec`` makes that wait the exact process ``Popen`` owns, so
 #: ``beets_validate``'s ``finally`` terminates it without orphaning a child.
 _HARNESS_TEMPLATE = """#!/bin/sh
+printf '%s\\n' "$@" > {args_file}
 cat {stdout_file}
 exec 1>&-
 cat {stderr_file} >&2
 exec 2>&-
 {terminal_action}
 """
+
+#: Where the fake harness records its argv, one token per line — so tests
+#: can assert the exact session shape (``--pretend`` vs real import) that
+#: reached the real process boundary.
+FAKE_HARNESS_ARGS_FILENAME = "harness_args.txt"
+
+
+def read_fake_harness_args(directory: str) -> list[str]:
+    """The argv the fake harness actually received, one token per entry."""
+    with open(
+        os.path.join(directory, FAKE_HARNESS_ARGS_FILENAME), encoding="utf-8",
+    ) as handle:
+        return handle.read().splitlines()
 
 
 def _shell_quote(path: str) -> str:
@@ -144,6 +158,9 @@ def write_fake_harness(
     harness_path = os.path.join(directory, "fake_harness.sh")
     with open(harness_path, "w", encoding="utf-8") as handle:
         handle.write(_HARNESS_TEMPLATE.format(
+            args_file=_shell_quote(
+                os.path.join(directory, FAKE_HARNESS_ARGS_FILENAME),
+            ),
             stdout_file=_shell_quote(stdout_file),
             stderr_file=_shell_quote(stderr_file),
             terminal_action=(

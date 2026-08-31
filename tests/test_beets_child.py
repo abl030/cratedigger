@@ -19,7 +19,12 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from unittest.mock import patch
 
-from lib.beets_child import BeetsChildRun, run_pinned_beets_child
+from lib.beets_child import (
+    BeetsChildRun,
+    harness_session_argv,
+    run_pinned_beets_child,
+    spawn_harness_session,
+)
 from lib.util import beets_subprocess_env
 
 FAKE_PYTHON = "/nix/store/fake-beets/bin/python3"
@@ -207,6 +212,89 @@ class TestBeetsChildRun(unittest.TestCase):
         self.assertEqual(run.returncode, 3)
         self.assertEqual(run.stdout, "�out")
         self.assertEqual(run.stderr, "�err")
+
+
+class TestHarnessSessionArgv(unittest.TestCase):
+    """Exhaustive over the builder's whole 2x2 flag domain — the validation
+    session and the real import differ ONLY by ``--pretend``, and both
+    lanes' historical argv shapes are pinned byte-for-byte."""
+
+    def test_every_flag_combination_produces_the_exact_argv(self) -> None:
+        wrapper = "/nix/store/x/harness/run_beets_harness.sh"
+        cases = [
+            (
+                "import",
+                False, False,
+                [wrapper, "--noincremental", "--search-id", "mb-1", "/a"],
+            ),
+            (
+                "import preserving flat subtracks",
+                False, True,
+                [
+                    wrapper, "--noincremental",
+                    "--preserve-discogs-flat-subtracks",
+                    "--search-id", "mb-1", "/a",
+                ],
+            ),
+            (
+                "validation",
+                True, False,
+                [
+                    wrapper, "--pretend", "--noincremental",
+                    "--search-id", "mb-1", "/a",
+                ],
+            ),
+            (
+                "validation preserving flat subtracks",
+                True, True,
+                [
+                    wrapper, "--pretend", "--noincremental",
+                    "--preserve-discogs-flat-subtracks",
+                    "--search-id", "mb-1", "/a",
+                ],
+            ),
+        ]
+        for desc, pretend, preserve, expected in cases:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    harness_session_argv(
+                        wrapper,
+                        mb_release_id="mb-1",
+                        album_path="/a",
+                        pretend=pretend,
+                        preserve_discogs_flat_subtracks=preserve,
+                    ),
+                    expected,
+                )
+
+
+class TestSpawnHarnessSession(unittest.TestCase):
+    def test_spawns_a_real_text_mode_child_with_the_beets_env(self) -> None:
+        """No mocks: a real child proves the production spawner passes
+        ``beets_subprocess_env()``'s environment (the Blueline Medic
+        0-candidates incident class — a harness child resolving config
+        from the wrong environment), pipes all three streams, and runs in
+        text mode."""
+        import sys
+
+        with runtime_config():
+            child_source = (
+                "import os, sys\n"
+                "sys.stdout.write(os.environ['BEETSDIR'] + '\\n')\n"
+                "sys.stdout.write(sys.stdin.readline())\n"
+            )
+            proc = spawn_harness_session([sys.executable, "-c", child_source])
+            stdin = proc.stdin
+            stdout = proc.stdout
+            assert stdin is not None
+            assert stdout is not None
+            stdin.write("echoed\n")
+            stdin.flush()
+            lines = list(stdout)
+            returncode = proc.wait(timeout=30)
+
+        self.assertEqual(lines, ["/var/lib/cratedigger/beets\n", "echoed\n"])
+        self.assertEqual(returncode, 0)
 
 
 if __name__ == "__main__":

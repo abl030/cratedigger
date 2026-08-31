@@ -26,7 +26,10 @@ sys.path.insert(0, ROOT_DIR)
 
 from tests.audio_fixtures import make_test_flac
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.test_beets_harness_session import write_fake_harness
+from tests.test_beets_harness_session import (
+    read_fake_harness_args,
+    write_fake_harness,
+)
 
 #: The one signal a fake harness can be ASKED to die from and be sure it
 #: does. ``SIG_IGN`` dispositions and the blocked-signal mask are both
@@ -367,6 +370,34 @@ class TestRunImportFailureReasons(unittest.TestCase):
             _harness_failure_error(outcome, outcome.exit_code),
             "beets harness ended without applying requested release "
             "release-under-test",
+        )
+
+
+class TestImportSessionArgvShape(unittest.TestCase):
+    def test_import_session_argv_is_the_real_import_shape(self) -> None:
+        """The import session must NEVER dry-run: the argv that reaches
+        the real process boundary carries ``--noincremental`` and the
+        exact ``--search-id``/path pair, and never ``--pretend`` — the
+        validation-only flag (``lib/beets_child.py::harness_session_argv``
+        owns the shape)."""
+        from harness import import_one
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            harness_path = write_fake_harness(
+                tmpdir, stdout_lines=[], process_returncode=0,
+            )
+            with (
+                warnings.catch_warnings(),
+                patch("sys.stderr", io.StringIO()),
+                patch.object(import_one, "HARNESS", harness_path),
+            ):
+                warnings.simplefilter("ignore", ResourceWarning)
+                import_one.run_import(tmpdir, "release-under-test")
+            args = read_fake_harness_args(tmpdir)
+
+        self.assertEqual(
+            args,
+            ["--noincremental", "--search-id", "release-under-test", tmpdir],
         )
 
 
