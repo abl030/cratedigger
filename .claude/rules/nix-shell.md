@@ -16,7 +16,10 @@ nix-shell --run "python3 -m unittest tests.<mod> -v"   # isolated test debugging
 nix-shell --run "python3 -c '...'"                     # one-off
 ```
 
-NEVER run `python3` outside nix-shell in this repo.
+NEVER run `python3` outside nix-shell in this repo. One deliberate
+exception: `scripts/run_final_gate.sh` execs the operator PATH's bare
+`python3` on `scripts/test_substrate.py`, which is stdlib-only by pinned
+contract (`tests/test_test_substrate.py`) precisely so it needs no shell.
 
 `nix develop --command <cmd>` is an exact equivalent and is what
 `scripts/test.sh` runs internally, and what the final gate behind

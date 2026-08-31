@@ -616,7 +616,8 @@ class OwnerMarkerCliTestCase(unittest.TestCase):
         # spawned immediately after the owner usually lands in the SAME
         # bucket — and a mutant that records the CLI's OWN ticks instead of
         # the requested pid's then writes a coincidentally matching value
-        # and survives (measured: killed ~40% of runs). Two full tick
+        # and survives (measured: without this sleep the aimed mutant
+        # survived 43 of 45 runs on this host). Two full tick
         # boundaries of separation makes the two processes' start times
         # differ by construction, so this test's verdict depends on which
         # pid was read rather than on scheduling luck.

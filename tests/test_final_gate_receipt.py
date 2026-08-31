@@ -434,9 +434,10 @@ class FinalGateWrapperTestCase(unittest.TestCase):
     def test_the_wrapper_keeps_no_copy_of_the_gate_it_delegates(self) -> None:
         """A BOUNDED spelling list, not a proof of absence.
 
-        This rejects the specific vocabulary the ported bash carried — the
-        names its own functions and receipt fields used, and the two
-        commands it ran — so re-growing a copy in the recognisable shape
+        This rejects the specific vocabulary the ported bash carried — its
+        function names, its receipt field names, the `/proc` path and
+        receipt-directory prefix it spelled, and the commands it ran
+        (`awk` included) — so re-growing a copy in the recognisable shape
         goes red here. It cannot decide that no second implementation
         exists under different names; a semantic scanner that tried would
         be the prohibited shape (`.claude/rules/code-quality.md`, "Semantic

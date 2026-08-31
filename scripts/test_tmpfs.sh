@@ -90,9 +90,9 @@ setup_cratedigger_test_tmpfs() {
     # issue #1131 removed the nesting since the already-active interpreter
     # needed no re-entry. This is the SAME `if` check either way, so it is
     # not dormant: it still runs, and skips, on every suite invocation
-    # started by scripts/test.sh, the final gate, and
-    # scripts/daily_flake_update.sh, which all set this var before the
-    # dev-shell entry they drive. Only the NESTED case — one shell
+    # started by scripts/test.sh, the final gate,
+    # scripts/daily_flake_update.sh, and scripts/daily_beets_tip_update.sh,
+    # which all set this var before the dev-shell entry they drive. Only the NESTED case — one shell
     # spawning another as its own subprocess and inheriting the var that
     # way — currently has no live example; nothing here needs to change
     # for the next test that legitimately needs it. Only a genuinely
@@ -136,17 +136,20 @@ setup_cratedigger_test_tmpfs() {
     # Anchor the substrate at the repo TOP LEVEL, never $PWD — the same
     # resolution (and the same fallback) nix/shell.nix already uses for its
     # two GC roots, for the same reason (issue #1208 item 3). A shell
-    # entered by path from anywhere else (`nix develop ~/cratedigger`, or
-    # from a subdirectory) has a $PWD that is not the repository, so a
-    # relative path would write NO marker at all there, re-opening the
-    # #1208 item 1 leak this marker exists to close — and would run
-    # whatever `scripts/test_substrate.py` that other directory happened
-    # to contain. Residual, stated rather than defended against: when $PWD
-    # is inside an UNRELATED git repository, `--show-toplevel` resolves to
-    # that repository, exactly as the GC roots above already land there;
-    # when it is in no repository at all, the $PWD fallback simply finds
-    # no substrate and writes no marker (fail closed — that tree is then
-    # never reaped, never wrongly reaped).
+    # entered from a repo SUBDIRECTORY has a $PWD that is not the top
+    # level, so a relative path would write NO marker at all there,
+    # re-opening the #1208 item 1 leak this marker exists to close — and
+    # would run whatever `scripts/test_substrate.py` that other directory
+    # happened to contain. The anchor repairs exactly that in-repo case.
+    # Residual, stated rather than defended against: when $PWD is inside
+    # an UNRELATED git repository, `--show-toplevel` resolves to that
+    # repository — the GC roots described in nix/shell.nix land in that
+    # repository too, though this line EXECUTES a file where they only
+    # plant symlinks; and when $PWD is in no repository at all (e.g.
+    # `nix develop ~/cratedigger` from a non-repo cwd), the $PWD fallback
+    # simply finds no substrate and writes no marker, before and after
+    # the anchor alike (fail closed — that tree is then never reaped,
+    # never wrongly reaped).
     #
     # The CLI is best-effort by construction (it exits 0 on every failure
     # and writes nothing), and the two guards on the call itself keep that
