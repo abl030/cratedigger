@@ -998,7 +998,7 @@ Four categories of tests. Each has different rules for what's acceptable. **All 
 - Implementation assertions (call args, payload shape) are **acceptable and encouraged** here.
 - Examples: `--force` flag forwarded, `--override-min-bitrate` derived correctly, route returns required fields.
 - These are legitimate tests — do not delete them to satisfy an "assert behavior not implementation" rule.
-- For dispatch tests, use `patch_dispatch_externals()` from `tests/helpers.py` — it patches the 5 external edges (`sp.run`, `_cleanup_staged_dir`, `trigger_plex_scan`, `trigger_jellyfin_scan`, `cleanup_disambiguation_orphans`) and yields a `SimpleNamespace` with mock references. Add your own test-specific patches inside the `with` block.
+- For dispatch tests, use `patch_dispatch_externals()` from `tests/helpers.py` — it patches the 4 external edges (`sp.run`, `_cleanup_staged_dir`, `trigger_plex_scan`, `trigger_jellyfin_scan`) and yields a `SimpleNamespace` with mock references. Add your own test-specific patches inside the `with` block.
 
 ### 3. Orchestration tests
 - Must assert **domain outcomes**, not only helper call shapes.
@@ -1039,7 +1039,7 @@ Always use these instead of inventing parallel scaffolding:
 - `make_dispatch_request(**overrides)` — the `DispatchRequest` every `dispatch_import_core` / `_reject_import_from_evidence_decision` test constructs through (#1277). Its optional defaults ARE the dataclass's own, pinned field-by-field by `tests/test_dispatch_request.py`.
 - `make_grab_list_entry(...)` — real `GrabListEntry`
 - `make_ctx_with_fake_db(fake_db)` — `CratediggerContext` wired to a fake
-- `patch_dispatch_externals()` — context manager for the 6 dispatch external patches
+- `patch_dispatch_externals()` — context manager for the 4 dispatch external patches
 - `noop_quality_gate(**kwargs) -> None` — drop-in `quality_gate_fn` stub for dispatch tests that don't care about the post-import gate. Pair with `dispatch_import_core(..., quality_gate_fn=noop_quality_gate)`.
 - `RecordingQualityGate()` — recorder `quality_gate_fn` with `assert_called_once()` / `assert_not_called()` / `call_count` / `calls` (list of kwargs). For tests that assert the gate ran with specific args.
 
