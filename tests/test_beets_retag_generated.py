@@ -44,6 +44,13 @@ G5  (#1093 item 5, both review rounds) A ``failed`` detail's own words must
     "changed occupant" only when a DIFFERENT album now holds it. Each
     direction has shipped as a real, reachable self-contradiction at least
     once.
+G6  (#1278 item-4 reflection, RD1) Once ``modify`` RAN, the verdict is a
+    total function of the re-read library: ``retagged`` iff the old id is
+    Missing and the new id uniquely held, ``failed`` for every other end
+    state — whatever exit code (or exception) the subprocess produced.
+    G1 polices only the ready direction, so before this clause a mutant
+    making ``run.returncode`` a decision input survived the property and
+    was killed only by deterministic pins.
 M1  (#1093 item 2, review F2 + round 3 F1) The retag query's compiled SQL
     clause and the post-retag guard's own matching SQL
     (``BeetsDB.resolve_current_release`` — the exact method
@@ -261,6 +268,37 @@ def check_query_and_assignment_name_the_right_identity(
                 "modify assignment is not the survivor assignment for "
                 f"{new_identity.release_id}: {assignment!r}"
             )
+
+
+def check_post_modify_verdict_is_the_reread_library(
+    outcome: str,
+    calls: list[tuple[tuple[str, str], str]],
+    *,
+    old_after: CurrentBeetsResolution,
+    new_after: CurrentBeetsResolution,
+) -> None:
+    """G6 — once modify RAN, the verdict is a total function of the
+    re-read library (#1278 item-4 reflection, RD1): ``retagged`` iff the
+    old id is observably gone AND the survivor uniquely holds the new id;
+    every other end state is ``failed``. G1 only polices ready claims, so
+    a mutant reading ``run.returncode`` could route a genuinely-moved
+    world into ``failed`` (or any non-ready outcome) unchallenged —
+    "the exit status decided nothing; the re-read library does" had no
+    generated teeth in the failure direction.
+    """
+    if not calls:
+        return
+    reread_says_retagged = isinstance(
+        old_after, CurrentBeetsMissing,
+    ) and isinstance(new_after, CurrentBeetsUnique)
+    expected = RETAG_RETAGGED if reread_says_retagged else RETAG_FAILED
+    if outcome != expected:
+        raise AssertionError(
+            f"after modify ran the re-read library dictates {expected!r} "
+            f"(old_after={type(old_after).__name__}, "
+            f"new_after={type(new_after).__name__}), but the retag "
+            f"returned {outcome!r} — the exit status decides nothing"
+        )
 
 
 def check_both_held_is_never_ready(
@@ -522,6 +560,13 @@ class TestRetagProperties(unittest.TestCase):
         old_ids=(7,), new_ids=(), modify_result="exit_0",
         post_state="old_displaced",
     )
+    # G6's decisive world (#1278 item-4 reflection, RD1): modify exits 1
+    # while the library genuinely moved — a returncode-reading mutant
+    # returns failed here. Pinned so the derandomized suite tier kills
+    # that mutant, not just the fuzz tier.
+    @example(
+        old_ids=(7,), new_ids=(), modify_result="exit_1", post_state="moved",
+    )
     def test_every_world_upholds_the_retag_invariants(
         self,
         old_ids: tuple[int, ...],
@@ -561,6 +606,10 @@ class TestRetagProperties(unittest.TestCase):
             result.outcome, result.detail,
             old_before=old_before, old_after=old_after,
             new_before=new_before, new_after=new_after,
+        )
+        check_post_modify_verdict_is_the_reread_library(
+            result.outcome, calls,
+            old_after=old_after, new_after=new_after,
         )
         self.assertTrue(result.detail, "every outcome carries a diagnostic")
 
@@ -1059,6 +1108,47 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 [(retag_album_query(OLD, album_id=7), retag_assignment(NEW))],
                 old_identity=OLD, new_identity=NEW, old_before=self._ambiguous(OLD),
             )
+
+    def test_a_returncode_driven_failed_over_a_moved_library_is_rejected(
+        self,
+    ) -> None:
+        """G6, the failure direction the residual named: modify ran, the
+        re-read library shows a clean move, and a returncode-reading
+        mutant claims ``failed`` anyway."""
+        with self.assertRaisesRegex(
+            AssertionError, r"the exit status decides nothing",
+        ):
+            check_post_modify_verdict_is_the_reread_library(
+                RETAG_FAILED,
+                [(retag_album_query(OLD, album_id=7), retag_assignment(NEW))],
+                old_after=self._missing(OLD),
+                new_after=self._unique(NEW),
+            )
+
+    def test_a_retagged_claim_over_an_unmoved_library_is_rejected(
+        self,
+    ) -> None:
+        """G6's ready direction (G1 also trips here; G6 must trip on its
+        own when called directly)."""
+        with self.assertRaisesRegex(
+            AssertionError, r"dictates 'failed'",
+        ):
+            check_post_modify_verdict_is_the_reread_library(
+                RETAG_RETAGGED,
+                [(retag_album_query(OLD, album_id=7), retag_assignment(NEW))],
+                old_after=self._unique(OLD),
+                new_after=self._missing(NEW),
+            )
+
+    def test_g6_is_silent_when_modify_never_ran(self) -> None:
+        """Pre-modify refusals (ambiguous, not_held, already_current) are
+        outside G6's claim — it keys on the write having happened."""
+        check_post_modify_verdict_is_the_reread_library(
+            RETAG_AMBIGUOUS,
+            [],
+            old_after=self._ambiguous(OLD),
+            new_after=self._missing(NEW),
+        )
 
     def test_a_ready_outcome_on_the_double_sided_merge_is_rejected(self) -> None:
         with self.assertRaises(AssertionError):
