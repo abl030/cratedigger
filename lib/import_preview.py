@@ -2421,8 +2421,10 @@ def measure_and_persist_candidate_evidence(
     ``download_log_id`` / ``import_job_id`` are how the persisted evidence
     gets linked onto the addressing entities (``download_log.
     candidate_evidence_id`` / ``import_jobs.candidate_evidence_id``).
-    Omitting both still persists the content-addressed evidence row, but
-    triage's FK walk won't find it — pass whichever IDs the call site has.
+    At least one is REQUIRED: persistence refuses an unowned candidate row
+    (``evidence_unowned`` / "no persisted candidate owner"), so omitting
+    both turns the whole call into ``measurement_failed`` — pass whichever
+    ID the call site has.
 
     This is the one surface that enables the AAC frame-lattice capture
     (issue #829 PR-A): the default supplies the real measurement, so every

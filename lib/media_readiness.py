@@ -536,7 +536,17 @@ def normalize_media_metadata(
     try:
         repair_mp3_headers(folder_path)
         for path in _audio_paths(folder_path):
-            _ffprobe_stream_inventory(path)
+            try:
+                _ffprobe_stream_inventory(path)
+            except MediaReadinessError as probe_error:
+                if probe_error.kind != "measurement_failed":
+                    raise
+                # ffprobe rejection alone cannot distinguish bad bytes from
+                # a broken measurement world.  The existing full-decoder
+                # contract makes that distinction: source corruption wins;
+                # if decoding succeeds, preserve the original probe failure.
+                _strict_decode(folder_path)
+                raise
             info, _min_block_size = _flac_streaminfo_from_path(path)
             if info is not None:
                 return prepare_media_readiness(

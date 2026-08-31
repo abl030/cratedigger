@@ -462,6 +462,105 @@ class _RecordingMatchFn:
             )
 
 
+class TestAdvertisedSizeAdmission(unittest.TestCase):
+    """#1301 defense in depth at both outer enqueue boundaries."""
+
+    def test_six_zero_byte_mp3s_never_claim_or_enqueue(self) -> None:
+        cfg = _make_cfg()
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db)
+        username = "sevennorth"
+        file_dir = "Music\\sevennorth\\Summer 2002 Tour EP"
+        ctx.user_upload_speed[username] = 10_000
+        filenames = (
+            "01 - sea and the rhythm.mp3",
+            "02 - jesus the mexican boy.mp3",
+            "03 - red dust.mp3",
+            "04 - someday the waves.mp3",
+            "05 - overhead.mp3",
+            "06 - dead man's will.mp3",
+        )
+        match = MatchResult(
+            matched=True,
+            directory={
+                "directory": file_dir,
+                "files": [
+                    {"filename": filename, "size": 0, "bitRate": 216}
+                    for filename in filenames
+                ],
+            },
+            file_dir=file_dir,
+            candidates=[],
+        )
+        results = {username: {"mp3": [file_dir]}}
+        enqueue = MagicMock()
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.slskd_enqueue_with_outcome", enqueue):
+            attempt = try_enqueue(
+                _make_tracks(), results, "mp3", ctx,
+                match_fn=_const_match(match),
+            )
+
+        self.assertFalse(attempt.matched)
+        enqueue.assert_not_called()
+        self.assertEqual(db.request(1)["status"], "wanted")
+        self.assertIsNone(db.request(1)["active_download_state"])
+        self.assertEqual(db.record_transfer_enqueue_calls, [])
+
+    def test_multi_disc_zero_byte_audio_never_claims_or_enqueues(self) -> None:
+        cfg = _make_cfg()
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db)
+        release = MagicMock()
+        release.media = [
+            MagicMock(medium_number=1),
+            MagicMock(medium_number=2),
+        ]
+        results = {
+            "u00": {"flac": ["u00\\Disc 1"]},
+            "u01": {"flac": ["u01\\Disc 2"]},
+        }
+
+        def match_disc(tracks, _filetype, _dirs, username, _ctx):
+            disc_no = tracks[0]["mediumNumber"]
+            expected_user = "u00" if disc_no == 1 else "u01"
+            if username != expected_user:
+                return _nomatch()
+            return MatchResult(
+                matched=True,
+                directory={
+                    "directory": f"{username}\\Disc {disc_no}",
+                    "files": [{
+                        "filename": f"{disc_no:02d}.flac",
+                        "size": 0 if disc_no == 1 else 1,
+                    }],
+                },
+                file_dir=f"{username}\\Disc {disc_no}",
+                candidates=[],
+            )
+
+        enqueue = MagicMock()
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.slskd_enqueue_with_outcome", enqueue):
+            attempt = try_multi_enqueue(
+                release,
+                _multi_disc_tracks(),
+                results,
+                "flac",
+                ctx,
+                match_fn=match_disc,
+            )
+
+        self.assertFalse(attempt.matched)
+        enqueue.assert_not_called()
+        self.assertEqual(db.request(1)["status"], "wanted")
+        self.assertIsNone(db.request(1)["active_download_state"])
+        self.assertEqual(db.record_transfer_enqueue_calls, [])
+
+
 # ---------------------------------------------------------------------------
 # Wave-shape tests
 # ---------------------------------------------------------------------------
