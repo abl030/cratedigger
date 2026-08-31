@@ -77,11 +77,8 @@ from scripts.run_python_tests import (
     test_subprocess_environment,
     worker_environment,
 )
-from scripts.run_test_suite import (
-    FAILURE_MARKER_PREFIX,
-    TEST_RAM_ROOT_EXHAUSTED,
-    CheckFailureMarker,
-)
+from scripts.run_test_suite import FAILURE_MARKER_PREFIX, CheckFailureMarker
+from scripts.test_substrate import TEST_RAM_ROOT_EXHAUSTED
 from tests._source_pins import pinned_source
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -727,7 +724,7 @@ class TestRunTargetsWorkerExceptionWiring(unittest.TestCase):
     """`_run_targets` really delegates to the measured classifier (#1111),
     with the floor controlled through the SAME configured
     ``CRATEDIGGER_TEST_RAM_MIN_BYTES`` override production honors
-    (`scripts/run_test_suite.py::_default_min_headroom_bytes`, read
+    (`scripts/test_substrate.py::default_min_headroom_bytes`, read
     verbatim including ``0``) — the identical env-var idiom
     `tests/test_test_tmpfs.py` already uses, set for the duration and
     restored in a ``finally`` (#1208 item 2).

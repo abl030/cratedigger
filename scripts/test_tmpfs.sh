@@ -3,7 +3,7 @@
 
 # Field 22 of /proc/<pid>/stat (process start time in clock ticks since
 # boot) — same shape as scripts/run_final_gate.sh's proc_start_ticks and
-# scripts/run_test_suite.py's _proc_start_ticks, kept as its own copy here
+# scripts/test_substrate.py's _proc_start_ticks, kept as its own copy here
 # since no shared shell lib exists yet in this repo.
 _cratedigger_test_tmpfs_proc_start_ticks() {
     local pid=$1 stat
@@ -129,12 +129,12 @@ setup_cratedigger_test_tmpfs() {
     # Ownership marker (issue #1208 item 1): a "<pid> <ticks>\n" pair naming
     # THIS shell process, written immediately after mktemp so the window
     # during which the directory exists with no marker at all is as small
-    # as possible. Same content shape as scripts/run_test_suite.py's own
+    # as possible. Same content shape as scripts/test_substrate.py's own
     # admission-lock holder identity (issue #1208 review D8: NOT the same
     # shape as scripts/run_final_gate.sh's helper/gate identity, which
     # stores pid and start-ticks in two SEPARATE files rather than one
     # "<pid> <ticks>" line — an earlier version of this comment claimed
-    # otherwise). scripts/run_test_suite.py::_scratch_tree_owner_dead reads
+    # otherwise). scripts/test_substrate.py::_scratch_tree_owner_dead reads
     # it on the reaping side and verifies liveness with the same
     # pid-reuse-safe start-ticks comparison those two already use — never
     # on readability alone. A missing or unparseable marker (this write

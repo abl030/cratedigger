@@ -400,7 +400,7 @@ active target gets a distinct cloned database. Each target also runs in a fresh
 interpreter with private Beets and Hypothesis paths. Ambient `TEST_DB_DSN` is
 replaced with an owned clone DSN and children cannot stop the shared cluster.
 The mirror-harness engine remains separately capped at two jobs. A shared
-tmpfs-headroom precondition (`headroom_floor_bytes`/`_check_suite_headroom`,
+tmpfs-headroom precondition (`headroom_floor_bytes`/`check_suite_headroom`,
 the same primitives `scripts/run_test_suite.py::run_suite` and the fuzz burst
 use) runs once before any work and again once per admission CYCLE inside the
 admission loop (a cycle can admit up to `jobs` targets at once, so this is
@@ -660,7 +660,7 @@ lane before ordinary capacity so PostgreSQL work cannot accumulate into a
 low-utilization tail. Any `ENOSPC`, PostgreSQL `DiskFull`, or unexpected loss of
 an ephemeral database aborts further admission and reports that the property
 verdict is invalid. A shared tmpfs-headroom precondition
-(`headroom_floor_bytes`/`_check_suite_headroom`, the same primitives
+(`headroom_floor_bytes`/`check_suite_headroom`, the same primitives
 `scripts/run_test_suite.py::run_suite` uses) runs once before any work and
 again once per admission CYCLE inside the admission loop (a cycle can admit
 up to `worker_count` targets at once, so this is not a per-target check);

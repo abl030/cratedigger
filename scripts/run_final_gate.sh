@@ -88,7 +88,7 @@ status_receipt() {
     fi
     # A receipt's own terminal/bundle FILE surviving is not evidence the
     # bundle DIRECTORY it names still exists — admission-time reaping
-    # (scripts/run_test_suite.py::reap_stale_check_bundles) can remove an
+    # (scripts/test_substrate.py::reap_stale_check_bundles) can remove an
     # idle one out from under an old receipt. One stat check, fail-visible,
     # rather than silently reporting "pass" over evidence that is gone
     # (issue #1111 review m5).

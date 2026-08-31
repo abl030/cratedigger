@@ -42,10 +42,10 @@ from scripts.run_python_tests import (
     TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
     RecordingTextTestResult,
 )
-from scripts.run_test_suite import (
+from scripts.test_substrate import (
     TEST_RAM_ROOT_EXHAUSTED,
     RamRootExhaustedError,
-    _check_suite_headroom,
+    check_suite_headroom,
     headroom_floor_bytes,
     private_runtime_dir,
 )
@@ -1017,12 +1017,12 @@ def main(
 
     ``check_headroom`` mirrors ``run_fuzz_tests.py::main``'s own DI seam
     (issue #1156 item 3): ``None`` (the production default) builds the
-    real ``_check_suite_headroom``/``headroom_floor_bytes`` closure below;
+    real ``check_suite_headroom``/``headroom_floor_bytes`` closure below;
     tests inject a controlled fake so both the preflight call and the
     mid-run admission-loop check can be driven deterministically.
 
     Design note (issue #1156, task scoping explicitly left this call): this
-    coordinator does NOT take ``scripts/run_test_suite.py::
+    coordinator does NOT take ``scripts/test_substrate.py::
     acquire_suite_admission``'s exclusive lock. It is long-running and
     variable-duration (minutes interactively, up to the full overnight
     budget in the daily gate); folding it into the SAME exclusive queue an
@@ -1083,7 +1083,7 @@ def main(
             # the world-model burst does not extend the suite's per-worker
             # multiplier to itself.
             headroom_minimum = headroom_floor_bytes(1)
-            check_headroom = lambda: _check_suite_headroom(
+            check_headroom = lambda: check_suite_headroom(
                 runtime, minimum_bytes=headroom_minimum
             )
         check_headroom()

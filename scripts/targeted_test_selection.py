@@ -122,6 +122,36 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "scripts/test.sh": (
         "tests.test_targeted_test_selection",
     ),
+    "scripts/test_substrate.py": (
+        # Issue #1278 item 6: the shared test-runtime substrate (admission,
+        # headroom, /proc liveness, scratch/bundle/receipt reaping, the
+        # on-disk name spellings) extracted out of scripts/run_test_suite.py.
+        # _direct_test_candidates already derives tests.test_test_substrate
+        # from this basename, but that module only pins the stdlib-only
+        # import boundary — the behaviour these functions actually own is
+        # driven by the modules named here, which no basename probe can
+        # reach. Every test module that imports from scripts.test_substrate
+        # is listed (measured by grep, not guessed), because a substrate
+        # change can break any of them: tests.test_suite_coordinator
+        # (admission lock, holder identity, headroom floors, both reapers),
+        # tests.test_test_tmpfs (the real ".owner" marker written by
+        # scripts/test_tmpfs.sh, read back through _scratch_tree_owner_dead),
+        # tests.test_fuzz_burst / tests.test_world_model_coordinator (the
+        # two bursts' real headroom preconditions and the shared
+        # exhaustion identity), tests.test_parallel_test_runner (the same
+        # identity mid-run) and tests.test_targeted_test_selection (the
+        # admission lockfile a targeted run waits on).
+        # tests.test_targeted_test_selection also pins this very entry's
+        # resolved selection, so deleting it goes RED there instead of
+        # falling silently back to the basename candidate.
+        "tests.test_fuzz_burst",
+        "tests.test_parallel_test_runner",
+        "tests.test_suite_coordinator",
+        "tests.test_targeted_test_selection",
+        "tests.test_test_substrate",
+        "tests.test_test_tmpfs",
+        "tests.test_world_model_coordinator",
+    ),
     "scripts/test_tmpfs.sh": (
         # Issue #1208 review D1: this file had NO entry at all — a solo
         # producer-side edit here (the /proc field index, $$ vs $PPID, the
@@ -131,7 +161,7 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # tests.test_test_tmpfs drives this file's real
         # setup_cratedigger_test_tmpfs end to end, including the real
         # ".owner" marker round-tripped through
-        # scripts.run_test_suite._scratch_tree_owner_dead.
+        # scripts.test_substrate._scratch_tree_owner_dead.
         "tests.test_test_tmpfs",
     ),
     # Shared tests/ infrastructure (issue #1081): none of these are

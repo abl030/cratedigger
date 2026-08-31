@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -20,7 +21,6 @@ from hypothesis.stateful import RuleBasedStateMachine, rule
 
 import tests._hypothesis_profiles  # noqa: F401 - required profile side effect
 from scripts.run_python_tests import TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
-from scripts.run_test_suite import TEST_RAM_ROOT_EXHAUSTED, RamRootExhaustedError
 from scripts.run_world_model_burst import (
     ChildReceipt,
     ReplayReceipt,
@@ -40,7 +40,10 @@ from scripts.run_world_model_burst import (
     replace_canonical_database,
     target_seed,
 )
+from scripts.test_substrate import TEST_RAM_ROOT_EXHAUSTED, RamRootExhaustedError
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+WORLD_MODEL_BURST = REPO_ROOT / "scripts" / "run_world_model_burst.py"
 GENERATED = tuple(
     f"tests.world_model.state_machine.Generated{i}.test_world" for i in range(5)
 )
@@ -589,7 +592,7 @@ class TestWorldModelReplayDatabase(unittest.TestCase):
 
             # Independent review B1 (BLOCKING): check_headroom=None (the
             # production default) drives the REAL private_runtime_dir()/
-            # _check_suite_headroom(), coupling this test -- which is NOT
+            # check_suite_headroom(), coupling this test -- which is NOT
             # about headroom -- to whatever the shared tmpfs root happens
             # to have free at test time. Pin it to an always-satisfied
             # no-op; the tests that ARE about headroom inject their own.
@@ -907,6 +910,59 @@ class TestWorldModelReplayDatabase(unittest.TestCase):
             self.assertTrue(
                 (candidate / ".cratedigger-world-model-database").is_file()
             )
+
+
+class TestWorldModelRealHeadroomWiring(unittest.TestCase):
+    """`main`'s own production `check_headroom is None` branch, driven for real.
+
+    Every other headroom test in this module injects a fake through the
+    `check_headroom` DI seam, so the real closure that seam defaults to --
+    `private_runtime_dir()` plus `headroom_floor_bytes(1)` closed over
+    `check_suite_headroom` -- was unconstrained: neutering it to
+    `lambda: None` left every one of them green (independent review's
+    surviving mutant M6b).
+
+    Twin of `tests.test_fuzz_burst`'s
+    `test_preflight_headroom_exhaustion_aborts_before_any_discovery`, and
+    the same deterministic trick: `CRATEDIGGER_TEST_RAM_MIN_BYTES` past any
+    real host's free bytes, so the genuine measurement trips. No fake disk,
+    no injected seam, and a real subprocess so the CLI's own
+    `check_headroom=None` default is what runs.
+    """
+
+    def test_the_real_preflight_closure_aborts_before_any_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output"
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(WORLD_MODEL_BURST),
+                    "--database", str(root / "canonical"),
+                    "--output-dir", str(output),
+                    "--examples", "1",
+                    "--steps", "1",
+                    "--jobs", "1",
+                    "--seed", "11",
+                ],
+                cwd=REPO_ROOT,
+                env={
+                    **os.environ,
+                    "CRATEDIGGER_TEST_RAM_MIN_BYTES": str(10**18),
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(
+                completed.returncode,
+                TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
+                completed.stdout + completed.stderr,
+            )
+            self.assertIn(TEST_RAM_ROOT_EXHAUSTED, completed.stderr)
+            self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":

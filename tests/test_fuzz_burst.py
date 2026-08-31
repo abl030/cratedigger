@@ -40,7 +40,7 @@ from scripts.run_python_tests import (
     TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
     HypothesisPropertyStats,
 )
-from scripts.run_test_suite import TEST_RAM_ROOT_EXHAUSTED, RamRootExhaustedError
+from scripts.test_substrate import TEST_RAM_ROOT_EXHAUSTED, RamRootExhaustedError
 from tests._source_pins import pinned_source
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -589,7 +589,7 @@ class TestFuzzTargetsMidRunHeadroom(unittest.TestCase):
     """``run_fuzz_targets``'s own admission-loop headroom check (issue
     #1156 item 3) -- distinct from the preflight check ``main`` also runs
     (covered end-to-end in ``TestFuzzRunnerProcess`` below). Both call
-    sites use the identical real ``_check_suite_headroom`` measurement
+    sites use the identical real ``check_suite_headroom`` measurement
     against the same shared tmpfs, so a static real-disk threshold cannot
     tell them apart; a controlled ``check_headroom`` fake proves the loop
     consults it a SECOND time, mid-run, not just once at the top.
@@ -1119,7 +1119,7 @@ class TestFuzzRunnerProcess(unittest.TestCase):
     def setUp(self) -> None:
         # Independent review B1 (BLOCKING): main()'s production default
         # (check_headroom=None) now calls the REAL private_runtime_dir()/
-        # _check_suite_headroom() with a flat 1 GiB floor. Every subprocess
+        # check_suite_headroom() with a flat 1 GiB floor. Every subprocess
         # test in this class that does not deliberately test headroom
         # inherited a live ambient-free-space precondition, coupling them
         # to whatever the shared tmpfs root happens to have free at test
@@ -1607,7 +1607,7 @@ class TestFuzzRunnerProcess(unittest.TestCase):
         bytes can exceed is the same deterministic trick
         TestRunTargetsWorkerExceptionWiring already documents for the
         suite's own classifier -- real headroom_floor_bytes/
-        _check_suite_headroom, genuinely tripped, no fake disk.
+        check_suite_headroom, genuinely tripped, no fake disk.
         """
         env = {
             **os.environ,

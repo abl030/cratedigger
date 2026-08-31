@@ -25,39 +25,42 @@ from scripts.run_python_tests import (
 )
 from scripts.run_targeted_tests import targeted_phases
 from scripts.run_test_suite import (
+    FAILURE_MARKER_PREFIX,
+    CheckFailureMarker,
+    CheckSummary,
+    PhaseSpec,
+    _active_processes_lock,
+    _default_phases,
+    dirty_state_fingerprint,
+    run_suite,
+)
+from scripts.test_substrate import (
     _HEADROOM_BASE_BYTES,
     _HEADROOM_PER_WORKER_BYTES,
     DEFAULT_MIN_HEADROOM_BYTES,
     DEFAULT_RECEIPT_RETIREMENT_MAX_AGE_SECONDS,
-    FAILURE_MARKER_PREFIX,
     SCRATCH_TREE_OWNER_MARKER_NAME,
     SCRATCH_TREE_PREFIX,
     TEST_RAM_ROOT_EXHAUSTED,
-    CheckFailureMarker,
-    CheckSummary,
-    PhaseSpec,
     RamRootExhaustedError,
     SuiteAdmissionTimeout,
-    _active_processes_lock,
-    _check_suite_headroom,
-    _default_min_headroom_bytes,
-    _default_phases,
     _proc_start_ticks,
     _proc_stat_start_ticks,
     _read_lock_holder_identity,
     _scratch_tree_owner_dead,
     acquire_suite_admission,
     admission_lock_path,
-    dirty_state_fingerprint,
+    check_suite_headroom,
+    default_min_headroom_bytes,
     headroom_floor_bytes,
     reap_stale_check_bundles,
     reap_stale_final_gate_receipts,
-    run_suite,
 )
 from tests.parent_signal_guard import guard_kill_statement, guard_source_prelude
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 JS_HELPER = REPO_ROOT / "scripts" / "run_js_checks.sh"
+RUN_SUITE = REPO_ROOT / "scripts" / "run_test_suite.py"
 
 
 def decode_summary(path: Path) -> CheckSummary:
@@ -1382,7 +1385,7 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
             "import os\n"
             "import time\n"
             "from pathlib import Path\n"
-            "from scripts.run_test_suite import reap_stale_check_bundles\n"
+            "from scripts.test_substrate import reap_stale_check_bundles\n"
             "\n"
             f"runtime = Path({str(self.runtime)!r})\n"
             f"bundle = Path({str(bundle)!r})\n"
@@ -1439,7 +1442,7 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
         `tests.test_test_tmpfs.ScratchTreeOwnershipMarkerTestCase`'s real
         SIGKILL round trip (drives the real setup function end to end).
         This pin is kept anyway because it fails fast and names the exact
-        drifted value if the two literals here and in run_test_suite.py
+        drifted value if the two literals here and in test_substrate.py
         ever disagree with each other — it does not replace those."""
         self.assertEqual(SCRATCH_TREE_PREFIX, "cratedigger-tests.")
 
@@ -2171,7 +2174,7 @@ class FinalGateReceiptRetirementTestCase(unittest.TestCase):
             "import os\n"
             "import time\n"
             "from pathlib import Path\n"
-            "from scripts.run_test_suite import reap_stale_final_gate_receipts\n"
+            "from scripts.test_substrate import reap_stale_final_gate_receipts\n"
             "\n"
             f"runtime = Path({str(self.runtime)!r})\n"
             f"receipt = Path({str(receipt)!r})\n"
@@ -2312,7 +2315,7 @@ class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
         original = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
         try:
             os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = "123456"
-            self.assertEqual(_default_min_headroom_bytes(), 123456)
+            self.assertEqual(default_min_headroom_bytes(), 123456)
         finally:
             if original is None:
                 os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
@@ -2331,7 +2334,7 @@ class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
         original_jobs = os.environ.pop("CRATEDIGGER_TEST_JOBS", None)
         try:
             os.environ["CRATEDIGGER_TEST_JOBS"] = "40"
-            floor = _default_min_headroom_bytes()
+            floor = default_min_headroom_bytes()
         finally:
             if original_floor is None:
                 os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
@@ -2356,7 +2359,7 @@ class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
         original_jobs = os.environ.pop("CRATEDIGGER_TEST_JOBS", None)
         try:
             os.environ["CRATEDIGGER_TEST_JOBS"] = "1"
-            floor = _default_min_headroom_bytes()
+            floor = default_min_headroom_bytes()
         finally:
             if original_floor is None:
                 os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
@@ -2379,7 +2382,7 @@ class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
         try:
             os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = "5000000"
             os.environ["CRATEDIGGER_TEST_JOBS"] = "200"
-            floor = _default_min_headroom_bytes()
+            floor = default_min_headroom_bytes()
         finally:
             if original_floor is None:
                 os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
@@ -2397,7 +2400,7 @@ class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
         try:
             os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = "not-a-number"
             with self.assertRaises(ValueError):
-                _default_min_headroom_bytes()
+                default_min_headroom_bytes()
         finally:
             if original is None:
                 os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
@@ -2407,9 +2410,9 @@ class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
     def test_headroom_floor_bytes_rejects_a_worker_count_below_one(self) -> None:
         """Known-bad self-test for headroom_floor_bytes's own guard clause
         (issue #1156 item 3): every OTHER clause in this function is
-        already covered indirectly via _default_min_headroom_bytes's own
+        already covered indirectly via default_min_headroom_bytes's own
         tests below, but THIS clause only trips when a caller passes a
-        non-positive worker_count directly -- _default_min_headroom_bytes
+        non-positive worker_count directly -- default_min_headroom_bytes
         can never reach it, since _expected_worker_count always returns at
         least 1."""
         original = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
@@ -2424,7 +2427,7 @@ class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
 
     def test_headroom_floor_bytes_scales_with_the_given_worker_count(self) -> None:
         """Issue #1156 item 3: headroom_floor_bytes is the SAME formula
-        _default_min_headroom_bytes wraps, but callable directly with an
+        default_min_headroom_bytes wraps, but callable directly with an
         explicit worker_count -- the fuzz and world-model bursts each size
         their own floor this way rather than through the deterministic
         suite's own worker-count prediction."""
@@ -2466,7 +2469,7 @@ class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
         try:
             os.environ["CRATEDIGGER_TEST_RAM_ROOT"] = str(self.runtime)
             with self.assertRaises(RamRootExhaustedError) as caught:
-                _check_suite_headroom(other, minimum_bytes=1 << 62)
+                check_suite_headroom(other, minimum_bytes=1 << 62)
             self.assertIn(str(self.runtime), str(caught.exception))
             self.assertNotIn(str(other), str(caught.exception))
         finally:
@@ -2560,6 +2563,53 @@ class JsCheckHelperTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(len(self.record.read_text().splitlines()), 2)
         self.assertEqual(result.stdout.count("CRATEDIGGER_JS_FAILURE"), 2)
+
+
+class TestCoordinatorRunsAsAScript(unittest.TestCase):
+    """The canonical entry point runs this module AS A SCRIPT, not as an import.
+
+    `scripts/run_tests.sh` execs `python3 scripts/run_test_suite.py`, so
+    Python puts `scripts/` -- not the repository root -- on `sys.path[0]`,
+    and the module's `from scripts.test_substrate import ...` (issue #1278
+    item 6) resolves only because of its own REPO_ROOT `sys.path` bootstrap.
+    Every other test in this tree imports the module as
+    `scripts.run_test_suite` with the root already importable, so before
+    this pin existed, deleting that bootstrap left the whole suite green
+    while the canonical command died on its very first import (independent
+    review's surviving mutant).
+
+    `--help` short-circuits inside argparse, before `run_suite`, so this
+    drives the real script-mode import boundary without running a suite
+    inside a suite. `PYTHONPATH` is stripped deliberately: when this test
+    runs under the canonical suite or targeted runner, the inherited value
+    is the suite worker's own environment
+    (`scripts/run_python_tests.py::_python_path_environment` prepends
+    `REPO_ROOT`), which makes the root importable anyway, so the pin would
+    pass with the bootstrap deleted. The ambient dev-shell `PYTHONPATH`
+    holds only store site-packages entries and would NOT rescue it —
+    measured during independent review; the strip covers the suite-worker
+    case, which is the one every gating run exercises.
+    """
+
+    def test_script_mode_resolves_the_substrate_import(self) -> None:
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key != "PYTHONPATH"
+        }
+
+        completed = subprocess.run(
+            [sys.executable, str(RUN_SUITE), "--help"],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(
+            completed.returncode, 0, completed.stdout + completed.stderr
+        )
 
 
 if __name__ == "__main__":
