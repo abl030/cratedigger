@@ -33,7 +33,7 @@ import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -235,6 +235,47 @@ class TestGeneratedMultiDiscManifest(unittest.TestCase):
         attempt, manifest_files = _run_world(world)
         self.assertTrue(attempt.matched)
         assert_manifest_covers_all_discs(world, attempt, manifest_files)
+
+    @given(
+        sizes=st.tuples(
+            st.one_of(st.none(), st.integers(min_value=-1, max_value=2)),
+            st.one_of(st.none(), st.integers(min_value=-1, max_value=2)),
+        ),
+    )
+    @example(sizes=(0, 1))
+    @example(sizes=(1, None))
+    def test_every_disc_requires_positive_advertised_audio_sizes(
+        self, *, sizes: tuple[int | None, int | None],
+    ) -> None:
+        world = MultiDiscWorld(
+            disc_track_counts=(2, 2),
+            titles_restart_per_disc=False,
+            folder_scheme="CD 0{d}",
+            folder_order=(0, 1),
+        )
+        db, ctx, release, tracks, results = _build_harness(world)
+        directories = list(ctx.folder_cache["peer"].values())
+        for directory, size in zip(directories, sizes, strict=True):
+            for file in directory["files"]:
+                if size is None:
+                    file.pop("size", None)
+                else:
+                    file["size"] = size
+        enqueue = MagicMock(side_effect=_production_shaped_enqueue_stub())
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("lib.enqueue.slskd_enqueue_with_outcome", enqueue):
+            attempt = try_multi_enqueue(
+                release, tracks, results, "mp3", ctx,
+            )
+
+        should_admit = all(size is not None and size > 0 for size in sizes)
+        self.assertEqual(attempt.matched, should_admit)
+        self.assertEqual(enqueue.call_count, 2 if should_admit else 0)
+        self.assertEqual(
+            db.request(1)["status"],
+            "downloading" if should_admit else "wanted",
+        )
 
 
 class TestManifestCheckerTripsOnViolations(unittest.TestCase):

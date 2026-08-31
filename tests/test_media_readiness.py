@@ -119,6 +119,36 @@ class TestFlacReadinessPin(unittest.TestCase):
                     self.assertGreater(fact.sample_count, 0)
                     self.assertIsNotNone(fact.average_bitrate_kbps)
 
+    def test_ffprobe_tool_failure_stays_measurement_failed(self) -> None:
+        """A decode-valid source must not be blamed for an unavailable probe."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "01.wav"
+            subprocess.run(
+                [
+                    "ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi",
+                    "-i", "sine=frequency=440:duration=0.1", str(path),
+                ],
+                check=True,
+                timeout=30,
+            )
+
+            def fail_ffprobe(
+                argv: list[str], **_kwargs: object,
+            ) -> subprocess.CompletedProcess[bytes]:
+                if argv[0] == "ffprobe":
+                    raise OSError("ffprobe unavailable")
+                if argv[0] == "ffmpeg":
+                    return subprocess.CompletedProcess(argv, 0, b"", b"")
+                raise AssertionError(f"unexpected media tool: {argv[0]}")
+
+            with patch(
+                "lib.media_readiness.subprocess.run", side_effect=fail_ffprobe,
+            ), self.assertRaises(MediaReadinessError) as raised:
+                normalize_media_metadata(tmp)
+
+            self.assertEqual(raised.exception.kind, "measurement_failed")
+            self.assertIn("ffprobe failed", str(raised.exception))
+
     def test_container_is_detected_not_inferred_from_extension(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             disguised = Path(tmp) / "01 - mislabeled.ogg"

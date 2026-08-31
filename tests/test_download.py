@@ -2348,6 +2348,80 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             self.assertIsNotNone(album.import_folder)
             self.assertFalse(os.path.exists(album.import_folder or ""))
 
+    def test_zero_byte_mp3_album_uses_audio_corrupt_rejection_owner(self):
+        """#1301: the exact sevennorth manifest must ban, delete, and retry."""
+        from lib.config import CratediggerConfig
+        from lib.download_processing import (
+            CompletionDispatched,
+            process_completed_album,
+        )
+
+        filenames = (
+            "01 - sea and the rhythm.mp3",
+            "02 - jesus the mexican boy.mp3",
+            "03 - red dust.mp3",
+            "04 - someday the waves.mp3",
+            "05 - overhead.mp3",
+            "06 - dead man's will.mp3",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            downloads = os.path.join(tmpdir, "downloads")
+            source_dir = os.path.join(downloads, "Summer 2002 Tour EP")
+            os.makedirs(source_dir)
+            files = []
+            for filename in filenames:
+                source = os.path.join(source_dir, filename)
+                Path(source).write_bytes(b"")
+                file = make_download_file(
+                    filename=f"sevennorth\\Summer 2002 Tour EP\\{filename}",
+                    file_dir="sevennorth\\Summer 2002 Tour EP",
+                    username="sevennorth",
+                    size=0,
+                    bitRate=216,
+                )
+                file.local_path = source
+                files.append(file)
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=8900,
+                status="downloading",
+                artist_name="Iron & Wine",
+                album_title="Summer 2002 Tour EP",
+                year=2002,
+                mb_release_id="live-release-mbid",
+            ))
+            cfg = CratediggerConfig(
+                slskd_download_dir=downloads,
+                beets_validation_enabled=False,
+                processing_dir=_private_processing_dir(tmpdir),
+                beets_tracking_file=os.path.join(tmpdir, "beets-tracking.jsonl"),
+            )
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+            album = make_grab_list_entry(
+                files=files,
+                artist="Iron & Wine",
+                title="Summer 2002 Tour EP",
+                year="2002",
+                mb_release_id="live-release-mbid",
+                db_request_id=8900,
+                db_source="request",
+            )
+
+            result = process_completed_album(album, ctx, import_job_id=61316)
+
+            self.assertIsInstance(result, CompletionDispatched)
+            source_db = ctx.pipeline_db_source
+            assert isinstance(source_db, FakePipelineDBSource)
+            self.assertEqual(len(source_db.reject_and_requeue_calls), 1)
+            rejected = source_db.reject_and_requeue_calls[0]["bv_result"]
+            self.assertEqual(rejected.scenario, "audio_corrupt")
+            self.assertEqual(rejected.denylisted_users, ["sevennorth"])
+            self.assertIsNone(rejected.failed_path)
+            self.assertEqual(db.request(8900)["status"], "wanted")
+            self.assertEqual(db.download_logs[-1].outcome, "rejected")
+            self.assertFalse(os.path.exists(album.import_folder or ""))
+
     def test_audio_corrupt_delete_never_removes_the_processing_albums_root(self):
         """Issue #1077, "smalls" (round-2 review): ``_cleanup_staged_dir``'s
         empty-parent prune was written for the nested slskd download-dir
