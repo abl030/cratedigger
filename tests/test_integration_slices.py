@@ -5607,6 +5607,28 @@ class TestStartupReconciliationSlice(unittest.TestCase):
         db.set_tracks(rid, tracks)
         return rid
 
+    def test_dry_run_labels_cover_every_shared_readiness_bucket(self):
+        """The dry-run rename must be total over the shared rule's buckets.
+
+        ``_classify_dry_run`` now delegates the five-way precedence to
+        ``decisions.classify_plan_readiness_bucket`` and renames its result
+        (issue #1278 item 7). A bucket the mapping forgot would raise
+        ``KeyError`` mid-cycle, so the mapping's exhaustiveness is pinned
+        against the registry rather than against a hand-typed list.
+        """
+        from lib.pipeline_db.decisions import PLAN_READINESS_BUCKETS
+        from lib.startup_reconciliation import _DRY_RUN_BUCKET_LABELS
+
+        self.assertEqual(
+            set(_DRY_RUN_BUCKET_LABELS), set(PLAN_READINESS_BUCKETS),
+        )
+        # The rename must also stay injective — two buckets collapsing to
+        # one label would silently merge summary counts.
+        self.assertEqual(
+            len(set(_DRY_RUN_BUCKET_LABELS.values())),
+            len(PLAN_READINESS_BUCKETS),
+        )
+
     def test_scans_all_wanted_ignoring_pagination_and_backoff(self):
         """Reconciliation must visit every wanted row, not just the
         page-limited / due ones ``get_wanted`` would surface.

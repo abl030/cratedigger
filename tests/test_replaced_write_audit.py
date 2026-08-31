@@ -118,9 +118,16 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "helper from `_shared.py` — same encoder, same output, no SQL change)"
         ),
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", "cd644e51f3670265"): (
+    ("lib/pipeline_db/terminal_outcomes.py", "acecdeb5d9931e7f"): (
         (
-            "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
+            "terminal attempt kind is restricted to the fixed retry-counter "
+            "vocabulary. Issue #1278 item 7 re-keyed this "
+            "(cd644e51f3670265 -> acecdeb5d9931e7f) for the same exponent clamp "
+            "described on requests.py's twin above: "
+            "``POWER(2, LEAST(COALESCE(col, 0), %s))`` with the bound "
+            "``SEARCH_BACKOFF_MAX_EXPONENT``, value-identical below the "
+            "double-precision overflow point and unchanged in guard, "
+            "placeholder discipline, and counter vocabulary"
         ),
     ),
     ("lib/pipeline_db/download_log.py", "95d18a3931276ae1"): (
@@ -355,14 +362,23 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "unchanged throughout, so the fingerprint is unaffected by either change"
         ),
     ),
-    ("lib/pipeline_db/requests.py", "fdbd2821ab3cbb5a"): (
+    ("lib/pipeline_db/requests.py", "1cbaa87e89b44252"): (
         (
             "attempt kind is validated against the fixed retry-counter vocabulary "
             "and every value remains a direct placeholder; an attached processing "
-            "owner makes the compare-and-set a zero-write conflict"
+            "owner makes the compare-and-set a zero-write conflict. Issue #1278 "
+            "item 7 re-keyed this (fdbd2821ab3cbb5a -> 1cbaa87e89b44252) for a "
+            "real SQL change: the doubling exponent is now clamped by a bound "
+            "``SEARCH_BACKOFF_MAX_EXPONENT`` placeholder "
+            "(``POWER(2, LEAST(COALESCE(col, 0), %s))``) because PostgreSQL "
+            "resolves POWER to double precision and raised "
+            "``value out of range: overflow`` once a counter reached 1024. The "
+            "clamp changes no value below that point — the surrounding LEAST "
+            "already capped every exponent past 3 — and the WHERE guard, the "
+            "placeholder discipline, and the counter vocabulary are untouched"
         ),
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", "ebb50341a8d836f6"): (
+    ("lib/pipeline_db/terminal_outcomes.py", "c4d426397b1774f9"): (
         (
             "processing-terminal metadata keys use the validated request-field "
             "vocabulary while exact request and owner predicates retain authority; "
@@ -374,7 +390,12 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "``_insert_terminal_download_audit``'s unrelated download_log-facing "
             "CASE, earlier in this same file — that statement never mentions "
             "album_requests and is outside this audit's scope, but it shifted "
-            "this line only)"
+            "this line only. Issue #1278 item 7 moved this identity again "
+            "(ebb50341a8d836f6 -> c4d426397b1774f9) with no SQL-shape change: "
+            "this scope's own retry-backoff arithmetic now calls the shared "
+            "``decisions.search_backoff_minutes`` instead of restating "
+            "``min(BASE * 2 ** prior, MAX)`` inline, and a lifecycle-bound "
+            "fingerprint hashes the whole enclosing method AST)"
         ),
     ),
 }
@@ -424,7 +445,7 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "atomic terminal typed transition CASes the source status selected by the DAG"
         ),
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", "6674811fa5453c86"): (
+    ("lib/pipeline_db/terminal_outcomes.py", "93a08ead2aed7cf8"): (
         (
             "automation terminalization performs the final exact processing-owner "
             "CAS and clears the owner in the same static request write "
@@ -436,7 +457,13 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "owner-clearing final write are unchanged. Issue #1176 PR1 round 2's "
             "``local_import`` CASE arm in ``_insert_terminal_download_audit``, "
             "earlier in this file, shifted this line only — that statement is "
-            "download_log-facing and never mentions album_requests)"
+            "download_log-facing and never mentions album_requests. Issue "
+            "#1278 item 7 moved this identity again "
+            "(6674811fa5453c86 -> 93a08ead2aed7cf8) with no SQL-shape change, "
+            "for the same reason as its dynamic sibling above: this scope's "
+            "retry-backoff arithmetic now calls the shared "
+            "``decisions.search_backoff_minutes``, and a lifecycle-bound "
+            "fingerprint binds the whole enclosing method AST)"
         ),
     ),
     ("lib/pipeline_db/requests.py", "a2f3083f8cbe8885"): (

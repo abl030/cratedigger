@@ -196,12 +196,55 @@ _LOG_QUERY_TEMPLATE = """
     ORDER BY dl.created_at DESC LIMIT %s
 """
 
+#: The ``download_log.outcome`` values ``get_log``'s two Recents filters
+#: admit. One spelling: the SQL fragments below are rendered from these
+#: tuples, and ``tests/fakes/pipeline_db.py`` imports the same tuples rather
+#: than hand-copying the vocabulary into a Python set.
+LOG_FILTER_IMPORTED_OUTCOMES: tuple[DownloadLogOutcome, ...] = (
+    "success", "force_import", "local_import",
+)
+LOG_FILTER_REJECTED_OUTCOMES: tuple[DownloadLogOutcome, ...] = (
+    "rejected", "failed", "timeout", "measurement_failed",
+)
+
+
+def _sql_outcome_list(outcomes: tuple[DownloadLogOutcome, ...]) -> str:
+    """Render a closed outcome vocabulary as a SQL string list.
+
+    Input is always a module-owned tuple of ``DownloadLogOutcome`` members
+    — never caller data — and every member is re-checked against the
+    canonical taxonomy so a typo cannot reach the database as a silently
+    unmatched literal.
+    """
+    unknown = sorted(set(outcomes) - DOWNLOAD_LOG_OUTCOMES)
+    if unknown:
+        raise ValueError(
+            "not download_log.outcome values: " + ", ".join(unknown)
+        )
+    return ", ".join(f"'{outcome}'" for outcome in outcomes)
+
+
+#: The ``download_log.outcome`` values that mark a row as the MUTATING
+#: successor of an earlier audit row — what ``get_linked_import_logs``
+#: fetches for a kept wrong match. Broader than the Recents "imported"
+#: filter above: it also admits the historical ``manual_import`` lane,
+#: whose rows still link back. The vocabulary is exported so the in-memory
+#: twin filters on the same set; the SQL below keeps its literal, and
+#: ``TestSharedOutcomeVocabularies`` binds the two by round-tripping every
+#: canonical outcome through real PostgreSQL.
+LINKED_IMPORT_OUTCOMES: tuple[DownloadLogOutcome, ...] = (
+    "success", "force_import", "manual_import", "local_import",
+)
+
 #: The only outcome filters ``get_log`` accepts, as literal SQL fragments.
 _LOG_OUTCOME_FILTERS: dict[str, str] = {
-    "imported": "WHERE dl.outcome IN ('success', 'force_import', 'local_import')",
+    "imported": (
+        "WHERE dl.outcome IN "
+        f"({_sql_outcome_list(LOG_FILTER_IMPORTED_OUTCOMES)})"
+    ),
     "rejected": (
         "WHERE dl.outcome IN "
-        "('rejected', 'failed', 'timeout', 'measurement_failed')"
+        f"({_sql_outcome_list(LOG_FILTER_REJECTED_OUTCOMES)})"
     ),
 }
 

@@ -88,6 +88,16 @@ WORLD_MODEL_NEIGHBOURS = (
 )
 
 EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
+    "lib/pipeline_db/decisions.py": (
+        # The lib/pipeline_db/ prefix rule below already adds the heavy
+        # PIPELINE_DB_NEIGHBOURS set, so this file is never zero-neighbour
+        # — but the two modules that actually pin its four pure rules are
+        # named for the package, not the file stem, so
+        # _direct_test_candidates' basename probes (tests.test_decisions /
+        # tests.test_decisions_generated) miss them entirely.
+        "tests.test_pipeline_db_decisions",
+        "tests.test_pipeline_db_decisions_generated",
+    ),
     "pyrightconfig.json": (
         "tests.test_pyright_checks",
     ),

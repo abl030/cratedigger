@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, ClassVar, TypedDict, cast
+from typing import Any, ClassVar, Protocol, TypedDict, cast, get_args
 from unittest.mock import patch
 
 import msgspec
@@ -39,6 +39,7 @@ from lib.import_execution import (
 )
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
+    IMPORT_JOB_TYPES,
     AutomationHandoffResult,
     ImportJob,
     force_import_payload,
@@ -56,8 +57,22 @@ from lib.pipeline_db import (
     SupersedeRaceError,
     TransferLedgerRow,
 )
-from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
-from lib.pipeline_db.dashboard import wanted_trend_panel
+from lib.pipeline_db._shared import (
+    REQUEST_METADATA_RESERVED_FIELDS,
+    SearchPlanItemInput,
+)
+from lib.pipeline_db.dashboard import SEARCH_ERROR_OUTCOMES, wanted_trend_panel
+from lib.pipeline_db.decisions import search_backoff_minutes
+from lib.pipeline_db.download_log import (
+    LINKED_IMPORT_OUTCOMES,
+    LOG_FILTER_IMPORTED_OUTCOMES,
+    LOG_FILTER_REJECTED_OUTCOMES,
+)
+from lib.pipeline_db.requests import (
+    CAPTURE_DOWNLOAD_OUTCOMES,
+    CAPTURE_IMPORT_JOB_TYPES,
+)
+from lib.pipeline_db.terminal_outcomes import _TransactionalTransitionsDB
 from lib.quality import (
     CURRENT_EVIDENCE_LINEAGE_VERSION,
     ActiveDownloadState,
@@ -81,6 +96,13 @@ from tests.helpers import (
 )
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
+
+#: The whole canonical ``download_log.outcome`` taxonomy, typed. Derived
+#: from the Literal rather than hand-listed, so a migration that widens the
+#: CHECK constraint widens every vocabulary round-trip below with it.
+_ALL_DOWNLOAD_LOG_OUTCOMES: tuple[DownloadLogOutcome, ...] = get_args(
+    DownloadLogOutcome,
+)
 
 def requires_postgres(cls):
     """Skip test class if TEST_DB_DSN is not set."""
@@ -6637,6 +6659,332 @@ class TestSearchPlanReadiness(unittest.TestCase):
         self.assertEqual(readiness["wanted_total"], 1)
         self.assertEqual(readiness["wanted_no_plan"], 1)
         self.assertEqual(readiness["wanted_failed_deterministic"], 0)
+
+
+class _ReadinessSeedDB(Protocol):
+    """Exactly the three writes ``_seed_readiness_worlds`` performs.
+
+    Both ``PipelineDB`` and ``FakePipelineDB`` satisfy it structurally,
+    which is what lets one seeding function build the same world in each.
+    """
+
+    def add_request(
+        self,
+        *,
+        artist_name: str,
+        album_title: str,
+        source: str,
+        mb_release_id: str | None = None,
+    ) -> int: ...
+
+    def create_successful_search_plan(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        items: list[SearchPlanItemInput],
+    ) -> int: ...
+
+    def create_failed_search_plan(
+        self,
+        *,
+        request_id: int,
+        generator_id: str,
+        failure_class: str,
+        error_message: str | None = None,
+        transient: bool,
+    ) -> int: ...
+
+
+def _seed_readiness_worlds(
+    db: _ReadinessSeedDB, *, current: str, old: str,
+) -> None:
+    """Build one wanted request per readiness bucket in ``db``.
+
+    ``db`` is either a real ``PipelineDB`` or a ``FakePipelineDB`` — the
+    calls are identical, which is the point: the two must agree on how
+    they bucket the same world.
+    """
+
+    def _items(query: str) -> list[SearchPlanItemInput]:
+        return [SearchPlanItemInput(
+            ordinal=0, strategy="slot_0", query=query,
+            canonical_query_key=query.lower(),
+        )]
+
+    def _wanted(suffix: str) -> int:
+        return db.add_request(
+            mb_release_id=f"readiness-parity-{suffix}",
+            artist_name="Parity", album_title=suffix, source="request",
+        )
+
+    db.create_successful_search_plan(
+        request_id=_wanted("searchable"), generator_id=current,
+        items=_items("query A"),
+    )
+    # Two searchable rows, so a bucket that silently collapsed to a count
+    # of one per bucket could not pass.
+    db.create_successful_search_plan(
+        request_id=_wanted("searchable-2"), generator_id=current,
+        items=_items("query B"),
+    )
+    db.create_successful_search_plan(
+        request_id=_wanted("legacy"), generator_id=old,
+        items=_items("query C"),
+    )
+    db.create_failed_search_plan(
+        request_id=_wanted("deterministic"), generator_id=current,
+        failure_class="no_runnable_query", error_message="empty",
+        transient=False,
+    )
+    db.create_failed_search_plan(
+        request_id=_wanted("transient"), generator_id=current,
+        failure_class="resolver_unavailable", error_message="down",
+        transient=True,
+    )
+    # Deterministic must outrank transient on the same request.
+    both = _wanted("both-failures")
+    db.create_failed_search_plan(
+        request_id=both, generator_id=current,
+        failure_class="resolver_unavailable", error_message="down",
+        transient=True,
+    )
+    db.create_failed_search_plan(
+        request_id=both, generator_id=current,
+        failure_class="no_runnable_query", error_message="empty",
+        transient=False,
+    )
+    # A failure recorded under an older generator id proves nothing about
+    # the current one.
+    db.create_failed_search_plan(
+        request_id=_wanted("old-generator-failure"), generator_id=old,
+        failure_class="no_runnable_query", error_message="historical",
+        transient=False,
+    )
+    _wanted("no-plan")
+
+
+@requires_postgres
+class TestPlanReadinessParity(unittest.TestCase):
+    """Real PostgreSQL and the in-memory twin bucket the same world alike.
+
+    Issue #1278 item 7: the twin used to restate the five-bucket
+    precedence in Python beside production's SQL CASE ladder. It now calls
+    ``decisions.classify_plan_readiness_bucket``; this pins that the CASE
+    ladder still agrees with it over a world covering every bucket.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+        self.fake = FakePipelineDB()
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_real_and_fake_readiness_agree_across_every_bucket(self):
+        for db in (self.db, self.fake):
+            _seed_readiness_worlds(db, current="gen-current", old="gen-old")
+        live = self.db.get_search_plan_readiness("gen-current")
+        twin = self.fake.get_search_plan_readiness("gen-current")
+        self.assertEqual(live, twin)
+        # The world is not degenerate: every bucket is populated, so an
+        # all-zeros agreement cannot pass this test.
+        self.assertEqual(live, {
+            "generator_id": "gen-current",
+            "wanted_total": 8,
+            "wanted_searchable": 2,
+            "wanted_legacy": 1,
+            "wanted_failed_deterministic": 2,
+            "wanted_failed_transient": 1,
+            "wanted_no_plan": 2,
+        })
+
+
+@requires_postgres
+class TestSearchBackoffSqlParity(unittest.TestCase):
+    """Both SQL retry-pacing writers agree with ``search_backoff_minutes``.
+
+    The Python callers now share one formula; these two adapters keep
+    their own ``LEAST(base * POWER(2, LEAST(counter, cap)), max)``
+    expression inside the atomic UPDATE that increments the counter. The
+    domain deliberately crosses 1024: PostgreSQL resolves ``POWER`` to
+    ``double precision``, and before issue #1278 item 7 clamped the
+    exponent, ``POWER(2, 1024)`` raised ``value out of range: overflow``
+    instead of being capped. The upper bound stops at 4096 because that is
+    already an order of magnitude past the live worst counter (407,
+    measured 2026-08-31) — nothing production can reach is excluded.
+    """
+
+    #: Prior-attempt counts the pin drives end to end.
+    PRIORS = (0, 1, 2, 3, 4, 10, 407, 1022, 1023, 1024, 1025, 4096)
+
+    def setUp(self):
+        self.db = make_db()
+        self.request_id = self.db.add_request(
+            mb_release_id="backoff-sql-parity",
+            artist_name="Backoff", album_title="Parity", source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def _seed_counter(self, column: str, prior: int) -> None:
+        self.db._execute(
+            f"UPDATE album_requests SET {column} = %s WHERE id = %s",
+            (prior, self.request_id),
+        )
+
+    def _observed_backoff_minutes(self) -> int:
+        cur = self.db._execute(
+            "SELECT last_attempt_at, next_retry_after "
+            "FROM album_requests WHERE id = %s",
+            (self.request_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        delta = row["next_retry_after"] - row["last_attempt_at"]
+        return round(delta.total_seconds() / 60)
+
+    def test_request_record_attempt_matches_the_shared_formula(self):
+        for attempt_type in ("search", "download", "validation"):
+            for prior in self.PRIORS:
+                with self.subTest(attempt_type=attempt_type, prior=prior):
+                    self._seed_counter(f"{attempt_type}_attempts", prior)
+                    self.assertTrue(self.db.record_attempt(
+                        self.request_id, attempt_type,
+                        expected_status="wanted",
+                    ))
+                    self.assertEqual(
+                        self._observed_backoff_minutes(),
+                        search_backoff_minutes(prior),
+                    )
+
+    def test_terminal_record_attempt_matches_the_shared_formula(self):
+        boundaries: list[str] = []
+        transitions_db = _TransactionalTransitionsDB(
+            self.db, boundaries.append,
+        )
+        for prior in self.PRIORS:
+            with self.subTest(prior=prior):
+                self._seed_counter("validation_attempts", prior)
+                self.assertTrue(transitions_db.record_attempt(
+                    self.request_id, "validation",
+                    expected_status="wanted",
+                ))
+                self.assertEqual(
+                    self._observed_backoff_minutes(),
+                    search_backoff_minutes(prior),
+                )
+        self.assertEqual(
+            set(boundaries), {"request.attempt.validation"},
+        )
+
+
+@requires_postgres
+class TestSharedOutcomeVocabularies(unittest.TestCase):
+    """Every exported outcome vocabulary matches the SQL it describes.
+
+    Issue #1278 item 7 exported these four tuples so the in-memory twin
+    stops hand-copying them. The SQL keeps its own literals, so each tuple
+    is bound to its query by round-tripping the WHOLE canonical outcome
+    taxonomy through real PostgreSQL and asserting the query admits
+    exactly the members — a drift in either direction fails here.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _request(self, suffix: str) -> int:
+        return self.db.add_request(
+            mb_release_id=f"vocabulary-{suffix}",
+            artist_name="Vocabulary", album_title=suffix, source="request",
+        )
+
+    def _captured(self, suffix: str) -> bool:
+        overlay = self.db.get_pipeline_overlay([f"vocabulary-{suffix}"])
+        return bool(overlay[f"vocabulary-{suffix}"]["has_captured_history"])
+
+    def test_log_filter_outcomes_match_get_log(self):
+        by_outcome: dict[str, int] = {}
+        for outcome in sorted(_ALL_DOWNLOAD_LOG_OUTCOMES):
+            request_id = self._request(f"log-{outcome}")
+            by_outcome[outcome] = self.db.log_download(
+                request_id=request_id, outcome=outcome,
+            )
+        for name, vocabulary in (
+            ("imported", LOG_FILTER_IMPORTED_OUTCOMES),
+            ("rejected", LOG_FILTER_REJECTED_OUTCOMES),
+        ):
+            with self.subTest(filter=name):
+                rows = self.db.get_log(limit=200, outcome_filter=name)
+                self.assertEqual(
+                    {str(row["outcome"]) for row in rows}, set(vocabulary),
+                )
+
+    def test_linked_import_outcomes_match_the_successor_query(self):
+        origin_request = self._request("linked-origin")
+        origin_id = self.db.log_download(
+            request_id=origin_request, outcome="rejected",
+        )
+        for outcome in sorted(_ALL_DOWNLOAD_LOG_OUTCOMES):
+            self.db.log_download(
+                request_id=self._request(f"linked-{outcome}"),
+                outcome=outcome,
+                source_download_log_id=origin_id,
+            )
+        rows = self.db.get_linked_import_logs([origin_id])
+        self.assertEqual(
+            {str(row["outcome"]) for row in rows},
+            set(LINKED_IMPORT_OUTCOMES),
+        )
+
+    def test_capture_download_outcomes_match_has_captured_history(self):
+        admitted: set[str] = set()
+        for outcome in sorted(_ALL_DOWNLOAD_LOG_OUTCOMES):
+            suffix = f"capture-{outcome}"
+            self.db.log_download(
+                request_id=self._request(suffix),
+                outcome=outcome,
+            )
+            if self._captured(suffix):
+                admitted.add(outcome)
+        self.assertEqual(admitted, set(CAPTURE_DOWNLOAD_OUTCOMES))
+
+    def test_capture_job_types_match_has_captured_history(self):
+        admitted: set[str] = set()
+        for job_type in sorted(IMPORT_JOB_TYPES):
+            suffix = f"capture-job-{job_type}"
+            self.db._execute(
+                "INSERT INTO import_jobs "
+                "(request_id, job_type, status, payload) "
+                "VALUES (%s, %s, 'completed', '{}'::jsonb)",
+                (self._request(suffix), job_type),
+            )
+            if self._captured(suffix):
+                admitted.add(job_type)
+        self.assertEqual(admitted, set(CAPTURE_IMPORT_JOB_TYPES))
+
+    def test_search_error_outcomes_match_both_dashboard_panels(self):
+        request_id = self._request("search-errors")
+        for outcome in (
+            "found", "no_match", "no_results", "exhausted",
+            *SEARCH_ERROR_OUTCOMES,
+        ):
+            self.db.log_search(request_id, query="q", outcome=outcome)
+        window = self.db._dashboard_search_window("24h", 24)
+        self.assertEqual(
+            window["outcomes"]["errors"], len(SEARCH_ERROR_OUTCOMES),
+        )
+        problem = {
+            int(row["request_id"]): int(row["problem_24h"])
+            for row in self.db._dashboard_loop_suspects()
+        }
+        self.assertEqual(
+            problem.get(request_id), len(SEARCH_ERROR_OUTCOMES),
+        )
 
 
 @requires_postgres
