@@ -27,6 +27,10 @@ from lib.pipeline_db.cleanup_journal import (
     CleanupJournalConflict,
     _CleanupCursor,
 )
+from lib.pipeline_db.decisions import (
+    SEARCH_BACKOFF_MAX_EXPONENT,
+    search_backoff_minutes,
+)
 from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
 from lib.terminal_outcomes import (
     AutomationTerminalAuthority,
@@ -378,8 +382,8 @@ class _TransactionalTransitionsDB:
             f"SET {column} = COALESCE({column}, 0) + 1, "
             "last_attempt_at = %s, "
             "next_retry_after = %s + ("
-            "LEAST(%s * POWER(2, COALESCE("
-            f"{column}, 0)), %s) * INTERVAL '1 minute'), "
+            "LEAST(%s * POWER(2, LEAST(COALESCE("
+            f"{column}, 0), %s)), %s) * INTERVAL '1 minute'), "
             "updated_at = %s "
             "WHERE id = %s AND status = %s AND status != 'replaced' "
             f"RETURNING {column}",
@@ -387,6 +391,7 @@ class _TransactionalTransitionsDB:
                 now,
                 now,
                 BACKOFF_BASE_MINUTES,
+                SEARCH_BACKOFF_MAX_EXPONENT,
                 BACKOFF_MAX_MINUTES,
                 now,
                 request_id,
@@ -1104,9 +1109,8 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 prior_attempts = counters[counter]
                 counters[counter] += 1
                 retry_state_changed = True
-                attempt_backoff_minutes = min(
-                    BACKOFF_BASE_MINUTES * (2 ** prior_attempts),
-                    BACKOFF_MAX_MINUTES,
+                attempt_backoff_minutes = search_backoff_minutes(
+                    prior_attempts
                 )
             transition_fields = dict(transition.fields)
             validate_request_metadata_fields(transition_fields)

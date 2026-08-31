@@ -15,6 +15,16 @@ from lib.pipeline_db._shared import (
     pg_execute_values,
 )
 
+#: The ``search_log.outcome`` values both dashboard search panels roll up
+#: as "errors" / "problem" — attempts that failed before they could say
+#: anything about the release, as opposed to ``no_match`` / ``no_results``
+#: / ``exhausted``, which are real answers. Exported so the in-memory twin
+#: filters on the same vocabulary instead of hand-copying it twice; the two
+#: SQL sites keep their literals, and
+#: ``TestSharedOutcomeVocabularies`` binds them by round-tripping the whole
+#: search-outcome vocabulary through real PostgreSQL.
+SEARCH_ERROR_OUTCOMES: tuple[str, ...] = ("timeout", "error", "empty_query")
+
 
 class UnfindableRunMetricsRow(TypedDict):
     """One ``unfindable_run_metrics`` row (#1112), raw column values.

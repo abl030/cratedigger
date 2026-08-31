@@ -39,6 +39,14 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from lib.pipeline_db.decisions import (
+    PLAN_READINESS_FAILED_DETERMINISTIC,
+    PLAN_READINESS_FAILED_TRANSIENT,
+    PLAN_READINESS_LEGACY,
+    PLAN_READINESS_NO_PLAN,
+    PLAN_READINESS_SEARCHABLE,
+    classify_plan_readiness_bucket,
+)
 from lib.search import SEARCH_PLAN_GENERATOR_ID
 from lib.search_plan_service import (
     RESULT_FAILED_DETERMINISTIC,
@@ -409,6 +417,21 @@ def _classify_live_sticky_failure(
     return None
 
 
+#: The dry-run summary's own vocabulary, keyed by the shared readiness
+#: bucket. Same five-way precedence the dashboard's SQL CASE ladder and the
+#: in-memory twin use (``lib/pipeline_db/decisions.py``); only the operator-
+#: facing names differ, because this summary describes what the LIVE run
+#: would DO ("replaced", "generated") rather than what state the request is
+#: IN ("legacy", "no plan").
+_DRY_RUN_BUCKET_LABELS: dict[str, str] = {
+    PLAN_READINESS_SEARCHABLE: "active_current",
+    PLAN_READINESS_LEGACY: "old_generator_replaced",
+    PLAN_READINESS_FAILED_DETERMINISTIC: "deterministic_failed",
+    PLAN_READINESS_FAILED_TRANSIENT: "retryable_failed",
+    PLAN_READINESS_NO_PLAN: "generated",
+}
+
+
 def _classify_dry_run(
     db: PipelineDB | _DBProto,
     candidate: WantedReconciliationCandidate,
@@ -419,7 +442,14 @@ def _classify_dry_run(
     """Read-only classification path for dry-run.
 
     Mirrors the buckets the live reconciliation would assign without
-    persisting anything.
+    persisting anything, by calling the ONE shared precedence rule
+    (``decisions.classify_plan_readiness_bucket``) and renaming its buckets
+    through ``_DRY_RUN_BUCKET_LABELS``. It used to restate the precedence
+    inline, keyed on ``candidate.active_plan_id is not None`` rather than
+    on the resolved generator; the two differ only when an
+    ``active_plan_id`` resolves to no generator id, which the
+    ``search_plans`` FK plus its ``generator_id NOT NULL`` column
+    (migration 014) makes unreachable.
 
     The optional ``classification`` argument carries the latest
     failed-deterministic / failed-transient generator ids for this
@@ -427,26 +457,28 @@ def _classify_dry_run(
     so we do not pay 5 queries per row × N rows. When omitted (single
     callers, tests), we fall back to the per-row inspection call.
     """
-    if candidate.active_plan_id is not None:
-        if candidate.active_plan_generator_id == generator_id:
-            return "active_current"
-        # Old-generator active plan: live run would supersede it.
-        return "old_generator_replaced"
-
-    # No active plan: distinguish missing vs. failed-recorded.
-    if classification is not None:
-        det_gen = classification.latest_failed_deterministic_generator_id
-        trans_gen = classification.latest_failed_transient_generator_id
-    else:
-        inspection = db.get_search_plan_inspection(candidate.request_id)
-        det = inspection.latest_failed_deterministic
-        trans = inspection.latest_failed_transient
-        det_gen = det.generator_id if det is not None else None
-        trans_gen = trans.generator_id if trans is not None else None
-
-    if det_gen == generator_id:
-        return "deterministic_failed"
-    if trans_gen == generator_id:
-        return "retryable_failed"
-    # Neither active nor failed -- live run would generate.
-    return "generated"
+    active_generator = candidate.active_plan_generator_id
+    det_matches = False
+    trans_matches = False
+    if active_generator is None:
+        # The failure facts only matter for a request with no resolved
+        # active generator — that is the shared rule's own precedence, and
+        # it is why fetching them here rather than unconditionally keeps
+        # the dry run at one batch instead of a query per row.
+        if classification is not None:
+            det_gen = classification.latest_failed_deterministic_generator_id
+            trans_gen = classification.latest_failed_transient_generator_id
+        else:
+            inspection = db.get_search_plan_inspection(candidate.request_id)
+            det = inspection.latest_failed_deterministic
+            trans = inspection.latest_failed_transient
+            det_gen = det.generator_id if det is not None else None
+            trans_gen = trans.generator_id if trans is not None else None
+        det_matches = det_gen == generator_id
+        trans_matches = trans_gen == generator_id
+    return _DRY_RUN_BUCKET_LABELS[classify_plan_readiness_bucket(
+        active_plan_generator_id=active_generator,
+        current_generator_id=generator_id,
+        has_failed_deterministic=det_matches,
+        has_failed_transient=trans_matches,
+    )]

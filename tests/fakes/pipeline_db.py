@@ -84,10 +84,6 @@ from lib.import_queue import (
 )
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
-    BACKOFF_BASE_MINUTES,
-    BACKOFF_MAX_MINUTES,
-    CURSOR_UPDATE_ADVANCED,
-    CURSOR_UPDATE_STALE,
     CURSOR_UPDATE_UNCHANGED,
     CURSOR_UPDATE_WRAPPED,
     DOWNLOAD_LOG_OUTCOMES,
@@ -99,9 +95,7 @@ from lib.pipeline_db import (
     PLAN_STATUS_SUPERSEDED,
     PLEX_PIN_STATUSES,
     PLEX_TERMINAL_PIN_STATUSES,
-    SEARCH_LOG_STAGE_ACCEPTED,
     SEARCH_LOG_STAGE_PRE_ATTEMPT,
-    SEARCH_LOG_STAGE_STALE_COMPLETION,
     ActiveSearchPlan,
     BadAudioHashInput,
     BadAudioHashRow,
@@ -145,6 +139,7 @@ from lib.pipeline_db._shared import (
     validate_request_metadata_fields,
 )
 from lib.pipeline_db.dashboard import (
+    SEARCH_ERROR_OUTCOMES,
     dashboard_envelope,
     serialize_dashboard_cycle_row,
     serialize_dashboard_heavy_query_row,
@@ -153,7 +148,17 @@ from lib.pipeline_db.dashboard import (
     unfindable_panel,
     wanted_trend_panel,
 )
+from lib.pipeline_db.decisions import (
+    PLAN_READINESS_BUCKETS,
+    classify_plan_readiness_bucket,
+    cursor_advance_decision,
+    saturation_summary_from_counts,
+    search_backoff_minutes,
+)
 from lib.pipeline_db.download_log import (
+    LINKED_IMPORT_OUTCOMES,
+    LOG_FILTER_IMPORTED_OUTCOMES,
+    LOG_FILTER_REJECTED_OUTCOMES,
     overlay_evidence_onto_download_log_row,
 )
 from lib.pipeline_db.import_jobs import (
@@ -163,6 +168,8 @@ from lib.pipeline_db.import_jobs import (
     _recovery_owner_matches,
 )
 from lib.pipeline_db.requests import (
+    CAPTURE_DOWNLOAD_OUTCOMES,
+    CAPTURE_IMPORT_JOB_TYPES,
     _linked_current_evidence_facts,
     collect_pipeline_overlays,
 )
@@ -3576,9 +3583,8 @@ class FakePipelineDB:
                 prior_attempts = counters[key]
                 counters[key] = prior_attempts + 1
                 retry_state_changed = True
-                attempt_backoff_minutes = min(
-                    BACKOFF_BASE_MINUTES * (2 ** prior_attempts),
-                    BACKOFF_MAX_MINUTES,
+                attempt_backoff_minutes = search_backoff_minutes(
+                    prior_attempts
                 )
             fields = dict(transition.fields)
             metadata_changed = metadata_changed or bool(fields)
@@ -4744,10 +4750,7 @@ class FakePipelineDB:
             row[col] = (row.get(col) or 0) + 1
             row["last_attempt_at"] = now
             row["updated_at"] = now
-            backoff_minutes = min(
-                BACKOFF_BASE_MINUTES * (2 ** (row[col] - 1)),
-                BACKOFF_MAX_MINUTES,
-            )
+            backoff_minutes = search_backoff_minutes(row[col] - 1)
             row["next_retry_after"] = now + timedelta(minutes=backoff_minutes)
             return True
         return False
@@ -6567,8 +6570,8 @@ class FakePipelineDB:
     def get_log(self, limit: int = 50,
                 outcome_filter: str | None = None,
                 ) -> list[DownloadLogWithRequestRow]:
-        imported = {"success", "force_import", "local_import"}
-        rejected = {"rejected", "failed", "timeout", "measurement_failed"}
+        imported = frozenset(LOG_FILTER_IMPORTED_OUTCOMES)
+        rejected = frozenset(LOG_FILTER_REJECTED_OUTCOMES)
         rows: list[dict[str, object]] = []
         # Newest-first to match the real ORDER BY dl.created_at DESC.
         for entry in reversed(self.download_logs):
@@ -6675,9 +6678,7 @@ class FakePipelineDB:
             self._download_log_base_dict(entry)
             for entry in reversed(self.download_logs)
             if entry.source_download_log_id in wanted
-            and entry.outcome in (
-                "success", "force_import", "manual_import", "local_import",
-            )
+            and entry.outcome in LINKED_IMPORT_OUTCOMES
         ])
 
     def get_by_status(
@@ -6836,40 +6837,20 @@ class FakePipelineDB:
         request_id = row.get("id")
         has_captured_history = row.get("status") == "imported"
         if isinstance(request_id, int) and not isinstance(request_id, bool):
+            # Both vocabularies are imported from the module that owns
+            # ``_CAPTURE_AND_EVIDENCE_SELECT`` rather than restated here:
+            # this fake previously carried its own copy of each, and the
+            # outcome half was once left un-widened while the job_type half
+            # gained ``local_import`` in the same change.
             has_captured_history = has_captured_history or any(
                 entry.request_id == request_id
-                and entry.outcome in (
-                    # Mirrors _CAPTURE_AND_EVIDENCE_SELECT
-                    # (lib/pipeline_db/requests.py). Review round: this
-                    # outcome half was left un-widened while the job_type
-                    # half below (added in the SAME PR1 round-2 change)
-                    # correctly gained 'local_import' — a successful local
-                    # import writes a 'local_import' download_log outcome
-                    # too, so both halves must confer
-                    # has_captured_history identically.
-                    "success", "force_import", "manual_import",
-                    "local_import",
-                )
+                and entry.outcome in CAPTURE_DOWNLOAD_OUTCOMES
                 for entry in self.download_logs
             )
             has_captured_history = has_captured_history or any(
                 job.get("request_id") == request_id
                 and job.get("status") == "completed"
-                and job.get("job_type") in (
-                    # Mirrors _CAPTURE_AND_EVIDENCE_SELECT
-                    # (lib/pipeline_db/requests.py): migration 080 (issue
-                    # #1176 PR1) retired the job_type value 'manual_import'
-                    # entirely — it is no longer even historically valid on
-                    # import_jobs.job_type (contrast with the download_log
-                    # outcome of the same name, below, which is unaffected).
-                    # PR1 round 2 added 'local_import' here: a successful
-                    # local import genuinely is a capture (the album was
-                    # acquired and installed), so it must confer
-                    # has_captured_history exactly as force_import and
-                    # youtube_import already do.
-                    "automation_import", "force_import", "youtube_import",
-                    "local_import",
-                )
+                and job.get("job_type") in CAPTURE_IMPORT_JOB_TYPES
                 for job in self._import_jobs
             )
 
@@ -7381,8 +7362,7 @@ class FakePipelineDB:
                 1 for e in rows if e.outcome == "no_results"),
             "exhausted": sum(1 for e in rows if e.outcome == "exhausted"),
             "errors": sum(
-                1 for e in rows
-                if e.outcome in ("timeout", "error", "empty_query")),
+                1 for e in rows if e.outcome in SEARCH_ERROR_OUTCOMES),
         }
         elapsed = sorted(
             e.elapsed_s for e in rows if e.elapsed_s is not None)
@@ -7494,7 +7474,7 @@ class FakePipelineDB:
                     r["no_results_24h"] += 1
                 elif e.outcome == "exhausted":
                     r["reset_24h"] += 1
-                elif e.outcome in ("timeout", "error", "empty_query"):
+                elif e.outcome in SEARCH_ERROR_OUTCOMES:
                     r["problem_24h"] += 1
             if at >= cutoff_6h:
                 r["searches_6h"] += 1
@@ -7757,18 +7737,15 @@ class FakePipelineDB:
     ) -> dict[str, Any]:
         """Mirror of ``PipelineDB.get_search_plan_readiness`` for tests.
 
-        Walks ``self._requests`` + ``self.search_plans`` to bucket each
-        wanted row exactly once. See the live implementation in
-        ``lib/pipeline_db/search_plan.py`` for bucket precedence; both must
-        agree on every transition or the dashboard contract breaks
-        silently.
+        Walks ``self._requests`` + ``self.search_plans`` to gather each
+        wanted row's three facts, then hands them to the ONE bucket rule
+        (``decisions.classify_plan_readiness_bucket``) production's SQL
+        CASE ladder mirrors. Only the gathering differs; the precedence —
+        including "an active-plan pointer that resolves to nothing is not
+        legacy" — is no longer restated here.
         """
+        counts = dict.fromkeys(PLAN_READINESS_BUCKETS, 0)
         wanted_total = 0
-        wanted_searchable = 0
-        wanted_legacy = 0
-        wanted_failed_deterministic = 0
-        wanted_failed_transient = 0
-        wanted_no_plan = 0
         for req in self._requests.values():
             if req.get("status") != "wanted":
                 continue
@@ -7778,42 +7755,31 @@ class FakePipelineDB:
                 self.search_plans.get(active_id)
                 if active_id is not None else None
             )
-            if active_plan is not None and active_plan.generator_id == generator_id:
-                wanted_searchable += 1
-                continue
-            if active_plan is not None and active_plan.generator_id != generator_id:
-                wanted_legacy += 1
-                continue
-            # No active plan -- look for failed plans on the current
-            # generator id. Deterministic > transient (sticky).
             req_id = req["id"]
-            has_det = any(
-                p.request_id == req_id
-                and p.generator_id == generator_id
-                and p.status == "failed_deterministic"
-                for p in self.search_plans.values()
+            bucket = classify_plan_readiness_bucket(
+                active_plan_generator_id=(
+                    active_plan.generator_id
+                    if active_plan is not None else None
+                ),
+                current_generator_id=generator_id,
+                has_failed_deterministic=any(
+                    p.request_id == req_id
+                    and p.generator_id == generator_id
+                    and p.status == PLAN_STATUS_FAILED_DETERMINISTIC
+                    for p in self.search_plans.values()
+                ),
+                has_failed_transient=any(
+                    p.request_id == req_id
+                    and p.generator_id == generator_id
+                    and p.status == PLAN_STATUS_FAILED_TRANSIENT
+                    for p in self.search_plans.values()
+                ),
             )
-            if has_det:
-                wanted_failed_deterministic += 1
-                continue
-            has_trans = any(
-                p.request_id == req_id
-                and p.generator_id == generator_id
-                and p.status == "failed_transient"
-                for p in self.search_plans.values()
-            )
-            if has_trans:
-                wanted_failed_transient += 1
-                continue
-            wanted_no_plan += 1
+            counts[bucket] += 1
         return {
             "generator_id": generator_id,
             "wanted_total": wanted_total,
-            "wanted_searchable": wanted_searchable,
-            "wanted_legacy": wanted_legacy,
-            "wanted_failed_deterministic": wanted_failed_deterministic,
-            "wanted_failed_transient": wanted_failed_transient,
-            "wanted_no_plan": wanted_no_plan,
+            **counts,
         }
 
     def _download_log_base_dict(self,
@@ -8337,9 +8303,10 @@ class FakePipelineDB:
         ``SearchLogRow.created_at`` deterministically.
 
         ``saturation_rate`` is ``0.0`` (not NaN) when the window
-        contains no rows — same explicit fallback the real DB returns.
+        contains no rows — the assembly (rate + zero-total fallback) is
+        production's own ``saturation_summary_from_counts``; only the
+        window cut is adapter-local.
         """
-        from lib.pipeline_db import SaturationSummary as _SatSummary
         cutoff = _utcnow() - timedelta(days=int(window_days))
         total = 0
         saturated = 0
@@ -8353,11 +8320,9 @@ class FakePipelineDB:
             if entry.final_state is not None and "LimitReached" in entry.final_state:
                 saturated += 1
             skips += int(entry.pre_filter_skip_count or 0)
-        rate = (saturated / total) if total > 0 else 0.0
-        return _SatSummary(
+        return saturation_summary_from_counts(
             total_searches=total,
             saturated_searches=saturated,
-            saturation_rate=rate,
             total_pre_filter_skips=skips,
             window_days=int(window_days),
         )
@@ -9286,12 +9251,20 @@ class FakePipelineDB:
             raise ValueError(
                 f"plan_item_id={attempt.plan_item_id} does not belong to "
                 f"plan_id={attempt.plan_id} for request_id={attempt.request_id}")
-        is_stale = (
-            row.get("status") == "replaced"
-            or active_plan_id != attempt.plan_id
-            or next_ordinal != attempt.plan_ordinal
-            or cycle_count != attempt.cycle_count_snapshot
+        # One shared decision with production's own cursor arm
+        # (``lib/pipeline_db/decisions.py``); only the reads around it
+        # differ (this dict walk vs a ``FOR UPDATE`` re-read).
+        decision = cursor_advance_decision(
+            current_status=str(row.get("status") or ""),
+            active_plan_id=active_plan_id,
+            next_ordinal=next_ordinal,
+            cycle_count=cycle_count,
+            attempt_plan_id=attempt.plan_id,
+            attempt_plan_ordinal=attempt.plan_ordinal,
+            attempt_cycle_count_snapshot=attempt.cycle_count_snapshot,
+            attempt_plan_item_count=attempt.plan_item_count,
         )
+        is_stale = decision.is_stale
 
         # Snapshot pre-write so a partial mutation can be unwound on
         # validation failure, mirroring the real DB transaction.
@@ -9300,32 +9273,11 @@ class FakePipelineDB:
         snapshot_next_id = self._next_search_log_id
 
         try:
-            if is_stale:
-                cursor_update_status = CURSOR_UPDATE_STALE
-                execution_stage = SEARCH_LOG_STAGE_STALE_COMPLETION
-                stale_reason: str | None = (
-                    "request_replaced"
-                    if row.get("status") == "replaced"
-                    else "regenerated"
-                )
-                new_next_ordinal = next_ordinal
-                new_cycle = cycle_count
-            else:
-                execution_stage = SEARCH_LOG_STAGE_ACCEPTED
-                stale_reason = None
-                count = max(int(attempt.plan_item_count), 0)
-                if count == 0:
-                    cursor_update_status = CURSOR_UPDATE_ADVANCED
-                    new_next_ordinal = next_ordinal + 1
-                    new_cycle = cycle_count
-                elif attempt.plan_ordinal >= count - 1:
-                    cursor_update_status = CURSOR_UPDATE_WRAPPED
-                    new_next_ordinal = 0
-                    new_cycle = cycle_count + 1
-                else:
-                    cursor_update_status = CURSOR_UPDATE_ADVANCED
-                    new_next_ordinal = next_ordinal + 1
-                    new_cycle = cycle_count
+            cursor_update_status = decision.cursor_update_status
+            execution_stage = decision.execution_stage
+            stale_reason = decision.stale_reason
+            new_next_ordinal = decision.new_next_ordinal
+            new_cycle = decision.new_cycle_count
 
             self._next_search_log_id += 1
             log_id = self._next_search_log_id
@@ -9383,10 +9335,7 @@ class FakePipelineDB:
                     new_count = (row.get("search_attempts") or 0) + 1
                     row["search_attempts"] = new_count
                     row["last_attempt_at"] = now
-                    backoff_minutes = min(
-                        BACKOFF_BASE_MINUTES * (2 ** (new_count - 1)),
-                        BACKOFF_MAX_MINUTES,
-                    )
+                    backoff_minutes = search_backoff_minutes(new_count - 1)
                     row["next_retry_after"] = (
                         now + timedelta(minutes=backoff_minutes))
                 elif (
@@ -9487,10 +9436,7 @@ class FakePipelineDB:
             new_count = (row.get("search_attempts") or 0) + 1
             row["search_attempts"] = new_count
             row["last_attempt_at"] = now
-            backoff_minutes = min(
-                BACKOFF_BASE_MINUTES * (2 ** (new_count - 1)),
-                BACKOFF_MAX_MINUTES,
-            )
+            backoff_minutes = search_backoff_minutes(new_count - 1)
             row["next_retry_after"] = now + timedelta(
                 minutes=backoff_minutes)
             row["updated_at"] = now

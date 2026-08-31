@@ -170,7 +170,9 @@ Every download is validated against its exact target release (beets match distan
 
 ## Request retry backoff
 
-A request can be `wanted` while intentionally skipped for a few hours: retry-worthy failures (search miss, download timeout, rejected import) set a shared exponential `next_retry_after` (30 min base, 6 h cap), and `get_wanted()` only returns rows that are due. Search, download, and validation attempts are counted separately; the retry clock is shared. The backoff is currently hardcoded (`BACKOFF_BASE_MINUTES = 30`, `BACKOFF_MAX_MINUTES = 360`), not module-tunable.
+A request can be `wanted` while intentionally skipped for a few hours: retry-worthy failures (search miss, download timeout, rejected import) set a shared exponential `next_retry_after` (30 min base, 4 h cap — so the steady state is at most about six searches per release per day), and `get_wanted()` only returns rows that are due. Search, download, and validation attempts are counted separately; the retry clock is shared. The backoff is currently hardcoded (`BACKOFF_BASE_MINUTES = 30`, `BACKOFF_MAX_MINUTES = 240`), not module-tunable.
+
+Every writer derives the interval from one function, `lib/pipeline_db/decisions.py::search_backoff_minutes`; the two SQL writers that compute it inside their own counter-incrementing `UPDATE` bound the doubling exponent with `SEARCH_BACKOFF_MAX_EXPONENT` from the same module, because PostgreSQL evaluates `POWER` in `double precision` and the product overflows long before an attempt counter realistically could. The clamp is value-identical: from the third doubling on, the 4 h cap already decides the result.
 
 ## Going deeper
 

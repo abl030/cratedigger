@@ -11,6 +11,12 @@ import psycopg2.extras
 if TYPE_CHECKING:
     from lib.unfindable_detection_service import UnfindableSearchLogSignal
 
+from lib.import_queue import (
+    IMPORT_JOB_AUTOMATION,
+    IMPORT_JOB_FORCE,
+    IMPORT_JOB_LOCAL,
+    IMPORT_JOB_YOUTUBE,
+)
 from lib.json_narrow import is_object_list, is_str_object_dict
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
@@ -30,6 +36,7 @@ from lib.pipeline_db._shared import (
     processing_owner_payload,
     validate_request_metadata_fields,
 )
+from lib.pipeline_db.decisions import SEARCH_BACKOFF_MAX_EXPONENT
 from lib.pipeline_db.rows import (
     AlbumRequestPresentationRow,
     AlbumRequestRow,
@@ -41,6 +48,24 @@ from lib.release_identity import (
     exact_request_evidence_identity_matches,
     frontend_release_id,
     normalize_release_id,
+)
+
+#: What ``has_captured_history`` accepts as proof the album was once
+#: acquired: a ``download_log`` outcome, or a completed ``import_jobs`` row
+#: of one of these types. Two independent vocabularies, deliberately
+#: separate constants — migration 080 retired ``manual_import`` as a
+#: job_type while leaving the download_log outcome of the same name
+#: historically valid, so the two lists are NOT interchangeable. Both are
+#: exported so the in-memory twin stops hand-copying them; the SQL below
+#: keeps its literals, and ``TestSharedOutcomeVocabularies`` binds each
+#: list to the real query by round-tripping every canonical member through
+#: PostgreSQL.
+CAPTURE_DOWNLOAD_OUTCOMES: tuple[str, ...] = (
+    "success", "force_import", "manual_import", "local_import",
+)
+CAPTURE_IMPORT_JOB_TYPES: tuple[str, ...] = (
+    IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE, IMPORT_JOB_YOUTUBE,
+    IMPORT_JOB_LOCAL,
 )
 
 _CAPTURE_AND_EVIDENCE_SELECT = """
@@ -1945,7 +1970,7 @@ class _RequestsMixin(_PipelineDBBase):
                 last_attempt_at = %s,
                 next_retry_after = %s + (
                     LEAST(
-                        %s * POWER(2, COALESCE({col}, 0)),
+                        %s * POWER(2, LEAST(COALESCE({col}, 0), %s)),
                         %s
                     ) * INTERVAL '1 minute'
                 ),
@@ -1959,6 +1984,7 @@ class _RequestsMixin(_PipelineDBBase):
             now,
             now,
             BACKOFF_BASE_MINUTES,
+            SEARCH_BACKOFF_MAX_EXPONENT,
             BACKOFF_MAX_MINUTES,
             now,
             request_id,

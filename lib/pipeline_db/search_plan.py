@@ -14,19 +14,13 @@ from lib.import_queue import (
 )
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
-    BACKOFF_BASE_MINUTES,
-    BACKOFF_MAX_MINUTES,
-    CURSOR_UPDATE_ADVANCED,
-    CURSOR_UPDATE_STALE,
     CURSOR_UPDATE_UNCHANGED,
     CURSOR_UPDATE_WRAPPED,
     PLAN_STATUS_ACTIVE,
     PLAN_STATUS_FAILED_DETERMINISTIC,
     PLAN_STATUS_FAILED_TRANSIENT,
     PLAN_STATUS_SUPERSEDED,
-    SEARCH_LOG_STAGE_ACCEPTED,
     SEARCH_LOG_STAGE_PRE_ATTEMPT,
-    SEARCH_LOG_STAGE_STALE_COMPLETION,
     ActiveSearchPlan,
     ConsumedAttemptInput,
     ConsumedAttemptResult,
@@ -50,6 +44,11 @@ from lib.pipeline_db._shared import (
     _metadata_snapshot_from_jsonb,
     _plan_provenance_from_jsonb,
     pg_execute_values,
+)
+from lib.pipeline_db.decisions import (
+    cursor_advance_decision,
+    saturation_summary_from_counts,
+    search_backoff_minutes,
 )
 from lib.search_classification import (
     SearchSummary as _SearchSummary,
@@ -244,20 +243,15 @@ class _SearchPlanMixin(_PipelineDBBase):
         if row is None:
             # Defensive — aggregate queries always return one row, but
             # keep the type-checker happy and the helper total.
-            return SaturationSummary(
+            return saturation_summary_from_counts(
                 total_searches=0,
                 saturated_searches=0,
-                saturation_rate=0.0,
                 total_pre_filter_skips=0,
                 window_days=int(window_days),
             )
-        total = int(row["total_searches"] or 0)
-        saturated = int(row["saturated_searches"] or 0)
-        rate = (saturated / total) if total > 0 else 0.0
-        return SaturationSummary(
-            total_searches=total,
-            saturated_searches=saturated,
-            saturation_rate=rate,
+        return saturation_summary_from_counts(
+            total_searches=int(row["total_searches"] or 0),
+            saturated_searches=int(row["saturated_searches"] or 0),
             total_pre_filter_skips=int(row["total_pre_filter_skips"] or 0),
             window_days=int(window_days),
         )
@@ -368,6 +362,16 @@ class _SearchPlanMixin(_PipelineDBBase):
         checks (active-plan FK integrity, contiguous ordinals, post-deploy
         ``outcome='exhausted'`` rate).
         """
+        # The CASE ladder below is the SQL spelling of
+        # ``decisions.classify_plan_readiness_bucket`` — same precedence,
+        # same ``generator_id IS NOT NULL`` guard keeping an unresolved
+        # active-plan pointer out of ``wanted_legacy``. It stays SQL (one
+        # aggregate over the whole wanted backlog is the right production
+        # shape, and a resolvable static statement here is what keeps this
+        # read out of the reviewed-dynamic-SQL registry); the shared
+        # function is the documented authority the in-memory twin calls,
+        # and ``TestPlanReadinessParity`` proves the two agree over seeded
+        # worlds covering every bucket.
         cur = self._execute(
             """
             WITH wanted AS (
@@ -1379,43 +1383,22 @@ class _SearchPlanMixin(_PipelineDBBase):
                         f"belong to plan_id={attempt.plan_id} for "
                         f"request_id={attempt.request_id}")
 
-                is_stale = (
-                    current_status == "replaced"
-                    or active_plan_id != attempt.plan_id
-                    or next_ordinal != attempt.plan_ordinal
-                    or cycle_count != attempt.cycle_count_snapshot
+                decision = cursor_advance_decision(
+                    current_status=current_status,
+                    active_plan_id=active_plan_id,
+                    next_ordinal=next_ordinal,
+                    cycle_count=cycle_count,
+                    attempt_plan_id=attempt.plan_id,
+                    attempt_plan_ordinal=attempt.plan_ordinal,
+                    attempt_cycle_count_snapshot=attempt.cycle_count_snapshot,
+                    attempt_plan_item_count=attempt.plan_item_count,
                 )
-
-                if is_stale:
-                    cursor_update_status = CURSOR_UPDATE_STALE
-                    execution_stage = SEARCH_LOG_STAGE_STALE_COMPLETION
-                    stale_reason = (
-                        "request_replaced"
-                        if current_status == "replaced"
-                        else "regenerated"
-                    )
-                    new_next_ordinal = next_ordinal
-                    new_cycle = cycle_count
-                else:
-                    execution_stage = SEARCH_LOG_STAGE_ACCEPTED
-                    stale_reason = None
-                    plan_item_count = max(int(attempt.plan_item_count), 0)
-                    if plan_item_count == 0:
-                        # Pathological: caller said no items. Treat as
-                        # advanced-without-wrap to avoid /0 wrap math; the
-                        # generator's CHECK + service contract should
-                        # prevent this in practice.
-                        cursor_update_status = CURSOR_UPDATE_ADVANCED
-                        new_next_ordinal = next_ordinal + 1
-                        new_cycle = cycle_count
-                    elif attempt.plan_ordinal >= plan_item_count - 1:
-                        cursor_update_status = CURSOR_UPDATE_WRAPPED
-                        new_next_ordinal = 0
-                        new_cycle = cycle_count + 1
-                    else:
-                        cursor_update_status = CURSOR_UPDATE_ADVANCED
-                        new_next_ordinal = next_ordinal + 1
-                        new_cycle = cycle_count
+                is_stale = decision.is_stale
+                cursor_update_status = decision.cursor_update_status
+                execution_stage = decision.execution_stage
+                stale_reason = decision.stale_reason
+                new_next_ordinal = decision.new_next_ordinal
+                new_cycle = decision.new_cycle_count
 
                 cur.execute(
                     """
@@ -1533,9 +1516,8 @@ class _SearchPlanMixin(_PipelineDBBase):
                         s_row = cur.fetchone()
                         assert s_row is not None
                         new_count = int(s_row["search_attempts"])
-                        backoff_minutes = min(
-                            BACKOFF_BASE_MINUTES * (2 ** (new_count - 1)),
-                            BACKOFF_MAX_MINUTES,
+                        backoff_minutes = search_backoff_minutes(
+                            new_count - 1
                         )
                         cur.execute(
                             "UPDATE album_requests "
@@ -1726,10 +1708,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                     s_row = cur.fetchone()
                     assert s_row is not None
                     new_count = int(s_row["search_attempts"])
-                    backoff_minutes = min(
-                        BACKOFF_BASE_MINUTES * (2 ** (new_count - 1)),
-                        BACKOFF_MAX_MINUTES,
-                    )
+                    backoff_minutes = search_backoff_minutes(new_count - 1)
                     cur.execute(
                         "UPDATE album_requests "
                         "SET next_retry_after = %s WHERE id = %s "
