@@ -387,6 +387,15 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_protected_path_truth_generated",
         "tests.test_render_differential",
     ),
+    # The queue projection's direct tests ARE probe-derivable
+    # (tests.web.test_wrong_match_queue_view), but a solo change to the
+    # projection also regresses the /api/wrong-matches contract, which
+    # lives with the route module's tests — a name no probe can reach
+    # from this path (#1278 "worth exploring" item 4).
+    "web/wrong_match_queue_view.py": (
+        "tests.web.test_wrong_match_queue_view",
+        "tests.web.test_routes_imports",
+    ),
     # web/discogs.py has no derivable neighbours: neither
     # tests.test_web_discogs nor tests.web.test_discogs exists on disk
     # (same mechanism as wrong_match_file_service.py above). It also

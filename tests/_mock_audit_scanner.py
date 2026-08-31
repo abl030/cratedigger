@@ -328,6 +328,10 @@ _LEAF_SEAM_PATTERNS = [
     # function lives in lib.* and is allowlisted there; tests just
     # patch the import binding inside the route module.
     re.compile(r"^web\.routes\.\w+\.observe_failed_path$"),
+    # Same re-export, one module over: the wrong-match queue projection
+    # (#1278 extraction from web/routes/imports.py) carries its own
+    # binding of the ``lib.util.observe_failed_path`` filesystem leaf.
+    re.compile(r"^web\.wrong_match_queue_view\.observe_failed_path$"),
     # Destructive service binding around the ffmpeg-backed audio hash leaf.
     re.compile(r"^lib\.destructive_release_service\.hash_audio_content$"),
 
