@@ -121,3 +121,4 @@
 - [Review mutants target changed expressions](feedback_review_mutants_and_worktree_pinning.md) — mutate the diff's changed expressions first; kill claims need the failing TEST ID; subagents are pinned to the parent's worktree
 - [#1278 wx6 beets_compat split SHIPPED](project_1278_wx6_beets_compat_split.md) — PR #1310 live-verified 2026-08-31, Worth-exploring list COMPLETE; era premise refuted by measurement; MagicMock parent-attr trap; from beets import X ignores sys.modules stubs
 - [#1278 hygiene items SHIPPED](project_1278_hygiene_items_shipped.md) — PRs #1308+#1309 live-verified 2026-08-31; match_transfer_id NOT deletable (demoted); job-kind registry 14/15 sites; preview-worker db:Any deferred with measurement; count errors were the round defect class
+- [#1278 register CLOSED](project_1278_register_closed.md) — 2026-08-31 residual sweep PR #1311 live; candidate 1 -> #1312; V6 harness-scoping + Pyright-finishes-kwarg-sweeps lessons
