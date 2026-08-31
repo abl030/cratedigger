@@ -17,7 +17,7 @@ import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal, get_args
 
 import msgspec
 import psycopg2
@@ -551,6 +551,22 @@ PLAN_STATUS_ACTIVE = "active"
 PLAN_STATUS_SUPERSEDED = "superseded"
 PLAN_STATUS_FAILED_DETERMINISTIC = "failed_deterministic"
 PLAN_STATUS_FAILED_TRANSIENT = "failed_transient"
+
+# Canonical ``search_log.outcome`` taxonomy — the Python mirror of the
+# ``search_log_outcome_check`` CHECK constraint (latest definition:
+# migrations/010). The two test-enforced sync points are this Literal and
+# the migration SQL — ``tests/test_migrator.py`` pins them together, the
+# same contract ``DownloadLogOutcome`` carries for ``download_log.outcome``
+# (prose spellings in docs/pipeline-db-schema.md and lib/search.py point
+# here rather than being enforced). Added by the #1278 item-7 residual
+# sweep so the shared-vocabulary tests derive their probe lists instead of
+# hand-listing seven strings; ``SEARCH_ERROR_OUTCOMES`` is the narrowed
+# production consumer.
+SearchLogOutcome = Literal[
+    "found", "no_match", "no_results", "timeout", "error",
+    "empty_query", "exhausted",
+]
+SEARCH_LOG_OUTCOMES: frozenset[str] = frozenset(get_args(SearchLogOutcome))
 
 # search_log.execution_stage values.
 SEARCH_LOG_STAGE_PRE_ATTEMPT = "pre_attempt"

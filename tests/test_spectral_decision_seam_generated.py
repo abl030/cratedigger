@@ -1569,7 +1569,6 @@ class LosslessWorld:
     """A lossless-container candidate against an arbitrary MP3 HAVE."""
 
     grade: str
-    post_conversion: int | None
     v0_avg: int | None
     v0_min: int | None
     current_min: int | None
@@ -1582,8 +1581,6 @@ def lossless_candidate_worlds(draw) -> LosslessWorld:
     return LosslessWorld(
         grade=draw(st.sampled_from(
             ("genuine", "marginal", "suspect", "likely_transcode"))),
-        post_conversion=draw(st.one_of(
-            st.none(), st.integers(min_value=120, max_value=300))),
         v0_avg=draw(st.one_of(
             st.none(), st.integers(min_value=120, max_value=300))),
         v0_min=draw(st.one_of(
@@ -1618,7 +1615,6 @@ class TestLosslessDomainUnchanged(unittest.TestCase):
                     min_bitrate=0,
                     is_cbr=False,
                     spectral_grade=world.grade,
-                    post_conversion_min_bitrate=world.post_conversion,
                     candidate_v0_probe_avg=world.v0_avg,
                     candidate_v0_probe_min=world.v0_min,
                     cliff_hz=cliff,

@@ -19,7 +19,19 @@ W   **Write gating.** The ``beet write`` subprocess runs exactly once, and
 V   **Verdict from the re-read files.** ``synced`` is claimed only over a
     world whose re-read tags all agree; ``residual_divergence`` only over
     one that still disagrees; ``already_synced`` never follows a write;
-    and every typed refusal leaves the file-tag world byte-identical.
+    every typed refusal leaves the file-tag world byte-identical; and once
+    the write RAN the verdict comes from the re-read alone — within THIS
+    harness's world space, ``synced`` iff converged else
+    ``residual_divergence``, whatever exit code the subprocess reported
+    (the exit-code doctrine's consequence, V6). That totality is a
+    harness-scoped claim, not a production one: production legitimately
+    returns ``not_found`` (album vanished mid-sync) or, through the
+    mediated wrapper, ``beets_unavailable`` (authority raised on the
+    post-write re-read) after a landed write — worlds ``_FakeSyncBeets``
+    cannot produce, which is exactly why those outcomes after a write ARE
+    the returncode-mutant signature here. A future world that vanishes
+    the album or fails the authority mid-run must widen V6's (and V4's)
+    carve-outs before it lands.
 I   **Seam inertness.** ``lib.download_validation.
     _sync_file_tags_after_merge_rekey`` — the merge seam's best-effort
     caller — returns ``None`` and never raises, whatever the sync
@@ -269,6 +281,30 @@ def verdict_violations(run: SyncRun) -> list[str]:
         )
     if outcome not in TAG_SYNC_HTTP_STATUS:
         violations.append(f"V5: unmapped outcome {outcome!r}")
+    if run.write_calls:
+        # V6 — the exit-code doctrine's consequence (#1278 item-4
+        # reflection, RD1/SD1): once the write RAN, the verdict comes from
+        # the re-read files alone. V1/V2 police the synced/residual claims
+        # individually but let a returncode-driven mutant escape into any
+        # OTHER mapped outcome (beets_unavailable was the proven survivor
+        # shape); this clause closes that door. HARNESS-SCOPED, not a
+        # production totality claim: production's post-write not_found
+        # (album vanished mid-sync, lib/beets_tag_sync.py's post-is-None
+        # arm) and the mediated wrapper's beets_unavailable (authority
+        # raised on the re-read) are correct behavior in worlds
+        # _FakeSyncBeets cannot produce — so seeing them here is evidence
+        # of a returncode-driven verdict, and a future strategy that adds
+        # authority failure or mid-sync deletion must widen this clause.
+        expected = (
+            RESULT_SYNCED if _post_converged(run)
+            else RESULT_RESIDUAL_DIVERGENCE
+        )
+        if outcome != expected:
+            violations.append(
+                f"V6: after a write the verdict must be {expected!r} (from "
+                f"the re-read files alone), not {outcome!r} — the exit "
+                "status decides nothing",
+            )
     return violations
 
 
@@ -292,6 +328,15 @@ class TestTagSyncProperties(unittest.TestCase):
         album_present=True, db_identity=DB_ID, expected=DB_ID,
         files=(("/library/a/01.opus", OLD_TAG, False),),
         lock_granted=True, write_mode="raise_after_apply",
+    ))
+    @example(world=SyncWorld(
+        # V6's decisive world: the write landed AND exited nonzero — a
+        # returncode-reading mutant flips this off ``synced`` (#1278
+        # item-4 reflection, SD1). Pinned so the derandomized suite tier
+        # kills that mutant, not just the fuzz tier.
+        album_present=True, db_identity=DB_ID, expected=DB_ID,
+        files=(("/library/a/01.opus", OLD_TAG, False),),
+        lock_granted=True, write_mode="applies_nonzero",
     ))
     def test_write_gating_and_verdict(self, world: SyncWorld) -> None:
         run = run_sync_world(world)
@@ -449,6 +494,32 @@ class TestCheckersTripOnViolations(unittest.TestCase):
         )
         self.assertTrue(
             any(v.startswith("V5") for v in verdict_violations(run)),
+        )
+
+    def test_v6_trips_on_a_returncode_driven_verdict_after_a_write(
+        self,
+    ) -> None:
+        """The proven survivor shape: the write ran, the files converged,
+        and a mutant reading the exit code claims ``beets_unavailable`` —
+        a mapped outcome V1–V5 all wave through."""
+        run = self._base_run(
+            result=TagSyncResult(
+                outcome=RESULT_BEETS_UNAVAILABLE, album_id=ALBUM_ID,
+            ),
+        )
+        violations = verdict_violations(run)
+        self.assertTrue(
+            any(
+                v.startswith("V6") and "beets_unavailable" in v
+                for v in violations
+            ),
+            violations,
+        )
+        # And every earlier clause stays quiet, proving V6 is the one
+        # clause doing the work here (short-circuit masking cannot occur
+        # in an accumulating checker, but the point deserves its pin).
+        self.assertEqual(
+            [v for v in violations if not v.startswith("V6")], [],
         )
 
     def test_the_beets_unavailable_outcome_is_not_a_refusal_clause(

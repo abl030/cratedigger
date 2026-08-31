@@ -57,7 +57,8 @@ class SearchResult:
     query: str = ""
     result_count: int | None = None
     elapsed_s: float = 0.0
-    # found, no_match, no_results, timeout, error, empty_query, exhausted
+    # One of lib.pipeline_db.SEARCH_LOG_OUTCOMES (the canonical taxonomy,
+    # pinned to migration 010's CHECK); "" until the search resolves.
     outcome: str = ""
     # Forensic capture persisted to search_log: candidates JSONB (top-20
     # match scores from find_download), variant tag, slskd terminal state.

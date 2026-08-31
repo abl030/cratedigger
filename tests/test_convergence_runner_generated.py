@@ -466,7 +466,7 @@ class TestReconcileDryRun(unittest.TestCase):
         db = FakePipelineDB()
         source = FakePipelineDBSource(db)
         with self.assertLogs(
-                "lib.startup_reconciliation", level="INFO") as captured:
+                "cratedigger", level="INFO") as captured:
             self.assertEqual(cratedigger._reconcile_dry_run(source), 0)
         self.assertTrue(any(
             "dry_run=true" in line for line in captured.output))
@@ -538,11 +538,15 @@ class TestRunCycleExecutable(unittest.TestCase):
             phase1_sources.append(source)
             return source
 
-        # Two loggers: every step module logs to "cratedigger" except
-        # lib/startup_reconciliation.py, which uses __name__ (review F10) —
-        # without the second guard its per-row ERRORs would escape.
-        with self.assertNoLogs("cratedigger", level="ERROR"), \
-                self.assertNoLogs("lib.startup_reconciliation", level="ERROR"):
+        # Every step module logs to "cratedigger" (startup_reconciliation
+        # was the one __name__ holdout until the #1278 residual sweep).
+        # This guard asserts a clean world emits no ERROR at all — it is
+        # trivially green whichever logger name a module uses, so it does
+        # NOT pin the unification itself; the message-specific assertLogs
+        # pins in tests/test_integration_slices.py own that (a
+        # logger-name-revert mutant survives this test and dies there —
+        # #1278 sweep review, runner finding).
+        with self.assertNoLogs("cratedigger", level="ERROR"):
             cratedigger.run_cycle(ctx, phase1_source_factory=factory)
 
         # Phase 0 ran: the cooldown loader filled the roster in place.

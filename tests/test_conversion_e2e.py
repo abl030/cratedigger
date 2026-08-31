@@ -1047,7 +1047,6 @@ class TestDeniedProofStillStoresTheConfiguredTarget(unittest.TestCase):
         candidate = build_parity_candidate_evidence(
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="genuine",
-            post_conversion_min_bitrate=245,
             candidate_v0_probe_avg=245,
             candidate_v0_probe_min=245,
             codec_family="lossless",

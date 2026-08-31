@@ -3018,7 +3018,6 @@ def _parity_evidence_inputs(
         avg_bitrate=world.avg_bitrate,
         spectral_grade=world.grade,
         spectral_bitrate=world.spectral_bitrate,
-        post_conversion_min_bitrate=world.post_conversion_min_bitrate,
         candidate_v0_probe_avg=world.v0_avg,
         candidate_v0_probe_min=world.v0_min,
         native_codec=_NATIVE_CODECS[world.candidate_format],
@@ -4984,7 +4983,6 @@ class TestUltrasonicProofLegCheckerSelfTests(unittest.TestCase):
         return build_parity_candidate_evidence(
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="genuine",
-            post_conversion_min_bitrate=245,
             candidate_v0_probe_avg=245,
             candidate_v0_probe_min=245,
             codec_family="lossless",
@@ -5045,7 +5043,6 @@ class TestUltrasonicProofLegCheckerSelfTests(unittest.TestCase):
         candidate = build_parity_candidate_evidence(
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="genuine",
-            post_conversion_min_bitrate=245,
             candidate_v0_probe_avg=245, candidate_v0_probe_min=245,
             codec_family="lossless",
             ultrasonic_deficit_db=65.16,
@@ -6381,7 +6378,6 @@ class TestAacLatticeProofLegCheckerSelfTests(unittest.TestCase):
         return build_parity_candidate_evidence(
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="genuine",
-            post_conversion_min_bitrate=245,
             candidate_v0_probe_avg=245, candidate_v0_probe_min=245,
             codec_family="lossless",
             aac_lattice=_THIN_LATTICE_CAPTURE,

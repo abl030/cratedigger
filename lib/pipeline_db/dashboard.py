@@ -9,6 +9,7 @@ from lib.pipeline_db._shared import (
     DASHBOARD_WANTED_BACKLOG_STATUSES,
     DASHBOARD_WANTED_TREND_WINDOWS,
     DASHBOARD_WINDOWS,
+    SearchLogOutcome,
     _float_or_none,
     _isoformat_or_none,
     _peer_hash,
@@ -23,7 +24,9 @@ from lib.pipeline_db._shared import (
 #: SQL sites keep their literals, and
 #: ``TestSharedOutcomeVocabularies`` binds them by round-tripping the whole
 #: search-outcome vocabulary through real PostgreSQL.
-SEARCH_ERROR_OUTCOMES: tuple[str, ...] = ("timeout", "error", "empty_query")
+SEARCH_ERROR_OUTCOMES: tuple[SearchLogOutcome, ...] = (
+    "timeout", "error", "empty_query",
+)
 
 
 class UnfindableRunMetricsRow(TypedDict):
