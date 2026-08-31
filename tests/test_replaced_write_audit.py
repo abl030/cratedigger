@@ -123,7 +123,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
         ),
     ),
-    ("lib/pipeline_db/download_log.py", "cba0d6d56f1878ac"): (
+    ("lib/pipeline_db/download_log.py", "95d18a3931276ae1"): (
         (
             "get_log's three outcome variants were three verbatim copies of one "
             "SELECT; issue #829 Phase 5 PR4 collapsed them to a single template "
@@ -134,7 +134,14 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "shared row's current-only lineage to NULL on this read surface. "
             "Issue #1176 PR3's ``local_import`` Literal member above shifted "
             "this line only — fingerprint unchanged, confirming the SQL itself "
-            "is untouched"
+            "is untouched. Issue #1278 item 7 DID move this fingerprint "
+            "(cba0d6d56f1878ac -> 95d18a3931276ae1) without touching a "
+            "character of the SQL: a non-constant SQL argument fingerprints "
+            "over DYNAMIC_SCOPE, the whole enclosing function's AST, and "
+            "``get_log``'s body now calls the module-level "
+            "``overlay_evidence_onto_download_log_row`` where it used to call "
+            "``self._overlay_evidence_onto_download_log_row``. Same template, "
+            "same two closed slots, still read-only over album_requests"
         ),
     ),
     ("lib/pipeline_db/download_log.py", "2d2cba8bbf4b379f"): (
