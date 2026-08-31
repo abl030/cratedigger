@@ -14,9 +14,14 @@ lane policy, individually load-bearing) and its own evidence mechanism.
 
 The streaming harness sessions — validation in ``lib/beets.py`` and the
 import in ``harness/import_one.py`` — spawn ``run_beets_harness.sh``
-instead, whose bash performs the same interpreter refusal before ``exec``;
-their interactive stdin/stdout protocol is not a run-to-completion child
-and stays with them.
+instead, whose bash performs the same interpreter refusal before ``exec``.
+Their one shared argv shape is :func:`harness_session_argv` (the two
+sessions differ only by ``--pretend``), and the validation session's
+spawner is :func:`spawn_harness_session` behind the narrow
+:class:`HarnessSession` protocol — the lane-A injection seam.
+``import_one.py`` keeps its own spawn (it needs ``start_new_session`` and
+passes its snapshotted Beets authority explicitly); the interactive
+stdin/stdout protocol itself stays with each session's driver.
 
 **The exit code is never success evidence.** For the two ``python -m
 beets`` lanes, a query matching nothing exits 1 (``UserError``) while a
@@ -35,8 +40,8 @@ anything; it launches, captures, and reports.
 The four Beets mutation lanes stay four (CLAUDE.md § Decision
 architecture); this module adds no lane — only the mechanics they share.
 The module top stays deliberately light (stdlib only today), and
-``beets_subprocess_env`` is imported inside the run function, continuing
-the lanes' own convention. Neither is load-bearing: the pinned interpreter
+``beets_subprocess_env`` is imported inside the two spawning functions,
+continuing the lanes' own convention. Neither is load-bearing: the pinned interpreter
 in this deployment is Cratedigger's own Python environment
 (``nix/module.nix`` renders ``[Beets] python`` from the same ``pythonEnv``
 the pipeline runs on), so ``harness/delete_album.py``'s in-child import of
@@ -46,8 +51,9 @@ the pipeline runs on), so ``harness/delete_album.py``'s in-child import of
 from __future__ import annotations
 
 import subprocess as sp
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from typing import Protocol
 
 #: The injectable child runner every lane forwards to
 #: :func:`run_pinned_beets_child` — the one leaf-seam DI point for these
@@ -113,8 +119,99 @@ def run_pinned_beets_child(
     )
 
 
+class HarnessStdin(Protocol):
+    """What a session driver writes decisions through."""
+
+    def write(self, data: str, /) -> int: ...
+    def flush(self) -> None: ...
+
+
+class HarnessStdout(Protocol):
+    """What a session driver reads protocol lines from."""
+
+    def __iter__(self) -> Iterator[str]: ...
+
+
+class HarnessStderr(Protocol):
+    """What a session driver harvests diagnostics from."""
+
+    def read(self) -> str: ...
+
+
+class HarnessSession(Protocol):
+    """The slice of a text-mode ``sp.Popen[str]`` a streaming harness
+    session actually drives — the lane-A injection seam's return type.
+    ``sp.Popen[str]`` satisfies it structurally; tests satisfy it with a
+    small typed fake instead of module-attribute patching."""
+
+    @property
+    def stdin(self) -> HarnessStdin | None: ...
+    @property
+    def stdout(self) -> HarnessStdout | None: ...
+    @property
+    def stderr(self) -> HarnessStderr | None: ...
+    def kill(self) -> None: ...
+    def terminate(self) -> None: ...
+    def wait(self, timeout: float | None = None) -> int: ...
+
+
+#: The injectable spawner for a streaming harness session — a
+#: definition-time default on ``lib/beets.py``'s validation entry points,
+#: so tests inject a replacement and never patch a module binding.
+type HarnessSpawnFn = Callable[[list[str]], HarnessSession]
+
+
+def harness_session_argv(
+    harness_path: str,
+    *,
+    mb_release_id: str,
+    album_path: str,
+    # Deliberately NO default: this is the one flag separating a dry run
+    # from a real Beets import, so a forgotten kwarg must be a TypeError,
+    # never a silent real import (review round, reader finding 5).
+    pretend: bool,
+    preserve_discogs_flat_subtracks: bool = False,
+) -> list[str]:
+    """The one argv shape for a streaming harness session
+    (``run_beets_harness.sh``): the validation session (``--pretend``) and
+    the real import differ ONLY by that flag. ``--noincremental`` is
+    unconditional — a session that silently skipped a previously-seen
+    directory would offer no match and read as ``no_choose_match``.
+    """
+    argv = [harness_path]
+    if pretend:
+        argv.append("--pretend")
+    argv.append("--noincremental")
+    if preserve_discogs_flat_subtracks:
+        argv.append("--preserve-discogs-flat-subtracks")
+    argv.extend(["--search-id", mb_release_id, album_path])
+    return argv
+
+
+def spawn_harness_session(argv: list[str]) -> HarnessSession:
+    """Production spawner for the validation harness session: all three
+    streams piped, text mode with ``errors="replace"`` (non-UTF-8 bytes in
+    harness output must never raise mid-read), environment from
+    ``beets_subprocess_env`` — the Blueline Medic 0-candidates incident
+    class is a harness child resolving beets config from the wrong
+    environment."""
+    from lib.util import beets_subprocess_env
+
+    return sp.Popen(
+        argv, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE,
+        text=True, errors="replace", env=beets_subprocess_env(),
+    )
+
+
 __all__ = [
     "BeetsChildRun",
+    "HarnessSession",
+    "HarnessSpawnFn",
+    "HarnessStderr",
+    "HarnessStdin",
+    "HarnessStdout",
     "SubprocessRunFn",
+    "harness_session_argv",
     "run_pinned_beets_child",
+    "spawn_harness_session",
 ]

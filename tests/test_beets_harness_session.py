@@ -102,12 +102,26 @@ VALIDATION_ERROR_VERDICT_PREFIX = (
 #: ``exec`` makes that wait the exact process ``Popen`` owns, so
 #: ``beets_validate``'s ``finally`` terminates it without orphaning a child.
 _HARNESS_TEMPLATE = """#!/bin/sh
+printf '%s\\n' "$@" > {args_file}
 cat {stdout_file}
 exec 1>&-
 cat {stderr_file} >&2
 exec 2>&-
 {terminal_action}
 """
+
+#: Where the fake harness records its argv, one token per line — so tests
+#: can assert the exact session shape (``--pretend`` vs real import) that
+#: reached the real process boundary.
+FAKE_HARNESS_ARGS_FILENAME = "harness_args.txt"
+
+
+def read_fake_harness_args(directory: str) -> list[str]:
+    """The argv the fake harness actually received, one token per entry."""
+    with open(
+        os.path.join(directory, FAKE_HARNESS_ARGS_FILENAME), encoding="utf-8",
+    ) as handle:
+        return handle.read().splitlines()
 
 
 def _shell_quote(path: str) -> str:
@@ -125,7 +139,10 @@ def write_fake_harness(
 
     Returns the harness path to hand to ``beets_validate``. The lines are
     emitted verbatim, so a caller can plant malformed JSON, blank lines, or
-    nothing at all. A negative ``process_returncode`` makes the harness
+    nothing at all. At RUN time the harness first records its argv into
+    ``FAKE_HARNESS_ARGS_FILENAME`` inside ``directory`` (read it back with
+    :func:`read_fake_harness_args`); the file is truncated per invocation,
+    so a multi-pass session leaves only the LAST pass's argv. A negative ``process_returncode`` makes the harness
     signal itself, so ``Popen`` observes a real negative return code — but
     ONLY for a signal no ancestor can be holding: ``SIG_IGN`` and the
     blocked mask are both inherited across ``exec``, and a held signal
@@ -144,6 +161,9 @@ def write_fake_harness(
     harness_path = os.path.join(directory, "fake_harness.sh")
     with open(harness_path, "w", encoding="utf-8") as handle:
         handle.write(_HARNESS_TEMPLATE.format(
+            args_file=_shell_quote(
+                os.path.join(directory, FAKE_HARNESS_ARGS_FILENAME),
+            ),
             stdout_file=_shell_quote(stdout_file),
             stderr_file=_shell_quote(stderr_file),
             terminal_action=(

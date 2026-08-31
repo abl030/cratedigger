@@ -20,7 +20,7 @@ from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-from lib.beets_child import run_pinned_beets_child
+from lib.beets_child import harness_session_argv, run_pinned_beets_child
 from lib.util import beets_subprocess_env
 from tests.test_beets_child import FAKE_PYTHON, _RecordingRunner, runtime_config
 
@@ -234,6 +234,205 @@ class TestTokenIntegrityCheckerTripsOnViolations(unittest.TestCase):
             run_pinned_beets_child,
         ).parameters["runner"].default
         self.assertIs(default, sp.run)
+
+
+#: The harness session argv grammar: [wrapper] (--pretend?) --noincremental
+#: (--preserve-discogs-flat-subtracks?) --search-id <id> <path>. Length is
+#: fully determined by the two flags.
+def _session_argv_length(pretend: bool, preserve: bool) -> int:
+    return 5 + int(pretend) + int(preserve)
+
+
+def session_argv_violations(
+    argv: list[str],
+    *,
+    harness_path: str,
+    mb_release_id: str,
+    album_path: str,
+    pretend: bool,
+    preserve_discogs_flat_subtracks: bool,
+) -> list[str]:
+    """Accumulating checker for invariant S — the session argv grammar.
+
+    Positional clauses (never membership tests), so a generated
+    ``mb_release_id`` that happens to equal a flag string can never fake a
+    violation or mask one. Every clause evaluates; ordering cannot mask one.
+    """
+    def token(index: int) -> str | None:
+        return argv[index] if 0 <= index < len(argv) else None
+
+    violations: list[str] = []
+    if token(0) != harness_path:
+        violations.append("argv does not begin with the harness wrapper")
+    if (token(1) == "--pretend") != pretend:
+        violations.append("--pretend does not track the pretend flag")
+    if token(1 + int(pretend)) != "--noincremental":
+        violations.append("--noincremental is not at its place")
+    if preserve_discogs_flat_subtracks and token(
+        2 + int(pretend),
+    ) != "--preserve-discogs-flat-subtracks":
+        violations.append("the flat-subtracks token is not at its place")
+    if argv[-3:] != ["--search-id", mb_release_id, album_path]:
+        violations.append("the search-id/album-path tail is not verbatim")
+    if len(argv) != _session_argv_length(
+        pretend, preserve_discogs_flat_subtracks,
+    ):
+        violations.append("argv carries a missing or stray token")
+    return violations
+
+
+class TestSessionArgvGrammar(unittest.TestCase):
+    """Invariant S: whatever strings a session supplies, the builder emits
+    exactly the session grammar — arbitrary harness path, release id, and
+    album path pass through verbatim, flags track their booleans, nothing
+    is joined, dropped, or invented. The deterministic 2x2 table in
+    ``tests/test_beets_child.py`` pins the exact shapes; this patrols the
+    string space around them (review round 2, reader finding 3)."""
+
+    @settings(deadline=None)
+    @given(
+        harness_path=st.text(min_size=1, max_size=40),
+        mb_release_id=st.text(min_size=0, max_size=40),
+        album_path=st.text(min_size=0, max_size=40),
+        pretend=st.booleans(),
+        preserve=st.booleans(),
+    )
+    @example(
+        harness_path="/nix/store/x/harness/run_beets_harness.sh",
+        mb_release_id="8987a929-0000-4000-8000-000000000001",
+        album_path="/mnt/virtio/music/slskd/album",
+        pretend=True,
+        preserve=False,
+    )
+    @example(
+        harness_path="/nix/store/x/harness/run_beets_harness.sh",
+        mb_release_id="2085134",
+        album_path="/processing/albums/x",
+        pretend=False,
+        preserve=True,
+    )
+    def test_builder_emits_the_session_grammar(
+        self,
+        harness_path: str,
+        mb_release_id: str,
+        album_path: str,
+        pretend: bool,
+        preserve: bool,
+    ) -> None:
+        argv = harness_session_argv(
+            harness_path,
+            mb_release_id=mb_release_id,
+            album_path=album_path,
+            pretend=pretend,
+            preserve_discogs_flat_subtracks=preserve,
+        )
+        self.assertEqual(
+            session_argv_violations(
+                argv,
+                harness_path=harness_path,
+                mb_release_id=mb_release_id,
+                album_path=album_path,
+                pretend=pretend,
+                preserve_discogs_flat_subtracks=preserve,
+            ),
+            [],
+        )
+
+
+class TestSessionArgvCheckerTripsOnViolations(unittest.TestCase):
+    """Q1 per clause: each clause trips on a world violating it alone
+    (in-place token substitutions keep every other clause satisfied)."""
+
+    def _violations(
+        self,
+        argv: list[str],
+        *,
+        pretend: bool = True,
+        preserve: bool = False,
+    ) -> list[str]:
+        return session_argv_violations(
+            argv,
+            harness_path="/h",
+            mb_release_id="m",
+            album_path="/a",
+            pretend=pretend,
+            preserve_discogs_flat_subtracks=preserve,
+        )
+
+    def test_a_wrong_wrapper_trips_only_the_wrapper_clause(self) -> None:
+        self.assertEqual(
+            self._violations([
+                "/wrong", "--pretend", "--noincremental",
+                "--search-id", "m", "/a",
+            ]),
+            ["argv does not begin with the harness wrapper"],
+        )
+
+    def test_a_replaced_pretend_token_trips_only_the_pretend_clause(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self._violations([
+                "/h", "--verbose", "--noincremental",
+                "--search-id", "m", "/a",
+            ]),
+            ["--pretend does not track the pretend flag"],
+        )
+
+    def test_a_replaced_noincremental_trips_only_its_clause(self) -> None:
+        self.assertEqual(
+            self._violations([
+                "/h", "--pretend", "--incremental",
+                "--search-id", "m", "/a",
+            ]),
+            ["--noincremental is not at its place"],
+        )
+
+    def test_a_replaced_flat_subtracks_token_trips_only_its_clause(
+        self,
+    ) -> None:
+        self.assertEqual(
+            self._violations([
+                "/h", "--pretend", "--noincremental", "--wrong-flag",
+                "--search-id", "m", "/a",
+            ], preserve=True),
+            ["the flat-subtracks token is not at its place"],
+        )
+
+    def test_a_swapped_tail_trips_only_the_tail_clause(self) -> None:
+        self.assertEqual(
+            self._violations([
+                "/h", "--pretend", "--noincremental",
+                "--search-id", "/a", "m",
+            ]),
+            ["the search-id/album-path tail is not verbatim"],
+        )
+
+    def test_a_stray_token_trips_only_the_length_clause(self) -> None:
+        self.assertEqual(
+            self._violations([
+                "/h", "--pretend", "--noincremental", "--stray",
+                "--search-id", "m", "/a",
+            ]),
+            ["argv carries a missing or stray token"],
+        )
+
+    def test_the_checker_accepts_both_faithful_shapes(self) -> None:
+        self.assertEqual(
+            self._violations([
+                "/h", "--pretend", "--noincremental",
+                "--search-id", "m", "/a",
+            ]),
+            [],
+        )
+        self.assertEqual(
+            self._violations([
+                "/h", "--noincremental",
+                "--preserve-discogs-flat-subtracks",
+                "--search-id", "m", "/a",
+            ], pretend=False, preserve=True),
+            [],
+        )
 
 
 if __name__ == "__main__":

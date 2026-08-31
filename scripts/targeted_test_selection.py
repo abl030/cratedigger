@@ -453,6 +453,14 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_dispatch_outcomes_generated",
         "tests.test_local_import_lane",
     ),
+    # harness/import_one.py's basename probes resolve its stage tests, but
+    # tests/test_disambiguation.py is what pins the SECOND harness pass's
+    # argv (--preserve-discogs-flat-subtracks on the retry) — exactly the
+    # construction lib/beets_child.py::harness_session_argv now owns
+    # (#1278 item 4, PR 2 review).
+    "harness/import_one.py": (
+        "tests.test_disambiguation",
+    ),
     # lib/surface_outcomes.py is the repository-wide status/exit
     # convention (#1278): a change to it must run the services whose exit
     # maps derive from it and the CLI relay adapters, not only its own

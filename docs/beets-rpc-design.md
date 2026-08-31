@@ -41,11 +41,13 @@ hidden env/IO dependency we haven't hit yet.
 
 ## Who spawns beet today
 
-Production callsites (`grep "sp\\.run\\|sp\\.Popen" -- lib/ harness/`):
+Production callsites (`grep "sp\\.run\\|sp\\.Popen" -- lib/ harness/`; the
+shared spawn mechanics live in `lib/beets_child.py` since #1278 item 4):
 
 - `lib/beets.py::beets_validate` — invokes `run_beets_harness.sh`
-  for the pre-import validation flow. Already uses a JSON protocol
-  over stdin/stdout, but spawns fresh each time.
+  (via `lib/beets_child.py::spawn_harness_session`) for the pre-import
+  validation flow. Already uses a JSON protocol over stdin/stdout, but
+  spawns fresh each time.
 - the former `beets_album_op._run_beet_op` — the centralised `beet
   remove` / `beet move` wrapper (issue #133). Every post-import
   stale-row cleanup, ban-source, and sibling canonicalization goes

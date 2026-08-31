@@ -52,6 +52,7 @@ _bootstrap_import_paths()
 from lib import transitions
 from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
 from lib.beets_candidate_coverage import candidate_audio_coverage
+from lib.beets_child import harness_session_argv
 from lib.beets_db import AlbumInfo, BeetsDB, validate_beets_storage_pair
 from lib.config import CratediggerConfig, read_runtime_config
 from lib.import_manifest import audio_relative_paths
@@ -1294,10 +1295,13 @@ def _run_import_once(
     Guarded Beets-owned replacement answers ``remove`` only when Beets
     reports exactly one duplicate whose release identity matches the target.
     """
-    cmd = [HARNESS, "--noincremental"]
-    if preserve_discogs_flat_subtracks:
-        cmd.append("--preserve-discogs-flat-subtracks")
-    cmd.extend(["--search-id", mb_release_id, path])
+    cmd = harness_session_argv(
+        HARNESS,
+        mb_release_id=mb_release_id,
+        album_path=path,
+        pretend=False,
+        preserve_discogs_flat_subtracks=preserve_discogs_flat_subtracks,
+    )
     print(f"  [HARNESS] {' '.join(cmd)}", file=sys.stderr)
 
     proc = subprocess.Popen(

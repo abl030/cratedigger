@@ -19,7 +19,12 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from unittest.mock import patch
 
-from lib.beets_child import BeetsChildRun, run_pinned_beets_child
+from lib.beets_child import (
+    BeetsChildRun,
+    harness_session_argv,
+    run_pinned_beets_child,
+    spawn_harness_session,
+)
 from lib.util import beets_subprocess_env
 
 FAKE_PYTHON = "/nix/store/fake-beets/bin/python3"
@@ -207,6 +212,113 @@ class TestBeetsChildRun(unittest.TestCase):
         self.assertEqual(run.returncode, 3)
         self.assertEqual(run.stdout, "�out")
         self.assertEqual(run.stderr, "�err")
+
+
+class TestHarnessSessionArgv(unittest.TestCase):
+    """Exhaustive over the builder's whole 2x2 flag domain — the validation
+    session and the real import differ ONLY by ``--pretend``, and both
+    lanes' historical argv shapes are pinned byte-for-byte."""
+
+    def test_every_flag_combination_produces_the_exact_argv(self) -> None:
+        wrapper = "/nix/store/x/harness/run_beets_harness.sh"
+        cases = [
+            (
+                "import",
+                False, False,
+                [wrapper, "--noincremental", "--search-id", "mb-1", "/a"],
+            ),
+            (
+                "import preserving flat subtracks",
+                False, True,
+                [
+                    wrapper, "--noincremental",
+                    "--preserve-discogs-flat-subtracks",
+                    "--search-id", "mb-1", "/a",
+                ],
+            ),
+            (
+                "validation",
+                True, False,
+                [
+                    wrapper, "--pretend", "--noincremental",
+                    "--search-id", "mb-1", "/a",
+                ],
+            ),
+            (
+                "validation preserving flat subtracks",
+                True, True,
+                [
+                    wrapper, "--pretend", "--noincremental",
+                    "--preserve-discogs-flat-subtracks",
+                    "--search-id", "mb-1", "/a",
+                ],
+            ),
+        ]
+        for desc, pretend, preserve, expected in cases:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    harness_session_argv(
+                        wrapper,
+                        mb_release_id="mb-1",
+                        album_path="/a",
+                        pretend=pretend,
+                        preserve_discogs_flat_subtracks=preserve,
+                    ),
+                    expected,
+                )
+
+
+class TestSpawnHarnessSession(unittest.TestCase):
+    def test_spawns_a_real_text_mode_child_with_the_beets_env(self) -> None:
+        """No mocks: a real child proves the production spawner pipes all
+        three streams, decodes non-UTF-8 output with replacement instead of
+        raising mid-read, and passes ``beets_subprocess_env()``'s WHOLE
+        environment — asserted as a superset because the interpreter's own
+        launcher may add variables of its own, but a spawner that filters
+        the env (the Blueline Medic 0-candidates incident class: a harness
+        child resolving config from the wrong environment, or the wrapper's
+        ``CRATEDIGGER_BEETS_PYTHON`` refusal firing) must fail here, not in
+        production (review round 2, reader findings 1-2)."""
+        import json as json_mod
+        import sys
+
+        with runtime_config():
+            expected_env = beets_subprocess_env()
+            child_source = (
+                "import json, os, sys\n"
+                "sys.stdout.write(json.dumps(dict(os.environ)) + '\\n')\n"
+                "sys.stdout.buffer.write(b'\\xff\\n')\n"
+                "sys.stdout.flush()\n"
+                "sys.stderr.write('stderr-marker\\n')\n"
+                "sys.stdout.write(sys.stdin.readline())\n"
+            )
+            proc = spawn_harness_session([sys.executable, "-c", child_source])
+            stdin = proc.stdin
+            stdout = proc.stdout
+            stderr = proc.stderr
+            assert stdin is not None
+            assert stdout is not None
+            assert stderr is not None
+            stdin.write("echoed\n")
+            stdin.flush()
+            lines = list(stdout)
+            stderr_text = stderr.read()
+            returncode = proc.wait(timeout=30)
+
+        self.assertEqual(len(lines), 3)
+        child_env = json_mod.loads(lines[0])
+        assert isinstance(child_env, dict)
+        for key, value in expected_env.items():
+            self.assertEqual(
+                child_env.get(key), value,
+                f"env var {key} was not forwarded to the child",
+            )
+        self.assertEqual(child_env["BEETSDIR"], "/var/lib/cratedigger/beets")
+        self.assertEqual(child_env["CRATEDIGGER_BEETS_PYTHON"], FAKE_PYTHON)
+        self.assertEqual(lines[1], "�\n")
+        self.assertEqual(lines[2], "echoed\n")
+        self.assertEqual(stderr_text, "stderr-marker\n")
+        self.assertEqual(returncode, 0)
 
 
 if __name__ == "__main__":

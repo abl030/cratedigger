@@ -92,7 +92,10 @@ lane-supplied timeout — while each lane keeps its own argv tail and its own
 "did the mutation land" evidence (an exit code is never SUCCESS evidence;
 the per-lane mechanisms, including the delete child's exit-as-refusal, are
 in that module's docstring). Lane 1's interactive harness session spawns
-`run_beets_harness.sh` instead.
+`run_beets_harness.sh` instead — the two session shapes (validation
+`--pretend`, real import) share one argv builder (`harness_session_argv`),
+and the validation session's spawner (`spawn_harness_session`) is
+kwarg-injectable behind the narrow `HarnessSession` protocol.
 
 The lanes:
 
