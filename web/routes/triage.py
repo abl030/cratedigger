@@ -274,17 +274,16 @@ def post_stop_converged_search(
         int(req_id_str),
         signal_token=payload.signal_token,
     )
+    from lib.convergence_service import STOP_CONVERGED_SEARCH_HTTP_STATUS
+
     response = msgspec.to_builtins(result)
-    if result.outcome == "stopped":
-        h._json(response)
-    elif result.outcome == "not_found":
-        h._json(response, status=404)
-    elif result.outcome in {"wrong_state", "stale"}:
-        h._json(response, status=409)
-    elif result.outcome == "unavailable":
-        h._json(response, status=503)
-    else:
-        h._json(response, status=422)
+    # Status from the service's outcome table (#1278); the typed
+    # StopConvergenceOutcome Literal guarantees membership, audited by
+    # tests/test_surface_outcomes.py.
+    h._json(
+        response,
+        status=STOP_CONVERGED_SEARCH_HTTP_STATUS[result.outcome],
+    )
 
 
 ROUTES: list[RouteRegistration] = [

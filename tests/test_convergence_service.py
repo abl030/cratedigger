@@ -11,6 +11,8 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
 from lib.convergence_service import (
+    STOP_CONVERGED_SEARCH_EXIT_CODES,
+    STOP_CONVERGED_SEARCH_HTTP_STATUS,
     ConvergenceObservation,
     ConvergenceSignal,
     ConvergenceStopService,
@@ -255,6 +257,33 @@ class TestConvergenceDerivation(unittest.TestCase):
                 observation_count=20,
                 signal=bad_signal,
             )
+
+
+class TestStopConvergenceOutcomeTables(unittest.TestCase):
+    """Value pins for the stop-converged-search pair (#1278 item 3).
+
+    Vocabulary/derivation conformance is audited centrally in
+    ``tests/test_surface_outcomes.py``; both surfaces look these exact
+    values up (the route status ladder and the CLI's inline exit dict
+    were replaced by these tables)."""
+
+    def test_table_values(self) -> None:
+        self.assertEqual(STOP_CONVERGED_SEARCH_HTTP_STATUS, {
+            "stopped": 200,
+            "not_found": 404,
+            "wrong_state": 409,
+            "stale": 409,
+            "not_converged": 422,
+            "unavailable": 503,
+        })
+        self.assertEqual(STOP_CONVERGED_SEARCH_EXIT_CODES, {
+            "stopped": 0,
+            "not_found": 2,
+            "wrong_state": 4,
+            "stale": 4,
+            "not_converged": 3,
+            "unavailable": 5,
+        })
 
 
 class _StopDB:

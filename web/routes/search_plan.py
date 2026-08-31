@@ -70,9 +70,8 @@ def get_pipeline_search_plan_dry_run(
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
-        RESULT_DRY_RUN_GENERATION_FAILED,
-        RESULT_DRY_RUN_SUCCESS,
         RESULT_REQUEST_NOT_FOUND,
+        SEARCH_PLAN_DRY_RUN_HTTP_STATUS,
         SearchPlanService,
         dry_run_payload,
     )
@@ -108,16 +107,14 @@ def get_pipeline_search_plan_dry_run(
         request_row=row,
         has_active_plan=has_active,
     )
+    status = SEARCH_PLAN_DRY_RUN_HTTP_STATUS.get(result.outcome)
+    if status is None:
+        # Defensive fallback for any future outcome string.
+        h._error(f"Unknown dry-run outcome: {result.outcome}", 500)
+        return
     if result.outcome == RESULT_REQUEST_NOT_FOUND:
         payload["error"] = result.error_message or "Not found"
-        h._json(payload, status=404)
-        return
-    if result.outcome in (
-            RESULT_DRY_RUN_SUCCESS, RESULT_DRY_RUN_GENERATION_FAILED):
-        h._json(payload)
-        return
-    # Defensive fallback for any future outcome string.
-    h._error(f"Unknown dry-run outcome: {result.outcome}", 500)
+    h._json(payload, status=status)
 
 
 def get_pipeline_search_plan_saturation(
@@ -151,8 +148,8 @@ def get_pipeline_search_plan_saturation(
     from lib.search_plan_service import (
         RESULT_REQUEST_NOT_FOUND,
         RESULT_SATURATION_INPUT_INVALID,
-        RESULT_SATURATION_SUCCESS,
         SATURATION_WINDOW_DEFAULT_DAYS,
+        SEARCH_PLAN_SATURATION_HTTP_STATUS,
         SearchPlanService,
         saturation_payload,
     )
@@ -181,20 +178,17 @@ def get_pipeline_search_plan_saturation(
         request_id, window_days=window_days,
     )
     payload = saturation_payload(result)
+    status = SEARCH_PLAN_SATURATION_HTTP_STATUS.get(result.outcome)
+    if status is None:
+        # Defensive fallback for any future outcome string.
+        h._error(f"Unknown saturation outcome: {result.outcome}", 500)
+        return
     if result.outcome == RESULT_REQUEST_NOT_FOUND:
         payload["error"] = result.error_message or "Not found"
-        h._json(payload, status=404)
-        return
-    if result.outcome == RESULT_SATURATION_INPUT_INVALID:
+    elif result.outcome == RESULT_SATURATION_INPUT_INVALID:
         payload["error"] = (
             result.error_message or "Invalid window_days")
-        h._json(payload, status=400)
-        return
-    if result.outcome == RESULT_SATURATION_SUCCESS:
-        h._json(payload)
-        return
-    # Defensive fallback for any future outcome string.
-    h._error(f"Unknown saturation outcome: {result.outcome}", 500)
+    h._json(payload, status=status)
 
 
 def get_pipeline_search_plan_history(
@@ -221,9 +215,9 @@ def get_pipeline_search_plan_history(
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
         HISTORY_PAGE_DEFAULT_LIMIT,
-        RESULT_HISTORY_PAGE_INPUT_INVALID,
         RESULT_HISTORY_PAGE_SUCCESS,
         RESULT_REQUEST_NOT_FOUND,
+        SEARCH_PLAN_HISTORY_HTTP_STATUS,
         SearchPlanService,
     )
     try:
@@ -288,15 +282,16 @@ def get_pipeline_search_plan_history(
         }
         h._json(payload)
         return
+    status = SEARCH_PLAN_HISTORY_HTTP_STATUS.get(result.outcome)
+    if status is None:
+        # Defensive fallback for any future outcome string.
+        h._error(f"Unknown history outcome: {result.outcome}", 500)
+        return
     if result.outcome == RESULT_REQUEST_NOT_FOUND:
         # F3: match h._error() shape used by neighbor routes (get_pipeline_detail etc.)
-        h._error(result.error_message or "Request not found", 404)
+        h._error(result.error_message or "Request not found", status)
         return
-    if result.outcome == RESULT_HISTORY_PAGE_INPUT_INVALID:
-        h._error(result.error_message or "Invalid history page request", 400)
-        return
-    # Defensive fallback for any future outcome string.
-    h._error(f"Unknown history outcome: {result.outcome}", 500)
+    h._error(result.error_message or "Invalid history page request", status)
 
 
 class PipelineSearchPlanRegenerateRequest(BaseModel):
@@ -328,10 +323,10 @@ def post_pipeline_search_plan_regenerate(
     from lib.search_plan_service import (
         RESULT_FAILED_DETERMINISTIC,
         RESULT_FAILED_TRANSIENT,
-        RESULT_NOOP_ACTIVE_PLAN_EXISTS,
         RESULT_REQUEST_NOT_FOUND,
         RESULT_REQUEST_REPLACED,
         RESULT_SUCCESS,
+        SEARCH_PLAN_REGENERATE_HTTP_STATUS,
         SearchPlanService,
     )
     try:
@@ -370,31 +365,24 @@ def post_pipeline_search_plan_regenerate(
         payload["request_status"] = None
         payload["executable"] = False
 
+    # Status from the action's table (lib/search_plan_service.py, #1278);
+    # an unknown outcome string is a bug and surfaces as 500.
+    status = SEARCH_PLAN_REGENERATE_HTTP_STATUS.get(result.outcome)
+    if status is None:
+        h._error(f"Unknown plan generation outcome: {result.outcome}", 500)
+        return
     if result.outcome == RESULT_REQUEST_NOT_FOUND:
         # Symmetric body shape with 422 / 503: clients expect to see
         # request_id / outcome / plan_id (None) / failure_class /
         # error_message even on the not-found path.
         payload["error"] = "Not found"
-        h._json(payload, status=404)
-        return
-    if result.outcome == RESULT_REQUEST_REPLACED:
+    elif result.outcome == RESULT_REQUEST_REPLACED:
         payload["error"] = result.error_message or "Request is replaced"
-        h._json(payload, status=409)
-        return
-    if result.outcome == RESULT_FAILED_DETERMINISTIC:
+    elif result.outcome == RESULT_FAILED_DETERMINISTIC:
         payload["error"] = result.error_message or "Plan generation failed"
-        h._json(payload, status=422)
-        return
-    if result.outcome == RESULT_FAILED_TRANSIENT:
+    elif result.outcome == RESULT_FAILED_TRANSIENT:
         payload["error"] = result.error_message or "Plan generation retryable"
-        h._json(payload, status=503)
-        return
-    # RESULT_SUCCESS or RESULT_NOOP_ACTIVE_PLAN_EXISTS.
-    if result.outcome not in (RESULT_SUCCESS, RESULT_NOOP_ACTIVE_PLAN_EXISTS):
-        # Defensive fallback; surface as 500 so we notice unknown shapes.
-        h._error(f"Unknown plan generation outcome: {result.outcome}", 500)
-        return
-    h._json(payload)
+    h._json(payload, status=status)
 
 
 class PipelineSearchPlanAdvanceRequest(BaseModel):
@@ -444,12 +432,12 @@ def post_pipeline_search_plan_advance(
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
-        RESULT_ADVANCED,
         RESULT_FAILED_TRANSIENT,
         RESULT_INVALID_TARGET,
         RESULT_NO_ACTIVE_PLAN,
         RESULT_REQUEST_NOT_FOUND,
         RESULT_REQUEST_REPLACED,
+        SEARCH_PLAN_ADVANCE_HTTP_STATUS,
         SearchPlanService,
     )
     try:
@@ -479,34 +467,25 @@ def post_pipeline_search_plan_advance(
         "new_query": result.new_query,
         "error_message": result.error_message,
     }
-    if result.outcome == RESULT_ADVANCED:
-        h._json(payload)
+    status = SEARCH_PLAN_ADVANCE_HTTP_STATUS.get(result.outcome)
+    if status is None:
+        # Defensive: any unknown outcome string is a bug.
+        h._error(f"Unknown advance outcome: {result.outcome}", 500)
         return
     if result.outcome == RESULT_REQUEST_NOT_FOUND:
         payload["error"] = result.error_message or "Not found"
-        h._json(payload, status=404)
-        return
-    if result.outcome == RESULT_REQUEST_REPLACED:
+    elif result.outcome == RESULT_REQUEST_REPLACED:
         payload["error"] = result.error_message or "Request is replaced"
-        h._json(payload, status=409)
-        return
-    if result.outcome == RESULT_NO_ACTIVE_PLAN:
+    elif result.outcome == RESULT_NO_ACTIVE_PLAN:
         payload["error"] = (
             result.error_message or "No active plan; regenerate first")
-        h._json(payload, status=409)
-        return
-    if result.outcome == RESULT_INVALID_TARGET:
+    elif result.outcome == RESULT_INVALID_TARGET:
         payload["error"] = (
             result.error_message or "Invalid advance target")
-        h._json(payload, status=422)
-        return
-    if result.outcome == RESULT_FAILED_TRANSIENT:
+    elif result.outcome == RESULT_FAILED_TRANSIENT:
         payload["error"] = (
             result.error_message or "Plan lock contention; retry")
-        h._json(payload, status=503)
-        return
-    # Defensive: any unknown outcome string is a bug.
-    h._error(f"Unknown advance outcome: {result.outcome}", 500)
+    h._json(payload, status=status)
 
 
 ROUTES: list[RouteRegistration] = [
