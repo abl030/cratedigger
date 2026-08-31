@@ -686,7 +686,7 @@ def _match_transfer_all_history(
     matcher, so the un-narrowed choice read as the default. Renaming and
     hiding it records that closed seam and gives review something to
     catch a new caller on — a marker, not a wall, exactly as
-    ``_match_transfer_id``'s docstring says one function up
+    ``_match_transfer_id``'s docstring says earlier in this module
     (``reportPrivateUsage`` is off and cross-module private imports are
     the house convention, PR #775). Do not re-export or widen this back
     to public.
@@ -1224,12 +1224,16 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
     can't be decoded, the whole sweep is skipped for the cycle (zero
     deletions, ``aborted=True``) — see
     ``_protected_paths_for_downloading``. The other two DB seams carry
-    deliberately different contracts (issue #1312; pinned in
+    deliberately different dispositions (issue #1312; pinned in
     ``tests/test_slskd_sweep_exception_contracts.py``): the
     ledger-ownership read propagates to ``lib/convergence.py``'s
-    registered-step isolation (see ``_owned_paths_from_ledger``), and a
-    failed abandoned-attempt read only degrades to the ordinary age
-    threshold. Best-effort otherwise, and
+    registered-step isolation (see ``_owned_paths_from_ledger``) — like
+    the abort, that is zero deletions for the cycle; the two differ in
+    which failure line the operator sees, not in what gets deleted — and
+    a failure computing the abandoned-attempt set (the read or the path
+    normalization over it) only degrades to the ordinary age threshold,
+    narrowing, never widening, what may be deleted. Best-effort
+    otherwise, and
     silent unless it actually removed files or pruned directories —
     matching ``converge_slskd_orphans``'s Phase 0 contract.
     """

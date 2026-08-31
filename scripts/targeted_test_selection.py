@@ -133,12 +133,28 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # regresses: enqueue/orphan/purge pins (test_download), the
         # disk reaper's invariants, cancel_and_delete's C3/C4 ownership
         # properties, the completed-purge properties, and the five
-        # sweeps' settled exception contracts (issue #1312).
+        # sweeps' settled exception contracts (issue #1312), plus the
+        # T1 write-ahead-ordering property whose subject is this
+        # module's own slskd_enqueue_with_outcome (the ONE production
+        # enqueue call site).
         "tests.test_download",
         "tests.test_disk_reaper_generated",
         "tests.test_convergence_ledger_generated",
         "tests.test_completed_purge_generated",
+        "tests.test_transfer_ledger_generated",
         "tests.test_slskd_sweep_exception_contracts",
+    ),
+    "lib/download_ownership.py": (
+        # Was an admitted zero-neighbour gap (issue #1199): no
+        # tests.test_download_ownership. The ownership writer/reader
+        # port's real coverage: the DownloadOwnershipDB parity tests and
+        # claim/confirm orchestration live in test_download; the T1
+        # write-ahead property drives DownloadOwnershipWriter directly;
+        # the cross-request guard property drives its conflict-check
+        # session (issue #1312 reader finding F5).
+        "tests.test_download",
+        "tests.test_transfer_ledger_generated",
+        "tests.test_cross_request_enqueue_guard_generated",
     ),
     "lib/slskd_searches.py": (
         # The basename probe resolves tests.test_slskd_searches on its
@@ -1225,11 +1241,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "measured 2026-08-19: zero neighbours -- "
         "tests.test_download_materialization does not exist and no "
         "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
-    ),
-    "lib/download_ownership.py": (
-        "measured 2026-08-19: zero neighbours -- "
-        "tests.test_download_ownership does not exist and no EXACT_PATH_"
-        "NEIGHBOURS/prefix rule covers it (issue #1199)"
     ),
     "lib/download_processing.py": (
         "measured 2026-08-19: zero neighbours -- "

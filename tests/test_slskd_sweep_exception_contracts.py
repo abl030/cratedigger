@@ -1,51 +1,71 @@
 """Settled swallow-vs-propagate exception contracts for the five slskd
 sweeps (issue #1312, the #1297/#1299 series' named residual).
 
-Every sweep is a registered convergence step, so ``lib/convergence.py``'s
-runner already isolates a step failure from the cycle. "Propagates" below
-therefore means "reaches the runner's per-step isolation, which logs the
-step's registered failure message and continues the cycle" — never
-"aborts the cycle". The settled contract, per sweep and seam:
+The five deferred sweeps — spelled by the run-cycle reachability table's
+own scope note before this settlement — are ``converge_slskd_orphans``,
+``reap_disk_orphans``, ``converge_slskd_searches``,
+``harvest_terminal_transfer_evidence``, and
+``purge_completed_transfers``. Every one is a registered convergence
+step, so ``lib/convergence.py``'s runner isolates a step failure from
+the cycle: "propagates" below means "reaches the runner's per-step
+isolation, which logs the step's registered failure message and
+continues the cycle" — never "aborts the cycle". That composition is
+proven per sweep by the reachability table itself
+(``tests/test_convergence_runner_generated.py::
+TestRegisteredStepFailureMessagesReachable``), which gained one row per
+sweep when this settlement landed; this module pins the sweep-internal
+seam behavior. The settled contract, per sweep and seam:
 
-============================  ==================  ====================  =======================
-sweep                         slskd failure       per-item destructive  pipeline-DB failure
-============================  ==================  ====================  =======================
-converge_slskd_orphans        skip pass (0)       log, continue         propagates
-reap_disk_orphans             (no slskd calls)    log, continue         protected-set read:
-                                                                        aborted=True, zero
-                                                                        deletions; ledger-owned
-                                                                        read: propagates;
-                                                                        abandoned read: degrade
-                                                                        to the ordinary age
-                                                                        threshold
-converge_slskd_searches       skip reconcile,     log, continue         unswept read / mark:
-                              prune still runs                          propagates; retention
-                                                                        prune: swallowed (warn),
-                                                                        summary still returned
-prune_transfer_ledger_cycle   (no slskd calls)    (none)                propagates
-purge_completed_transfers     noop summary        count failed,         propagates
-                                                  continue
-============================  ==================  ====================  =======================
+==============================  ==================  ====================  =======================
+sweep                           slskd failure       per-item destructive  pipeline-DB failure
+==============================  ==================  ====================  =======================
+converge_slskd_orphans          skip pass (0)       log, continue         propagates
+reap_disk_orphans               (no slskd calls)    log, continue         protected-set read:
+                                                                          aborted=True, zero
+                                                                          deletions; ledger-owned
+                                                                          read: propagates;
+                                                                          abandoned-set
+                                                                          computation: degrade to
+                                                                          the ordinary age
+                                                                          threshold
+converge_slskd_searches         skip reconcile,     log, continue         unswept read / swept
+                                prune still runs                          mark: propagates;
+                                                                          retention prune:
+                                                                          swallowed (warn), the
+                                                                          pass's reconciliation
+                                                                          work survives
+harvest_terminal_transfer_      snapshot skips      per-row skip,         propagates
+evidence                        the pass            continue
+purge_completed_transfers       noop summary        count failed,         propagates
+==============================  ==================  ====================  =======================
 
-The slskd and per-item cells were already pinned where each sweep's tests
-live: ``tests/test_download.py`` (``TestConvergeSlskdOrphans``'s
+The slskd and per-item cells were already pinned where each sweep's
+tests live: ``tests/test_download.py`` (``TestConvergeSlskdOrphans``'s
 snapshot-failure and cancel-error pins; ``TestPurgeCompletedTransfers``'s
-snapshot-failure and removal-error pins), ``tests/test_slskd_searches.py``
-(fetch-failure and per-id delete-failure pins), and
-``tests/test_disk_reaper_generated.py`` (the fail-closed protected-set
-abort pins). This module pins the previously-unpinned pipeline-DB cells —
-the propagate/degrade column — one deterministic pin per cell, so the
-contract each docstring now states is enforced rather than prose.
+snapshot-failure and removal-error pins;
+``TestHarvestTerminalTransferEvidence``'s snapshot-noop and per-row
+isolation pins), ``tests/test_slskd_searches.py`` (fetch-failure and
+per-id delete-failure pins), and ``tests/test_disk_reaper_generated.py``
+(the fail-closed protected-set abort pins). This module pins the
+pipeline-DB cells those homes did not: the propagate/degrade column.
 
-Deterministic-only on purpose: the cells are a finite, enumerable
-contract, not a world space, and the generated step-failure-isolation
-property at the runner boundary
-(``tests/test_convergence_runner_generated.py``) already patrols that a
-propagated failure never escapes the cycle.
+One bonus row rides along: ``prune_transfer_ledger_cycle`` was NOT one
+of the deferred five — the reachability table has composed its
+DB-failure propagation with the real runner since #1297/#1299 — but its
+pin here adds Rule-B exception fidelity (``psycopg2.OperationalError``
+where the table's generic injection raises ``RuntimeError``) and keeps
+the whole slskd-adjacent Phase-0/end-of-cycle sweep family answerable
+in one place.
 
-Rule B fidelity: the injected failure is ``psycopg2.OperationalError`` —
-what the real ``PipelineDB`` raises when the connection drops — never a
-synthetic stand-in.
+Deterministic-only on purpose: each cell is one enumerable seam of one
+sweep — a finite contract, not a world space — and the sweep↔runner
+composition each "propagates" cell relies on is proven by the
+reachability table's per-sweep rows named above.
+
+Rule B fidelity: the injected failure is ``psycopg2.OperationalError``
+— the class the real ``PipelineDB`` lets escape when its single
+closed-connection reconnect-and-retry also fails (``lib/pipeline_db/
+_core.py``), never a synthetic stand-in.
 """
 from __future__ import annotations
 
@@ -53,16 +73,21 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import psycopg2
 
+from lib.download import harvest_terminal_transfer_evidence
 from lib.pipeline_db import TransferLedgerRow
 from lib.pipeline_db.rows import AlbumRequestRow
-from lib.slskd_searches import SearchSweepSummary, converge_slskd_searches
+from lib.slskd_searches import (
+    SEARCH_LEDGER_SWEEP_GRACE_S,
+    SearchSweepSummary,
+    converge_slskd_searches,
+)
 from lib.slskd_transfer_ledger import prune_transfer_ledger_cycle
 from lib.slskd_transfers import (
     converge_slskd_orphans,
@@ -102,6 +127,11 @@ class _UnsweptReadRaises(FakePipelineDB):
         raise psycopg2.OperationalError(_DB_DOWN)
 
 
+class _MarkSweptRaises(FakePipelineDB):
+    def mark_search_ids_deleted(self, search_ids: list[str]) -> None:
+        raise psycopg2.OperationalError(_DB_DOWN)
+
+
 class _SearchPruneRaises(FakePipelineDB):
     def prune_search_ledger(self, deleted_before: datetime) -> int:
         raise psycopg2.OperationalError(_DB_DOWN)
@@ -110,6 +140,21 @@ class _SearchPruneRaises(FakePipelineDB):
 class _TransferPruneRaises(FakePipelineDB):
     def prune_transfer_ledger(self, older_than: datetime) -> int:
         raise psycopg2.OperationalError(_DB_DOWN)
+
+
+def _seed_eligible_completed_search(
+    db: FakePipelineDB, slskd: FakeSlskdAPI, search_id: str,
+) -> None:
+    """One ledgered search past the grace window whose slskd state is
+    terminal — the world in which the sweep's reconciliation block
+    actually runs (deletes the search, marks the row swept)."""
+    db.record_search_id(search_id, "plan_search", 1)
+    db._search_ledger[search_id].created_at = (
+        datetime.now(UTC)
+        - timedelta(seconds=SEARCH_LEDGER_SWEEP_GRACE_S + 60.0)
+    )
+    slskd.searches.add_search(
+        search_id=search_id, state="Completed, TimedOut", responses=[])
 
 
 class TestOrphanConvergenceDbFailurePropagates(unittest.TestCase):
@@ -132,10 +177,23 @@ class TestCompletedPurgeDbFailurePropagates(unittest.TestCase):
             purge_completed_transfers(ctx)
 
 
+class TestHarvestDbFailurePropagates(unittest.TestCase):
+    """harvest_terminal_transfer_evidence: a DB failure reaches the
+    runner unswallowed. Its snapshot-noop and per-row isolation cells
+    are pinned in tests/test_download.py."""
+
+    def test_downloading_read_failure_propagates(self):
+        ctx = make_ctx_with_fake_db(
+            _DownloadingReadRaises(), slskd=FakeSlskdAPI())
+        with self.assertRaises(psycopg2.OperationalError):
+            harvest_terminal_transfer_evidence(ctx)
+
+
 class TestTransferLedgerPruneDbFailurePropagates(unittest.TestCase):
     """prune_transfer_ledger_cycle: a DB failure reaches the runner
-    unswallowed — the docstring's "DB failures deliberately propagate"
-    claim, enforced."""
+    unswallowed — the bonus Rule-B-fidelity row (see module docstring);
+    the composed propagate-through-the-runner proof has lived in the
+    reachability table since #1297/#1299."""
 
     def test_prune_failure_propagates(self):
         ctx = make_ctx_with_fake_db(_TransferPruneRaises())
@@ -144,32 +202,52 @@ class TestTransferLedgerPruneDbFailurePropagates(unittest.TestCase):
 
 
 class TestSearchSweepDbContracts(unittest.TestCase):
-    """converge_slskd_searches: the unswept read propagates; the retention
-    prune is internally isolated so a prune failure never discards the
-    sweep's own reconciliation work."""
+    """converge_slskd_searches: the unswept read and the swept mark
+    propagate; the retention prune is internally isolated so a prune
+    failure never discards the same pass's reconciliation work."""
 
     def test_unswept_read_failure_propagates(self):
         ctx = make_ctx_with_fake_db(_UnsweptReadRaises(), slskd=FakeSlskdAPI())
         with self.assertRaises(psycopg2.OperationalError):
             converge_slskd_searches(ctx)
 
-    def test_retention_prune_failure_is_swallowed_and_summary_survives(self):
-        ctx = make_ctx_with_fake_db(_SearchPruneRaises(), slskd=FakeSlskdAPI())
+    def test_swept_mark_failure_propagates(self):
+        db = _MarkSweptRaises()
+        slskd = FakeSlskdAPI()
+        _seed_eligible_completed_search(db, slskd, "mark-fails-1")
+        ctx = make_ctx_with_fake_db(db, slskd=slskd)
+        with self.assertRaises(psycopg2.OperationalError):
+            converge_slskd_searches(ctx)
+
+    def test_retention_prune_failure_is_swallowed_and_work_survives(self):
+        """The world must actually do reconciliation work, or the pin is
+        vacuous: with an empty ledger the summary equals the no-op value
+        whether or not the prune failure was contained."""
+        db = _SearchPruneRaises()
+        slskd = FakeSlskdAPI()
+        _seed_eligible_completed_search(db, slskd, "prune-fails-1")
+        ctx = make_ctx_with_fake_db(db, slskd=slskd)
+
         with self.assertLogs("cratedigger", level="WARNING") as logs:
             summary = converge_slskd_searches(ctx)
-        self.assertEqual(summary, SearchSweepSummary(
-            deleted=0, already_gone=0, foreign_skipped=0))
+
+        self.assertEqual(summary, SearchSweepSummary(deleted=1))
+        self.assertIn("prune-fails-1", slskd.searches.delete_calls)
+        self.assertIsNotNone(db._search_ledger["prune-fails-1"].deleted_at)
         self.assertTrue(
             any("prune failed" in line for line in logs.output),
             f"expected the prune-failure warning, got: {logs.output}")
 
 
 class TestDiskReaperDbFailureSeams(unittest.TestCase):
-    """reap_disk_orphans: three DB seams, three deliberately different
-    contracts — the protected-set read aborts fail-closed (pinned in
-    tests/test_disk_reaper_generated.py), the ledger-owned read
-    propagates, and the abandoned-attempt read degrades to the ordinary
-    age threshold."""
+    """reap_disk_orphans: three DB seams, three deliberate dispositions.
+    The protected-set read aborts internally (``aborted=True``, pinned in
+    tests/test_disk_reaper_generated.py) while the ledger-owned read
+    propagates — both end in zero deletions, differing in which failure
+    line the operator sees (the runner's registered message vs the
+    sweep's own ABORTED log). The abandoned-set computation is the
+    behaviorally distinct cell: its failure only degrades, narrowing —
+    never widening — what may be deleted this cycle."""
 
     def _ctx(self, root: str, fake_db: FakePipelineDB):
         cfg = MagicMock()
