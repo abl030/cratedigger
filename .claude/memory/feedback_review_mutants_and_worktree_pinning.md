@@ -30,3 +30,14 @@ only the next independent read caught.
 mutate each; paste the failing test line into any kill claim; before spawning
 a mutant runner, decide deliberately where it will actually run and freeze
 that tree.
+
+Addendum (#1278 wx6, 2026-08-31): the pinning reproduced three ways in one
+session — a plain subagent handed a pre-made detached worktree could not
+reach it (Bash guard reports the parent's worktree); `EnterWorktree(path=…)`
+from the pinned subagent REPORTED success but Bash still refused; and
+`Agent(isolation: "worktree")` created its own worktree yet the subagent's
+shell stayed pinned to the parent's tree (it detached the parent's HEAD
+before self-correcting — content-identical, branch reattached). The workable
+protocol remains: sequence the reviewers (reader first, runner second, never
+concurrent in one tree), freeze orchestrator edits, git-proven restores, and
+the orchestrator re-verifies HEAD + branch attachment + clean status after.

@@ -119,3 +119,4 @@
 - [Live means verified deploy](feedback_live_means_verified_deploy.md) — memory says "merged" until the deploy chain verifies; flake.lock pin is the authority
 - [#1278 wx4 wrong-match queue view SHIPPED](project_1278_wx4_wrong_match_queue_view.md) — PR #1304 live-verified 2026-08-31; projection extracted with Protocol+injected collaborators; byte-identical differential; 40 mutants, 1 survivor pinned
 - [Review mutants target changed expressions](feedback_review_mutants_and_worktree_pinning.md) — mutate the diff's changed expressions first; kill claims need the failing TEST ID; subagents are pinned to the parent's worktree
+- [#1278 wx6 beets_compat split SHIPPED](project_1278_wx6_beets_compat_split.md) — PR #1310 live-verified 2026-08-31, Worth-exploring list COMPLETE; era premise refuted by measurement; MagicMock parent-attr trap; from beets import X ignores sys.modules stubs
