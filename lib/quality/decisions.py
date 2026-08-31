@@ -79,7 +79,8 @@ class MeasurementFailure(msgspec.Struct, frozen=True):
     types" — encode via ``msgspec.json.encode`` / ``msgspec.to_builtins``,
     decode via ``msgspec.convert``. Strict validation at the boundary catches
     drift between the Struct's declared taxonomy and what the producer wrote.
-    Mirrors the precedent set by ``lib.beets_album_op.BeetsOpFailure``.
+    Mirrors the precedent set by
+    ``lib.quality.import_result_types.DisambiguationFailure``.
     """
     reason: MeasurementFailureReason
     detail: str

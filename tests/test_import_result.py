@@ -18,6 +18,7 @@ from lib.quality import (
     IMPORT_RESULT_SENTINEL,
     AudioQualityMeasurement,
     ConversionInfo,
+    DisambiguationFailure,
     DownloadInfo,
     DuplicateRemoveCandidate,
     DuplicateRemoveGuardInfo,
@@ -166,8 +167,6 @@ class TestImportResultConstruction(unittest.TestCase):
         so the audit trail in download_log.import_result preserves
         both the coarse reason tag and the human-readable detail.
         """
-        from lib.quality import DisambiguationFailure
-
         r = ImportResult(
             postflight=PostflightInfo(
                 beets_id=42, track_count=11,
@@ -552,8 +551,7 @@ class TestImportResultConstruction(unittest.TestCase):
         """Issue #133 back-compat: old download_log rows serialized
         AFTER #127 but BEFORE #133 have ``disambiguation_failure``
         with only ``{reason, detail}`` — no ``selector``. The unified
-        ``BeetsOpFailure`` (was ``DisambiguationFailure``) added
-        ``selector: str = ""`` so these rows still deserialize.
+        type added ``selector: str = ""`` so these rows still deserialize.
 
         Without the default, ``DisambiguationFailure(**{"reason":"timeout",
         "detail":"x"})`` would raise ``TypeError`` and every
@@ -615,6 +613,36 @@ class TestImportResultConstruction(unittest.TestCase):
         assert r.current_measurement is not None
         self.assertEqual(r.current_measurement.spectral_bitrate_kbps, 128)
         self.assertEqual(r.postflight.track_count, 12)
+
+
+class TestDisambiguationFailureWireContract(unittest.TestCase):
+    """Field, default and frozen pins for the persisted failure payload.
+
+    Relocated from ``tests/test_beets_album_op.py`` when ``DisambiguationFailure``
+    moved out of the deleted ``lib/beets_album_op.py`` (#1278). Same subject,
+    same assertions; the type is now defined in
+    ``lib/quality/import_result_types.py`` and imported here through the
+    ``lib.quality`` re-export, the way the rest of the repo reaches it.
+    """
+
+    def test_op_failure_fields_and_legacy_selector_default(self):
+        failure = DisambiguationFailure(
+            reason="timeout",
+            detail="timed out after 30s",
+            selector="id:42",
+        )
+        self.assertEqual(failure.reason, "timeout")
+        self.assertEqual(failure.detail, "timed out after 30s")
+        self.assertEqual(failure.selector, "id:42")
+        self.assertEqual(
+            DisambiguationFailure(reason="nonzero_rc", detail="rc=1").selector,
+            "",
+        )
+
+    def test_op_failure_is_frozen(self):
+        failure = DisambiguationFailure(reason="timeout", detail="x")
+        with self.assertRaises(AttributeError):
+            failure.detail = "y"  # pyright: ignore[reportAttributeAccessIssue]
 
 
 class TestImportResultSerialization(unittest.TestCase):
@@ -1122,7 +1150,7 @@ class TestImportResultProductionFixtures(unittest.TestCase):
     def test_production_v2_pre_133_disambiguation_failure_roundtrip(self):
         """Pre-#133 production shape: disambiguation_failure is populated
         with ``{reason, detail}`` only — no ``selector`` key (the field
-        was added in PR #131). ``BeetsOpFailure.selector`` must default
+        was added in PR #131). ``DisambiguationFailure.selector`` must default
         to ``""`` so force-import / web UI reads don't 500 on old rows.
         """
         prod_row = {

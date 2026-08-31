@@ -16,11 +16,11 @@ import stat
 import subprocess as sp
 import time
 import unicodedata
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Protocol
 from xml.etree.ElementTree import Element
 
 from defusedxml import ElementTree as ET
@@ -31,6 +31,12 @@ from lib.json_narrow import (
 )
 from lib.json_narrow import (
     is_str_object_dict as _is_str_object_dict,
+)
+from lib.json_narrow import (
+    json_dict as _json_dict,
+)
+from lib.json_narrow import (
+    json_list as _json_list,
 )
 from lib.quality.audio_validation import (
     AUDIO_VALIDATION_DIAGNOSTIC_LIMIT,
@@ -53,7 +59,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cratedigger")
 
 
-def parse_mb_first_release_year(data: dict[str, Any]) -> int | None:
+def _json_text(value: object) -> str:
+    """A decoded-JSON value as ``str``; ``""`` for absent or non-string values.
+
+    The slskd / Jellyfin payloads this module reads are untyped JSON whose
+    string fields are strings in every observed response. Reading a non-string
+    as absent rather than crashing the caller is the same graceful degrade
+    ``lib/json_narrow.py`` applies to containers; that module owns the
+    dict/list narrowers, and this is the scalar companion these call sites
+    need. ``web/classify.py::_as_str`` and ``lib/beets_distance.py::
+    _mb_str_field`` are the existing module-local precedents for this narrow;
+    both answer ``str | None`` because SOME of their callers distinguish
+    absent from empty (others coalesce with ``or ""`` at the call site).
+    None of the call sites here make that distinction, so this one answers
+    ``str``.
+    """
+    return value if isinstance(value, str) else ""
+
+
+def parse_mb_first_release_year(data: dict[str, object]) -> int | None:
     """Parse the 4-digit year from an MB release-group ``first-release-date``.
 
     Used by ``web/mb.py::get_release_group_year``; the resolver service
@@ -662,8 +686,15 @@ def _extract_title_from_filename(filename: str) -> str:
     return _normalize_title(name)
 
 
-def _track_titles_cross_check(expected_tracks: Sequence[Any], slskd_files: Sequence[Any]) -> bool:
+def _track_titles_cross_check(
+    expected_tracks: Sequence[Mapping[str, object]],
+    slskd_files: Sequence[Mapping[str, object]],
+) -> bool:
     """Cross-check that Soulseek filenames match expected track titles.
+
+    Production passes ``cratedigger.TrackRecord`` and ``cratedigger.SlskdFile``
+    TypedDicts (via ``lib/matching.py``'s ``cross_check_fn`` seam); both satisfy
+    the read-only ``Mapping[str, object]`` this only ever ``.get()``s from.
 
     Returns True if enough titles match, False if too many are missing.
     Tolerance: up to 1/5 tracks can mismatch.
@@ -671,8 +702,11 @@ def _track_titles_cross_check(expected_tracks: Sequence[Any], slskd_files: Seque
     if not expected_tracks or not slskd_files:
         return True
 
-    expected = [_normalize_title(t.get("title", "")) for t in expected_tracks]
-    slskd_titles = [_extract_title_from_filename(f.get("filename", "")) for f in slskd_files]
+    expected = [_normalize_title(_json_text(t.get("title"))) for t in expected_tracks]
+    slskd_titles = [
+        _extract_title_from_filename(_json_text(f.get("filename")))
+        for f in slskd_files
+    ]
 
     mismatches = 0
     for exp_title in expected:
@@ -696,15 +730,6 @@ def _track_titles_cross_check(expected_tracks: Sequence[Any], slskd_files: Seque
                     f"(max allowed: {max_allowed})")
         return False
     return True
-
-
-# === Beets validation wrapper ===
-
-def beets_validate(harness_path: str, album_path: str, mb_release_id: str,
-                   distance_threshold: float = 0.15) -> Any:
-    """Thin wrapper — delegates to lib.beets.beets_validate()."""
-    from lib.beets import beets_validate as _bv
-    return _bv(harness_path, album_path, mb_release_id, distance_threshold)
 
 
 # === Media server integrations ===
@@ -1075,8 +1100,22 @@ class JellyfinItemRef:
     date_created: str
 
 
-JsonGetFn = Callable[..., Any]
-JsonPostFn = Callable[[str, Any], int]
+JsonGetFn = Callable[..., object]
+JsonPostFn = Callable[[str, Mapping[str, object]], int]
+
+
+def _jellyfin_items(doc: object) -> list[dict[str, object]]:
+    """The ``Items`` array of a Jellyfin list response, as string-keyed dicts.
+
+    Jellyfin's list endpoints answer ``{"Items": [...]}``. Transport failures
+    and undecodable bodies still raise out of ``_jellyfin_get_json`` itself, as
+    the callers' docstrings promise. A body that decodes but is not that shape
+    now reads as an empty result instead of raising ``AttributeError`` from a
+    bare ``.get`` — the graceful degrade ``lib/json_narrow.py`` documents for
+    its container narrowers. No such body has been observed; both outcomes are
+    non-fatal to the caller, which treats Jellyfin work as best-effort.
+    """
+    return [_json_dict(item) for item in _json_list(_json_dict(doc).get("Items"))]
 
 
 def _jellyfin_container_path(cfg: CratediggerConfig, imported_path: str) -> str | None:
@@ -1088,7 +1127,7 @@ def _jellyfin_container_path(cfg: CratediggerConfig, imported_path: str) -> str 
         path_map=cfg.jellyfin_path_map)
 
 
-def _jellyfin_get_json(cfg: CratediggerConfig, path: str, **params: str) -> Any:
+def _jellyfin_get_json(cfg: CratediggerConfig, path: str, **params: str) -> object:
     """Thin urllib GET → decoded Jellyfin JSON. Network leaf seam."""
     from urllib.parse import urlencode
     url = f"{cfg.jellyfin_url}{path}"
@@ -1102,7 +1141,9 @@ def _jellyfin_get_json(cfg: CratediggerConfig, path: str, **params: str) -> Any:
         return json.loads(resp.read())
 
 
-def _jellyfin_post_json(cfg: CratediggerConfig, path: str, payload: Any) -> int:
+def _jellyfin_post_json(
+    cfg: CratediggerConfig, path: str, payload: Mapping[str, object],
+) -> int:
     """Thin urllib POST of a JSON body → HTTP status. Network leaf seam."""
     req = urllib.request.Request(
         f"{cfg.jellyfin_url}{path}",
@@ -1144,38 +1185,38 @@ def jellyfin_find_album_by_path(
     artist, album = _parse_artist_album(imported_path)
     target = container.rstrip("/")
 
-    def _candidates() -> Iterator[dict[str, Any]]:
+    def _candidates() -> Iterator[dict[str, object]]:
         if album:
-            doc = get("/Items", recursive="true",
-                      includeItemTypes="MusicAlbum", searchTerm=album,
-                      fields="Path,DateCreated", limit="50")
-            yield from doc.get("Items", [])
+            yield from _jellyfin_items(
+                get("/Items", recursive="true",
+                    includeItemTypes="MusicAlbum", searchTerm=album,
+                    fields="Path,DateCreated", limit="50"))
         if artist:
             adoc = get("/Items", recursive="true",
                        includeItemTypes="MusicArtist", searchTerm=artist,
                        limit="10")
-            for a in adoc.get("Items", []):
-                aid = a.get("Id")
+            for a in _jellyfin_items(adoc):
+                aid = _json_text(a.get("Id"))
                 if not aid:
                     continue
-                doc = get("/Items", recursive="true",
-                          includeItemTypes="MusicAlbum", albumArtistIds=aid,
-                          fields="Path,DateCreated", limit="200")
-                yield from doc.get("Items", [])
+                yield from _jellyfin_items(
+                    get("/Items", recursive="true",
+                        includeItemTypes="MusicAlbum", albumArtistIds=aid,
+                        fields="Path,DateCreated", limit="200"))
 
     seen: set[str] = set()
     for it in _candidates():
-        iid = it.get("Id")
+        iid = _json_text(it.get("Id"))
         if not iid or iid in seen:
             continue
         seen.add(iid)
-        if (it.get("Path") or "").rstrip("/") != target:
+        if _json_text(it.get("Path")).rstrip("/") != target:
             continue
         return JellyfinAlbumRef(
             item_id=iid,
-            date_created=it.get("DateCreated") or "",
-            name=it.get("Name") or "",
-            artist=it.get("AlbumArtist") or "",
+            date_created=_json_text(it.get("DateCreated")),
+            name=_json_text(it.get("Name")),
+            artist=_json_text(it.get("AlbumArtist")),
         )
     return None
 
@@ -1196,12 +1237,12 @@ def jellyfin_get_album_children(
     doc = get("/Items", parentId=album_item_id, includeItemTypes="Audio",
               fields="DateCreated", limit="2000")
     out: list[JellyfinItemRef] = []
-    for it in doc.get("Items", []):
-        iid = it.get("Id")
+    for it in _jellyfin_items(doc):
+        iid = _json_text(it.get("Id"))
         if not iid:
             continue
         out.append(JellyfinItemRef(
-            item_id=iid, date_created=it.get("DateCreated") or ""))
+            item_id=iid, date_created=_json_text(it.get("DateCreated"))))
     return out
 
 

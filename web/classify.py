@@ -225,8 +225,9 @@ class ClassifiedEntry(msgspec.Struct):
     # Issue #130: ``PostflightInfo.disambiguation_failure`` reaches JSONB but
     # had no UI surface until this field was added. ``None`` = no failure
     # (either disambiguation succeeded or wasn't attempted); string values
-    # mirror ``BeetsOpFailureReason`` Literal: "timeout" | "nonzero_rc" |
-    # "exception". ``disambiguation_detail`` carries the short human-readable
+    # mirror the ``DisambiguationFailureReason`` Literal: "timeout" |
+    # "nonzero_rc" | "exception".
+    # ``disambiguation_detail`` carries the short human-readable
     # ``detail`` for hover/tooltip — do not parse it.
     disambiguation_failure: str | None = None
     disambiguation_detail: str | None = None

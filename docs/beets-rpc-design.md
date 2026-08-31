@@ -112,8 +112,10 @@ Errors:
 ← {"id": 2, "ok": false, "error": {"reason": "not_found", "detail": "no album with mb_albumid=...", "selector": "mb_albumid:..."}}
 ```
 
-`error.reason` is a `Literal[...]` enum mirroring the existing
-`BeetsOpFailureReason` so we don't lose typing granularity:
+`error.reason` is a `Literal[...]` enum mirroring the then-existing
+`BeetsOpFailureReason` (those same three values are now
+`DisambiguationFailureReason` in `lib/quality/import_result_types.py`)
+so we don't lose typing granularity:
 `"timeout" | "nonzero_rc" | "exception" | "not_found" | "validation_error" | "conversion_error"`.
 
 ### Method surface (initial)
@@ -137,8 +139,8 @@ that need beets' own cache coherence**.
 
 ### Client shape
 
-The proposed `beets_rpc_client` module replaces `lib/beets_album_op.py`
-subprocess primitives.
+The proposed `beets_rpc_client` module replaces the former
+`beets_album_op` subprocess primitives.
 
 ```python
 class BeetsRpc:
@@ -188,7 +190,7 @@ Typed helpers return `msgspec.Struct` types, decoded via
 
 Once all callsites are ported:
 
-- **`lib/beets_album_op.py`** → replaced by the proposed
+- **the former `beets_album_op` module** → replaced by the proposed
   `beets_rpc_client` module.
   5 invariants collapse to "spawn rpc, call method". No stdin
   prompts (we pass `delete_files=True` in JSON). No rc parsing (we
@@ -206,7 +208,7 @@ Once all callsites are ported:
 - **`harness/beets_harness.py`** → may stay as an implementation
   detail of `validate_import` inside the RPC, but no longer a
   separate subprocess entry point.
-- **The beet-stdin-prompt fix in `beets_album_op.py`** (`ac07aa2`)
+- **The beet-stdin-prompt fix in the former `beets_album_op`** (`ac07aa2`)
   → gone; we never touch the `beet` CLI.
 - **The PYTHONPATH guard in `tests/test_nix_module.py`** → still
   valid (it protects against a different class of bug), but less

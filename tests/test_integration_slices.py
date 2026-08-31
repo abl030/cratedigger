@@ -2581,10 +2581,16 @@ class TestForceImportSlice(unittest.TestCase):
           acceptance.
 
         After the fix the string is spelled ONCE (``FORCE_ACTION_PREFIX`` in
-        ``lib/import_preview.py``). Four of the original eight sites
+        ``lib/import_preview.py``). Three of the original eight sites
         (``ACTION_COPY_PREFIX_BY_JOB_TYPE``, ``force_action_copy_path``'s
-        default, ``execute_import_job``'s ``action_prefix=``, and
-        ``_FORCE_ACTION_AUTHORITY.action_prefix``) now reference it by name.
+        default, and ``_FORCE_ACTION_AUTHORITY.action_prefix``) now
+        reference it by name. A fourth used to: ``execute_import_job``'s
+        ``action_prefix=`` argument, which issue #1278 removed along with
+        the per-job-type branch that supplied it — the force lane's prefix
+        now comes from ``scripts/importer.py``'s
+        ``_ActionCopyLane.action_copy_prefix()``, which reads
+        ``ACTION_COPY_PREFIX_BY_JOB_TYPE`` (site 1) rather than naming the
+        constant itself.
         Issue #1246 item 2 dropped a fifth (``importer.py``'s ``.get(...)``
         fallback): ``_cleanup_terminal_force_action`` no longer defaults an
         unrecognized job type to ``FORCE_ACTION_PREFIX`` at all — it fails
