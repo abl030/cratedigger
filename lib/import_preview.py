@@ -2193,7 +2193,7 @@ def _measure_lane_world(
     spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
     existing_spectral_resolver: ExistingSpectralResolver | None = None,
     aac_lattice_measure_fn: AacLatticeMeasureFn | None = None,
-    cd_rip_verify_fn: CdRipVerifyFn | None = None,
+    capture_cd_rip_verification: bool = False,
 ) -> _MeasuredLaneWorld | ImportPreviewResult:
     """Run the pure measurement and refresh exact-current spectral state.
 
@@ -2202,9 +2202,10 @@ def _measure_lane_world(
     all defaulting to "measure nothing extra":
 
     - the measure-and-persist lane supplies ``aac_lattice_measure_fn`` and
-      ``cd_rip_verify_fn`` (tens of seconds of CPU per track — every
-      producer of persisted candidate evidence pays it) plus its test
-      injection seams for the analyzer and existing resolver;
+      sets ``capture_cd_rip_verification`` (tens of seconds of CPU per
+      track — every producer of persisted candidate evidence pays it)
+      plus its test injection seams for the analyzer and existing
+      resolver;
     - the classify lane (CLI inspector, wrong-match triage UI) supplies
       none of them — a synchronous operator surface must not block on the
       expensive captures.
@@ -2217,6 +2218,16 @@ def _measure_lane_world(
     """
     current_evidence = lane_evidence.current_evidence
     try:
+        cd_rip_verify_fn: CdRipVerifyFn | None = None
+        if capture_cd_rip_verification:
+            # The verifier imports numpy. Keep it on the background
+            # measurement lane instead of adding that import cost to every
+            # web/API process that imports preview orchestration — and keep
+            # the import inside this boundary so a broken world maps to
+            # ``measurement_failed`` like any other collaborator failure.
+            from lib.cd_rip_verifier import verify_cd_rip
+
+            cd_rip_verify_fn = verify_cd_rip
         _checkpoint(cancellation_token)
         measurement = measure_preimport_state(
             path=preview_path,
@@ -2548,11 +2559,6 @@ def measure_and_persist_candidate_evidence(
         inspection = inspect_local_files(preview_path)
 
         # --- Run the pure measurement helper (no decision) ---
-        # The verifier imports numpy. Keep it on this background
-        # measurement lane instead of adding that import cost to every
-        # web/API process that imports preview orchestration.
-        from lib.cd_rip_verifier import verify_cd_rip
-
         measured = _measure_lane_world(
             db,
             request_id=request_id,
@@ -2569,7 +2575,7 @@ def measure_and_persist_candidate_evidence(
             spectral_detail_analyzer=spectral_detail_analyzer,
             existing_spectral_resolver=existing_spectral_resolver,
             aac_lattice_measure_fn=aac_lattice_measure_fn,
-            cd_rip_verify_fn=verify_cd_rip,
+            capture_cd_rip_verification=True,
         )
         if isinstance(measured, ImportPreviewResult):
             return measured
