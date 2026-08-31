@@ -1085,14 +1085,18 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(db.request(42)["download_attempts"], 3)
         self.assertEqual(db.status_history, [(42, "wanted")])
 
-    def test_update_spectral_state(self):
+    def test_spectral_state_update_fields_apply(self):
+        """The typed spectral payload lands through ``update_request_fields``
+        — the production shape since the ``update_spectral_state`` wrapper
+        (last reachable only from tests) was deleted with the dead
+        measurement-side stamp writer."""
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42))
 
         update = RequestSpectralStateUpdate(
             current=SpectralMeasurement(grade="genuine", bitrate_kbps=None),
         )
-        db.update_spectral_state(42, update)
+        db.update_request_fields(42, **update.as_update_fields())
 
         row = db.request(42)
         self.assertEqual(row["current_spectral_grade"], "genuine")
@@ -1381,14 +1385,16 @@ class TestFakePipelineDB(unittest.TestCase):
             db.reset_downloading_to_wanted(41, reasoning="smuggled")
         self.assertEqual(db.request(41), before)
 
-    def test_empty_spectral_adapter_cannot_report_missing_or_replaced_success(self):
+    def test_spectral_fields_cannot_report_missing_or_replaced_success(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="replaced"))
         before = copy.deepcopy(db.request(42))
-        empty = RequestSpectralStateUpdate()
+        fields = RequestSpectralStateUpdate(
+            current=SpectralMeasurement(grade="genuine", bitrate_kbps=320),
+        ).as_update_fields()
 
-        self.assertFalse(db.update_spectral_state(42, empty))
-        self.assertFalse(db.update_spectral_state(999, empty))
+        self.assertFalse(db.update_request_fields(42, **fields))
+        self.assertFalse(db.update_request_fields(999, **fields))
         self.assertEqual(db.request(42), before)
 
     def test_clear_on_disk_quality_fields_matches_real_db(self):

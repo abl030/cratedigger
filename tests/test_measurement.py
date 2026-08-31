@@ -12,7 +12,6 @@ import configparser
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Any, cast
 from unittest.mock import patch
 
 from lib.measurement import _check_bad_audio_hashes, _iter_audio_files
@@ -427,6 +426,23 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures" / "audio_hash"
 class TestCheckBadAudioHashes(unittest.TestCase):
     """Direct tests of the per-track hash + lookup loop."""
 
+    def test_supported_exts_match_the_hasher_exactly(self):
+        """The gate's ext filter IS audio_hash's support set — both ways.
+
+        Narrowing it silently skips reported formats; widening it (the
+        mutant-runner survivor R3 on the gate-revival review round) makes
+        every legitimate wav/alac album log a per-track failure on every
+        measurement. Pin equality against the hasher's own format map so
+        drift in either direction is loud.
+        """
+        from lib.audio_hash import _EXT_TO_FORMAT
+        from lib.measurement import _BAD_HASH_SUPPORTED_EXTS
+
+        self.assertEqual(
+            _BAD_HASH_SUPPORTED_EXTS,
+            {ext.lstrip(".") for ext in _EXT_TO_FORMAT},
+        )
+
     def test_hits_first_match_and_returns_id_and_path(self):
         """Single-track candidate whose hash matches a seeded bad hash."""
         from lib.audio_hash import hash_audio_content
@@ -442,7 +458,7 @@ class TestCheckBadAudioHashes(unittest.TestCase):
             hashes=[BadAudioHashInput(hash_value=digest, audio_format="mp3")],
         )
 
-        match = _check_bad_audio_hashes([mp3], db)  # type: ignore[arg-type]
+        match = _check_bad_audio_hashes([mp3], db)
 
         self.assertIsNotNone(match)
         assert match is not None  # narrow for pyright
@@ -452,7 +468,7 @@ class TestCheckBadAudioHashes(unittest.TestCase):
     def test_returns_none_when_no_match(self):
         db = FakePipelineDB()
         match = _check_bad_audio_hashes(
-            [FIXTURE_DIR / "sine_440.mp3"], db,  # type: ignore[arg-type]
+            [FIXTURE_DIR / "sine_440.mp3"], db,
         )
         self.assertIsNone(match)
 
@@ -478,7 +494,7 @@ class TestCheckBadAudioHashes(unittest.TestCase):
         ]
         paths.append(mp3)
 
-        match = _check_bad_audio_hashes(paths, db)  # type: ignore[arg-type]
+        match = _check_bad_audio_hashes(paths, db)
         self.assertIsNotNone(match)
         assert match is not None
         self.assertEqual(match.track_path, str(mp3))
@@ -495,7 +511,7 @@ class TestCheckBadAudioHashes(unittest.TestCase):
             side_effect=AudioHashError("boom"),
         ), patch.object(db, "lookup_bad_audio_hash") as lookup:
             match = _check_bad_audio_hashes(
-                [FIXTURE_DIR / "sine_440.mp3"], db,  # type: ignore[arg-type]
+                [FIXTURE_DIR / "sine_440.mp3"], db,
             )
         self.assertIsNone(match)
         lookup.assert_not_called()
@@ -507,7 +523,7 @@ class TestCheckBadAudioHashes(unittest.TestCase):
             db, "lookup_bad_audio_hash", side_effect=RuntimeError("db down"),
         ):
             match = _check_bad_audio_hashes(
-                [FIXTURE_DIR / "sine_440.mp3"], db,  # type: ignore[arg-type]
+                [FIXTURE_DIR / "sine_440.mp3"], db,
             )
         self.assertIsNone(match)
 
@@ -516,7 +532,7 @@ class TestCheckBadAudioHashes(unittest.TestCase):
         db = FakePipelineDB()
         with patch("lib.measurement.hash_audio_content") as h:
             match = _check_bad_audio_hashes(
-                [Path("/tmp/no_extension")], db,  # type: ignore[arg-type]
+                [Path("/tmp/no_extension")], db,
             )
         self.assertIsNone(match)
         h.assert_not_called()
@@ -571,8 +587,7 @@ class TestBadAudioHashGateFastPath(unittest.TestCase):
                 download_min_bitrate_bps=320_000,
                 download_is_vbr=False,
                 cfg=cfg,
-                db=cast(Any, db),
-                request_id=42,
+                bad_hash_db=db,
             )
 
         # ``has_any_bad_audio_hashes`` is the fast-path gate — it must be
@@ -687,8 +702,7 @@ class TestMeasurePreimportState(unittest.TestCase):
                 download_min_bitrate_bps=320_000,
                 download_is_vbr=False,
                 cfg=cfg,
-                db=cast(Any, db),
-                request_id=42,
+                bad_hash_db=db,
             )
         self.assertTrue(m.audio_corrupt)
         self.assertEqual(m.corrupt_files, ["track01.mp3"])

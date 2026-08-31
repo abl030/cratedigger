@@ -22,7 +22,6 @@ _UPDATE_ALBUM_REQUESTS = re.compile(
 _GUARDED_WRITE_METHODS = frozenset({
     "record_field_resolution",
     "update_request_fields",
-    "update_spectral_state",
     "update_track_artists",
 })
 _GUARDED_RESULT_HANDLERS = frozenset({

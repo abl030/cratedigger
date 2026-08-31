@@ -25,7 +25,7 @@ import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import msgspec
 
@@ -38,7 +38,6 @@ from lib.media_readiness import MediaReadinessError, inspect_media
 # (includes wav, alac); the bad-hash gate filters to this subset so legitimate
 # wav/alac albums don't trip a per-track warning every validation cycle.
 _BAD_HASH_SUPPORTED_EXTS: frozenset[str] = frozenset({"flac", "mp3", "m4a", "aac", "ogg", "opus"})
-from lib.pipeline_db import RequestSpectralStateUpdate
 from lib.quality import (
     AacLatticeCapture,
     AudioValidationMeasurementError,
@@ -55,9 +54,27 @@ from lib.util import validate_audio
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
-    from lib.pipeline_db import PipelineDB
+    from lib.pipeline_db import BadAudioHashRow
 
 logger = logging.getLogger("cratedigger")
+
+
+class BadHashGateDB(Protocol):
+    """The exact pipeline-DB surface the bad-hash gate uses.
+
+    Narrow port (the #1277 ``DispatchDB`` pattern): the concrete
+    ``PipelineDB`` and ``FakePipelineDB`` both satisfy it structurally, so
+    tests drive the gate without bridging through ``Any``. Extend only when
+    measurement itself calls a new DB method.
+    """
+
+    def has_any_bad_audio_hashes(self) -> bool: ...
+
+    def lookup_bad_audio_hash(
+        self,
+        hash_value: bytes,
+        audio_format: str,
+    ) -> BadAudioHashRow | None: ...
 
 
 # Lazy import proxy — keeps sox out of import-time deps.
@@ -640,48 +657,6 @@ def _needs_spectral_check(
     return "mp3" in filetype_lower and "flac" not in filetype_lower
 
 
-def _persist_spectral_state(
-    *,
-    db: PipelineDB,
-    request_id: int,
-    existing_spectral: SpectralMeasurement | None,
-) -> SpectralMeasurement | None:
-    """Persist a real measured on-disk (HAVE) spectral state to album_requests.
-
-    Writes ONLY a spectral measurement that was actually taken from the
-    existing installed files. When ``existing_spectral`` is None the on-disk
-    audit produced nothing, so this bails and writes nothing — the candidate
-    download's spectral is NEVER adopted as the request's on-disk state.
-
-    Issue #815 (fail-closed doctrine, same as #762/#723): the old "reasonable
-    proxy" branch adopted a rejected fake-320 candidate's likely_transcode/128
-    as the HAVE grade of a genuine 192 copy; the evidence seeder froze it, and
-    fill-only-if-NULL persistence kept it until it drove a real library
-    downgrade (request 4351, dl 37742). If we cannot ascertain evidence of the
-    on-disk files, we bail — we never infer HAVE state from the candidate.
-
-    Returns the measurement actually written (or None if nothing to write).
-    """
-    if existing_spectral is None:
-        return None
-    try:
-        applied = db.update_spectral_state(
-            request_id,
-            RequestSpectralStateUpdate(current=existing_spectral),
-        )
-        if not applied:
-            logger.warning(
-                "Skipped on-disk spectral update for frozen/missing "
-                "request %s",
-                request_id,
-            )
-            return None
-    except Exception:
-        logger.exception("Failed to update on-disk spectral data")
-        return None
-    return existing_spectral
-
-
 @dataclass(frozen=True)
 class _BadHashMatch:
     """Result of ``_check_bad_audio_hashes`` on a positive match."""
@@ -712,7 +687,7 @@ def _iter_audio_files(path: str) -> list[Path]:
 
 def _check_bad_audio_hashes(
     paths: list[Path],
-    db: PipelineDB,
+    db: BadHashGateDB,
 ) -> _BadHashMatch | None:
     """Return the first matched bad-hash row, or None.
 
@@ -764,8 +739,7 @@ def measure_preimport_state(
     download_min_bitrate_bps: int | None,
     download_is_vbr: bool | None,
     cfg: CratediggerConfig,
-    db: PipelineDB | None = None,
-    request_id: int | None = None,
+    bad_hash_db: BadHashGateDB | None = None,
     existing_spectral_evidence: SpectralAnalysisDetail | None = None,
     reuse_existing_spectral_evidence: bool = False,
     preserve_existing_source_spectral: bool = False,
@@ -778,11 +752,15 @@ def measure_preimport_state(
     """Collect pre-import measurement facts. Returns ``PreimportMeasurement``.
 
     This is the pure measurement helper introduced in U3. It has NO decision
-    fields, no denylist writes, no requeue decisions. It DOES persist on-disk
-    (HAVE) spectral state to ``album_requests`` via ``_persist_spectral_state``
-    when a DB is wired — but ONLY a real measured existing spectral. The
-    candidate download's spectral is never adopted as HAVE state; when the
-    on-disk audit produces nothing, nothing is written (issue #815 bail).
+    fields, no denylist writes, no requeue decisions, and no DB writes at
+    all: its only DB access is the read-only bad-hash gate through
+    ``bad_hash_db``. From the measurement lanes, HAVE spectral state
+    persists exclusively through the content-addressed evidence row
+    (``lib.import_preview.persist_exact_current_spectral_from_attempt``),
+    which writes ONLY a real measured existing spectral — the candidate
+    download's spectral is never adopted as HAVE state (issue #815 bail).
+    (Dispatch separately stamps ``album_requests.current_spectral_*`` at
+    import acceptance; that is its writer, not measurement's.)
 
     As of U11 there is exactly one decision function: persisted evidence
     flows into ``lib.quality.full_pipeline_decision_from_evidence``, whose
@@ -800,9 +778,9 @@ def measure_preimport_state(
         download_min_bitrate_bps: Caller-supplied container min bitrate (bps).
         download_is_vbr: Caller-supplied VBR hint.
         cfg: Runtime CratediggerConfig.
-        db: Pipeline DB — pass to enable spectral audit persistence and
-            bad-hash lookup.
-        request_id: Required when ``db`` is supplied.
+        bad_hash_db: Bad-hash gate port — pass to enable the curator
+            bad-rip hash lookup. Every producer of persisted candidate
+            evidence must supply it; ``None`` skips the gate entirely.
         existing_spectral_evidence: Persisted HAVE detail from a separately
             authorized current-evidence row.
         reuse_existing_spectral_evidence: The preview caller has matched that
@@ -918,16 +896,16 @@ def measure_preimport_state(
     # match than run sox).
     matched_bad_hash_id: int | None = None
     matched_bad_track_path: str | None = None
-    if db is not None:
+    if bad_hash_db is not None:
         try:
-            any_bad = db.has_any_bad_audio_hashes()
+            any_bad = bad_hash_db.has_any_bad_audio_hashes()
         except Exception:
             logger.warning(
                 "bad-hash gate: has_any_bad_audio_hashes probe failed, skipping",
                 exc_info=True)
             any_bad = False
         if any_bad:
-            match = _check_bad_audio_hashes(audio_files_for_count, db)
+            match = _check_bad_audio_hashes(audio_files_for_count, bad_hash_db)
             if match is not None:
                 matched_bad_hash_id = match.bad_hash_id
                 matched_bad_track_path = match.track_path
@@ -1119,24 +1097,6 @@ def measure_preimport_state(
             existing_detail=reusable_existing,
         )
         existing_spectral_path = existing_lookup.path
-
-    # --- Persist on-disk (HAVE) spectral state to DB ---
-    # Only a real measured existing spectral is written. The candidate's
-    # ``download_spectral`` is NEVER adopted as the request's on-disk state
-    # (issue #815): inferring HAVE from the candidate froze a rejected
-    # fake-320's grade onto a genuine copy and drove a real downgrade. When the
-    # on-disk audit yields nothing, ``existing_spectral`` is None and nothing is
-    # written (bail). The request stamps stay accurate for audit and rendering;
-    # the decision runs in ``full_pipeline_decision_from_evidence`` on the
-    # persisted candidate evidence row, which never reads the request stamps.
-    if existing_spectral is not None and db is not None and request_id is not None:
-        try:
-            _persist_spectral_state(
-                db=db, request_id=request_id,
-                existing_spectral=existing_spectral,
-            )
-        except Exception:
-            logger.exception("failed to persist spectral state")
 
     return PreimportMeasurement(
         corrupt_files=corrupt_files,

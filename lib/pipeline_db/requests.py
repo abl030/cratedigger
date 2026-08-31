@@ -29,7 +29,6 @@ from lib.pipeline_db._shared import (
     AddRequestInput,
     MbidCollisionError,
     MergeRekeyCollision,
-    RequestSpectralStateUpdate,
     SupersedeRaceError,
     _escape_like_pattern,
     _msgspec_json_dumps,
@@ -1301,18 +1300,6 @@ class _RequestsMixin(_PipelineDBBase):
                 )
             self.conn.commit()
             return True
-
-
-    def update_spectral_state(
-        self,
-        request_id: int,
-        update: RequestSpectralStateUpdate,
-    ) -> bool:
-        """Write spectral state pairs together, including explicit NULLs."""
-        return self.update_request_fields(
-            request_id, **update.as_update_fields(),
-        )
-
 
 
     def clear_on_disk_quality_fields(self, request_id: int) -> None:

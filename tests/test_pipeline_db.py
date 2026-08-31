@@ -4204,6 +4204,7 @@ class TestTrackManagement(unittest.TestCase):
     def test_empty_request_field_update_is_a_read_only_cas_truth_table(self):
         """Empty/control-only metadata writes still validate lifecycle."""
         from lib import pipeline_db
+        from lib.quality import SpectralMeasurement
 
         replaced_id = self.db.add_request(
             mb_release_id="empty-cas-replaced-old",
@@ -4242,11 +4243,11 @@ class TestTrackManagement(unittest.TestCase):
         self.assertFalse(self.db.update_request_fields(
             999_999, expected_status="wanted",
         ))
-        self.assertFalse(self.db.update_spectral_state(
-            replaced_id, pipeline_db.RequestSpectralStateUpdate(),
-        ))
-        self.assertFalse(self.db.update_spectral_state(
-            999_999, pipeline_db.RequestSpectralStateUpdate(),
+        self.assertFalse(self.db.update_request_fields(
+            replaced_id,
+            **pipeline_db.RequestSpectralStateUpdate(
+                current=SpectralMeasurement(grade="genuine", bitrate_kbps=320),
+            ).as_update_fields(),
         ))
 
         self.assertEqual(self.db.get_request(self.req_id), active_before)
@@ -10265,18 +10266,21 @@ class TestSpectralColumns(unittest.TestCase):
         self.assertIsNone(req["current_spectral_grade"])
         self.assertIsNone(req["current_spectral_bitrate"])
 
-    def test_update_spectral_state_updates_both_pairs(self):
+    def test_spectral_state_update_fields_write_both_pairs(self):
+        """``RequestSpectralStateUpdate.as_update_fields`` through the live
+        production shape (dispatch merges it into ``update_request_fields``)
+        round-trips both spectral pairs on real PG."""
         from lib import pipeline_db
         from lib.quality import SpectralMeasurement
 
-        self.db.update_spectral_state(
+        self.db.update_request_fields(
             self.req_id,
-            pipeline_db.RequestSpectralStateUpdate(
+            **pipeline_db.RequestSpectralStateUpdate(
                 last_download=SpectralMeasurement(
                     grade="suspect", bitrate_kbps=128),
                 current=SpectralMeasurement(
                     grade="genuine", bitrate_kbps=245),
-            ),
+            ).as_update_fields(),
         )
 
         req = self.db.get_request(self.req_id)
@@ -10286,7 +10290,7 @@ class TestSpectralColumns(unittest.TestCase):
         self.assertEqual(req["current_spectral_grade"], "genuine")
         self.assertEqual(req["current_spectral_bitrate"], 245)
 
-    def test_update_spectral_state_on_disk_only_clears_nulls(self):
+    def test_spectral_state_update_on_disk_only_clears_nulls(self):
         from lib import pipeline_db
         from lib.quality import SpectralMeasurement
 
@@ -10299,12 +10303,12 @@ class TestSpectralColumns(unittest.TestCase):
             current_spectral_bitrate=192,
         )
 
-        self.db.update_spectral_state(
+        self.db.update_request_fields(
             self.req_id,
-            pipeline_db.RequestSpectralStateUpdate(
+            **pipeline_db.RequestSpectralStateUpdate(
                 current=SpectralMeasurement(
                     grade="genuine", bitrate_kbps=None),
-            ),
+            ).as_update_fields(),
         )
 
         req = self.db.get_request(self.req_id)
