@@ -16376,38 +16376,76 @@ class TestDashboardFakeParity(unittest.TestCase):
             "point of your PR.",
         )
 
-    def test_fake_dashboard_cycle_ties_follow_production_order(self):
+    #: (completed_at offset from the anchor, cycle_total_s). Row 0 and row
+    #: 1 tie on completed_at; rows 2 and 3 tie on cycle_total_s. Both
+    #: production ORDER BYs break their tie on ``id DESC``, so each pair
+    #: has a decided winner neither insertion order nor luck can supply.
+    _CYCLE_TIE_SPECS: ClassVar[list[tuple[int, float]]] = [
+        (1, 25.0),
+        (1, 10.0),
+        (2, 100.0),
+        (3, 100.0),
+    ]
+
+    @classmethod
+    def _seed_cycle_ties(cls, db, anchor: datetime) -> list[int]:
+        """Seed the tied cycle world on whichever backend is handed in."""
+        return [
+            db.record_cycle_metrics(
+                completed_at=anchor - timedelta(hours=hours_ago),
+                cycle_total_s=total_s,
+            )
+            for hours_ago, total_s in cls._CYCLE_TIE_SPECS
+        ]
+
+    @staticmethod
+    def _seed_order(panel_rows, seed_ids: list[int]) -> list[int]:
+        """Panel order expressed as seeding positions, not raw ids.
+
+        The two backends mint different ids (PG sequences never reset
+        between tests; the fake counts from 1), so the ids themselves are
+        incomparable while their ORDER is exactly the contract.
+        """
+        return [seed_ids.index(int(row["id"])) for row in panel_rows]
+
+    def test_dashboard_cycle_ties_follow_production_order(self):
+        """Tie-breaking on the cycle panels, measured against real PG.
+
+        This used to construct a ``FakePipelineDB`` alone and assert a
+        hardcoded "production order" it never measured — a fake-only test
+        inside a parity class, which could only ever confirm the fake
+        agreed with itself. It now seeds the SAME tied worlds into both
+        backends and requires the two orderings to agree, plus the
+        absolute order production's ``ORDER BY`` implies, so agreement by
+        construction cannot hollow it out.
+        """
         from tests.fakes import FakePipelineDB
 
+        anchor = datetime.now(UTC)
         fake = FakePipelineDB()
-        now = datetime.now(UTC)
-        newest_id = fake.record_cycle_metrics(
-            completed_at=now - timedelta(hours=1),
-            cycle_total_s=25.0,
-        )
-        newest_tie_id = fake.record_cycle_metrics(
-            completed_at=now - timedelta(hours=1),
-            cycle_total_s=10.0,
-        )
-        slower_id = fake.record_cycle_metrics(
-            completed_at=now - timedelta(hours=2),
-            cycle_total_s=100.0,
-        )
-        slower_tie_id = fake.record_cycle_metrics(
-            completed_at=now - timedelta(hours=3),
-            cycle_total_s=100.0,
-        )
+        real_ids = self._seed_cycle_ties(self.db, anchor)
+        fake_ids = self._seed_cycle_ties(fake, anchor)
 
-        cycles = fake.get_pipeline_dashboard_metrics()["cycles"]
+        real_cycles = self.db.get_pipeline_dashboard_metrics()["cycles"]
+        fake_cycles = fake.get_pipeline_dashboard_metrics()["cycles"]
+
+        real_recent = self._seed_order(real_cycles["recent"], real_ids)
+        fake_recent = self._seed_order(fake_cycles["recent"], fake_ids)
+        real_outliers = self._seed_order(real_cycles["outliers"], real_ids)
+        fake_outliers = self._seed_order(fake_cycles["outliers"], fake_ids)
 
         self.assertEqual(
-            [row["id"] for row in cycles["recent"]],
-            [newest_tie_id, newest_id, slower_id, slower_tie_id],
-        )
+            real_recent, fake_recent,
+            "recent-cycles order drifted between real PG and the fake")
         self.assertEqual(
-            [row["id"] for row in cycles["outliers"]],
-            [slower_tie_id, slower_id, newest_id, newest_tie_id],
-        )
+            real_outliers, fake_outliers,
+            "outlier-cycles order drifted between real PG and the fake")
+
+        # Absolute: recent is (created_at DESC, id DESC) — the later of the
+        # two 1h-old rows first; outliers is (cycle_total_s DESC, id DESC)
+        # — the later of the two 100s rows first.
+        self.assertEqual(real_recent, [1, 0, 2, 3])
+        self.assertEqual(real_outliers, [3, 2, 0, 1])
 
 
 @requires_postgres
@@ -18924,6 +18962,73 @@ class TestReadProjectionRegistryParity(unittest.TestCase):
                         f"the seeder in tests/read_projection_registry.py")
                     TestReadProjectionParity._assert_keyset_parity(
                         self, real_rows, fake_rows, method_name)
+                finally:
+                    real_db.close()
+
+
+@requires_postgres
+class TestReadProjectionValueParity(unittest.TestCase):
+    """#1278 item 7 — registry-driven read-projection VALUE parity gate.
+
+    ``TestReadProjectionRegistryParity`` above compares KEY SETS, and its
+    ``ALLOWLIST`` deliberately excuses the mirrors whose key set is
+    assembled in Python rather than by a SELECT column list: the SQL-owned
+    aggregates — a rollup view, a ``CASE`` ladder, a percentile, a
+    ``DISTINCT ON`` collapse. For those the key set was never the risk;
+    what the aggregate COMPUTES is. Extracting that SQL into shared Python
+    would be the wrong fix (the database is the authority on its own
+    aggregation), so this gate takes the other axis instead: run the same
+    seeder on both backends and compare every non-excluded field by VALUE.
+
+    Each held-out field carries its own rationale in the registry, so a
+    field can only leave the comparison with a written reason attached.
+    """
+
+    def test_every_value_registered_mirror_agrees_on_values(self):
+        from tests.fakes import FakePipelineDB
+        from tests.read_projection_registry import (
+            VALUE_PARITY_REGISTRY,
+            compare_projection_values,
+        )
+
+        for method_name, entry in sorted(VALUE_PARITY_REGISTRY.items()):
+            with self.subTest(method=method_name):
+                real_db = make_db()
+                try:
+                    fake_db = FakePipelineDB()
+                    real_rows = entry.seeder(real_db)
+                    fake_rows = entry.seeder(fake_db)
+                    self.assertTrue(
+                        real_rows,
+                        f"{method_name}: seeder produced no rows on real PG "
+                        f"— value parity would pass vacuously; fix the "
+                        f"seeder in tests/read_projection_registry.py")
+                    self.assertTrue(
+                        fake_rows,
+                        f"{method_name}: seeder produced no rows on "
+                        f"FakePipelineDB — value parity would pass "
+                        f"vacuously; fix the seeder in "
+                        f"tests/read_projection_registry.py")
+                    result = compare_projection_values(
+                        real_rows, fake_rows,
+                        excluded=entry.excluded_paths)
+                    self.assertGreaterEqual(
+                        result.substantive_leaves, 1,
+                        f"{method_name}: compared "
+                        f"{result.compared_leaves} field(s) but not one of "
+                        f"them held a non-null, non-empty, non-zero value "
+                        f"— a payload of nulls and zeros agrees for free. "
+                        f"Seed values that DISTINGUISH.")
+                    self.assertEqual(
+                        result.mismatches, (),
+                        f"{method_name}: real PG and FakePipelineDB "
+                        f"computed different values from identically "
+                        f"seeded state. Fix the fake (production SQL is "
+                        f"the authority on its own aggregation), or — if "
+                        f"the two are allowed to differ — add a "
+                        f"ValueExclusion with its rationale in "
+                        f"tests/read_projection_registry.py:\n  - "
+                        + "\n  - ".join(result.mismatches))
                 finally:
                     real_db.close()
 

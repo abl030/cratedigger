@@ -424,6 +424,39 @@ from tests.fakes.rows import (
 )
 
 
+def _jsonb_column(value: object) -> object:
+    """Project a stored JSONB value the way a real ``SELECT`` returns it.
+
+    ``download_log.validation_result`` / ``.import_result`` are JSONB
+    columns and every production writer hands them a JSON STRING
+    (``ValidationResult.to_json()``, ``msgspec.json.encode(...).decode()``,
+    ``json.dumps(...)``) or ``None`` — psycopg2 has no adapter that would
+    let a bare dict through. What comes back out is parsed JSON, for every
+    reader. The fake stores what it was handed — that raw form is what
+    ``db.download_logs[i]`` exposes and what the JSONB-boundary tests
+    decode — so the parse belongs on the row PROJECTION, which is exactly
+    where psycopg2 does it (issue #1278 item 7: a string-seeded fake used
+    to hand ``get_wrong_matches`` callers a ``str`` where production hands
+    a ``dict``). Values already stored as a mapping — the shape many
+    fake-backed tests seed directly — pass through unchanged, which is
+    what production's reader would have returned for them too.
+
+    A non-JSON string is not a shape production can hold: PostgreSQL
+    rejects it at INSERT. Surfacing the decode error here is the closest
+    the fake can get to that refusal.
+    """
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
+#: The ``request_search_summary`` view's own window
+#: (``migrations/031_request_search_summary_view.sql``). Every consumer of
+#: that view — the triage rollup and the ``search_not_converting`` page
+#: join — sees only search_log rows this recent, so the mirror must too.
+_SEARCH_SUMMARY_WINDOW = timedelta(days=14)
+
+
 @dataclass
 class _FakeSearchPlanRow:
     """In-memory mirror of a search_plans row."""
@@ -5034,11 +5067,24 @@ class FakePipelineDB:
     ) -> dict[str, Any] | None:
         """Compute one row of the ``request_search_summary`` view.
 
-        Mirrors the SQL aggregate against ``self.search_logs``. Returns
-        ``None`` when the request has zero rows — matches the view's
-        ``GROUP BY`` semantics (empty groups produce no row).
+        Mirrors the SQL aggregate against ``self.search_logs``, INCLUDING
+        the view's 14-day window (``migrations/031_request_search_summary_
+        view.sql`` filters ``sl.created_at >= NOW() - INTERVAL '14 days'``
+        in its outer WHERE and again inside the
+        ``first_strategy_with_cands`` subquery). Windowing ``rows`` here
+        covers both: every aggregate below, and the earliest-with-
+        candidates pick, read the same windowed list.
+
+        Returns ``None`` when the request has zero rows IN WINDOW —
+        matches the view's ``GROUP BY`` semantics (empty groups produce
+        no row).
         """
-        rows = [e for e in self.search_logs if e.request_id == int(request_id)]
+        cutoff = _utcnow() - _SEARCH_SUMMARY_WINDOW
+        rows = [
+            e for e in self.search_logs
+            if e.request_id == int(request_id)
+            and self._as_utc(e.created_at) >= cutoff
+        ]
         if not rows:
             return None
         total = len(rows)
@@ -5074,8 +5120,14 @@ class FakePipelineDB:
             reason_counts[e.rejection_reason] = (
                 reason_counts.get(e.rejection_reason, 0) + 1
             )
+        # MODE() WITHIN GROUP (ORDER BY sl.rejection_reason) picks the most
+        # frequent value and breaks a tie on that ORDER BY — the smallest
+        # reason wins, never the first one seeded. Sorting by
+        # (-count, reason) reproduces both halves; a plain max() on count
+        # alone returned whichever tied reason happened to be inserted
+        # first, which is not a fact the database has.
         dominant = (
-            max(reason_counts.items(), key=lambda kv: kv[1])[0]
+            min(reason_counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
             if reason_counts else None
         )
         last_search = max(rows, key=lambda e: (e.created_at, e.id)).created_at
@@ -7538,9 +7590,34 @@ class FakePipelineDB:
                 "matches_per_day": n,
             })
 
-        def _request_row(rid: int) -> dict[str, Any]:
-            """The raw joined row the production suspect/stale SELECTs
-            return, handed to production's own serializer."""
+        def _outcome_columns(rid: int) -> dict[str, int]:
+            """The per-outcome 24h breakdown, computed by ONE panel query.
+
+            ``_dashboard_top_loop_suspects`` selects these; the
+            stale-wanted query below does not select them at all.
+            """
+            r = rollup.get(rid, {})
+            return {
+                "found_24h": r.get("found_24h", 0),
+                "no_match_24h": r.get("no_match_24h", 0),
+                "no_results_24h": r.get("no_results_24h", 0),
+                "reset_24h": r.get("reset_24h", 0),
+                "problem_24h": r.get("problem_24h", 0),
+            }
+
+        def _request_row(
+            rid: int, outcomes: dict[str, int],
+        ) -> dict[str, Any]:
+            """The raw joined row a production panel SELECT returns.
+
+            ``outcomes`` is passed explicitly — empty for the stale-wanted
+            panel, whose query projects identity plus the two search
+            counts only, so every per-outcome column falls through
+            ``serialize_dashboard_request_row``'s ``or 0`` default. The
+            two panels used to share the full breakdown, which handed
+            stale rows counters production always reports as 0 (issue
+            #1278 item 7).
+            """
             req = backlog[rid]
             r = rollup.get(rid, {})
             return serialize_dashboard_request_row({
@@ -7551,15 +7628,11 @@ class FakePipelineDB:
                 "last_search_at": r.get("last_search_at"),
                 "searches_24h": r.get("searches_24h", 0),
                 "searches_6h": r.get("searches_6h", 0),
-                "found_24h": r.get("found_24h", 0),
-                "no_match_24h": r.get("no_match_24h", 0),
-                "no_results_24h": r.get("no_results_24h", 0),
-                "reset_24h": r.get("reset_24h", 0),
-                "problem_24h": r.get("problem_24h", 0),
+                **outcomes,
             })
 
         suspects = [
-            _request_row(rid)
+            _request_row(rid, _outcome_columns(rid))
             for rid in sorted(
                 (rid for rid in backlog
                  if rollup.get(rid, {}).get("searches_24h", 0) > 0),
@@ -7580,7 +7653,7 @@ class FakePipelineDB:
 
         stale = []
         for rid in sorted(backlog, key=_stale_sort_key)[:12]:
-            row = _request_row(rid)
+            row = _request_row(rid, {})
             at = rollup.get(rid, {}).get("last_search_at")
             row["hours_since_search"] = (
                 (now - at).total_seconds() / 3600 if at else None)
@@ -7805,8 +7878,8 @@ class FakePipelineDB:
             "beets_detail": entry.beets_detail,
             "staged_path": entry.staged_path,
             "error_message": entry.error_message,
-            "validation_result": entry.validation_result,
-            "import_result": entry.import_result,
+            "validation_result": _jsonb_column(entry.validation_result),
+            "import_result": _jsonb_column(entry.import_result),
             # Migration 043 — per-file failure detail audit blob (issue
             # #564 C7).
             "transfer_detail": entry.transfer_detail,
@@ -7994,6 +8067,7 @@ class FakePipelineDB:
             # evidence-derived measurements over the legacy denorm columns.
             ev = self._evidence_by_id.get(entry.candidate_evidence_id) \
                 if entry.candidate_evidence_id is not None else None
+            import_payload = _jsonb_column(entry.import_result)
             ev_measurement = ev.measurement if ev is not None else None
             ev_v0 = ev.v0_metric if ev is not None else None
             spectral_grade = (
@@ -8025,7 +8099,7 @@ class FakePipelineDB:
                 "mb_release_id": req.get("mb_release_id"),
                 "mb_release_group_id": req.get("mb_release_group_id"),
                 "soulseek_username": entry.soulseek_username,
-                "validation_result": entry.validation_result,
+                "validation_result": _jsonb_column(entry.validation_result),
                 "spectral_grade": spectral_grade,
                 "spectral_bitrate": spectral_bitrate,
                 "v0_probe_kind": v0_probe_kind,
@@ -8056,13 +8130,21 @@ class FakePipelineDB:
                     ev_measurement.avg_bitrate_kbps
                     if ev_measurement is not None else None
                 ),
+                # LEFT JOIN semantics: with no evidence row joined the
+                # column is SQL NULL, not FALSE. A bare boolean here told
+                # every fake-backed reader "this candidate is provably not
+                # verified lossless" where production says "unknown".
                 "evidence_verified_lossless": (
-                    ev is not None and ev.verified_lossless_proof is not None
+                    ev.verified_lossless_proof is not None
+                    if ev is not None else None
                 ),
+                # ``dl.import_result->>'decision'`` reads the JSONB
+                # column, so the string form a production writer stored is
+                # a dict by the time the operator query touches it.
                 "terminal_import_decision": (
-                    entry.import_result.get("decision")
-                    if isinstance(entry.import_result, dict)
-                    and isinstance(entry.import_result.get("decision"), str)
+                    import_payload.get("decision")
+                    if isinstance(import_payload, dict)
+                    and isinstance(import_payload.get("decision"), str)
                     else None
                 ),
                 "request_status": req.get("status"),
