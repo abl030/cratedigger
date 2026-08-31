@@ -60,6 +60,7 @@ from lib.json_narrow import (
     json_list as _json_list,
 )
 from lib.release_identity import detect_release_source, normalize_release_id
+from lib.surface_outcomes import exit_codes_from_http
 
 # ``except _pipeline_db_mod.YoutubeInFlightError`` resolves the class at catch
 # time. A symbol import (``from lib.pipeline_db import YoutubeInFlightError``)
@@ -111,21 +112,14 @@ OUTCOME_HTTP_STATUS: dict[str, int] = {
 }
 """Service ``SubmitOutcome`` → HTTP status. U5 imports this directly.
 
-The outcome set is pinned by
-``TestOutcomeMapsAreComplete::test_outcome_set_is_stable`` which asserts
-``set(OUTCOME_HTTP_STATUS) == set(OUTCOME_EXIT_CODE)``."""
+Audited against the ``SubmitOutcome`` vocabulary and the repository
+convention by ``tests/test_surface_outcomes.py``."""
 
 
-OUTCOME_EXIT_CODE: dict[str, int] = {
-    "accepted": 0,
-    "request_not_found": 2,
-    "wrong_state": 4,
-    "in_flight": 4,
-    "no_resolver_mapping": 3,
-    "track_count_precheck_failed": 3,
-    "transient": 5,
-}
-"""Service ``SubmitOutcome`` → CLI exit code. U4 imports this directly."""
+OUTCOME_EXIT_CODE: dict[str, int] = exit_codes_from_http(OUTCOME_HTTP_STATUS)
+"""Service ``SubmitOutcome`` → CLI exit code, derived branch for branch
+from the HTTP map (``lib/surface_outcomes.py``). U4 imports this
+directly."""
 
 
 # Request statuses that may be advanced into a YT rescue submission.

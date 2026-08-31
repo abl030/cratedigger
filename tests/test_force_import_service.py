@@ -34,7 +34,7 @@ class TestForceImportService(unittest.TestCase):
         is DERIVED from the status below. Pinning the derivation is what
         proves the historical CLI mapping survived the move.
         """
-        from scripts.pipeline_cli.api_mutations import _exit_code
+        from lib.surface_outcomes import exit_code_for_http_status
 
         expected_exit = {
             RESULT_QUEUED: 0,
@@ -62,7 +62,8 @@ class TestForceImportService(unittest.TestCase):
         for outcome, exit_code in expected_exit.items():
             with self.subTest(outcome=outcome):
                 self.assertEqual(
-                    _exit_code(FORCE_IMPORT_HTTP_STATUS[outcome]), exit_code)
+                    exit_code_for_http_status(
+                        FORCE_IMPORT_HTTP_STATUS[outcome]), exit_code)
 
     def test_processing_owner_is_rejected_before_filesystem_or_enqueue(self) -> None:
         db, cfg, staging, log_id = self._world()

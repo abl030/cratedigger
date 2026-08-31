@@ -81,26 +81,30 @@ class TestSetIncompleteMark(unittest.TestCase):
 
 
 class TestOutcomeMapsAgree(unittest.TestCase):
-    """CLI ⇄ API symmetry: one outcome vocabulary, matched code mappings."""
-
-    def test_maps_cover_the_same_outcomes(self) -> None:
-        self.assertEqual(
-            set(INCOMPLETE_MARK_EXIT_CODES),
-            set(INCOMPLETE_MARK_HTTP_STATUS),
-        )
-
-    def test_success_and_failure_branches_match(self) -> None:
-        for outcome, exit_code in INCOMPLETE_MARK_EXIT_CODES.items():
-            with self.subTest(outcome=outcome):
-                http = INCOMPLETE_MARK_HTTP_STATUS[outcome]
-                self.assertEqual(exit_code == 0, http == 200)
+    """CLI ⇄ API symmetry: the exit map is derived from the HTTP map
+    (``lib/surface_outcomes.py``), so key/polarity agreement holds by
+    construction and ``tests/test_surface_outcomes.py`` audits it; the
+    values below pin the convention semantics this action relies on."""
 
     def test_convention_codes(self) -> None:
-        # 404/2 not found, 409/4 wrong state — the repository convention.
-        self.assertEqual(INCOMPLETE_MARK_EXIT_CODES["not_found"], 2)
-        self.assertEqual(INCOMPLETE_MARK_HTTP_STATUS["not_found"], 404)
-        self.assertEqual(INCOMPLETE_MARK_EXIT_CODES["replaced"], 4)
-        self.assertEqual(INCOMPLETE_MARK_HTTP_STATUS["replaced"], 409)
+        # Full value pins for both maps — the derived exit map's output is
+        # behavior, not implementation detail.
+        self.assertEqual(INCOMPLETE_MARK_HTTP_STATUS, {
+            "marked": 200,
+            "cleared": 200,
+            "already_marked": 200,
+            "already_clear": 200,
+            "not_found": 404,
+            "replaced": 409,
+        })
+        self.assertEqual(INCOMPLETE_MARK_EXIT_CODES, {
+            "marked": 0,
+            "cleared": 0,
+            "already_marked": 0,
+            "already_clear": 0,
+            "not_found": 2,
+            "replaced": 4,
+        })
 
 
 if __name__ == "__main__":

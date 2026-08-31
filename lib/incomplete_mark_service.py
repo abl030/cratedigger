@@ -17,6 +17,8 @@ surface symmetry).
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
+from lib.surface_outcomes import exit_codes_from_http
+
 IncompleteMarkOutcome = Literal[
     "marked",
     "cleared",
@@ -26,17 +28,7 @@ IncompleteMarkOutcome = Literal[
     "replaced",
 ]
 
-#: Outcome → ``pipeline-cli`` exit code. Idempotent no-ops are successes.
-INCOMPLETE_MARK_EXIT_CODES: dict[str, int] = {
-    "marked": 0,
-    "cleared": 0,
-    "already_marked": 0,
-    "already_clear": 0,
-    "not_found": 2,
-    "replaced": 4,
-}
-
-#: Outcome → HTTP status. Matches the exit-code map branch for branch.
+#: Outcome → HTTP status. Idempotent no-ops are successes.
 INCOMPLETE_MARK_HTTP_STATUS: dict[str, int] = {
     "marked": 200,
     "cleared": 200,
@@ -45,6 +37,12 @@ INCOMPLETE_MARK_HTTP_STATUS: dict[str, int] = {
     "not_found": 404,
     "replaced": 409,
 }
+
+#: Outcome → ``pipeline-cli`` exit code, derived branch for branch from the
+#: HTTP map through the repository convention (``lib/surface_outcomes.py``).
+INCOMPLETE_MARK_EXIT_CODES: dict[str, int] = exit_codes_from_http(
+    INCOMPLETE_MARK_HTTP_STATUS
+)
 
 
 @dataclass(frozen=True)
