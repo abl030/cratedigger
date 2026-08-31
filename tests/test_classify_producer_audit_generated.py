@@ -90,7 +90,7 @@ from tests.test_classify_producer_audit import (
     classify_match_targets,
     extra_tracks_blob,
 )
-from web.classify import LogEntry, classify_log_entry
+from web.classify import LogEntry, _classify_log_entry
 
 # ---------------------------------------------------------------------------
 # Worlds — derived from the audit's own discovery, never hand-listed
@@ -466,8 +466,8 @@ def quoting_rejection_scenarios(probe: str = _QUOTING_PROBE) -> frozenset[str]:
     return frozenset(
         scenario
         for scenario in REJECTION_SCENARIO_LITERALS
-        if classify_log_entry(_rejection_entry(scenario)).verdict
-        != classify_log_entry(
+        if _classify_log_entry(_rejection_entry(scenario)).verdict
+        != _classify_log_entry(
             _rejection_entry(scenario, error_message=probe)).verdict
     )
 
@@ -519,7 +519,7 @@ class TestDecisionClaimsMatchTheProducersAction(unittest.TestCase):
             outcomes if data is None else (data.draw(st.sampled_from(outcomes)),)
         )
         for outcome in chosen:
-            classified = classify_log_entry(_entry_for(
+            classified = _classify_log_entry(_entry_for(
                 decision,
                 outcome=outcome,
                 username=username,
@@ -541,7 +541,7 @@ class TestDecisionClaimsMatchTheProducersAction(unittest.TestCase):
     ) -> None:
         """The list row is the line the operator reads (issue #868 #12)."""
         for outcome in _outcomes_for(decision):
-            classified = classify_log_entry(
+            classified = _classify_log_entry(
                 _entry_for(decision, outcome=outcome, username=username))
             if classified.badge == "Imported":
                 continue
@@ -566,7 +566,7 @@ class TestUnproducedNamesAreNeverRewritten(unittest.TestCase):
         # A token that humanizes away entirely ("___") legitimately falls
         # back to the generic "Rejected"; there is no fact to preserve.
         assume(humanized(scenario))
-        classified = classify_log_entry(
+        classified = _classify_log_entry(
             LogEntry(id=1, request_id=2, outcome="rejected",
                      beets_scenario=scenario))
         violation = check_unproduced_name_is_not_rewritten(
@@ -580,7 +580,7 @@ class TestMatchedNamesRenderWords(unittest.TestCase):
     def test_every_matched_rejection_scenario_renders_a_sentence(self) -> None:
         for scenario in REJECTION_SCENARIO_LITERALS:
             with self.subTest(scenario=scenario):
-                classified = classify_log_entry(
+                classified = _classify_log_entry(
                     LogEntry(id=1, request_id=2, outcome="rejected",
                              beets_scenario=scenario))
                 violation = check_matched_name_renders_words(
@@ -598,7 +598,7 @@ class TestRenderedCountsAreTheProducers(unittest.TestCase):
     def test_the_unmatched_track_count_is_rendered_exactly(
         self, unmatched: int,
     ) -> None:
-        classified = classify_log_entry(_rejection_entry(
+        classified = _classify_log_entry(_rejection_entry(
             EXTRA_TRACKS_SCENARIO,
             validation_result=extra_tracks_blob(unmatched)))
         violation = check_rendered_count_is_the_producers(
@@ -617,7 +617,7 @@ class TestRenderedCountsAreTheProducers(unittest.TestCase):
         """Including the fail-closed case: a target candidate whose array
         is EMPTY is not evidence of zero unmatched tracks — the producer
         only writes this scenario when the array is non-empty."""
-        classified = classify_log_entry(
+        classified = _classify_log_entry(
             _rejection_entry(EXTRA_TRACKS_SCENARIO, validation_result=blob))
         violation = check_rendered_count_is_the_producers(
             None, classified.verdict)
@@ -648,7 +648,7 @@ class TestQuotedDiagnosticsAreTheProducers(unittest.TestCase):
     def test_a_quoting_branch_carries_the_recorded_reason(
         self, scenario: str, recorded: str,
     ) -> None:
-        verdict = classify_log_entry(
+        verdict = _classify_log_entry(
             _rejection_entry(scenario, error_message=recorded)).verdict
         violation = check_recorded_diagnostic_reaches_the_operator(
             scenario, recorded, verdict)
@@ -657,7 +657,7 @@ class TestQuotedDiagnosticsAreTheProducers(unittest.TestCase):
     def test_a_quoting_branch_invents_nothing_when_the_row_is_silent(self):
         for scenario in sorted(QUOTING_SCENARIOS):
             with self.subTest(scenario):
-                verdict = classify_log_entry(
+                verdict = _classify_log_entry(
                     _rejection_entry(scenario)).verdict
                 violation = check_no_diagnostic_is_invented(scenario, verdict)
                 self.assertIsNone(violation, violation)
@@ -676,8 +676,8 @@ class TestQuotedDiagnosticsAreTheProducers(unittest.TestCase):
         cannot pass as non-quoting."""
         violation = check_verdict_ignores_the_diagnostic(
             scenario,
-            classify_log_entry(_rejection_entry(scenario)).verdict,
-            classify_log_entry(
+            _classify_log_entry(_rejection_entry(scenario)).verdict,
+            _classify_log_entry(
                 _rejection_entry(scenario, error_message=recorded)).verdict,
         )
         self.assertIsNone(violation, violation)

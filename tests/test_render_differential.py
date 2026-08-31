@@ -45,7 +45,7 @@ from scripts.render_differential import (
     unwatched_field_names,
     watched_field_names,
 )
-from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
+from web.classify import ClassifiedEntry, LogEntry, _classify_log_entry
 from web.download_history_view import (
     _classify_pipeline_log_item,
     build_recents_download_log_rows,
@@ -297,7 +297,7 @@ class TestClassifyRenderTargetIsTheProductionPath(unittest.TestCase):
         row = _download_log_row()
         rendered = _render_one(row)
         self.assertEqual(rendered.id, 4242)
-        classified = classify_log_entry(LogEntry.from_row(dict(row)))
+        classified = _classify_log_entry(LogEntry.from_row(dict(row)))
         payload: dict[str, object] = msgspec.to_builtins(classified)
         for name in watched_field_names(ClassifiedEntry):
             with self.subTest(field=name):

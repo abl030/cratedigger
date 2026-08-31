@@ -58,7 +58,7 @@ from tests.helpers import (
     make_audio_corrupt_validation_report,
     make_request_row,
 )
-from web.classify import LogEntry, classify_log_entry
+from web.download_history_view import build_recents_download_log_rows
 
 
 def _cfg() -> types.SimpleNamespace:
@@ -932,17 +932,17 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         self.assertIsNotNone(audit.candidate_v0_probe)
         self.assertIsNotNone(audit.current_v0_probe)
 
-        classified = classify_log_entry(LogEntry.from_row(dict(raw)))
-        self.assertIsNone(classified.source_format)
-        self.assertIsNone(classified.source_min_bitrate)
-        self.assertIsNone(classified.source_avg_bitrate)
-        self.assertIsNone(classified.existing_format)
-        self.assertIsNone(classified.existing_min_bitrate)
-        self.assertIsNone(classified.comparison_basis)
-        self.assertEqual(classified.spectral_grade, "likely_transcode")
-        self.assertEqual(classified.existing_spectral_grade, "genuine")
-        self.assertEqual(classified.v0_probe_avg_bitrate, 259)
-        self.assertEqual(classified.existing_v0_probe_avg_bitrate, 260)
+        classified = build_recents_download_log_rows([dict(raw)])[0]
+        self.assertIsNone(classified["source_format"])
+        self.assertIsNone(classified["source_min_bitrate"])
+        self.assertIsNone(classified["source_avg_bitrate"])
+        self.assertIsNone(classified["existing_format"])
+        self.assertIsNone(classified["existing_min_bitrate"])
+        self.assertIsNone(classified["comparison_basis"])
+        self.assertEqual(classified["spectral_grade"], "likely_transcode")
+        self.assertEqual(classified["existing_spectral_grade"], "genuine")
+        self.assertEqual(classified["v0_probe_avg_bitrate"], 259)
+        self.assertEqual(classified["existing_v0_probe_avg_bitrate"], 260)
 
     def test_beets_absent_passes_current_none_to_reducer(self) -> None:
         """Helper returns None (no Beets album) → reducer sees current=None."""

@@ -53,7 +53,7 @@ from tests.helpers import (
     noop_quality_gate,
     pinned_dispatch_authority,
 )
-from web.classify import LogEntry, classify_log_entry
+from web.download_history_view import build_recents_download_log_rows
 
 # The request id every generated world seeds and self-heal checks read back.
 _OPERATION_FENCE_REQUEST_ID = 703
@@ -291,13 +291,14 @@ def assert_non_automation_failure_lifecycle(
         # cannot miss. Kept so a bundle that reports an id it did not commit
         # fails loudly instead of rendering nothing in Recents.
         raise AssertionError("linked terminal audit disappeared")
-    rendered = classify_log_entry(LogEntry.from_row(dict(audit)))
+    rendered = build_recents_download_log_rows([dict(audit)])[0]
     expected_prefix = (
         "Force import attempt failed:"
         if job_type == IMPORT_JOB_FORCE
         else "YouTube import attempt failed:"
     )
-    if not (rendered.verdict or "").startswith(expected_prefix):
+    verdict = rendered["verdict"]
+    if not isinstance(verdict, str) or not verdict.startswith(expected_prefix):
         raise AssertionError("Recents lost the failed job-type identity")
 
 
