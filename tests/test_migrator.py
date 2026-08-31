@@ -3404,6 +3404,39 @@ class TestDownloadLogOutcomeTaxonomySync(unittest.TestCase):
         self.assertEqual(DOWNLOAD_LOG_OUTCOMES, latest_values)
 
 
+class TestSearchLogOutcomeTaxonomySync(unittest.TestCase):
+    """Pin lib.pipeline_db.SEARCH_LOG_OUTCOMES to the migration SQL.
+
+    Same two-sync-point contract as the download_log taxonomy above:
+    the CHECK constraint and the Python Literal are the only spellings
+    of the search_log outcome vocabulary, and this test fails when a
+    migration widens the constraint without the Literal (or vice
+    versa). Before the #1278 item-7 residual sweep the vocabulary lived
+    only in migration 010's SQL and every consumer hand-listed it.
+    """
+
+    def test_literal_matches_latest_migration_check(self):
+        import re
+
+        from lib.migrator import DEFAULT_MIGRATIONS_DIR
+        from lib.pipeline_db import SEARCH_LOG_OUTCOMES
+
+        pattern = re.compile(
+            r"ADD CONSTRAINT search_log_outcome_check\s*"
+            r"CHECK \(outcome IN \(([^;]+)\)\)",
+            re.DOTALL,
+        )
+        latest_values = None
+        for path in sorted(pathlib.Path(DEFAULT_MIGRATIONS_DIR).glob("*.sql")):
+            match = pattern.search(path.read_text())
+            if match:
+                latest_values = frozenset(
+                    re.findall(r"'([a-z_]+)'", match.group(1)))
+        assert latest_values is not None, (
+            "no migration defines search_log_outcome_check")
+        self.assertEqual(SEARCH_LOG_OUTCOMES, latest_values)
+
+
 class TestRequestStatusTaxonomySync(unittest.TestCase):
     """The exported request vocabulary matches the latest schema check."""
 

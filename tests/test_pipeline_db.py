@@ -49,6 +49,7 @@ from lib.merge_rekey_service import RESULT_REKEYED, MergeRekeyService
 from lib.pipeline_db import (
     JELLYFIN_PIN_STATUSES,
     PLEX_PIN_STATUSES,
+    SEARCH_LOG_OUTCOMES,
     DownloadLogOutcome,
     PersistedDistance,
     PersistedTrack,
@@ -7092,12 +7093,12 @@ class TestSharedOutcomeVocabularies(unittest.TestCase):
 
     The four ``download_log.outcome`` tuples are driven against the WHOLE
     canonical taxonomy (``get_args(DownloadLogOutcome)``, itself pinned to
-    the CHECK constraint by ``tests/test_migrator.py``), and the job-type
-    tuple against the whole ``IMPORT_JOB_TYPES`` frozenset. The
-    ``search_log.outcome`` case is the exception: that column has no
-    Python-side taxonomy constant to derive from, so its probe list is
-    written out here and is only as complete as this list — see that
-    test's own docstring.
+    the CHECK constraint by ``tests/test_migrator.py``), the job-type
+    tuple against the whole ``IMPORT_JOB_TYPES`` frozenset, and the
+    ``search_log.outcome`` case against the whole ``SEARCH_LOG_OUTCOMES``
+    frozenset (pinned to migration 010's CHECK by the same migrator
+    test module — the #1278 item-7 residual sweep replaced the
+    hand-written probe list this test used to carry).
     """
 
     def setUp(self):
@@ -7179,20 +7180,19 @@ class TestSharedOutcomeVocabularies(unittest.TestCase):
     def test_search_error_outcomes_match_both_dashboard_panels(self):
         """Both panels count exactly ``SEARCH_ERROR_OUTCOMES`` as errors.
 
-        Unlike the ``download_log`` cases above, this probe list is
-        hand-written: ``search_log.outcome`` has no Python-side taxonomy
-        constant to derive from — its vocabulary lives only in
-        ``search_log_outcome_check`` (migration 010). The list below happens
-        to be that constraint's full seven values today, but nothing
-        enforces that, so this test proves the two panels admit exactly the
-        exported error tuple OUT OF THE OUTCOMES IT PROBES, not that no
-        other outcome could ever be miscounted.
+        The probe list is the WHOLE canonical taxonomy —
+        ``SEARCH_LOG_OUTCOMES``, itself pinned to migration 010's
+        ``search_log_outcome_check`` by ``tests/test_migrator.py`` — so a
+        migration widening the vocabulary flows into this probe
+        automatically and a new outcome the panels miscount fails here.
+        (Before the #1278 item-7 residual sweep this list was hand-written
+        and only as complete as the hand that wrote it.)
         """
+        self.assertLessEqual(
+            set(SEARCH_ERROR_OUTCOMES), SEARCH_LOG_OUTCOMES,
+            "the error subset must stay inside the canonical taxonomy")
         request_id = self._request("search-errors")
-        for outcome in (
-            "found", "no_match", "no_results", "exhausted",
-            *SEARCH_ERROR_OUTCOMES,
-        ):
+        for outcome in sorted(SEARCH_LOG_OUTCOMES):
             self.db.log_search(request_id, query="q", outcome=outcome)
         window = self.db._dashboard_search_window("24h", 24)
         self.assertEqual(
