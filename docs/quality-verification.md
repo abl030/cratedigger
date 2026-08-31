@@ -1798,8 +1798,12 @@ spectral fact is written:
 - **Bail, never infer.** The candidate download's spectral is NEVER adopted as
   the request's on-disk state. When the on-disk audit of the installed files
   yields no measurement — a stale/missing Beets path, an analyzer error — the
-  measurement helper (`lib/measurement.py::_persist_spectral_state`) writes
-  nothing; the container bitrate remains the HAVE comparison fallback. The old
+  measurement helper (`lib/measurement.py::measure_preimport_state`) carries
+  only the failed/unattempted existing-side audit detail, and the persister's
+  own guard is the bail: `persist_exact_current_spectral_from_attempt`
+  refuses a `measured_existing` whose grade is absent or `error` (fail-soft
+  `incomplete`, nothing written). The container bitrate remains the HAVE
+  comparison fallback. The old
   "reasonable proxy" branch that adopted a candidate's grade is deleted: on
   2026-05-12 it wrote a rejected fake-320's `likely_transcode`/128 as the HAVE
   state of a genuine 192 copy, the evidence seeder froze it, and on 2026-07-21

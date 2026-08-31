@@ -119,12 +119,16 @@ baseline to admit one, check `tests/helpers.py`'s existing typed bridges
 first. The `db=<FakePipelineDB>` kwarg gap used to be the largest single
 cluster of frozen tests-side `type_ignore` debt; issue #1277 removed most of
 it by narrowing the production annotation instead of bridging the call site.
-Measured 2026-08-26, after that change: **18** of the tests baseline's 123
-`type_ignore` findings still share that shape, and only 15 of those are a
-genuine fake-vs-concrete gap — `measure_preimport_state` (14) and
-`_persist_spectral_state` (1), both still annotated `db: PipelineDB`. The
-other three are deliberate wrong-type injections a narrow port would not
-fix (`_refresh_current_evidence_after_import(db=None)` ×2,
+Measured 2026-08-31, after the follow-up that closed the last genuine
+cluster (the #1278 preview-lane series narrowed `measure_preimport_state`
+to the `BadHashGateDB` port and deleted the dead `_persist_spectral_state`
+writer, removing every fake-vs-concrete `db` hatch — the census's 15
+`db=` sites in `tests/test_force_import_gates.py` and
+`tests/test_integration_slices.py`, plus `tests/test_measurement.py`'s
+positional-`db` ignores and casts): the only `type_ignore` findings still
+sharing that shape are deliberate wrong-type injections a narrow port
+would not fix
+(`_refresh_current_evidence_after_import(db=None)` ×2,
 `_check_quality_gate_core(db=SimpleNamespace())` ×1). The whole
 `dispatch_import_core` cluster (34 findings, reached through an
 `Any`-accepting `dispatch_import_with_fake_db` bridge) is gone: dispatch
@@ -138,7 +142,7 @@ in this family — `finalize_claimed_dispatch` (an `Any`-typed bridge from a
 `FakePipelineDB` fixture into the `PipelineDB`-typed `process_claimed_job`)
 and `make_ctx_with_fake_db` (wraps a fake in `FakePipelineDBSource` so
 production code hits a typed `CratediggerContext`, not a `PipelineDB`) —
-and neither covers the two remaining clusters above. So for a new hatch of
+and neither covers the deliberate injections above. So for a new hatch of
 this shape: first ask whether the production function actually needs the
 concrete `PipelineDB` (usually it does not — ~40 narrow DB Protocols
 already exist); if it genuinely does, reuse an existing bridge where the

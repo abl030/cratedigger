@@ -3,8 +3,9 @@
  * Run with: node tests/test_js_pipeline_dashboard.mjs
  */
 
-import { __test__ } from '../web/js/pipeline_dashboard.js';
+import { __test__, renderPipelineDashboard } from '../web/js/pipeline_dashboard.js';
 import { state } from '../web/js/state.js';
+import { awstDateTime } from '../web/js/util.js';
 
 let passed = 0;
 let failed = 0;
@@ -909,6 +910,142 @@ console.log('main.js binds window.refreshLibraryCensus (the onclick dead-end gua
     globalThis.window = prevWindow;
     globalThis.document = prevDocument;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Composer wiring (#1278 "worth exploring" item 3): renderPipelineDashboard
+// takes the payload and target element as parameters, so the card ORDER and
+// each card's payload-KEY selection — the #1110/#1241 argument-inversion
+// mutant class, previously untestable behind document/state reads — are
+// pinned against the real production entry point.
+// ---------------------------------------------------------------------------
+
+console.log('renderPipelineDashboard() loading branch renders nav + Loading only');
+{
+  const el = { innerHTML: 'stale-content' };
+  renderPipelineDashboard('<nav id="nav-sentinel"></nav>', null, el);
+  assertContains(el.innerHTML, 'nav-sentinel', 'loading branch keeps the nav strip');
+  assertContains(el.innerHTML, 'Loading...', 'loading branch shows the loading state');
+  assertExcludes(el.innerHTML, 'dashboard-grid', 'loading branch renders no card grid');
+  assertExcludes(el.innerHTML, 'stale-content', 'loading branch replaces prior content');
+}
+
+console.log('renderPipelineDashboard() composes all 14 cards, in order, each from its own payload key');
+{
+  state.pipelineMatchGraphOpen = false;
+  state.pipelineHourlyMatchGraphOpen = false;
+  state.pipelineDailyMatchGraphOpen = false;
+  // Every card's payload key carries a sentinel no other card can render, so
+  // a key swap between any two cards moves a sentinel out of its slice.
+  const data = {
+    generated_at: '2026-08-30T16:30:00+00:00',
+    redis: { status: 'rs-status-sentinel' },
+    coverage: {
+      // No matches_per_hour_* here, deliberately: their absence forces the
+      // composer's one real derivation (withCoverageMatchRates over the
+      // search windows) to run, so deleting that call is a killed mutant,
+      // not a no-op.
+      wanted_total: 641,
+      wanted_searched_24h: 640,
+      top_loop_suspects: [{ request_id: 71, artist_name: 'LOOPARTIST', album_title: 'LoopX', searches_24h: 4 }],
+      stale_wanted: [{ request_id: 81, artist_name: 'STALE-ARTIST', album_title: 'StaleX', hours_since_search: 30 }],
+      wanted_trend: { current_wanted: 741, windows: [{ label: 'TREND-W' }], series_24h: [] },
+    },
+    disk_coverage: { counts: { on_disk_total: 611, active_total: 612 }, drift_rows: [] },
+    library_completeness: { state: 'unreadable', error: 'lc-err-sentinel' },
+    retag_divergence_census: { state: 'unreadable', error: 'rc-err-sentinel' },
+    peers: {
+      totals: { known_peers: 671 },
+      days: [{ date: 'PEER-DAY', new_peers: 1, total_peers: 671 }],
+      heavy_queries: [{ created_at: '2026-08-30T11:00:00+00:00', query: 'heavy-query-sentinel' }],
+      heavy_query_hours: 24,
+    },
+    searches: { windows: [
+      { label: 'SEARCH-W', searches: 5, hours: 6, outcomes: { found: 3 } },
+      { label: 'SEARCH-W24', searches: 20, hours: 24, outcomes: { found: 48 } },
+    ] },
+    cycles: {
+      windows: [{ label: 'CYCLE-W', cycles: 2 }],
+      outliers: [{ created_at: '2026-08-30T10:00:00+00:00', cycle_total_s: 47.3 }],
+    },
+    unfindable: {
+      recent_runs: [{ created_at: '2026-08-30T09:00:00+00:00', cohort_total: 731 }],
+      backlog_trend: { series: [] },
+    },
+  };
+  const el = { innerHTML: '' };
+  renderPipelineDashboard('<nav id="nav-sentinel"></nav>', data, el);
+  const html = el.innerHTML;
+
+  const titles = [
+    'Redis',
+    'Wanted Coverage',
+    'Disk Coverage',
+    'Library Completeness',
+    'Beets DB &harr; File Tags Drift',
+    'Wanted Trend',
+    'Known Peers',
+    'Search Throughput',
+    'Cycle Times',
+    'Cycle Outliers',
+    'Peer/Dir Heavy Queries (24h)',
+    'Loop Suspects',
+    'Stale Wanted',
+    'Unfindable Detection',
+  ];
+  const markers = titles.map(t => `<div class="dashboard-card-title">${t}</div>`);
+  let prev = -1;
+  let ordered = true;
+  for (const marker of markers) {
+    const at = html.indexOf(marker);
+    assert(at !== -1, `card present: ${marker}`);
+    if (at <= prev) ordered = false;
+    prev = at;
+  }
+  assert(ordered, 'the 14 cards appear in the documented order');
+  assert(html.split('dashboard-card-title').length - 1 === titles.length,
+    'exactly 14 card titles render — no duplicated card');
+
+  const navAt = html.indexOf('nav-sentinel');
+  const headerAt = html.indexOf('dashboard-header');
+  assert(navAt !== -1 && headerAt !== -1 && navAt < headerAt,
+    'nav strip renders before the dashboard header');
+  const headerSlice = html.slice(headerAt, html.indexOf(markers[0]));
+  const generatedLabel = awstDateTime(data.generated_at);
+  assert(generatedLabel.length > 0, 'header timestamp formatter yields a non-empty needle');
+  assertContains(headerSlice, generatedLabel,
+    'generated_at renders in the dashboard header');
+
+  /**
+   * Assert a sentinel renders inside card i's slice of the page — between
+   * its own title marker and the next card's — so key-swap mutants fail.
+   * @param {number} i @param {string} needle @param {string} msg
+   */
+  function assertInCard(i, needle, msg) {
+    const start = html.indexOf(markers[i]);
+    const end = i + 1 < markers.length ? html.indexOf(markers[i + 1]) : html.length;
+    assert(start !== -1, `card slice resolvable for ${titles[i]}`);
+    assertContains(html.slice(start, end), needle, msg);
+  }
+  assertInCard(0, 'rs-status-sentinel', 'Redis card renders data.redis');
+  assertInCard(1, '<strong>641</strong>', 'Coverage card renders data.coverage');
+  // Derived, not seeded: 48 found / 24h from the search windows — proves
+  // withCoverageMatchRates ran over data.searches.windows.
+  assertInCard(1, '<strong class="metric-good">2.00</strong>',
+    'Coverage card renders the match rate derived from the search windows');
+  assertInCard(2, '<strong>611 / 612</strong>', 'Disk Coverage card renders data.disk_coverage');
+  assertInCard(3, 'lc-err-sentinel', 'Library Completeness card renders data.library_completeness');
+  assertInCard(4, 'rc-err-sentinel', 'Retag census card renders data.retag_divergence_census');
+  assertInCard(5, '<strong>741</strong>', 'Wanted Trend card renders coverage.wanted_trend');
+  assertInCard(5, 'TREND-W', 'Wanted Trend card renders the trend windows');
+  assertInCard(6, 'PEER-DAY', 'Known Peers card renders data.peers');
+  assertInCard(7, 'SEARCH-W', 'Search Throughput card renders data.searches.windows');
+  assertInCard(8, 'CYCLE-W', 'Cycle Times card renders data.cycles.windows');
+  assertInCard(9, '47.3s', 'Cycle Outliers card renders data.cycles.outliers');
+  assertInCard(10, 'heavy-query-sentinel', 'Heavy Queries card renders peers.heavy_queries');
+  assertInCard(11, 'LOOPARTIST', 'Loop Suspects card renders coverage.top_loop_suspects');
+  assertInCard(12, 'STALE-ARTIST', 'Stale Wanted card renders coverage.stale_wanted');
+  assertInCard(13, '<strong>731</strong>', 'Unfindable card renders data.unfindable');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
