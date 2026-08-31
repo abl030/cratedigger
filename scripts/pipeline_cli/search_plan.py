@@ -191,13 +191,10 @@ def cmd_search_plan_dry_run(
     generator output matches expectations before bumping
     ``SEARCH_PLAN_GENERATOR_ID``.
 
-    Exit codes:
-      * 0 — ``RESULT_DRY_RUN_SUCCESS`` or
-        ``RESULT_DRY_RUN_GENERATION_FAILED`` (generator returned a
-        deterministic generation failure — informational, not a CLI
-        error; the operator still wants to see ``failure_reason`` and
-        provenance).
-      * 2 — ``RESULT_REQUEST_NOT_FOUND``.
+    Exit codes come from ``SEARCH_PLAN_DRY_RUN_EXIT_CODES``
+    (``lib/search_plan_service.py``). ``generation_failed`` is a success
+    exit — informational, not a CLI error; the operator still wants to
+    see ``failure_reason`` and provenance.
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
@@ -301,13 +298,10 @@ def cmd_search_plan_saturation(
     wrap ``SearchPlanService.saturation_for_request`` — keep them in
     sync (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
 
-    Exit codes:
-      * 0 — ``RESULT_SATURATION_SUCCESS`` (zeros are still success —
-        the request exists, the window is just quiet)
-      * 2 — ``RESULT_REQUEST_NOT_FOUND``
-      * 3 — ``RESULT_SATURATION_INPUT_INVALID`` (argparse normally
-        bounds this; the branch is defensive parity with the API's
-        400)
+    Exit codes come from ``SEARCH_PLAN_SATURATION_EXIT_CODES``
+    (``lib/search_plan_service.py``). Zeros are still success — the
+    request exists, the window is just quiet; ``input_invalid`` is
+    defensive parity with the API's 400 (argparse normally bounds it).
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
@@ -362,13 +356,10 @@ def cmd_search_plan_advance(
     surfaces wrap ``SearchPlanService.advance_for_request`` — keep them
     in sync (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
 
-    Exit codes:
-      * 0 — ``RESULT_ADVANCED``
-      * 2 — ``RESULT_REQUEST_NOT_FOUND``
-      * 3 — ``RESULT_INVALID_TARGET`` (out of range, would go backward,
-        no slot matches strategy, or both/neither flag given)
-      * 4 — ``RESULT_NO_ACTIVE_PLAN`` or ``RESULT_REQUEST_REPLACED``
-      * 5 — ``RESULT_FAILED_TRANSIENT`` (lock contention)
+    Exit codes come from ``SEARCH_PLAN_ADVANCE_EXIT_CODES``
+    (``lib/search_plan_service.py``); ``invalid_target`` covers out of
+    range, would-go-backward, no slot matching the strategy, and
+    both/neither flag given; ``failed_transient`` is lock contention.
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
@@ -429,11 +420,9 @@ def cmd_search_plan_history(
     ``--before-id <id>`` to read the next page. JSON mode returns the
     same payload as the API (``request_id`` / ``rows`` / ``next_before_id``).
 
-    Exit codes:
-      * 0 — ``RESULT_HISTORY_PAGE_SUCCESS``
-      * 2 — ``RESULT_REQUEST_NOT_FOUND``
-      * 3 — ``RESULT_HISTORY_PAGE_INPUT_INVALID`` (limit out of bounds,
-        before_id < 1)
+    Exit codes come from ``SEARCH_PLAN_HISTORY_EXIT_CODES``
+    (``lib/search_plan_service.py``); ``input_invalid`` covers a limit
+    out of bounds or ``before_id < 1``.
     """
     from lib.config import read_runtime_config
     from lib.search_plan_service import (

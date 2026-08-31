@@ -312,7 +312,9 @@ def _render_convergence_stop_result(
         )
     from lib.convergence_service import STOP_CONVERGED_SEARCH_EXIT_CODES
 
-    return STOP_CONVERGED_SEARCH_EXIT_CODES[result.outcome]
+    # Defensive .get, mirroring the search-plan commands: an unknown
+    # future outcome exits 1 instead of a bare KeyError traceback.
+    return STOP_CONVERGED_SEARCH_EXIT_CODES.get(result.outcome, 1)
 
 
 def _convergence_stop_unavailable(args: argparse.Namespace) -> int:

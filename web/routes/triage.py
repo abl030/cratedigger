@@ -265,7 +265,10 @@ def post_stop_converged_search(
     h: RouteHandler, body: dict[str, object], req_id_str: str,
 ) -> None:
     """Stop searching only if the locked, freshly-derived signal matches."""
-    from lib.convergence_service import ConvergenceStopService
+    from lib.convergence_service import (
+        STOP_CONVERGED_SEARCH_HTTP_STATUS,
+        ConvergenceStopService,
+    )
 
     payload = parse_body(h, body, StopConvergedSearchRequest)
     if payload is None:
@@ -274,16 +277,17 @@ def post_stop_converged_search(
         int(req_id_str),
         signal_token=payload.signal_token,
     )
-    from lib.convergence_service import STOP_CONVERGED_SEARCH_HTTP_STATUS
-
     response = msgspec.to_builtins(result)
     # Status from the service's outcome table (#1278); the typed
-    # StopConvergenceOutcome Literal guarantees membership, audited by
-    # tests/test_surface_outcomes.py.
-    h._json(
-        response,
-        status=STOP_CONVERGED_SEARCH_HTTP_STATUS[result.outcome],
-    )
+    # StopConvergenceOutcome Literal guarantees membership (audited by
+    # tests/test_surface_outcomes.py), so the 500 arm below is the same
+    # unknown-outcome fail-closed contract as the search-plan handlers —
+    # NOT the historical catch-all 422 for anything unrecognized.
+    status = STOP_CONVERGED_SEARCH_HTTP_STATUS.get(result.outcome)
+    if status is None:
+        h._error(f"Unknown stop-converged outcome: {result.outcome}", 500)
+        return
+    h._json(response, status=status)
 
 
 ROUTES: list[RouteRegistration] = [

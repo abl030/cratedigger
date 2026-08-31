@@ -215,6 +215,7 @@ def get_pipeline_search_plan_history(
     from lib.config import read_runtime_config
     from lib.search_plan_service import (
         HISTORY_PAGE_DEFAULT_LIMIT,
+        RESULT_HISTORY_PAGE_INPUT_INVALID,
         RESULT_HISTORY_PAGE_SUCCESS,
         RESULT_REQUEST_NOT_FOUND,
         SEARCH_PLAN_HISTORY_HTTP_STATUS,
@@ -283,15 +284,18 @@ def get_pipeline_search_plan_history(
         h._json(payload)
         return
     status = SEARCH_PLAN_HISTORY_HTTP_STATUS.get(result.outcome)
-    if status is None:
-        # Defensive fallback for any future outcome string.
-        h._error(f"Unknown history outcome: {result.outcome}", 500)
-        return
-    if result.outcome == RESULT_REQUEST_NOT_FOUND:
+    if result.outcome == RESULT_REQUEST_NOT_FOUND and status is not None:
         # F3: match h._error() shape used by neighbor routes (get_pipeline_detail etc.)
         h._error(result.error_message or "Request not found", status)
         return
-    h._error(result.error_message or "Invalid history page request", status)
+    if result.outcome == RESULT_HISTORY_PAGE_INPUT_INVALID and status is not None:
+        h._error(result.error_message or "Invalid history page request", status)
+        return
+    # Defensive fallback for any future outcome string — including one a
+    # future table maps but the branches above don't name (a bare
+    # by-elimination tail here would emit the input-invalid message with
+    # that outcome's status; #1278 review F3).
+    h._error(f"Unknown history outcome: {result.outcome}", 500)
 
 
 class PipelineSearchPlanRegenerateRequest(BaseModel):
