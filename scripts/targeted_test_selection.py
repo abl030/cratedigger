@@ -901,8 +901,10 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # ever probed .py paths, so any wrapper without a hand-written entry
     # resolved zero neighbours SILENTLY -- thirteen of the sixteen,
     # measured 2026-08-31. scripts/run_final_gate.sh is the instance that
-    # was actually paid for: it had no entry through the whole of item 6,
-    # so every wrapper edit selected nothing. The scripts/ root rule now
+    # was actually paid for: on main's history the ONLY commit that ever
+    # added its entry is item 6's PR2 (0c3bae8e), the same commit that made
+    # it a wrapper -- so through item 6's PR1 and everything earlier, an
+    # edit to that file selected nothing. The scripts/ root rule now
     # polices `.sh` too, and the same basename probe resolves five of them
     # (daily_beets_tip_update, daily_flake_update, daily_resource_monitor,
     # fuzz_burst, world_model_burst -- each has a real
@@ -1274,22 +1276,25 @@ SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
     ),
     "scripts/lint.sh": (
         "measured 2026-08-31: zero neighbours -- tests.test_lint does not "
-        "exist, and a repository-wide grep for the string 'lint.sh' finds "
-        "no reference anywhere outside the file itself: no test, no doc, "
-        "no Nix module, no other script. It is a bare developer "
-        "convenience wrapper around `nix-shell --run pyright` on a "
-        "hand-typed file list; the canonical typing contracts run through "
-        "scripts/run_pyright_checks.py instead (issue #1278 item 9)"
+        "exist, and a repository-wide grep for the string 'lint.sh' "
+        "matches nothing outside this registry entry: no test, no doc, no "
+        "Nix module, no other script, and not the file itself either. "
+        "It is a "
+        "bare developer convenience wrapper around `nix-shell --run "
+        "pyright` on a hand-typed file list; the canonical typing "
+        "contracts run through scripts/run_pyright_checks.py instead "
+        "(issue #1278 item 9)"
     ),
     "scripts/mcp-playwright.sh": (
         "measured 2026-08-31: zero neighbours -- tests.test_mcp-playwright "
         "is not even a legal module name, and nothing under tests/ "
-        "mentions this file. Its consumers are .mcp.json's `command` "
-        "string, .claude/agents/playwright.md, and docs/playwright-mcp.md "
-        "-- all of which name the wrapper's PATH, never its contents, so "
-        "the binary-name resolution and CDP/headless mode selection inside "
-        "it are exercised only by really launching an MCP server "
-        "(issue #1278 item 9)"
+        "mentions this file. Its consumers name the wrapper's PATH, never "
+        "its contents -- including .mcp.json's `command` string and the "
+        "generated .codex/config.toml / .codex/agents/playwright.toml "
+        "beside it, .claude/agents/playwright.md, docs/playwright-mcp.md, "
+        "and two .claude/memory notes -- so the binary-name resolution and "
+        "CDP/headless mode selection inside it are exercised only by "
+        "really launching an MCP server (issue #1278 item 9)"
     ),
 }
 
@@ -1316,8 +1321,10 @@ class RootCoverageRule:
     hand-maintained data — nothing here infers coverage from an import
     graph.
 
-    `admitted_selects_nothing` is the one real behavioural difference
-    between the rows. The `tests/` registry early-returns BEFORE resolution
+    Two columns are behavioural, not descriptive: `suffixes` decides which
+    files a root polices at all (`.sh` joined the `scripts/` row in item 9),
+    and `admitted_selects_nothing` decides WHEN a registered path is
+    honoured. The `tests/` registry early-returns BEFORE resolution
     (a registration must not be a lookalike neighbour set — issue #1081),
     so a registered `tests/` path never reaches the post-resolution branch
     at all. The `lib/` and `scripts/` registries do not early-return: full
@@ -1375,10 +1382,13 @@ ROOT_COVERAGE_RULES: tuple[RootCoverageRule, ...] = (
         root="scripts",
         # ``.sh`` joined this row in issue #1278 item 9: the shell wrappers
         # are entry points with no fail-closed selection story at all until
-        # then — scripts/run_final_gate.sh had NO entry through the whole of
-        # item 6, so every wrapper edit selected nothing and no audit
-        # noticed. ``lib/`` and ``tests/`` hold no ``.sh`` files, so the
-        # suffix stays on this row rather than becoming a global default.
+        # then. scripts/run_final_gate.sh is the measured case — on main's
+        # history the ONLY commit that ever gave it an entry is item 6's
+        # PR2 (0c3bae8e), the same commit that turned it into a wrapper, so
+        # through item 6's PR1 and everything before it an edit to that file
+        # selected nothing and no audit noticed. ``lib/`` and ``tests/``
+        # hold no ``.sh`` files, so the suffix stays on this row rather than
+        # becoming a global default.
         suffixes=(".py", ".sh"),
         registry=SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE,
         registry_name="SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE",
@@ -1424,12 +1434,26 @@ def _assert_no_double_registration(
         )
 
 
-for _rule in ROOT_COVERAGE_RULES:
-    _assert_no_double_registration(
-        EXACT_PATH_NEIGHBOURS,
-        _rule.registry,
-        gap_registry_name=_rule.registry_name,
-    )
+def _assert_registries_disjoint(
+    rules: Sequence[RootCoverageRule],
+    exact_path_neighbours: Mapping[str, tuple[str, ...]],
+) -> None:
+    """Run the double-registration guard for EVERY row of a rule table.
+
+    A function rather than an inline import-time loop so a self-test can
+    drive it with a fabricated table whose contradiction sits in the LAST
+    row — truncating the real loop to its first row was otherwise green
+    (issue #1278 item 9 review M24).
+    """
+    for rule in rules:
+        _assert_no_double_registration(
+            exact_path_neighbours,
+            rule.registry,
+            gap_registry_name=rule.registry_name,
+        )
+
+
+_assert_registries_disjoint(ROOT_COVERAGE_RULES, EXACT_PATH_NEIGHBOURS)
 
 
 def _module_path(module: str, repo_root: Path) -> Path:

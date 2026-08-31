@@ -11,15 +11,27 @@ differing essentially by the token `lib`↔`scripts`) with one parameterized
 audit that derives its rows FROM that table — no root is named by hand, so
 a fourth row is audited the moment it is added.
 
-Three registry contracts, all driving the REAL resolution functions rather
+Four registry contracts, all driving the REAL resolution functions rather
 than a reimplementation:
 
+0. the table's own scope-deciding columns match an anchor held OUTSIDE the
+   table (`EXPECTED_ADMITTED_SELECTS_NOTHING`, `registry_name` against the
+   object it labels) — every other contract here derives its rows from that
+   table, so a column that decides scope cannot also be its own authority;
 1. every registered path still resolves zero neighbours (else it is a STALE
    admission and must be removed);
 2. every real file under a rule's root, with one of its suffixes, either
-   resolves at least one neighbour or is admitted in that rule's registry;
+   resolves at least one neighbour or is admitted in that rule's registry,
+   AND every neighbour it resolves is a runnable `tests.` module that
+   exists;
 3. every registry entry is well formed — a non-empty rationale, and a path
    that still exists on disk.
+
+Contracts 1 and 2 run over `AUDITED_RULES` only — the `lib/` and
+`scripts/` rows. `SHARED_MODULES_WITHOUT_COVERAGE` gets contracts 0 and 3
+here and nothing more; its own both-directions exactness lives in
+`tests/test_targeted_test_selection.py`'s tree walk plus
+`tests/test_negative_coverage_audit.py`.
 
 Plus three contracts on `EXACT_PATH_NEIGHBOURS` itself, which the twin
 audits could not see at all:
@@ -50,21 +62,36 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
+from scripts import targeted_test_selection
 from scripts.targeted_test_selection import (
+    ADMITTED_GAP_MESSAGE,
+    ALWAYS_AMBIENT_TESTS,
     EXACT_PATH_NEIGHBOURS,
-    PIPELINE_DB_NEIGHBOURS,
     ROOT_COVERAGE_RULES,
-    ROUTE_NEIGHBOURS,
-    STRUCTURAL_AUDIT_NEIGHBOURS,
-    WEB_TEST_HARNESS_NEIGHBOURS,
-    WORLD_MODEL_NEIGHBOURS,
     RootCoverageRule,
+    _assert_registries_disjoint,
     _changed_path_neighbours,
+    _direct_test_candidates,
     _existing_module,
     _resolve_neighbours,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: Every row's expected `admitted_selects_nothing`, held OUTSIDE the table
+#: (issue #1278 item 9 review F1). `AUDITED_RULES` below derives its scope
+#: from that same column, so without this anchor flipping the lib row to
+#: True would silently drop the lib half of the seven tests that iterate
+#: `AUDITED_RULES` AND regress production (a registered lib gap would
+#: early-return before resolution, killing the #1199 "selects new coverage
+#: immediately" property and the stderr note) — measured green before this
+#: anchor existed. Keyed by root, so a new row with no entry here fails
+#: with a KeyError rather than being unconstrained.
+EXPECTED_ADMITTED_SELECTS_NOTHING: dict[str, bool] = {
+    "tests": True,
+    "lib": False,
+    "scripts": False,
+}
 
 #: The rows whose admitted gaps do NOT early-return: full resolution runs
 #: first, so a registration can go stale the moment a path gains real
@@ -76,15 +103,35 @@ AUDITED_RULES: tuple[RootCoverageRule, ...] = tuple(
     rule for rule in ROOT_COVERAGE_RULES if not rule.admitted_selects_nothing
 )
 
-#: The shared neighbour tuples EXACT_PATH_NEIGHBOURS and the prefix rules
-#: hand out, by name, so contract A can prove the modules they name exist.
-SHARED_NEIGHBOUR_SETS: dict[str, tuple[str, ...]] = {
-    "PIPELINE_DB_NEIGHBOURS": PIPELINE_DB_NEIGHBOURS,
-    "ROUTE_NEIGHBOURS": ROUTE_NEIGHBOURS,
-    "WEB_TEST_HARNESS_NEIGHBOURS": WEB_TEST_HARNESS_NEIGHBOURS,
-    "STRUCTURAL_AUDIT_NEIGHBOURS": STRUCTURAL_AUDIT_NEIGHBOURS,
-    "WORLD_MODEL_NEIGHBOURS": WORLD_MODEL_NEIGHBOURS,
-}
+
+def shared_neighbour_sets() -> dict[str, tuple[str, ...]]:
+    """Every module-level neighbour tuple the production module exports.
+
+    Derived by introspection over the `*_NEIGHBOURS`-named module
+    attributes plus `ALWAYS_AMBIENT_TESTS`, not hand-listed (issue #1278
+    item 9 review F7): a new shared tuple is covered by contract A the
+    moment it is added, and a hand-list silently would not cover it.
+    `EXACT_PATH_NEIGHBOURS` matches the name convention but is a dict, so
+    the `isinstance` filter keeps it out — its per-path entries are fed to
+    contract A separately.
+
+    This is bounded name-convention introspection of DATA (module
+    attributes), never a source scan. Deliberately outside its reach: the
+    module names spelled as inline literals inside `_resolve_neighbours`'
+    own prefix rules. A nonexistent one there fails loudly downstream at
+    the first selection that hits the rule ("unknown test selector"),
+    which is why chasing them into a source scanner is not worth it.
+    """
+    sets: dict[str, tuple[str, ...]] = {
+        "ALWAYS_AMBIENT_TESTS": ALWAYS_AMBIENT_TESTS,
+    }
+    for name in dir(targeted_test_selection):
+        if not name.endswith("_NEIGHBOURS"):
+            continue
+        value = getattr(targeted_test_selection, name)
+        if isinstance(value, tuple):
+            sets[name] = value
+    return sets
 
 #: Per-root subdirectory for the NESTED unmapped probe. A top-level probe
 #: alone cannot distinguish the real `path.parts[:1] == (root,)` guard from
@@ -301,6 +348,34 @@ def redundant_entry_violations(
     return violations
 
 
+def selector_violations(
+    relative_path: str,
+    neighbours: tuple[str, ...],
+    repo_root: Path,
+) -> list[str]:
+    """One message per resolved neighbour that is not a runnable target.
+
+    A selector must be a dotted module under `tests.` AND exist on disk —
+    anything else crashes the parallel runner with `unknown test selector`
+    deep inside `select_test_targets`, which is issue #1081's founding
+    defect. Uses the production module's own `_existing_module`, never a
+    reimplementation of its path arithmetic.
+    """
+    violations: list[str] = []
+    for neighbour in neighbours:
+        if not neighbour.startswith("tests."):
+            violations.append(
+                f"{relative_path} resolves {neighbour}, which is not a "
+                "tests.* module and cannot be run as a selector"
+            )
+        elif _existing_module(neighbour, repo_root) is None:
+            violations.append(
+                f"{relative_path} resolves {neighbour}, which has no "
+                "module file"
+            )
+    return violations
+
+
 def missing_neighbour_modules(
     named_neighbour_sets: Mapping[str, tuple[str, ...]],
     repo_root: Path,
@@ -314,6 +389,52 @@ def missing_neighbour_modules(
                     f"{name} names {module}, which has no module file"
                 )
     return violations
+
+
+class TestRootCoverageTableIsWellFormed(unittest.TestCase):
+    """The table's own columns, anchored outside the table.
+
+    Every other class here derives its scope from `ROOT_COVERAGE_RULES`, so
+    a column that decides scope has to be pinned against something that is
+    not the table itself (issue #1278 item 9 review F1/M46).
+    """
+
+    def test_every_row_has_its_expected_early_return_behaviour(self) -> None:
+        for rule in ROOT_COVERAGE_RULES:
+            with self.subTest(root=rule.root):
+                self.assertEqual(
+                    rule.admitted_selects_nothing,
+                    EXPECTED_ADMITTED_SELECTS_NOTHING[rule.root],
+                    f"{rule.root}: flipping this column silently changes "
+                    "which rows this module audits AND when production "
+                    "honours a registered gap",
+                )
+
+    def test_the_audited_row_set_is_not_empty(self) -> None:
+        """Floor for the derived scope. Deliberately outside every per-rule
+        loop: an empty `AUDITED_RULES` makes each of those loops a no-op
+        that passes, including the tree walk's own `assertTrue(files)`.
+        """
+        self.assertTrue(
+            AUDITED_RULES,
+            "no row has admitted_selects_nothing=False — every "
+            "registry-exactness test in this module just became a no-op",
+        )
+
+    def test_every_row_labels_the_registry_it_actually_holds(self) -> None:
+        """`registry_name` is the identity in every diagnostic this module
+        and production emit, and nothing else checks it against the object
+        it names (review M46). Object identity, so no registry contents are
+        duplicated here.
+        """
+        for rule in ROOT_COVERAGE_RULES:
+            with self.subTest(root=rule.root):
+                self.assertIs(
+                    rule.registry,
+                    getattr(targeted_test_selection, rule.registry_name),
+                    f"{rule.root} row is labelled {rule.registry_name} but "
+                    "holds a different registry object",
+                )
 
 
 class TestRootCoverageRegistriesAreExact(unittest.TestCase):
@@ -339,10 +460,22 @@ class TestRootCoverageRegistriesAreExact(unittest.TestCase):
     def test_every_policed_file_resolves_or_is_registered(self) -> None:
         """Tree-walking pin: every real file under an audited root, with one
         of that row's suffixes, either resolves at least one neighbour or is
-        admitted in its registry. Calls the REAL `_changed_path_neighbours`
-        for every file — an unregistered zero-neighbour file raises
-        `ValueError` naming itself, which `subTest` reports as that file's
-        own failure without stopping the walk.
+        admitted in its registry, AND every neighbour it does resolve is a
+        runnable test module. Calls the REAL `_changed_path_neighbours` for
+        every file — an unregistered zero-neighbour file raises `ValueError`
+        naming itself, which `subTest` reports as that file's own failure
+        without stopping the walk.
+
+        The second half is what the deleted twins lacked (review M48): they
+        threw the resolved tuple away, so deleting `_resolve_neighbours`'
+        `module.startswith("tests.")` self-selector guard — which makes
+        `scripts/test_substrate.py` emit the bogus selector
+        `scripts.test_substrate`, the exact #1081 founding defect of an
+        unrunnable selector reaching the runner — left every test green.
+        `selector_violations` checks it without the runner's expensive
+        discovery subprocess; the tests/-side walk in
+        tests/test_targeted_test_selection.py keeps the heavier
+        `select_test_targets` proof.
         """
         for rule in AUDITED_RULES:
             for suffix in rule.suffixes:
@@ -359,7 +492,15 @@ class TestRootCoverageRegistriesAreExact(unittest.TestCase):
                 for path in files:
                     relative = path.relative_to(REPO_ROOT).as_posix()
                     with self.subTest(path=relative):
-                        _changed_path_neighbours(relative, REPO_ROOT)
+                        neighbours = _changed_path_neighbours(
+                            relative, REPO_ROOT
+                        )
+                        violations = selector_violations(
+                            relative, neighbours, REPO_ROOT
+                        )
+                        self.assertEqual(
+                            violations, [], "\n  ".join(violations)
+                        )
 
 
 class TestEveryRegistryEntryIsWellFormed(unittest.TestCase):
@@ -395,18 +536,45 @@ class TestExactPathNeighbourMappings(unittest.TestCase):
     def test_every_named_neighbour_module_exists(self) -> None:
         """Contract A: a mapping that names a module nobody wrote resolves
         to nothing at run time — the entry looks like coverage and selects
-        none. Covers the per-path entries and the shared tuples the prefix
-        rules hand out.
+        none. Covers the per-path entries plus every shared tuple the
+        production module exports, derived by introspection rather than
+        hand-listed (see `shared_neighbour_sets`, which also records what
+        stays outside this contract).
         """
         violations = missing_neighbour_modules(
-            {**EXACT_PATH_NEIGHBOURS, **SHARED_NEIGHBOUR_SETS}, REPO_ROOT
+            {**EXACT_PATH_NEIGHBOURS, **shared_neighbour_sets()}, REPO_ROOT
         )
         self.assertEqual(violations, [], "\n  ".join(violations))
+
+    def test_the_shared_tuple_sweep_is_not_vacuous(self) -> None:
+        """The introspection above is only as good as what it finds: an
+        empty or collapsed sweep would make contract A silently narrower
+        than its docstring claims.
+        """
+        sets = shared_neighbour_sets()
+
+        self.assertIn("ALWAYS_AMBIENT_TESTS", sets)
+        self.assertIn("WEB_TEST_HARNESS_NEIGHBOURS", sets)
+        self.assertNotIn("EXACT_PATH_NEIGHBOURS", sets)
+        self.assertTrue(all(sets.values()), sets)
 
     def test_no_entry_is_fully_redundant_with_its_own_fallback(self) -> None:
         """Contract B: an entry whose modules the path already resolves
         without it is stale data — it survives every other check while
         teaching a reader that the mapping is load-bearing when it is not.
+
+        Deliberately ambient-BLIND (issue #1278 item 9 review F5, orchestrator
+        ruling). `scripts/find_dead_code.sh` and `scripts/run_ruff.sh` name
+        `tests.test_unused_import_audit`, which `ambient_test_modules`
+        already appends to every selection — so those two entries add no
+        marginal selection at all. They are kept, and permitted here,
+        because their real job is to suppress the fail-closed raise with a
+        TRUTHFUL pointer at the module that genuinely runs both wrappers as
+        bash subprocesses; a pseudo-gap admission in
+        `SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE` would claim "no
+        coverage", which is false. Widening the fallback here to
+        `fallback ∪ ambient` would force deleting eight truthful entries,
+        six of them pre-existing `tests/_*` ones, for no selection change.
         """
         violations = redundant_entry_violations(EXACT_PATH_NEIGHBOURS, REPO_ROOT)
         self.assertEqual(violations, [], "\n  ".join(violations))
@@ -436,9 +604,20 @@ class TestMaskableEntryPins(unittest.TestCase):
         )
 
     def test_every_pin_matches_the_live_entry(self) -> None:
+        """The assertion ordinary maintenance hits first: adding a neighbour
+        to a pinned entry fails here until the pin is updated too.
+        """
         for path, expected in MASKABLE_ENTRY_PINS.items():
             with self.subTest(path=path):
-                self.assertEqual(EXACT_PATH_NEIGHBOURS.get(path), expected)
+                self.assertEqual(
+                    EXACT_PATH_NEIGHBOURS.get(path),
+                    expected,
+                    f"{path}'s EXACT_PATH_NEIGHBOURS entry and its "
+                    "MASKABLE_ENTRY_PINS pin disagree. No fail-closed rule "
+                    "protects this entry, so the pin is what makes a "
+                    "deletion visible — changing the entry is a deliberate "
+                    "two-place edit: update the pin in this file to match.",
+                )
 
     def test_live_resolution_covers_every_pinned_neighbour(self) -> None:
         """Drives the REAL resolution, not the mapping: a change that stops
@@ -621,6 +800,105 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
                     )
                 },
                 REPO_ROOT,
+            ),
+            [],
+        )
+
+    def test_no_admitted_gap_line_is_printed_for_an_unmapped_path(
+        self,
+    ) -> None:
+        """The stderr note claims a REVIEWED admission. A path that is not
+        registered must never get one (review M42): a mutant printing it
+        with a fabricated rationale right before the raise was otherwise
+        green — operator-facing copy asserting an admission nobody made.
+        """
+        marker = "admitted selection gap"
+        self.assertIn(marker, ADMITTED_GAP_MESSAGE)
+
+        for rule in ROOT_COVERAGE_RULES:
+            probe = f"{rule.root}/_unregistered_probe{rule.suffixes[0]}"
+            buffer = io.StringIO()
+            with self.subTest(root=rule.root):
+                with (
+                    contextlib.redirect_stderr(buffer),
+                    self.assertRaises(ValueError),
+                ):
+                    _changed_path_neighbours(probe, REPO_ROOT)
+                self.assertNotIn(marker, buffer.getvalue())
+
+    def test_shell_probe_is_scoped_to_the_scripts_root(self) -> None:
+        """The `.sh` basename probe is deliberately scripts-only, and that
+        scoping was prose-only (review M26): widening it to every root is
+        latent today — harness/run_beets_harness.sh and three docs/research
+        wrappers have no matching test module — so a widened probe would
+        resolve nothing and stay green until one is added.
+        """
+        self.assertEqual(
+            _direct_test_candidates(
+                PurePosixPath("harness/run_beets_harness.sh")
+            ),
+            (),
+        )
+        self.assertEqual(
+            _direct_test_candidates(PurePosixPath("scripts/fuzz_burst.sh")),
+            ("tests.test_fuzz_burst",),
+        )
+
+    def test_double_registration_guard_reaches_every_row(self) -> None:
+        """`_assert_registries_disjoint` must run for the WHOLE table, not
+        just its first row (review M24): truncating the real import-time
+        loop to `ROOT_COVERAGE_RULES[:1]` was green. The fabricated table
+        puts its contradiction in the LAST row, so only a full sweep raises.
+        """
+        contradiction = {"lib/_double_registered.py": ("tests.test_fakes",)}
+        clean_rule = RootCoverageRule(
+            root="tests",
+            suffixes=(".py",),
+            registry={},
+            registry_name="CLEAN_PROBE_REGISTRY",
+            admitted_selects_nothing=True,
+            unmapped_message="unmapped: {path}",
+        )
+        last_rule = RootCoverageRule(
+            root="lib",
+            suffixes=(".py",),
+            registry={"lib/_double_registered.py": "synthetic gap"},
+            registry_name="LAST_ROW_PROBE_REGISTRY",
+            admitted_selects_nothing=False,
+            unmapped_message="unmapped: {path}",
+        )
+
+        with self.assertRaisesRegex(ValueError, "LAST_ROW_PROBE_REGISTRY"):
+            _assert_registries_disjoint(
+                (clean_rule, clean_rule, last_rule), contradiction
+            )
+
+        _assert_registries_disjoint((clean_rule, clean_rule), contradiction)
+
+    def test_selector_checker_rejects_a_non_test_or_missing_selector(
+        self,
+    ) -> None:
+        """Both clauses of `selector_violations`, each with its own
+        message: a selector outside `tests.` (the #1081 founding defect
+        shape, `scripts.test_substrate`) and one that is dotted correctly
+        but names no file. A real, runnable selector produces nothing.
+        """
+        outside = selector_violations(
+            "scripts/test_substrate.py", ("scripts.test_substrate",), REPO_ROOT
+        )
+        self.assertEqual(len(outside), 1)
+        self.assertIn("scripts.test_substrate", outside[0])
+        self.assertIn("not a tests.* module", outside[0])
+
+        missing = selector_violations(
+            "lib/probe.py", ("tests.test_no_such_module_anywhere",), REPO_ROOT
+        )
+        self.assertEqual(len(missing), 1)
+        self.assertIn("has no module file", missing[0])
+
+        self.assertEqual(
+            selector_violations(
+                "lib/probe.py", ("tests.test_targeted_test_selection",), REPO_ROOT
             ),
             [],
         )

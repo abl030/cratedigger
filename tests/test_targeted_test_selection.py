@@ -100,10 +100,12 @@ class TestTargetedTestSelection(unittest.TestCase):
         `tests.test_test_substrate` -- which pins the stdlib-only import
         boundary and nothing else. Without the EXACT_PATH_NEIGHBOURS entry,
         editing the reaper (or the gate's status ladder) would select no
-        test that runs it, and the scripts-selection coverage audit would
-        still pass (it only requires at least one neighbour, and the
-        basename candidate satisfies that trivially). Drive the real
-        resolution so deleting the entry goes RED here.
+        test that runs it, and the scripts-selection coverage audit of the
+        day still passed: it required only one neighbour, which the
+        basename candidate satisfied trivially. That gap is what item 9's
+        `MASKABLE_ENTRY_PINS` closed -- this exact entry is pinned there
+        now, and deleting it goes RED in three places in
+        tests/test_selection_coverage_audit.py as well as here.
         """
         selected = expand_test_selection(
             (),

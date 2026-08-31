@@ -415,14 +415,19 @@ miss (`scripts/pipeline_cli/
 cli.py` probes only `tests.test_cli`, ignoring the `pipeline_cli/`
 component) — and, since #1278 item 9, so does a changed
 `scripts/**/*.sh`: the shell wrappers had no fail-closed story at all
-(`scripts/run_final_gate.sh` carried no entry through the whole of item 6,
-so wrapper edits selected nothing), and they now resolve through the same
-`tests.test_<stem>` basename probe or fail closed like their `.py`
+(`scripts/run_final_gate.sh`'s entry was added by item 6's PR2, the same
+commit that made it a wrapper — through item 6's PR1 and everything
+earlier, editing that file selected nothing), and they now resolve through
+the same `tests.test_<stem>` basename probe or fail closed like their `.py`
 siblings. All three roots are one `ROOT_COVERAGE_RULES` table — root,
 policed suffixes, registry, whether admitted gaps early-return, and the
 unmapped-path message — audited by one parameterized
 `tests/test_selection_coverage_audit.py` that derives its rows from that
-table. That audit also polices `EXACT_PATH_NEIGHBOURS` itself: every named
+table (with the scope-deciding columns anchored outside it) and proves the
+`lib/`/`scripts/` registries exact in both directions; the `tests/`
+registry's exactness stays with `tests/test_targeted_test_selection.py` and
+`tests/test_negative_coverage_audit.py`. That audit also polices
+`EXACT_PATH_NEIGHBOURS` itself: every named
 module exists, no entry is fully redundant with what the path resolves
 without it, and every entry whose deletion no fail-closed rule would catch
 (because a basename probe or prefix rule still resolves something, or

@@ -212,9 +212,12 @@ coverage filed under a nested path, e.g. `lib/dispatch/core.py`) fails closed
 too unless admitted in `LIB_MODULES_WITHOUT_SELECTION_COVERAGE`. A changed
 `scripts/**/*.py` or `scripts/**/*.sh` file — the shell wrappers included —
 is policed the same way through `SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE`.
-One row per root lives in `ROOT_COVERAGE_RULES`, and
-`tests/test_selection_coverage_audit.py` keeps every one of those registries
-exact in both directions.
+One row per root lives in `ROOT_COVERAGE_RULES`;
+`tests/test_selection_coverage_audit.py` keeps those two registries exact in
+both directions and checks every registry's entries for a rationale and a
+path that still exists. The `tests/` registry's own exactness lives in
+`tests/test_targeted_test_selection.py` and
+`tests/test_negative_coverage_audit.py` instead.
 `run_tests.sh` remains the one canonical complete suite.
 `run_final_gate.sh` runs that exact suite on a clean commit and adds a receipt;
 it does not select different checks. CI does not enforce this local workflow.
