@@ -15,14 +15,15 @@ lossless source.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from lib import transitions
-from lib.pipeline_db.rows import AlbumRequestRow
 from lib.quality import QUALITY_LOSSLESS, should_clear_lossless_search_override
 from lib.surface_outcomes import exit_codes_from_http
+
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import AlbumRequestRow
 
 SetIntentOutcome = Literal[
     "updated",
@@ -77,18 +78,11 @@ class SetIntentDB(transitions.TransitionsDB, Protocol):
     ) -> bool: ...
 
 
-FinalizeRequestFn = Callable[
-    [transitions.TransitionsDB, int, transitions.RequestTransition],
-    transitions.TransitionResult,
-]
-
-
 def set_lossless_intent(
     db: SetIntentDB,
     request_id: int,
     *,
     intent: Literal["lossless", "default"],
-    finalize_request_fn: FinalizeRequestFn = transitions.finalize_operator_request,
 ) -> SetIntentResult | transitions.TransitionConflict:
     """Toggle the lossless-on-disk intent for one request."""
     target_format = QUALITY_LOSSLESS if intent == "lossless" else None
@@ -124,7 +118,7 @@ def set_lossless_intent(
         # the canonical invalid-edge conflict through the transition engine
         # rather than a bespoke error. Should that edge ever become valid,
         # the revived row simply continues below like any other request.
-        revive = finalize_request_fn(
+        revive = transitions.finalize_operator_request(
             db,
             request_id,
             transitions.RequestTransition.to_wanted(from_status="replaced"),
@@ -140,7 +134,7 @@ def set_lossless_intent(
 
     if req["status"] == "imported" and target_format:
         # Re-queue to search for a lossless source.
-        requeue = finalize_request_fn(
+        requeue = transitions.finalize_operator_request(
             db,
             request_id,
             transitions.RequestTransition.to_wanted(

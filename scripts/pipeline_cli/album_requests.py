@@ -77,7 +77,10 @@ class _AlbumRequestsDB(
     in ``lib/field_resolver_service.py``) are private for the same
     reason AND leading-underscore, so their two methods are mirrored
     too, plus the handful of methods unique to this module's own
-    ``cmd_*`` bodies (list/search/add/status/raw-SQL).
+    ``cmd_*`` bodies (list/search/add/status/raw-SQL). It also satisfies
+    ``lib.set_intent_service.SetIntentDB`` structurally (TransitionsDB
+    plus ``update_request_fields``), which ``cmd_set_intent`` passes
+    through to the service.
 
     ``add_request``'s MB/Discogs-JSON-sourced fields (``artist_name``,
     ``album_title``, ``mb_release_group_id``, ``mb_artist_id``,
@@ -618,8 +621,16 @@ def cmd_set(db: _AlbumRequestsDB, args: argparse.Namespace) -> int:
             from_status=old_status,
         ),
     )
-    if not _transition_applied_or_report(result):
-        return 4
+    if isinstance(result, transitions.TransitionConflict):
+        # Derive from the conflict's HTTP classification exactly as
+        # set-intent does (#1278): a vanished row exits 2 to match the
+        # route twin's 404 instead of the historical blanket 4.
+        from lib.surface_outcomes import exit_code_for_http_status
+
+        _transition_applied_or_report(result)
+        return exit_code_for_http_status(
+            transitions.transition_conflict_http_status(result)
+        )
     print(f"  [{args.id}] {req['artist_name']} - {req['album_title']}: {old_status} → {args.status}")
     return 0
 

@@ -1145,6 +1145,35 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         assert row is not None
         self.assertIsNone(row["target_format"])
 
+    def test_pipeline_set_intent_vanished_row_cas_miss_404(self):
+        """A row deleted mid-CAS classifies not_found -> 404 (the CLI twin
+        exits 2 through the same shared classification)."""
+        import web.server as srv
+
+        class _VanishingDB(FakePipelineDB):
+            def update_request_fields(
+                self,
+                request_id: int,
+                *,
+                expected_status: str | None = None,
+                **fields: object,
+            ) -> bool:
+                del expected_status, fields
+                self._requests.pop(request_id, None)
+                return False
+
+        vanishing_db = _VanishingDB()
+        vanishing_db.seed_request(make_request_row(
+            id=797, status="wanted", mb_release_id="vanish-intent",
+        ))
+        with patch.object(srv, "db", vanishing_db):
+            status, data = self._post(
+                "/api/pipeline/set-intent", {"id": 797, "intent": "lossless"},
+            )
+        self.assertEqual(status, 404)
+        self.assertEqual(data["error"], "transition_conflict")
+        self.assertEqual(data["reason"], "not_found")
+
     def test_pipeline_set_intent_replaced_reports_frozen_conflict(self):
         self.db.seed_request(make_request_row(
             id=795, status="replaced", mb_release_id="replaced-intent",
@@ -1184,6 +1213,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
 
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "initialization_incomplete")
+        self.assertEqual(data["id"], 793)
 
     def test_pipeline_set_intent_reports_replace_race(self):
         import web.server as srv

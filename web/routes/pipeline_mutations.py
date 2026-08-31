@@ -151,14 +151,19 @@ def _request_fields_applied_or_respond(
 
 
 def _respond_initialization_incomplete(
-    h: RouteHandler, request_id: object,
+    h: RouteHandler, request_id: object, *, status: int = 409,
 ) -> None:
-    """The one payload for generic mutations refused during initialization."""
+    """The one payload for generic mutations refused during initialization.
+
+    ``status`` lets a table-driven adapter pass its service table's value
+    (#1278 review F1) so the table genuinely governs the branch; the
+    default serves the generic pre-service guard below.
+    """
     h._json({
         "error": "initialization_incomplete",
         "id": request_id,
         "detail": "retry the original add or upgrade to resume initialization",
-    }, status=409)
+    }, status=status)
 
 
 def _initializing_mutation_rejected(h: RouteHandler, req: Mapping[str, object]) -> bool:
@@ -741,7 +746,9 @@ def post_pipeline_set_intent(h: RouteHandler, body: dict[str, object]) -> None:
         h._error("Not found", status)
         return
     if result.outcome == "initializing":
-        _respond_initialization_incomplete(h, result.request_id)
+        _respond_initialization_incomplete(
+            h, result.request_id, status=status,
+        )
         return
     if result.outcome == "downloading":
         h._error("Cannot set intent while album is downloading", status)
@@ -752,7 +759,7 @@ def post_pipeline_set_intent(h: RouteHandler, body: dict[str, object]) -> None:
         "intent": intent,
         "target_format": result.target_format,
         "requeued": result.outcome == "requeued",
-    })
+    }, status=status)
 
 
 class PipelineBanSourceRequest(BaseModel):

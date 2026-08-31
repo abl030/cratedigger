@@ -818,10 +818,12 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         """The compat aliases (flac/flac_only/best_effort/upgrade) are gone
         (issue #1278): no caller ever sent them, so they now 400 like any
         other unknown intent."""
-        status, data = self._post("/api/pipeline/set-intent",
-                                  {"id": 100, "intent": "flac_only"})
-        self.assertEqual(status, 400)
-        self.assertIn("Invalid intent", str(data["error"]))
+        for alias in ("flac", "flac_only", "best_effort", "upgrade"):
+            with self.subTest(alias=alias):
+                status, data = self._post("/api/pipeline/set-intent",
+                                          {"id": 100, "intent": alias})
+                self.assertEqual(status, 400)
+                self.assertIn("Invalid intent", str(data["error"]))
 
     def test_post_force_import_passes_source_username(self):
         from lib.import_queue import (
@@ -880,6 +882,9 @@ class TestServerEndpoints(_FakeDbWebServerCase):
                                   {"id": 100, "intent": "default"})
         self.assertEqual(status, 200)
         self.assertFalse(data["requeued"])
+        # The echo must reflect THIS request's intent (PR2 mutant-runner
+        # survivor M18: a hardcoded "lossless" echo survived every test).
+        self.assertEqual(data["intent"], "default")
         # Both stale fields cleared on the row itself.
         row = self.db.request(100)
         self.assertIsNone(row["target_format"])
