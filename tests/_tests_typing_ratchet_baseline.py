@@ -31,7 +31,6 @@ TESTS_TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "tests/test_album_source.py": {"type_ignore": 2},
     "tests/test_artist_compare.py": {"cast": 3},
     "tests/test_artist_compare_generated.py": {"cast": 4},
-    "tests/test_beets_album_op.py": {"type_ignore": 1},
     "tests/test_beets_db.py": {"any": 2, "type_ignore": 2},
     "tests/test_beets_destructive_configs_generated.py": {"any": 3},
     "tests/test_browse.py": {"any": 7, "cast": 5},

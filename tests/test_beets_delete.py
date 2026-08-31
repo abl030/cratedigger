@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import subprocess as sp
 import sys
@@ -702,6 +703,52 @@ class TestDeleteManifestOrdering(unittest.TestCase):
             )
             self.assertIsInstance(outcome, BeetsDeleteFailed)
             self.assertFalse(metadata_removed)
+
+
+class TestSelectorDestructiveBypassRetired(unittest.TestCase):
+    """No production file may construct a raw ``beet remove`` / ``beet move``.
+
+    Relocated from ``tests/test_beets_album_op.py`` when that module's last
+    surviving type moved into ``lib/quality`` and the module was deleted
+    (#1278). This is the exact-album delete child's own boundary — Critical
+    rule 1 — so it belongs beside the pins for the lane that replaced the
+    retired selector path.
+    """
+
+    REPO_ROOT = Path(__file__).resolve().parent.parent
+
+    PATTERNS = (
+        re.compile(r'["\']beet["\']\s*,\s*["\'](?:remove|move)["\']'),
+        re.compile(r'beet_bin\s*\(\s*\)\s*,\s*["\'](?:remove|move)["\']'),
+        re.compile(r'BEET_BIN\s*,\s*["\'](?:remove|move)["\']'),
+    )
+
+    def test_retired_selector_modules_are_absent(self) -> None:
+        # Absence assertions are trivially satisfied by a typo'd path — this
+        # only holds while these two strings stay correct. Recreating either
+        # real file does fail it (verified); a misspelling would not.
+        for relative in ("lib/release_cleanup.py", "lib/beets_album_op.py"):
+            with self.subTest(module=relative):
+                self.assertFalse((self.REPO_ROOT / relative).exists())
+
+    def test_production_never_constructs_raw_beet_remove_or_move(self) -> None:
+        paths = [self.REPO_ROOT / "cratedigger.py"]
+        for directory in ("lib", "harness", "scripts", "web"):
+            paths.extend((self.REPO_ROOT / directory).rglob("*.py"))
+        offending: list[str] = []
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if any(pattern.search(line) for pattern in self.PATTERNS):
+                    offending.append(
+                        f"{path.relative_to(self.REPO_ROOT)}:{lineno}: {line.strip()}",
+                    )
+        self.assertEqual(
+            offending,
+            [],
+            "selector-based Beets mutation bypasses pinned exact delete:\n"
+            + "\n".join(offending),
+        )
 
 
 if __name__ == "__main__":
