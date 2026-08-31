@@ -13,6 +13,7 @@ import os
 import sys
 import unittest
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -32,7 +33,7 @@ from lib.convergence import (
     resolve_convergence_target,
     run_convergence_steps,
 )
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 from tests.helpers import make_ctx_with_fake_db
 
 
@@ -163,11 +164,19 @@ class TestConvergenceRegistryPins(unittest.TestCase):
             ("after",), tuple(attempted))
 
 
-class TestMainConvergenceWindows(unittest.TestCase):
-    """Minimal production integration pin for the two group call sites."""
+class TestCycleConvergenceWindows(unittest.TestCase):
+    """Production pin for the two group call sites in ``run_cycle``.
 
-    def test_main_calls_both_groups_in_their_required_windows(self):
-        tree = ast.parse(inspect.getsource(cratedigger.main))
+    ``run_cycle`` is executable with fakes (TestRunCycleExecutable below
+    drives it for real); this bounded AST pin keeps the WINDOW claim —
+    Phase 0 strictly before the Phase-1/Phase-2 block, end-of-cycle
+    strictly after it — plus the claim that ``main()`` hands off to
+    ``run_cycle`` exactly once, which no behavioral test can reach because
+    ``main()`` still needs a live DB and slskd client.
+    """
+
+    def test_run_cycle_calls_both_groups_in_their_required_windows(self):
+        tree = ast.parse(inspect.getsource(cratedigger.run_cycle))
         group_lines: dict[str, list[int]] = {
             "PHASE_ZERO": [],
             "END_OF_CYCLE": [],
@@ -215,13 +224,25 @@ class TestMainConvergenceWindows(unittest.TestCase):
         self.assertLess(phase_zero_line, phase1_with_start)
         self.assertGreater(end_of_cycle_line, phase1_with_end)
 
+    def test_main_hands_off_to_run_cycle_exactly_once(self):
+        tree = ast.parse(inspect.getsource(cratedigger.main))
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "run_cycle"
+        ]
+        self.assertEqual(
+            len(calls), 1,
+            "main() must run exactly one cycle via run_cycle(ctx)")
+
 
 class TestMainContextWiring(unittest.TestCase):
     """#1178 PR2 review F1 (mutant b): a bounded AST parse of
     ``cratedigger.main`` -- the same technique as
     ``TestMainConvergenceWindows`` above, since ``main()`` needs a live DB
     / slskd client to actually run -- pinning that the per-cycle
-    ``_module_ctx`` construction wires a real
+    owner-``ctx`` construction wires a real
     ``lib.enqueue.ClaimedQueueKeysRegistry()`` into
     ``claimed_queue_keys_registry``. Deleting the kwarg (or the whole
     construction) would silently degrade the cross-request enqueue guard
@@ -237,7 +258,7 @@ class TestMainContextWiring(unittest.TestCase):
                 isinstance(node, ast.Assign)
                 and len(node.targets) == 1
                 and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id == "_module_ctx"
+                and node.targets[0].id == "ctx"
                 and isinstance(node.value, ast.Call)
                 and isinstance(node.value.func, ast.Name)
                 and node.value.func.id == "CratediggerContext"
@@ -249,7 +270,7 @@ class TestMainContextWiring(unittest.TestCase):
 
         self.assertEqual(
             len(matches), 1,
-            "expected exactly one _module_ctx = CratediggerContext(...) "
+            "expected exactly one ctx = CratediggerContext(...) "
             "assignment carrying a claimed_queue_keys_registry= kwarg",
         )
         value = matches[0].value
@@ -276,7 +297,7 @@ class TestPhase1ContextCallSite(unittest.TestCase):
     """
 
     def test_phase1_ctx_is_built_by_the_forwarding_helper(self):
-        tree = ast.parse(inspect.getsource(cratedigger.main))
+        tree = ast.parse(inspect.getsource(cratedigger._run_phase1))
         assignments = [
             node for node in ast.walk(tree)
             if isinstance(node, ast.Assign)
@@ -287,7 +308,7 @@ class TestPhase1ContextCallSite(unittest.TestCase):
 
         self.assertEqual(
             len(assignments), 1,
-            "expected exactly one phase1_ctx = ... assignment in main()",
+            "expected exactly one phase1_ctx = ... assignment in _run_phase1",
         )
         value = assignments[0].value
         self.assertTrue(
@@ -398,6 +419,111 @@ class TestRegisteredStepFailureMessagesReachable(unittest.TestCase):
                 log = MagicMock()
                 run_convergence_steps(ctx, (step,), log=log)
                 log.exception.assert_called_once_with(step.failure_message)
+
+
+def _cycle_cfg():
+    """All-defaults production config shape for a fake-driven cycle."""
+    import configparser
+    return CratediggerConfig.from_ini(configparser.ConfigParser())
+
+
+def _cycle_ctx(db, *, cfg=None):
+    ctx = make_ctx_with_fake_db(db, cfg=cfg or _cycle_cfg(), slskd=FakeSlskdAPI())
+    return ctx
+
+
+class TestRunCycleExecutable(unittest.TestCase):
+    """The extracted cycle body executes end to end against fakes.
+
+    This is the test the pre-extraction ``main()`` could never have: the
+    real Phase 0 registry, the real Phase 1 thread (own fake source via the
+    kwarg-DI factory), the real Phase 2 wanted scan, and the real
+    end-of-cycle close-out — all over ``FakePipelineDB``/``FakeSlskdAPI``,
+    asserting persisted domain state rather than source order.
+    """
+
+    def test_clean_world_full_cycle_persists_close_out_state(self):
+        from datetime import timedelta
+
+        db = FakePipelineDB()
+        db.add_cooldown(
+            "cool-peer",
+            cooldown_until=datetime.now(UTC) + timedelta(hours=1))
+        ctx = _cycle_ctx(db)
+
+        phase1_sources: list[FakePipelineDBSource] = []
+
+        def factory(cfg):
+            source = FakePipelineDBSource(FakePipelineDB())
+            phase1_sources.append(source)
+            return source
+
+        with self.assertNoLogs("cratedigger", level="ERROR"):
+            cratedigger.run_cycle(ctx, phase1_source_factory=factory)
+
+        # Phase 0 ran: the cooldown loader replaced the roster.
+        self.assertEqual(ctx.cooled_down_users, {"cool-peer"})
+        # Phase 1 ran on its own source, and the source was closed.
+        self.assertEqual(len(phase1_sources), 1)
+        self.assertEqual(phase1_sources[0].close_calls, 1)
+        # End-of-cycle close-out persisted the metrics row with the
+        # ctx-anchored start time.
+        self.assertEqual(len(db.cycle_metrics), 1)
+        self.assertEqual(
+            db.cycle_metrics[0]["started_at"], ctx.cycle_started_at)
+        self.assertIsNotNone(ctx.cycle_started_at)
+
+
+#: DB methods touched only by best-effort registered steps — never by the
+#: Phase 1/Phase 2 spine — so a failure in any subset must be isolated.
+_STEP_DB_METHODS = (
+    "get_cooled_down_users",
+    "list_wanted_for_plan_reconciliation",
+    "prune_transfer_ledger",
+    "prune_terminal_plex_added_at_pins",
+    "prune_terminal_jellyfin_date_created_pins",
+    "record_cycle_metrics",
+    "record_peer_observations",
+)
+
+
+class TestGeneratedCycleSurvivesStepFailures(unittest.TestCase):
+    """Invariant: no best-effort step failure prevents the search phase.
+
+    The registry-level isolation property above proves the runner attempts
+    every step; this cycle-level property proves the COMPOSITION — an
+    arbitrary subset of step-touched DB methods raising still yields a
+    completed ``run_cycle`` whose Phase 2 wanted scan executed.
+    """
+
+    @given(failing=st.sets(st.sampled_from(_STEP_DB_METHODS)))
+    def test_arbitrary_step_db_failures_never_prevent_phase2(self, failing):
+        db = FakePipelineDB()
+        for name in failing:
+            def _boom(*_args: object, _name: str = name, **_kwargs: object) -> object:
+                raise RuntimeError(f"{_name} down")
+            setattr(db, name, _boom)
+        ctx = _cycle_ctx(db)
+        wanted_scans: list[str] = []
+        source = ctx.pipeline_db_source
+        real_get_wanted = source.get_wanted_searchable
+
+        def _recording_get_wanted(generator_id, limit=None, *, title_blacklist=()):
+            wanted_scans.append(generator_id)
+            return real_get_wanted(
+                generator_id, limit, title_blacklist=title_blacklist)
+
+        source.get_wanted_searchable = _recording_get_wanted
+
+        cratedigger.run_cycle(
+            ctx,
+            phase1_source_factory=lambda cfg: FakePipelineDBSource(
+                FakePipelineDB()),
+        )
+
+        self.assertEqual(len(wanted_scans), 1)
+        if "record_cycle_metrics" not in failing:
+            self.assertEqual(len(db.cycle_metrics), 1)
 
 
 class TestConvergenceCheckerTripsOnViolations(unittest.TestCase):

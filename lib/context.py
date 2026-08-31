@@ -70,7 +70,7 @@ class CratediggerContext:
     slskd: Any  # lib.slskd_client.SlskdClient — Any so tests can wire FakeSlskdAPI
     pipeline_db_source: PipelineDBSource
     download_ownership: Any = None
-    # One instance is constructed per cycle (cratedigger.py's _module_ctx)
+    # One instance is constructed per cycle (main()'s owner ctx)
     # and threaded into every find-download worker context by reference,
     # the same pattern as download_ownership above (issue #1178 PR2 review
     # F7 -- was a module-global dict). Real-typed via the TYPE_CHECKING

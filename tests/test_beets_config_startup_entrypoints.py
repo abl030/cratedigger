@@ -81,7 +81,6 @@ class TestEntrypointStartupPlacement(unittest.TestCase):
         runtime_root = Path(self.tmp.name)
         before_runtime = _snapshot_runtime_tree(runtime_root)
         lock_path = runtime_root / ".cratedigger.lock"
-        prior_main_config = cratedigger.cfg
         prior_runtime = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
         prior_beetsdir = os.environ.get("BEETSDIR")
         prior_admitted = runtime_config_module._admitted_runtime_config
@@ -122,7 +121,6 @@ class TestEntrypointStartupPlacement(unittest.TestCase):
         self.assertEqual(lock_opens, [])
         self.assertFalse(lock_path.exists())
         self.assertEqual(_snapshot_runtime_tree(runtime_root), before_runtime)
-        self.assertIs(cratedigger.cfg, prior_main_config)
         self.assertEqual(os.environ.get("CRATEDIGGER_RUNTIME_CONFIG"), prior_runtime)
         self.assertEqual(os.environ.get("BEETSDIR"), prior_beetsdir)
         self.assertIs(runtime_config_module._admitted_runtime_config, prior_admitted)

@@ -670,20 +670,7 @@ class TestSearchForAlbumWriteAheadOrdering(unittest.TestCase):
         )
         ctx = _ctx(db, slskd)
 
-        orig_cfg, orig_slskd, orig_pdb, orig_module_ctx = (
-            cratedigger.cfg, cratedigger.slskd,
-            cratedigger.pipeline_db_source, cratedigger._module_ctx,
-        )
-        cratedigger.cfg = ctx.cfg
-        cratedigger.slskd = slskd
-        cratedigger.pipeline_db_source = ctx.pipeline_db_source
-        cratedigger._module_ctx = ctx
-        try:
-            result = cratedigger.search_for_album(album, ctx)
-        finally:
-            cratedigger.cfg, cratedigger.slskd = orig_cfg, orig_slskd
-            cratedigger.pipeline_db_source = orig_pdb
-            cratedigger._module_ctx = orig_module_ctx
+        result = cratedigger.search_for_album(album, ctx)
 
         self.assertTrue(order and order[0].startswith("ledger:"))
         search_id = order[0].split(":", 1)[1]

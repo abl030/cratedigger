@@ -599,7 +599,7 @@ def _state_json_for_entry(
 # than the unfindable horizon, so this is not treated as a defect here.
 #
 # One instance of ClaimedQueueKeysRegistry is constructed per cycle
-# (cratedigger.py's _module_ctx); process exit is its natural reset, so it
+# (main()'s owner ctx); process exit is its natural reset, so it
 # carries no TTL/cleanup machinery.
 
 
