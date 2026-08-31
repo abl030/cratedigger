@@ -688,7 +688,8 @@ The harness communicates over stdin/stdout using newline-delimited JSON (NDJSON)
 
 // Match decision needed
 {"type": "choose_match", "task_id": 0, "path": "...", "cur_artist": "...", "cur_album": "...",
- "item_count": 12, "items": [...], "candidates": [...], "recommendation": "strong"}
+ "item_count": 12, "items": [...], "candidate_count": 3, "candidates": [...],
+ "recommendation": "strong"}
 
 // Duplicate detected. duplicate_candidates is the exact beets album set that
 // Beets will remove if the controller answers {"action": "remove"}.

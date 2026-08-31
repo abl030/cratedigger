@@ -77,6 +77,7 @@ from lib.quality import (
     TrackMapping,
     ValidationResult,
 )
+from tests.helpers import make_candidate_summary
 from web.classify import (
     TRACK_LENGTH_WARNING_BOUND_SECONDS,
     LogEntry,
@@ -183,7 +184,7 @@ def _candidate_summary_from_pairs(
         for index, (_role, track_length, item_length, component_count)
         in enumerate(pairs)
     ]
-    return CandidateSummary(
+    return make_candidate_summary(
         mbid=mbid, distance=0.05, is_target=is_target, mapping=mapping,
     )
 

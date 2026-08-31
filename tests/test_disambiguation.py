@@ -39,6 +39,39 @@ TARGET_MBID = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
 OTHER_MBID = "cccccccc-4444-5555-6666-dddddddddddd"
 
 
+def _choose_match(**candidate_overrides: object) -> dict:
+    """A complete choose_match message with one candidate.
+
+    Every required wire key is present (#1278 item 8) so the strict
+    ``ChooseMatchMessage`` decode inside ``run_import`` succeeds and each
+    test exercises the behaviour it names, not a schema violation.
+    """
+    candidate: dict = {
+        "album_id": TARGET_MBID,
+        "distance": 0.05,
+        "artist": "The National",
+        "album": "High Violet",
+        "data_source": "MusicBrainz",
+        "tracks": [],
+        "mapping": [],
+        "extra_items": [],
+        "extra_tracks": [],
+    }
+    candidate.update(candidate_overrides)
+    return {
+        "type": "choose_match",
+        "task_id": 0,
+        "path": "/tmp/test",
+        "cur_artist": str(candidate["artist"]),
+        "cur_album": str(candidate["album"]),
+        "item_count": 10,
+        "items": [],
+        "recommendation": "strong",
+        "candidate_count": 1,
+        "candidates": [candidate],
+    }
+
+
 def _coverage_message(
     *,
     mapped_paths: list[str],
@@ -64,12 +97,18 @@ def _coverage_message(
             }
             for path in admitted
         ],
+        "cur_artist": "David Bowie",
+        "cur_album": "David Bowie",
+        "recommendation": "strong",
+        "candidate_count": 1,
         "candidates": [{
             "album_id": "2823685",
             "distance": distance,
             "artist": "David Bowie",
             "album": "David Bowie",
             "data_source": data_source,
+            "tracks": [],
+            "extra_tracks": [],
             "mapping": [
                 {
                     "item": {
@@ -228,10 +267,7 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
                 {"beets_album_id": 10, "mb_albumid": OTHER_MBID,
                  "album_path": "/Beets/Other", "item_count": 11},
             ]},
-            {"type": "choose_match", "candidates": [
-                {"album_id": TARGET_MBID, "distance": 0.05,
-                 "artist": "The National", "album": "High Violet"},
-            ]},
+            _choose_match(),
         ]
         proc = _make_harness_proc(messages)
         mock_popen.return_value = proc
@@ -262,10 +298,7 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
                 {"beets_album_id": 10, "mb_albumid": TARGET_MBID,
                  "album_path": "/Beets/Target", "item_count": 10},
             ]},
-            {"type": "choose_match", "candidates": [
-                {"album_id": TARGET_MBID, "distance": 0.05,
-                 "artist": "The National", "album": "High Violet"},
-            ]},
+            _choose_match(),
         ]
         proc = _make_harness_proc(messages)
         mock_popen.return_value = proc
@@ -286,10 +319,7 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
         from harness import import_one
 
         messages = [
-            {"type": "choose_match", "candidates": [
-                {"album_id": TARGET_MBID, "distance": 0.02,
-                 "artist": "The National", "album": "High Violet"},
-            ]},
+            _choose_match(distance=0.02),
         ]
         proc = _make_harness_proc(messages)
         mock_popen.return_value = proc
@@ -332,10 +362,8 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
         from harness import import_one
 
         messages = [
-            {"type": "choose_match", "candidates": [
-                {"album_id": "wrong-mbid", "distance": 0.02,
-                 "artist": "X", "album": "Y"},
-            ]},
+            _choose_match(album_id="wrong-mbid", distance=0.02,
+                          artist="X", album="Y"),
         ]
         proc = _make_harness_proc(messages)
         mock_popen.return_value = proc
@@ -352,10 +380,7 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
         from harness import import_one
 
         messages = [
-            {"type": "choose_match", "candidates": [
-                {"album_id": TARGET_MBID, "distance": 0.02,
-                 "artist": "The National", "album": "High Violet"},
-            ]},
+            _choose_match(distance=0.02),
         ]
         proc = _make_harness_proc(messages)
         proc.poll.return_value = 2
@@ -371,6 +396,36 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
         self.assertEqual(outcome.exit_code, 2)
         self.assertIn("readonly database", "\n".join(outcome.beets_lines))
 
+    @patch("harness.import_one.select.select")
+    @patch("harness.import_one.subprocess.Popen")
+    def test_matched_candidate_schema_violation_fails_with_exit_2(
+            self, mock_popen, mock_select):
+        """A matched candidate the strict decode refuses is a failed import.
+
+        The target matches by raw ``album_id``, so the strict
+        ``ChooseMatchMessage`` convert is reached; with a required wire
+        key missing (#1278 item 8) it must surface as exit 2 with the
+        schema violation named — never be swallowed as a skip-and-continue
+        (that mutant survived the whole suite before this pin existed).
+        """
+        from harness import import_one
+
+        message = _choose_match()
+        del message["candidates"][0]["data_source"]
+        proc = _make_harness_proc([message])
+        mock_popen.return_value = proc
+        mock_select.return_value = ([99], [], [])
+
+        outcome = import_one.run_import("/tmp/test", TARGET_MBID)
+
+        self.assertEqual(outcome.exit_code, 2)
+        assert outcome.failure_reason is not None
+        self.assertIn("schema violation", outcome.failure_reason)
+        self.assertIn("data_source", outcome.failure_reason)
+        writes = "".join(
+            call.args[0] for call in proc.stdin.write.call_args_list)
+        self.assertIn('"skip"', writes)
+
 
 class TestHarnessDuplicateRemoveGuard(unittest.TestCase):
     """Invariant: ``remove`` crosses the wire only for one exact duplicate."""
@@ -384,9 +439,7 @@ class TestHarnessDuplicateRemoveGuard(unittest.TestCase):
             {"type": "resolve_duplicate", "duplicate_candidates": [
                 {"beets_album_id": 10, "mb_albumid": TARGET_MBID},
             ]},
-            {"type": "choose_match", "candidates": [
-                {"album_id": TARGET_MBID, "distance": 0.05,
-                 "artist": "X", "album": "Y"}]},
+            _choose_match(artist="X", album="Y"),
         ]
         proc = _make_harness_proc(messages)
         mock_popen.return_value = proc
@@ -407,9 +460,7 @@ class TestHarnessDuplicateRemoveGuard(unittest.TestCase):
             {"type": "resolve_duplicate", "duplicate_candidates": [
                 {"beets_album_id": 10, "mb_albumid": OTHER_MBID},
             ]},
-            {"type": "choose_match", "candidates": [
-                {"album_id": TARGET_MBID, "distance": 0.05,
-                 "artist": "X", "album": "Y"}]},
+            _choose_match(artist="X", album="Y"),
         ]
         proc = _make_harness_proc(messages)
         mock_popen.return_value = proc
@@ -434,9 +485,7 @@ class TestHarnessDuplicateRemoveGuard(unittest.TestCase):
                 {"beets_album_id": 10, "mb_albumid": TARGET_MBID},
                 {"beets_album_id": 11, "mb_albumid": OTHER_MBID},
             ]},
-            {"type": "choose_match", "candidates": [
-                {"album_id": TARGET_MBID, "distance": 0.05,
-                 "artist": "X", "album": "Y"}]},
+            _choose_match(artist="X", album="Y"),
         ]
         proc = _make_harness_proc(messages)
         mock_popen.return_value = proc

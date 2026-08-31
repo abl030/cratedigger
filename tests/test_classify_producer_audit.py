@@ -65,13 +65,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import msgspec
 
 from lib.quality import (
-    CandidateSummary,
     HarnessTrackInfo,
     ValidationResult,
     dispatch_action,
 )
 from lib.quality.dispatch_actions import decision_denylists
-from tests.helpers import make_import_result
+from tests.helpers import make_candidate_summary, make_import_result
 from web import classify
 from web.classify import LogEntry, _classify_log_entry
 
@@ -1022,7 +1021,7 @@ def mbid_not_found_blob(candidate_count: int) -> dict[str, object]:
         items=[{"title": f"track {index}"} for index in range(3)],
         candidate_count=candidate_count,
         candidates=[
-            CandidateSummary(mbid=f"other-{index}", distance=0.4)
+            make_candidate_summary(mbid=f"other-{index}", distance=0.4)
             for index in range(candidate_count)
         ],
     )
@@ -1069,7 +1068,7 @@ def extra_tracks_blob(unmatched_tracks: int) -> dict[str, object]:
         local_track_count=9,
         items=[{"title": f"track {index}"} for index in range(9)],
         candidate_count=1,
-        candidates=[CandidateSummary(
+        candidates=[make_candidate_summary(
             mbid="rel-1",
             distance=0.03,
             is_target=True,

@@ -9,6 +9,7 @@ import sys
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from types import ModuleType
+from unittest.mock import MagicMock
 
 _HARNESS_MODULES = ("harness.beets_harness", "harness.beets_compat")
 
@@ -19,6 +20,46 @@ def legacy_import_task_stub() -> type:
     ``beets.importer.tasks.ImportTask`` needs one attribute present or
     ``beets_compat.py``'s era ambiguity check (issue #1088) fails closed."""
     return type("ImportTask", (object,), {"cur_artist": None, "cur_album": None})
+
+
+def beets_module_mocks() -> dict[str, MagicMock]:
+    """The synthetic beets module set the harness unit tests import against.
+
+    Shared by ``tests/test_harness_serialization.py`` and
+    ``tests/test_harness_wire_contract_audit.py`` — the real-beets import +
+    API contract lives in ``tests/test_harness_beets2_contract.py``. The
+    customizations keep ``beets_compat``'s era detection deterministic:
+    the ``beets.ui`` legacy getters are set to None so exactly one library
+    era (modern) is detected, a real ``ImportSession`` class exposes only
+    ``resolve_duplicate`` (legacy duplicate era, and subclassing works),
+    and ``legacy_import_task_stub`` pins the legacy task-metadata era.
+    Callers may add further attributes to the returned mocks before
+    entering ``isolated_beets_harness``.
+    """
+    mocks: dict[str, MagicMock] = {
+        name: MagicMock()
+        for name in (
+            "beets",
+            "beets.config",
+            "beets.library",
+            "beets.plugins",
+            "beets.ui",
+            "beets.importer",
+            "beets.importer.actions",
+            "beets.importer.session",
+            "beets.importer.tasks",
+            "beets.autotag",
+            "beets.dbcore",
+            "beets.util",
+        )
+    }
+    mocks["beets.ui"].get_path_formats = None
+    mocks["beets.ui"].get_replacements = None
+    mocks["beets.importer.session"].ImportSession = type(
+        "ImportSession", (object,), {"resolve_duplicate": lambda *_args: None},
+    )
+    mocks["beets.importer.tasks"].ImportTask = legacy_import_task_stub()
+    return mocks
 
 
 @contextmanager

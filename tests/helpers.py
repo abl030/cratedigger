@@ -68,18 +68,22 @@ from lib.quality import (
     AudioQualityMeasurement,
     AudioToolDiagnostic,
     AudioValidationReport,
+    CandidateSummary,
     CdRipBitVerification,
     CodecFamily,
     CodecRankBands,
     ConversionInfo,
     DisambiguationFailure,
     DownloadInfo,
+    HarnessItem,
+    HarnessTrackInfo,
     ImportResult,
     PostflightInfo,
     QualityRankConfig,
     RankBitrateMetric,
     SpectralMeasurement,
     TargetQualityContract,
+    TrackMapping,
     V0ProbeEvidence,
     ValidationResult,
     VerifiedLosslessProof,
@@ -1715,6 +1719,45 @@ def make_grab_list_entry(
         download_spectral=download_spectral,
         current_min_bitrate=current_min_bitrate,
         current_spectral=current_spectral,
+    )
+
+
+def make_candidate_summary(
+    mbid: str = "",
+    distance: float = 0.05,
+    data_source: str = "MusicBrainz",
+    tracks: list[HarnessTrackInfo] | None = None,
+    mapping: list[TrackMapping] | None = None,
+    extra_items: list[HarnessItem] | None = None,
+    extra_tracks: list[HarnessTrackInfo] | None = None,
+    **audit_overrides: object,
+) -> CandidateSummary:
+    """Build a wire-valid CandidateSummary with the required fields filled.
+
+    The decision-consumed fields are required on the Struct (#1278 item
+    8), so every test construction has to supply them; this builder gives
+    them producible defaults. Audit metadata rides in ``audit_overrides``
+    and is applied by ``setattr`` — msgspec Structs are slotted, so a
+    mistyped field NAME raises ``AttributeError`` instead of vanishing —
+    and the result is then round-tripped through ``msgspec.convert`` so a
+    mistyped field VALUE (``year="2020"``) raises ``ValidationError``
+    instead of building a shape the harness could never emit. Tests that
+    need a deliberately wire-invalid candidate use a raw dict, never this
+    builder.
+    """
+    summary = CandidateSummary(
+        mbid=mbid,
+        distance=distance,
+        data_source=data_source,
+        tracks=list(tracks or []),
+        mapping=list(mapping or []),
+        extra_items=list(extra_items or []),
+        extra_tracks=list(extra_tracks or []),
+    )
+    for name, value in audit_overrides.items():
+        setattr(summary, name, value)
+    return msgspec.convert(
+        msgspec.to_builtins(summary), type=CandidateSummary,
     )
 
 

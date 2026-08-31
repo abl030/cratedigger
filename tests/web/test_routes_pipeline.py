@@ -37,6 +37,7 @@ from lib.quality import (
 from tests.fakes import FakeBeetsDB
 from tests.helpers import (
     handoff_automation_owner,
+    make_candidate_summary,
     make_request_row,
 )
 from tests.web._harness import (
@@ -64,7 +65,7 @@ def _validation_result_blob(
     them keeps ``is_target=False`` by construction, since only one
     candidate is ever the selected match.
     """
-    candidate = CandidateSummary(
+    candidate = make_candidate_summary(
         mbid=mbid, distance=distance, is_target=True, mapping=mappings,
     )
     result = ValidationResult(
@@ -467,7 +468,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         of them would be a sibling pressing's mismatch bleeding onto the
         row actually imported."""
         self.db.seed_request(make_request_row(id=906, status="imported"))
-        sibling = CandidateSummary(
+        sibling = make_candidate_summary(
             mbid="rel-sibling-pressing", distance=0.30, is_target=False,
             mapping=[
                 TrackMapping(

@@ -198,6 +198,13 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_beets_tag_sync",
         "tests.test_merge_rekey",
     ),
+    # The lib/quality/ prefix rule resolves the three quality-decision
+    # modules, which are not what this entry names (#1278 item 8).
+    "lib/quality/wire_types.py": (
+        "tests.test_validation_result",
+        "tests.test_beets_validation",
+        "tests.test_beets_harness_session",
+    ),
     # The lib/pipeline_db/ prefix rule resolves PIPELINE_DB_NEIGHBOURS.
     "lib/pipeline_db/decisions.py": (
         "tests.test_pipeline_db_decisions",
