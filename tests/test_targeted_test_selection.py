@@ -91,6 +91,33 @@ class TestTargetedTestSelection(unittest.TestCase):
         self.assertNotIn("tests.test_pyright_checks_generated", selected)
         self.assertIn("tests.test_artist_releases", selected)
 
+    def test_substrate_change_selects_the_modules_that_drive_its_behaviour(
+        self,
+    ) -> None:
+        """Issue #1278 item 6: `scripts/test_substrate.py` owns the admission
+        lock, headroom floors, `/proc` liveness and both reapers, but its
+        basename resolves only `tests.test_test_substrate` -- which pins the
+        stdlib-only import boundary and nothing else. Without the
+        EXACT_PATH_NEIGHBOURS entry, editing the reaper would select no test
+        that runs it, and the scripts-selection coverage audit would still
+        pass (it only requires at least one neighbour, and the basename
+        candidate satisfies that trivially). Drive the real resolution so
+        deleting the entry goes RED here.
+        """
+        selected = expand_test_selection(
+            (),
+            changed_paths=("scripts/test_substrate.py",),
+            repo_root=REPO_ROOT,
+        )
+
+        self.assertTrue(
+            {
+                "tests.test_suite_coordinator",
+                "tests.test_test_tmpfs",
+            }.issubset(selected),
+            selected,
+        )
+
     def test_pipeline_db_change_adds_shared_boundary_contracts(self) -> None:
         selected = expand_test_selection(
             (),

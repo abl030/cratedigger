@@ -60,6 +60,7 @@ from tests.parent_signal_guard import guard_kill_statement, guard_source_prelude
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 JS_HELPER = REPO_ROOT / "scripts" / "run_js_checks.sh"
+RUN_SUITE = REPO_ROOT / "scripts" / "run_test_suite.py"
 
 
 def decode_summary(path: Path) -> CheckSummary:
@@ -2562,6 +2563,47 @@ class JsCheckHelperTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(len(self.record.read_text().splitlines()), 2)
         self.assertEqual(result.stdout.count("CRATEDIGGER_JS_FAILURE"), 2)
+
+
+class TestCoordinatorRunsAsAScript(unittest.TestCase):
+    """The canonical entry point runs this module AS A SCRIPT, not as an import.
+
+    `scripts/run_tests.sh` execs `python3 scripts/run_test_suite.py`, so
+    Python puts `scripts/` -- not the repository root -- on `sys.path[0]`,
+    and the module's `from scripts.test_substrate import ...` (issue #1278
+    item 6) resolves only because of its own REPO_ROOT `sys.path` bootstrap.
+    Every other test in this tree imports the module as
+    `scripts.run_test_suite` with the root already importable, so before
+    this pin existed, deleting that bootstrap left the whole suite green
+    while the canonical command died on its very first import (independent
+    review's surviving mutant).
+
+    `--help` short-circuits inside argparse, before `run_suite`, so this
+    drives the real script-mode import boundary without running a suite
+    inside a suite. `PYTHONPATH` is stripped deliberately: with the ambient
+    dev-shell value inherited, the root is importable anyway and the pin
+    would pass with the bootstrap deleted.
+    """
+
+    def test_script_mode_resolves_the_substrate_import(self) -> None:
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key != "PYTHONPATH"
+        }
+
+        completed = subprocess.run(
+            [sys.executable, str(RUN_SUITE), "--help"],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(
+            completed.returncode, 0, completed.stdout + completed.stderr
+        )
 
 
 if __name__ == "__main__":

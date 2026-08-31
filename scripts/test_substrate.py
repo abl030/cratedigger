@@ -108,9 +108,11 @@ DEFAULT_MIN_HEADROOM_BYTES = 1_073_741_824
 #: near-term evidence, not to prove liveness.
 DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS = 4 * 60 * 60
 
-#: The one named identity every RAM-root-exhaustion signal uses, at suite
-#: start (scripts/run_test_suite.py) and mid-run
-#: (scripts/run_python_tests.py) alike — issue #1111 item 2's single
+#: The one named identity every RAM-root-exhaustion signal uses: at suite
+#: start it is emitted by this module's own ``check_suite_headroom``, which
+#: ``scripts/run_test_suite.py::run_suite`` calls before any phase runs (that
+#: file no longer spells this string at all), and mid-run by
+#: ``scripts/run_python_tests.py`` — issue #1111 item 2's single
 #: failure-index entry instead of N disguised test failures.
 TEST_RAM_ROOT_EXHAUSTED = "test RAM root exhausted"
 
@@ -124,9 +126,12 @@ class RamRootExhaustedError(RuntimeError):
 
 
 #: Name of the advisory admission lockfile inside the shared test RAM root.
-#: Spelled exactly once, here (issue #1278 item 6): this module is the one
-#: home for the on-disk names the test runtime uses, so renaming one is a
-#: single edit rather than a search across coordinators.
+#: Spelled once in PRODUCTION code, here (issue #1278 item 6): this module is
+#: the one home for the on-disk names the test runtime uses, so renaming one
+#: is a single production edit rather than a search across coordinators.
+#: Tests (``tests/test_suite_coordinator.py``) and ``.claude/rules/
+#: code-quality.md`` spell it again on purpose — a pin that re-derived the
+#: name from this constant would agree with a rename by construction.
 ADMISSION_LOCK_NAME = ".cratedigger-test-admission.lock"
 
 
@@ -472,10 +477,14 @@ def _scratch_tree_last_activity(tree: Path) -> float:
 #: "abandoned").
 SCRATCH_TREE_PREFIX = "cratedigger-tests."
 
-#: Directory-name prefix of one ``run_suite`` check bundle. Spelled once
-#: (issue #1278 item 6): ``scripts/run_test_suite.py::_create_bundle``
-#: CREATES these, this module REAPS them, and a drift between the two
-#: spellings would silently stop every bundle from ever being reaped.
+#: Directory-name prefix of one ``run_suite`` check bundle. Spelled once in
+#: PRODUCTION code (issue #1278 item 6): ``scripts/run_test_suite.py::
+#: _create_bundle`` CREATES these, this module REAPS them, and a drift
+#: between those two spellings would silently stop every bundle from ever
+#: being reaped. The tests keep their own hand-typed copies — this module's
+#: own reaper docstrings below name the ``cratedigger-checks.*`` glob in
+#: prose too — deliberately: a fixture that re-derived the prefix from this
+#: constant could never detect a rename.
 CHECK_BUNDLE_PREFIX = "cratedigger-checks."
 _REAPABLE_PREFIXES = (
     CHECK_BUNDLE_PREFIX,
@@ -545,9 +554,11 @@ def _scratch_tree_owner_dead(
 
 
 #: On-disk shape of one ``scripts/run_final_gate.sh`` receipt directory,
-#: spelled exactly once here for every Python reader below (issue #1278
-#: item 6). ``run_final_gate.sh`` still spells its own copies on the writing
-#: side; this module is the one home for the reading side.
+#: spelled once here for every Python reader below (issue #1278 item 6).
+#: This is the one home for the PYTHON reading side only: the gate script
+#: itself both WRITES these files and READS them back in bash (its
+#: ``status_receipt`` checks ``terminal``/``bundle`` and both process
+#: identities), carrying its own copies until a later PR ports them.
 FINAL_GATE_RECEIPT_PREFIX = "cratedigger-final-gate."
 RECEIPT_TERMINAL_FIELD = "terminal"
 RECEIPT_BUNDLE_FIELD = "bundle"
