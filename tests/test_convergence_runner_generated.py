@@ -539,8 +539,13 @@ class TestRunCycleExecutable(unittest.TestCase):
             return source
 
         # Every step module logs to "cratedigger" (startup_reconciliation
-        # was the one __name__ holdout until the #1278 residual sweep), so
-        # one guard covers the whole cycle's ERROR surface.
+        # was the one __name__ holdout until the #1278 residual sweep).
+        # This guard asserts a clean world emits no ERROR at all — it is
+        # trivially green whichever logger name a module uses, so it does
+        # NOT pin the unification itself; the message-specific assertLogs
+        # pins in tests/test_integration_slices.py own that (a
+        # logger-name-revert mutant survives this test and dies there —
+        # #1278 sweep review, runner finding).
         with self.assertNoLogs("cratedigger", level="ERROR"):
             cratedigger.run_cycle(ctx, phase1_source_factory=factory)
 

@@ -1132,24 +1132,100 @@ def _seed_value_get_saturation_summary(
     return [dataclasses.asdict(db.get_saturation_summary(request_a))]
 
 
+def _consume_next_plan_item(
+    db: "PipelineDB | FakePipelineDB",
+    request_id: int,
+    *,
+    result_count: int,
+    elapsed_s: float,
+    browse_time_s: float = 0.0,
+    match_time_s: float = 0.0,
+    peers_browsed: int = 0,
+    fanout_waves: int = 0,
+    pre_filter_skip_count: int = 0,
+    rejection_reason: str | None = None,
+    matcher_score_top1: float | None = None,
+) -> None:
+    """Consume the item the cursor actually schedules next, executor-style.
+
+    Re-reads the active plan before every consume so the recorded plan
+    context, ``plan_item_count`` and ``cycle_count_snapshot`` always match
+    the cursor state — exactly what the executor does — and the row is
+    never flagged stale.
+    """
+    active = db.get_active_search_plan(request_id)
+    assert active is not None
+    item = next(
+        i for i in active.items if i.ordinal == active.next_ordinal)
+    db.record_consumed_search_attempt(ConsumedAttemptInput(
+        request_id=request_id,
+        plan_id=active.plan.id,
+        plan_item_id=item.id,
+        plan_ordinal=item.ordinal,
+        plan_strategy=item.strategy,
+        plan_canonical_query_key=item.canonical_query_key,
+        plan_repeat_group=item.repeat_group,
+        plan_generator_id=active.plan.generator_id,
+        query=item.query,
+        outcome="no_match",
+        result_count=result_count,
+        elapsed_s=elapsed_s,
+        browse_time_s=browse_time_s,
+        match_time_s=match_time_s,
+        peers_browsed=peers_browsed,
+        fanout_waves=fanout_waves,
+        pre_filter_skip_count=pre_filter_skip_count,
+        rejection_reason=rejection_reason,
+        matcher_score_top1=matcher_score_top1,
+        plan_item_count=len(active.items),
+        cycle_count_snapshot=active.cycle_count,
+    ))
+
+
 def _seed_value_plan_with_consumed_attempts(
     db: "PipelineDB | FakePipelineDB", *, mbid: str,
 ) -> int:
-    """One active plan (two items) with two consumed attempts through the
-    REAL plan-attempt seam on either backend.
+    """A superseded plan, an active plan spanning two cycles, and a
+    legacy plan-less row — all through the REAL seams on either backend.
 
     This is the persisted-plan seeding the two former
     ``VALUE_GATE_EXEMPTIONS`` entries said their non-vacuous worlds
     needed (#1278 item-7 residual 3): ``record_consumed_search_attempt``
     is the only writer of plan context + ``plan_cycle_snapshot``, so both
     ``get_search_plan_stats`` and ``get_unfindable_search_log_signal``
-    aggregate over rows only this seam can produce. The second attempt
-    carries a wrong-pressing forensic signature (strict_count_mismatch at
-    a high matcher score) so the signal's second scalar is non-zero.
+    aggregate over rows only this seam can produce. The world is
+    deliberately rich (review round: a one-plan/one-cycle world compared
+    half of each payload vacuously):
+
+      * plan A ("g-old", one item) takes one consumed attempt carrying
+        the wrong-pressing forensic signature (strict_count_mismatch at
+        a high matcher score), then is atomically superseded by plan B —
+        so the stats' superseded cohort is non-empty;
+      * plan B ("g-value-parity", two items) takes three consumed
+        attempts: two in cycle 0 (the second wraps the cursor) and one
+        in cycle 1 — so ``plan_cycle_snapshot`` grouping is load-bearing
+        (two distinct zero-find cycles, not one);
+      * one plain ``log_search`` row has no plan context — so the
+        stats' ``legacy_bucket`` is non-empty.
     """
     request_id = db.add_request(
         "Parity Artist", "Parity Album", "request", mb_release_id=mbid)
+    db.log_search(
+        request_id, query="legacy planless q", outcome="no_match",
+        result_count=3, elapsed_s=1.0)
     db.create_successful_search_plan(
+        request_id=request_id, generator_id="g-old",
+        items=[
+            SearchPlanItemInput(
+                ordinal=0, strategy="core", query="old q0",
+                canonical_query_key="k-old-0"),
+        ],
+        set_active=True,
+    )
+    _consume_next_plan_item(
+        db, request_id, result_count=40, elapsed_s=3.5,
+        rejection_reason="strict_count_mismatch", matcher_score_top1=0.91)
+    db.supersede_search_plan_with_replacement(
         request_id=request_id, generator_id="g-value-parity",
         items=[
             SearchPlanItemInput(
@@ -1159,75 +1235,34 @@ def _seed_value_plan_with_consumed_attempts(
                 ordinal=1, strategy="wildcard", query="parity q1",
                 canonical_query_key="k1"),
         ],
-        set_active=True,
     )
-    active = db.get_active_search_plan(request_id)
-    assert active is not None
-
-    def consume(
-        ordinal: int,
-        *,
-        result_count: int,
-        elapsed_s: float,
-        browse_time_s: float = 0.0,
-        match_time_s: float = 0.0,
-        peers_browsed: int = 0,
-        fanout_waves: int = 0,
-        pre_filter_skip_count: int = 0,
-        rejection_reason: str | None = None,
-        matcher_score_top1: float | None = None,
-    ) -> None:
-        item = active.items[ordinal]
-        db.record_consumed_search_attempt(ConsumedAttemptInput(
-            request_id=request_id,
-            plan_id=active.plan.id,
-            plan_item_id=item.id,
-            plan_ordinal=item.ordinal,
-            plan_strategy=item.strategy,
-            plan_canonical_query_key=item.canonical_query_key,
-            plan_repeat_group=item.repeat_group,
-            plan_generator_id=active.plan.generator_id,
-            query=item.query,
-            outcome="no_match",
-            result_count=result_count,
-            elapsed_s=elapsed_s,
-            browse_time_s=browse_time_s,
-            match_time_s=match_time_s,
-            peers_browsed=peers_browsed,
-            fanout_waves=fanout_waves,
-            pre_filter_skip_count=pre_filter_skip_count,
-            rejection_reason=rejection_reason,
-            matcher_score_top1=matcher_score_top1,
-            plan_item_count=len(active.items),
-            cycle_count_snapshot=active.cycle_count,
-        ))
-
-    consume(
-        0, result_count=12, elapsed_s=2.5, browse_time_s=1.25,
-        match_time_s=0.5, peers_browsed=3, fanout_waves=1,
-        pre_filter_skip_count=2)
-    consume(
-        1, result_count=40, elapsed_s=3.5,
-        rejection_reason="strict_count_mismatch", matcher_score_top1=0.91)
+    _consume_next_plan_item(
+        db, request_id, result_count=12, elapsed_s=2.5,
+        browse_time_s=1.25, match_time_s=0.5, peers_browsed=3,
+        fanout_waves=1, pre_filter_skip_count=2)
+    _consume_next_plan_item(db, request_id, result_count=7, elapsed_s=1.5)
+    _consume_next_plan_item(db, request_id, result_count=5, elapsed_s=1.75)
     return request_id
 
 
 def _seed_value_get_search_plan_stats(
     db: "PipelineDB | FakePipelineDB",
 ) -> "list[dict[str, object]]":
-    """Plan-usefulness aggregates over genuinely consumed plan attempts."""
+    """All three stats cohorts populated: active, superseded, legacy."""
     import dataclasses
 
     request_id = _seed_value_plan_with_consumed_attempts(
         db, mbid="planstats-value-parity")
-    return [dataclasses.asdict(db.get_search_plan_stats(request_id))]
+    return [dataclasses.asdict(
+        db.get_search_plan_stats(request_id, current_only=False))]
 
 
 def _seed_value_get_unfindable_search_log_signal(
     db: "PipelineDB | FakePipelineDB",
 ) -> "list[dict[str, object]]":
-    """Both classifier scalars non-zero: one zero-find cycle, one
-    wrong-pressing hit at a score above the threshold."""
+    """Both classifier scalars non-zero, with the cycle grouping
+    load-bearing: two distinct zero-find cycles (an any-row mutant
+    reads 1) and one wrong-pressing hit above the threshold."""
     import dataclasses
 
     request_id = _seed_value_plan_with_consumed_attempts(
@@ -1496,6 +1531,21 @@ VALUE_PARITY_REGISTRY: dict[str, ValueParityEntry] = {
                 "current.slots[].last_seen_at", _EXCL_WALL_CLOCK),
             ValueExclusion(
                 "current.query_groups[].last_seen_at", _EXCL_WALL_CLOCK),
+            ValueExclusion(
+                "superseded_and_legacy.slots[].identity.plan_id",
+                _EXCL_SURROGATE_ID),
+            ValueExclusion(
+                "superseded_and_legacy.query_groups[].identity.plan_id",
+                _EXCL_SURROGATE_ID),
+            ValueExclusion(
+                "superseded_and_legacy.slots[].last_seen_at",
+                _EXCL_WALL_CLOCK),
+            ValueExclusion(
+                "superseded_and_legacy.query_groups[].last_seen_at",
+                _EXCL_WALL_CLOCK),
+            ValueExclusion(
+                "superseded_and_legacy.legacy_bucket.last_seen_at",
+                _EXCL_WALL_CLOCK),
         ),
     ),
     "get_unfindable_search_log_signal": ValueParityEntry(

@@ -51,9 +51,13 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     download_path: str | None
     staged_path: str | None
     # Both JSONB columns arrive as decoded dicts (or None) from every
-    # producer: psycopg2 decodes jsonb server-side and the fake mirrors
-    # that projection (lib/pipeline_db/rows.py types the row contract
+    # producer: psycopg2's jsonb typecaster decodes the wire text to a
+    # dict at read time and the fake's _jsonb_column mirrors that
+    # projection (lib/pipeline_db/rows.py types the row contract
     # dict-only). No str arm — a text-JSONB row cannot reach this Struct.
+    # web/classify.py's LogEntry still declares str arms for the same two
+    # columns; retiring those is its own sweep (many direct-construction
+    # test fixtures, and the Rule-D-sensitive Recents surface).
     import_result: dict[str, object] | None
     validation_result: dict[str, object] | None
     filetype: str | None

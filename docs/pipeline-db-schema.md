@@ -1000,7 +1000,9 @@ Indexes:
 Outcomes still recognised by the schema: `found` (matched + enqueued),
 `no_match` (results but no suitable download), `no_results` (0 results
 from slskd), `timeout`, `error`, `empty_query` (can't build query),
-`exhausted` (legacy reset signal).
+`exhausted` (legacy reset signal). The canonical Python spelling is
+`lib.pipeline_db.SEARCH_LOG_OUTCOMES` (`SearchLogOutcome` Literal),
+pinned to migration 010's CHECK by `tests/test_migrator.py`.
 
 After the persisted-search-plans cutover, **new code never writes
 `outcome='exhausted'`**. Plan wrap is the replacement: the executor

@@ -282,9 +282,18 @@ def build_parity_candidate_evidence(
     helpers-split residual 2): the post-conversion projection is never
     evidence-row data — on the evidence side it travels through
     ``AlbumQualityEvidenceDecisionFacts.post_conversion_min_bitrate`` (or
-    derives from the candidate V0 probe when the facts leave it None).
-    The builder used to accept and silently discard it, which is exactly
-    the two-different-world-encodings trap this helper exists to close.
+    derives from ``candidate_v0_probe_min`` when the facts leave it
+    None). The builder used to accept and silently discard it — a
+    misleading channel, now a loud TypeError.
+
+    Honestly stated: this builder does NOT enforce world equality with a
+    simulator twin. A parity site that gives the simulator a
+    post-conversion value must itself convey it on the evidence side
+    (facts, or the V0 probe min) — several historical twins never did
+    and agree on outcome anyway (e.g. the mountain-goats-bride pair:
+    simulator gets ``post_conversion_min_bitrate=214``, evidence side
+    derives None). Tightening those worlds is quality-core parity work,
+    not this helper's job.
     """
     # Candidate evidence always describes the downloaded source bytes.
     # Conversion policy/output stay on the target contract and decision facts;

@@ -5803,6 +5803,11 @@ class TestStartupReconciliationSlice(unittest.TestCase):
                 ordinal=0, strategy="default", query="q")],
         )
 
+        # Deliberately the SHARED logger since the #1278 residual sweep
+        # unified startup_reconciliation onto it: the guard's subject
+        # broadened from one module to everything in this call path that
+        # logs to "cratedigger". If an unrelated INFO line ever lands
+        # here, scope the world, don't re-split the logger.
         with self.assertNoLogs(
             "cratedigger", level="INFO",
         ):

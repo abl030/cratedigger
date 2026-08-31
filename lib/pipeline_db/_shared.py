@@ -554,11 +554,14 @@ PLAN_STATUS_FAILED_TRANSIENT = "failed_transient"
 
 # Canonical ``search_log.outcome`` taxonomy — the Python mirror of the
 # ``search_log_outcome_check`` CHECK constraint (latest definition:
-# migrations/010). Two sync points only: this Literal and the migration
-# SQL; ``tests/test_migrator.py`` pins them together, the same contract
-# ``DownloadLogOutcome`` carries for ``download_log.outcome``. Added by
-# the #1278 item-7 residual sweep so the shared-vocabulary tests derive
-# their probe lists instead of hand-listing seven strings.
+# migrations/010). The two test-enforced sync points are this Literal and
+# the migration SQL — ``tests/test_migrator.py`` pins them together, the
+# same contract ``DownloadLogOutcome`` carries for ``download_log.outcome``
+# (prose spellings in docs/pipeline-db-schema.md and lib/search.py point
+# here rather than being enforced). Added by the #1278 item-7 residual
+# sweep so the shared-vocabulary tests derive their probe lists instead of
+# hand-listing seven strings; ``SEARCH_ERROR_OUTCOMES`` is the narrowed
+# production consumer.
 SearchLogOutcome = Literal[
     "found", "no_match", "no_results", "timeout", "error",
     "empty_query", "exhausted",

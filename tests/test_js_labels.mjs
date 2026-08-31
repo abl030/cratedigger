@@ -118,7 +118,12 @@ console.log('renderLabelDetail() composes header, filters, rows and pagination w
   // The P2 #2 header-count fix: pagination.items (12) wins over the
   // entity release_count (7).
   assertContains(container.innerHTML, '12 releases', 'header count comes from pagination.items, not release_count');
-  assertContains(container.innerHTML, 'Page 2 of 5', 'multi-page world renders its page-position note');
+  // The em-dash "N releases total" suffix distinguishes renderLabelDetail's
+  // own page-position note from renderPaginationControls' "Page X of Y"
+  // span (reader finding: the bare string matches both producers, so a
+  // deleted note survived it).
+  assertContains(container.innerHTML, 'Page 2 of 5 — 12 releases total',
+    'multi-page world renders its page-position note');
   // Exact handler wiring (#1110/#1241 argument-inversion class).
   assertContains(container.innerHTML, 'oninput="window.onLabelYearFilterInput()"', 'year inputs wire the debounced year handler');
   assertContains(container.innerHTML, 'onchange="window.onLabelFilterChange()"', 'format/hide-held controls wire the filter handler');
@@ -156,13 +161,30 @@ console.log('renderLabelDetail() big-label + dropped-sublabels arms');
   assertContains(container.innerHTML,
     'onchange="window.toggleLabelIncludeSublabels(this.checked)"',
     'big label wires the include-sublabels toggle to its exact handler');
-  assert(!container.innerHTML.includes('this.checked)" checked'),
+  // `checked` renders BEFORE the onchange attribute, so pin the substring
+  // that actually distinguishes the arms (reader finding: the original
+  // pin quoted a string neither arm produces and was inert both ways).
+  assert(!container.innerHTML.includes('label-include-sublabels" checked'),
     'include_sublabels=false renders the toggle unchecked');
   assertContains(container.innerHTML, 'Sub-labels unavailable',
     'sub_labels_dropped renders the degraded-catalogue banner');
   assert(!container.innerHTML.includes('Page 1 of 1'),
     'single-page world renders no page-position note');
   assert(container._includeSub === false, 'include_sublabels=false stashes false');
+  // The positive arm: re-render with include_sublabels on and the same
+  // distinguishing substring must appear (kills a hard-coded '' mutant
+  // the negative pin alone cannot see).
+  const rerender = makeDetailContainer();
+  renderLabelDetail(rerender.container, {
+    label: { id: 9, name: 'Warp' },
+    releases: [
+      { id: '201', title: 'Artificial Intelligence', date: '1992', format: 'CD', in_library: false },
+    ],
+    pagination: { items: BIG_LABEL_THRESHOLD + 1, pages: 1, page: 1 },
+    include_sublabels: true,
+  });
+  assertContains(rerender.container.innerHTML, 'label-include-sublabels" checked',
+    'include_sublabels=true renders the toggle checked');
 }
 
 console.log('renderLabelDetail() falls back to the entity count when pagination is missing');

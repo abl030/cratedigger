@@ -20,9 +20,18 @@ V   **Verdict from the re-read files.** ``synced`` is claimed only over a
     world whose re-read tags all agree; ``residual_divergence`` only over
     one that still disagrees; ``already_synced`` never follows a write;
     every typed refusal leaves the file-tag world byte-identical; and once
-    the write RAN the verdict is total — ``synced`` iff the re-read world
-    converged, ``residual_divergence`` otherwise, whatever exit code the
-    subprocess reported (the exit-code doctrine's consequence, V6).
+    the write RAN the verdict comes from the re-read alone — within THIS
+    harness's world space, ``synced`` iff converged else
+    ``residual_divergence``, whatever exit code the subprocess reported
+    (the exit-code doctrine's consequence, V6). That totality is a
+    harness-scoped claim, not a production one: production legitimately
+    returns ``not_found`` (album vanished mid-sync) or, through the
+    mediated wrapper, ``beets_unavailable`` (authority raised on the
+    post-write re-read) after a landed write — worlds ``_FakeSyncBeets``
+    cannot produce, which is exactly why those outcomes after a write ARE
+    the returncode-mutant signature here. A future world that vanishes
+    the album or fails the authority mid-run must widen V6's (and V4's)
+    carve-outs before it lands.
 I   **Seam inertness.** ``lib.download_validation.
     _sync_file_tags_after_merge_rekey`` — the merge seam's best-effort
     caller — returns ``None`` and never raises, whatever the sync
@@ -274,11 +283,18 @@ def verdict_violations(run: SyncRun) -> list[str]:
         violations.append(f"V5: unmapped outcome {outcome!r}")
     if run.write_calls:
         # V6 — the exit-code doctrine's consequence (#1278 item-4
-        # reflection, RD1/SD1): once the write RAN, the verdict is a total
-        # function of the re-read files. V1/V2 police the synced/residual
-        # claims individually but let a returncode-driven mutant escape
-        # into any OTHER mapped outcome (beets_unavailable was the proven
-        # survivor shape); this clause closes that door.
+        # reflection, RD1/SD1): once the write RAN, the verdict comes from
+        # the re-read files alone. V1/V2 police the synced/residual claims
+        # individually but let a returncode-driven mutant escape into any
+        # OTHER mapped outcome (beets_unavailable was the proven survivor
+        # shape); this clause closes that door. HARNESS-SCOPED, not a
+        # production totality claim: production's post-write not_found
+        # (album vanished mid-sync, lib/beets_tag_sync.py's post-is-None
+        # arm) and the mediated wrapper's beets_unavailable (authority
+        # raised on the re-read) are correct behavior in worlds
+        # _FakeSyncBeets cannot produce — so seeing them here is evidence
+        # of a returncode-driven verdict, and a future strategy that adds
+        # authority failure or mid-sync deletion must widen this clause.
         expected = (
             RESULT_SYNCED if _post_converged(run)
             else RESULT_RESIDUAL_DIVERGENCE
