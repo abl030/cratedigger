@@ -2971,17 +2971,29 @@ class FakePipelineDB:
 
         ``album_requests.active_download_state`` is JSONB written as a JSON
         string (``... = %s::jsonb`` in ``lib/pipeline_db/requests.py``), so
-        every real read hands back a parsed object — which is what
+        every real read hands back parsed JSON — which is what
         ``AlbumRequestRow`` declares and what
         ``lib/download_recovery.py``'s ``_is_str_object_dict`` gate
-        requires. The fake stores the string it was handed (its own
-        internals re-parse it), so the parse belongs here, on the way out
-        (issue #1278 item 7). Every request-row projection goes through
-        this.
+        requires. ``set_downloading`` stores the writer's string (the
+        fake's own internals re-parse it), so the parse belongs here, on
+        the way out (issue #1278 item 7). Every request-row projection
+        goes through this.
+
+        Unparseable text is left ALONE rather than raised on, unlike
+        ``_jsonb_column``'s other callers. Those read columns only the
+        fake's own writers filled, so a string there is always writer
+        form; a request row can also be injected wholesale by a fixture,
+        already in READER form, and the two are indistinguishable here.
+        Nothing is lost by degrading: PostgreSQL rejects malformed JSON at
+        INSERT, so a value that will not parse is one no real column could
+        hold and no real read could return.
         """
         projected = copy.deepcopy(dict(row))
-        projected["active_download_state"] = _jsonb_column(
-            projected.get("active_download_state"))
+        state = projected.get("active_download_state")
+        try:
+            projected["active_download_state"] = _jsonb_column(state)
+        except json.JSONDecodeError:
+            projected["active_download_state"] = state
         return projected
 
     def _request_presentation_copy(
