@@ -7758,6 +7758,63 @@ class TestFakeDownloadLogEvidenceOverlay(unittest.TestCase):
         self.assertIsNotNone(row["_evidence_verified_lossless_classifier"])
         self.assertEqual(row["source_format"], "FLAC")
 
+    def test_candidate_role_withholds_conversion_lineage_current_carries_it(self):
+        """One evidence row linked as BOTH candidate and current must show
+        ``was_converted_from`` only under the current prefix.
+
+        Production spells this in SQL, unconditionally: for the candidate
+        prefix ``accusation_evidence_columns`` emits ``NULL::text AS
+        _evidence_was_converted_from`` while every other alias reads its
+        column, and ``_LOG_QUERY_TEMPLATE`` separately projects
+        ``current_evidence.was_converted_from AS
+        _current_evidence_was_converted_from``. A canonical evidence row
+        may be co-referenced as current, but its CANDIDATE role is always
+        source semantics — installed-output conversion lineage is not a
+        fact about the downloaded bytes.
+
+        The fake's ``_accusation_alias_projection`` carve-out is the
+        mirror of that, and a follow-up mutant proved nothing asserted it:
+        deleting the carve-out passed every test in this module.
+        """
+        from lib.quality import AudioQualityMeasurement
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, mb_release_id="conv-1"))
+        log_id = db.log_download(1, outcome="success")
+        evidence = make_album_quality_evidence(
+            mb_release_id="conv-1",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                format="MP3",
+                spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="measured",
+                was_converted_from="mp3",
+            ),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        # The SAME row on both sides of the join — the exact shape the
+        # carve-out exists for.
+        db.set_download_log_candidate_evidence(log_id, stored.id)
+        self.assertTrue(db.set_request_current_evidence(1, stored.id))
+
+        row = next(r for r in db.get_log() if r["id"] == log_id)
+        self.assertIsNone(
+            row["_evidence_was_converted_from"],
+            "the candidate role must withhold installed-output conversion "
+            "lineage; production hardcodes NULL::text there",
+        )
+        self.assertEqual(
+            row["_current_evidence_was_converted_from"], "mp3",
+            "the current prefix is the one that carries the real column",
+        )
+
     def test_linked_import_logs_carry_no_evidence_derived_values(self):
         """``get_linked_import_logs`` has NO evidence join in production
         (``lib/pipeline_db/download_log.py``), so its rows can never carry
