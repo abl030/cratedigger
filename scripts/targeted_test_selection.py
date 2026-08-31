@@ -453,6 +453,18 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_dispatch_outcomes_generated",
         "tests.test_local_import_lane",
     ),
+    # lib/beets_child.py is the shared spawner UNDER the three
+    # run-to-completion Beets mutation lanes (#1278 item 4). Its own two
+    # modules arrive via the basename probes; the lane suites — one of them
+    # the destructive delete child's — are what prove a spawner change did
+    # not move a lane outcome, the same reasoning as lib/dispatch/types.py
+    # above (#1277).
+    "lib/beets_child.py": (
+        "tests.test_beets_delete",
+        "tests.test_beets_retag",
+        "tests.test_beets_tag_sync",
+        "tests.test_merge_rekey",
+    ),
     # lib/discogs_positions.py has no tests.test_discogs_positions module:
     # its deterministic pins live with its two production consumers (the
     # get_release adapter pins in tests.test_discogs_api, the search-worker

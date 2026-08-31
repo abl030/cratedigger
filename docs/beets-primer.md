@@ -84,7 +84,17 @@ is pure attribute assignment across the whole supported range — only when the
 cheap check finds neither attribute. The 19-leg `beetsStableCandidate` matrix
 is what caught this.
 
-Cratedigger has four Beets mutation lanes:
+Cratedigger has four Beets mutation lanes. The three run-to-completion
+children among them (Lanes 2–4) share one spawner,
+`lib/beets_child.py::run_pinned_beets_child` — interpreter/env resolution
+via `beets_subprocess_env`, `[<beets python>, *argv_tail]`, captured output,
+lane-supplied timeout — while each lane keeps its own argv tail and its own
+"did the mutation land" evidence (an exit code is never SUCCESS evidence;
+the per-lane mechanisms, including the delete child's exit-as-refusal, are
+in that module's docstring). Lane 1's interactive harness session spawns
+`run_beets_harness.sh` instead.
+
+The lanes:
 
 1. The serial importer worker drives the JSON harness for admitted imports and
    same-release duplicate replacement.
