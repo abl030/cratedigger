@@ -698,4 +698,24 @@ resetWorld();
   state.browseSource = 'mb';
 }
 
+resetWorld();
+{
+  // The VA disjunct of the same ternary: a Various Artists release group
+  // must route to loadReleaseGroup too, never to a dead-end artist page.
+  state.browseSearchType = 'release';
+  globalThis.fetch = async () => response(200, {
+    release_groups: [{
+      id: 'rgva',
+      artist_id: '89ad4ac3-39f7-470e-963a-56509c546377',
+      artist_name: 'Various Artists',
+      title: 'VA Comp',
+    }],
+  });
+  await searchArtists('va comp');
+  assert.match(elements.results.innerHTML,
+    /onclick="window\.loadReleaseGroup\(&quot;rgva&quot;, this, \{source:'mb',identityKind:'work'\}\)"/,
+    'VA release row onclick routes to loadReleaseGroup with (release group id, this, load opts)');
+  state.browseSearchType = 'artist';
+}
+
 console.log('JS browse fast-pair failure tests passed');

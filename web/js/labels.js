@@ -13,8 +13,7 @@
  * `renderLabelRows`, ...) in `tests/test_js_util.mjs`, and the
  * search-result render + click wiring in `tests/test_js_labels.mjs`.
  * The label-detail page flow (`openLabelDetail`, `closeLabelDetail`,
- * `goToLabelPage`, `renderLabelDetail`) is DOM-bound and verified via
- * playwright.
+ * `goToLabelPage`) is DOM-bound and verified via playwright.
  */
 
 import { state, API, toast } from './state.js';
