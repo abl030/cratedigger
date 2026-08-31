@@ -307,13 +307,15 @@ producer_audit.py`'s registered producer files —
   the audit naming the unmoved path, exactly as it did before this fix.
 - **Never consumes a Wrong Matches source on success or failure** — unlike
   force's D7 routing above. `scripts/importer.py::
-  _force_job_wrong_match_payload` returns `None` for any job whose
-  `job_type != 'force_import'` BY CONSTRUCTION, so `_dismiss_successful_
-  force_import` / `_cleanup_failed_force_import` are no-ops for every
-  local-import job regardless of outcome — there is no "original quarantine
-  folder" for this lane to consume; a local import's REAL source is the
-  operator's folder, which this lane never deletes, moves, or otherwise
-  mutates. `lib/pipeline_db/import_jobs.py::
+  _force_job_wrong_match_payload` returns `None` for any job whose kind
+  adapter does not set `owns_wrong_match_source` — since issue #1278 that
+  registry flag, not a `job_type != 'force_import'` comparison, is the
+  mechanism, and `force_import` is the only kind that sets it. So
+  `_dismiss_successful_force_import` / `_cleanup_failed_force_import` are
+  no-ops for every local-import job regardless of outcome — there is no
+  "original quarantine folder" for this lane to consume; a local import's
+  REAL source is the operator's folder, which this lane never deletes,
+  moves, or otherwise mutates. `lib/pipeline_db/import_jobs.py::
   list_terminal_force_wrong_match_cleanup_jobs` (the D7 crash-recovery
   replay sweep) stays `job_type = 'force_import'`-only for the same reason —
   widening it would cost nothing functionally (the same no-op guard applies)
@@ -325,8 +327,10 @@ producer_audit.py`'s registered producer files —
   private copy under `processing/albums/` (`force-action-<job_id>` /
   `local-import-action-<job_id>`) that needs the same crash-safe convergence.
   `scripts/importer.py::_cleanup_terminal_force_action` (the live cleanup
-  call this sweep replays) resolves each job's own prefix from
-  `lib.import_preview.ACTION_COPY_PREFIX_BY_JOB_TYPE` before calling
+  call this sweep replays) resolves each job's own prefix through that job
+  kind's action-copy lane, which reads
+  `lib.import_preview.ACTION_COPY_PREFIX_BY_JOB_TYPE` — the single source
+  for the mapping — before calling
   `cleanup_force_action_copy_for_job` — a PR3 review round found this call
   hardcoding force's own prefix, so every local-import cleanup compared its
   path against the WRONG job type's deterministic name, raised before ever
