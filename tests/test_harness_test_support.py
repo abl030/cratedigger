@@ -39,7 +39,9 @@ def _mock_modules():
     )
     modules["beets.importer.tasks"].ImportTask = legacy_import_task_stub()
     modules["beets.library"].Album = modern_album_stub()
+    modules["beets"].config = modules["beets.config"]
     modules["beets"].library = modules["beets.library"]
+    modules["beets"].plugins = modules["beets.plugins"]
     return modules
 
 
@@ -115,7 +117,9 @@ class TestIsolatedBeetsHarness(unittest.TestCase):
                 )
                 result["beets.importer.tasks"].ImportTask = legacy_import_task_stub()
                 result["beets.library"].Album = modern_album_stub()
+                result["beets"].config = result["beets.config"]
                 result["beets"].library = result["beets.library"]
+                result["beets"].plugins = result["beets.plugins"]
                 return result
 
             assert "harness" not in sys.modules

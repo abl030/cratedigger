@@ -165,12 +165,14 @@ def _load_capabilities() -> BeetsCapabilities:
         )
 
     # Duplicates-query era (#1278 wx6): ``Album.duplicates_query`` replaced
-    # the inherited ``all_fields_query`` classmethod in beets 2.3.0, so
-    # exactly one of the two builders is present on every supported release
-    # (measured across the 2.1.0–2.13.1 manifest) — the same exactly-one
-    # ambiguity check as the sibling eras. Deciding this at load means an
-    # unrecognised Beets fails at import — including ``lib/beets_distance``'s
-    # deferred ``CAPABILITIES`` import — not at first duplicate lookup.
+    # the inherited ``all_fields_query`` classmethod in beets 2.3.0 (the
+    # 2.2.0/2.3.0 tarball swap and the pinned release were measured
+    # directly; the intermediate legs follow from that removal), so exactly
+    # one of the two builders is present on every supported release — the
+    # same exactly-one ambiguity check as the sibling eras. Deciding this at
+    # load means an unrecognised Beets fails at import — including
+    # ``lib/beets_distance``'s deferred ``CAPABILITIES`` import — not at
+    # first duplicate lookup.
     modern_duplicates_query = callable(
         getattr(library.Album, "duplicates_query", None))
     legacy_duplicates_query = callable(

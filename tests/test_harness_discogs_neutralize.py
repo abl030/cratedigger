@@ -59,7 +59,9 @@ _beets_mocks["beets.importer.session"].ImportSession = type(
 )
 _beets_mocks["beets.importer.tasks"].ImportTask = legacy_import_task_stub()
 _beets_mocks["beets.library"].Album = modern_album_stub()
+_beets_mocks["beets"].config = _beets_mocks["beets.config"]
 _beets_mocks["beets"].library = _beets_mocks["beets.library"]
+_beets_mocks["beets"].plugins = _beets_mocks["beets.plugins"]
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 with isolated_beets_harness(_beets_mocks) as beets_harness:

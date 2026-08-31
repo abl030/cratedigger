@@ -74,11 +74,16 @@ def beets_module_mocks() -> dict[str, MagicMock]:
     )
     mocks["beets.importer.tasks"].ImportTask = legacy_import_task_stub()
     mocks["beets.library"].Album = modern_album_stub()
-    # ``from beets import library`` resolves the PARENT module's attribute,
-    # which on a bare MagicMock parent is a divergent auto-child, not the
-    # sys.modules["beets.library"] entry the stubs above were pinned on —
-    # bind it explicitly, as the real package machinery would.
+    # ``from beets import config, library, plugins`` (beets_harness.py)
+    # resolves the PARENT module's attributes, which on a bare MagicMock
+    # parent are divergent auto-children, not the sys.modules entries the
+    # stubs above were pinned on — bind all three names the statement
+    # imports, as the real package machinery would. Dotted-module imports
+    # (``importlib``, ``from beets.autotag import ...``) already resolve
+    # the sys.modules entries and need no binding.
+    mocks["beets"].config = mocks["beets.config"]
     mocks["beets"].library = mocks["beets.library"]
+    mocks["beets"].plugins = mocks["beets.plugins"]
     return mocks
 
 
