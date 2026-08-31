@@ -269,11 +269,10 @@ def _library_module_with_album(album_class: type) -> ModuleType:
 class TestBeetsCompatDuplicatesQueryEra(TestCase):
     """Fail-closed pins for the ``Album`` duplicate-lookup builder era
     (#1278 wx6 — the era decision that lived inline in
-    ``beets_harness.py``): ``all_fields_query`` is an inherited model
-    classmethod present in BOTH eras, so this is a precedence probe — a
-    callable ``duplicates_query`` decides modern, mirroring upstream
-    ``ImportTask``'s own duplicate lookup — never the siblings'
-    exactly-one ambiguity check."""
+    ``beets_harness.py``): ``Album.duplicates_query`` replaced the
+    inherited ``all_fields_query`` classmethod in beets 2.3.0, so exactly
+    one builder is present on every supported release and the probe uses
+    the same exactly-one ambiguity check as the sibling eras."""
 
     def test_modern_era_when_album_has_duplicates_query(self) -> None:
         album = type("Album", (), {"duplicates_query": lambda self, keys: None})
@@ -281,16 +280,20 @@ class TestBeetsCompatDuplicatesQueryEra(TestCase):
             capabilities = beets_compat._load_capabilities()
         self.assertEqual(capabilities.duplicates_query_era, "modern")
 
-    def test_modern_wins_when_both_builders_are_present(self) -> None:
-        """The realistic modern shape: ``all_fields_query`` never went away,
-        so its presence must not drag a modern Beets onto the legacy path."""
+    def test_both_builders_present_fails_loudly(self) -> None:
+        """No supported Beets carries both builders (2.3.0 swapped one for
+        the other) — both present is an unexpected upstream shape."""
         album = type("Album", (), {
             "duplicates_query": lambda self, keys: None,
             "all_fields_query": classmethod(lambda cls, by: None),
         })
-        with patch.object(beets_compat, "library", _library_module_with_album(album)):
-            capabilities = beets_compat._load_capabilities()
-        self.assertEqual(capabilities.duplicates_query_era, "modern")
+        with (
+            patch.object(beets_compat, "library", _library_module_with_album(album)),
+            self.assertRaisesRegex(
+                beets_compat.BeetsCapabilityError,
+                "exactly one of duplicates_query or all_fields_query"),
+        ):
+            beets_compat._load_capabilities()
 
     def test_legacy_era_when_only_all_fields_query_is_present(self) -> None:
         album = type("Album", (), {
@@ -306,7 +309,7 @@ class TestBeetsCompatDuplicatesQueryEra(TestCase):
             patch.object(beets_compat, "library", _library_module_with_album(album)),
             self.assertRaisesRegex(
                 beets_compat.BeetsCapabilityError,
-                "duplicate lookup.*unrecognised upstream release"),
+                "exactly one of duplicates_query or all_fields_query"),
         ):
             beets_compat._load_capabilities()
 
@@ -375,6 +378,24 @@ class TestBeetsCompatAlbumDuplicatesQuery(TestCase):
             patch.object(beets_compat, "CAPABILITIES", legacy),
             self.assertRaisesRegex(
                 beets_compat.BeetsCapabilityError, "all_fields_query"),
+        ):
+            beets_compat.album_duplicates_query(_Album(), ["mb_albumid"])
+
+    def test_legacy_era_without_field_access_fails_loudly(self) -> None:
+        """Fail-closed legislation: ``library.Album`` is always
+        field-readable, but a divergent instance must raise the capability
+        error, not a bare ``TypeError`` from the mapping comprehension."""
+        class _Album:
+            @classmethod
+            def all_fields_query(cls, by: dict[str, object]) -> object:
+                return ("legacy-query", by)
+
+        legacy = dataclasses.replace(
+            beets_compat.CAPABILITIES, duplicates_query_era="legacy")
+        with (
+            patch.object(beets_compat, "CAPABILITIES", legacy),
+            self.assertRaisesRegex(
+                beets_compat.BeetsCapabilityError, "not field-readable"),
         ):
             beets_compat.album_duplicates_query(_Album(), ["mb_albumid"])
 

@@ -1,9 +1,12 @@
 """The small structural compatibility boundary for supported Beets releases.
 
-This module intentionally owns the beets-core upstream seams Cratedigger
-calls. Nothing outside it decides a beets-core era, and never from a
-version string. The Discogs plugin's own behaviour seams live in
-``discogs_patches``.
+This module intentionally owns the beets-core upstream seams the harness
+child calls. Nothing else in the harness decides a beets-core era, and
+never from a version string. The Discogs plugin's own behaviour seams
+live in ``discogs_patches``. (One beets-core era decision lives outside
+this module by design: the delete child's plugin-loading probe in
+``lib/beets_delete.py`` runs in a different child with a different
+import surface.)
 """
 
 from __future__ import annotations
@@ -161,20 +164,21 @@ def _load_capabilities() -> BeetsCapabilities:
             "unrecognised upstream release"
         )
 
-    # Duplicates-query era (#1278 wx6): ``all_fields_query`` is an inherited
-    # model classmethod present in BOTH eras, so this is a precedence probe —
-    # a callable ``duplicates_query`` decides modern, mirroring upstream
-    # ``ImportTask``'s own duplicate lookup — never the siblings'
-    # exactly-one ambiguity check.
+    # Duplicates-query era (#1278 wx6): ``Album.duplicates_query`` replaced
+    # the inherited ``all_fields_query`` classmethod in beets 2.3.0, so
+    # exactly one of the two builders is present on every supported release
+    # (measured across the 2.1.0–2.13.1 manifest) — the same exactly-one
+    # ambiguity check as the sibling eras. Deciding this at load means an
+    # unrecognised Beets fails at import — including ``lib/beets_distance``'s
+    # deferred ``CAPABILITIES`` import — not at first duplicate lookup.
     modern_duplicates_query = callable(
         getattr(library.Album, "duplicates_query", None))
     legacy_duplicates_query = callable(
         getattr(library.Album, "all_fields_query", None))
-    if not modern_duplicates_query and not legacy_duplicates_query:
+    if modern_duplicates_query == legacy_duplicates_query:
         raise BeetsCapabilityError(
-            "Beets Album duplicate lookup is ambiguous: neither "
-            "duplicates_query nor all_fields_query is present — an "
-            "unrecognised upstream release"
+            "Beets Album duplicate-lookup builders are ambiguous; expected "
+            "exactly one of duplicates_query or all_fields_query"
         )
 
     util_module = _optional_module("beets.util")

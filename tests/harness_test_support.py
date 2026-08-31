@@ -26,6 +26,15 @@ def legacy_import_task_stub() -> type:
     return type("ImportTask", (object,), {"cur_artist": None, "cur_album": None})
 
 
+def modern_album_stub() -> type:
+    """A bare ``library.Album`` stand-in pinning the modern duplicates-query
+    era. Every harness mock-module fixture that swaps in a synthetic
+    ``beets.library`` needs exactly one of the two duplicate-lookup builders
+    present or ``beets_compat.py``'s era ambiguity check (#1278 wx6) fails
+    closed — a bare ``MagicMock`` manufactures BOTH via auto-attributes."""
+    return type("Album", (object,), {"duplicates_query": lambda self, keys: None})
+
+
 def beets_module_mocks() -> dict[str, MagicMock]:
     """The synthetic beets module set the harness unit tests import against.
 
@@ -36,7 +45,8 @@ def beets_module_mocks() -> dict[str, MagicMock]:
     the ``beets.ui`` legacy getters are set to None so exactly one library
     era (modern) is detected, a real ``ImportSession`` class exposes only
     ``resolve_duplicate`` (legacy duplicate era, and subclassing works),
-    and ``legacy_import_task_stub`` pins the legacy task-metadata era.
+    ``legacy_import_task_stub`` pins the legacy task-metadata era, and
+    ``modern_album_stub`` pins the modern duplicates-query era.
     Callers may add further attributes to the returned mocks before
     entering ``isolated_beets_harness``.
     """
@@ -63,6 +73,12 @@ def beets_module_mocks() -> dict[str, MagicMock]:
         "ImportSession", (object,), {"resolve_duplicate": lambda *_args: None},
     )
     mocks["beets.importer.tasks"].ImportTask = legacy_import_task_stub()
+    mocks["beets.library"].Album = modern_album_stub()
+    # ``from beets import library`` resolves the PARENT module's attribute,
+    # which on a bare MagicMock parent is a divergent auto-child, not the
+    # sys.modules["beets.library"] entry the stubs above were pinned on —
+    # bind it explicitly, as the real package machinery would.
+    mocks["beets"].library = mocks["beets.library"]
     return mocks
 
 

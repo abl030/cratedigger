@@ -26,7 +26,11 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
-from tests.harness_test_support import isolated_beets_harness, legacy_import_task_stub
+from tests.harness_test_support import (
+    isolated_beets_harness,
+    legacy_import_task_stub,
+    modern_album_stub,
+)
 
 # beets 2.x IS in the dev shell, but these unit tests mock it to isolate the
 # harness's pure helpers from beets internals. The real-beets import + API
@@ -53,6 +57,8 @@ _beets_mocks["beets.importer.session"].ImportSession = type(
     "ImportSession", (object,), {"resolve_duplicate": lambda *_args: None},
 )
 _beets_mocks["beets.importer.tasks"].ImportTask = legacy_import_task_stub()
+_beets_mocks["beets.library"].Album = modern_album_stub()
+_beets_mocks["beets"].library = _beets_mocks["beets.library"]
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 with isolated_beets_harness(_beets_mocks) as beets_harness:

@@ -16,7 +16,7 @@ import logging
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TypeGuard
+from typing import TYPE_CHECKING, TypeGuard
 
 import msgspec
 import requests
@@ -26,9 +26,20 @@ try:
 except ModuleNotFoundError:  # direct wrapper execution puts harness/ first
     beets_compat = importlib.import_module("beets_compat")
 
-BeetsCapabilityError = beets_compat.BeetsCapabilityError
-_class = beets_compat._class
-_required_module = beets_compat._required_module
+if TYPE_CHECKING:
+    # The runtime aliases below read attributes off whichever module object
+    # the dual import bound, whose fallback arm is a bare ModuleType — that
+    # would Any-taint all three names. The package-mode import gives pyright
+    # their exact types; runtime never executes this branch.
+    from harness.beets_compat import (
+        BeetsCapabilityError,
+        _class,
+        _required_module,
+    )
+else:
+    BeetsCapabilityError = beets_compat.BeetsCapabilityError
+    _class = beets_compat._class
+    _required_module = beets_compat._required_module
 
 # beets_harness.py's own module-level logging.basicConfig(stream=sys.stderr)
 # runs at import time, before any harness call reaches this module -- a

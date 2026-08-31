@@ -820,7 +820,9 @@ class TestHarnessBeets2Contract(unittest.TestCase):
         does NOT export PYTHONPATH -- only importerPkg/previewWorkerPkg do.
         harness/beets_harness.py's own sys.path[0] is harness/, not the repo
         root, so any module-scope ``from lib.X import Y`` reachable from
-        harness/beets_compat.py breaks the main pipeline loop specifically
+        harness/beets_compat.py or harness/discogs_patches.py (the module
+        carrying the third-party msgspec/requests imports) breaks the main
+        pipeline loop specifically
         (issue #1200 review F1). The sibling --help launch above proves
         nothing about this: it never overrides ``env=``, so it silently
         inherits THIS test process's own PYTHONPATH (nix-shell/the test
