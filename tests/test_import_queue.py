@@ -10977,7 +10977,13 @@ class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):
         db: FakePipelineDB,
         claimed: ImportJob,
     ) -> None:
-        """The failure contract is the real Recents classifier, not a job row."""
+        """The failure contract is the real Recents render, not a job row.
+
+        The row comes from ``get_download_log_entry`` — the detail-view
+        SELECT, which carries no ``_current_evidence_*`` aliases — so the
+        HAVE projection is structurally inert here; the pin is on the
+        classifier's badge/verdict as the composed renderer emits them.
+        """
         from web.download_history_view import build_recents_download_log_rows
 
         assert isinstance(claimed.payload, ForceImportPayload)

@@ -1,13 +1,17 @@
 """Unit tests for the composed Recents render interface.
 
-Every scenario the pipeline can produce is driven through
+Every classification pin here drives
 ``web/download_history_view.py::build_recents_download_log_rows`` — the
-function the Recents route itself calls — so a pin here describes what an
+function the Recents route itself calls — so a pin describes what an
 operator sees, not what one stage of the composition computed.
 ``web/classify.py::_classify_log_entry`` is the middle of that path and is
-deliberately not called directly: the persisted-evidence projections that
-run after it are part of the rendered row (issue #1278).
+deliberately never called here: the persisted-evidence projections that
+run after it are part of the rendered row (issue #1278). The remaining
+tests unit-test the pieces around that path — ``LogEntry.from_row``,
+``ClassifiedEntry`` construction, and the quality-label and basis-verdict
+helpers.
 """
+import dataclasses
 import os
 import sys
 import unittest
@@ -21,6 +25,7 @@ from datetime import UTC
 
 from lib.json_narrow import is_str_object_dict
 from lib.quality import (
+    PROOF_TIER_DETECTED,
     AudioQualityMeasurement,
     DuplicateRemoveCandidate,
     DuplicateRemoveGuardInfo,
@@ -44,6 +49,15 @@ from web.download_history_view import build_recents_download_log_rows
 # ---------------------------------------------------------------------------
 # Helpers to build a minimal download_log row and render it like Recents does
 # ---------------------------------------------------------------------------
+
+# The keys _row accepts beyond LogEntry's own fields: the candidate-evidence
+# join key and the two evidence-join alias namespaces (the _evidence_*
+# columns read by LogEntry.from_row and proof_gate_projection, and the
+# _current_evidence_* columns _project_current_library_have reads).
+# Anything else is a typo — the old dataclasses.replace helper raised on
+# unknown names, and a dict merge that silently accepts them lets a test
+# describe a world its author did not write.
+_LOG_ENTRY_FIELDS = frozenset(f.name for f in dataclasses.fields(LogEntry))
 
 _ROW_DEFAULTS: dict[str, object] = {
     "id": 1,
@@ -70,6 +84,14 @@ _ROW_DEFAULTS: dict[str, object] = {
 
 def _row(**overrides: object) -> dict[str, object]:
     """Build a raw download_log row with sensible defaults."""
+    unknown = {
+        key for key in overrides
+        if key not in _LOG_ENTRY_FIELDS
+        and key != "candidate_evidence_id"
+        and not key.startswith(("_evidence_", "_current_evidence_"))
+    }
+    if unknown:
+        raise TypeError(f"unknown download_log row keys: {sorted(unknown)}")
     return {**_ROW_DEFAULTS, **overrides}
 
 
@@ -2400,9 +2422,9 @@ class TestMalformedImportResultDegradesInsteadOfRaising(unittest.TestCase):
     rather than 500 the whole route.
 
     Each case renders the SAME blob twice: once with the type drift, once
-    with it repaired. The repaired twin is what proves the degraded render
-    really lost something, instead of asserting fields the world was never
-    going to populate.
+    with it repaired. ``comparison_basis`` is the discriminating field —
+    populated by the repaired twin, None on the degraded render — and the
+    badge check proves the row still renders rather than going blank.
     """
 
     def _blob(self, exit_code: object) -> dict[str, object]:
@@ -2427,8 +2449,6 @@ class TestMalformedImportResultDegradesInsteadOfRaising(unittest.TestCase):
     def test_malformed_dict_degrades_to_the_unclassified_render(self):
         result = _classified(import_result=self._blob("not-an-int"))
         self.assertIsNone(result["comparison_basis"])
-        self.assertIsNone(result["disambiguation_failure"])
-        self.assertEqual(result["bad_extensions"], [])
         # The row still renders — degraded, not blank.
         self.assertTrue(result["badge"])
         repaired = _classified(import_result=self._blob(0))
@@ -2439,11 +2459,53 @@ class TestMalformedImportResultDegradesInsteadOfRaising(unittest.TestCase):
         result = _classified(
             import_result=_json.dumps(self._blob("not-an-int")))
         self.assertIsNone(result["comparison_basis"])
-        self.assertIsNone(result["disambiguation_failure"])
-        self.assertEqual(result["bad_extensions"], [])
         self.assertTrue(result["badge"])
         repaired = _classified(import_result=_json.dumps(self._blob(0)))
         self.assertIsNotNone(repaired["comparison_basis"])
+
+
+# ============================================================================
+# Recents render — proof-gate verdict needs a joined candidate
+# ============================================================================
+
+class TestProofGateNeedsAJoinedCandidate(unittest.TestCase):
+    """A proof-gate finding may only be rendered off a joined candidate.
+
+    The same evidence aliases that fire the in-window-cliff leg when
+    ``candidate_evidence_id`` names a real join must project the EMPTY
+    verdict when it does not — the card must never report a finding (or a
+    clearance) nothing tested for. The firing world is borrowed from the
+    deterministic tier table (``tests/test_verdict_tiers.py``): a
+    FLAC-banded ``likely_transcode`` grade is Tier 1, and the joined twin
+    below proves this world really would fire, so the unjoined half pins
+    the ``candidate_evidence_id`` short-circuit rather than a world that
+    never derives anything.
+    """
+
+    _EVIDENCE_ALIASES: ClassVar[dict[str, object]] = {
+        "spectral_grade": "likely_transcode",
+        "_evidence_format": "FLAC",
+        "_evidence_storage_format": "FLAC",
+        "_evidence_filetype_band": "flac",
+        "_evidence_spectral_subject": "source",
+        "_evidence_container_extensions": [".flac"],
+        "_evidence_spectral_measurement_version": 2,
+    }
+
+    def test_joined_candidate_fires_the_finding(self):
+        result = _classified(
+            candidate_evidence_id=4711, **self._EVIDENCE_ALIASES)
+        self.assertEqual(result["verdict_tier"], PROOF_TIER_DETECTED)
+        self.assertTrue(result["spectral_accusation_admissible"])
+        self.assertIsNotNone(result["verdict_tier_statement"])
+
+    def test_unjoined_row_projects_the_empty_verdict(self):
+        result = _classified(**self._EVIDENCE_ALIASES)
+        self.assertIsNone(result["verdict_tier"])
+        self.assertIsNone(result["verdict_tier_statement"])
+        self.assertEqual(result["verdict_fired_legs"], [])
+        self.assertIsNone(result["spectral_accusation_admissible"])
+        self.assertIsNone(result["spectral_accusation_withheld"])
 
 
 # ============================================================================

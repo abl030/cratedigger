@@ -114,9 +114,11 @@ def assert_composite_triage_projection(
 ) -> None:
     """Check the compact contract for a persisted cleanup audit.
 
-    ``result`` is a row rendered by ``build_recents_download_log_rows``.
-    The classification it carries is the exact same projection the detail
-    view's history panel renders, so this pins both surfaces at once.
+    ``result`` is a row rendered by ``build_recents_download_log_rows`` —
+    the Recents surface only. The detail view's history panel shares the
+    classifier stage but stops before ``_project_current_library_have``,
+    so a world carrying ``_current_evidence_*`` aliases renders different
+    ``existing_*`` values there; this checker pins the Recents render.
     """
     expected_object = (
         "download deleted" if action.startswith("deleted_") else "download kept"
