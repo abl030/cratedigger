@@ -57,8 +57,10 @@ and edits* Plex metadata (the only place it does more than the refresh GET):
   and stash its current `addedAt` as a `pending` row in `plex_added_at_pins`.
   A genuinely-new album isn't in Plex yet, so nothing is captured — the table
   self-selects upgrades.
-- **Reconcile** (`reconcile_plex_added_at_pins`, called each 5-min cratedigger
-  cycle): for each pending pin past a 180s settle window, re-find the album and,
+- **Reconcile** (`reconcile_plex_added_at_pins`, driven each 5-min cratedigger
+  cycle by its registered Phase-0 step `reconcile_plex_added_at_pins_cycle` in
+  `lib/convergence.py`'s registry): for each pending pin past a 180s settle
+  window, re-find the album and,
   if Plex bumped its `addedAt`, `PUT …/library/sections/<id>/all?type=9&id=<rk>&addedAt.value=<orig>&addedAt.locked=1`. The `addedAt.locked=1` is
   load-bearing — without it the next metadata refresh re-stamps the date.
 

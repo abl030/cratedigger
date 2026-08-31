@@ -6,16 +6,24 @@ fan-out work, and Redis peer-cache behavior.
 from __future__ import annotations
 
 import configparser
+import time
 import unittest
+from datetime import UTC, datetime
 from typing import ClassVar, cast
 from unittest.mock import MagicMock, patch
 
 from cratedigger import SlskdFile, TrackRecord
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
-from lib.cycle_summary import format_cycle_summary
+from lib.cycle_summary import (
+    format_cycle_summary,
+    log_cycle_summary,
+    record_cycle_metrics_cycle,
+    record_peer_observations_cycle,
+)
 from lib.matching import check_for_match
-from tests.fakes import FakePipelineDBSource, FakeSlskdAPI
+from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+from tests.helpers import make_ctx_with_fake_db
 
 
 def _make_ctx() -> CratediggerContext:
@@ -341,6 +349,59 @@ class TestBrowseTimeAccumulator(unittest.TestCase):
         )
         self.assertEqual(ctx.peers_browsed, 0)
         self.assertEqual(ctx.peers_browsed_lazy, 0)
+
+
+class TestCloseOutSteps(unittest.TestCase):
+    """The three registered end-of-cycle close-out steps persist domain state."""
+
+    def _ctx(self, db: FakePipelineDB):
+        ctx = make_ctx_with_fake_db(db, cfg=CratediggerConfig())
+        ctx.cycle_started_at = datetime(2026, 8, 31, 8, 0, tzinfo=UTC)
+        ctx.cycle_start = time.time() - 12.0
+        return ctx
+
+    def test_log_cycle_summary_emits_the_canonical_line(self):
+        ctx = self._ctx(FakePipelineDB())
+        ctx.peers_browsed = 3
+
+        with self.assertLogs("cratedigger", level="INFO") as captured:
+            line = log_cycle_summary(ctx)
+
+        self.assertIn("Cratedigger cycle complete in", line)
+        self.assertIn("peers_browsed=3", line)
+        self.assertIn(line, captured.output[0])
+
+    def test_record_cycle_metrics_persists_the_context_accumulators(self):
+        db = FakePipelineDB()
+        ctx = self._ctx(db)
+        ctx.peers_browsed = 7
+        ctx.cache_pos_hits = 4
+        ctx.find_download_queued = 2
+
+        record_cycle_metrics_cycle(ctx)
+
+        self.assertEqual(len(db.cycle_metrics), 1)
+        row = db.cycle_metrics[0]
+        self.assertEqual(row["started_at"], ctx.cycle_started_at)
+        self.assertEqual(row["peers_browsed"], 7)
+        self.assertEqual(row["cache_pos_hits"], 4)
+        self.assertEqual(row["find_download_queued"], 2)
+        self.assertGreaterEqual(row["cycle_total_s"], 12.0)
+
+    def test_record_peer_observations_flushes_the_roster(self):
+        db = FakePipelineDB()
+        ctx = self._ctx(db)
+        ctx.peer_observations = {"peer-a", "peer-b"}
+
+        self.assertEqual(record_peer_observations_cycle(ctx), 2)
+        self.assertEqual(len(db.peer_observations), 2)
+
+    def test_record_peer_observations_skips_an_empty_roster(self):
+        db = FakePipelineDB()
+        ctx = self._ctx(db)
+
+        self.assertEqual(record_peer_observations_cycle(ctx), 0)
+        self.assertEqual(db.peer_observations, {})
 
 
 if __name__ == "__main__":

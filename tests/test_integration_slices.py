@@ -6090,6 +6090,45 @@ class TestStartupReconciliationSlice(unittest.TestCase):
             ]
             self.assertEqual(len(actives), 1)
 
+    def test_cycle_step_reconciles_and_logs_the_summary_line(self):
+        """The registered Phase-0 step drives the same slice end to end."""
+        from lib.startup_reconciliation import reconcile_search_plans_cycle
+        from tests.helpers import make_ctx_with_fake_db
+        db = FakePipelineDB()
+        rid = self._seed_wanted(db, "cycle-step-mbid")
+
+        ctx = make_ctx_with_fake_db(db, cfg=self._cfg())
+        with self.assertLogs(
+                "lib.startup_reconciliation", level="INFO") as captured:
+            summary = reconcile_search_plans_cycle(ctx)
+
+        self.assertEqual(summary.wanted_total, 1)
+        self.assertEqual(summary.generated, 1)
+        self.assertFalse(summary.dry_run)
+        actives = [
+            p for p in db.search_plans.values()
+            if p.request_id == rid and p.status == "active"
+        ]
+        self.assertEqual(len(actives), 1)
+        self.assertTrue(any(
+            "search_plan_reconciliation " in line for line in captured.output))
+
+    def test_summary_logging_surfaces_the_stop_the_deploy_signal(self):
+        from lib.startup_reconciliation import (
+            ReconciliationSummary,
+            log_reconciliation_summary,
+        )
+        unclassified = ReconciliationSummary(
+            generator_id="g", wanted_total=1, active_current=0, generated=0,
+            old_generator_replaced=0, deterministic_failed=0,
+            retryable_failed=0, skipped=0, unclassified_no_plan=1,
+            duration_s=0.1, dry_run=False)
+        with self.assertLogs(
+                "lib.startup_reconciliation", level="ERROR") as captured:
+            log_reconciliation_summary(unclassified)
+        self.assertTrue(any(
+            "stop-the-deploy signal" in line for line in captured.output))
+
 
 class TestPhaseTwoEligibilitySlice(unittest.TestCase):
     """Phase 2 wanted selection respects active-plan eligibility (U4).

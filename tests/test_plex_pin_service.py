@@ -11,9 +11,11 @@ from lib.config import CratediggerConfig
 from lib.plex_pin_service import (
     capture_plex_added_at_pin,
     reconcile_plex_added_at_pins,
+    reconcile_plex_added_at_pins_cycle,
 )
 from lib.util import PlexAlbumRef
 from tests.fakes import FakePipelineDB
+from tests.helpers import make_ctx_with_fake_db
 
 NOW = datetime(2026, 6, 28, 12, 0, tzinfo=UTC)
 
@@ -185,6 +187,32 @@ class TestReconcile(unittest.TestCase):
         self.assertEqual((res.pinned, res.already_correct, res.skipped, res.errors),
                          (0, 0, 0, 0))
         self.assertEqual(called, [])
+
+    def test_pending_fetch_failure_propagates(self):
+        # The registered cycle step's runner (lib/convergence.py) owns
+        # step-level isolation; a fetch failure must reach it, not be
+        # swallowed here at warning level.
+        class FailingDB(FakePipelineDB):
+            def get_pending_plex_added_at_pins(self, **kw):
+                raise RuntimeError("db down")
+        with self.assertRaises(RuntimeError):
+            reconcile_plex_added_at_pins(
+                _cfg(), FailingDB(), now=NOW,
+                find_fn=lambda cfg, path: self.fail("must not reach Plex"),
+                set_fn=lambda *a, **k: True)
+
+
+class TestReconcileCycleStep(unittest.TestCase):
+    """The ctx-only registered step drives the reconciler and logs the line."""
+
+    def test_unconfigured_backend_reconciles_to_zero(self):
+        ctx = make_ctx_with_fake_db(FakePipelineDB(), cfg=CratediggerConfig())
+        with self.assertLogs("cratedigger", level="INFO") as captured:
+            result = reconcile_plex_added_at_pins_cycle(ctx)
+        self.assertEqual(
+            (result.pinned, result.already_correct, result.skipped,
+             result.errors), (0, 0, 0, 0))
+        self.assertIn("PLEX PIN reconcile:", captured.output[0])
 
 
 if __name__ == "__main__":

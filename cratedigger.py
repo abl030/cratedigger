@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from album_source import AlbumRecord, DatabaseSource
     from lib.config import CratediggerConfig
     from lib.context import CratediggerContext, PipelineDBSource
-    from lib.grab_list import DownloadFile, GrabListEntry
+    from lib.grab_list import GrabListEntry
     from lib.pipeline_db import ActiveSearchPlan
     from lib.quality import AudioFileSpec, CandidateScore
     from lib.search import PlanExecutionContext, SearchResult
@@ -1356,8 +1356,6 @@ def _search_and_queue_parallel(
     return grab_list, failed_search, failed_grab
 
 
-from lib.slskd_transfers import cancel_and_delete as _cancel_and_delete_impl
-
 # ``lib.download.grab_most_wanted`` is Group B's file (issue #784 tranche
 # split) and still carries bare-generic parameter/return types
 # (``list[Any]`` / ``tuple[dict, list, list]``), which makes both an
@@ -1429,13 +1427,6 @@ def build_phase1_context(
     )
 
 
-def _make_ctx():
-    """Return the module-level CratediggerContext (created in main())."""
-    return _module_ctx
-
-
-def cancel_and_delete(files: list[DownloadFile]) -> None:
-    _cancel_and_delete_impl(files, _make_ctx())
 
 
 def grab_most_wanted(albums: list[AlbumRecord]) -> int:
@@ -1608,18 +1599,10 @@ def main() -> int:
         from lib.peer_cache import connect_from_config
         _module_ctx.peer_cache = connect_from_config(cfg)
 
-        # Populate global user cooldowns (issue #39)
-        try:
-            db = pipeline_db_source._get_db()
-            cooled = db.get_cooled_down_users()
-            _module_ctx.cooled_down_users = set(cooled)
-            if cooled:
-                logger.info(f"User cooldowns active: {', '.join(sorted(cooled))}")
-        except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-            logger.warning(f"Failed to load user cooldowns: {e}")
-
-        cycle_started_at = datetime.now(UTC)
-        cycle_start = time.time()
+        # Wall-clock anchors for the registered end-of-cycle close-out steps
+        # (lib/cycle_summary.py). Set before any cycle work runs.
+        _module_ctx.cycle_started_at = datetime.now(UTC)
+        _module_ctx.cycle_start = time.time()
         # Per-cycle watchdog counter (issue #212). Reset at cycle start;
         # incremented by `_log_search_result` for every SearchResult whose
         # `watchdog_fired=True`.
@@ -1658,91 +1641,37 @@ def main() -> int:
             finally:
                 phase1_source.close()
 
-        # --- Startup search-plan reconciliation (U4) ---
-        # Walk every wanted request and ensure each has a current-generator
-        # active plan or a visible failed/retryable record. Any row that ends
-        # up unclassified (no plan + no current-generator failure record) is
-        # surfaced as a stop-the-deploy signal at ERROR. We never block the
-        # cycle on transient failures -- the cycle continues with whatever
-        # rows are searchable.
         from lib.search import SEARCH_PLAN_GENERATOR_ID
-        from lib.search_plan_service import SearchPlanService
-        from lib.startup_reconciliation import reconcile_search_plans
-        try:
-            recon_db = pipeline_db_source._get_db()
-            recon_service = (
-                None if args.reconcile_dry_run
-                else SearchPlanService(recon_db, cfg)
-            )
-            recon_summary = reconcile_search_plans(
-                recon_db,
-                recon_service,
-                dry_run=args.reconcile_dry_run,
-            )
-            logger.info(recon_summary.to_log_line())
-            if recon_summary.unclassified_no_plan > 0:
-                logger.error(
-                    "search_plan_reconciliation: %d wanted row(s) lack "
-                    "explainable plan state -- stop-the-deploy signal "
-                    "(see prior ERROR lines for the request ids)",
-                    recon_summary.unclassified_no_plan,
-                )
-        except Exception:
-            logger.exception(
-                "Startup search-plan reconciliation failed; continuing "
-                "with whatever rows are already searchable.")
-            recon_summary = None
 
         if args.reconcile_dry_run:
-            # Dry-run mode is a deploy-verification tool. Skip Phase 2
-            # entirely so operators can preflight without producing
-            # search traffic.
+            # Dry-run mode is a deploy-verification tool: run ONLY the
+            # startup search-plan reconciliation, read-only, then exit --
+            # no convergence steps, no Phase 1, no search traffic.
+            from lib.startup_reconciliation import (
+                log_reconciliation_summary,
+                reconcile_search_plans,
+            )
+            try:
+                log_reconciliation_summary(reconcile_search_plans(
+                    pipeline_db_source._get_db(), None, dry_run=True))
+            except Exception:
+                logger.exception(
+                    "Startup search-plan reconciliation failed; continuing "
+                    "with whatever rows are already searchable.")
             logger.info(
                 "--reconcile-dry-run set; skipping Phase 1 + Phase 2 "
                 "search execution.")
             return 0
 
-        # --- Plex addedAt pin reconciliation (migration 040) ---
-        # Restore the original "added" date on albums that an upgrade
-        # re-import (and its Plex rescan) bumped to now, so re-acquired
-        # albums don't wrongly appear in Plex "Recently Added". Bounded,
-        # best-effort, never blocks the cycle. Normal cycles only (skipped
-        # under --reconcile-dry-run via the return above).
-        try:
-            from lib.plex_pin_service import reconcile_plex_added_at_pins
-            pin_result = reconcile_plex_added_at_pins(
-                cfg, pipeline_db_source._get_db(),
-                now=datetime.now(UTC))
-            logger.info(pin_result.to_log_line())
-        except Exception:
-            logger.exception(
-                "PLEX PIN: reconciliation failed; continuing with the cycle.")
-
-        # --- Jellyfin DateCreated pin reconciliation (migration 046) ---
-        # The Jellyfin sibling of the Plex block above (issue #574): restore
-        # the original DateCreated on the album AND its audio items once the
-        # Jellyfin rescan is observable (item ids drifted from the capture
-        # snapshot) — Jellyfin's "Recently Added" orders by the CHILDREN's
-        # dates, and there is no field lock, so pins wait for the rescan to
-        # land instead of trusting a fixed settle window. Bounded,
-        # best-effort, never blocks the cycle.
-        try:
-            from lib.jellyfin_pin_service import (
-                reconcile_jellyfin_date_created_pins,
-            )
-            jf_pin_result = reconcile_jellyfin_date_created_pins(
-                cfg, pipeline_db_source._get_db(),
-                now=datetime.now(UTC))
-            logger.info(jf_pin_result.to_log_line())
-        except Exception:
-            logger.exception(
-                "JELLYFIN PIN: reconciliation failed; continuing with the cycle.")
-
         # --- Phase 0 convergence ---
-        # Run the ordered transfer convergence, disk reaper, search-ledger
-        # sweep, and transfer-ledger prune while the loop is quiescent, before
-        # Phase 1/Phase 2 can race their ownership snapshots.  The registry's
-        # runner isolates every step so cleanup can never abort the cycle.
+        # Run the ordered pre-phase steps (cooldown load, search-plan
+        # reconciliation, media-server pin reconcilers) and the transfer
+        # convergence / reaper / ledger sweeps while the loop is quiescent,
+        # before Phase 1/Phase 2 can race their ownership snapshots.  The
+        # registry's runner isolates every step so no best-effort step can
+        # abort the cycle.  The cooldown loader must stay ahead of Phase 1's
+        # submit below: build_phase1_context forwards ctx.cooled_down_users
+        # by reference after the loader replaces it.
         from lib.convergence import ConvergenceGroup, run_convergence_group
         run_convergence_group(_module_ctx, ConvergenceGroup.PHASE_ZERO)
 
@@ -1788,55 +1717,12 @@ def main() -> int:
         # --- End-of-cycle convergence ---
         # The registry pins harvest-before-purge as ordering data: terminal
         # transfer evidence must land in active_download_state before the
-        # ledger-owned completed records are removed.  Failure isolation is
-        # per step, so a failed harvest still cannot block the purge.
+        # ledger-owned completed records are removed.  The close-out steps
+        # (summary line, cycle-metrics row, browsed-peer roster) follow in
+        # the same registry.  Failure isolation is per step, so a failed
+        # harvest still cannot block the purge, and a failed summary render
+        # cannot block metrics persistence.
         run_convergence_group(_module_ctx, ConvergenceGroup.END_OF_CYCLE)
-
-        elapsed = time.time() - cycle_start
-        from lib.cycle_summary import format_cycle_summary
-        logger.info(format_cycle_summary(_module_ctx, elapsed))
-        cycle_completed_at = datetime.now(UTC)
-        try:
-            db = pipeline_db_source._get_db()
-            db.record_cycle_metrics(
-                started_at=cycle_started_at,
-                completed_at=cycle_completed_at,
-                cycle_total_s=elapsed,
-                browse_time_s=_module_ctx.browse_time_s,
-                match_time_s=_module_ctx.match_time_s,
-                search_time_s=_module_ctx.search_time_s,
-                cache_pos_hits=_module_ctx.cache_pos_hits,
-                cache_neg_hits=_module_ctx.cache_neg_hits,
-                cache_misses=_module_ctx.cache_misses,
-                cache_errors=_module_ctx.cache_errors,
-                cache_fuse_tripped=_module_ctx.cache_fuse_tripped,
-                cache_write_errors=_module_ctx.cache_write_errors,
-                peers_browsed=_module_ctx.peers_browsed,
-                peers_browsed_lazy=_module_ctx.peers_browsed_lazy,
-                fanout_waves=_module_ctx.fanout_waves,
-                cycle_searches_watchdog_killed=(
-                    _module_ctx.cycle_searches_watchdog_killed
-                ),
-                find_download_queued=_module_ctx.find_download_queued,
-                find_download_completed=_module_ctx.find_download_completed,
-                find_download_drain_time_s=_module_ctx.find_download_drain_time_s,
-            )
-        except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-            logger.warning(f"Failed to persist cycle metrics: {e}")
-        try:
-            observations = _module_ctx.peer_observations
-            if observations:
-                db = pipeline_db_source._get_db()
-                new_observations = db.record_peer_observations(
-                    observations,
-                    observed_at=cycle_completed_at,
-                )
-                logger.info(
-                    "Peer observations persisted: "
-                    f"observed={len(observations)} new={new_observations}"
-                )
-        except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-            logger.warning(f"Failed to persist peer observations: {e}")
 
     finally:
         # Clean up pipeline DB connection

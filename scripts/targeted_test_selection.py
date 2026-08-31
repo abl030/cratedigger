@@ -99,6 +99,20 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_pipeline_db_decisions",
         "tests.test_pipeline_db_decisions_generated",
     ),
+    "lib/convergence.py": (
+        # Was an admitted zero-neighbour gap (issue #1199, measured
+        # 2026-08-19): there is no tests.test_convergence, so the basename
+        # probes found nothing. Its real coverage lives in the runner /
+        # registry module, whose name the probes cannot derive.
+        "tests.test_convergence_runner_generated",
+    ),
+    "lib/slskd_transfer_ledger.py": (
+        # Was an admitted zero-neighbour gap (issue #1199): no
+        # tests.test_slskd_transfer_ledger. The registered cycle step's
+        # failure-reachability pin (the module's only direct test driver)
+        # lives with the convergence runner.
+        "tests.test_convergence_runner_generated",
+    ),
     "lib/startup_reconciliation.py": (
         # Was an admitted zero-neighbour gap (issue #1199, measured
         # 2026-08-19): there is no tests.test_startup_reconciliation, so
@@ -1069,11 +1083,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "does not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
         "(issue #1199)"
     ),
-    "lib/convergence.py": (
-        "measured 2026-08-19: zero neighbours -- tests.test_convergence "
-        "does not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
-        "(issue #1199)"
-    ),
     "lib/destructive_release_service.py": (
         "measured 2026-08-19: zero neighbours -- "
         "tests.test_destructive_release_service does not exist and no "
@@ -1195,11 +1204,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "measured 2026-08-19: zero neighbours -- "
         "tests.test_search_plan_inspection does not exist and no "
         "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
-    ),
-    "lib/slskd_transfer_ledger.py": (
-        "measured 2026-08-19: zero neighbours -- "
-        "tests.test_slskd_transfer_ledger does not exist and no EXACT_PATH_"
-        "NEIGHBOURS/prefix rule covers it (issue #1199)"
     ),
     "lib/slskd_transfers.py": (
         "measured 2026-08-19: zero neighbours -- "
