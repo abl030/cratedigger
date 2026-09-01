@@ -362,6 +362,7 @@ class TestPostImportMutationPins(unittest.TestCase):
             )
         self.assertIn("force", logs.output[0])
         self.assertIn("request_id=7", logs.output[0])
+        self.assertIn("label=Album", logs.output[0])
         self.assertIn("a.tmp, b.exe", logs.output[0])
 
     def test_quality_gate_non_plan_keeps_pending_and_invalid_status_is_rejected(self):
