@@ -15,7 +15,7 @@
  *     assertion vocabulary. Every file uses the same names.
  *   - One exit path (`checker.done()`), which emits a
  *     `CRATEDIGGER_JS_FAILURE` marker per FAILED ASSERTION —
- *     `scripts/run_test_suite.py::_parse_failures` decodes each into its
+ *     `scripts/phase_parsers/js_checks.py` decodes each into its
  *     own indexed failure, owner and rerun command derived from the file
  *     half of the identity.
  *   - `stubGlobals()` / `domStub()` / `element()`, so the recurring
@@ -35,7 +35,7 @@
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-/** The marker prefix `scripts/run_test_suite.py::_parse_failures` decodes. */
+/** The marker prefix `scripts/phase_parsers/js_checks.py` decodes. */
 export const FAILURE_MARKER = 'CRATEDIGGER_JS_FAILURE';
 
 /**
@@ -74,7 +74,7 @@ const writeErr = process.stderr.write.bind(process.stderr);
  * side.
  *
  * The set is PYTHON's, not JavaScript's: the reader is
- * `scripts/run_test_suite.py::_parse_failures`, which iterates
+ * `scripts/phase_parsers/js_checks.py`, which iterates
  * `str.splitlines()` — and that also breaks on VT, FF, FS, GS, RS,
  * U+0085, U+2028 and U+2029, not just CR and LF. `JSON.stringify`
  * escapes the ones below 0x20 but not U+0085/U+2028/U+2029, and an

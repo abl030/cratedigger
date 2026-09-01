@@ -1871,6 +1871,22 @@ PREFIX_RULES: tuple[SelectionRule, ...] = (
         # shape as the deploy_hold instance in issue #1081 review round 2.
     ),
     SelectionRule(
+        name="prefix:scripts/phase_parsers/",
+        description=(
+            "a phase log parser regresses its own dialect tests and the "
+            "coordinator that composes them"
+        ),
+        prefixes=("scripts/phase_parsers/",),
+        neighbours=("tests.test_phase_parsers", "tests.test_suite_coordinator"),
+        # Issue #1313. The basename probe derives tests.test_<stem> from the
+        # FILE name only, so scripts/phase_parsers/ruff.py looks for a
+        # nonexistent tests/test_ruff.py and the scripts/ root rule fails the
+        # path closed. Both named modules are real consumers rather than a
+        # floor: the dialect tests drive each parser directly, and the
+        # coordinator's own suite proves the callable a PhaseSpec names is
+        # the one that reads its log.
+    ),
+    SelectionRule(
         name="prefix:tests/structural_audits/",
         description="shared structural-audit support regresses its audits",
         prefixes=("tests/structural_audits/",),

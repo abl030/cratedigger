@@ -23,6 +23,10 @@ from hypothesis.internal.conjecture.data import Status
 from hypothesis.statistics import collector
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from scripts.phase_parsers.python_tests import (
+    FAILURE_MARKER_PREFIX,
+    CheckFailureMarker,
+)
 from scripts.run_fuzz_tests import (
     aggregate_property_depth,
     is_structurally_shallow,
@@ -77,7 +81,6 @@ from scripts.run_python_tests import (
     test_subprocess_environment,
     worker_environment,
 )
-from scripts.run_test_suite import FAILURE_MARKER_PREFIX, CheckFailureMarker
 from scripts.test_substrate import TEST_RAM_ROOT_EXHAUSTED
 from tests._source_pins import pinned_source
 

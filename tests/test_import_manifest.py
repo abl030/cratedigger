@@ -1,7 +1,7 @@
+import json
 import os
 import tempfile
 import unittest
-from typing import Any, cast
 from unittest.mock import patch
 
 from lib.dispatch import (
@@ -9,8 +9,11 @@ from lib.dispatch import (
     DispatchOutcome,
     dispatch_import_from_db,
 )
-from lib.dispatch.manifest_guard import _guard_force_import_audio_manifest
-from lib.dispatch.types import ImportAttemptResult
+from lib.dispatch.manifest_guard import (
+    _guard_force_import_audio_manifest,
+    _guard_reject,
+)
+from lib.dispatch.types import DispatchDB, ImportAttemptResult
 from lib.grab_list import DownloadFile
 from lib.import_execution import ExecutionCancelled
 from lib.import_manifest import (
@@ -20,11 +23,22 @@ from lib.import_manifest import (
     tracked_audio_paths_for_downloads,
 )
 from lib.import_queue import IMPORT_JOB_FORCE
+from lib.quality import (
+    ImportResult,
+    SpectralAnalysisDetail,
+    SpectralDetail,
+)
 from lib.quality_evidence import snapshot_audio_files
+from lib.terminal_outcomes import PendingImportTerminalOutcome
 from tests.dispatch_helpers import claim_next_import_job
 from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
+
+
+def _dispatch_db(db: FakePipelineDB) -> DispatchDB:
+    """Expose the fake through the production dispatch protocol."""
+    return db
 
 
 class TestImportManifest(unittest.TestCase):
@@ -406,6 +420,248 @@ class TestForceImportManifestGuard(unittest.TestCase):
         assert claimed is not None and claimed.id == job.id
         return job.id
 
+
+    def test_manifest_rejection_persists_complete_audit_and_outcome(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted", mb_release_id="mb-42"))
+        outcome = _guard_reject(
+            _dispatch_db(db), request_id=42, failed_path="/action-copy/Album",
+            audit_source_path="/operator/Album", source_username="peer",
+            attempt_result=ImportAttemptResult(None), detail="manifest mismatch",
+            scenario="untracked_audio", distance=0.42, import_job_id=None,
+            source_download_log_id=23,
+        )
+        self.assertFalse(outcome.success)
+        self.assertEqual(outcome.message, "manifest mismatch")
+        self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
+        self.assertEqual(len(db.download_logs), 1)
+        row = db.download_logs[0]
+        self.assertEqual(row.soulseek_username, "peer")
+        self.assertEqual(row.outcome, "rejected")
+        self.assertEqual(row.beets_distance, 0.42)
+        self.assertEqual(row.beets_scenario, "untracked_audio")
+        self.assertEqual(row.beets_detail, "manifest mismatch")
+        self.assertEqual(row.staged_path, "/action-copy/Album")
+        self.assertEqual(row.source_download_log_id, 23)
+        self.assertEqual(
+            json.loads(row.validation_result)["failed_path"], "/operator/Album"
+        )
+
+    def test_manifest_rejection_audit_preserves_every_nondefault_field(self):
+        """The guard's synchronous rejection is a durable audit contract."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        attempt = ImportAttemptResult(SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="suspect", bitrate_kbps=96),
+            existing=SpectralAnalysisDetail(
+                attempted=True, grade="genuine", bitrate_kbps=245),
+        ))
+
+        outcome = _guard_reject(
+            _dispatch_db(db), request_id=42, failed_path="/action/Album",
+            audit_source_path="/operator/Album", source_username="peer",
+            attempt_result=attempt, detail="manifest mismatch",
+            scenario="untracked_audio", distance=0.42, import_job_id=None,
+            source_download_log_id=23,
+        )
+
+        self.assertIs(outcome.success, False)
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(len(db.download_logs), 1)
+        row = db.download_logs[0]
+        self.assertEqual(row.soulseek_username, "peer")
+        self.assertEqual(row.outcome, "rejected")
+        self.assertEqual(row.staged_path, "/action/Album")
+        self.assertEqual(row.source_download_log_id, 23)
+        self.assertEqual(row.beets_distance, 0.42)
+        self.assertEqual(row.beets_scenario, "untracked_audio")
+        self.assertEqual(row.beets_detail, "manifest mismatch")
+        self.assertIsNotNone(row.import_result)
+        self.assertEqual(
+            ImportResult.from_json(row.import_result).spectral,
+            attempt.audit,
+        )
+        self.assertEqual(
+            json.loads(row.validation_result)["failed_path"], "/operator/Album"
+        )
+
+    def test_incomplete_guard_forwards_the_complete_owner_world(self):
+        """An incomplete manifest rejection preserves every terminal input."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        with tempfile.TemporaryDirectory() as action_root, tempfile.TemporaryDirectory() as operator_root:
+            audio = os.path.join(action_root, "01.mp3")
+            open(audio, "wb").close()
+            db._next_download_log_id = 22
+            source_log_id = db.log_download(
+                42, outcome="rejected",
+                validation_result={
+                    "failed_path": action_root,
+                    "items": [
+                        {"path": audio},
+                        {"path": os.path.join(action_root, "02.mp3")},
+                    ],
+                },
+            )
+            self.assertEqual(source_log_id, 23)
+            db._next_import_job_id = 8
+            attempt = ImportAttemptResult(SpectralDetail(
+                candidate=SpectralAnalysisDetail(
+                    attempted=True, grade="suspect", bitrate_kbps=96),
+                existing=SpectralAnalysisDetail(
+                    attempted=True, grade="genuine", bitrate_kbps=245),
+            ))
+            job_id = self._claimed_job(
+                db, action_root, download_log_id=source_log_id,
+                preview_result={"import_result": {"spectral": {"candidate": {
+                    "attempted": True, "grade": "suspect", "bitrate_kbps": 96,
+                }, "existing": {
+                    "attempted": True, "grade": "genuine", "bitrate_kbps": 245,
+                }}}},
+            )
+            outcome = _guard_force_import_audio_manifest(
+                _dispatch_db(db), request_id=42, failed_path=action_root,
+                audit_source_path=operator_root, download_log_id=source_log_id,
+                source_username="peer", attempt_result=attempt,
+                import_job_id=job_id,
+            )
+            # The same incomplete branch must also use the real DB on the
+            # immediate (non-owner) path; this keeps the db forwarding pin
+            # meaningful rather than relying only on the pending value.
+            immediate = _guard_force_import_audio_manifest(
+                _dispatch_db(db), request_id=42, failed_path=action_root,
+                audit_source_path=operator_root, download_log_id=source_log_id,
+                source_username="peer", attempt_result=attempt,
+            )
+            self.assertIsNotNone(immediate)
+
+        self.assertIsInstance(outcome, DispatchOutcome)
+        assert outcome is not None and outcome.terminal_outcome is not None
+        pending = outcome.terminal_outcome
+        self.assertEqual((pending.request_id, pending.import_job_id), (42, job_id))
+        self.assertIsNone(pending.initial_transition)
+        self.assertEqual(len(db.download_logs), 2)
+        request = db.request(42)
+        self.assertEqual(request["status"], "wanted")
+        self.assertIsNone(request["active_automation_import_job_id"])
+        self.assertEqual(pending.audit.soulseek_username, "peer")
+        self.assertEqual(pending.audit.staged_path, action_root)
+        self.assertEqual(pending.audit.source_download_log_id, 23)
+        self.assertIsNotNone(pending.audit.import_result)
+        assert pending.audit.import_result is not None
+        self.assertEqual(
+            ImportResult.from_json(pending.audit.import_result).spectral,
+            attempt.audit,
+        )
+        validation = json.loads(pending.audit.validation_result or "{}")
+        self.assertEqual(validation["failed_path"], operator_root)
+        self.assertEqual(validation["scenario"], "incomplete_fileset")
+        self.assertEqual(
+            validation["detail"],
+            "Force import source is missing validated audio: "
+            "missing audio: 02.mp3",
+        )
+
+    def test_extra_guard_forwards_the_complete_owner_world(self):
+        """An extra-manifest rejection preserves every terminal input."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        with tempfile.TemporaryDirectory() as action_root, tempfile.TemporaryDirectory() as operator_root:
+            first = os.path.join(action_root, "01.mp3")
+            bonus = os.path.join(action_root, "bonus.opus")
+            open(first, "wb").close()
+            open(bonus, "wb").close()
+            db._next_download_log_id = 22
+            source_log_id = db.log_download(
+                42, outcome="rejected",
+                validation_result={
+                    "failed_path": action_root,
+                    "items": [{"path": first}],
+                },
+            )
+            self.assertEqual(source_log_id, 23)
+            db._next_import_job_id = 8
+            attempt = ImportAttemptResult(SpectralDetail(
+                candidate=SpectralAnalysisDetail(
+                    attempted=True, grade="suspect", bitrate_kbps=96),
+                existing=SpectralAnalysisDetail(
+                    attempted=True, grade="genuine", bitrate_kbps=245),
+            ))
+            job_id = self._claimed_job(
+                db, action_root, download_log_id=source_log_id,
+                preview_result={"import_result": {"spectral": {"candidate": {
+                    "attempted": True, "grade": "suspect", "bitrate_kbps": 96,
+                }, "existing": {
+                    "attempted": True, "grade": "genuine", "bitrate_kbps": 245,
+                }}}},
+            )
+            outcome = _guard_force_import_audio_manifest(
+                _dispatch_db(db), request_id=42, failed_path=action_root,
+                audit_source_path=operator_root, download_log_id=source_log_id,
+                source_username="peer", attempt_result=attempt,
+                import_job_id=job_id,
+            )
+
+        self.assertIsNotNone(outcome)
+        assert outcome is not None and outcome.terminal_outcome is not None
+        pending = outcome.terminal_outcome
+        self.assertEqual((pending.request_id, pending.import_job_id), (42, job_id))
+        self.assertIsNone(pending.initial_transition)
+        self.assertEqual(len(db.download_logs), 1)
+        self.assertEqual(pending.audit.soulseek_username, "peer")
+        self.assertEqual(pending.audit.staged_path, action_root)
+        self.assertEqual(pending.audit.source_download_log_id, 23)
+        self.assertIsNotNone(pending.audit.import_result)
+        assert pending.audit.import_result is not None
+        self.assertEqual(
+            ImportResult.from_json(pending.audit.import_result).spectral,
+            attempt.audit,
+        )
+        validation = json.loads(pending.audit.validation_result or "{}")
+        self.assertEqual(validation["failed_path"], operator_root)
+        self.assertEqual(validation["scenario"], "untracked_audio")
+        self.assertEqual(
+            validation["detail"],
+            "Force import source does not match the original "
+            "selected audio manifest: extra audio: bonus.opus",
+        )
+
+    def test_manifest_rejection_deferred_outcome_preserves_owner_and_audit(self):
+        """The owner-backed path must remain a typed pending terminal outcome."""
+        db = FakePipelineDB()
+        attempt = ImportAttemptResult(SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="suspect", bitrate_kbps=96),
+            existing=SpectralAnalysisDetail(
+                attempted=True, grade="genuine", bitrate_kbps=245),
+        ))
+
+        outcome = _guard_reject(
+            _dispatch_db(db), request_id=42, failed_path="/action/Album",
+            audit_source_path="/operator/Album", source_username="peer",
+            attempt_result=attempt, detail="manifest mismatch",
+            scenario="untracked_audio", distance=0.42, import_job_id=9,
+            source_download_log_id=23,
+        )
+
+        self.assertIsInstance(outcome.terminal_outcome, PendingImportTerminalOutcome)
+        assert outcome.terminal_outcome is not None
+        pending = outcome.terminal_outcome
+        self.assertEqual(pending.request_id, 42)
+        self.assertEqual(pending.import_job_id, 9)
+        self.assertIsNone(pending.initial_transition)
+        self.assertEqual(pending.audit.outcome, "rejected")
+        self.assertEqual(pending.audit.soulseek_username, "peer")
+        self.assertEqual(pending.audit.staged_path, "/action/Album")
+        self.assertEqual(pending.audit.source_download_log_id, 23)
+        self.assertEqual(pending.audit.beets_detail, "manifest mismatch")
+        self.assertEqual(
+            json.loads(pending.audit.validation_result or "{}")["failed_path"],
+            "/operator/Album",
+        )
+        self.assertIsNotNone(pending.audit.import_result)
+
     def test_force_import_rejects_audio_not_in_origin_manifest(self):
         import msgspec
 
@@ -447,7 +703,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
             )
 
             outcome = dispatch_import_from_db(
-                cast(Any, db),
+                _dispatch_db(db),
                 request_id=42,
                 failed_path=root,
                 import_job_id=job_id,
@@ -459,7 +715,11 @@ class TestForceImportManifestGuard(unittest.TestCase):
         # Extra/untracked audio: keep the Wrong Matches entry for operator
         # review (the importer skips cleanup on this code).
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
-        self.assertIn("12 Wash.opus", outcome.message)
+        self.assertEqual(
+            outcome.message,
+            "Force import source does not match the original "
+            "selected audio manifest: extra audio: 12 Wash.opus",
+        )
         # The candidate fact is recorded, but the operator-owned search stop
         # and the Wrong Matches entry are both preserved.
         self.assertEqual(db.request(42)["status"], "unsearchable")
@@ -469,6 +729,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
             log for log in db.download_logs
             if log.outcome == "rejected" and log.beets_scenario == "untracked_audio"
         )
+        self.assertEqual(rejection.source_download_log_id, log_id)
         self.assertIsNotNone(rejection.import_result)
         assert rejection.import_result is not None
         self.assertEqual(
@@ -508,7 +769,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
                 },
             )
             outcome = _guard_force_import_audio_manifest(
-                cast(Any, db),
+                _dispatch_db(db),
                 request_id=42,
                 failed_path=root,
                 download_log_id=log_id,
@@ -516,6 +777,19 @@ class TestForceImportManifestGuard(unittest.TestCase):
                 attempt_result=ImportAttemptResult(None),
             )
 
+        self.assertIsNone(outcome)
+
+    def test_force_import_without_manifest_accepts_matching_track_count(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="unsearchable"))
+        db.set_tracks(42, [{"track_number": 1, "title": "One"}])
+        with tempfile.TemporaryDirectory() as root:
+            open(os.path.join(root, "01.mp3"), "wb").close()
+            outcome = _guard_force_import_audio_manifest(
+                _dispatch_db(db), request_id=42, failed_path=root,
+                download_log_id=None, source_username=None,
+                attempt_result=ImportAttemptResult(None), import_job_id=None,
+            )
         self.assertIsNone(outcome)
 
     def test_force_import_without_origin_manifest_rejects_track_count_mismatch(self):
@@ -537,7 +811,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
             job_id = self._claimed_job(db, root)
 
             outcome = dispatch_import_from_db(
-                cast(Any, db),
+                _dispatch_db(db),
                 request_id=42,
                 failed_path=root,
                 import_job_id=job_id,
@@ -546,7 +820,11 @@ class TestForceImportManifestGuard(unittest.TestCase):
         self._persist_deferred_terminal(db, outcome)
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
-        self.assertIn("3 audio files", outcome.message)
+        self.assertEqual(
+            outcome.message,
+            "Force import source has 3 audio files but the request expects 2; "
+            "source audio: 01.mp3, 02.mp3, bonus.mp3",
+        )
         self.assertEqual(db.request(42)["status"], "unsearchable")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "untracked_audio"), outcomes)
@@ -568,7 +846,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
             job_id = self._claimed_job(db, root)
 
             outcome = dispatch_import_from_db(
-                cast(Any, db),
+                _dispatch_db(db),
                 request_id=42,
                 failed_path=root,
                 import_job_id=job_id,
@@ -577,7 +855,11 @@ class TestForceImportManifestGuard(unittest.TestCase):
         self._persist_deferred_terminal(db, outcome)
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
-        self.assertIn("requires either an origin audio manifest", outcome.message)
+        self.assertEqual(
+            outcome.message,
+            "Force import requires either an origin audio manifest or "
+            "request track rows; refusing to pass an unowned folder to beets",
+        )
         self.assertEqual(db.request(42)["status"], "unsearchable")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "unverifiable_source"), outcomes)
@@ -606,7 +888,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
             job_id = self._claimed_job(db, root)
 
             outcome = dispatch_import_from_db(
-                cast(Any, db),
+                _dispatch_db(db),
                 request_id=42,
                 failed_path=root,
                 import_job_id=job_id,
@@ -617,6 +899,11 @@ class TestForceImportManifestGuard(unittest.TestCase):
         # Preserve-folder code (importer skips deletion) — a non-empty source
         # must never route through the rmtree-ing QUALITY_PIPELINE_REJECTED.
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
+        self.assertEqual(
+            outcome.message,
+            "Force import source has 1 audio files but the request expects 2; "
+            "source audio: 01.mp3",
+        )
         self.assertEqual(db.request(42)["status"], "unsearchable")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "incomplete_fileset"), outcomes)
@@ -655,7 +942,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
             job_id = self._claimed_job(db, root, download_log_id=log_id)
 
             outcome = dispatch_import_from_db(
-                cast(Any, db),
+                _dispatch_db(db),
                 request_id=42,
                 failed_path=root,
                 import_job_id=job_id,
@@ -665,6 +952,10 @@ class TestForceImportManifestGuard(unittest.TestCase):
         self._persist_deferred_terminal(db, outcome)
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
+        self.assertEqual(
+            outcome.message,
+            "Force import source is missing validated audio: missing audio: 02.mp3",
+        )
         self.assertEqual(db.request(42)["status"], "unsearchable")
         outcomes = [(log.outcome, log.beets_scenario) for log in db.download_logs]
         self.assertIn(("rejected", "incomplete_fileset"), outcomes)

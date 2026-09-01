@@ -11210,6 +11210,19 @@ class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):
         self.assertEqual(updated.message, "requeue UPDATE failed: boom")
         self._assert_recents_visible_failure(db, claimed)
 
+    def test_requeue_without_job_id_is_a_failed_boolean_outcome(self) -> None:
+        """A missing job cannot be reported as a successful or null result."""
+        from lib.dispatch.evidence_gate import _requeue_import_job_to_preview
+
+        outcome = _requeue_import_job_to_preview(
+            FakePipelineDB(),
+            import_job_id=None,
+            reason="candidate evidence unavailable",
+        )
+
+        self.assertIs(outcome.success, False)
+        self.assertEqual(outcome.code, DISPATCH_CODE_REQUEUE_FAILED)
+
     def test_real_requeue_failure_producer_is_not_prefixed_twice(self) -> None:
         """The producer's contextual requeue prefix is persisted verbatim."""
         from lib.dispatch.evidence_gate import _requeue_import_job_to_preview

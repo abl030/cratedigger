@@ -22,6 +22,14 @@ function. It never rewrites your source files (all writes land under
 restore trap of hand-planted mutants do not apply. Results are cached in
 `mutants/` and re-runs are incremental.
 
+**The cache is keyed on the SOURCE, not on the tests.** Fixing a survivor
+by strengthening a test and re-running `mutmut run` re-executes nothing:
+it reports the identical tally at `0.00 mutations/second`, which reads
+exactly like a run that confirmed your fix did not work. Delete
+`mutants/` to re-measure. Issue #1313 hit this on the first survivor
+round of `scripts/phase_parsers/` — a stale 261/7 where the clean re-run
+said 266/2.
+
 ## Running it
 
 The whole test tree is pytest-runnable: `tests/conftest.py` boots the
