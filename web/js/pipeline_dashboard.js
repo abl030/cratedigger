@@ -56,7 +56,7 @@ export function renderPipelineDashboard(navHtml, data, el) {
   `;
 }
 
-function renderWantedTrendCard(trend) {
+export function renderWantedTrendCard(trend) {
   const current = trend.current_wanted == null ? null : Number(trend.current_wanted);
   const windows = Array.isArray(trend.windows) ? trend.windows : [];
   const etaWindow = windows.find(w => Number(w?.drain_per_hour) > 0 && w?.label === '24h')
@@ -140,7 +140,7 @@ function formatWantedTrendWindow(w) {
   return `${direction} ${formatDecimal(Math.abs(w.delta_per_hour))}/hr (${formatSignedCount(delta)})`;
 }
 
-function renderPeersCard(peers) {
+export function renderPeersCard(peers) {
   const totals = peers.totals || {};
   const days = /** @type {any[]} */ (peers.days || []);
   return `
@@ -192,7 +192,7 @@ function renderRedisCard(redis) {
   `;
 }
 
-function renderDiskCoverageCard(dc) {
+export function renderDiskCoverageCard(dc) {
   if (!dc) {
     return `
     <div class="dashboard-card">
@@ -230,7 +230,7 @@ function renderDiskCoverageCard(dc) {
  * @param {{request_id?: number|null, marked_incomplete?: boolean}} row
  * @returns {string}
  */
-function renderMarkIncompleteButton(row) {
+export function renderMarkIncompleteButton(row) {
   if (row.request_id == null) return '';
   return row.marked_incomplete
     ? `<button class="p-btn" onclick="window.toggleMarkIncomplete(${row.request_id}, false, this)">Clear incomplete mark</button>`
@@ -238,7 +238,7 @@ function renderMarkIncompleteButton(row) {
 }
 
 /** Render the persisted read-only source/catalog/files census. */
-function renderLibraryCompletenessCard(census) {
+export function renderLibraryCompletenessCard(census) {
   const c = census || {};
   const runButton = `<button class="p-btn" onclick="window.refreshLibraryCensus(this)">Run census now</button>`;
   if (c.state === 'missing') {
@@ -323,7 +323,7 @@ function renderLibraryCompletenessCard(census) {
  * @param {any} r
  * @returns {string}
  */
-function renderDriftRow(r) {
+export function renderDriftRow(r) {
   const ambiguousAlbumCount = Array.isArray(r.resolution?.album_ids)
     ? r.resolution.album_ids.length : 0;
   const resolution = r.resolution?.kind === 'ambiguous'
@@ -360,7 +360,7 @@ const RETAG_CENSUS_STALE_AFTER_HOURS = 36;
  * @param {number} [nowMs]
  * @returns {number | null}
  */
-function retagDivergenceSnapshotAgeHours(generatedAt, nowMs = Date.now()) {
+export function retagDivergenceSnapshotAgeHours(generatedAt, nowMs = Date.now()) {
   if (!generatedAt) return null;
   const then = Date.parse(generatedAt);
   if (Number.isNaN(then)) return null;
@@ -374,7 +374,7 @@ function retagDivergenceSnapshotAgeHours(generatedAt, nowMs = Date.now()) {
  * @param {number} [nowMs]
  * @returns {boolean}
  */
-function retagDivergenceSnapshotIsStale(generatedAt, nowMs = Date.now()) {
+export function retagDivergenceSnapshotIsStale(generatedAt, nowMs = Date.now()) {
   const ageHours = retagDivergenceSnapshotAgeHours(generatedAt, nowMs);
   return ageHours != null && ageHours > RETAG_CENSUS_STALE_AFTER_HOURS;
 }
@@ -413,7 +413,7 @@ function retagDivergenceStatusTone(status) {
  * @param {any} census
  * @returns {string}
  */
-function renderRetagDivergenceCensusCard(census) {
+export function renderRetagDivergenceCensusCard(census) {
   const c = census || {};
   const state = c.state || 'missing';
   if (state === 'missing') {
@@ -511,11 +511,11 @@ function renderRetagDivergenceAlbumRow(album) {
 /**
  * The inner content of one retag-divergence album row (classification
  * line + Recheck button), WITHOUT the outer id'd container
- * `renderRetagDivergenceAlbumRow` wraps it in. Exported (not just
- * `__test__`-only) because `pipeline.js::recheckRetagDivergenceAlbum`
- * calls this for real, to re-render just this row's `innerHTML` in
- * place after a fresh per-album check — never the outer container,
- * which already exists in the DOM and must keep its own `id`.
+ * `renderRetagDivergenceAlbumRow` wraps it in.
+ * `pipeline.js::recheckRetagDivergenceAlbum` calls this for real, to
+ * re-render just this row's `innerHTML` in place after a fresh per-album
+ * check — never the outer container, which already exists in the DOM and
+ * must keep its own `id`.
  * @param {any} album
  * @returns {string}
  */
@@ -591,7 +591,7 @@ function renderRetagDivergenceItemRow(item) {
   `;
 }
 
-function renderCoverageCard(coverage) {
+export function renderCoverageCard(coverage) {
   const wanted = coverage.wanted_total || 0;
   const searched24 = coverage.wanted_searched_24h || 0;
   const searched6 = coverage.wanted_searched_6h || 0;
@@ -698,7 +698,7 @@ function formatChartRate(value, unit) {
   return formatMatchRate(value);
 }
 
-function withCoverageMatchRates(coverage, windows) {
+export function withCoverageMatchRates(coverage, windows) {
   if (
     coverage.matches_per_hour_6h != null
     && coverage.matches_per_hour_24h != null
@@ -809,7 +809,7 @@ function renderCycleOutliers(rows) {
   `;
 }
 
-function renderPeerBrowseHeavyQueries(peers) {
+export function renderPeerBrowseHeavyQueries(peers) {
   const rows = /** @type {any[]} */ (peers.heavy_queries || []);
   const hours = Number(peers.heavy_query_hours || 24);
   return `
@@ -904,7 +904,7 @@ function renderStaleWanted(rows) {
  * @param {any} unfindable
  * @returns {string}
  */
-function renderUnfindableCard(unfindable) {
+export function renderUnfindableCard(unfindable) {
   const runs = /** @type {any[]} */ (unfindable.recent_runs || []);
   const latest = runs.length > 0 ? runs[0] : null;
   const trend = unfindable.backlog_trend || {};
@@ -974,7 +974,7 @@ function renderUnfindableBacklogChart(points) {
   `;
 }
 
-function normalizeUnfindableBacklogSeries(points) {
+export function normalizeUnfindableBacklogSeries(points) {
   return (Array.isArray(points) ? points : []).map(point => {
     const row = point || {};
     const backlog = Number(row.due_backlog_at_start);
@@ -1074,30 +1074,3 @@ function formatPercent(value) {
   return `${(Number(value) * 100).toFixed(1)}%`;
 }
 
-export const __test__ = {
-  formatEtaHours,
-  formatWantedTrendWindow,
-  normalizeMatchRateSeries,
-  normalizeUnfindableBacklogSeries,
-  normalizeWantedTrendSeries,
-  renderDailyMatchRateChart,
-  renderCoverageCard,
-  renderDiskCoverageCard,
-  renderLibraryCompletenessCard,
-  renderMarkIncompleteButton,
-  renderDriftRow,
-  renderHourlyMatchRateChart,
-  renderMatchRateChart,
-  renderPeerBrowseHeavyQueries,
-  renderPeersCard,
-  renderRetagDivergenceAlbumRow,
-  renderRetagDivergenceAlbumRowInner,
-  renderRetagDivergenceCensusCard,
-  renderUnfindableBacklogChart,
-  renderUnfindableCard,
-  renderWantedTrendCard,
-  renderWantedTrendChart,
-  retagDivergenceSnapshotAgeHours,
-  retagDivergenceSnapshotIsStale,
-  withCoverageMatchRates,
-};

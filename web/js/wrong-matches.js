@@ -260,7 +260,7 @@ function renderWrongMatchExplorerFile(file) {
  * @param {any} data
  * @returns {string}
  */
-function renderWrongMatchExplorer(data) {
+export function renderWrongMatchExplorer(data) {
   const files = Array.isArray(data?.files) ? data.files : [];
   const otherFileCount = Number.isFinite(data?.other_file_count) ? data.other_file_count : 0;
   const audioFileCount = Number.isFinite(data?.audio_file_count) ? data.audio_file_count : files.length;
@@ -367,7 +367,7 @@ function renderWrongMatchExplorer(data) {
  *
  * @type {Set<unknown>}
  */
-const EXPLORER_RENDERABLE_STATUSES = new Set(['ok', 'unavailable']);
+export const EXPLORER_RENDERABLE_STATUSES = new Set(['ok', 'unavailable']);
 
 /**
  * Did the server record a refusal the operator could go and repair?
@@ -384,7 +384,7 @@ const EXPLORER_RENDERABLE_STATUSES = new Set(['ok', 'unavailable']);
  * @param {any} data
  * @returns {boolean}
  */
-function explorerListingIsRepairable(data) {
+export function explorerListingIsRepairable(data) {
   return Number(data?.unreadable_entry_count) > 0
     || data?.status === 'unavailable';
 }
@@ -538,7 +538,7 @@ function thresholdStorageKey(requestId) {
  * @param {unknown} value
  * @returns {number}
  */
-function normalizeThreshold(value) {
+export function normalizeThreshold(value) {
   const raw = value == null || value === '' ? DEFAULT_CONVERGE_THRESHOLD_MILLI : value;
   const parsed = Number.parseInt(String(raw), 10);
   if (!Number.isFinite(parsed)) return DEFAULT_CONVERGE_THRESHOLD_MILLI;
@@ -600,7 +600,7 @@ export function entryPathUnavailable(entry) {
  * @param {number} thresholdMilli
  * @returns {boolean}
  */
-function isConvergeGreen(entry, thresholdMilli) {
+export function isConvergeGreen(entry, thresholdMilli) {
   if (entryPathUnavailable(entry)) return false;
   const distance = distanceValue(entry?.distance);
   return distance != null && distance <= normalizeThreshold(thresholdMilli) / 1000;
@@ -629,7 +629,7 @@ function greenEntries(group, thresholdMilli) {
  * @param {any} group
  * @returns {any[]}
  */
-function actionableDeleteEntries(group) {
+export function actionableDeleteEntries(group) {
   return (group.entries || []).filter((/** @type {any} */ entry) => (
     !entryPathUnavailable(entry)
   ));
@@ -640,7 +640,7 @@ function actionableDeleteEntries(group) {
  * @param {number} totalCount
  * @returns {string}
  */
-function deleteAllButtonLabel(actionableCount, totalCount) {
+export function deleteAllButtonLabel(actionableCount, totalCount) {
   return actionableCount === totalCount
     ? `Delete All (${totalCount})`
     : `Delete All (${actionableCount} of ${totalCount})`;
@@ -651,7 +651,7 @@ function deleteAllButtonLabel(actionableCount, totalCount) {
  * @param {unknown} thresholdMilli
  * @returns {{request_id: number, threshold_milli: number, delete_unmatched: boolean}}
  */
-function convergeRequestBody(requestId, thresholdMilli) {
+export function convergeRequestBody(requestId, thresholdMilli) {
   return {
     request_id: Number(requestId),
     threshold_milli: normalizeThreshold(thresholdMilli),
@@ -671,7 +671,7 @@ function convergeRequestBody(requestId, thresholdMilli) {
  * @param {any} entry
  * @returns {{format: string, spectral: string, v0: string}}
  */
-function formatEntryEvidence(entry) {
+export function formatEntryEvidence(entry) {
   const fmt = entry && typeof entry.format === 'string' && entry.format
     ? entry.format : null;
   const source = entry && typeof entry.source_codec === 'string' && entry.source_codec
@@ -731,7 +731,7 @@ function formatEntryEvidence(entry) {
  * @param {string} spectralText - `formatEntryEvidence(entry).spectral`
  * @returns {string}
  */
-function entrySpectralCell(entry, spectralText) {
+export function entrySpectralCell(entry, spectralText) {
   const grade = entry && entry.spectral_grade ? entry.spectral_grade : null;
   if (!grade) {
     return `<span class="${qualityToneClass('unknown')}">spectral: ${esc(spectralText)}</span>`;
@@ -763,7 +763,7 @@ function convergeToast(data) {
  * @param {any} data
  * @returns {string}
  */
-function cleanupSummaryToast(data) {
+export function cleanupSummaryToast(data) {
   const deleted = Number(data?.deleted || 0)
     + Number(data?.deleted_verified_lossless_parent || 0);
   const kept = Number(data?.kept_would_import || 0)
@@ -940,7 +940,7 @@ function removeWrongMatchGroup(requestId) {
  * removes the whole group. Preserves scroll position and other expanded state.
  * @param {number|string} logId
  */
-function removeWrongMatchEntry(logId) {
+export function removeWrongMatchEntry(logId) {
   const id = Number(logId);
   if (!Number.isFinite(id)) return;
   _entryExplorerState.delete(id);
@@ -1003,7 +1003,7 @@ export function setWrongMatchConvergeThreshold(requestId, value) {
  * @param {Object} data
  * @param {HTMLElement} el
  */
-function renderWrongMatches(data, el) {
+export function renderWrongMatches(data, el) {
   _lastData = data;
   _lastEl = el;
   _entryExplorerState.clear();
@@ -1040,7 +1040,7 @@ function renderWrongMatches(data, el) {
  * @param {any} g
  * @returns {string}
  */
-function renderQualityBadges(g) {
+export function renderQualityBadges(g) {
   // Drive the 'nothing on disk' badge off data, not the DB status.
   // A row left at status='imported' after a manual beet rm still has
   // nothing on disk, so checking status alone would swallow the signal
@@ -1137,7 +1137,7 @@ function fmtTs(iso) {
  * @param {{in_library?: boolean, verified_lossless?: boolean}} [group]
  * @returns {string}
  */
-function renderLatestImport(d, group) {
+export function renderLatestImport(d, group) {
   if (d) {
     const fmtBr = d.actual_filetype ? `${String(d.actual_filetype).toUpperCase()}${d.actual_min_bitrate ? ' ' + d.actual_min_bitrate + 'k' : ''}` : '';
     return `
@@ -1256,7 +1256,7 @@ function renderConvergeControls(g, count, thresholdMilli) {
  * @param {number|string} requestId
  * @returns {string}
  */
-function renderEntry(e, thresholdMilli, requestId) {
+export function renderEntry(e, thresholdMilli, requestId) {
   const detailId = `wm-entry-${e.download_log_id}`;
   const distValue = distanceValue(e.distance);
   const dist = distValue != null ? distValue.toFixed(3) : '?';
@@ -1521,7 +1521,7 @@ export async function refreshWrongMatches(btn) {
  *   surgically remove the row from the queue on completion. When omitted,
  *   completion just toasts and updates the button without touching the DOM.
  */
-async function _pollImportJob(jobId, btn, logId) {
+export async function pollImportJob(jobId, btn, logId) {
   for (let i = 0; i < 240; i++) {
     await new Promise(resolve => setTimeout(resolve, 2000));
     try {
@@ -1576,45 +1576,6 @@ async function _pollImportJob(jobId, btn, logId) {
   btn.textContent = 'Queued';
 }
 
-export const __test__ = {
-  EXPLORER_RENDERABLE_STATUSES,
-  explorerListingIsRepairable,
-  pollImportJob: _pollImportJob,
-  actionableDeleteEntries,
-  bulkTriageWrongMatches,
-  claimTriageFollow: _claimTriageFollow,
-  releaseTriageFollow: _releaseTriageFollow,
-  retryTriageStatusOnce: _retryTriageStatusOnce,
-  cleanupSummaryToast,
-  convergeRequestBody,
-  convergeWrongMatches,
-  deleteAllButtonLabel,
-  deleteWrongMatch,
-  deleteWrongMatchGroup,
-  deleteUnmatchedOnConverge,
-  entryPathUnavailable,
-  entrySpectralCell,
-  formatEntryEvidence,
-  greenEntries,
-  isConvergeGreen,
-  loadWrongMatches,
-  maybeLoadWrongMatchExplorer,
-  normalizeThreshold,
-  refreshWrongMatches,
-  reloadWrongMatchExplorer,
-  renderEntry,
-  removeWrongMatchEntry,
-  removeWrongMatchGroup,
-  renderLatestImport,
-  renderQualityBadges,
-  renderWrongMatchExplorer,
-  renderWrongMatches,
-  setWrongMatchConvergeThreshold,
-  stopWrongMatchTriage,
-  thresholdForGroup,
-  toggleWrongMatchEntry,
-  triageButtonPresentation,
-};
 
 /**
  * Queue every green candidate for a release and delete the rest.
@@ -1705,7 +1666,7 @@ export async function forceImportWrongMatch(logId, btn) {
       btn.style.color = '#9bf';
       toast(`Queued import: ${data.artist} - ${data.album}`);
       if (data.job_id) {
-        await _pollImportJob(data.job_id, btn, logId);
+        await pollImportJob(data.job_id, btn, logId);
       }
     } else {
       btn.textContent = 'Failed';
@@ -1958,7 +1919,7 @@ let _triageFollowedStartedAt = null;
  * @param {string | null} startedAt
  * @returns {boolean}
  */
-function _claimTriageFollow(startedAt) {
+export function claimTriageFollow(startedAt) {
   if (startedAt == null) return true;
   if (_triageFollowedStartedAt != null && startedAt <= _triageFollowedStartedAt) {
     return false;
@@ -1970,7 +1931,7 @@ function _claimTriageFollow(startedAt) {
 /**
  * @param {string | null} startedAt
  */
-function _releaseTriageFollow(startedAt) {
+export function releaseTriageFollow(startedAt) {
   if (startedAt != null && _triageFollowedStartedAt === startedAt) {
     _triageFollowedStartedAt = null;
   }
@@ -2033,9 +1994,9 @@ async function _applyTriageTerminalState(status) {
 
 /**
  * Poll one sweep to completion and apply the shared terminal handling,
- * exclusively owning it via `_claimTriageFollow` (issue #1106 F5/N3).
+ * exclusively owning it via `claimTriageFollow` (issue #1106 F5/N3).
  * Before acting on the poll's result, verifies it actually describes
- * the SAME sweep this call claimed — `_claimTriageFollow` only refuses
+ * the SAME sweep this call claimed — `claimTriageFollow` only refuses
  * an incoming claim that is stale relative to the slot; it does not
  * freeze the slot for the lifetime of this poll, so a genuinely newer
  * sweep can still take over while `pollTriageStatus()` is in flight. A
@@ -2052,7 +2013,7 @@ async function _followTriageSweepToCompletion(knownStatus) {
   const status = knownStatus ?? await _fetchTriageStatus();
   const startedAt = status && typeof status.started_at === 'string'
     ? status.started_at : null;
-  if (!_claimTriageFollow(startedAt)) return;
+  if (!claimTriageFollow(startedAt)) return;
   try {
     const finalStatus = status && status.state !== 'running'
       ? status
@@ -2064,7 +2025,7 @@ async function _followTriageSweepToCompletion(knownStatus) {
       await _applyTriageTerminalState(finalStatus);
     }
   } finally {
-    _releaseTriageFollow(startedAt);
+    releaseTriageFollow(startedAt);
   }
 }
 
@@ -2087,7 +2048,7 @@ function _applyTriageStatus(status) {
 }
 
 /**
- * Guards `_retryTriageStatusOnce` to at most one in-flight retry at a
+ * Guards `retryTriageStatusOnce` to at most one in-flight retry at a
  * time (issue #1106 N7b). Without this, several renders failing their
  * OWN initial status fetch in close succession (`loadWrongMatches`'s
  * two derive calls under one transient blip, a Refresh racing a tab
@@ -2118,7 +2079,7 @@ let _triageRetryInFlight = false;
  * way), so the window self-corrects rather than mis-starting anything.
  * @returns {Promise<void>}
  */
-async function _retryTriageStatusOnce() {
+export async function retryTriageStatusOnce() {
   if (_triageRetryInFlight) return;
   if (!_triageCleanupBtn() && !_triageStopBtn()) return;
   _triageRetryInFlight = true;
@@ -2158,7 +2119,7 @@ async function _deriveTriageButtonState() {
   // call and abort the caller entirely (`loadWrongMatches()` would
   // never even reach its own queue fetch).
   if (status == null) {
-    void _retryTriageStatusOnce();
+    void retryTriageStatusOnce();
     return;
   }
   _applyTriageStatus(status);

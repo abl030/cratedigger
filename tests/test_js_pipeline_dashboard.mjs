@@ -3,7 +3,24 @@
  * Run with: node tests/test_js_pipeline_dashboard.mjs
  */
 
-import { __test__, renderPipelineDashboard } from '../web/js/pipeline_dashboard.js';
+import {
+  normalizeUnfindableBacklogSeries,
+  renderCoverageCard,
+  renderDiskCoverageCard,
+  renderDriftRow,
+  renderLibraryCompletenessCard,
+  renderMarkIncompleteButton,
+  renderPeerBrowseHeavyQueries,
+  renderPeersCard,
+  renderPipelineDashboard,
+  renderRetagDivergenceAlbumRowInner,
+  renderRetagDivergenceCensusCard,
+  renderUnfindableCard,
+  renderWantedTrendCard,
+  retagDivergenceSnapshotAgeHours,
+  retagDivergenceSnapshotIsStale,
+  withCoverageMatchRates,
+} from '../web/js/pipeline_dashboard.js';
 import { state } from '../web/js/state.js';
 import { awstDateTime } from '../web/js/util.js';
 
@@ -16,7 +33,7 @@ t.section('renderCoverageCard() shows found-enqueue match rates');
   state.pipelineMatchGraphOpen = false;
   state.pipelineHourlyMatchGraphOpen = false;
   state.pipelineDailyMatchGraphOpen = false;
-  const html = __test__.renderCoverageCard({
+  const html = renderCoverageCard({
     wanted_total: 10,
     wanted_searched_24h: 8,
     wanted_searched_6h: 5,
@@ -38,7 +55,7 @@ t.section('renderCoverageCard() shows found-enqueue match rates');
 }
 t.section('renderWantedTrendCard() shows backlog drain and ETA');
 {
-  const html = __test__.renderWantedTrendCard({
+  const html = renderWantedTrendCard({
     current_wanted: 10,
     series_24h: [
       {sampled_at: '2026-05-05T00:00:00+00:00', wanted_total: 14},
@@ -76,7 +93,7 @@ t.section('renderCoverageCard() expands an hourly match-rate chart under the 6h 
   state.pipelineMatchGraphOpen = false;
   state.pipelineHourlyMatchGraphOpen = true;
   state.pipelineDailyMatchGraphOpen = false;
-  const html = __test__.renderCoverageCard({
+  const html = renderCoverageCard({
     wanted_total: 10,
     wanted_searched_24h: 8,
     wanted_searched_6h: 5,
@@ -105,7 +122,7 @@ t.section('renderCoverageCard() expands a daily match-rate chart under the 24h r
   state.pipelineMatchGraphOpen = false;
   state.pipelineHourlyMatchGraphOpen = false;
   state.pipelineDailyMatchGraphOpen = true;
-  const html = __test__.renderCoverageCard({
+  const html = renderCoverageCard({
     wanted_total: 10,
     wanted_searched_24h: 8,
     wanted_searched_6h: 5,
@@ -128,7 +145,7 @@ t.section('renderCoverageCard() expands a daily match-rate chart under the 24h r
 }
 t.section('withCoverageMatchRates() falls back to search window found counts');
 {
-  const coverage = __test__.withCoverageMatchRates({
+  const coverage = withCoverageMatchRates({
     wanted_total: 10,
     wanted_searched_24h: 8,
   }, [
@@ -155,7 +172,7 @@ t.section('withCoverageMatchRates() falls back to search window found counts');
   // early-return's `&&` from `||`; with `||` the present rate short-circuits
   // and the absent one is never derived. Pre-existing gap that the old
   // compound assertion shared (round-2 review, mutant M58).
-  const halfKnown = __test__.withCoverageMatchRates({
+  const halfKnown = withCoverageMatchRates({
     wanted_total: 10,
     matches_per_hour_24h: 5.5,
   }, [
@@ -167,7 +184,7 @@ t.section('withCoverageMatchRates() falls back to search window found counts');
 }
 t.section('renderPeerBrowseHeavyQueries() shows release ids and exact query tokens');
 {
-  const html = __test__.renderPeerBrowseHeavyQueries({
+  const html = renderPeerBrowseHeavyQueries({
     heavy_query_hours: 24,
     heavy_queries: [
       {
@@ -195,7 +212,7 @@ t.section('renderPeerBrowseHeavyQueries() shows release ids and exact query toke
 }
 t.section('renderPeersCard() shows totals strip and cumulative day table');
 {
-  const html = __test__.renderPeersCard({
+  const html = renderPeersCard({
     totals: {
       known_peers: 40746,
       new_24h: 312,
@@ -215,13 +232,13 @@ t.section('renderPeersCard() shows totals strip and cumulative day table');
 }
 t.section('renderPeersCard() with no observations renders the empty row');
 {
-  const html = __test__.renderPeersCard({ totals: {}, days: [] });
+  const html = renderPeersCard({ totals: {}, days: [] });
   t.contains(html, 'No peer observations yet', 'empty state rendered');
 }
 
 t.section('renderUnfindableCard() with no runs yet renders the honest empty state (#1112)');
 {
-  const html = __test__.renderUnfindableCard({ recent_runs: [], backlog_trend: {} });
+  const html = renderUnfindableCard({ recent_runs: [], backlog_trend: {} });
   t.contains(html, 'Unfindable Detection', 'card title rendered');
   t.contains(html, 'No unfindable-detection runs yet', 'empty table row rendered');
   t.contains(html, '>never</strong>', 'last-run falls back to never');
@@ -230,7 +247,7 @@ t.section('renderUnfindableCard() with no runs yet renders the honest empty stat
 }
 t.section('renderUnfindableCard() shows latest-run facts, outcome breakdown, and breaker state');
 {
-  const html = __test__.renderUnfindableCard({
+  const html = renderUnfindableCard({
     recent_runs: [
       {
         created_at: '2026-08-12T00:10:00+00:00',
@@ -284,7 +301,7 @@ t.section('renderUnfindableCard() shows latest-run facts, outcome breakdown, and
 }
 t.section('normalizeUnfindableBacklogSeries() maps due_backlog_at_start to a plottable series');
 {
-  const series = __test__.normalizeUnfindableBacklogSeries([
+  const series = normalizeUnfindableBacklogSeries([
     {sampled_at: '2026-08-11T00:00:00+00:00', due_backlog_at_start: 900},
     {sampled_at: '2026-08-12T00:00:00+00:00', due_backlog_at_start: 686},
   ]);
@@ -300,7 +317,7 @@ t.section('normalizeUnfindableBacklogSeries() maps due_backlog_at_start to a plo
 
 t.section('renderDriftRow() renders the operator merge-rekey button for MB-sourced rows (#1089)');
 {
-  const html = __test__.renderDriftRow({
+  const html = renderDriftRow({
     id: 8792, artist_name: 'Slipknot', album_title: 'Vol. 3: (The Subliminal Verses)',
     status: 'imported', mb_release_id: 'd990b8af-0000-0000-0000-000000000000',
     discogs_release_id: null, source: 'musicbrainz',
@@ -320,7 +337,7 @@ t.section('renderDriftRow() withholds the button for non-MB-sourced rows (#1089 
   // discogs_release_id (ReleaseIdentity.from_strict_fields's own
   // docstring) — mb_release_id truthiness alone would falsely gate the
   // button on. The server-derived `source` field is the real gate.
-  const html = __test__.renderDriftRow({
+  const html = renderDriftRow({
     id: 1870, artist_name: 'Some Artist', album_title: 'Some Album',
     status: 'imported', mb_release_id: '1870', discogs_release_id: '1870',
     source: 'discogs', resolution: {kind: 'missing'},
@@ -333,7 +350,7 @@ t.section('renderDriftRow() withholds the button for non-MB-sourced rows (#1089 
 }
 t.section('renderDriftRow() escapes artist/album HTML');
 {
-  const html = __test__.renderDriftRow({
+  const html = renderDriftRow({
     id: 1, artist_name: '<script>x</script>', album_title: 'A & B', status: 'imported',
     mb_release_id: 'd990b8af-0000-0000-0000-000000000000', source: 'musicbrainz',
     resolution: {kind: 'missing'},
@@ -343,7 +360,7 @@ t.section('renderDriftRow() escapes artist/album HTML');
 }
 t.section('renderDriftRow() distinguishes ambiguity from missing by exact album cardinality');
 {
-  const html = __test__.renderDriftRow({
+  const html = renderDriftRow({
     id: 2, artist_name: 'Ambiguous Artist', album_title: 'Two Albums',
     status: 'imported', source: 'musicbrainz',
     resolution: {kind: 'ambiguous', album_ids: [7, 9], reason: 'multiple_matches'},
@@ -353,7 +370,7 @@ t.section('renderDriftRow() distinguishes ambiguity from missing by exact album 
 }
 t.section('renderDiskCoverageCard() composes one drift row per off-disk request');
 {
-  const html = __test__.renderDiskCoverageCard({
+  const html = renderDiskCoverageCard({
     counts: {on_disk_total: 9, active_total: 11, off_disk_by_status: {wanted: 1}},
     drift_rows: [
       {id: 316, artist_name: 'Rebecca Black', album_title: 'Sing It', status: 'imported',
@@ -372,7 +389,7 @@ t.section('renderDiskCoverageCard() composes one drift row per off-disk request'
 }
 t.section('renderDiskCoverageCard() keeps wanted coverage neutral when a wanted row is ambiguous');
 {
-  const html = __test__.renderDiskCoverageCard({
+  const html = renderDiskCoverageCard({
     counts: {on_disk_total: 9, active_total: 10, off_disk_by_status: {wanted: 1}},
     drift_rows: [],
   });
@@ -381,7 +398,7 @@ t.section('renderDiskCoverageCard() keeps wanted coverage neutral when a wanted 
 }
 t.section('renderDiskCoverageCard() renders no drift rows or buttons when nothing has drifted');
 {
-  const html = __test__.renderDiskCoverageCard({
+  const html = renderDiskCoverageCard({
     counts: {on_disk_total: 11, active_total: 11, off_disk_by_status: {}},
     drift_rows: [],
   });
@@ -391,7 +408,7 @@ t.section('renderDiskCoverageCard() renders no drift rows or buttons when nothin
 
 t.section('renderRetagDivergenceCensusCard() honestly shows the missing state');
 {
-  const html = __test__.renderRetagDivergenceCensusCard({
+  const html = renderRetagDivergenceCensusCard({
     state: 'missing', error: null, snapshot: null,
   });
   t.contains(html, 'Beets DB', 'card title mentions Beets DB');
@@ -401,7 +418,7 @@ t.section('renderRetagDivergenceCensusCard() honestly shows the missing state');
 }
 t.section('renderRetagDivergenceCensusCard() shows the unreadable state without crashing');
 {
-  const html = __test__.renderRetagDivergenceCensusCard({
+  const html = renderRetagDivergenceCensusCard({
     state: 'unreadable', error: 'DecodeError: bad json', snapshot: null,
   });
   t.contains(html, 'unreadable', 'unreadable state copy rendered');
@@ -409,7 +426,7 @@ t.section('renderRetagDivergenceCensusCard() shows the unreadable state without 
 }
 t.section('renderRetagDivergenceCensusCard() renders a clean snapshot with zero listed albums');
 {
-  const html = __test__.renderRetagDivergenceCensusCard({
+  const html = renderRetagDivergenceCensusCard({
     state: 'ok', error: null,
     snapshot: {
       generated_at: '2026-08-14T09:00:00+00:00',
@@ -429,15 +446,15 @@ t.section('retagDivergenceSnapshotAgeHours() computes hours since generated_at')
 {
   const nowMs = Date.parse('2026-08-16T00:00:00+00:00');
   t.ok(
-    __test__.retagDivergenceSnapshotAgeHours('2026-08-15T00:00:00+00:00', nowMs) === 24,
+    retagDivergenceSnapshotAgeHours('2026-08-15T00:00:00+00:00', nowMs) === 24,
     '24h old is 24',
   );
   t.ok(
-    __test__.retagDivergenceSnapshotAgeHours(null, nowMs) === null,
+    retagDivergenceSnapshotAgeHours(null, nowMs) === null,
     'missing generated_at is null, not NaN',
   );
   t.ok(
-    __test__.retagDivergenceSnapshotAgeHours('not a date', nowMs) === null,
+    retagDivergenceSnapshotAgeHours('not a date', nowMs) === null,
     'unparsable generated_at is null',
   );
 }
@@ -447,18 +464,18 @@ t.section('N5 (#1142 review) — stale boundary is exactly 36h; 36.0h is fresh, 
   const atBoundary = new Date(nowMs - 36 * 3600000).toISOString();
   const justPastBoundary = new Date(nowMs - 36.01 * 3600000).toISOString();
   t.ok(
-    __test__.retagDivergenceSnapshotIsStale(atBoundary, nowMs) === false,
+    retagDivergenceSnapshotIsStale(atBoundary, nowMs) === false,
     'exactly 36h old is NOT stale (boundary is exclusive)',
   );
   t.ok(
-    __test__.retagDivergenceSnapshotIsStale(justPastBoundary, nowMs) === true,
+    retagDivergenceSnapshotIsStale(justPastBoundary, nowMs) === true,
     'just past 36h old IS stale',
   );
 }
 t.section('renderRetagDivergenceCensusCard() N5 — a fresh snapshot never reads stale');
 {
   const fresh = new Date(Date.now() - 2 * 3600000).toISOString();
-  const html = __test__.renderRetagDivergenceCensusCard({
+  const html = renderRetagDivergenceCensusCard({
     state: 'ok', error: null,
     snapshot: {
       generated_at: fresh,
@@ -476,7 +493,7 @@ t.section('renderRetagDivergenceCensusCard() N5 — a fresh snapshot never reads
 t.section('renderRetagDivergenceCensusCard() N5 — a snapshot older than 36h reads stale with a warn tone');
 {
   const stale = new Date(Date.now() - 40 * 3600000).toISOString();
-  const html = __test__.renderRetagDivergenceCensusCard({
+  const html = renderRetagDivergenceCensusCard({
     state: 'ok', error: null,
     snapshot: {
       generated_at: stale,
@@ -494,7 +511,7 @@ t.section('renderRetagDivergenceCensusCard() N5 — a snapshot older than 36h re
 t.section('renderLibraryCompletenessCard() groups findings into collapsed, honestly capped categories');
 {
   const stale = new Date(Date.now() - 40 * 3600000).toISOString();
-  const html = __test__.renderLibraryCompletenessCard({
+  const html = renderLibraryCompletenessCard({
     state: 'ok', albums_shown: 1, albums_listed_total: 2,
     snapshot: {
       generated_at: stale, duration_seconds: 2.5,
@@ -525,7 +542,7 @@ t.section('renderLibraryCompletenessCard() groups findings into collapsed, hones
 }
 t.section('renderLibraryCompletenessCard() keeps zero defect observations neutral');
 {
-  const html = __test__.renderLibraryCompletenessCard({
+  const html = renderLibraryCompletenessCard({
     state: 'ok', snapshot: {generated_at: new Date().toISOString(), duration_seconds: 1,
       report: {status: 'complete', counts: {albums_scanned: 1, audio_complete: 1, missing_source_audio: 0, catalog_drift: 0, unknown: 0}, albums: []}},
   });
@@ -534,7 +551,7 @@ t.section('renderLibraryCompletenessCard() keeps zero defect observations neutra
 }
 t.section('renderRetagDivergenceCensusCard() lists a divergent album with a recheck button');
 {
-  const html = __test__.renderRetagDivergenceCensusCard({
+  const html = renderRetagDivergenceCensusCard({
     state: 'ok', error: null,
     snapshot: {
       generated_at: '2026-08-14T09:00:00+00:00',
@@ -556,7 +573,7 @@ t.section('renderRetagDivergenceCensusCard() lists a divergent album with a rech
 }
 t.section('renderRetagDivergenceAlbumRowInner() #1260 — names first, raw MBIDs demoted, Write-tags wired');
 {
-  const html = __test__.renderRetagDivergenceAlbumRowInner({
+  const html = renderRetagDivergenceAlbumRowInner({
     album_id: 16948,
     db_mb_albumid: '26693e58-02c0-4bb1-b66f-f0f44f8a234d',
     albumartist: 'Terre Thaemlitz / DJ Sprinkles',
@@ -581,7 +598,7 @@ t.section('renderRetagDivergenceAlbumRowInner() #1260 — names first, raw MBIDs
 }
 t.section('renderRetagDivergenceAlbumRowInner() #1260 — no Write-tags button without a divergent item');
 {
-  const html = __test__.renderRetagDivergenceAlbumRowInner({
+  const html = renderRetagDivergenceAlbumRowInner({
     album_id: 7,
     db_mb_albumid: '26693e58-02c0-4bb1-b66f-f0f44f8a234d',
     album_class: 'unreadable', item_count: 1,
@@ -595,7 +612,7 @@ t.section('renderRetagDivergenceAlbumRowInner() #1260 — no Write-tags button w
 }
 t.section('renderRetagDivergenceAlbumRowInner() #1260 — a pre-#1260 snapshot without names still renders');
 {
-  const html = __test__.renderRetagDivergenceAlbumRowInner({
+  const html = renderRetagDivergenceAlbumRowInner({
     album_id: 9,
     db_mb_albumid: '26693e58-02c0-4bb1-b66f-f0f44f8a234d',
     album_class: 'diverges', item_count: 1,
@@ -609,7 +626,7 @@ t.section('renderRetagDivergenceAlbumRowInner() #1260 — a pre-#1260 snapshot w
 }
 t.section('renderRetagDivergenceCensusCard() escapes the db_mb_albumid value');
 {
-  const html = __test__.renderRetagDivergenceCensusCard({
+  const html = renderRetagDivergenceCensusCard({
     state: 'ok', error: null,
     snapshot: {
       generated_at: '2026-08-14T09:00:00+00:00',
@@ -628,7 +645,7 @@ t.section('renderRetagDivergenceCensusCard() escapes the db_mb_albumid value');
 }
 t.section('renderRetagDivergenceCensusCard() N1 (fresh review) — shows "Showing N of M" when the dashboard route capped the album list');
 {
-  const html = __test__.renderRetagDivergenceCensusCard({
+  const html = renderRetagDivergenceCensusCard({
     state: 'ok', error: null,
     albums_shown: 50, albums_listed_total: 57,
     snapshot: {
@@ -650,7 +667,7 @@ t.section('renderRetagDivergenceCensusCard() N1 (fresh review) — shows "Showin
 }
 t.section('renderRetagDivergenceCensusCard() N1 (fresh review) — no "Showing" text when nothing was capped');
 {
-  const html = __test__.renderRetagDivergenceCensusCard({
+  const html = renderRetagDivergenceCensusCard({
     state: 'ok', error: null,
     albums_shown: 1, albums_listed_total: 1,
     snapshot: {
@@ -670,7 +687,7 @@ t.section('renderRetagDivergenceCensusCard() N1 (fresh review) — no "Showing" 
 }
 t.section('renderRetagDivergenceAlbumRowInner() N2 (fresh review) — shows each non-agreeing item\'s class + identity + detail');
 {
-  const html = __test__.renderRetagDivergenceAlbumRowInner({
+  const html = renderRetagDivergenceAlbumRowInner({
     album_id: 6612, db_mb_albumid: 'd990b8af-0000-0000-0000-000000000000',
     album_class: 'diverges', item_count: 3,
     items: [
@@ -705,7 +722,7 @@ t.section('renderRetagDivergenceAlbumRowInner() N2 (fresh review) — shows each
 }
 t.section('renderRetagDivergenceAlbumRowInner() N2 (fresh review) — escapes XSS-looking item identity/detail');
 {
-  const html = __test__.renderRetagDivergenceAlbumRowInner({
+  const html = renderRetagDivergenceAlbumRowInner({
     album_id: 1, db_mb_albumid: 'cafef00d',
     album_class: 'diverges', item_count: 1,
     items: [{
@@ -725,7 +742,7 @@ t.section('renderRetagDivergenceCensusCard() N1 — an incomplete report with no
   // see lib/retag_divergence_audit.py), but the frontend must stay
   // defensively correct on its own terms rather than trusting that
   // backend invariant to hold forever.
-  const html = __test__.renderRetagDivergenceCensusCard({
+  const html = renderRetagDivergenceCensusCard({
     state: 'ok', error: null,
     snapshot: {
       generated_at: '2026-08-14T09:00:00+00:00',
@@ -751,7 +768,7 @@ t.section('renderRetagDivergenceCensusCard() N1 — an incomplete report with no
 }
 t.section('renderRetagDivergenceCensusCard() N1 — a clean report keeps Albums scanned unmuted');
 {
-  const html = __test__.renderRetagDivergenceCensusCard({
+  const html = renderRetagDivergenceCensusCard({
     state: 'ok', error: null,
     snapshot: {
       generated_at: '2026-08-14T09:00:00+00:00',
@@ -774,14 +791,14 @@ t.section('renderRetagDivergenceCensusCard() N1 — a clean report keeps Albums 
 t.section('renderMarkIncompleteButton() three-state contract (#1241)');
 {
   // Marked row → the clear action, sending marked=false.
-  const clearHtml = __test__.renderMarkIncompleteButton(
+  const clearHtml = renderMarkIncompleteButton(
     {request_id: 310, marked_incomplete: true});
   t.contains(clearHtml, '>Clear incomplete mark</button>',
     'marked row offers the clear action');
   t.contains(clearHtml, 'window.toggleMarkIncomplete(310, false, this)',
     'clear action sends marked=false for THIS request');
   // Unmarked row → the mark action, sending marked=true.
-  const markHtml = __test__.renderMarkIncompleteButton(
+  const markHtml = renderMarkIncompleteButton(
     {request_id: 311, marked_incomplete: false});
   t.contains(markHtml, '>Mark incomplete</button>',
     'unmarked row offers the mark action');
@@ -789,17 +806,17 @@ t.section('renderMarkIncompleteButton() three-state contract (#1241)');
     'mark action sends marked=true for THIS request');
   // No resolvable request → no button at all.
   t.ok(
-    __test__.renderMarkIncompleteButton(
+    renderMarkIncompleteButton(
       {request_id: null, marked_incomplete: false}) === '',
     'a census album with no resolvable request renders no button');
   t.ok(
-    __test__.renderMarkIncompleteButton({}) === '',
+    renderMarkIncompleteButton({}) === '',
     'a row with request_id absent renders no button');
 }
 
 t.section('renderLibraryCompletenessCard() wires the mark buttons per row (#1241)');
 {
-  const html = __test__.renderLibraryCompletenessCard({
+  const html = renderLibraryCompletenessCard({
     state: 'ok',
     error: null,
     albums_shown: 3,
@@ -840,15 +857,15 @@ t.section('renderLibraryCompletenessCard() wires the mark buttons per row (#1241
 
 t.section('renderLibraryCompletenessCard() offers Run census now in every branch');
 {
-  const missing = __test__.renderLibraryCompletenessCard({state: 'missing'});
+  const missing = renderLibraryCompletenessCard({state: 'missing'});
   t.contains(missing, 'window.refreshLibraryCensus(this)',
     'missing branch offers the census run action');
-  const unreadable = __test__.renderLibraryCompletenessCard({
+  const unreadable = renderLibraryCompletenessCard({
     state: 'unreadable', error: 'boom',
   });
   t.contains(unreadable, 'window.refreshLibraryCensus(this)',
     'unreadable branch offers the repair action');
-  const populated = __test__.renderLibraryCompletenessCard({
+  const populated = renderLibraryCompletenessCard({
     state: 'ok', error: null, albums_shown: 0, albums_listed_total: 0,
     snapshot: {
       generated_at: new Date().toISOString(),
