@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
+import io
 import os
 import select
 import shutil
@@ -11,7 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from scripts.run_python_tests import (
     _parser as _run_python_tests_parser,
@@ -24,13 +26,24 @@ from scripts.run_python_tests import (
 from scripts.run_targeted_tests import targeted_phases
 from scripts.targeted_test_selection import (
     ALWAYS_AMBIENT_TESTS,
+    BASENAME_RULES,
     EXACT_PATH_NEIGHBOURS,
+    EXACT_TABLE_SOURCE,
+    PIPELINE_DB_NEIGHBOURS,
+    PREFIX_RULES,
+    SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE,
+    SELECTION_RULES,
+    SELF_SELECTOR_SOURCE,
     SHARED_MODULES_WITHOUT_COVERAGE,
+    SelectionRule,
     _assert_no_double_registration,
+    _assert_selection_rules_well_formed,
     _changed_path_neighbours,
     ambient_test_modules,
     assert_selection_complete,
     expand_test_selection,
+    explain_path,
+    resolve_attributed_neighbours,
 )
 from scripts.test_substrate import admission_lock_path
 from tests._source_pins import pinned_source
@@ -595,6 +608,358 @@ class TestTargetedTestSelection(unittest.TestCase):
                 ("tests.test_alpha", "tests.test_alpha"),
                 ("tests.test_alpha",),
             )
+
+
+class TestSelectionRuleTable(unittest.TestCase):
+    """`SELECTION_RULES` and the `explain` seam (issue #1313).
+
+    The basename conventions and directory rules used to be eighteen
+    hand-written `if` branches. As data they are auditable and attributable;
+    these are the contracts that keeps them honest. Selection machinery, so
+    deterministic tests only.
+    """
+
+    #: Path shapes the repository does not currently contain, so the
+    #: disjointness pin below covers more than today's tree: a shell script
+    #: outside scripts/, a top-level shell script, a route module, and a
+    #: top-level Python file.
+    SYNTHETIC_PROBES = (
+        "lib/probe.sh",
+        "scripts/probe.sh",
+        "scripts/probe.py",
+        "web/probe.py",
+        "web/routes/probe.py",
+        "probe.py",
+        "probe.sh",
+        "harness/probe.py",
+        "tests/probe.py",
+        "migrations/099_probe.sql",
+    )
+
+    #: Every root a basename rule can match, plus the top level. Rooted at
+    #: each directory rather than REPO_ROOT, so `.claude/worktrees/` stale
+    #: checkouts are structurally unreachable (the #520/#543 shape); the
+    #: top-level sweep uses `iterdir`, which does not descend at all.
+    WALKED_ROOTS = ("lib", "scripts", "web", "tests", "harness")
+
+    def _repository_paths(self) -> list[str]:
+        """Every real file a basename rule could match, walked not queried.
+
+        Deliberately not `git ls-files`: this test has to keep working
+        inside a copied tree that is not a git worktree, which is where
+        mutmut runs it (issue #1325 residual 5 recorded that shape for this
+        very file, and a `git ls-files` version of this pin reproduced it —
+        every path came back empty and the sweep silently covered nothing).
+        """
+        paths = [
+            path.relative_to(REPO_ROOT).as_posix()
+            for root in self.WALKED_ROOTS
+            for path in (REPO_ROOT / root).rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts
+        ]
+        paths.extend(
+            path.name for path in REPO_ROOT.iterdir() if path.is_file()
+        )
+        return paths
+
+    def test_at_most_one_basename_rule_matches_any_path(self) -> None:
+        """`_basename_rule` speaks of "the" matching rule, so there must be
+        at most one.
+
+        The rows are meant to be disjoint by construction — different roots,
+        different suffixes within a root, and a top-level rule no rooted path
+        can reach. If two ever overlapped, the first would silently win and
+        the second's templates would vanish with nothing saying so. Checked
+        over every real file under a root a basename rule can reach, plus
+        shapes the tree does not currently hold.
+        """
+        walked = self._repository_paths()
+        self.assertGreater(len(walked), 100, "expected a populated worktree")
+
+        for relative in (*walked, *self.SYNTHETIC_PROBES):
+            path = PurePosixPath(relative)
+            matching = [
+                rule.name
+                for rule in BASENAME_RULES
+                if rule.matches(relative, path)
+            ]
+            with self.subTest(path=relative):
+                self.assertLessEqual(len(matching), 1, matching)
+
+    def test_duplicate_rule_names_are_refused_at_import_time(self) -> None:
+        """Known-bad self-test. Two rows sharing a name make `explain`'s
+        attribution ambiguous and let one row's pin stand in for another's.
+        """
+        row = SelectionRule(
+            name="probe", description="probe", root="lib", derived=("tests.x",)
+        )
+        with self.assertRaisesRegex(
+            ValueError, r"duplicate SelectionRule name: probe"
+        ):
+            _assert_selection_rules_well_formed((row, row))
+
+    def test_a_rule_matching_every_path_is_refused_at_import_time(self) -> None:
+        """Known-bad self-test. A row with no path condition matches every
+        file in the repository, so its modules would join every selection.
+        `suffixes` alone is not a path condition — `.py` is most of the tree.
+        """
+        with self.assertRaisesRegex(
+            ValueError,
+            r"constrains no path and would match every file in the repository",
+        ):
+            _assert_selection_rules_well_formed(
+                (
+                    SelectionRule(
+                        name="probe",
+                        description="probe",
+                        suffixes=(".py",),
+                        neighbours=("tests.test_fakes",),
+                    ),
+                )
+            )
+
+    def test_a_rule_contributing_nothing_is_refused_at_import_time(self) -> None:
+        """Known-bad self-test. A row that matches paths and names no module
+        reads as coverage in the table while selecting nothing.
+        """
+        with self.assertRaisesRegex(ValueError, r"contributes no test module"):
+            _assert_selection_rules_well_formed(
+                (
+                    SelectionRule(
+                        name="probe", description="probe", prefixes=("lib/",)
+                    ),
+                )
+            )
+
+    def test_the_real_table_passes_its_own_checker(self) -> None:
+        """Must-still-work control for the three clauses above, and the
+        reason the import-time call is not merely decorative.
+        """
+        _assert_selection_rules_well_formed(SELECTION_RULES)
+        self.assertEqual(SELECTION_RULES, (*BASENAME_RULES, *PREFIX_RULES))
+
+    def test_attribution_names_the_mechanism_behind_every_module(self) -> None:
+        """Three mechanisms fire for one path, and each names what it added.
+
+        `lib/pipeline_db/decisions.py` is the richest real instance: a
+        hand-authored entry, a basename rule that finds nothing on disk, and
+        the pipeline-DB prefix rule. Before this table, "which rule selected
+        this module" meant reading the file or diffing a run.
+        """
+        relative = "lib/pipeline_db/decisions.py"
+        sources = resolve_attributed_neighbours(
+            relative, PurePosixPath(relative), REPO_ROOT
+        )
+
+        self.assertEqual(
+            [source.name for source in sources],
+            [
+                EXACT_TABLE_SOURCE,
+                "basename:lib/*.py",
+                "prefix:lib/pipeline_db/",
+            ],
+        )
+        # Every source carries the sentence `explain` prints beside it. The
+        # two that belong to no rule are spelled here because nothing else
+        # holds them; the rule-owned two come from the table, so a row whose
+        # description drifts from what it does is caught at its own site.
+        by_name = {rule.name: rule for rule in SELECTION_RULES}
+        self.assertEqual(
+            [source.description for source in sources],
+            [
+                "hand-authored entry for this exact path",
+                by_name["basename:lib/*.py"].description,
+                by_name["prefix:lib/pipeline_db/"].description,
+            ],
+        )
+        self.assertEqual(
+            sources[0].modules, EXACT_PATH_NEIGHBOURS[relative]
+        )
+        # The basename rule matched and contributed nothing: neither
+        # tests.test_decisions nor its generated sibling exists, which is
+        # exactly why this path carries a hand-authored entry.
+        self.assertEqual(sources[1].modules, ())
+        self.assertEqual(
+            sources[1].unresolved,
+            ("tests.test_decisions", "tests.test_decisions_generated"),
+        )
+        self.assertEqual(sources[2].modules, PIPELINE_DB_NEIGHBOURS)
+        self.assertEqual(
+            sources[2].unresolved, ("tests.test_fakes_decisions",)
+        )
+
+    def test_the_hand_authored_entry_resolves_before_the_prefix_rules(
+        self,
+    ) -> None:
+        """Order is a contract, not an accident: the runner takes the
+        selection in this order, and the whole table exists to preserve it.
+        Built from the named constants, so it cannot rot into a restatement
+        of whatever the resolver happens to do.
+        """
+        relative = "lib/pipeline_db/decisions.py"
+
+        self.assertEqual(
+            _changed_path_neighbours(relative, REPO_ROOT),
+            (*EXACT_PATH_NEIGHBOURS[relative], *PIPELINE_DB_NEIGHBOURS),
+        )
+
+    def test_a_changed_test_module_is_attributed_to_the_self_selector(
+        self,
+    ) -> None:
+        """The one mechanism that is neither a table entry nor a rule."""
+        relative = "tests/test_pyright_checks.py"
+        sources = resolve_attributed_neighbours(
+            relative, PurePosixPath(relative), REPO_ROOT
+        )
+
+        self.assertEqual([source.name for source in sources], [SELF_SELECTOR_SOURCE])
+        self.assertEqual(sources[0].modules, ("tests.test_pyright_checks",))
+        self.assertEqual(
+            sources[0].description,
+            "the changed file is itself a runnable test module",
+        )
+
+    def test_explain_names_the_rule_that_selected_each_module(self) -> None:
+        report = explain_path("web/routes/youtube.py", REPO_ROOT)
+        joined = "\n".join(report)
+
+        self.assertIn("prefix:web/routes/", joined)
+        self.assertIn("tests.web.test_routes_youtube", joined)
+        self.assertIn("tests.web.test_route_audit", joined)
+        # The whole sentence, as a line: `web/` is policed by no root rule,
+        # and a reader who only sees "policed by: nothing" does not learn
+        # that zero neighbours here would be silent rather than fatal.
+        self.assertIn(
+            "  policed by: nothing — no ROOT_COVERAGE_RULES row covers this "
+            "root and suffix, so resolving zero neighbours here is silent",
+            report,
+        )
+
+    def test_explain_says_so_when_no_mechanism_matches_at_all(self) -> None:
+        """A path outside every root and every rule. The line is the whole
+        answer for it, so it is asserted as a line, not as a substring.
+        """
+        report = explain_path("docs/mirrors.md", REPO_ROOT)
+
+        self.assertIn("  (no mechanism matched this path)", report)
+        self.assertNotIn(
+            "  (no mechanism matched this path)",
+            explain_path("lib/download.py", REPO_ROOT),
+        )
+
+    def test_explain_reports_a_derived_name_with_no_module_on_disk(self) -> None:
+        """The single most common reason a path resolves less than expected,
+        and the reason `NeighbourSource` carries `unresolved` at all.
+        """
+        self.assertFalse((REPO_ROOT / "tests" / "test_fakes_evidence.py").exists())
+
+        report = "\n".join(
+            explain_path("tests/fakes/pipeline_db/evidence.py", REPO_ROOT)
+        )
+
+        self.assertIn("tests.test_fakes_evidence  (no module file on disk)", report)
+        self.assertIn("selects: tests.test_fakes", report)
+
+    def test_explain_reports_a_fail_closed_path_instead_of_raising(self) -> None:
+        """A diagnostic that dies on the paths worth diagnosing is useless:
+        an unmapped file is exactly when someone runs `explain`.
+        """
+        report = "\n".join(
+            explain_path("lib/_no_such_module_anywhere.py", REPO_ROOT)
+        )
+
+        self.assertIn("fails closed", report)
+        self.assertIn("unmapped lib module", report)
+        self.assertIn("lib/_no_such_module_anywhere.py", report)
+
+    def test_explain_reports_an_admitted_gap_with_its_rationale(self) -> None:
+        registered = next(iter(SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE))
+        rationale = SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE[registered]
+
+        report = "\n".join(explain_path(registered, REPO_ROOT))
+
+        self.assertIn("SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE", report)
+        self.assertIn(rationale, report)
+        self.assertIn("selects: nothing beyond the ambient gates", report)
+
+    def test_explain_swallows_the_resolver_stderr_note_it_duplicates(
+        self,
+    ) -> None:
+        """`_changed_path_neighbours` writes the admitted-gap note to stderr
+        every time it resolves one. The report already states the gap and its
+        full rationale, so the duplicate is suppressed — a claim the
+        docstring makes and nothing else checks: `redirect_stderr(None)`
+        sends the note to stdout instead, where the report's own assertions
+        cannot see it.
+        """
+        registered = next(iter(SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE))
+        out, err = io.StringIO(), io.StringIO()
+
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            explain_path(registered, REPO_ROOT)
+
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue(), "")
+
+    def test_explain_deduplicates_what_it_reports_as_selected(self) -> None:
+        """`lib/download.py` resolves tests.test_download twice — its entry
+        and its basename rule both name it. The runner sees one target, so
+        the summary line says one, while the breakdown above still shows both
+        mechanisms naming it.
+
+        Parsed into a list rather than counted as a substring: the duplicate
+        lands LAST, so `count("tests.test_download,")` stays 1 whether or not
+        the line is de-duplicated, and a mutant dropping `_ordered_unique`
+        survived that spelling.
+        """
+        report = explain_path("lib/download.py", REPO_ROOT)
+        selects = next(line for line in report if "  selects: " in line)
+        listed = [name.strip() for name in selects.split(": ", 1)[1].split(",")]
+
+        self.assertIn("tests.test_download", listed)
+        self.assertEqual(sorted(listed), sorted(set(listed)), listed)
+        self.assertEqual(
+            "\n".join(report).count("      tests.test_download\n"), 2
+        )
+
+    def test_the_explain_entry_point_runs_as_a_script(self) -> None:
+        """Drives the real entry point, not `main()` in-process: the module
+        is documented as runnable, and the `__main__` guard plus argparse
+        wiring is what an operator actually meets.
+        """
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "targeted_test_selection.py"),
+                "explain",
+                "lib/download.py",
+                "docs/mirrors.md",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("basename:lib/*.py", completed.stdout)
+        self.assertIn("(no mechanism matched this path)", completed.stdout)
+
+    def test_the_explain_entry_point_refuses_an_unknown_subcommand(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "targeted_test_selection.py"),
+                "resolve",
+                "lib/download.py",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 2, completed.stdout)
 
 
 class TestTargetedSuiteWiring(unittest.TestCase):
