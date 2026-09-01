@@ -639,7 +639,7 @@ t.section('Processing conflict handler — newest same-request refresh wins');
   await currentSuccessHandling;
   const retryCountBeforeStaleFailure = inserted.filter(
     node => node.isConnected
-      && element.className === 'p-btn processing-refresh-retry',
+      && node.className === 'p-btn processing-refresh-retry',
   ).length;
   const announcementBeforeStaleFailure = live.textContent;
   staleFailure.reject(new Error('obsolete row refresh failed'));
@@ -647,7 +647,7 @@ t.section('Processing conflict handler — newest same-request refresh wins');
   t.equal(
     inserted.filter(
       node => node.isConnected
-        && element.className === 'p-btn processing-refresh-retry',
+        && node.className === 'p-btn processing-refresh-retry',
     ).length,
     retryCountBeforeStaleFailure,
     'older failed response cannot expose obsolete retry UI',
@@ -936,6 +936,66 @@ t.section('Processing conflict handler — focus moved during mutation locks onl
     globalThis.document.activeElement,
     unrelatedControl,
     'focus moved during the mutation stays on the operator-selected target',
+  );
+  globals.restore();
+}
+
+t.section('Processing conflict handler — a control detached before the 409 is never locked');
+{
+  // `processingOriginControl` refuses a control with `isConnected === false`:
+  // a re-render between the click and the 409 replaces the node, and locking
+  // the detached one writes the operator's explanation where nothing shows it.
+  // Nothing drove that guard until the shared `element()` gave every fake an
+  // `isConnected` field to seed (issue #1313, found by PR #1339's review).
+  const inserted = [];
+  const detachedControl = fakeDomElement('Add request', 912, inserted, false);
+  const live = fakeDomElement('', null, inserted);
+  const globals = stubGlobals({
+    document: {
+      activeElement: null,
+      body: fakeDomElement('application shell', null, inserted),
+      documentElement: fakeDomElement('document root', null, inserted),
+      createElement() {
+        return fakeDomElement('', null, inserted, false);
+      },
+      getElementById(id) {
+        if (id === 'processing-lock-live-region') return live;
+        return inserted.find(node => node.id === id && node.isConnected) || null;
+      },
+      // Empty on purpose: a re-render already replaced the row, so the
+      // request-scoped scan finds the live node, not this one.
+      querySelectorAll() { return []; },
+    },
+    window: { scrollX: 0, scrollY: 0, scrollTo() {} },
+  });
+  await handleProcessingLockedConflict({
+    httpStatus: 409,
+    payload: {
+      error: 'processing_locked',
+      request_id: 912,
+      processing_owner: {
+        job_id: 80,
+        status: 'queued',
+        preview_status: 'running',
+      },
+    },
+    control: detachedControl,
+    refetch: async () => {},
+  });
+  t.equal(
+    detachedControl.hasAttribute('data-processing-locked'),
+    false,
+    'a control detached before the conflict landed is never locked',
+  );
+  t.equal(
+    detachedControl.getAttribute('aria-disabled'),
+    null,
+    'and it is never marked aria-disabled either',
+  );
+  t.contains(
+    live.textContent,
+    'job #80',
+    'the lock is still announced with the exact owner',
   );
   globals.restore();
 }
