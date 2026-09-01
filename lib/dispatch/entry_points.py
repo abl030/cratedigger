@@ -450,7 +450,7 @@ def _dispatch_import_from_db_locked(
         # failure never blocks the rejection itself — invariant 11, broken
         # worlds surface and restart — it just leaves the audit naming the
         # unmoved path, exactly as it did before this fix.
-        from lib.import_execution import ExecutionCancelled
+        from lib.import_execution import ExecutionCancelled, cancellation_hook
         from lib.import_manifest import move_failed_import_whole
 
         rejection_path = failed_path
@@ -461,10 +461,7 @@ def _dispatch_import_from_db_locked(
             moved_path = move_failed_import_whole(
                 failed_path,
                 scenario=validation.result.scenario or "invalid",
-                before_mutation=(
-                    cancellation_token.raise_if_cancelled
-                    if cancellation_token is not None else None
-                ),
+                before_mutation=cancellation_hook(cancellation_token),
             )
             if moved_path is not None:
                 rejection_path = moved_path

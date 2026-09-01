@@ -778,6 +778,35 @@ class CancellationToken:
         if reason is not None:
             raise ExecutionCancelled(reason)
 
+
+def checkpoint(cancellation_token: CancellationToken | None) -> None:
+    """Refuse to continue when execution has been cancelled.
+
+    An uncancellable caller passes ``None`` and this does nothing, which is
+    why every stage can call it unconditionally. Five modules carried a
+    byte-identical private copy of this before issue #1313 folded them here.
+    """
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
+
+
+def cancellation_hook(
+    cancellation_token: CancellationToken | None,
+) -> Callable[[], None] | None:
+    """The ``before_mutation`` hook a token implies, or ``None`` without one.
+
+    Filesystem-authority mutators (``lib.fs_authority.remove_relative_tree``,
+    ``lib.import_manifest``'s movers) take ``before_mutation`` and re-check it
+    immediately before each irreversible step. Translating a token into that
+    hook is the same two lines everywhere, so it is written once here rather
+    than as the four private ``*_cancellable`` wrappers and one inline
+    conditional that used to spell it (issue #1313).
+    """
+    if cancellation_token is None:
+        return None
+    return cancellation_token.raise_if_cancelled
+
+
 class OwnerSessionWatchdog:
     """Probe one pinned owner session throughout a non-database stage."""
 

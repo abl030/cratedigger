@@ -38,7 +38,11 @@ from lib.fs_authority import (
     unlink_if_same,
 )
 from lib.grab_list import GrabListEntry
-from lib.import_execution import CancellationToken
+from lib.import_execution import (
+    CancellationToken,
+    cancellation_hook,
+    checkpoint,
+)
 from lib.import_manifest import audio_relative_paths, manifest_trace_summary
 from lib.processing_paths import (
     attempt_fingerprint_of_files,
@@ -51,26 +55,6 @@ if TYPE_CHECKING:
     from lib.context import CratediggerContext
 
 logger = logging.getLogger("cratedigger")
-
-
-def _checkpoint(cancellation_token: CancellationToken | None) -> None:
-    if cancellation_token is not None:
-        cancellation_token.raise_if_cancelled()
-
-
-def _remove_relative_tree_cancellable(
-    parent_fd: int,
-    name: str,
-    cancellation_token: CancellationToken | None,
-) -> None:
-    if cancellation_token is None:
-        remove_relative_tree(parent_fd, name)
-        return
-    remove_relative_tree(
-        parent_fd,
-        name,
-        before_mutation=cancellation_token.raise_if_cancelled,
-    )
 
 
 # === Materialize failure reasons (issue #868) ===
@@ -576,11 +560,11 @@ def _materialize_processing_dir(
             transaction_prefix = f".materialize-tmp-{materialize_token}-"
             for entry_name in os.listdir(albums_fd):
                 if entry_name.startswith(transaction_prefix):
-                    _checkpoint(cancellation_token)
-                    _remove_relative_tree_cancellable(
+                    checkpoint(cancellation_token)
+                    remove_relative_tree(
                         albums_fd,
                         entry_name,
-                        cancellation_token,
+                        before_mutation=cancellation_hook(cancellation_token),
                     )
 
             # An existing destination is valid only when it is a
@@ -646,7 +630,7 @@ def _materialize_processing_dir(
                         )
 
             temp_name = f"{transaction_prefix}{secrets.token_hex(16)}"
-            _checkpoint(cancellation_token)
+            checkpoint(cancellation_token)
             os.mkdir(temp_name, 0o700, dir_fd=albums_fd)
             temp_fd = os.open(
                 temp_name,
@@ -656,7 +640,7 @@ def _materialize_processing_dir(
             published = False
             try:
                 for opened, name in zip(opened_sources, destination_names, strict=True):
-                    _checkpoint(cancellation_token)
+                    checkpoint(cancellation_token)
                     destination_fd = os.open(
                         name,
                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
@@ -666,27 +650,27 @@ def _materialize_processing_dir(
                     try:
                         if before_file_copy is not None:
                             before_file_copy()
-                        _checkpoint(cancellation_token)
+                        checkpoint(cancellation_token)
                         copy_opened_file(
                             opened.fd,
                             destination_fd,
-                            before_write=lambda _count: _checkpoint(
+                            before_write=lambda _count: checkpoint(
                                 cancellation_token
                             ),
                         )
                     finally:
                         os.close(destination_fd)
-                _checkpoint(cancellation_token)
+                checkpoint(cancellation_token)
                 _fsync_private_directory(
                     temp_fd, "transaction directory")
                 if before_publish is not None:
                     before_publish(albums_fd, canonical_name)
-                _checkpoint(cancellation_token)
+                checkpoint(cancellation_token)
                 published = rename_relative_noreplace(
                     albums_fd, temp_name, canonical_name,
                 )
                 if published:
-                    _checkpoint(cancellation_token)
+                    checkpoint(cancellation_token)
                     _fsync_private_directory(albums_fd, "albums directory")
             finally:
                 os.close(temp_fd)
@@ -697,11 +681,11 @@ def _materialize_processing_dir(
                         and cancellation_token.cancelled
                     )
                 ):
-                    _checkpoint(cancellation_token)
-                    _remove_relative_tree_cancellable(
+                    checkpoint(cancellation_token)
+                    remove_relative_tree(
                         albums_fd,
                         temp_name,
-                        cancellation_token,
+                        before_mutation=cancellation_hook(cancellation_token),
                     )
 
             if not published:
@@ -738,7 +722,7 @@ def _materialize_processing_dir(
             # The durable private album is now visible. An
             # adversarial slskd replacement is never unlinked.
             for opened in opened_sources:
-                _checkpoint(cancellation_token)
+                checkpoint(cancellation_token)
                 unlink_if_same(opened)
     except CopySourceReadError as exc:
         # The share is read in FULL here, so this is where the convicted

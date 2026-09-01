@@ -61,7 +61,12 @@ from lib.fs_authority import (
     refusal_is_indeterminate,
     remove_relative_tree,
 )
-from lib.import_execution import CancellationToken, ExecutionCancelled
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionCancelled,
+    cancellation_hook,
+    checkpoint,
+)
 from lib.import_queue import IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL
 from lib.measurement import (
     AacLatticeMeasureFn,
@@ -163,26 +168,6 @@ _PREVIEW_MAX_BYTES = 100 * 1024**3
 _PREVIEW_FREE_RESERVE_BYTES = 100 * 1024**2
 
 
-def _checkpoint(cancellation_token: CancellationToken | None) -> None:
-    if cancellation_token is not None:
-        cancellation_token.raise_if_cancelled()
-
-
-def _remove_relative_tree_cancellable(
-    parent_fd: int,
-    name: str,
-    cancellation_token: CancellationToken | None,
-) -> None:
-    if cancellation_token is None:
-        remove_relative_tree(parent_fd, name)
-        return
-    remove_relative_tree(
-        parent_fd,
-        name,
-        before_mutation=cancellation_token.raise_if_cancelled,
-    )
-
-
 @dataclass(frozen=True)
 class PreviewSnapshotLimits:
     """Bounded-copy policy for one isolated preview snapshot.
@@ -279,7 +264,7 @@ def _snapshot_opened_directory(
                 free_reserve_bytes=effective_limits.free_reserve_bytes,
                 available_bytes_fn=effective_available_bytes,
             )
-            _checkpoint(cancellation_token)
+            checkpoint(cancellation_token)
             os.mkdir(snapshot_name, 0o700, dir_fd=preview_fd)
             made_snapshot = True
             snapshot_fd = os.open(
@@ -320,7 +305,7 @@ def _snapshot_opened_directory(
                                     raise FilesystemAuthorityError("snapshot contains non-directory")
                                 if depth >= effective_limits.max_depth:
                                     raise FilesystemAuthorityError("preview depth limit exceeded")
-                                _checkpoint(cancellation_token)
+                                checkpoint(cancellation_token)
                                 os.mkdir(name, 0o700, dir_fd=destination_dir_fd)
                                 destination_child_fd = os.open(
                                     name,
@@ -345,7 +330,7 @@ def _snapshot_opened_directory(
                                 or copied_bytes + declared_size > effective_limits.max_bytes
                             ):
                                 raise FilesystemAuthorityError("preview snapshot limit exceeded")
-                            _checkpoint(cancellation_token)
+                            checkpoint(cancellation_token)
                             destination_fd = os.open(
                                 name,
                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
@@ -354,7 +339,7 @@ def _snapshot_opened_directory(
                             )
                             try:
                                 def assert_space_before_write(count: int) -> None:
-                                    _checkpoint(cancellation_token)
+                                    checkpoint(cancellation_token)
                                     _assert_preview_space(
                                         preview_fd,
                                         count,
@@ -388,13 +373,13 @@ def _snapshot_opened_directory(
         raise
     except Exception:
         if made_snapshot:
-            _checkpoint(cancellation_token)
+            checkpoint(cancellation_token)
             with _preview_copy_lock(cfg) as preview_fd:
-                _checkpoint(cancellation_token)
-                _remove_relative_tree_cancellable(
+                checkpoint(cancellation_token)
+                remove_relative_tree(
                     preview_fd,
                     snapshot_name,
-                    cancellation_token,
+                    before_mutation=cancellation_hook(cancellation_token),
                 )
         raise
 
@@ -482,11 +467,11 @@ def _remove_preview_tree(
     if os.path.dirname(path) != processing_preview_dir(cfg.processing_dir):
         raise FilesystemAuthorityError("preview snapshot is outside private root")
     with _preview_copy_lock(cfg) as preview_fd:
-        _checkpoint(cancellation_token)
-        _remove_relative_tree_cancellable(
+        checkpoint(cancellation_token)
+        remove_relative_tree(
             preview_fd,
             name,
-            cancellation_token,
+            before_mutation=cancellation_hook(cancellation_token),
         )
 
 
@@ -583,13 +568,13 @@ def retain_preview_snapshot_for_force_action(
     ) as processing_fd, open_private_child_directory(processing_fd, "preview") as preview_fd, open_private_child_directory(processing_fd, "albums") as albums_fd, exclusive_relative_lock(
         albums_fd, f".{action_name}.lock",
     ):
-        _checkpoint(cancellation_token)
-        _remove_relative_tree_cancellable(
+        checkpoint(cancellation_token)
+        remove_relative_tree(
             albums_fd,
             action_name,
-            cancellation_token,
+            before_mutation=cancellation_hook(cancellation_token),
         )
-        _checkpoint(cancellation_token)
+        checkpoint(cancellation_token)
         os.rename(
             name, action_name,
             src_dir_fd=preview_fd, dst_dir_fd=albums_fd,
@@ -622,11 +607,11 @@ def remove_force_action_copy(
     with open_private_processing_root(
         cfg.processing_dir, cfg.slskd_download_dir,
     ) as processing_fd, open_private_child_directory(processing_fd, "albums") as albums_fd:
-        _checkpoint(cancellation_token)
-        _remove_relative_tree_cancellable(
+        checkpoint(cancellation_token)
+        remove_relative_tree(
             albums_fd,
             name,
-            cancellation_token,
+            before_mutation=cancellation_hook(cancellation_token),
         )
 
 
@@ -759,7 +744,7 @@ def _write_preview_spectral_evidence_file(
             snapshot_status="matched",
         ),
     )
-    _checkpoint(cancellation_token)
+    checkpoint(cancellation_token)
     return write_quality_evidence_action_file(payload)
 
 
@@ -771,7 +756,7 @@ def _cleanup_preview_artifacts(
     cancellation_token: CancellationToken | None,
 ) -> None:
     """Clean owned preview artifacts only while execution remains authorized."""
-    _checkpoint(cancellation_token)
+    checkpoint(cancellation_token)
     remove_quality_evidence_action_file(preview_spectral_file)
     if temp_root is not None:
         _remove_preview_tree(
@@ -1244,7 +1229,7 @@ def _measure_lane_world(
             from lib.cd_rip_verifier import verify_cd_rip
 
             cd_rip_verify_fn = verify_cd_rip
-        _checkpoint(cancellation_token)
+        checkpoint(cancellation_token)
         # ``measure_fn`` is the sanctioned kwarg-DI seam for tests that
         # need to observe or stub the measurement call; resolved at call
         # time so the module attribute stays patchable for legacy tests.
@@ -1270,7 +1255,7 @@ def _measure_lane_world(
             aac_lattice_measure_fn=aac_lattice_measure_fn,
             cd_rip_verify_fn=cd_rip_verify_fn,
         )
-        _checkpoint(cancellation_token)
+        checkpoint(cancellation_token)
         if not lane_evidence.reuse_have_evidence:
             spectral_result = persist_exact_current_spectral_from_attempt(
                 db,
@@ -1356,7 +1341,7 @@ def _invoke_preview_harness(
     lane) is called without the cancellation token, preserving that seam's
     historical call shape.
     """
-    _checkpoint(cancellation_token)
+    checkpoint(cancellation_token)
     if run_import_fn is None:
         run = run_import_one(
             path=preview_path,
@@ -1390,7 +1375,7 @@ def _invoke_preview_harness(
             existing_v0_probe=existing_v0_probe,
             quality_evidence_action_file=quality_evidence_action_file,
         )
-    _checkpoint(cancellation_token)
+    checkpoint(cancellation_token)
     return run
 
 
@@ -1533,9 +1518,9 @@ def measure_and_persist_candidate_evidence(
     # preview snapshot so evidence and the later importer both see the same
     # bytes.  Foreign paths still reach repair only after descriptor copying.
     if owns_path:
-        _checkpoint(cancellation_token)
+        checkpoint(cancellation_token)
         repair(path)
-        _checkpoint(cancellation_token)
+        checkpoint(cancellation_token)
     try:
         temp_root = (
             None
@@ -1565,9 +1550,9 @@ def measure_and_persist_candidate_evidence(
     try:
         preview_path = path if temp_root is None else temp_root
         if not owns_path:
-            _checkpoint(cancellation_token)
+            checkpoint(cancellation_token)
             repair(preview_path)
-            _checkpoint(cancellation_token)
+            checkpoint(cancellation_token)
         try:
             # Address evidence from precisely the immutable private bytes
             # being inspected and passed to the harness.  Never re-inventory
@@ -1646,7 +1631,7 @@ def measure_and_persist_candidate_evidence(
         audit_result = ImportResult(spectral=measurement.spectral_audit)
         if measurement_rejecting:
             try:
-                _checkpoint(cancellation_token)
+                checkpoint(cancellation_token)
                 evidence_result = (
                     persist_measurement_fn
                     or persist_candidate_evidence_from_measurement
@@ -1659,7 +1644,7 @@ def measure_and_persist_candidate_evidence(
                     import_job_id=import_job_id,
                     files=source_snapshot,
                 )
-                _checkpoint(cancellation_token)
+                checkpoint(cancellation_token)
             except ExecutionCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
@@ -1820,7 +1805,7 @@ def measure_and_persist_candidate_evidence(
                     import_result=run.import_result,
                 )
             try:
-                _checkpoint(cancellation_token)
+                checkpoint(cancellation_token)
                 evidence_result = (
                     persist_measurement_fn
                     or persist_candidate_evidence_from_measurement
@@ -1833,7 +1818,7 @@ def measure_and_persist_candidate_evidence(
                     import_job_id=import_job_id,
                     files=source_snapshot,
                 )
-                _checkpoint(cancellation_token)
+                checkpoint(cancellation_token)
             except ExecutionCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
@@ -1920,7 +1905,7 @@ def measure_and_persist_candidate_evidence(
 
         # --- Persist candidate evidence ---
         try:
-            _checkpoint(cancellation_token)
+            checkpoint(cancellation_token)
             evidence_result = persist_candidate_evidence_from_import_result(
                 db,
                 mb_release_id=mbid,
@@ -1931,7 +1916,7 @@ def measure_and_persist_candidate_evidence(
                 files=source_snapshot,
                 measurement=measurement,
             )
-            _checkpoint(cancellation_token)
+            checkpoint(cancellation_token)
         except ExecutionCancelled:
             raise
         except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
@@ -2157,9 +2142,9 @@ def preview_import_from_path(
         # the source immutable while preserving the importer-facing order:
         # repair before inspection, measurement, and the dry-run harness.
         try:
-            _checkpoint(cancellation_token)
+            checkpoint(cancellation_token)
             _prepare_preview_media(preview_path)
-            _checkpoint(cancellation_token)
+            checkpoint(cancellation_token)
         except ExecutionCancelled:
             raise
         except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
@@ -2349,7 +2334,7 @@ def preview_import_from_path(
                     import_result=run.import_result,
                 )
             try:
-                _checkpoint(cancellation_token)
+                checkpoint(cancellation_token)
                 evidence = persist_candidate_evidence_from_import_result(
                     db,
                     mb_release_id=mbid,
@@ -2359,7 +2344,7 @@ def preview_import_from_path(
                     import_job_id=import_job_id,
                     files=source_snapshot,
                 )
-                _checkpoint(cancellation_token)
+                checkpoint(cancellation_token)
                 evidence_status = evidence.status
                 evidence_reason = evidence.reason
             except ExecutionCancelled:
