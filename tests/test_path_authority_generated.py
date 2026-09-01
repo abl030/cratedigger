@@ -36,15 +36,15 @@ from lib.fs_authority import (
     open_regular_relative,
 )
 from lib.grab_list import DownloadFile
-from lib.import_preview import (
-    PreviewSnapshotLimits,
-    _snapshot_authorized_directory,
-    remove_preview_snapshot,
-)
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
     force_import_dedupe_key,
     force_import_payload,
+)
+from lib.preview_snapshot import (
+    PreviewSnapshotLimits,
+    remove_preview_snapshot,
+    snapshot_authorized_directory,
 )
 from lib.processing_paths import (
     canonical_folder_for_row,
@@ -166,14 +166,14 @@ class TestGeneratedDescriptorAuthority(unittest.TestCase):
                         FilesystemAuthorityError,
                         "entry limit",
                     ):
-                        _snapshot_authorized_directory(
+                        snapshot_authorized_directory(
                             source,
                             cfg,
                             limits=PreviewSnapshotLimits(max_entries=3),
                         )
                     self.assertEqual(os.listdir(preview), [])
                 else:
-                    snapshot = _snapshot_authorized_directory(
+                    snapshot = snapshot_authorized_directory(
                         source,
                         cfg,
                         limits=PreviewSnapshotLimits(max_entries=3),
@@ -703,7 +703,7 @@ class TestGeneratedPreviewCopyBounds(unittest.TestCase):
 
                     snapshot: str | None = None
                     try:
-                        snapshot = _snapshot_authorized_directory(
+                        snapshot = snapshot_authorized_directory(
                             source,
                             cfg,
                             limits=PreviewSnapshotLimits(

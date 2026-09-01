@@ -329,7 +329,7 @@ producer_audit.py`'s registered producer files —
   `scripts/importer.py::_cleanup_terminal_force_action` (the live cleanup
   call this sweep replays) resolves each job's own prefix through that job
   kind's action-copy lane, which reads
-  `lib.import_preview.ACTION_COPY_PREFIX_BY_JOB_TYPE` — the single source
+  `lib.preview_snapshot.ACTION_COPY_PREFIX_BY_JOB_TYPE` — the single source
   for the mapping — before calling
   `cleanup_force_action_copy_for_job` — a PR3 review round found this call
   hardcoding force's own prefix, so every local-import cleanup compared its

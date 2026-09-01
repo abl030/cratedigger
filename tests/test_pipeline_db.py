@@ -2369,7 +2369,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
     ) -> None:
         """Issue #1089 review MAJOR-1: ``recover_running_import_jobs``'s
         production default for ``force_action_copy_path_fn`` must derive
-        the SAME path ``lib.import_preview.force_action_copy_path`` itself
+        the SAME path ``lib.preview_snapshot.force_action_copy_path`` itself
         computes from the currently configured runtime — not a hand-typed
         approximation the two could silently drift from. Limit (review
         round 3 item 6): ``read_runtime_config`` is patched away here, so
@@ -2379,8 +2379,8 @@ class TestImportJobQueueAPI(unittest.TestCase):
         from unittest.mock import patch
 
         from lib.config import CratediggerConfig
-        from lib.import_preview import force_action_copy_path
         from lib.pipeline_db.import_jobs import _default_force_action_copy_path
+        from lib.preview_snapshot import force_action_copy_path
 
         cfg = CratediggerConfig(processing_dir="/tmp/cratedigger-processing")
         with patch(

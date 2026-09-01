@@ -7,10 +7,12 @@ siblings live in `tests/test_current_library_evidence_generated.py`.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tempfile
 import unittest
+from contextlib import nullcontext
 from unittest.mock import patch
 
 from lib.current_library_evidence import (
@@ -302,6 +304,124 @@ class TestResolveCurrentLibraryEvidence(unittest.TestCase):
         self.assertIsNotNone(preloaded)
         assert preloaded is not None
         self.assertEqual(getattr(preloaded, "id"), stored.id)  # noqa: B009
+
+    def test_an_unresolvable_link_hands_the_loader_no_preloaded_row(self):
+        """Every way the link can fail reaches the loader as one absence.
+
+        No link, a link naming a row that is gone, and either read raising
+        are four different worlds, and the loader must not be able to tell
+        them apart: it resolves Beets freshly and backfills from the files
+        that are actually installed. Handing it a half-built row instead
+        would let an unreadable link decide the HAVE facts (issue #1313).
+        """
+        boom = RuntimeError("evidence unavailable")
+        for label in (
+            "no link at all",
+            "link names a row that is gone",
+            "the id read raises",
+            "the row read raises",
+        ):
+            with self.subTest(world=label):
+                db = self._db()
+                if label == "link names a row that is gone":
+                    db.set_request_current_evidence(42, 999)
+                seen: list[object] = []
+
+                def loader(_db, seen=seen, **kwargs):
+                    seen.append(kwargs.get("preloaded_evidence"))
+                    return EvidenceBuildResult(None, "empty_current")
+
+                if label == "the id read raises":
+                    failing = patch.object(
+                        db, "get_request_current_evidence_id", side_effect=boom,
+                    )
+                elif label == "the row read raises":
+                    db.set_request_current_evidence(42, 999)
+                    failing = patch.object(
+                        db, "load_album_quality_evidence_by_id", side_effect=boom,
+                    )
+                else:
+                    failing = nullcontext()
+
+                with failing:
+                    resolved = self._resolve(db, loader)
+
+                self.assertEqual(seen, [None])
+                assert isinstance(resolved, CurrentLibraryEvidence)
+                self.assertIsNone(resolved.evidence)
+                self.assertFalse(resolved.existing_spectral_evidence.attempted)
+
+    def test_every_broken_link_says_which_link_broke(self):
+        """The three worlds whose only trace is a log line.
+
+        A vanished row, an unreadable id and an unreadable row all return
+        None exactly like a request with no link at all, so nothing about
+        the resolved bundle tells an operator that a HAVE link is broken.
+        The warning is the entire signal in each case, and it is useless
+        without the ids it names. These are the only assertions stopping any
+        of the three branches from inverting or losing its arguments
+        (issue #1313 mutmut pass, and its review round, which pointed out
+        that the two raising branches earn the pin for the same reason the
+        vanished-row branch does).
+        """
+        boom = RuntimeError("evidence unavailable")
+        cases = (
+            (
+                "the row vanished",
+                nullcontext(),
+                "Current spectral evidence 999 is missing for request 42",
+            ),
+            (
+                "the id read raised",
+                lambda db: patch.object(
+                    db, "get_request_current_evidence_id", side_effect=boom),
+                "Unable to resolve current spectral evidence for request 42",
+            ),
+            (
+                "the row read raised",
+                lambda db: patch.object(
+                    db, "load_album_quality_evidence_by_id", side_effect=boom),
+                "Unable to load current spectral evidence 999 for request 42",
+            ),
+        )
+        for label, failure, expected in cases:
+            with self.subTest(world=label):
+                db = self._db()
+                db.set_request_current_evidence(42, 999)
+                failing = failure(db) if callable(failure) else failure
+
+                with self.assertLogs(
+                    "cratedigger", level="WARNING",
+                ) as captured, failing:
+                    resolved = self._resolve(
+                        db,
+                        lambda *_a, **_k: EvidenceBuildResult(
+                            None, "empty_current"),
+                    )
+
+                assert isinstance(resolved, CurrentLibraryEvidence)
+                self.assertIsNone(resolved.evidence)
+                self.assertEqual(len(captured.records), 1)
+                self.assertEqual(captured.records[0].getMessage(), expected)
+
+    def test_a_resolvable_link_warns_about_nothing(self):
+        """Must-still-work: the healthy world must not accuse itself."""
+        db = self._db()
+        source = self._source_dir()
+        evidence = make_album_quality_evidence(
+            mb_release_id="mb-release",
+            source_path=source,
+            files=snapshot_audio_files(source),
+        )
+        _link(db, evidence)
+        logger = logging.getLogger("cratedigger")
+
+        with patch.object(logger, "warning") as warned:
+            self._resolve(
+                db, lambda *_a, **_k: EvidenceBuildResult(evidence, "ready"),
+            )
+
+        warned.assert_not_called()
 
 
 class _PersistRecordingDB(FakePipelineDB):

@@ -20,10 +20,10 @@ from lib.import_execution import (
     CancellationToken,
     ExecutionCancelled,
 )
-from lib.import_preview import (
-    _remove_preview_tree,
-    _snapshot_authorized_directory,
-    measure_and_persist_candidate_evidence,
+from lib.import_preview import measure_and_persist_candidate_evidence
+from lib.preview_snapshot import (
+    remove_preview_snapshot,
+    snapshot_authorized_directory,
 )
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.quality import ValidationResult
@@ -239,7 +239,7 @@ class TestPreviewCancellation(unittest.TestCase):
                 ExecutionCancelled,
                 "lost_before_copy_write",
             ):
-                _snapshot_authorized_directory(
+                snapshot_authorized_directory(
                     source,
                     cfg,  # pyright: ignore[reportArgumentType] - minimal path config
                     copy_fn=cancel_copy,
@@ -323,13 +323,50 @@ class TestPreviewCancellation(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ExecutionCancelled, "lost_before_cleanup"):
-                _remove_preview_tree(
+                remove_preview_snapshot(
                     snapshot,
                     cfg,  # pyright: ignore[reportArgumentType] - minimal path config
                     cancellation_token=token,
                 )
 
             self.assertTrue(os.path.exists(snapshot))
+
+    def test_cleanup_cancelled_mid_removal_stops_at_the_next_file(self) -> None:
+        """Cancellation that arrives DURING the removal, not before it.
+
+        The sibling test above cancels first, so the entry checkpoint
+        catches it and the ``before_mutation`` hook inside the removal never
+        runs — which means passing no hook at all would pass that test
+        (issue #1313, mutant runner finding 2). Counting checkpoints past
+        the entry one puts the cancellation between two unlinks, where only
+        the hook can stop it.
+        """
+        token = _CancelAtCheckpoint(3)
+        with tempfile.TemporaryDirectory() as raw:
+            download_root, processing_root = _private_roots(raw)
+            snapshot = os.path.join(processing_root, "preview", "preview-owned")
+            os.mkdir(snapshot)
+            for name in ("01.flac", "02.flac", "03.flac"):
+                pathlib.Path(snapshot, name).write_bytes(b"audio")
+            cfg = SimpleNamespace(
+                processing_dir=processing_root,
+                slskd_download_dir=download_root,
+            )
+
+            with self.assertRaisesRegex(ExecutionCancelled, "cancel_at_3"):
+                remove_preview_snapshot(
+                    snapshot,
+                    cfg,  # pyright: ignore[reportArgumentType] - minimal path config
+                    cancellation_token=token,
+                )
+
+            survivors = sorted(os.listdir(snapshot))
+            self.assertTrue(os.path.isdir(snapshot))
+            # Stopped part-way: something went, something stayed. Both halves
+            # matter — an unhooked removal deletes all three, and a removal
+            # that refused outright deletes none.
+            self.assertTrue(survivors)
+            self.assertLess(len(survivors), 3)
 
 
 def _refuse_db_use(token: CancellationToken) -> object:

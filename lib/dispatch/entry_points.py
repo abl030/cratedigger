@@ -168,14 +168,14 @@ def dispatch_import_from_db(
     """
     from lib.beets_db import validate_beets_storage_pair
     from lib.config import read_runtime_config
+    from lib.import_execution import checkpoint
     from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
 
     if (cancellation_token is None) != (owner_session_identity is None):
         raise ValueError(
             "cancellation token and owner session identity must be paired"
         )
-    if cancellation_token is not None:
-        cancellation_token.raise_if_cancelled()
+    checkpoint(cancellation_token)
 
     validate_beets_storage_pair(
         db_path=beets_library_db_path,
@@ -224,7 +224,7 @@ def _assert_local_import_relocation_containment(
     validation guard is its one caller and ``failed_path`` is always the
     job's own private action copy. Every sibling mutator of this namespace
     asserts its own containment before acting
-    (``lib.import_preview.remove_force_action_copy`` checks ``dirname(path)
+    (``lib.preview_snapshot.remove_force_action_copy`` checks ``dirname(path)
     != processing_albums_dir(...)``); without the same assertion here, a
     future caller passing a lane path directly would have
     ``lib.import_manifest._allocate_target`` relocate the OPERATOR's own
@@ -450,7 +450,7 @@ def _dispatch_import_from_db_locked(
         # failure never blocks the rejection itself — invariant 11, broken
         # worlds surface and restart — it just leaves the audit naming the
         # unmoved path, exactly as it did before this fix.
-        from lib.import_execution import ExecutionCancelled
+        from lib.import_execution import ExecutionCancelled, cancellation_hook
         from lib.import_manifest import move_failed_import_whole
 
         rejection_path = failed_path
@@ -461,10 +461,7 @@ def _dispatch_import_from_db_locked(
             moved_path = move_failed_import_whole(
                 failed_path,
                 scenario=validation.result.scenario or "invalid",
-                before_mutation=(
-                    cancellation_token.raise_if_cancelled
-                    if cancellation_token is not None else None
-                ),
+                before_mutation=cancellation_hook(cancellation_token),
             )
             if moved_path is not None:
                 rejection_path = moved_path
