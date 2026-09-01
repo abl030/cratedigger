@@ -231,6 +231,9 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertEqual(status["state"], STATE_FAILED)
         self.assertIn("close blew up", str(status["error"]))
         self.assertIsNotNone(status["finished_at"])
+        # The cost of that ordering, pinned so it stays visible: seven
+        # rows genuinely ran and the operator is shown nothing.
+        self.assertIsNone(status["summary"])
 
     def test_a_base_exception_still_records_a_terminal_state(self) -> None:
         """Nothing is parked: a sweep killed by a KeyboardInterrupt on
@@ -240,11 +243,21 @@ class TriageRunnerTest(unittest.TestCase):
         def cleanup_fn(db, *, confirm_all_wrong_matches, cancellation_token=None):
             raise KeyboardInterrupt("operator interrupted the sweep thread")
 
+        # The re-raise reaches threading's excepthook, which would print
+        # a traceback into every green suite log. Swallow it here and
+        # assert it fired, which also pins that the exception really is
+        # re-raised rather than absorbed.
+        escaped: list[type[BaseException] | None] = []
+        default_hook = threading.excepthook
+        threading.excepthook = lambda args: escaped.append(args.exc_type)
+        self.addCleanup(setattr, threading, "excepthook", default_hook)
+
         self.assertTrue(self.runner.start(
             db_session=self._session, cleanup_fn=cleanup_fn,
         ))
         self.runner.join(timeout=5)
 
+        self.assertEqual(escaped, [KeyboardInterrupt])
         status = self.runner.status()
         self.assertEqual(status["state"], STATE_FAILED)
         self.assertIn("KeyboardInterrupt", str(status["error"]))
@@ -256,6 +269,46 @@ class TriageRunnerTest(unittest.TestCase):
         ))
         self.runner.join(timeout=5)
         self.assertEqual(self.runner.status()["state"], STATE_COMPLETED)
+
+    def test_a_refused_thread_spawn_does_not_leave_the_runner_running(
+        self,
+    ) -> None:
+        """``start`` writes RUNNING before it spawns.
+
+        A refused spawn (``RuntimeError: can't start new thread``, which
+        a ThreadingHTTPServer under thread pressure can genuinely reach)
+        otherwise leaves that RUNNING with nothing to clear it: every
+        later sweep refused, and ``join`` raising "cannot join thread
+        before it is started" for the life of the process.
+        """
+        with (
+            patch.object(
+                threading.Thread,
+                "start",
+                side_effect=RuntimeError("can't start new thread"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "can't start new thread"),
+        ):
+            self.runner.start(
+                db_session=self._session, cleanup_fn=self._never_runs,
+            )
+
+        status = self.runner.status()
+        self.assertEqual(status["state"], STATE_FAILED)
+        self.assertIn("can't start new thread", str(status["error"]))
+        self.assertIsNotNone(status["finished_at"])
+        # Not wedged: join is safe and the next sweep is admitted.
+        self.runner.join(timeout=1)
+        self.assertTrue(self.runner.start(
+            db_session=self._session,
+            cleanup_fn=lambda db, **kwargs: WrongMatchCleanupSummary(processed=0),
+        ))
+        self.runner.join(timeout=5)
+        self.assertEqual(self.runner.status()["state"], STATE_COMPLETED)
+
+    @staticmethod
+    def _never_runs(db, *, confirm_all_wrong_matches, cancellation_token=None):
+        raise AssertionError("the sweep must not run when the spawn failed")
 
 
 class TriageRunnerCancellationTest(unittest.TestCase):

@@ -306,6 +306,31 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             runtime_resolution_violations(wrong),
         )
 
+    def test_background_session_clauses_stay_quiet_under_a_dsn(self) -> None:
+        """Q3 for both background-session clauses.
+
+        A DSN-configured runtime legitimately does the opposite of what
+        they demand: it yields a connection of its own rather than the
+        injected handle, and it closes that connection on the way out.
+        Both clauses are gated on the DSN being unset for exactly that
+        reason, and this is the direction Q1 and Q2 never exercise. It
+        also pins that the checker never dials ``UNDIALLED_DSN``.
+        """
+        rt = make_web_runtime(
+            WebRuntime(db_dsn=UNDIALLED_DSN), db=FakePipelineDB(),
+        )
+
+        violations = runtime_resolution_violations(rt)
+
+        self.assertNotIn(
+            "a DSN-less background session did not yield the injected handle",
+            violations,
+        )
+        self.assertNotIn(
+            "a background session closed an injected handle it does not own",
+            violations,
+        )
+
     def test_injected_beets_handle_clause(self) -> None:
         class Wrong(WebRuntime):
             def beets_db(self) -> BeetsDB | None:

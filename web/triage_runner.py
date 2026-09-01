@@ -143,9 +143,11 @@ class TriageRunner:
         it is exited on every terminal path, a raising ``cleanup_fn``
         included. The exit happens BEFORE the terminal state is
         recorded, so a session whose own exit raises marks the sweep
-        failed rather than completed; production's session
-        (``WebRuntime.open_background_db``) swallows its own close
-        errors, so it cannot reach that, but an injected one can.
+        failed and discards the summary of work that genuinely ran. An
+        injected session can reach that; production's
+        (``WebRuntime.open_background_db``) cannot, by two different
+        mechanisms — its DSN branch swallows close errors, and its
+        DSN-less branch closes nothing at all.
 
         When a pending cancel (#1106) is still within its window, the
         sweep is still admitted (still True, still starts a thread) but
@@ -170,7 +172,24 @@ class TriageRunner:
                 name="wrong-match-triage",
                 daemon=True,
             )
-            self._thread.start()
+            try:
+                self._thread.start()
+            except BaseException as exc:
+                # A refused spawn (``RuntimeError: can't start new
+                # thread`` under thread or memory pressure, which a
+                # ThreadingHTTPServer can genuinely reach) must not
+                # leave the RUNNING written five lines above: nothing
+                # would ever clear it, so every later sweep is refused
+                # and join() raises "cannot join thread before it is
+                # started" for the life of the process. The fields are
+                # written inline rather than through _record_failure
+                # because this lock is already held and is not
+                # reentrant.
+                self._state = STATE_FAILED
+                self._error = f"{type(exc).__name__}: {exc}"
+                self._finished_at = _utcnow_iso()
+                self._thread = None
+                raise
         return True
 
     def status(self) -> TriageStatusSnapshot:
@@ -279,17 +298,22 @@ class TriageRunner:
                 "cancelled" if summary.cancelled else "completed",
             )
         except Exception as exc:
-            logger.exception("wrong_match_triage_sweep.failed")
+            # Terminal state first, log second: a raise from logging is
+            # not caught by this try's sibling clause and would re-open
+            # the parked state both clauses exist to prevent.
             self._record_failure(exc)
+            logger.exception("wrong_match_triage_sweep.failed")
         except BaseException as exc:
             # A KeyboardInterrupt or SystemExit reaching this thread
             # used to leave the runner at RUNNING for the life of the
             # process: every later start() refused, the only way out a
             # web restart. That is the parked state invariant 11
             # forbids, so record the same terminal outcome before
-            # letting it propagate.
-            logger.exception("wrong_match_triage_sweep.failed")
+            # letting it propagate. (Neither can be DELIVERED to a
+            # non-main thread; both have to be raised by code running on
+            # it, which ``cleanup_fn`` or the session can do.)
             self._record_failure(exc)
+            logger.exception("wrong_match_triage_sweep.failed")
             raise
 
     def _record_failure(self, exc: BaseException) -> None:

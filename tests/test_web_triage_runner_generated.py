@@ -42,6 +42,7 @@ from web.triage_runner import (
     PENDING_CANCEL_WINDOW_SECONDS,
     STATE_CANCELLED,
     STATE_COMPLETED,
+    STATE_FAILED,
     TriageRunner,
 )
 
@@ -102,6 +103,16 @@ def session_ledger_violations(
 
     Accumulates rather than short-circuits, so a run breaking several
     clauses reports all of them.
+
+    The "left open" clause is fail-closed legislation with no reaching
+    mutant, and more stubbornly so than it looks: the obvious future
+    writer's mistake, ``db = db_session().__enter__()`` instead of a
+    ``with``, does NOT trip it, because the orphaned context manager is
+    collected immediately and ``GeneratorExit`` runs the generator's
+    ``finally`` anyway. It can only fire if something holds the session
+    open past this check — opening it in ``start()``, say. Kept per
+    "widen the strategy, never delete the clause"; recorded so nobody
+    hunts for a mutant that cannot exist.
     """
     violations: list[str] = []
     if ledger.entered != admitted:
@@ -363,6 +374,49 @@ class TriageRunnerStickyCancelGeneratedTest(unittest.TestCase):
         self.assertIn(
             "the runner closed a handle the session owns (1 time(s))",
             session_ledger_violations(ledger, admitted=1),
+        )
+
+    def test_ledger_checker_stays_quiet_on_outcomes_it_does_not_read(
+        self,
+    ) -> None:
+        """Q3 for all three ledger clauses.
+
+        They read session scopes and handle closes, and ignore the
+        dimension that decides everything else about a sweep: how it
+        ended. Drive the real runner through the three endings the
+        clauses never look at — a refusal, a raising cleanup, and a
+        cancellation — and require silence.
+        """
+        session = _SessionLedger()
+        runner = TriageRunner()
+        admitted = 0
+
+        cleanup_fn, entered, release = _blocking_cleanup_fn_factory()
+        self.assertTrue(runner.start(db_session=session, cleanup_fn=cleanup_fn))
+        admitted += 1
+        self.assertTrue(entered.wait(timeout=5))
+        # Refused while one is running: no session, and not admitted.
+        self.assertFalse(runner.start(db_session=session, cleanup_fn=cleanup_fn))
+        runner.cancel("q3_cancel")
+        release.set()
+        runner.join(timeout=5)
+        self.assertEqual(runner.status()["state"], STATE_CANCELLED)
+
+        def raises(
+            db: object,
+            *,
+            confirm_all_wrong_matches: bool,
+            cancellation_token: CancellationToken | None = None,
+        ) -> WrongMatchCleanupSummary:
+            raise RuntimeError("the sweep blew up")
+
+        self.assertTrue(runner.start(db_session=session, cleanup_fn=raises))
+        admitted += 1
+        runner.join(timeout=5)
+        self.assertEqual(runner.status()["state"], STATE_FAILED)
+
+        self.assertEqual(
+            session_ledger_violations(session, admitted=admitted), [],
         )
 
     def test_checker_rejects_a_running_cancel_that_did_not_stop_the_sweep(
