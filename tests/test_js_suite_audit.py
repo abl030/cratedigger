@@ -160,10 +160,29 @@ class TestEveryJsSuiteUsesTheSharedHarness(unittest.TestCase):
         self.assertIn("CRATEDIGGER_JS_DONE", source)
 
     def test_the_harness_module_is_not_itself_run_as_a_suite(self) -> None:
-        """`run_js_checks.sh` globs `test_js_*.mjs`; the harness must not match."""
+        """The harness must not match the glob `run_js_checks.sh` really uses.
+
+        The pattern is READ OUT of the script rather than hand-typed: an
+        earlier version of this test compared two literals
+        (``fnmatch("js_harness.mjs", "test_js_*.mjs")``) and so proved
+        nothing about the script at all — widening its glob to
+        ``tests/*js*.mjs``, which DOES match the harness, left this test
+        green (independent review, mutant B9). That is the constant-versus-
+        hand-typed-literal shape `.claude/rules/code-quality.md` names.
+        """
+        script = pinned_source(Path(RUN_JS_CHECKS))
+        patterns = [
+            os.path.basename(m.group(2)) for m in _FOR_GLOB_RE.finditer(script)
+        ]
+        self.assertEqual(
+            len(patterns),
+            1,
+            f"expected exactly one JS-suite glob in the script, got {patterns}",
+        )
         self.assertFalse(
-            fnmatch.fnmatch("js_harness.mjs", "test_js_*.mjs"),
-            "the harness module would be executed as if it were a suite",
+            fnmatch.fnmatch("js_harness.mjs", patterns[0]),
+            f"the script's glob {patterns[0]!r} would run the harness module "
+            "as if it were a suite",
         )
         self.assertNotIn("js_harness.mjs", _js_suite_names_on_disk())
 

@@ -188,11 +188,21 @@ t.section('matchRatesFromDashboardWindows() derives found enqueue rates from old
     {label: '24h', hours: 24, outcomes: {found: 132}},
     {label: '6h', hours: 6, outcomes: {found: 27}},
   ]);
-  t.ok(rates.matches_24h === 132
-      && rates.matches_6h === 27
-      && rates.matches_per_hour_24h === 5.5
-      && rates.matches_per_hour_6h === 4.5,
-    'dashboard windows did not derive expected match rates');
+  t.deepEqual(
+    {
+      matches_24h: rates.matches_24h,
+      matches_6h: rates.matches_6h,
+      matches_per_hour_24h: rates.matches_per_hour_24h,
+      matches_per_hour_6h: rates.matches_per_hour_6h,
+    },
+    {
+      matches_24h: 132,
+      matches_6h: 27,
+      matches_per_hour_24h: 5.5,
+      matches_per_hour_6h: 4.5,
+    },
+    'dashboard windows derive a per-hour match rate for each window',
+  );
 }
 
 t.section('renderImportItems() shows server-classified uncertain preview failures');

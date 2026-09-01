@@ -135,11 +135,21 @@ t.section('withCoverageMatchRates() falls back to search window found counts');
     {label: '24h', hours: 24, outcomes: {found: 132}},
     {label: '6h', hours: 6, outcomes: {found: 27}},
   ]);
-  t.ok(coverage.matches_24h === 132
-      && coverage.matches_6h === 27
-      && coverage.matches_per_hour_24h === 5.5
-      && coverage.matches_per_hour_6h === 4.5,
-    'coverage fallback did not derive expected match rates');
+  t.deepEqual(
+    {
+      matches_24h: coverage.matches_24h,
+      matches_6h: coverage.matches_6h,
+      matches_per_hour_24h: coverage.matches_per_hour_24h,
+      matches_per_hour_6h: coverage.matches_per_hour_6h,
+    },
+    {
+      matches_24h: 132,
+      matches_6h: 27,
+      matches_per_hour_24h: 5.5,
+      matches_per_hour_6h: 4.5,
+    },
+    'the coverage fallback derives a per-hour match rate for each window',
+  );
 }
 t.section('renderPeerBrowseHeavyQueries() shows release ids and exact query tokens');
 {
@@ -264,11 +274,14 @@ t.section('normalizeUnfindableBacklogSeries() maps due_backlog_at_start to a plo
     {sampled_at: '2026-08-11T00:00:00+00:00', due_backlog_at_start: 900},
     {sampled_at: '2026-08-12T00:00:00+00:00', due_backlog_at_start: 686},
   ]);
-  t.ok(series.length === 2
-      && series[0].time === '2026-08-11T00:00:00+00:00'
-      && series[0].backlog === 900
-      && series[1].backlog === 686,
-    'normalizeUnfindableBacklogSeries did not derive expected points');
+  t.deepEqual(
+    series.map(point => ({ time: point.time, backlog: point.backlog })),
+    [
+      { time: '2026-08-11T00:00:00+00:00', backlog: 900 },
+      { time: '2026-08-12T00:00:00+00:00', backlog: 686 },
+    ],
+    'the backlog series keeps one point per sample, in order',
+  );
 }
 
 t.section('renderDriftRow() renders the operator merge-rekey button for MB-sourced rows (#1089)');

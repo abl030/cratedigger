@@ -2567,14 +2567,14 @@ class JsCheckHelperTestCase(unittest.TestCase):
         self.assertEqual(len(self.record.read_text().splitlines()), 2)
         self.assertEqual(result.stdout.count("CRATEDIGGER_JS_FAILURE"), 2)
 
-    def _fake_node_emitting(self, script: str) -> None:
-        """Replace the fake node with one printing `script` and exiting 1."""
+    def _fake_node_emitting(self, script: str, exit_code: int = 1) -> None:
+        """Replace the fake node with one printing `script` and exiting."""
         fake_node = Path(self.fake_bin.name) / "node"
         fake_node.write_text(
             "#!/usr/bin/env bash\n"
             'printf \'%s\\n\' "$*" >> "$CRATEDIGGER_NODE_RECORD"\n'
             f"{script}\n"
-            "exit 1\n",
+            f"exit {exit_code}\n",
             encoding="utf-8",
         )
         fake_node.chmod(0o755)
@@ -2604,6 +2604,98 @@ class JsCheckHelperTestCase(unittest.TestCase):
         self.assertEqual(result.stdout.count("CRATEDIGGER_JS_FAILURE"), 2)
         self.assertIn("tests/test_js_a.mjs::sec::one", result.stdout)
         self.assertNotIn("suite exited before reaching", result.stdout)
+
+    def test_a_suite_that_exits_zero_without_running_is_not_credited(
+        self,
+    ) -> None:
+        """The done marker, not the exit status, decides whether a suite ran.
+
+        A suite whose body is entirely inside a `/* */` block never builds a
+        checker, never registers the harness's exit guard, and exits ZERO --
+        so an exit-status-first check credits one edit that disables a whole
+        suite (independent review F1).
+        """
+        (Path(self.root.name) / "tests" / "test_js_a.mjs").write_text(
+            "x", encoding="utf-8"
+        )
+        self._fake_node_emitting("printf 'nothing to see\\n'\nexit 0", exit_code=0)
+
+        result = self._run("unit")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.count("CRATEDIGGER_JS_FAILURE"), 1)
+        self.assertIn("suite exited before reaching", result.stdout)
+
+    def test_a_suite_that_dies_after_a_clean_finish_still_names_the_file(
+        self,
+    ) -> None:
+        """A clean `done()` followed by a death is its own finding.
+
+        Reported failures make the harness's own nonzero exit expected, so
+        the wrapper reads the done marker's failure COUNT to tell a
+        reported failure from a late death. Without this branch the
+        coordinator falls through to its generic per-phase synthesis --
+        "js-unit failed with exit 1" across 24 files, with no file name and
+        no runnable rerun (independent review F3).
+        """
+        (Path(self.root.name) / "tests" / "test_js_a.mjs").write_text(
+            "x", encoding="utf-8"
+        )
+        self._fake_node_emitting(
+            "printf 'CRATEDIGGER_JS_DONE\\ttests/test_js_a.mjs\\t7\\t0\\n'"
+        )
+
+        result = self._run("unit")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.count("CRATEDIGGER_JS_FAILURE"), 1)
+        self.assertIn(
+            "CRATEDIGGER_JS_FAILURE\ttests/test_js_a.mjs\t"
+            "suite exited 1 after a clean checker.done()",
+            result.stdout,
+        )
+
+    def test_reported_failures_do_not_also_produce_a_file_level_marker(
+        self,
+    ) -> None:
+        """A done marker with a nonzero failure count explains the exit code."""
+        (Path(self.root.name) / "tests" / "test_js_a.mjs").write_text(
+            "x", encoding="utf-8"
+        )
+        self._fake_node_emitting(
+            "printf 'CRATEDIGGER_JS_FAILURE\\ttests/test_js_a.mjs::s::one\\tboom\\n'\n"
+            "printf 'CRATEDIGGER_JS_DONE\\ttests/test_js_a.mjs\\t5\\t1\\n'"
+        )
+
+        result = self._run("unit")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.count("CRATEDIGGER_JS_FAILURE"), 1)
+        self.assertNotIn("after a clean checker.done()", result.stdout)
+        self.assertNotIn("suite exited before reaching", result.stdout)
+
+    def test_a_suites_stderr_reaches_the_phase_log(self) -> None:
+        """The harness writes its human-readable FAIL lines to stderr.
+
+        The markers go to stdout and populate the failure index; the
+        diagnosable half -- `FAIL: <message> - <detail>` and any crash
+        stack -- is on stderr, and only the wrapper's `2>&1` puts it in the
+        phase log. Dropping that redirect is otherwise invisible
+        (independent review, mutant C9).
+        """
+        (Path(self.root.name) / "tests" / "test_js_a.mjs").write_text(
+            "x", encoding="utf-8"
+        )
+        self._fake_node_emitting(
+            "printf 'CRATEDIGGER_JS_FAILURE\\ttests/test_js_a.mjs::s::one\\tboom\\n'\n"
+            "printf '  FAIL: one - boom\\n' >&2\n"
+            "printf 'CRATEDIGGER_JS_DONE\\ttests/test_js_a.mjs\\t0\\t1\\n'"
+        )
+
+        result = self._run("unit")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("  FAIL: one - boom", result.stdout)
 
     def test_a_suite_that_dies_after_reporting_owes_both_findings(self) -> None:
         """A crash is its own finding, not one the earlier failures absorb.
@@ -2683,6 +2775,36 @@ class TestJavaScriptFailureIdentityIsPerAssertion(unittest.TestCase):
         self.assertNotEqual(first.identity, second.identity)
         self.assertEqual(first.owner, second.owner)
         self.assertEqual(first.rerun_command, second.rerun_command)
+
+    def test_a_marker_with_too_few_fields_is_refused_not_guessed(self) -> None:
+        """A short marker is a broken tool, not a failure to half-read.
+
+        `_parse_failures` raises rather than unpacking whatever it got, and
+        the suite turns that into an infrastructure-failure -- the honest
+        label. Nothing constrained either the refusal or the split's field
+        bound before (independent review, mutants C1 and C2).
+        """
+        with self.assertRaises(ValueError) as caught:
+            self._failures(
+                "js-unit", "CRATEDIGGER_JS_FAILURE\tonly-two-fields"
+            )
+        self.assertIn("malformed JavaScript failure marker", str(caught.exception))
+
+    def test_a_tab_inside_the_detail_stays_in_the_detail(self) -> None:
+        """The split stops at three fields, so field three keeps its tabs.
+
+        The harness collapses tabs before writing, but the bound is what
+        makes a fourth field impossible: widening it would drop everything
+        after a stray tab instead of keeping it as detail.
+        """
+        (failure,) = self._failures(
+            "js-unit",
+            "CRATEDIGGER_JS_FAILURE\ttests/test_js_a.mjs::s::one\t"
+            "left\tright",
+        )
+
+        self.assertEqual(failure.identity, "tests/test_js_a.mjs::s::one")
+        self.assertEqual(failure.detail, "left\tright")
 
     def test_a_syntax_marker_carries_a_bare_path_and_is_unaffected(
         self,

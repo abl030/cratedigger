@@ -69,9 +69,29 @@ const REPO_ROOT = path.resolve(
 const writeOut = process.stdout.write.bind(process.stdout);
 const writeErr = process.stderr.write.bind(process.stderr);
 
-/** Collapse tabs/newlines and cap length — one marker is one line. */
+/**
+ * Every character that would split one marker into two on the reading
+ * side.
+ *
+ * The set is PYTHON's, not JavaScript's: the reader is
+ * `scripts/run_test_suite.py::_parse_failures`, which iterates
+ * `str.splitlines()` — and that also breaks on VT, FF, FS, GS, RS,
+ * U+0085, U+2028 and U+2029, not just CR and LF. `JSON.stringify`
+ * escapes the ones below 0x20 but not U+0085/U+2028/U+2029, and an
+ * assertion MESSAGE never passes through `show()` at all, so it reaches
+ * the marker verbatim. A message carrying one of these would otherwise
+ * yield a two-field line and trip the reader's malformed-marker
+ * refusal — replacing the real failure with a parser error. The tab is
+ * here for the same reason one field down: it is the field separator.
+ *
+ * Written as escapes on purpose: U+2028 and U+2029 are JavaScript line
+ * terminators too, so a literal one here ends the regex mid-source.
+ */
+const MARKER_LINE_BREAKERS = /[\t\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]+/g;
+
+/** Collapse anything line-breaking and cap length — one marker is one line. */
 function oneLine(value, limit = MAX_DETAIL) {
-  const flat = String(value).replace(/[\t\r\n]+/g, ' ');
+  const flat = String(value).replace(MARKER_LINE_BREAKERS, ' ');
   return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
 }
 
@@ -82,6 +102,63 @@ function show(value) {
   } catch {
     return String(value);
   }
+}
+
+/**
+ * Structural equality, key-order independent.
+ *
+ * Deliberately NOT `JSON.stringify(a) === JSON.stringify(b)`, which the
+ * pre-harness `test_js_wrong_matches.mjs::assertDeepEqual` used: that
+ * compares key ORDER as well as content, so reordering two lines in a
+ * production object literal — a semantically null edit — reds the test.
+ * `browse` and `convergence` came from real `node:assert` `deepEqual` and
+ * would have been newly coupled to production key order at five sites.
+ * It also silently drops `undefined`-valued keys, folds `NaN`/`Infinity`
+ * to `null`, and flattens `Set`/`Map` to `{}`.
+ *
+ * `Object.is` at the leaves, so `NaN` equals `NaN` and `-0` does not equal
+ * `0` — the same strictness `assert.deepStrictEqual` applies.
+ */
+function deepMatches(actual, expected) {
+  if (Object.is(actual, expected)) return true;
+  if (
+    typeof actual !== 'object' || actual === null
+    || typeof expected !== 'object' || expected === null
+  ) return false;
+  if (Array.isArray(actual) !== Array.isArray(expected)) return false;
+  if (Array.isArray(actual)) {
+    return actual.length === expected.length
+      && actual.every((item, index) => deepMatches(item, expected[index]));
+  }
+  const actualKeys = Object.keys(actual);
+  if (actualKeys.length !== Object.keys(expected).length) return false;
+  return actualKeys.every(
+    key => Object.prototype.hasOwnProperty.call(expected, key)
+      && deepMatches(actual[key], expected[key]),
+  );
+}
+
+/**
+ * Does `thrown` match `expected`?
+ *
+ * `expected` is an error class OR a `RegExp` tested against the message.
+ * The regex form exists because the audit now forbids `node:assert`, whose
+ * `assert.throws(fn, /re/)` was how this repository asserted a thrown
+ * MESSAGE — without it the next author needing one hand-rolls a try/catch,
+ * which is exactly what `tests/test_js_browse.mjs` had to do.
+ */
+function errorMatches(thrown, expected) {
+  if (expected instanceof RegExp) {
+    return expected.test(String(thrown && thrown.message));
+  }
+  return thrown instanceof expected;
+}
+
+function errorMismatchDetail(thrown, expected) {
+  const got = thrown && thrown.constructor && thrown.constructor.name;
+  return expected instanceof RegExp
+    ? `expected a message matching ${String(expected)}, got ${show(thrown && thrown.message)}`
+    : `expected ${expected.name}, got ${got}`;
 }
 
 /**
@@ -139,11 +216,6 @@ export function suite(moduleUrl) {
       writeOut(`${section}\n`);
       return checker;
     },
-    /** Drop back to unlabelled assertions. */
-    endSection() {
-      section = '';
-      return checker;
-    },
     ok(condition, message) {
       return record(Boolean(condition), message, `expected truthy, got ${show(condition)}`);
     },
@@ -164,10 +236,10 @@ export function suite(moduleUrl) {
         `expected anything but ${show(expected)}`,
       );
     },
-    /** Structural equality by JSON shape — the historical `assertDeepEqual`. */
+    /** Structural equality, key-order independent — see `deepMatches`. */
     deepEqual(actual, expected, message) {
       return record(
-        JSON.stringify(actual) === JSON.stringify(expected),
+        deepMatches(actual, expected),
         message,
         `expected ${show(expected)}, got ${show(actual)}`,
       );
@@ -201,10 +273,11 @@ export function suite(moduleUrl) {
       );
     },
     /**
-     * Assert `fn()` throws. `errorClass` is optional; when given the thrown
-     * value must be an instance of it.
+     * Assert `fn()` throws. `expected` is optional and is either an error
+     * class the thrown value must be an instance of, or a `RegExp` its
+     * message must match.
      */
-    throws(fn, message, errorClass) {
+    throws(fn, message, expected) {
       let thrown;
       let didThrow = false;
       try {
@@ -214,17 +287,23 @@ export function suite(moduleUrl) {
         thrown = error;
       }
       if (!didThrow) return record(false, message, 'expected a throw, none happened');
-      if (errorClass && !(thrown instanceof errorClass)) {
-        return record(
-          false,
-          message,
-          `expected ${errorClass.name}, got ${thrown && thrown.constructor && thrown.constructor.name}`,
-        );
+      if (expected && !errorMatches(thrown, expected)) {
+        return record(false, message, errorMismatchDetail(thrown, expected));
       }
       return record(true, message, '');
     },
-    /** Await `promiseOrFn` and assert it rejects. */
-    async rejects(promiseOrFn, message, errorClass) {
+    /**
+     * Await `promiseOrFn` and assert it rejects. `expected` takes the same
+     * error class or `RegExp` as `throws`.
+     *
+     * The ONLY async method here. `await` it: an un-awaited call records
+     * after `done()` has already set the exit code, so the marker is
+     * emitted but the process still exits 0. The suite coordinator catches
+     * that shape ("phase emitted failure markers but exited zero" ->
+     * infrastructure-failure), so it is mislabelled rather than silent —
+     * but it is still a failure reported as a broken tool.
+     */
+    async rejects(promiseOrFn, message, expected) {
       let thrown;
       let didThrow = false;
       try {
@@ -234,12 +313,8 @@ export function suite(moduleUrl) {
         thrown = error;
       }
       if (!didThrow) return record(false, message, 'expected a rejection, none happened');
-      if (errorClass && !(thrown instanceof errorClass)) {
-        return record(
-          false,
-          message,
-          `expected ${errorClass.name}, got ${thrown && thrown.constructor && thrown.constructor.name}`,
-        );
+      if (expected && !errorMatches(thrown, expected)) {
+        return record(false, message, errorMismatchDetail(thrown, expected));
       }
       return record(true, message, '');
     },
@@ -331,6 +406,14 @@ export function stubGlobals(values) {
  * @returns {any}
  */
 export function element(initial = {}) {
+  // Attributes live in their own map, NOT as fields on the element. The
+  // earlier version assigned `this[name] = value`, so
+  // `setAttribute('remove', …)` clobbered the element's own method and
+  // `getAttribute('textContent')` answered `''` instead of `null` — less
+  // faithful than the hand-rolled `attributes`-Map stubs this factory
+  // exists to replace, which is a fake diverging from the real edge
+  // (`.claude/rules/test-fidelity.md` Rule B in spirit).
+  const attributes = new Map();
   return {
     textContent: '',
     innerHTML: '',
@@ -342,8 +425,10 @@ export function element(initial = {}) {
     remove() { this.removed = true; },
     querySelector() { return null; },
     querySelectorAll() { return []; },
-    setAttribute(name, value) { this[name] = value; },
-    getAttribute(name) { return Object.prototype.hasOwnProperty.call(this, name) ? this[name] : null; },
+    setAttribute(name, value) { attributes.set(name, String(value)); },
+    getAttribute(name) { return attributes.has(name) ? attributes.get(name) : null; },
+    removeAttribute(name) { attributes.delete(name); },
+    hasAttribute(name) { return attributes.has(name); },
     addEventListener() {},
     insertAdjacentHTML() {},
     ...initial,

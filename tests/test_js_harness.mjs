@@ -63,6 +63,22 @@ function runFixture(body, { inRepo = false } = {}) {
   }
 }
 
+// The assertions below are made THROUGH the harness, so a harness whose
+// `record()` returned true unconditionally would report every one of them
+// as passing — including the ones checking that a failure is reported.
+// This one raw check, owing nothing to the harness, is what makes the rest
+// falsifiable (independent review F2).
+{
+  const probe = runFixture("t.equal(1, 2, 'always fails');\nt.done();");
+  if (probe.status !== 1 || probe.markers.length !== 1) {
+    throw new Error(
+      'js_harness is inert: a failing fixture exited '
+        + `${probe.status} with ${probe.markers.length} markers, `
+        + 'so every assertion in this file is unfalsifiable',
+    );
+  }
+}
+
 t.section('a green suite exits 0 and reports its tally');
 {
   const run = runFixture("t.equal(1, 1, 'one'); t.ok(true, 'two'); t.done();");
@@ -108,6 +124,24 @@ t.section('every marker is exactly three tab-separated fields on one line');
   t.contains(run.markers[0], 'msg with tabs and newline', 'the message survives, flattened');
 }
 
+t.section('a marker survives every character PYTHON calls a line break');
+{
+  // The reader is `scripts/run_test_suite.py::_parse_failures` iterating
+  // `str.splitlines()`, which breaks on more than CR/LF. An assertion
+  // message never passes through `show()`, so one of these reaches the
+  // marker verbatim and yields a two-field line -- which the reader
+  // REFUSES as malformed, replacing the real failure with a parser error
+  // (independent review F4). JSON.stringify does not escape the three
+  // above 0x20, so the JS-side test cannot catch itself.
+  const breakers = '\\t\\n\\r\\v\\f\\x1c\\x1d\\x1e\\x85\\u2028\\u2029';
+  const run = runFixture(
+    `t.equal('a${breakers}b', 'x', 'msg${breakers}with breakers');\nt.done();`,
+  );
+  t.equal(run.markers.length, 1, 'the marker is still exactly one line');
+  t.equal(run.markers[0].split('\t').length, 3, 'and still exactly three fields');
+  t.contains(run.markers[0], 'msg with breakers', 'the message survives, flattened');
+}
+
 t.section('a long detail is truncated so one marker stays one readable line');
 {
   const run = runFixture(
@@ -116,6 +150,19 @@ t.section('a long detail is truncated so one marker stays one readable line');
   const detail = run.markers[0].split('\t')[2];
   t.ok(detail.length <= 400, `detail is capped (was ${detail.length})`);
   t.contains(detail, '…', 'truncation is marked with an ellipsis');
+}
+
+t.section('a long identity is capped too, not just the detail');
+{
+  // The identity has its own, tighter cap; only the detail's was pinned, so
+  // the identity's could be widened unnoticed (independent review, mutant
+  // A16). Both halves of "one marker stays one readable line" are covered.
+  const run = runFixture(
+    `t.ok(false, '${'m'.repeat(1000)}');\nt.done();`,
+  );
+  const identity = run.markers[0].split('\t')[1];
+  t.ok(identity.length <= 240, `identity is capped (was ${identity.length})`);
+  t.contains(identity, '…', 'the identity truncation is marked too');
 }
 
 t.section('a suite that never reaches done() fails closed');
@@ -177,6 +224,66 @@ t.section('checker vocabulary — the failing side of every method');
   t.contains(run.stdout, 'expected a throw, none happened', 'throws() explains a missing throw');
   t.contains(run.stdout, 'expected a rejection, none happened', 'rejects() explains a missing rejection');
   t.contains(run.stdout, 'expected RangeError, got TypeError', 'the wrong error class is named');
+}
+
+t.section('equal and notEqual are STRICT');
+{
+  // Nothing else distinguished `===` from `==`: degrading both to loose
+  // equality left all 23 suites green (independent review, mutants A7 and
+  // A17). `t.equal` is now the most-used assertion in the tree, replacing a
+  // mix of strict and loose helpers, so this is the pin that fixes which
+  // one it is.
+  const run = runFixture(
+    "t.equal(1, '1', 'a number is not its string');\n"
+    + "t.equal('', 0, 'an empty string is not zero');\n"
+    + "t.equal(null, undefined, 'null is not undefined');\n"
+    + "t.notEqual(1, '1', 'notEqual is strict the same way');\n"
+    + "t.notEqual(0, false, 'zero is not false');\n"
+    + 't.done();',
+  );
+  t.equal(run.status, 1, 'the three loose-equal pairs are refused');
+  t.equal(run.markers.length, 3, 'exactly the three equal() cases fail');
+  t.contains(run.stdout, '2 passed, 3 failed', 'both notEqual cases pass under strictness');
+  t.contains(run.markers[0], 'expected "1", got 1', 'the detail distinguishes the string from the number');
+}
+
+t.section('deepEqual is structural, not a JSON string comparison');
+{
+  const run = runFixture(
+    "t.deepEqual({ a: 1, b: 2 }, { b: 2, a: 1 }, 'key order does not matter');\n"
+    + "t.deepEqual([1, [2, { c: 3 }]], [1, [2, { c: 3 }]], 'nested shapes compare');\n"
+    + "t.deepEqual({ a: undefined }, {}, 'an undefined-valued key is NOT dropped');\n"
+    + "t.deepEqual({ a: NaN }, { a: NaN }, 'NaN equals NaN');\n"
+    + "t.deepEqual({ a: 1 }, { a: 1, b: 2 }, 'a missing key is a difference');\n"
+    + "t.deepEqual([1, 2], { 0: 1, 1: 2 }, 'an array is not a plain object');\n"
+    + 't.done();',
+  );
+  t.equal(run.markers.length, 3, 'exactly the three genuine differences fail');
+  t.contains(run.stdout, '3 passed, 3 failed', 'order-independence and NaN pass');
+  t.contains(
+    run.markers[0],
+    'an undefined-valued key is NOT dropped',
+    'JSON.stringify would have called these two equal',
+  );
+}
+
+t.section('throws and rejects accept an error class OR a message regexp');
+{
+  const run = runFixture(
+    "t.throws(() => { throw new TypeError('bad shape'); }, 'by class', TypeError);\n"
+    + "t.throws(() => { throw new Error('bad shape'); }, 'by message', /bad shape/);\n"
+    + "t.throws(() => { throw new Error('other'); }, 'wrong message', /bad shape/);\n"
+    + "await t.rejects(Promise.reject(new Error('nope')), 'rejects by message', /nope/);\n"
+    + "await t.rejects(Promise.reject(new Error('nope')), 'rejects wrong message', /yes/);\n"
+    + 't.done();',
+  );
+  t.equal(run.markers.length, 2, 'only the two mismatching regexps fail');
+  t.contains(run.stdout, '3 passed, 2 failed', 'class and matching-regexp forms pass');
+  t.contains(
+    run.markers[0],
+    'expected a message matching /bad shape/, got "other"',
+    'the detail names the pattern and the actual message',
+  );
 }
 
 t.section('an assertion with no message fails closed, even when it would pass');
@@ -299,6 +406,29 @@ t.section('element() gives the fields render code touches');
   const seeded = element({ textContent: 'seed', extra: 1 });
   t.equal(seeded.textContent, 'seed', 'a seeded field overrides the default');
   t.equal(seeded.extra, 1, 'an unknown seeded field is kept');
+}
+
+t.section('element() attributes live beside the element, never on it');
+{
+  // The first version assigned `this[name] = value`, which is less faithful
+  // than the hand-rolled `attributes`-Map stubs this factory replaces
+  // (independent review F10): an attribute could clobber the element's own
+  // method, and getAttribute answered a seeded FIELD instead of null.
+  const el = element({ textContent: 'hello' });
+  el.setAttribute('remove', 'not a function any more?');
+  t.equal(typeof el.remove, 'function', 'an attribute cannot clobber a method');
+  el.remove();
+  t.equal(el.removed, true, 'and the method still works');
+
+  t.equal(el.getAttribute('textContent'), null, 'a seeded FIELD is not an attribute');
+  t.equal(el.textContent, 'hello', 'and the field itself is untouched');
+
+  el.setAttribute('aria-busy', true);
+  t.equal(el.getAttribute('aria-busy'), 'true', 'attribute values are strings, as in the DOM');
+  t.equal(el.hasAttribute('aria-busy'), true, 'hasAttribute sees it');
+  el.removeAttribute('aria-busy');
+  t.equal(el.getAttribute('aria-busy'), null, 'removeAttribute clears it');
+  t.equal(el.hasAttribute('aria-busy'), false, 'and hasAttribute agrees');
 }
 
 t.done();

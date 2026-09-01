@@ -595,8 +595,7 @@ t.equal(
 t.section('parsePastedId()');
 
 function assertParse(input, expected, msg) {
-  const actual = parsePastedId(input);
-  t.equal(JSON.stringify(actual), JSON.stringify(expected), msg);
+  t.deepEqual(parsePastedId(input), expected, msg);
 }
 
 // Bare IDs (kind unknown — resolver disambiguates server-side)
