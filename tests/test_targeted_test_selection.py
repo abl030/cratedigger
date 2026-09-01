@@ -785,6 +785,50 @@ class TestSelectionRuleTable(unittest.TestCase):
             "_assert_selection_rules_well_formed(SELECTION_RULES)", source
         )
 
+    def test_the_rule_tables_are_a_seam_the_resolver_really_reads(self) -> None:
+        """Both table kwargs reach the resolution AND the fail-closed raise.
+
+        `tests/test_selection_coverage_audit.py`'s contract D measures a
+        row's deletion visibility by handing the resolver the table minus
+        that row; a resolver that quietly read the module globals instead
+        would report every row as safe. Three paths, one per stage: a route
+        module has nothing but its prefix rule, `lib/download.py` keeps its
+        hand-authored entry when the basename stage is empty, and a file
+        that resolves through the rules alone fails closed with both tables
+        emptied.
+        """
+        route = "web/routes/pipeline.py"
+        self.assertEqual(
+            resolve_attributed_neighbours(
+                route, PurePosixPath(route), REPO_ROOT, prefix_rules=()
+            ),
+            (),
+        )
+
+        download = "lib/download.py"
+        self.assertEqual(
+            [
+                source.name
+                for source in resolve_attributed_neighbours(
+                    download,
+                    PurePosixPath(download),
+                    REPO_ROOT,
+                    basename_rules=(),
+                )
+            ],
+            [EXACT_TABLE_SOURCE],
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, r"unmapped lib module: lib/quality/verdict_tiers\.py"
+        ):
+            _changed_path_neighbours(
+                "lib/quality/verdict_tiers.py",
+                REPO_ROOT,
+                basename_rules=(),
+                prefix_rules=(),
+            )
+
     def test_attribution_names_the_mechanism_behind_every_module(self) -> None:
         """Three mechanisms fire for one path, and each names what it added.
 

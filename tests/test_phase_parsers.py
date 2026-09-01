@@ -508,12 +508,17 @@ class TestEveryParserSelectsThisModule(unittest.TestCase):
     row, because the basename probe derives `tests.test_<stem>` and no
     `tests/test_ruff.py`, `test_dead_code.py`, `test_js_checks.py`,
     `test_python_tests.py` or `test___init__.py` exists. `pyright_checks.py`
-    is the exception and the reason this pin is here: `tests/
+    is the exception and the reason this pin was written: `tests/
     test_pyright_checks.py` DOES exist, for `scripts/run_pyright_checks.py`,
     so that one file would quietly resolve a wrong-subject module instead
-    of raising. `PREFIX_RULES` rows have no `MASKABLE_ENTRY_PINS`
-    equivalent, so without this, deleting the row is silent for exactly
-    the file whose name collides.
+    of raising.
+
+    `MASKABLE_RULE_PINS` in tests/test_selection_coverage_audit.py now
+    carries that deletion-visibility contract for every rule row, this one
+    included (issue #1313, batch D). What stays here is what a one-path pin
+    cannot say: the package's own file list, and that ALL six parsers reach
+    the dialect tests. Deleting the row goes red in both places; narrowing
+    its prefix to a subset of the package goes red only here.
     """
 
     def test_each_parser_module_resolves_the_dialect_tests(self) -> None:
