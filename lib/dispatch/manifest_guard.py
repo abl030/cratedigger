@@ -236,9 +236,7 @@ def _guard_force_import_audio_manifest(
         f"{len(actual_audio)} audio files but the request expects "
         f"{expected_count}; source audio: {', '.join(actual_audio)}"
     )
-    if len(actual_audio) != expected_count:
-        if len(actual_audio) > expected_count:
-            return extra(detail)
-        # Under-count — fewer audio files than the request expects.
-        return incomplete(detail)
-    return None
+    if len(actual_audio) > expected_count:
+        return extra(detail)
+    # Under-count — fewer audio files than the request expects.
+    return incomplete(detail)
