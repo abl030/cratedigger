@@ -105,7 +105,7 @@ export function releaseGroupRequestPath(id, source, identityKind) {
  * @param {Object} row
  * @returns {string}
  */
-export function catalogueProvenanceBadges(row) {
+function catalogueProvenanceBadges(row) {
   const provenance = new Set(row.provenance || []);
   const labels = [];
   if (provenance.has('promo')) labels.push('promo');
@@ -121,7 +121,7 @@ export function catalogueProvenanceBadges(row) {
  * @param {Object} row
  * @returns {string}
  */
-export function catalogueCounterpartBadges(row) {
+function catalogueCounterpartBadges(row) {
   const counterpart = row.counterpart;
   if (!counterpart || counterpart.in_library !== true) return '';
   const label = counterpart.source === 'mb' ? 'MusicBrainz' : 'Discogs';
