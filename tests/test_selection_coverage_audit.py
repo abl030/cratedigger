@@ -201,6 +201,15 @@ STALE_PROBE_PATHS: dict[str, tuple[str, str]] = {
 #: § "Typing enforcement"). The point is that single-place deletion can
 #: never again be silent.
 MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
+    # No ROOT_COVERAGE_RULES row polices `.mjs` (the `tests/` row is
+    # `.py`-only) and no basename probe can reach a `.mjs` file, so
+    # deleting the shared JS harness's entry would silently stop selecting
+    # the audit that enforces its idiom and the coordinator tests that own
+    # its failure-marker contract (issue #1313 candidate 6).
+    "tests/js_harness.mjs": (
+        "tests.test_js_suite_audit",
+        "tests.test_suite_coordinator",
+    ),
     # No rule polices a top-level file, so nothing catches this deletion.
     "cratedigger.py": (
         "tests.test_slskd_searches",

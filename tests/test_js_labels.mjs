@@ -12,28 +12,11 @@ import {
 } from '../web/js/labels.js';
 import { state } from '../web/js/state.js';
 
-let passed = 0;
-let failed = 0;
+import { suite } from './js_harness.mjs';
 
-function assertContains(haystack, needle, msg) {
-  if (haystack.includes(needle)) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} - '${needle}' not in output`);
-  }
-}
+const t = suite(import.meta.url);
 
-function assert(condition, msg) {
-  if (condition) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg}`);
-  }
-}
-
-console.log('renderLabelSearchResults() wires each row through window.openLabelDetailFromList by index');
+t.section('renderLabelSearchResults() wires each row through window.openLabelDetailFromList by index');
 {
   const containerEl = { innerHTML: '' };
   renderLabelSearchResults(containerEl, [
@@ -42,20 +25,20 @@ console.log('renderLabelSearchResults() wires each row through window.openLabelD
   ], () => {});
   // Exact handler + argument order (#1110/#1241 argument-inversion class):
   // the row element lookup, then the hit index into the stashed array.
-  assertContains(containerEl.innerHTML,
+  t.contains(containerEl.innerHTML,
     "onclick=\"window.openLabelDetailFromList(this.closest('.artist'), 0)\"",
     'first row resolves index 0');
-  assertContains(containerEl.innerHTML,
+  t.contains(containerEl.innerHTML,
     "onclick=\"window.openLabelDetailFromList(this.closest('.artist'), 1)\"",
     'second row resolves index 1');
-  assertContains(containerEl.innerHTML, 'Second Label', 'row renders the hit name');
+  t.contains(containerEl.innerHTML, 'Second Label', 'row renders the hit name');
   // Assert the stash in THIS block too — the click-resolution block below
   // reads the same key, but this render contract must hold on its own.
-  assert(/** @type {any} */ (containerEl)._labelHits?.length === 2,
+  t.ok(/** @type {any} */ (containerEl)._labelHits?.length === 2,
     'render stashes the hits array the click resolver reads');
 }
 
-console.log('openLabelDetailFromList() resolves the stashed hit and calls the handler as (id, name)');
+t.section('openLabelDetailFromList() resolves the stashed hit and calls the handler as (id, name)');
 {
   const containerEl = { innerHTML: '' };
   const calls = [];
@@ -64,8 +47,8 @@ console.log('openLabelDetailFromList() resolves the stashed hit and calls the ha
     { id: 9, name: 'Second Label' },
   ], (labelId, labelName) => calls.push([labelId, labelName]));
   openLabelDetailFromList({ parentElement: containerEl }, 1);
-  assert(calls.length === 1, 'one click resolves exactly one handler call');
-  assert(calls[0][0] === '9' && calls[0][1] === 'Second Label',
+  t.ok(calls.length === 1, 'one click resolves exactly one handler call');
+  t.ok(calls[0][0] === '9' && calls[0][1] === 'Second Label',
     'handler receives (String(id), String(name)) for the clicked index, in order');
   // The missing-hit guard must make an out-of-range click a quiet no-op:
   // assert both halves explicitly so removing the guard fails these
@@ -76,16 +59,16 @@ console.log('openLabelDetailFromList() resolves the stashed hit and calls the ha
   } catch (_e) {
     threw = true;
   }
-  assert(!threw, 'an out-of-range click never throws');
-  assert(calls.length === 1, 'an out-of-range index never reaches the handler');
+  t.ok(!threw, 'an out-of-range click never throws');
+  t.ok(calls.length === 1, 'an out-of-range index never reaches the handler');
 }
 
-console.log('renderLabelSearchResults() renders the empty state without stashing hits');
+t.section('renderLabelSearchResults() renders the empty state without stashing hits');
 {
   const containerEl = { innerHTML: '' };
   renderLabelSearchResults(containerEl, [], () => {});
-  assertContains(containerEl.innerHTML, 'No label results', 'empty search renders its empty state');
-  assert(/** @type {any} */ (containerEl)._labelHits === undefined,
+  t.contains(containerEl.innerHTML, 'No label results', 'empty search renders its empty state');
+  t.ok(/** @type {any} */ (containerEl)._labelHits === undefined,
     'empty search never stashes hits on the container');
 }
 
@@ -101,7 +84,7 @@ function makeDetailContainer() {
   return { container, body };
 }
 
-console.log('renderLabelDetail() composes header, filters, rows and pagination with exact window.* wiring');
+t.section('renderLabelDetail() composes header, filters, rows and pagination with exact window.* wiring');
 {
   state.labelFilters = { yearMin: null, yearMax: null, format: '', hideHeld: false };
   const { container, body } = makeDetailContainer();
@@ -114,38 +97,38 @@ console.log('renderLabelDetail() composes header, filters, rows and pagination w
     pagination: { items: 12, pages: 5, page: 2 },
     include_sublabels: true,
   });
-  assertContains(container.innerHTML, 'Sarah Records', 'header renders the label name');
+  t.contains(container.innerHTML, 'Sarah Records', 'header renders the label name');
   // The P2 #2 header-count fix: pagination.items (12) wins over the
   // entity release_count (7).
-  assertContains(container.innerHTML, '12 releases', 'header count comes from pagination.items, not release_count');
+  t.contains(container.innerHTML, '12 releases', 'header count comes from pagination.items, not release_count');
   // The em-dash "N releases total" suffix distinguishes renderLabelDetail's
   // own page-position note from renderPaginationControls' "Page X of Y"
   // span (reader finding: the bare string matches both producers, so a
   // deleted note survived it).
-  assertContains(container.innerHTML, 'Page 2 of 5 — 12 releases total',
+  t.contains(container.innerHTML, 'Page 2 of 5 — 12 releases total',
     'multi-page world renders its page-position note');
   // Exact handler wiring (#1110/#1241 argument-inversion class).
-  assertContains(container.innerHTML, 'oninput="window.onLabelYearFilterInput()"', 'year inputs wire the debounced year handler');
-  assertContains(container.innerHTML, 'onchange="window.onLabelFilterChange()"', 'format/hide-held controls wire the filter handler');
-  assertContains(container.innerHTML, 'window.goToLabelPage(1)', 'prev button targets page 1');
-  assertContains(container.innerHTML, 'window.goToLabelPage(3)', 'next button targets page 3');
-  assert(!container.innerHTML.includes('toggleLabelIncludeSublabels'),
+  t.contains(container.innerHTML, 'oninput="window.onLabelYearFilterInput()"', 'year inputs wire the debounced year handler');
+  t.contains(container.innerHTML, 'onchange="window.onLabelFilterChange()"', 'format/hide-held controls wire the filter handler');
+  t.contains(container.innerHTML, 'window.goToLabelPage(1)', 'prev button targets page 1');
+  t.contains(container.innerHTML, 'window.goToLabelPage(3)', 'next button targets page 3');
+  t.ok(!container.innerHTML.includes('toggleLabelIncludeSublabels'),
     'a label under BIG_LABEL_THRESHOLD renders no include-sublabels toggle');
-  assert(!container.innerHTML.includes('Sub-labels unavailable'),
+  t.ok(!container.innerHTML.includes('Sub-labels unavailable'),
     'no dropped-sublabels banner when sub_labels_dropped is absent');
   // Rows really render through renderLabelRows into the body slot.
-  assertContains(body.innerHTML, 'Pristine Christine', 'release rows render into #browse-label-rows');
-  assertContains(body.innerHTML, 'via Sha-la-la', 'sub-label badge renders when any row carries one');
+  t.contains(body.innerHTML, 'Pristine Christine', 'release rows render into #browse-label-rows');
+  t.contains(body.innerHTML, 'via Sha-la-la', 'sub-label badge renders when any row carries one');
   // The stash contract filter re-renders and goToLabelPage read back.
-  assert(container._releases.length === 2, 'container stashes the release list');
-  assert(container._totalCount === 12, 'container stashes the pagination total');
-  assert(container._labelId === '42' && container._labelName === 'Sarah Records',
+  t.ok(container._releases.length === 2, 'container stashes the release list');
+  t.ok(container._totalCount === 12, 'container stashes the pagination total');
+  t.ok(container._labelId === '42' && container._labelName === 'Sarah Records',
     'container stashes String(id) and name');
-  assert(container._includeSub === true, 'container stashes include_sublabels');
-  assert(container._hasAnySubLabel === true, 'container stashes the sub-label presence flag');
+  t.ok(container._includeSub === true, 'container stashes include_sublabels');
+  t.ok(container._hasAnySubLabel === true, 'container stashes the sub-label presence flag');
 }
 
-console.log('renderLabelDetail() big-label + dropped-sublabels arms');
+t.section('renderLabelDetail() big-label + dropped-sublabels arms');
 {
   state.labelFilters = { yearMin: null, yearMax: null, format: '', hideHeld: false };
   const { container } = makeDetailContainer();
@@ -158,19 +141,19 @@ console.log('renderLabelDetail() big-label + dropped-sublabels arms');
     include_sublabels: false,
     sub_labels_dropped: true,
   });
-  assertContains(container.innerHTML,
+  t.contains(container.innerHTML,
     'onchange="window.toggleLabelIncludeSublabels(this.checked)"',
     'big label wires the include-sublabels toggle to its exact handler');
   // `checked` renders BEFORE the onchange attribute, so pin the substring
   // that actually distinguishes the arms (reader finding: the original
   // pin quoted a string neither arm produces and was inert both ways).
-  assert(!container.innerHTML.includes('label-include-sublabels" checked'),
+  t.ok(!container.innerHTML.includes('label-include-sublabels" checked'),
     'include_sublabels=false renders the toggle unchecked');
-  assertContains(container.innerHTML, 'Sub-labels unavailable',
+  t.contains(container.innerHTML, 'Sub-labels unavailable',
     'sub_labels_dropped renders the degraded-catalogue banner');
-  assert(!container.innerHTML.includes('Page 1 of 1'),
+  t.ok(!container.innerHTML.includes('Page 1 of 1'),
     'single-page world renders no page-position note');
-  assert(container._includeSub === false, 'include_sublabels=false stashes false');
+  t.ok(container._includeSub === false, 'include_sublabels=false stashes false');
   // The positive arm: re-render with include_sublabels on and the same
   // distinguishing substring must appear (kills a hard-coded '' mutant
   // the negative pin alone cannot see).
@@ -183,11 +166,11 @@ console.log('renderLabelDetail() big-label + dropped-sublabels arms');
     pagination: { items: BIG_LABEL_THRESHOLD + 1, pages: 1, page: 1 },
     include_sublabels: true,
   });
-  assertContains(rerender.container.innerHTML, 'label-include-sublabels" checked',
+  t.contains(rerender.container.innerHTML, 'label-include-sublabels" checked',
     'include_sublabels=true renders the toggle checked');
 }
 
-console.log('renderLabelDetail() falls back to the entity count when pagination is missing');
+t.section('renderLabelDetail() falls back to the entity count when pagination is missing');
 {
   state.labelFilters = { yearMin: null, yearMax: null, format: '', hideHeld: false };
   const { container } = makeDetailContainer();
@@ -197,11 +180,10 @@ console.log('renderLabelDetail() falls back to the entity count when pagination 
       { id: '301', title: 'Only Release', date: '1999', format: 'CD', in_library: false },
     ],
   });
-  assertContains(container.innerHTML, '4 releases', 'missing pagination falls back to label.release_count');
-  assert(container._totalCount === 4, 'stash carries the fallback total');
-  assert(!container.innerHTML.includes('goToLabelPage'),
+  t.contains(container.innerHTML, '4 releases', 'missing pagination falls back to label.release_count');
+  t.ok(container._totalCount === 4, 'stash carries the fallback total');
+  t.ok(!container.innerHTML.includes('goToLabelPage'),
     'no pagination controls without a pagination payload');
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+t.done();

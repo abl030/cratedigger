@@ -6,44 +6,9 @@
 import { __test__, mergeRekeyRequest, recheckRetagDivergenceAlbum, syncRetagDivergenceAlbum } from '../web/js/pipeline.js';
 import { state } from '../web/js/state.js';
 
-let passed = 0;
-let failed = 0;
+import { suite } from './js_harness.mjs';
 
-function assert(condition, msg) {
-  if (condition) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg}`);
-  }
-}
-
-function assertEqual(actual, expected, msg) {
-  if (actual === expected) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} — expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
-  }
-}
-
-function assertContains(haystack, needle, msg) {
-  if (haystack.includes(needle)) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} - '${needle}' not in output`);
-  }
-}
-
-function assertExcludes(haystack, needle, msg) {
-  if (!haystack.includes(needle)) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} - unexpectedly found '${needle}'`);
-  }
-}
+const t = suite(import.meta.url);
 
 /**
  * Drain pending microtasks — `mergeRekeyRequest`'s success path kicks off
@@ -106,68 +71,68 @@ function installDriftDom(requestId) {
   };
 }
 
-console.log('renderPipelineNav() has operational views only');
+t.section('renderPipelineNav() has operational views only');
 {
   state.pipelineView = 'dashboard';
   const html = __test__.renderPipelineNav();
-  assertExcludes(html, 'window.setPipelineView(\'queue\')', 'request queue tab removed');
-  assertContains(html, 'window.setPipelineView(\'dashboard\')', 'dashboard tab rendered');
-  assertContains(html, 'window.setPipelineView(\'long-tail\')', 'long-tail tab rendered');
-  assertContains(html, 'window.loadPipelineDashboard()', 'dashboard refresh reloads metrics');
-  assertContains(html, 'subtab-refresh', 'refresh uses shared subtab layout');
+  t.excludes(html, 'window.setPipelineView(\'queue\')', 'request queue tab removed');
+  t.contains(html, 'window.setPipelineView(\'dashboard\')', 'dashboard tab rendered');
+  t.contains(html, 'window.setPipelineView(\'long-tail\')', 'long-tail tab rendered');
+  t.contains(html, 'window.loadPipelineDashboard()', 'dashboard refresh reloads metrics');
+  t.contains(html, 'subtab-refresh', 'refresh uses shared subtab layout');
 }
-console.log('renderPipelineNav() refreshes the dashboard subtab');
+t.section('renderPipelineNav() refreshes the dashboard subtab');
 {
   state.pipelineView = 'dashboard';
   const html = __test__.renderPipelineNav();
-  assertContains(html, 'window.loadPipelineDashboard()', 'dashboard refresh reloads dashboard metrics');
-  assertContains(html, 'subtab-refresh', 'refresh uses shared subtab layout');
+  t.contains(html, 'window.loadPipelineDashboard()', 'dashboard refresh reloads dashboard metrics');
+  t.contains(html, 'subtab-refresh', 'refresh uses shared subtab layout');
 }
-console.log('pipeline status controls disable invalid unsearchable transitions');
+t.section('pipeline status controls disable invalid unsearchable transitions');
 {
   const imported = __test__.renderPipelineStatusButtons(42, 'imported');
-  assertContains(imported, "class=\"p-btn active-status\" data-pipeline-request-id=\"42\" onclick=\"event.stopPropagation(); window.updateStatus(42, 'imported')\">imported</button>", 'imported remains visibly current and conflict-addressable');
-  assertExcludes(imported, "window.updateStatus(42, 'unsearchable')", 'imported cannot invoke unsearchable');
-  assertContains(imported, 'disabled aria-disabled="true">unsearchable</button>', 'invalid imported stop is disabled');
+  t.contains(imported, "class=\"p-btn active-status\" data-pipeline-request-id=\"42\" onclick=\"event.stopPropagation(); window.updateStatus(42, 'imported')\">imported</button>", 'imported remains visibly current and conflict-addressable');
+  t.excludes(imported, "window.updateStatus(42, 'unsearchable')", 'imported cannot invoke unsearchable');
+  t.contains(imported, 'disabled aria-disabled="true">unsearchable</button>', 'invalid imported stop is disabled');
 
   const downloading = __test__.renderPipelineStatusButtons(42, 'downloading');
-  assertContains(downloading, 'disabled aria-disabled="true">downloading</button>', 'downloading remains visibly current');
-  assertExcludes(downloading, "window.updateStatus(42, 'unsearchable')", 'downloading cannot invoke unsearchable');
-  assertContains(downloading, 'disabled aria-disabled="true">unsearchable</button>', 'invalid downloading stop is disabled');
+  t.contains(downloading, 'disabled aria-disabled="true">downloading</button>', 'downloading remains visibly current');
+  t.excludes(downloading, "window.updateStatus(42, 'unsearchable')", 'downloading cannot invoke unsearchable');
+  t.contains(downloading, 'disabled aria-disabled="true">unsearchable</button>', 'invalid downloading stop is disabled');
 
   const processing = __test__.renderPipelineStatusButtons(42, 'processing', {
     job_id: 420,
     status: 'recovery_required',
     preview_status: 'running',
   });
-  assertContains(processing, 'aria-disabled="true"', 'processing controls expose disabled semantics');
-  assertContains(processing, 'aria-describedby=', 'processing controls name visible explanation');
-  assertContains(processing, 'job #420 awaits automatic convergence', 'processing explanation names exact owner');
-  assertContains(processing, '/api/import-jobs/420/recovery', 'processing links exact recovery detail');
-  assertExcludes(processing, ' disabled', 'processing controls remain focusable');
-  assertExcludes(processing, 'window.updateStatus', 'processing controls cannot mutate lifecycle');
+  t.contains(processing, 'aria-disabled="true"', 'processing controls expose disabled semantics');
+  t.contains(processing, 'aria-describedby=', 'processing controls name visible explanation');
+  t.contains(processing, 'job #420 awaits automatic convergence', 'processing explanation names exact owner');
+  t.contains(processing, '/api/import-jobs/420/recovery', 'processing links exact recovery detail');
+  t.excludes(processing, ' disabled', 'processing controls remain focusable');
+  t.excludes(processing, 'window.updateStatus', 'processing controls cannot mutate lifecycle');
 
   const wanted = __test__.renderPipelineStatusButtons(42, 'wanted');
-  assertContains(wanted, "window.updateStatus(42, 'unsearchable')", 'wanted may become unsearchable');
+  t.contains(wanted, "window.updateStatus(42, 'unsearchable')", 'wanted may become unsearchable');
 
   const stopped = __test__.renderPipelineStatusButtons(42, 'unsearchable');
-  assertContains(stopped, "window.updateStatus(42, 'unsearchable')", 'current unsearchable state remains an active control');
-  assertContains(stopped, 'class="p-btn active-status"', 'unsearchable remains visibly current');
+  t.contains(stopped, "window.updateStatus(42, 'unsearchable')", 'current unsearchable state remains an active control');
+  t.contains(stopped, 'class="p-btn active-status"', 'unsearchable remains visibly current');
 }
-console.log('request detail caps history and collapses tracks');
+t.section('request detail caps history and collapses tracks');
 {
   const history = Array.from({ length: 12 }, (_, id) => ({
     id, created_at: '2026-07-13T00:00:00+00:00',
   }));
   const tracks = Array.from({ length: 18 }, (_, id) => ({ id, title: `Track ${id}` }));
   const html = __test__.renderRequestEvidenceSections(history, tracks, []);
-  assertContains(html, 'Download History (12)', 'full history count remains visible');
-  assertContains(html, 'Show 2 older attempts', 'only older attempts move behind disclosure');
-  assertContains(html, '<details class="p-tracks"', 'library tracks are collapsed by default');
-  assertContains(html, 'In Library (18 tracks)', 'track disclosure keeps its count');
+  t.contains(html, 'Download History (12)', 'full history count remains visible');
+  t.contains(html, 'Show 2 older attempts', 'only older attempts move behind disclosure');
+  t.contains(html, '<details class="p-tracks"', 'library tracks are collapsed by default');
+  t.contains(html, 'In Library (18 tracks)', 'track disclosure keeps its count');
 }
 
-console.log('request detail disclosure — generated count sweep');
+t.section('request detail disclosure — generated count sweep');
 for (let count = 0; count <= 30; count++) {
   const history = Array.from({ length: count }, (_, id) => ({
     id, created_at: '2026-07-13T00:00:00+00:00',
@@ -175,41 +140,41 @@ for (let count = 0; count <= 30; count++) {
   const html = __test__.renderRequestEvidenceSections(history, [], []);
   const expectedOlder = Math.max(0, count - 10);
   if (expectedOlder === 0) {
-    assertExcludes(html, 'older attempt', `${count} histories need no older disclosure`);
+    t.excludes(html, 'older attempt', `${count} histories need no older disclosure`);
   } else {
-    assertContains(html, `Show ${expectedOlder} older attempt`, `${count} histories expose exact remainder`);
+    t.contains(html, `Show ${expectedOlder} older attempt`, `${count} histories expose exact remainder`);
   }
 }
 
-console.log('current library display uses typed authority states only');
+t.section('current library display uses typed authority states only');
 {
   const unique = __test__.renderCurrentLibraryRow({
     state: 'unique', path: '/library/Moved/current',
   });
-  assertContains(unique, 'Imported to', 'unique state labels the fresh path');
-  assertContains(unique, '/library/Moved/current', 'unique state renders the resolver path');
+  t.contains(unique, 'Imported to', 'unique state labels the fresh path');
+  t.contains(unique, '/library/Moved/current', 'unique state renders the resolver path');
 
   const missing = __test__.renderCurrentLibraryRow({state: 'missing'});
-  assertContains(missing, 'Beets library', 'missing state namespaces the live authority');
-  assertContains(missing, 'Not installed', 'missing state stays explicit');
+  t.contains(missing, 'Beets library', 'missing state namespaces the live authority');
+  t.contains(missing, 'Not installed', 'missing state stays explicit');
 
   const ambiguous = __test__.renderCurrentLibraryRow({
     state: 'ambiguous', reason: 'multiple_matches', album_ids: [7, 8],
   });
-  assertContains(ambiguous, 'Manual review', 'ambiguous state fails closed visibly');
-  assertContains(ambiguous, 'Beets library', 'ambiguous state namespaces the live authority');
-  assertContains(ambiguous, 'multiple_matches', 'ambiguity reason is visible');
-  assertContains(ambiguous, 'album IDs 7, 8', 'ambiguous album ids are visible');
+  t.contains(ambiguous, 'Manual review', 'ambiguous state fails closed visibly');
+  t.contains(ambiguous, 'Beets library', 'ambiguous state namespaces the live authority');
+  t.contains(ambiguous, 'multiple_matches', 'ambiguity reason is visible');
+  t.contains(ambiguous, 'album IDs 7, 8', 'ambiguous album ids are visible');
 
   const unavailable = __test__.renderCurrentLibraryRow({
     state: 'unavailable', reason: 'conflicting_request_identity',
   });
-  assertContains(unavailable, 'Unavailable', 'unavailable state stays explicit');
-  assertContains(unavailable, 'Beets library', 'unavailable state namespaces the live authority');
-  assertContains(unavailable, 'conflicting_request_identity', 'unavailable reason is visible');
+  t.contains(unavailable, 'Unavailable', 'unavailable state stays explicit');
+  t.contains(unavailable, 'Beets library', 'unavailable state namespaces the live authority');
+  t.contains(unavailable, 'conflicting_request_identity', 'unavailable reason is visible');
 }
 
-console.log('request 6039 current Quality uses average positive track bitrate');
+t.section('request 6039 current Quality uses average positive track bitrate');
 {
   const html = __test__.renderCurrentQualityRow(
     {
@@ -225,11 +190,11 @@ console.log('request 6039 current Quality uses average positive track bitrate');
       { format: 'MP3', bitrate: 194000 },
     ],
   );
-  assertContains(html, 'MP3 V0', 'avg 288 renders the current V0 label');
-  assertExcludes(html, 'MP3 V2', 'min 194 never paints current quality');
+  t.contains(html, 'MP3 V0', 'avg 288 renders the current V0 label');
+  t.excludes(html, 'MP3 V2', 'min 194 never paints current quality');
 }
 
-console.log('current Quality uses the shared ordered spectral palette');
+t.section('current Quality uses the shared ordered spectral palette');
 for (const [grade, tone] of [
   ['likely_transcode', 'poor'],
   ['suspect', 'acceptable'],
@@ -246,9 +211,9 @@ for (const [grade, tone] of [
     },
     [{ format: 'MP3', bitrate: 192000 }],
   );
-  assertContains(html, `quality-tone-${tone}`, `${grade} uses shared ${tone} tone`);
-  assertContains(html, grade.replaceAll('_', ' '), `${grade} is humanized`);
-  assertExcludes(html, grade.includes('_') ? grade : '__never__',
+  t.contains(html, `quality-tone-${tone}`, `${grade} uses shared ${tone} tone`);
+  t.contains(html, grade.replaceAll('_', ' '), `${grade} is humanized`);
+  t.excludes(html, grade.includes('_') ? grade : '__never__',
     `${grade} never leaks a raw token`);
 }
 
@@ -260,7 +225,7 @@ for (const [grade, tone] of [
 
 const BEETS_MP3 = [{ format: 'MP3', bitrate: 256000 }];
 
-console.log('current Quality withholds an audit-only HAVE accusation');
+t.section('current Quality withholds an audit-only HAVE accusation');
 {
   const html = __test__.renderCurrentQualityRow(
     {
@@ -273,14 +238,14 @@ console.log('current Quality withholds an audit-only HAVE accusation');
     },
     BEETS_MP3,
   );
-  assertContains(html, 'likely transcode', 'the measured grade stays visible');
-  assertContains(html, 'audit-only', 'the withheld suffix is stated');
-  assertContains(html, 'native encoder behaviour', 'the hover explains why');
-  assertContains(html, 'quality-tone-unknown', 'the neutral tone is used');
-  assertExcludes(html, 'quality-tone-poor', 'the accusing red is withheld');
+  t.contains(html, 'likely transcode', 'the measured grade stays visible');
+  t.contains(html, 'audit-only', 'the withheld suffix is stated');
+  t.contains(html, 'native encoder behaviour', 'the hover explains why');
+  t.contains(html, 'quality-tone-unknown', 'the neutral tone is used');
+  t.excludes(html, 'quality-tone-poor', 'the accusing red is withheld');
 }
 
-console.log('current Quality keeps the accusation for a real codec');
+t.section('current Quality keeps the accusation for a real codec');
 {
   const html = __test__.renderCurrentQualityRow(
     {
@@ -293,11 +258,11 @@ console.log('current Quality keeps the accusation for a real codec');
     },
     BEETS_MP3,
   );
-  assertContains(html, 'quality-tone-poor', 'an admissible grade still accuses');
-  assertExcludes(html, 'audit-only', 'no withheld suffix on a real finding');
+  t.contains(html, 'quality-tone-poor', 'an admissible grade still accuses');
+  t.excludes(html, 'audit-only', 'no withheld suffix on a real finding');
 }
 
-console.log('current Quality falls back to accusing when the flags are absent');
+t.section('current Quality falls back to accusing when the flags are absent');
 {
   const html = __test__.renderCurrentQualityRow(
     {
@@ -308,12 +273,12 @@ console.log('current Quality falls back to accusing when the flags are absent');
     },
     BEETS_MP3,
   );
-  assertContains(html, 'quality-tone-poor',
+  t.contains(html, 'quality-tone-poor',
     'a row with no evidence join keeps the historical accusing render');
-  assertExcludes(html, 'audit-only', 'nothing is withheld without a flag');
+  t.excludes(html, 'audit-only', 'nothing is withheld without a flag');
 }
 
-console.log('current Quality applies the pair belonging to the chosen grade');
+t.section('current Quality applies the pair belonging to the chosen grade');
 {
   // The chain fell through to the last download, so the HAVE pair must
   // NOT be read — it describes a different album.
@@ -330,9 +295,9 @@ console.log('current Quality applies the pair belonging to the chosen grade');
     },
     BEETS_MP3,
   );
-  assertContains(html, 'audit-only',
+  t.contains(html, 'audit-only',
     'the last-download pair is applied to the last-download grade');
-  assertExcludes(html, 'quality-tone-poor',
+  t.excludes(html, 'quality-tone-poor',
     'the HAVE pair never overrides the grade the chain selected');
 
   // ...and the converse: a HAVE grade must not read the candidate pair.
@@ -349,13 +314,13 @@ console.log('current Quality applies the pair belonging to the chosen grade');
     },
     BEETS_MP3,
   );
-  assertContains(haveHtml, 'quality-tone-poor',
+  t.contains(haveHtml, 'quality-tone-poor',
     'the HAVE grade keeps its own admissible finding');
-  assertExcludes(haveHtml, 'audit-only',
+  t.excludes(haveHtml, 'audit-only',
     'the candidate pair never neutralizes a HAVE accusation');
 }
 
-console.log('current Quality never claims encoder facts for an unresolved codec');
+t.section('current Quality never claims encoder facts for an unresolved codec');
 {
   const html = __test__.renderCurrentQualityRow(
     {
@@ -368,11 +333,11 @@ console.log('current Quality never claims encoder facts for an unresolved codec'
     },
     BEETS_MP3,
   );
-  assertContains(html, 'codec unresolved', 'the unresolved world is named');
-  assertContains(html, 'could not be identified', 'the hover says why');
-  assertExcludes(html, 'native encoder behaviour',
+  t.contains(html, 'codec unresolved', 'the unresolved world is named');
+  t.contains(html, 'could not be identified', 'the hover says why');
+  t.excludes(html, 'native encoder behaviour',
     'an unresolved codec is never described as native encoder rolloff');
-  assertExcludes(html, 'audit-only',
+  t.excludes(html, 'audit-only',
     'the two withholding worlds are never conflated');
 }
 
@@ -380,7 +345,7 @@ console.log('current Quality never claims encoder facts for an unresolved codec'
 // coverage — a reviewer replaced the whole function body with a no-op and
 // every JS test still passed. ---
 
-console.log('mergeRekeyRequest() success path posts, toasts, and reloads the dashboard');
+t.section('mergeRekeyRequest() success path posts, toasts, and reloads the dashboard');
 {
   const dom = installDriftDom(8792);
   const btn = { disabled: false, textContent: 'Follow MB merge' };
@@ -405,25 +370,25 @@ console.log('mergeRekeyRequest() success path posts, toasts, and reloads the das
   await mergeRekeyRequest(8792, btn);
   await flushMicrotasks();
 
-  assertEqual(calls[0].url, '/api/pipeline/8792/merge-rekey', 'posts to the exact request-scoped route');
-  assertEqual(calls[0].options.method, 'POST', 'uses POST');
-  assertEqual(calls[0].options.headers['Content-Type'], 'application/json', 'sends a JSON content type');
-  assertEqual(calls[0].options.body, '{}', 'sends an empty JSON body — no request payload');
-  assert(calls.some(c => c.url === '/api/pipeline/dashboard'),
+  t.equal(calls[0].url, '/api/pipeline/8792/merge-rekey', 'posts to the exact request-scoped route');
+  t.equal(calls[0].options.method, 'POST', 'uses POST');
+  t.equal(calls[0].options.headers['Content-Type'], 'application/json', 'sends a JSON content type');
+  t.equal(calls[0].options.body, '{}', 'sends an empty JSON body — no request payload');
+  t.ok(calls.some(c => c.url === '/api/pipeline/dashboard'),
     'success reloads the dashboard so the healed row disappears');
-  assert(dom.isReloaded(),
+  t.ok(dom.isReloaded(),
     'the reload really rewrote #pipeline-content — the note nodes were replaced');
-  assertEqual(dom.toast.textContent,
+  t.equal(dom.toast.textContent,
     'Request #8792 rekeyed to 9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4',
     'toasts the exact survivor id');
-  assertEqual(dom.toast.className, 'toast', 'success toast is not an error');
-  assertEqual(dom.preNote.textContent, '', 'success never writes the pre-reload note');
-  assertEqual(dom.postNote.textContent, '', 'success never writes the post-reload note');
-  assertEqual(btn.textContent, 'Rekeying...',
+  t.equal(dom.toast.className, 'toast', 'success toast is not an error');
+  t.equal(dom.preNote.textContent, '', 'success never writes the pre-reload note');
+  t.equal(dom.postNote.textContent, '', 'success never writes the post-reload note');
+  t.equal(btn.textContent, 'Rekeying...',
     'success leaves the disabled mid-flight label — the dashboard reload replaces the row entirely');
 }
 
-console.log('mergeRekeyRequest() refusal path re-arms the button and writes the inline note');
+t.section('mergeRekeyRequest() refusal path re-arms the button and writes the inline note');
 {
   const dom = installDriftDom(8792);
   const btn = { disabled: true, textContent: 'Rekeying...' };
@@ -446,18 +411,18 @@ console.log('mergeRekeyRequest() refusal path re-arms the button and writes the 
 
   await mergeRekeyRequest(8792, btn);
 
-  assert(!calls.includes('/api/pipeline/dashboard'), 'a refusal never reloads the dashboard');
-  assertEqual(btn.disabled, false, 'the button re-arms for a retry');
-  assertEqual(btn.textContent, 'Follow MB merge', 'the button label resets');
-  assertEqual(dom.visibleNote().textContent,
+  t.ok(!calls.includes('/api/pipeline/dashboard'), 'a refusal never reloads the dashboard');
+  t.equal(btn.disabled, false, 'the button re-arms for a retry');
+  t.equal(btn.textContent, 'Follow MB merge', 'the button label resets');
+  t.equal(dom.visibleNote().textContent,
     'not_merged: MusicBrainz names no merge survivor for the stored id; '
     + 'this request has not been merged',
     'the VISIBLE inline note names the exact outcome and message');
-  assertEqual(dom.visibleNote().className, 'drift-row-note metric-bad', 'the visible note uses the bad tone');
-  assertEqual(dom.toast.className, 'toast error', 'a refusal toast is an error');
+  t.equal(dom.visibleNote().className, 'drift-row-note metric-bad', 'the visible note uses the bad tone');
+  t.equal(dom.toast.className, 'toast error', 'a refusal toast is an error');
 }
 
-console.log('mergeRekeyRequest() network-error path re-arms the button with a generic note');
+t.section('mergeRekeyRequest() network-error path re-arms the button with a generic note');
 {
   const dom = installDriftDom(8792);
   const btn = { disabled: true, textContent: 'Rekeying...' };
@@ -467,15 +432,15 @@ console.log('mergeRekeyRequest() network-error path re-arms the button with a ge
 
   await mergeRekeyRequest(8792, btn);
 
-  assertEqual(btn.disabled, false, 'the button re-arms after a network failure');
-  assertEqual(btn.textContent, 'Follow MB merge', 'the button label resets');
-  assertEqual(dom.visibleNote().textContent, 'Merge-rekey request failed',
+  t.equal(btn.disabled, false, 'the button re-arms after a network failure');
+  t.equal(btn.textContent, 'Follow MB merge', 'the button label resets');
+  t.equal(dom.visibleNote().textContent, 'Merge-rekey request failed',
     'the VISIBLE inline note falls back to a generic message with no response to read');
-  assertEqual(dom.visibleNote().className, 'drift-row-note metric-bad', 'the visible note uses the bad tone');
-  assertEqual(dom.toast.className, 'toast error', 'a network failure toast is an error');
+  t.equal(dom.visibleNote().className, 'drift-row-note metric-bad', 'the visible note uses the bad tone');
+  t.equal(dom.toast.className, 'toast error', 'a network failure toast is an error');
 }
 
-console.log('mergeRekeyRequest() refusal note falls back to the raw error field when unmessaged');
+t.section('mergeRekeyRequest() refusal note falls back to the raw error field when unmessaged');
 {
   const dom = installDriftDom(42);
   const btn = { disabled: true, textContent: 'Rekeying...' };
@@ -487,7 +452,7 @@ console.log('mergeRekeyRequest() refusal note falls back to the raw error field 
 
   await mergeRekeyRequest(42, btn);
 
-  assertEqual(dom.visibleNote().textContent, 'rekey_refused: route-level error text',
+  t.equal(dom.visibleNote().textContent, 'rekey_refused: route-level error text',
     'falls back to the route-level "error" field when error_message is absent');
 }
 
@@ -542,7 +507,7 @@ function installReplacingRetagDom(albumId) {
   };
 }
 
-console.log('recheckRetagDivergenceAlbum() success path GETs, patches the row in place, and toasts');
+t.section('recheckRetagDivergenceAlbum() success path GETs, patches the row in place, and toasts');
 {
   const dom = installReplacingRetagDom(6612);
   const btn = { disabled: false, textContent: 'Recheck' };
@@ -560,21 +525,21 @@ console.log('recheckRetagDivergenceAlbum() success path GETs, patches the row in
 
   await recheckRetagDivergenceAlbum(6612, btn);
 
-  assertEqual(calls.length, 1, 'exactly one fetch issued');
-  assertEqual(calls[0].url, '/api/audit/retag-divergence/album/6612',
+  t.equal(calls.length, 1, 'exactly one fetch issued');
+  t.equal(calls[0].url, '/api/audit/retag-divergence/album/6612',
     'GETs the exact per-album route');
-  assert(calls[0].options === undefined || calls[0].options.method === undefined
+  t.ok(calls[0].options === undefined || calls[0].options.method === undefined
     || calls[0].options.method === 'GET', 'uses GET, never POST — this is a read-only check');
-  assertContains(dom.container.innerHTML, 'agrees', 'row patched with the fresh classification');
-  assertContains(dom.container.innerHTML, 'window.recheckRetagDivergenceAlbum(6612, this)',
+  t.contains(dom.container.innerHTML, 'agrees', 'row patched with the fresh classification');
+  t.contains(dom.container.innerHTML, 'window.recheckRetagDivergenceAlbum(6612, this)',
     'patched row keeps its own recheck button wired for a further recheck');
-  assertEqual(dom.toast.textContent, 'Album #6612 rechecked: agrees', 'toasts the fresh result');
-  assertEqual(dom.toast.className, 'toast', 'success toast is not an error');
-  assertEqual(dom.preNote.textContent, '', 'success never writes the pre-render note');
-  assertEqual(dom.postNote.textContent, '', 'success never writes the post-render note');
+  t.equal(dom.toast.textContent, 'Album #6612 rechecked: agrees', 'toasts the fresh result');
+  t.equal(dom.toast.className, 'toast', 'success toast is not an error');
+  t.equal(dom.preNote.textContent, '', 'success never writes the pre-render note');
+  t.equal(dom.postNote.textContent, '', 'success never writes the post-render note');
 }
 
-console.log('recheckRetagDivergenceAlbum() N2 (fresh review) — the patched row shows fresh non-agreeing item detail');
+t.section('recheckRetagDivergenceAlbum() N2 (fresh review) — the patched row shows fresh non-agreeing item detail');
 {
   const dom = installReplacingRetagDom(6612);
   const btn = { disabled: false, textContent: 'Recheck' };
@@ -598,18 +563,18 @@ console.log('recheckRetagDivergenceAlbum() N2 (fresh review) — the patched row
 
   await recheckRetagDivergenceAlbum(6612, btn);
 
-  assertContains(dom.container.innerHTML, 'diverges', 'patched row shows the fresh album class');
-  assertContains(dom.container.innerHTML, 'a6269e96-0000-0000-0000-000000000000',
+  t.contains(dom.container.innerHTML, 'diverges', 'patched row shows the fresh album class');
+  t.contains(dom.container.innerHTML, 'a6269e96-0000-0000-0000-000000000000',
     'patched row shows the fresh diverging item\'s identity');
   // #1260 revised the #1142 N2 stance on operator request: the file NAME
   // is the readable row subject, the FULL path only a hover title.
-  assertContains(dom.container.innerHTML, 'title="/library/Slipknot/01.flac"',
+  t.contains(dom.container.innerHTML, 'title="/library/Slipknot/01.flac"',
     'patched row keeps the full item path one hover away');
-  assertExcludes(dom.container.innerHTML, '>diverges: /library/Slipknot/01.flac',
+  t.excludes(dom.container.innerHTML, '>diverges: /library/Slipknot/01.flac',
     'patched row never renders the full path as row text');
 }
 
-console.log('recheckRetagDivergenceAlbum() never reloads the whole dashboard on success');
+t.section('recheckRetagDivergenceAlbum() never reloads the whole dashboard on success');
 {
   installReplacingRetagDom(6612);
   const btn = { disabled: false, textContent: 'Recheck' };
@@ -627,11 +592,11 @@ console.log('recheckRetagDivergenceAlbum() never reloads the whole dashboard on 
 
   await recheckRetagDivergenceAlbum(6612, btn);
 
-  assert(!calls.includes('/api/pipeline/dashboard'),
+  t.ok(!calls.includes('/api/pipeline/dashboard'),
     'a per-album recheck never triggers a full dashboard reload');
 }
 
-console.log('recheckRetagDivergenceAlbum() not-found path re-arms the button and writes the inline note');
+t.section('recheckRetagDivergenceAlbum() not-found path re-arms the button and writes the inline note');
 {
   const dom = installReplacingRetagDom(999);
   const btn = { disabled: true, textContent: 'Rechecking...' };
@@ -643,16 +608,16 @@ console.log('recheckRetagDivergenceAlbum() not-found path re-arms the button and
 
   await recheckRetagDivergenceAlbum(999, btn);
 
-  assertEqual(btn.disabled, false, 'the button re-arms for a retry');
-  assertEqual(btn.textContent, 'Recheck', 'the button label resets');
-  assertEqual(dom.visibleNote().textContent, 'No Beets album with id 999',
+  t.equal(btn.disabled, false, 'the button re-arms for a retry');
+  t.equal(btn.textContent, 'Recheck', 'the button label resets');
+  t.equal(dom.visibleNote().textContent, 'No Beets album with id 999',
     'the VISIBLE inline note names the exact error');
-  assertEqual(dom.visibleNote().className, 'drift-row-note metric-bad', 'the visible note uses the bad tone');
-  assertEqual(dom.postNote.textContent, '', 'nothing is written to the unrendered post-render note');
-  assertEqual(dom.toast.className, 'toast error', 'a refusal toast is an error');
+  t.equal(dom.visibleNote().className, 'drift-row-note metric-bad', 'the visible note uses the bad tone');
+  t.equal(dom.postNote.textContent, '', 'nothing is written to the unrendered post-render note');
+  t.equal(dom.toast.className, 'toast error', 'a refusal toast is an error');
 }
 
-console.log('recheckRetagDivergenceAlbum() network-error path re-arms the button with a generic note');
+t.section('recheckRetagDivergenceAlbum() network-error path re-arms the button with a generic note');
 {
   const dom = installReplacingRetagDom(6612);
   const btn = { disabled: true, textContent: 'Rechecking...' };
@@ -662,16 +627,16 @@ console.log('recheckRetagDivergenceAlbum() network-error path re-arms the button
 
   await recheckRetagDivergenceAlbum(6612, btn);
 
-  assertEqual(btn.disabled, false, 'the button re-arms after a network failure');
-  assertEqual(btn.textContent, 'Recheck', 'the button label resets');
-  assertEqual(dom.visibleNote().textContent, 'Recheck request failed',
+  t.equal(btn.disabled, false, 'the button re-arms after a network failure');
+  t.equal(btn.textContent, 'Recheck', 'the button label resets');
+  t.equal(dom.visibleNote().textContent, 'Recheck request failed',
     'the VISIBLE inline note falls back to a generic message with no response to read');
-  assertEqual(dom.toast.className, 'toast error', 'a network failure toast is an error');
+  t.equal(dom.toast.className, 'toast error', 'a network failure toast is an error');
 }
 
 const SYNC_DB_ID = '26693e58-02c0-4bb1-b66f-f0f44f8a234d';
 
-console.log('syncRetagDivergenceAlbum() POSTs the compare-and-set body and patches the row on success');
+t.section('syncRetagDivergenceAlbum() POSTs the compare-and-set body and patches the row on success');
 {
   const dom = installReplacingRetagDom(16948);
   const btn = {
@@ -697,21 +662,21 @@ console.log('syncRetagDivergenceAlbum() POSTs the compare-and-set body and patch
 
   await syncRetagDivergenceAlbum(16948, btn);
 
-  assertEqual(calls.length, 1, 'exactly one fetch issued');
-  assertEqual(calls[0].url, '/api/audit/retag-divergence/album/16948/sync-tags',
+  t.equal(calls.length, 1, 'exactly one fetch issued');
+  t.equal(calls[0].url, '/api/audit/retag-divergence/album/16948/sync-tags',
     'the sync POSTs the canonical route path');
-  assertEqual(calls[0].options.method, 'POST', 'the sync uses POST');
-  assertEqual(JSON.parse(calls[0].options.body).expected_mb_albumid, SYNC_DB_ID,
+  t.equal(calls[0].options.method, 'POST', 'the sync uses POST');
+  t.equal(JSON.parse(calls[0].options.body).expected_mb_albumid, SYNC_DB_ID,
     'the body carries the compare-and-set identity from data-expected');
-  assert(dom.isRerendered(), 'the row re-renders from the returned album');
-  assertContains(dom.container.innerHTML, 'agrees',
+  t.ok(dom.isRerendered(), 'the row re-renders from the returned album');
+  t.contains(dom.container.innerHTML, 'agrees',
     'the patched row shows the post-sync classification');
-  assertEqual(btn.disabled, true,
+  t.equal(btn.disabled, true,
     'the detached pre-render button is never resurrected on success');
-  assertEqual(dom.toast.className, 'toast', 'a success toast is not an error');
+  t.equal(dom.toast.className, 'toast', 'a success toast is not an error');
 }
 
-console.log('syncRetagDivergenceAlbum() residual refusal re-renders AND writes the POST-re-render note');
+t.section('syncRetagDivergenceAlbum() residual refusal re-renders AND writes the POST-re-render note');
 {
   const dom = installReplacingRetagDom(16948);
   const btn = {
@@ -739,19 +704,19 @@ console.log('syncRetagDivergenceAlbum() residual refusal re-renders AND writes t
 
   await syncRetagDivergenceAlbum(16948, btn);
 
-  assert(dom.isRerendered(), 'a residual refusal still re-renders the fresh scan');
-  assertEqual(btn.disabled, true,
+  t.ok(dom.isRerendered(), 'a residual refusal still re-renders the fresh scan');
+  t.equal(btn.disabled, true,
     'the detached pre-render button is never resurrected on a re-rendered refusal (#1260 review F11)');
-  assertContains(dom.postNote.textContent, 'residual_divergence',
+  t.contains(dom.postNote.textContent, 'residual_divergence',
     'the refusal note lands in the POST-re-render note node');
-  assertContains(dom.postNote.textContent, 're-read file tags still disagree',
+  t.contains(dom.postNote.textContent, 're-read file tags still disagree',
     'the refusal note carries the service detail');
-  assertEqual(dom.preNote.textContent, '',
+  t.equal(dom.preNote.textContent, '',
     'nothing is written to the destroyed pre-render note node');
-  assertEqual(dom.toast.className, 'toast error', 'a refusal toast is an error');
+  t.equal(dom.toast.className, 'toast error', 'a refusal toast is an error');
 }
 
-console.log('syncRetagDivergenceAlbum() album-less refusal re-arms the still-attached button');
+t.section('syncRetagDivergenceAlbum() album-less refusal re-arms the still-attached button');
 {
   const dom = installReplacingRetagDom(42);
   const btn = {
@@ -771,17 +736,17 @@ console.log('syncRetagDivergenceAlbum() album-less refusal re-arms the still-att
 
   await syncRetagDivergenceAlbum(42, btn);
 
-  assert(!dom.isRerendered(), 'no album payload, no re-render');
-  assertEqual(btn.disabled, false, 'the still-attached button re-arms');
-  assertEqual(btn.textContent, 'Write tags', 'the button label resets');
-  assertContains(dom.visibleNote().textContent, 'identity_mismatch',
+  t.ok(!dom.isRerendered(), 'no album payload, no re-render');
+  t.equal(btn.disabled, false, 'the still-attached button re-arms');
+  t.equal(btn.textContent, 'Write tags', 'the button label resets');
+  t.contains(dom.visibleNote().textContent, 'identity_mismatch',
     'the visible note names the refusal outcome');
-  assertEqual(dom.postNote.textContent, '',
+  t.equal(dom.postNote.textContent, '',
     'nothing is written to the unrendered post-render note');
-  assertEqual(dom.toast.className, 'toast error', 'a refusal toast is an error');
+  t.equal(dom.toast.className, 'toast error', 'a refusal toast is an error');
 }
 
-console.log('syncRetagDivergenceAlbum() network-error path re-arms the button with a generic note');
+t.section('syncRetagDivergenceAlbum() network-error path re-arms the button with a generic note');
 {
   const dom = installReplacingRetagDom(16948);
   const btn = {
@@ -794,12 +759,11 @@ console.log('syncRetagDivergenceAlbum() network-error path re-arms the button wi
 
   await syncRetagDivergenceAlbum(16948, btn);
 
-  assertEqual(btn.disabled, false, 'the button re-arms after a network failure');
-  assertEqual(btn.textContent, 'Write tags', 'the button label resets');
-  assertEqual(dom.preNote.textContent, 'Tag-sync request failed',
+  t.equal(btn.disabled, false, 'the button re-arms after a network failure');
+  t.equal(btn.textContent, 'Write tags', 'the button label resets');
+  t.equal(dom.preNote.textContent, 'Tag-sync request failed',
     'the note falls back to a generic message');
-  assertEqual(dom.toast.className, 'toast error', 'a network failure toast is an error');
+  t.equal(dom.toast.className, 'toast error', 'a network failure toast is an error');
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+t.done();

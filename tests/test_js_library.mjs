@@ -15,48 +15,15 @@ import {
 import { esc } from '../web/js/util.js';
 import { pipelineStore, updatePipelineStatus } from '../web/js/state.js';
 
-let passed = 0;
-let failed = 0;
+import { suite } from './js_harness.mjs';
 
-function assert(condition, msg) {
-  if (condition) passed++;
-  else {
-    failed++;
-    console.error(`  FAIL: ${msg}`);
-  }
-}
-
-function assertContains(haystack, needle, msg) {
-  if (haystack.includes(needle)) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} — '${needle}' not in output`);
-  }
-}
-
-function assertExcludes(haystack, needle, msg) {
-  if (!haystack.includes(needle)) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} — unexpectedly found '${needle}'`);
-  }
-}
-
-function assertEqual(actual, expected, msg) {
-  if (actual === expected) passed++;
-  else {
-    failed++;
-    console.error(`  FAIL: ${msg} — expected '${expected}', got '${actual}'`);
-  }
-}
+const t = suite(import.meta.url);
 
 function metadataHtmlIsEscaped(html, value) {
   return !html.includes(value) && html.includes(esc(value));
 }
 
-console.log('libraryAlbumBadgeItem() maps the production row contract exactly');
+t.section('libraryAlbumBadgeItem() maps the production row contract exactly');
 {
   const processingOwner = {
     job_id: 812,
@@ -77,7 +44,7 @@ console.log('libraryAlbumBadgeItem() maps the production row contract exactly');
     pipeline_verified_lossless: true,
     pipeline_provisional: false,
   });
-  assertEqual(JSON.stringify(item), JSON.stringify({
+  t.equal(JSON.stringify(item), JSON.stringify({
     id: '12856590',
     in_library: true,
     has_captured_history: true,
@@ -93,7 +60,7 @@ console.log('libraryAlbumBadgeItem() maps the production row contract exactly');
   }), 'helper exposes the exact BadgeItem consumed by production');
 }
 
-console.log('buildDeleteConfirmHtml() escapes user-visible text and JS args');
+t.section('buildDeleteConfirmHtml() escapes user-visible text and JS args');
 {
   const html = buildDeleteConfirmHtml(
     42,
@@ -103,27 +70,27 @@ console.log('buildDeleteConfirmHtml() escapes user-visible text and JS args');
     1712,
     "rel-10'oops",
   );
-  assertContains(html, 'Mum &amp; Dad - Kid A&#39;s &lt;special&gt;', 'artist/album escaped in overlay body');
-  assertContains(html, 'window.executeBeetsDeletion(42, this, 1712, &quot;rel-10&#39;oops&quot;)', 'release id encoded as JS string arg');
-  assertContains(html, 'matching pipeline request/history', 'pipeline note rendered when release id provided');
+  t.contains(html, 'Mum &amp; Dad - Kid A&#39;s &lt;special&gt;', 'artist/album escaped in overlay body');
+  t.contains(html, 'window.executeBeetsDeletion(42, this, 1712, &quot;rel-10&#39;oops&quot;)', 'release id encoded as JS string arg');
+  t.contains(html, 'matching pipeline request/history', 'pipeline note rendered when release id provided');
 }
 
-console.log('buildDeleteConfirmHtml() omits pipeline note without release id');
+t.section('buildDeleteConfirmHtml() omits pipeline note without release id');
 {
   const html = buildDeleteConfirmHtml(7, 'Bodyjar', 'Plastic Skies', 12, null, '');
-  assertContains(html, 'window.executeBeetsDeletion(7, this, null, &quot;&quot;)', 'empty release id still encoded safely');
-  assertExcludes(html, 'matching pipeline request/history', 'no pipeline note without release id');
+  t.contains(html, 'window.executeBeetsDeletion(7, this, null, &quot;&quot;)', 'empty release id still encoded safely');
+  t.excludes(html, 'matching pipeline request/history', 'no pipeline note without release id');
 }
 
-console.log('delete result UI never presents incomplete cleanup as success');
+t.section('delete result UI never presents incomplete cleanup as success');
 {
   const incomplete = describeBeetsDeletion({
     error: 'delete_incomplete',
     detail: 'cover.jpg survived',
   });
-  assertEqual(incomplete.completed, false, 'incomplete result does not refresh away evidence');
-  assertEqual(incomplete.error, true, 'incomplete result is an error toast');
-  assertContains(incomplete.message, 'cover.jpg survived', 'incomplete detail is visible');
+  t.equal(incomplete.completed, false, 'incomplete result does not refresh away evidence');
+  t.equal(incomplete.error, true, 'incomplete result is an error toast');
+  t.contains(incomplete.message, 'cover.jpg survived', 'incomplete detail is visible');
 
   const lostAck = describeBeetsDeletion({
     error: 'delete_incomplete',
@@ -133,11 +100,11 @@ console.log('delete result UI never presents incomplete cleanup as success');
     pipeline_id: 42, pipeline_status: 'imported',
     detail: 'Beets acknowledgement was lost; filesystem deletion is unconfirmed and Beets metadata may be gone. Do not assume files were deleted. Pipeline request #42 (imported) was preserved. Inspect the exact former album path "/music/Artist/Album" before explicit recovery.',
   });
-  assertEqual(lostAck.completed, false, 'lost acknowledgement requires manual recovery');
-  assertContains(lostAck.message, 'metadata may be gone', 'metadata ambiguity is explicit');
-  assertContains(lostAck.message, 'Do not assume files were deleted', 'file deletion is not claimed');
-  assertContains(lostAck.message, 'Pipeline request #42 (imported) was preserved', 'pipeline preservation is explicit');
-  assertContains(lostAck.message, '/music/Artist/Album', 'exact recovery path is visible');
+  t.equal(lostAck.completed, false, 'lost acknowledgement requires manual recovery');
+  t.contains(lostAck.message, 'metadata may be gone', 'metadata ambiguity is explicit');
+  t.contains(lostAck.message, 'Do not assume files were deleted', 'file deletion is not claimed');
+  t.contains(lostAck.message, 'Pipeline request #42 (imported) was preserved', 'pipeline preservation is explicit');
+  t.contains(lostAck.message, '/music/Artist/Album', 'exact recovery path is visible');
 
   const partial = describeBeetsDeletion({
     status: 'partial', album_deleted: true, pipeline_id: 42,
@@ -152,15 +119,15 @@ console.log('delete result UI never presents incomplete cleanup as success');
       detail: "exact album item jf-7 found at former path '/music/A/B' but NOT refreshed — a targeted refresh cannot reap a vanished item; Jellyfin's own next library validation reaps it",
     }],
   });
-  assertEqual(partial.completed, true, 'PG partial acknowledges album is already gone');
-  assertEqual(partial.error, true, 'PG partial is not a normal success toast');
-  assertContains(partial.message, 'pipeline request #42 remains', 'PG residual is actionable');
-  assertContains(partial.message, '1 unknown path preserved', 'PG partial keeps preserved-path warning visible');
-  assertContains(partial.message, '1 media notification warning', 'PG partial keeps media warning count visible');
-  assertContains(partial.message, 'jellyfin: exact album item jf-7 found at former path', 'PG partial keeps media warning detail visible');
+  t.equal(partial.completed, true, 'PG partial acknowledges album is already gone');
+  t.equal(partial.error, true, 'PG partial is not a normal success toast');
+  t.contains(partial.message, 'pipeline request #42 remains', 'PG residual is actionable');
+  t.contains(partial.message, '1 unknown path preserved', 'PG partial keeps preserved-path warning visible');
+  t.contains(partial.message, '1 media notification warning', 'PG partial keeps media warning count visible');
+  t.contains(partial.message, 'jellyfin: exact album item jf-7 found at former path', 'PG partial keeps media warning detail visible');
 }
 
-console.log('delete result UI surfaces unknown content and notifier warnings');
+t.section('delete result UI surfaces unknown content and notifier warnings');
 {
   const warning = describeBeetsDeletion({
     status: 'ok', artist: 'A', album: 'B', deleted_files: 2,
@@ -173,14 +140,14 @@ console.log('delete result UI surfaces unknown content and notifier warnings');
       detail: "exact album item jf-7 found at former path '/music/A/B' but NOT refreshed — a targeted refresh cannot reap a vanished item; Jellyfin's own next library validation reaps it",
     }],
   });
-  assertEqual(warning.completed, true, 'verified delete still completes');
-  assertEqual(warning.error, true, 'warning result gets warning styling');
-  assertContains(warning.message, '1 unknown path preserved', 'unknown content count visible');
-  assertContains(warning.message, '1 media notification warning', 'notifier warning count visible');
-  assertContains(warning.message, 'jellyfin: exact album item jf-7 found at former path', 'notifier warning detail visible');
+  t.equal(warning.completed, true, 'verified delete still completes');
+  t.equal(warning.error, true, 'warning result gets warning styling');
+  t.contains(warning.message, '1 unknown path preserved', 'unknown content count visible');
+  t.contains(warning.message, '1 media notification warning', 'notifier warning count visible');
+  t.contains(warning.message, 'jellyfin: exact album item jf-7 found at former path', 'notifier warning detail visible');
 }
 
-console.log('Bad Rip cleanup partial is never described as success');
+t.section('Bad Rip cleanup partial is never described as success');
 {
   const partial = describeBanSourceSuccess({
     status: 'partial',
@@ -190,8 +157,8 @@ console.log('Bad Rip cleanup partial is never described as success');
     beets_removed: false,
     hashes_recorded: 12,
   });
-  assertContains(partial, 'still in beets', 'retained album is explicit');
-  assertExcludes(partial, 'not in beets', 'partial is not phrased as absence');
+  t.contains(partial, 'still in beets', 'retained album is explicit');
+  t.excludes(partial, 'not in beets', 'partial is not phrased as absence');
 }
 
 /** Independent expected encoder: JSON JS literal, then HTML attribute escaping. */
@@ -218,12 +185,12 @@ function libraryDetail(releaseId, pipelineStatus = 'wanted', overrides = {}) {
   }, 42);
 }
 
-console.log('Bad Rip copy distinguishes requeue from preserved search stop');
+t.section('Bad Rip copy distinguishes requeue from preserved search stop');
 {
   const confirmation = banSourceConfirmationMessage();
-  assertContains(confirmation, 'remain unsearchable', 'confirmation explains preserved stop');
-  assertContains(confirmation, 'reset to wanted', 'confirmation explains ordinary requeue');
-  assertContains(
+  t.contains(confirmation, 'remain unsearchable', 'confirmation explains preserved stop');
+  t.contains(confirmation, 'reset to wanted', 'confirmation explains ordinary requeue');
+  t.contains(
     describeBanSourceSuccess({
       request_status: 'unsearchable', username: 'bad-peer',
       beets_removed: true, hashes_recorded: 2,
@@ -231,7 +198,7 @@ console.log('Bad Rip copy distinguishes requeue from preserved search stop');
     'remains unsearchable',
     'success copy reports the preserved search stop',
   );
-  assertContains(
+  t.contains(
     describeBanSourceSuccess({
       request_status: 'wanted', username: null,
       beets_removed: false, hashes_recorded: 0,
@@ -241,18 +208,18 @@ console.log('Bad Rip copy distinguishes requeue from preserved search stop');
   );
 }
 
-console.log('Library quality controls — adversarial deterministic release-id pin');
+t.section('Library quality controls — adversarial deterministic release-id pin');
 {
   const id = "release'\"\\</button><script>alert(1)</script>";
   const html = libraryDetail(id);
   const arg = expectedJsArg(id);
-  assertContains(html, `window.setLibQuality(${arg}, 'wanted', null)`, 'wanted control encodes release id');
-  assertContains(html, `window.setLibQuality(${arg}, 'unsearchable', null)`, 'unsearchable control encodes release id');
-  assertContains(html, `window.setLibQuality(${arg}, null, parseInt(v))`, 'min-bitrate control encodes release id');
-  assertExcludes(html, `window.setLibQuality('${id}'`, 'known-bad raw single-quoted interpolation is absent');
+  t.contains(html, `window.setLibQuality(${arg}, 'wanted', null)`, 'wanted control encodes release id');
+  t.contains(html, `window.setLibQuality(${arg}, 'unsearchable', null)`, 'unsearchable control encodes release id');
+  t.contains(html, `window.setLibQuality(${arg}, null, parseInt(v))`, 'min-bitrate control encodes release id');
+  t.excludes(html, `window.setLibQuality('${id}'`, 'known-bad raw single-quoted interpolation is absent');
 }
 
-console.log('renderLibraryAlbumRow() preserves ordinary metadata presentation');
+t.section('renderLibraryAlbumRow() preserves ordinary metadata presentation');
 {
   const html = renderLibraryAlbumRow({
     id: 42,
@@ -264,12 +231,12 @@ console.log('renderLibraryAlbumRow() preserves ordinary metadata presentation');
     in_library: false,
     pipeline_id: 17,
   });
-  assertContains(html, '<span>1989</span>', 'ordinary year remains visible');
-  assertContains(html, '<span>US</span>', 'ordinary country remains visible');
-  assertContains(html, '<span>Album</span>', 'ordinary release type remains visible');
+  t.contains(html, '<span>1989</span>', 'ordinary year remains visible');
+  t.contains(html, '<span>US</span>', 'ordinary country remains visible');
+  t.contains(html, '<span>Album</span>', 'ordinary release type remains visible');
 }
 
-console.log('Converged Library release has one detailed stop prompt');
+t.section('Converged Library release has one detailed stop prompt');
 {
   const convergence = {
     request_id: 1712,
@@ -294,29 +261,29 @@ console.log('Converged Library release has one detailed stop prompt');
     pipeline_status: 'wanted',
     convergence,
   });
-  assertContains(row, 'search converged', 'compact Library row keeps signal badge');
-  assertExcludes(row, 'convergence-prompt', 'compact Library row has no duplicate prompt');
-  assertExcludes(row, 'Stop searching', 'compact Library row has no stop action');
+  t.contains(row, 'search converged', 'compact Library row keeps signal badge');
+  t.excludes(row, 'convergence-prompt', 'compact Library row has no duplicate prompt');
+  t.excludes(row, 'Stop searching', 'compact Library row has no stop action');
 
   const detail = libraryDetail('release-id', 'wanted', { convergence });
-  assert((detail.match(/class="convergence-prompt"/g) || []).length === 1,
+  t.ok((detail.match(/class="convergence-prompt"/g) || []).length === 1,
     'expanded Library detail has exactly one convergence prompt');
-  assert((detail.match(/>Stop searching<\/button>/g) || []).length === 1,
+  t.ok((detail.match(/>Stop searching<\/button>/g) || []).length === 1,
     'expanded Library detail has exactly one stop action');
-  assertExcludes(detail, '>Accept</button>',
+  t.excludes(detail, '>Accept</button>',
     'convergence stop is not presented beside irreversible-looking Accept');
-  assertExcludes(detail, '>Status:</span>',
+  t.excludes(detail, '>Status:</span>',
     'generic lifecycle status controls are suppressed beside convergence stop');
-  assertExcludes(detail, '>Min bitrate:</span>',
+  t.excludes(detail, '>Min bitrate:</span>',
     'quality override controls are suppressed beside convergence stop');
-  assertExcludes(detail, '>Intent:</span>',
+  t.excludes(detail, '>Intent:</span>',
     'intent controls are suppressed beside convergence stop');
 }
 
-console.log('renderLibraryAlbumRow() escapes controlled metadata at the live HTML sink');
+t.section('renderLibraryAlbumRow() escapes controlled metadata at the live HTML sink');
 {
   const knownBad = '<span><script>alert(1)</script></span>';
-  assert(!metadataHtmlIsEscaped(knownBad, '<script>alert(1)</script>'),
+  t.ok(!metadataHtmlIsEscaped(knownBad, '<script>alert(1)</script>'),
     'metadata escape checker rejects known-bad raw HTML');
 
   const atoms = ['<', '>', '&', '"', "'", '\\'];
@@ -335,14 +302,14 @@ console.log('renderLibraryAlbumRow() escapes controlled metadata at the live HTM
         in_library: false,
         pipeline_id: 17,
       });
-      assert(metadataHtmlIsEscaped(html, year), `year escaped: ${JSON.stringify(year)}`);
-      assert(metadataHtmlIsEscaped(html, country), `country escaped: ${JSON.stringify(country)}`);
-      assert(metadataHtmlIsEscaped(html, type), `type escaped: ${JSON.stringify(type)}`);
+      t.ok(metadataHtmlIsEscaped(html, year), `year escaped: ${JSON.stringify(year)}`);
+      t.ok(metadataHtmlIsEscaped(html, country), `country escaped: ${JSON.stringify(country)}`);
+      t.ok(metadataHtmlIsEscaped(html, type), `type escaped: ${JSON.stringify(type)}`);
     }
   }
 }
 
-console.log('renderLibraryAlbumRow() escapes format metadata passed to status badges');
+t.section('renderLibraryAlbumRow() escapes format metadata passed to status badges');
 {
   const formats = '</span><img src=x onerror=alert(1)>';
   const html = renderLibraryAlbumRow({
@@ -353,15 +320,15 @@ console.log('renderLibraryAlbumRow() escapes format metadata passed to status ba
     in_library: true,
     beets_album_id: 42,
   });
-  assertContains(html, '>in library</span>',
+  t.contains(html, '>in library</span>',
     'library presence stays separate from quality');
-  assertContains(html, '>&lt;/SPAN&gt;&lt;IMG SRC=X ONERROR=ALERT(1)&gt;</span>',
+  t.contains(html, '>&lt;/SPAN&gt;&lt;IMG SRC=X ONERROR=ALERT(1)&gt;</span>',
     'format-derived badge label is escaped in the real library row');
-  assertExcludes(html, formats.toUpperCase(),
+  t.excludes(html, formats.toUpperCase(),
     'format metadata cannot inject markup through the library row');
 }
 
-console.log('renderLibraryAlbumRow() uses the shared independent fact vocabulary');
+t.section('renderLibraryAlbumRow() uses the shared independent fact vocabulary');
 {
   const missing = renderLibraryAlbumRow({
     id: 17,
@@ -375,10 +342,10 @@ console.log('renderLibraryAlbumRow() uses the shared independent fact vocabulary
     pipeline_verified_lossless: true,
     pipeline_provisional: false,
   });
-  assertContains(missing, '>captured<', 'Library row renders acquisition history');
-  assertContains(missing, '>missing<', 'Library row renders proven current absence');
-  assertContains(missing, '>verified<', 'Library row carries proof independently');
-  assertContains(missing, '>wanted<', 'Library row retains current lifecycle');
+  t.contains(missing, '>captured<', 'Library row renders acquisition history');
+  t.contains(missing, '>missing<', 'Library row renders proven current absence');
+  t.contains(missing, '>verified<', 'Library row carries proof independently');
+  t.contains(missing, '>wanted<', 'Library row retains current lifecycle');
 
   const untracked = renderLibraryAlbumRow({
     id: 42,
@@ -396,13 +363,13 @@ console.log('renderLibraryAlbumRow() uses the shared independent fact vocabulary
     pipeline_verified_lossless: false,
     pipeline_provisional: false,
   });
-  assertContains(untracked, '>in library</span>', 'Library row renders current holding');
-  assertContains(untracked, '>F</span>', 'Library row renders current quality separately');
-  assertContains(untracked, '>untracked<', 'Library row renders missing exact tracking');
-  assertExcludes(untracked, 'identity drift', 'Library row does not infer a sibling relationship');
+  t.contains(untracked, '>in library</span>', 'Library row renders current holding');
+  t.contains(untracked, '>F</span>', 'Library row renders current quality separately');
+  t.contains(untracked, '>untracked<', 'Library row renders missing exact tracking');
+  t.excludes(untracked, 'identity drift', 'Library row does not infer a sibling relationship');
 }
 
-console.log('renderLibraryAlbumRow() acknowledges one complete lifecycle before actions and badges');
+t.section('renderLibraryAlbumRow() acknowledges one complete lifecycle before actions and badges');
 {
   pipelineStore.clear();
   const releaseId = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
@@ -425,32 +392,32 @@ console.log('renderLibraryAlbumRow() acknowledges one complete lifecycle before 
     pipeline_verified_lossless: true,
     pipeline_provisional: false,
   });
-  assertContains(html, 'data-processing-locked="true"',
+  t.contains(html, 'data-processing-locked="true"',
     'the toolbar consumes the acknowledged exact owner before choosing actions');
-  assertContains(html, '>needs recovery<',
+  t.contains(html, '>needs recovery<',
     'the toolbar and badge agree on the exact owner presentation');
-  assertContains(html, '>captured<',
+  t.contains(html, '>captured<',
     'the same acknowledgement restores authoritative row facts');
-  assertContains(html, '>verified<',
+  t.contains(html, '>verified<',
     'proof and lifecycle cross the acknowledgement boundary together');
-  assert(!pipelineStore.has(releaseId),
+  t.ok(!pipelineStore.has(releaseId),
     'the complete authoritative lifecycle expires the local overlay once');
   pipelineStore.clear();
 }
 
-console.log('renderLibraryDetailBody() preserves ordinary track and pipeline metadata');
+t.section('renderLibraryDetailBody() preserves ordinary track and pipeline metadata');
 {
   const html = libraryDetail('release-id', 'wanted', {
     pipeline_source: 'request',
     tracks: [{ track: 1, title: 'Track', format: 'FLAC', bitrate: 320000 }],
   });
-  assertContains(html, 'FLAC 320kbps',
+  t.contains(html, 'FLAC 320kbps',
     'ordinary per-track format remains visible through the Library detail path');
-  assertContains(html, '<span class="p-detail-value">wanted (request)</span>',
+  t.contains(html, '<span class="p-detail-value">wanted (request)</span>',
     'ordinary empty-history pipeline status and source remain visible');
 }
 
-console.log('renderLibraryDetailBody() escapes track format and empty-history pipeline metadata');
+t.section('renderLibraryDetailBody() escapes track format and empty-history pipeline metadata');
 {
   const hostile = '</span><img src=x onerror=alert(1)>';
   const html = libraryDetail('release-id', hostile, {
@@ -458,15 +425,15 @@ console.log('renderLibraryDetailBody() escapes track format and empty-history pi
     tracks: [{ track: 1, title: 'Track', format: hostile }],
   });
   const escaped = esc(hostile);
-  assertExcludes(html, hostile,
+  t.excludes(html, hostile,
     'Library detail cannot emit raw track format, pipeline status, or pipeline source markup');
-  assertContains(html, `${escaped} (${escaped})`,
+  t.contains(html, `${escaped} (${escaped})`,
     'empty-history pipeline status and source are escaped at their HTML boundary');
-  assertContains(html, `<span class="lib-track-meta">${escaped}</span>`,
+  t.contains(html, `<span class="lib-track-meta">${escaped}</span>`,
     'track format is escaped at the shared row boundary through Library detail');
 }
 
-console.log('Library quality controls — generated critical-character property sweep');
+t.section('Library quality controls — generated critical-character property sweep');
 {
   const atoms = ['a', "'", '"', '\\', '<', '>', '&', '\n', '\u2028'];
   const ids = ['plain-id'];
@@ -477,34 +444,28 @@ console.log('Library quality controls — generated critical-character property 
     const html = libraryDetail(id);
     const arg = expectedJsArg(id);
     const encodedCalls = html.split(`window.setLibQuality(${arg},`).length - 1;
-    assertContains(html, `window.setLibQuality(${arg},`, `library ID encoded: ${JSON.stringify(id)}`);
-    if (encodedCalls !== 5) {
-      failed++;
-      console.error(`  FAIL: all five quality controls encode ${JSON.stringify(id)} — got ${encodedCalls}`);
-    } else {
-      passed++;
-    }
+    t.contains(html, `window.setLibQuality(${arg},`, `library ID encoded: ${JSON.stringify(id)}`);
+    t.equal(encodedCalls, 5, `all five quality controls encode ${JSON.stringify(id)}`);
   }
 
   const badId = "break'out";
   const oldHandler = `window.setLibQuality('${badId}', 'wanted', null)`;
   let oldCompiles = true;
   try { new Function('window', oldHandler); } catch (_) { oldCompiles = false; }
-  if (!oldCompiles) passed++;
-  else { failed++; console.error('  FAIL: known-bad raw library interpolation unexpectedly compiles'); }
+  t.notOk(oldCompiles, 'known-bad raw library interpolation unexpectedly compiles');
 }
 
-console.log('Library status controls disable invalid unsearchable transitions');
+t.section('Library status controls disable invalid unsearchable transitions');
 {
   const imported = libraryDetail('release-id', 'imported');
-  assertContains(imported, "class=\"p-btn active-status\" data-pipeline-request-id=\"1712\" onclick=\"event.stopPropagation(); window.setLibQuality(&quot;release-id&quot;, 'imported', null)\">imported</button>", 'imported remains visibly current and conflict-addressable');
-  assertExcludes(imported, "window.setLibQuality(&quot;release-id&quot;, 'unsearchable'", 'imported cannot invoke unsearchable');
-  assertContains(imported, 'disabled aria-disabled="true">unsearchable</button>', 'invalid imported stop is disabled');
+  t.contains(imported, "class=\"p-btn active-status\" data-pipeline-request-id=\"1712\" onclick=\"event.stopPropagation(); window.setLibQuality(&quot;release-id&quot;, 'imported', null)\">imported</button>", 'imported remains visibly current and conflict-addressable');
+  t.excludes(imported, "window.setLibQuality(&quot;release-id&quot;, 'unsearchable'", 'imported cannot invoke unsearchable');
+  t.contains(imported, 'disabled aria-disabled="true">unsearchable</button>', 'invalid imported stop is disabled');
 
   const downloading = libraryDetail('release-id', 'downloading');
-  assertContains(downloading, 'disabled aria-disabled="true">downloading</button>', 'downloading remains visibly current');
-  assertExcludes(downloading, "window.setLibQuality(&quot;release-id&quot;, 'unsearchable'", 'downloading cannot invoke unsearchable');
-  assertContains(downloading, 'disabled aria-disabled="true">unsearchable</button>', 'invalid downloading stop is disabled');
+  t.contains(downloading, 'disabled aria-disabled="true">downloading</button>', 'downloading remains visibly current');
+  t.excludes(downloading, "window.setLibQuality(&quot;release-id&quot;, 'unsearchable'", 'downloading cannot invoke unsearchable');
+  t.contains(downloading, 'disabled aria-disabled="true">unsearchable</button>', 'invalid downloading stop is disabled');
 
   const processing = libraryDetail('release-id', 'processing', {
     processing_owner: {
@@ -513,25 +474,25 @@ console.log('Library status controls disable invalid unsearchable transitions');
       preview_status: 'evidence_ready',
     },
   });
-  assertContains(processing, 'aria-disabled="true"', 'processing controls expose disabled semantics');
-  assertContains(processing, 'aria-describedby=', 'processing controls name visible explanation');
-  assertContains(processing, 'job #1713 is waiting to import', 'processing explanation names exact owner');
-  assertContains(processing, '/api/import-jobs/1713/recovery', 'processing links exact recovery detail');
-  assertExcludes(processing, ' disabled', 'processing controls remain focusable');
-  assertExcludes(processing, 'window.setLibQuality', 'processing controls cannot mutate lifecycle');
-  assertExcludes(processing, 'window.setIntent', 'processing intent remains locked');
-  assertExcludes(processing, 'window.confirmDeleteBeets', 'processing beets deletion remains locked');
-  assertExcludes(processing, 'window.banSource', 'processing source ban remains locked');
+  t.contains(processing, 'aria-disabled="true"', 'processing controls expose disabled semantics');
+  t.contains(processing, 'aria-describedby=', 'processing controls name visible explanation');
+  t.contains(processing, 'job #1713 is waiting to import', 'processing explanation names exact owner');
+  t.contains(processing, '/api/import-jobs/1713/recovery', 'processing links exact recovery detail');
+  t.excludes(processing, ' disabled', 'processing controls remain focusable');
+  t.excludes(processing, 'window.setLibQuality', 'processing controls cannot mutate lifecycle');
+  t.excludes(processing, 'window.setIntent', 'processing intent remains locked');
+  t.excludes(processing, 'window.confirmDeleteBeets', 'processing beets deletion remains locked');
+  t.excludes(processing, 'window.banSource', 'processing source ban remains locked');
 
   const wanted = libraryDetail('release-id', 'wanted');
-  assertContains(wanted, "window.setLibQuality(&quot;release-id&quot;, 'unsearchable', null)", 'wanted may become unsearchable');
+  t.contains(wanted, "window.setLibQuality(&quot;release-id&quot;, 'unsearchable', null)", 'wanted may become unsearchable');
 
   const stopped = libraryDetail('release-id', 'unsearchable');
-  assertContains(stopped, "window.setLibQuality(&quot;release-id&quot;, 'unsearchable', null)", 'current unsearchable state remains an active control');
-  assertContains(stopped, 'class="p-btn active-status"', 'unsearchable remains visibly current');
+  t.contains(stopped, "window.setLibQuality(&quot;release-id&quot;, 'unsearchable', null)", 'current unsearchable state remains an active control');
+  t.contains(stopped, 'class="p-btn active-status"', 'unsearchable remains visibly current');
 }
 
-console.log('renderLibraryAlbumRow() wires pipeline-only rows through window.toggleDetail');
+t.section('renderLibraryAlbumRow() wires pipeline-only rows through window.toggleDetail');
 {
   const html = renderLibraryAlbumRow({
     id: 42,
@@ -541,9 +502,9 @@ console.log('renderLibraryAlbumRow() wires pipeline-only rows through window.tog
     pipeline_id: 17,
   });
   // Exact handler + argument order (#1110/#1241 argument-inversion class).
-  assertContains(html, "window.toggleDetail('lib-pipeline-17', 17)",
+  t.contains(html, "window.toggleDetail('lib-pipeline-17', 17)",
     'pipeline-only row onclick carries (lib-pipeline-<id>, pipeline id) in order');
-  assertContains(html, 'id="lib-pipeline-17"',
+  t.contains(html, 'id="lib-pipeline-17"',
     'detail placeholder id matches the toggle target');
 
   const fallback = renderLibraryAlbumRow({
@@ -552,11 +513,11 @@ console.log('renderLibraryAlbumRow() wires pipeline-only rows through window.tog
     track_count: 3,
     in_library: false,
   });
-  assertContains(fallback, "window.toggleDetail('lib-pipeline-42', 42)",
+  t.contains(fallback, "window.toggleDetail('lib-pipeline-42', 42)",
     'row without a pipeline_id falls back to the library row id for both arguments');
 }
 
-console.log('renderLibraryAlbumRow() wires in-library rows through window.toggleLibDetail');
+t.section('renderLibraryAlbumRow() wires in-library rows through window.toggleLibDetail');
 {
   const html = renderLibraryAlbumRow({
     id: 42,
@@ -565,11 +526,10 @@ console.log('renderLibraryAlbumRow() wires in-library rows through window.toggle
     in_library: true,
     beets_album_id: 99,
   });
-  assertContains(html, 'window.toggleLibDetail(99)',
+  t.contains(html, 'window.toggleLibDetail(99)',
     'in-library row onclick keys on the beets album id');
-  assertContains(html, 'id="lib-99"',
+  t.contains(html, 'id="lib-99"',
     'detail placeholder id matches the toggle target');
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+t.done();

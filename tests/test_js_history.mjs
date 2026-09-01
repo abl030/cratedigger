@@ -11,47 +11,30 @@ import {
 import { validDualProviderProof } from './fixtures/cd_rip_proof.mjs';
 import { esc } from '../web/js/util.js';
 import { readFileSync } from 'node:fs';
+
+import { suite } from './js_harness.mjs';
 const {
   formatV0Probe, formatSpectral, spectralChip, spectralGradeIsAdmissible,
   spectralStripCell, withWas, storageFormatLabel,
 } = __test__;
 
-let passed = 0;
-let failed = 0;
+const t = suite(import.meta.url);
 
-function assertContains(haystack, needle, msg) {
-  if (haystack.includes(needle)) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} - '${needle}' not in output`);
-  }
-}
-
-function assertExcludes(haystack, needle, msg) {
-  if (!haystack.includes(needle)) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} - unexpectedly found '${needle}'`);
-  }
-}
-
-console.log('storageFormatLabel() preserves native codec names');
+t.section('storageFormatLabel() preserves native codec names');
 {
-  assertContains(
+  t.contains(
     storageFormatLabel({ materialized_format: 'vorbis' }, ''),
     'Vorbis',
     'Vorbis is not rendered as the Ogg container or all-caps metadata',
   );
-  assertContains(
+  t.contains(
     storageFormatLabel({ materialized_format: 'wma' }, ''),
     'WMA',
     'WMA keeps its native acronym',
   );
 }
 
-console.log('renderDownloadHistoryItem() shows wrong-match triage audit rows');
+t.section('renderDownloadHistoryItem() shows wrong-match triage audit rows');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
@@ -67,17 +50,17 @@ console.log('renderDownloadHistoryItem() shows wrong-match triage audit rows');
     wrong_match_triage_stage_chain: ['mp3_spectral:reject'],
   });
 
-  assertContains(html, 'Triage', 'triage summary label rendered');
-  assertContains(html, 'download deleted: spectral reject', 'triage summary rendered');
-  assertContains(html, 'Preview', 'preview label rendered');
-  assertContains(html, 'confident_reject / requeue_upgrade',
+  t.contains(html, 'Triage', 'triage summary label rendered');
+  t.contains(html, 'download deleted: spectral reject', 'triage summary rendered');
+  t.contains(html, 'Preview', 'preview label rendered');
+  t.contains(html, 'confident_reject / requeue_upgrade',
     'preview verdict and decision rendered');
-  assertContains(html, 'mp3_spectral:reject', 'stage chain rendered');
-  assertContains(html, 'Wrong match (dist 0.190)',
+  t.contains(html, 'mp3_spectral:reject', 'stage chain rendered');
+  t.contains(html, 'Wrong match (dist 0.190)',
     'original verdict remains visible');
 }
 
-console.log('renderDownloadHistoryItem() omits empty triage rows');
+t.section('renderDownloadHistoryItem() omits empty triage rows');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'success',
@@ -87,12 +70,12 @@ console.log('renderDownloadHistoryItem() omits empty triage rows');
     verdict: 'MP3 320',
   });
 
-  assertExcludes(html, 'Triage', 'no triage label without audit');
-  assertExcludes(html, 'Preview', 'no preview label without audit');
-  assertExcludes(html, 'Stages', 'no stages label without audit');
+  t.excludes(html, 'Triage', 'no triage label without audit');
+  t.excludes(html, 'Preview', 'no preview label without audit');
+  t.excludes(html, 'Stages', 'no stages label without audit');
 }
 
-console.log('renderDownloadHistoryItem() shows the track-length warning row (issue #1178)');
+t.section('renderDownloadHistoryItem() shows the track-length warning row (issue #1178)');
 {
   const warning = "Track length contradicts the matched release: "
     + "'00 - Hidden Track.flac' is 237.6s where the release declares "
@@ -106,14 +89,14 @@ console.log('renderDownloadHistoryItem() shows the track-length warning row (iss
     track_length_warning: warning,
   });
 
-  assertContains(html, '<span class="p-hist-label">Track length</span>',
+  t.contains(html, '<span class="p-hist-label">Track length</span>',
     'track-length row label rendered');
-  assertContains(html, `color:#ec6;">${esc(warning)}</span>`,
+  t.contains(html, `color:#ec6;">${esc(warning)}</span>`,
     'track-length row uses the same amber warning styling as Bad '
     + 'extension/Triage, with the full sentence as the value');
 }
 
-console.log('renderDownloadHistoryItem() omits the track-length row when the field is null');
+t.section('renderDownloadHistoryItem() omits the track-length row when the field is null');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'success',
@@ -123,10 +106,10 @@ console.log('renderDownloadHistoryItem() omits the track-length row when the fie
     verdict: 'MP3 320',
   });
 
-  assertExcludes(html, 'Track length', 'no track-length row without a warning');
+  t.excludes(html, 'Track length', 'no track-length row without a warning');
 }
 
-console.log('renderDownloadHistoryItem() escapes wrong-match triage audit values');
+t.section('renderDownloadHistoryItem() escapes wrong-match triage audit values');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
@@ -138,14 +121,14 @@ console.log('renderDownloadHistoryItem() escapes wrong-match triage audit values
     wrong_match_triage_stage_chain: ['mp3_spectral:<reject>'],
   });
 
-  assertContains(html, '&lt;img src=x&gt;', 'triage summary escaped');
-  assertContains(html, 'confident&lt;script&gt;', 'preview verdict escaped');
-  assertContains(html, 'mp3_spectral:&lt;reject&gt;', 'stage chain escaped');
-  assertExcludes(html, '<img src=x>', 'raw summary not rendered');
-  assertExcludes(html, 'confident<script>', 'raw preview not rendered');
+  t.contains(html, '&lt;img src=x&gt;', 'triage summary escaped');
+  t.contains(html, 'confident&lt;script&gt;', 'preview verdict escaped');
+  t.contains(html, 'mp3_spectral:&lt;reject&gt;', 'stage chain escaped');
+  t.excludes(html, '<img src=x>', 'raw summary not rendered');
+  t.excludes(html, 'confident<script>', 'raw preview not rendered');
 }
 
-console.log('renderDownloadHistoryItem() refuses to infer output from legacy bitrate columns');
+t.section('renderDownloadHistoryItem() refuses to infer output from legacy bitrate columns');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
@@ -160,20 +143,20 @@ console.log('renderDownloadHistoryItem() refuses to infer output from legacy bit
   });
 
   // Single grid, every metric on its own row. Existing data inline as "(was X)".
-  assertContains(html, 'class="p-hist-grid"',
+  t.contains(html, 'class="p-hist-grid"',
     'one consistent grid renders for every entry');
-  assertContains(html, 'class="p-hist-label">Output</span>',
+  t.contains(html, 'class="p-hist-label">Output</span>',
     'Output row label present');
-  assertContains(html, 'class="p-hist-label">Spectral</span>',
+  t.contains(html, 'class="p-hist-label">Spectral</span>',
     'Spectral row label present');
-  assertExcludes(html, 'class="p-hist-value">192kbps',
+  t.excludes(html, 'class="p-hist-value">192kbps',
     'legacy candidate minimum is not relabelled as materialized output');
-  assertContains(html, '~160kbps', 'candidate spectral floor rendered');
-  assertContains(html, 'suspect (~96kbps)',
+  t.contains(html, '~160kbps', 'candidate spectral floor rendered');
+  t.contains(html, 'suspect (~96kbps)',
     'existing spectral grade and floor appear on the spectral row');
 }
 
-console.log('renderDownloadHistoryItem() omits the (was X) suffix when no existing data');
+t.section('renderDownloadHistoryItem() omits the (was X) suffix when no existing data');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
@@ -184,12 +167,12 @@ console.log('renderDownloadHistoryItem() omits the (was X) suffix when no existi
     spectral_bitrate: 160,
   });
 
-  assertExcludes(html, 'class="p-hist-value">192kbps',
+  t.excludes(html, 'class="p-hist-value">192kbps',
     'candidate bitrate is not relabelled as output');
-  assertExcludes(html, '(was', 'no (was) suffix when existing data absent');
+  t.excludes(html, '(was', 'no (was) suffix when existing data absent');
 }
 
-console.log('two-sided spectral failures remain distinct from legacy unmeasured rows');
+t.section('two-sided spectral failures remain distinct from legacy unmeasured rows');
 {
   const failedHtml = renderDownloadHistoryFixture({
     outcome: 'rejected', created_at: '2026-07-12T00:00:00+00:00',
@@ -197,25 +180,25 @@ console.log('two-sided spectral failures remain distinct from legacy unmeasured 
     spectral_error: 'RuntimeError: decode failed',
     existing_spectral_attempted: true, existing_spectral_grade: 'genuine',
   });
-  assertContains(failedHtml, 'analysis failed', 'attempted failure is explicit');
-  assertContains(failedHtml, 'RuntimeError: decode failed', 'failure detail is available');
-  assertContains(failedHtml, '<details class="p-hist-forensics">',
+  t.contains(failedHtml, 'analysis failed', 'attempted failure is explicit');
+  t.contains(failedHtml, 'RuntimeError: decode failed', 'failure detail is available');
+  t.contains(failedHtml, '<details class="p-hist-forensics">',
     'spectral errors are reachable in focusable forensics');
-  assertContains(failedHtml, 'Spectral IN error',
+  t.contains(failedHtml, 'Spectral IN error',
     'candidate error has a labelled forensic row');
   const strip = renderEvidenceFixture({
     spectral_attempted: true, spectral_error: 'candidate failed',
     existing_spectral_attempted: true, existing_spectral_error: 'existing failed',
   });
-  assertContains(strip, 'IN', 'failure-only audit still renders in Recents');
-  assertContains(strip, 'spectral failed', 'Recents keeps failure state compact');
+  t.contains(strip, 'IN', 'failure-only audit still renders in Recents');
+  t.contains(strip, 'spectral failed', 'Recents keeps failure state compact');
   const legacyHtml = renderDownloadHistoryFixture({
     outcome: 'rejected', created_at: '2026-07-12T00:00:00+00:00',
   });
-  assertExcludes(legacyHtml, 'analysis failed', 'legacy row stays unmeasured');
+  t.excludes(legacyHtml, 'analysis failed', 'legacy row stays unmeasured');
 }
 
-console.log('renderDownloadHistoryItem() surfaces HAVE analysis diagnostics');
+t.section('renderDownloadHistoryItem() surfaces HAVE analysis diagnostics');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'have_analysis_error',
@@ -229,26 +212,26 @@ console.log('renderDownloadHistoryItem() surfaces HAVE analysis diagnostics');
     soulseek_username: 'archive-peer',
     created_at: '2026-07-16T10:00:00+00:00',
   });
-  assertContains(html, 'Environment failure', 'environment badge rendered');
-  assertContains(html, 'Failure category', 'failure category label rendered');
-  assertContains(html, 'permission denied', 'failure category humanized');
-  assertContains(html, 'Installed HAVE', 'installed path label rendered');
-  assertContains(html, '/mnt/Music/Beets/Low/&lt;current&gt;', 'installed path escaped');
-  assertContains(html, 'Candidate', 'candidate reference label rendered');
-  assertContains(html, '/mnt/Music/Incoming/candidate&amp;next', 'candidate reference escaped');
-  assertContains(html, 'PermissionError: &lt;denied&gt;', 'analysis error escaped');
-  assertContains(html, 'remains wanted', 'retryable state remains prominent');
-  assertExcludes(html, 'PermissionError: <denied>', 'raw analysis error not rendered');
+  t.contains(html, 'Environment failure', 'environment badge rendered');
+  t.contains(html, 'Failure category', 'failure category label rendered');
+  t.contains(html, 'permission denied', 'failure category humanized');
+  t.contains(html, 'Installed HAVE', 'installed path label rendered');
+  t.contains(html, '/mnt/Music/Beets/Low/&lt;current&gt;', 'installed path escaped');
+  t.contains(html, 'Candidate', 'candidate reference label rendered');
+  t.contains(html, '/mnt/Music/Incoming/candidate&amp;next', 'candidate reference escaped');
+  t.contains(html, 'PermissionError: &lt;denied&gt;', 'analysis error escaped');
+  t.contains(html, 'remains wanted', 'retryable state remains prominent');
+  t.excludes(html, 'PermissionError: <denied>', 'raw analysis error not rendered');
 }
 
-console.log('legacy existing floor-only Recents labels the missing grade');
+t.section('legacy existing floor-only Recents labels the missing grade');
 {
   const strip = renderEvidenceFixture({ existing_spectral_bitrate: 128 });
-  assertContains(strip, 'ungraded (~128k)',
+  t.contains(strip, 'ungraded (~128k)',
     'legacy HAVE floor cannot read like a complete spectral grade');
 }
 
-console.log('renderDownloadHistoryItem() labels both V0 probe sides explicitly');
+t.section('renderDownloadHistoryItem() labels both V0 probe sides explicitly');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'success',
@@ -261,19 +244,19 @@ console.log('renderDownloadHistoryItem() labels both V0 probe sides explicitly')
     verdict: 'Provisional lossless source',
   });
 
-  assertContains(html, 'class="p-hist-label">V0 probe</span>',
+  t.contains(html, 'class="p-hist-label">V0 probe</span>',
     'V0 probe row present for lossless source');
-  assertContains(html, '>IN</span> 228kbps avg',
+  t.contains(html, '>IN</span> 228kbps avg',
     'candidate V0 probe avg renders on the labelled IN side');
-  assertContains(html, '>HAVE</span> 171kbps avg',
+  t.contains(html, '>HAVE</span> 171kbps avg',
     'existing V0 probe renders on the labelled HAVE side');
-  assertContains(html, 'Stored as', 'final format label rendered');
-  assertContains(html, 'OPUS 128 contract', 'final format rendered as contract');
-  assertExcludes(html, '(lossless_source_v0)',
+  t.contains(html, 'Stored as', 'final format label rendered');
+  t.contains(html, 'OPUS 128 contract', 'final format rendered as contract');
+  t.excludes(html, '(lossless_source_v0)',
     'lossless probe omits the noisy kind suffix');
 }
 
-console.log('renderDownloadHistoryItem() leaves HAVE empty without a comparable V0 probe');
+t.section('renderDownloadHistoryItem() leaves HAVE empty without a comparable V0 probe');
 {
   // Lossless candidate over a library album with no recorded V0 probe.
   // The V0-probe row must NOT borrow the existing raw min bitrate as a
@@ -294,17 +277,17 @@ console.log('renderDownloadHistoryItem() leaves HAVE empty without a comparable 
     final_format: 'opus 128',
   });
 
-  assertContains(html, 'class="p-hist-label">V0 probe</span>',
+  t.contains(html, 'class="p-hist-label">V0 probe</span>',
     'V0 probe row present');
-  assertContains(html, '>IN</span> 260kbps avg',
+  t.contains(html, '>IN</span> 260kbps avg',
     'candidate V0 probe remains on the IN side');
-  assertContains(html, '>HAVE</span> —',
+  t.contains(html, '>HAVE</span> —',
     'missing existing probe is explicit without borrowing its raw minimum');
-  assertExcludes(html, 'class="p-hist-was">(was 192kbps)',
+  t.excludes(html, 'class="p-hist-was">(was 192kbps)',
     'legacy minimums are not projected as materialized output');
 }
 
-console.log('renderDownloadHistoryItem() renders the V0 probe row for research probes too');
+t.section('renderDownloadHistoryItem() renders the V0 probe row for research probes too');
 {
   // V0 probes run on EVERY candidate (native-lossy sources get a real
   // ffmpeg V0-transcode probe, kind=native_lossy_research_v0) and are
@@ -324,15 +307,15 @@ console.log('renderDownloadHistoryItem() renders the V0 probe row for research p
     downloaded_label: 'MP3 V0',
   });
 
-  assertContains(html, 'V0 probe',
+  t.contains(html, 'V0 probe',
     'V0 probe row renders for research probes');
-  assertContains(html, '247kbps avg (from lossy)',
+  t.contains(html, '247kbps avg (from lossy)',
     'research probe carries the from-lossy qualifier');
-  assertExcludes(html, 'class="p-hist-value">232kbps',
+  t.excludes(html, 'class="p-hist-value">232kbps',
     'research candidate minimum is not relabelled as output');
 }
 
-console.log('renderDownloadHistoryItem() V0 side labels retain kind provenance');
+t.section('renderDownloadHistoryItem() V0 side labels retain kind provenance');
 {
   // dl 36660: lossless-source candidate probe (255) vs the library
   // album's native-lossy research probe (250). Both render — the
@@ -346,12 +329,12 @@ console.log('renderDownloadHistoryItem() V0 side labels retain kind provenance')
     existing_v0_probe_kind: 'native_lossy_research_v0',
     existing_v0_probe_avg_bitrate: 250,
   });
-  assertContains(html, '255kbps avg', 'lossless-source probe renders bare');
-  assertContains(html, '>HAVE</span> 250kbps avg (from lossy)',
+  t.contains(html, '255kbps avg', 'lossless-source probe renders bare');
+  t.contains(html, '>HAVE</span> 250kbps avg (from lossy)',
     'existing research probe renders with its qualifier on HAVE');
 }
 
-console.log('renderDownloadHistoryItem() renders HAVE-only V0 provenance');
+t.section('renderDownloadHistoryItem() renders HAVE-only V0 provenance');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
@@ -360,14 +343,14 @@ console.log('renderDownloadHistoryItem() renders HAVE-only V0 provenance');
     existing_v0_probe_min_bitrate: 201,
     existing_v0_probe_avg_bitrate: 259,
   });
-  assertContains(html, 'class="p-hist-label">V0 probe</span>',
+  t.contains(html, 'class="p-hist-label">V0 probe</span>',
     'HAVE-only evidence still creates the expanded V0 row');
-  assertContains(html, '>IN</span> —', 'missing candidate probe is explicit');
-  assertContains(html, '>HAVE</span> 259kbps avg · min 201kbps (on-disk re-encode)',
+  t.contains(html, '>IN</span> —', 'missing candidate probe is explicit');
+  t.contains(html, '>HAVE</span> 259kbps avg · min 201kbps (on-disk re-encode)',
     'HAVE-only probe retains its detailed provenance');
 }
 
-console.log('renderDownloadHistoryItem() keeps a consistent row vocabulary across codecs');
+t.section('renderDownloadHistoryItem() keeps a consistent row vocabulary across codecs');
 {
   // Same renderer, two very different rows — both should expose
   // Source, Spectral, Bitrate as the consistent vocabulary so the
@@ -399,101 +382,72 @@ console.log('renderDownloadHistoryItem() keeps a consistent row vocabulary acros
   });
 
   for (const html of [losslessHtml, lossyHtml]) {
-    assertContains(html, 'class="p-hist-label">Source</span>',
+    t.contains(html, 'class="p-hist-label">Source</span>',
       'Source row in every entry');
-    assertContains(html, 'class="p-hist-label">Spectral</span>',
+    t.contains(html, 'class="p-hist-label">Spectral</span>',
       'Spectral row in every entry');
-    assertContains(html, 'class="p-hist-label">Output</span>',
+    t.contains(html, 'class="p-hist-label">Output</span>',
       'Output row in every entry');
   }
 }
 
-console.log('withWas() helper appends the existing comparison inline');
+t.section('withWas() helper appends the existing comparison inline');
 {
-  if (withWas('100kbps', '90kbps') !== '100kbps <span class="p-hist-was">(was 90kbps)</span>') {
-    failed++;
-    console.error('  FAIL: withWas should append (was Y) inline');
-  } else { passed++; }
-  if (withWas('100kbps', null) !== '100kbps') {
-    failed++;
-    console.error('  FAIL: withWas should return bare value when wasValue is null');
-  } else { passed++; }
-  if (withWas('100kbps', undefined) !== '100kbps') {
-    failed++;
-    console.error('  FAIL: withWas should return bare value when wasValue is undefined');
-  } else { passed++; }
+  t.equal(withWas('100kbps', '90kbps'),
+    '100kbps <span class="p-hist-was">(was 90kbps)</span>',
+    'withWas should append (was Y) inline');
+  t.equal(withWas('100kbps', null), '100kbps',
+    'withWas should return bare value when wasValue is null');
+  t.equal(withWas('100kbps', undefined), '100kbps',
+    'withWas should return bare value when wasValue is undefined');
 }
 
-console.log('formatSpectral() helper colors grades and prefixes the floor');
+t.section('formatSpectral() helper colors grades and prefixes the floor');
 {
-  if (!formatSpectral('genuine').includes('quality-tone-lossless')) {
-    failed++;
-    console.error('  FAIL: genuine should use the brightest shared green');
-  } else { passed++; }
-  if (!formatSpectral('marginal').includes('quality-tone-good')) {
-    failed++;
-    console.error('  FAIL: marginal should use the shared yellow tone');
-  } else { passed++; }
-  if (!formatSpectral('suspect').includes('quality-tone-acceptable')) {
-    failed++;
-    console.error('  FAIL: suspect should use the shared orange tone');
-  } else { passed++; }
-  if (!formatSpectral('likely_transcode').includes('quality-tone-poor')) {
-    failed++;
-    console.error('  FAIL: likely transcode should use the shared red tone');
-  } else { passed++; }
-  if (!formatSpectral('genuine', 96).includes('~96kbps')) {
-    failed++;
-    console.error('  FAIL: spectral with floor should show ~96kbps');
-  } else { passed++; }
-  if (formatSpectral('genuine').includes('~')) {
-    failed++;
-    console.error('  FAIL: spectral without floor should not show ~');
-  } else { passed++; }
-  if (!formatSpectral('likely_transcode', 160).includes('likely transcode (~160kbps)')) {
-    failed++;
-    console.error('  FAIL: spectral grade tokens should be humanized');
-  } else { passed++; }
+  t.contains(formatSpectral('genuine'), 'quality-tone-lossless',
+    'genuine should use the brightest shared green');
+  t.contains(formatSpectral('marginal'), 'quality-tone-good',
+    'marginal should use the shared yellow tone');
+  t.contains(formatSpectral('suspect'), 'quality-tone-acceptable',
+    'suspect should use the shared orange tone');
+  t.contains(formatSpectral('likely_transcode'), 'quality-tone-poor',
+    'likely transcode should use the shared red tone');
+  t.contains(formatSpectral('genuine', 96), '~96kbps',
+    'spectral with floor should show ~96kbps');
+  t.excludes(formatSpectral('genuine'), '~',
+    'spectral without floor should not show ~');
+  t.contains(formatSpectral('likely_transcode', 160), 'likely transcode (~160kbps)',
+    'spectral grade tokens should be humanized');
 }
 
-console.log('renderEvidenceStrip() humanizes spectral tokens on both sides');
+t.section('renderEvidenceStrip() humanizes spectral tokens on both sides');
 {
   const html = renderEvidenceFixture({
     spectral_grade: 'likely_transcode', spectral_bitrate: 160,
     existing_spectral_grade: 'likely_transcode', existing_spectral_bitrate: 128,
   });
-  assertContains(html, 'likely transcode', 'humanized grade rendered');
-  assertExcludes(html, 'likely_transcode', 'raw grade token never leaks');
+  t.contains(html, 'likely transcode', 'humanized grade rendered');
+  t.excludes(html, 'likely_transcode', 'raw grade token never leaks');
 }
 
-console.log('formatV0Probe() helper picks the right kind suffix per source lineage');
+t.section('formatV0Probe() helper picks the right kind suffix per source lineage');
 {
-  if (formatV0Probe(260, 'lossless_source_v0') !== '260kbps avg') {
-    failed++;
-    console.error('  FAIL: lossless probe should render bare ("260kbps avg")');
-  } else { passed++; }
+  t.equal(formatV0Probe(260, 'lossless_source_v0'), '260kbps avg',
+    'lossless probe should render bare ("260kbps avg")');
   // ``native_lossy_research_v0`` is a real ffmpeg V0-transcode probe of a
   // lossy source — qualified "(from lossy)" so it never reads as the
   // gold-standard lossless-source probe.
-  if (formatV0Probe(247, 'native_lossy_research_v0') !== '247kbps avg (from lossy)') {
-    failed++;
-    console.error('  FAIL: native_lossy_research_v0 should add "(from lossy)" suffix');
-  } else { passed++; }
-  if (formatV0Probe(200, undefined) !== '200kbps avg') {
-    failed++;
-    console.error('  FAIL: missing kind should render bare');
-  } else { passed++; }
-  if (formatV0Probe(180, 'on_disk_research_v0') !== '180kbps avg (on-disk re-encode)') {
-    failed++;
-    console.error('  FAIL: on_disk_research_v0 should render the on-disk re-encode qualifier');
-  } else { passed++; }
-  if (formatV0Probe(180, 'future_probe_kind') !== '180kbps avg (future_probe_kind)') {
-    failed++;
-    console.error('  FAIL: unknown kind should fall back to raw label');
-  } else { passed++; }
+  t.equal(formatV0Probe(247, 'native_lossy_research_v0'), '247kbps avg (from lossy)',
+    'native_lossy_research_v0 should add "(from lossy)" suffix');
+  t.equal(formatV0Probe(200, undefined), '200kbps avg',
+    'missing kind should render bare');
+  t.equal(formatV0Probe(180, 'on_disk_research_v0'), '180kbps avg (on-disk re-encode)',
+    'on_disk_research_v0 should render the on-disk re-encode qualifier');
+  t.equal(formatV0Probe(180, 'future_probe_kind'), '180kbps avg (future_probe_kind)',
+    'unknown kind should fall back to raw label');
 }
 
-console.log('renderDownloadHistoryItem() shows "overridden" instead of the fake 0.000 distance on force imports');
+t.section('renderDownloadHistoryItem() shows "overridden" instead of the fake 0.000 distance on force imports');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'force_import',
@@ -505,14 +459,14 @@ console.log('renderDownloadHistoryItem() shows "overridden" instead of the fake 
     verdict: 'Force imported after manual review',
   });
 
-  assertContains(html, 'class="p-hist-label">Distance</span>',
+  t.contains(html, 'class="p-hist-label">Distance</span>',
     'Distance row present on force imports');
-  assertContains(html, 'overridden', 'force-import distance reads overridden');
-  assertContains(html, '(was 0.233)', 'force-import distance retains its origin measurement');
-  assertExcludes(html, '0.000', 'the fake beets 0.000 never renders');
+  t.contains(html, 'overridden', 'force-import distance reads overridden');
+  t.contains(html, '(was 0.233)', 'force-import distance retains its origin measurement');
+  t.excludes(html, '0.000', 'the fake beets 0.000 never renders');
 }
 
-console.log('renderDownloadHistoryItem() always renders the core row vocabulary with em-dash placeholders');
+t.section('renderDownloadHistoryItem() always renders the core row vocabulary with em-dash placeholders');
 {
   // A timeout row with no measurements still shows the fixed schema —
   // Source / Spectral / Bitrate / Distance — so adjacent entries stop
@@ -525,13 +479,13 @@ console.log('renderDownloadHistoryItem() always renders the core row vocabulary 
   });
 
   for (const label of ['Source', 'Spectral', 'Output', 'Distance']) {
-    assertContains(html, `class="p-hist-label">${label}</span>`,
+    t.contains(html, `class="p-hist-label">${label}</span>`,
       `${label} row present even without data`);
   }
-  assertContains(html, '—', 'unknown cells render an em-dash');
+  t.contains(html, '—', 'unknown cells render an em-dash');
 }
 
-console.log('renderDownloadHistoryItem() header uses the server badge vocabulary');
+t.section('renderDownloadHistoryItem() header uses the server badge vocabulary');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'timeout',
@@ -541,24 +495,24 @@ console.log('renderDownloadHistoryItem() header uses the server badge vocabulary
     created_at: '2026-07-07T21:22:00+00:00',
   });
 
-  assertContains(html, 'badge badge-failed', 'server badge class on header');
-  assertContains(html, '>Failed<', 'server badge label on header');
+  t.contains(html, 'badge badge-failed', 'server badge class on header');
+  t.contains(html, '>Failed<', 'server badge label on header');
   // The raw outcome word must not appear as the status any more — the
   // list rows say "Failed", the detail block must not say "timeout".
-  assertExcludes(html, '>timeout<', 'raw outcome word no longer the header status');
+  t.excludes(html, '>timeout<', 'raw outcome word no longer the header status');
 }
 
-console.log('renderDownloadHistoryItem() header falls back to outcome when badge fields absent');
+t.section('renderDownloadHistoryItem() header falls back to outcome when badge fields absent');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
     soulseek_username: 'testuser',
     created_at: '2026-07-07T21:22:00+00:00',
   });
-  assertContains(html, '>rejected<', 'outcome fallback when classifier fields missing');
+  t.contains(html, '>rejected<', 'outcome fallback when classifier fields missing');
 }
 
-console.log('renderDownloadHistoryItem() tucks debug forensics behind a details toggle');
+t.section('renderDownloadHistoryItem() tucks debug forensics behind a details toggle');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
@@ -572,28 +526,20 @@ console.log('renderDownloadHistoryItem() tucks debug forensics behind a details 
     wrong_match_triage_stage_chain: ['mp3_spectral:reject'],
   });
 
-  assertContains(html, '<details class="p-hist-forensics">',
+  t.contains(html, '<details class="p-hist-forensics">',
     'forensics details element present');
-  assertContains(html, 'mp3_spectral:reject', 'stage chain still reachable');
+  t.contains(html, 'mp3_spectral:reject', 'stage chain still reachable');
   // Triage (the operator-action audit) stays visible outside the toggle.
   const detailsStart = html.indexOf('<details');
   const triagePos = html.indexOf('deleted: spectral reject');
-  if (triagePos !== -1 && detailsStart !== -1 && triagePos < detailsStart) {
-    passed++;
-  } else {
-    failed++;
-    console.error('  FAIL: triage summary should render before/outside the forensics toggle');
-  }
+  t.ok(triagePos !== -1 && detailsStart !== -1 && triagePos < detailsStart,
+    'triage summary should render before/outside the forensics toggle');
   const stagesPos = html.indexOf('mp3_spectral:reject');
-  if (stagesPos > detailsStart && detailsStart !== -1) {
-    passed++;
-  } else {
-    failed++;
-    console.error('  FAIL: stage chain should live inside the forensics toggle');
-  }
+  t.ok(stagesPos > detailsStart && detailsStart !== -1,
+    'stage chain should live inside the forensics toggle');
 }
 
-console.log('renderEvidenceStrip() builds the compact IN/HAVE comparison');
+t.section('renderEvidenceStrip() builds the compact IN/HAVE comparison');
 {
   const strip = renderEvidenceFixture({
     downloaded_label: 'MP3 320',
@@ -602,27 +548,24 @@ console.log('renderEvidenceStrip() builds the compact IN/HAVE comparison');
     spectral_bitrate: 160,
     existing_min_bitrate: 320,
   });
-  assertContains(strip, 'class="r-evidence"', 'strip wrapper class');
-  assertContains(strip, 'class="r-ev-row r-ev-in"', 'IN is a semantic grid row');
-  assertContains(strip, 'class="r-ev-row r-ev-have"', 'HAVE is a semantic grid row');
+  t.contains(strip, 'class="r-evidence"', 'strip wrapper class');
+  t.contains(strip, 'class="r-ev-row r-ev-in"', 'IN is a semantic grid row');
+  t.contains(strip, 'class="r-ev-row r-ev-have"', 'HAVE is a semantic grid row');
   for (const slot of ['source', 'metric', 'spectral', 'v0']) {
     const count = strip.split(`r-ev-${slot}`).length - 1;
-    if (count === 2) { passed++; } else {
-      failed++;
-      console.error(`  FAIL: ${slot} must occupy the same explicit slot in both rows; got ${count}`);
-    }
+    t.equal(count, 2, `${slot} must occupy the same explicit slot in both rows`);
   }
-  assertExcludes(strip, 'r-ev-rank', 'rows do not render the permanently empty rank slot');
-  assertExcludes(strip, 'r-ev-value', 'rows do not collapse back to one freeform value cell');
-  assertContains(strip, 'IN', 'IN side labelled');
-  assertContains(strip, 'MP3 320', 'incoming label rendered');
-  assertContains(strip, 'min 245k', 'incoming measured bitrate rendered with the min label');
-  assertContains(strip, '~160k', 'incoming spectral floor rendered');
-  assertContains(strip, 'HAVE', 'HAVE side labelled');
-  assertContains(strip, 'min 320k', 'on-disk bitrate rendered with the min label');
+  t.excludes(strip, 'r-ev-rank', 'rows do not render the permanently empty rank slot');
+  t.excludes(strip, 'r-ev-value', 'rows do not collapse back to one freeform value cell');
+  t.contains(strip, 'IN', 'IN side labelled');
+  t.contains(strip, 'MP3 320', 'incoming label rendered');
+  t.contains(strip, 'min 245k', 'incoming measured bitrate rendered with the min label');
+  t.contains(strip, '~160k', 'incoming spectral floor rendered');
+  t.contains(strip, 'HAVE', 'HAVE side labelled');
+  t.contains(strip, 'min 320k', 'on-disk bitrate rendered with the min label');
 }
 
-console.log('renderEvidenceStrip() keeps converted source bare in collapsed rows');
+t.section('renderEvidenceStrip() keeps converted source bare in collapsed rows');
 {
   const strip = renderEvidenceFixture({
     source_format: 'FLAC',
@@ -638,12 +581,12 @@ console.log('renderEvidenceStrip() keeps converted source bare in collapsed rows
       verified_lossless_bypass: false,
     },
   });
-  assertContains(strip, '>FLAC</span>', 'collapsed IN row names the measured source codec');
-  assertExcludes(strip, 'FLAC →', 'collapsed row does not show a conversion arrow');
-  assertExcludes(strip, 'OPUS 128', 'target/output contract is not labelled as source bitrate');
+  t.contains(strip, '>FLAC</span>', 'collapsed IN row names the measured source codec');
+  t.excludes(strip, 'FLAC →', 'collapsed row does not show a conversion arrow');
+  t.excludes(strip, 'OPUS 128', 'target/output contract is not labelled as source bitrate');
 }
 
-console.log('renderEvidenceStrip() labels an installed spectral-bound class truthfully');
+t.section('renderEvidenceStrip() labels an installed spectral-bound class truthfully');
 {
   const strip = renderEvidenceFixture({
     source_format: 'MP3', actual_min_bitrate: 190,
@@ -659,12 +602,12 @@ console.log('renderEvidenceStrip() labels an installed spectral-bound class trut
       verified_lossless_bypass: false,
     },
   });
-  assertContains(strip, '190k avg', 'known-clean candidate keeps its raw metric');
-  assertContains(strip, '~192k', 'installed class renders as a spectral floor');
-  assertExcludes(strip, 'avg 275k', 'installed raw VBR average does not relabel its class');
+  t.contains(strip, '190k avg', 'known-clean candidate keeps its raw metric');
+  t.contains(strip, '~192k', 'installed class renders as a spectral floor');
+  t.excludes(strip, 'avg 275k', 'installed raw VBR average does not relabel its class');
 }
 
-console.log('renderEvidenceStrip() keeps a VBR spectral class with its candidate encode');
+t.section('renderEvidenceStrip() keeps a VBR spectral class with its candidate encode');
 {
   const candidateBound = renderEvidenceFixture({
     source_format: 'MP3', actual_min_bitrate: 275,
@@ -680,11 +623,11 @@ console.log('renderEvidenceStrip() keeps a VBR spectral class with its candidate
       verified_lossless_bypass: false,
     },
   });
-  assertContains(candidateBound, '~192k', 'candidate class renders as a spectral floor');
-  assertExcludes(candidateBound, '275k avg', 'candidate raw VBR average does not relabel its class');
+  t.contains(candidateBound, '~192k', 'candidate class renders as a spectral floor');
+  t.excludes(candidateBound, '275k avg', 'candidate raw VBR average does not relabel its class');
 }
 
-console.log('renderEvidenceStrip() renders canonical candidate evidence as ordinary IN');
+t.section('renderEvidenceStrip() renders canonical candidate evidence as ordinary IN');
 {
   const strip = renderEvidenceFixture({
     downloaded_label: 'MP3 V2',
@@ -693,25 +636,22 @@ console.log('renderEvidenceStrip() renders canonical candidate evidence as ordin
     source_avg_bitrate: 259,
     source_median_bitrate: 255,
   });
-  assertContains(strip, '>IN</strong>', 'historical triage evidence keeps the normal IN row');
-  assertContains(strip, '>MP3</span>', 'candidate evidence supplies the source codec');
-  assertContains(strip, '>259k avg (min 201k)</span>',
+  t.contains(strip, '>IN</strong>', 'historical triage evidence keeps the normal IN row');
+  t.contains(strip, '>MP3</span>', 'candidate evidence supplies the source codec');
+  t.contains(strip, '>259k avg (min 201k)</span>',
     'candidate evidence supplies its average and minimum');
 }
 
-console.log('renderEvidenceStrip() returns empty string when no evidence exists');
+t.section('renderEvidenceStrip() returns empty string when no evidence exists');
 {
   const strip = renderEvidenceFixture({
     outcome: 'timeout',
     error_message: 'remote_queue_timeout 3600s exceeded',
   });
-  if (strip === '') { passed++; } else {
-    failed++;
-    console.error(`  FAIL: no-evidence rows should produce no strip, got '${strip}'`);
-  }
+  t.equal(strip, '', 'no-evidence rows should produce no strip');
 }
 
-console.log('renderEvidenceStrip() requires a number — a codec label alone is not a comparison');
+t.section('renderEvidenceStrip() requires a number — a codec label alone is not a comparison');
 {
   // Failed downloads carry downloaded_label (from slskd filetype) but no
   // measurements; a label-only strip would spam "IN MP3 HAVE —" on every
@@ -720,13 +660,10 @@ console.log('renderEvidenceStrip() requires a number — a codec label alone is 
     outcome: 'timeout',
     downloaded_label: 'MP3',
   });
-  if (strip === '') { passed++; } else {
-    failed++;
-    console.error(`  FAIL: label-only rows should produce no strip, got '${strip}'`);
-  }
+  t.equal(strip, '', 'label-only rows should produce no strip');
 }
 
-console.log('Download failures blank IN and keep the complete pre-attempt HAVE row');
+t.section('Download failures blank IN and keep the complete pre-attempt HAVE row');
 {
   const strip = renderEvidenceFixture({
     outcome: 'timeout',
@@ -746,21 +683,21 @@ console.log('Download failures blank IN and keep the complete pre-attempt HAVE r
     existing_v0_probe_min_bitrate: 193,
     existing_v0_probe_avg_bitrate: 256,
   });
-  assertContains(
+  t.contains(
     strip,
     '<strong class="r-ev-tag">IN</strong><span class="r-ev-cell r-ev-source">',
     'timeout renders the IN row',
   );
-  assertContains(strip, '>—</span>', 'timeout leaves IN blank');
-  assertExcludes(strip, '725k avg', 'timeout hides incoming bitrate');
-  assertExcludes(strip, 'V0 248k avg', 'timeout hides incoming V0');
-  assertContains(strip, 'Opus', 'timeout keeps HAVE codec');
-  assertContains(strip, '129k avg (min 93k)', 'timeout keeps HAVE average and minimum');
-  assertContains(strip, '~96k suspect', 'timeout keeps HAVE spectral');
-  assertContains(strip, 'V0 256k avg (min 193k)', 'timeout keeps HAVE V0');
+  t.contains(strip, '>—</span>', 'timeout leaves IN blank');
+  t.excludes(strip, '725k avg', 'timeout hides incoming bitrate');
+  t.excludes(strip, 'V0 248k avg', 'timeout hides incoming V0');
+  t.contains(strip, 'Opus', 'timeout keeps HAVE codec');
+  t.contains(strip, '129k avg (min 93k)', 'timeout keeps HAVE average and minimum');
+  t.contains(strip, '~96k suspect', 'timeout keeps HAVE spectral');
+  t.contains(strip, 'V0 256k avg (min 193k)', 'timeout keeps HAVE V0');
 }
 
-console.log('Import failures retain the grabbed candidate in IN');
+t.section('Import failures retain the grabbed candidate in IN');
 {
   const strip = renderEvidenceFixture({
     outcome: 'failed',
@@ -775,20 +712,18 @@ console.log('Import failures retain the grabbed candidate in IN');
     existing_min_bitrate: 93,
     existing_avg_bitrate: 129,
   });
-  assertContains(strip, '725k avg (min 455k)', 'failed import keeps incoming bitrate');
-  assertContains(strip, '~96k likely transcode', 'failed import keeps incoming spectral');
-  assertContains(strip, 'V0 248k avg (min 178k)', 'failed import keeps incoming V0');
-  assertContains(strip, '>725k avg/455k min<', 'mobile metric labels each number in place');
+  t.contains(strip, '725k avg (min 455k)', 'failed import keeps incoming bitrate');
+  t.contains(strip, '~96k likely transcode', 'failed import keeps incoming spectral');
+  t.contains(strip, 'V0 248k avg (min 178k)', 'failed import keeps incoming V0');
+  t.contains(strip, '>725k avg/455k min<', 'mobile metric labels each number in place');
   const spectralCount = strip.split('~96k likely transcode').length - 1;
-  if (spectralCount === 2) { passed++; } else {
-    failed++;
-    console.error(`  FAIL: mobile spectral keeps the full "likely transcode" wording (the column ellipsizes instead); got ${spectralCount} of 2 spans`);
-  }
-  assertContains(strip, 'V0 248/178k<', 'mobile V0 stays the bare pair — its label is the V0 prefix');
-  assertExcludes(strip, 'a/m', 'the cryptic a/m shorthand is dead');
+  t.equal(spectralCount, 2,
+    'mobile spectral keeps the full "likely transcode" wording (the column ellipsizes instead)');
+  t.contains(strip, 'V0 248/178k<', 'mobile V0 stays the bare pair — its label is the V0 prefix');
+  t.excludes(strip, 'a/m', 'the cryptic a/m shorthand is dead');
 }
 
-console.log('renderEvidenceStrip() keeps a CBR metric pair explicit but still collapses the V0 cell');
+t.section('renderEvidenceStrip() keeps a CBR metric pair explicit but still collapses the V0 cell');
 {
   const strip = renderEvidenceFixture({
     source_format: 'MP3',
@@ -800,15 +735,15 @@ console.log('renderEvidenceStrip() keeps a CBR metric pair explicit but still co
     existing_v0_probe_avg_bitrate: 245,
     existing_v0_probe_min_bitrate: 245,
   });
-  assertContains(strip, '320k avg (min 320k)', 'desktop wording keeps both numbers');
+  t.contains(strip, '320k avg (min 320k)', 'desktop wording keeps both numbers');
   // A CBR metric cell keeps its avg/min pair on mobile — a bare "320k" was
   // ambiguous with a min-only measurement (issue #813 follow-up).
-  assertContains(strip, '>320k avg/320k min<', 'mobile keeps the CBR metric pair explicit');
-  assertExcludes(strip, '>320k</span>', 'mobile no longer collapses the CBR metric to one number');
-  assertContains(strip, '>V0 245k<', 'an equal V0 pair still collapses (its prefix labels it)');
+  t.contains(strip, '>320k avg/320k min<', 'mobile keeps the CBR metric pair explicit');
+  t.excludes(strip, '>320k</span>', 'mobile no longer collapses the CBR metric to one number');
+  t.contains(strip, '>V0 245k<', 'an equal V0 pair still collapses (its prefix labels it)');
 }
 
-console.log('renderEvidenceStrip() shows the on-disk format on the HAVE side');
+t.section('renderEvidenceStrip() shows the on-disk format on the HAVE side');
 {
   // The Mothertongue case (#575): AAC 256 replacing unverified MP3 256.
   // Without the format, "IN M4A V0 · 256k HAVE 256k" reads as a
@@ -820,11 +755,11 @@ console.log('renderEvidenceStrip() shows the on-disk format on the HAVE side');
     existing_format: 'MP3',
     existing_min_bitrate: 256,
   });
-  assertContains(strip, '>MP3</span>', 'HAVE side leads with the on-disk format');
-  assertContains(strip, '>min 256k</span>', 'HAVE bitrate stays min-labelled in its shared slot');
+  t.contains(strip, '>MP3</span>', 'HAVE side leads with the on-disk format');
+  t.contains(strip, '>min 256k</span>', 'HAVE bitrate stays min-labelled in its shared slot');
 }
 
-console.log('renderEvidenceStrip() renders a supplied pre-attempt HAVE snapshot');
+t.section('renderEvidenceStrip() renders a supplied pre-attempt HAVE snapshot');
 {
   // Historical renderers receive only the evidence that belonged to the
   // attempt; a later current-library snapshot must never be projected here.
@@ -835,11 +770,11 @@ console.log('renderEvidenceStrip() renders a supplied pre-attempt HAVE snapshot'
     existing_format: 'Opus',
     existing_min_bitrate: 93,
   });
-  assertContains(strip, '>Opus</span>', 'pre-attempt format populates HAVE');
-  assertContains(strip, '>min 93k</span>', 'pre-attempt minimum populates HAVE');
+  t.contains(strip, '>Opus</span>', 'pre-attempt format populates HAVE');
+  t.contains(strip, '>min 93k</span>', 'pre-attempt minimum populates HAVE');
 }
 
-console.log('renderDownloadHistoryItem() does not infer output from legacy min fields');
+t.section('renderDownloadHistoryItem() does not infer output from legacy min fields');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'success',
@@ -850,13 +785,13 @@ console.log('renderDownloadHistoryItem() does not infer output from legacy min f
     existing_format: 'MP3',
     existing_min_bitrate: 256,
   });
-  assertContains(html, 'class="p-hist-label">Output</span>',
+  t.contains(html, 'class="p-hist-label">Output</span>',
     'fixed output row remains present');
-  assertContains(html, '<span class="p-hist-value">—</span>',
+  t.contains(html, '<span class="p-hist-value">—</span>',
     'legacy row without materialized evidence stays honest');
 }
 
-console.log('renderDownloadHistoryItem() does not fabricate output when format is unknown');
+t.section('renderDownloadHistoryItem() does not fabricate output when format is unknown');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'success',
@@ -865,30 +800,30 @@ console.log('renderDownloadHistoryItem() does not fabricate output when format i
     actual_min_bitrate: 320,
     existing_min_bitrate: 256,
   });
-  assertContains(html, 'class="p-hist-label">Output</span>',
+  t.contains(html, 'class="p-hist-label">Output</span>',
     'fixed output row remains present');
 }
 
-console.log('renderDownloadHistoryItem() calls only explicit quality labels contracts');
+t.section('renderDownloadHistoryItem() calls only explicit quality labels contracts');
 {
   const legacyMp3 = renderDownloadHistoryFixture({
     outcome: 'success',
     created_at: '2026-07-13T00:29:00+00:00',
     final_format: 'MP3',
   });
-  assertContains(legacyMp3, 'Stored as', 'legacy stored format still renders');
-  assertContains(legacyMp3, '>MP3<', 'bare MP3 remains a codec fact');
-  assertExcludes(legacyMp3, 'MP3 contract', 'bare MP3 is not a quality contract');
+  t.contains(legacyMp3, 'Stored as', 'legacy stored format still renders');
+  t.contains(legacyMp3, '>MP3<', 'bare MP3 remains a codec fact');
+  t.excludes(legacyMp3, 'MP3 contract', 'bare MP3 is not a quality contract');
 
   const explicitOpus = renderDownloadHistoryFixture({
     outcome: 'success',
     created_at: '2026-07-13T01:06:00+00:00',
     final_format: 'opus 128',
   });
-  assertContains(explicitOpus, 'OPUS 128 contract', 'numeric target is a contract');
+  t.contains(explicitOpus, 'OPUS 128 contract', 'numeric target is a contract');
 }
 
-console.log('renderEvidenceStrip() stops compact V0 probes after the minimum');
+t.section('renderEvidenceStrip() stops compact V0 probes after the minimum');
 {
   // Probe-kind provenance belongs to expanded details. Every compact kind
   // gets the same bounded numeric form so long qualifiers cannot overflow.
@@ -905,24 +840,24 @@ console.log('renderEvidenceStrip() stops compact V0 probes after the minimum');
       v0_probe_avg_bitrate: 247,
       v0_probe_min_bitrate: 224,
     });
-    assertContains(strip, 'V0 247k avg (min 224k)', `${kind} keeps avg and min`);
-    assertExcludes(strip, 'from lossy', `${kind} omits lossy provenance`);
-    assertExcludes(strip, 'on-disk re-encode', `${kind} omits re-encode provenance`);
-    assertExcludes(strip, 'future_probe_kind', `${kind} omits raw kind provenance`);
+    t.contains(strip, 'V0 247k avg (min 224k)', `${kind} keeps avg and min`);
+    t.excludes(strip, 'from lossy', `${kind} omits lossy provenance`);
+    t.excludes(strip, 'on-disk re-encode', `${kind} omits re-encode provenance`);
+    t.excludes(strip, 'future_probe_kind', `${kind} omits raw kind provenance`);
   }
 }
 
-console.log('renderEvidenceStrip() escapes injected values');
+t.section('renderEvidenceStrip() escapes injected values');
 {
   const strip = renderEvidenceFixture({
     downloaded_label: '<img src=x>',
     actual_min_bitrate: 200,
   });
-  assertExcludes(strip, '<img src=x>', 'raw label not rendered');
-  assertContains(strip, '&lt;img src=x&gt;', 'label escaped');
+  t.excludes(strip, '<img src=x>', 'raw label not rendered');
+  t.contains(strip, '&lt;img src=x&gt;', 'label escaped');
 }
 
-console.log('renderEvidenceStrip() renders the persisted comparison basis when present');
+t.section('renderEvidenceStrip() renders the persisted comparison basis when present');
 {
   // Request 6039: avg 196->288 rank upgrade; min 194 on BOTH sides made the
   // legacy strip a tautology ("IN MP3 V2 . 194k HAVE MP3 194k").
@@ -947,19 +882,19 @@ console.log('renderEvidenceStrip() renders the persisted comparison basis when p
       verified_lossless_bypass: false,
     },
   });
-  assertContains(strip, '288k avg (min 194k)',
+  t.contains(strip, '288k avg (min 194k)',
     'IN side shows the deciding average and actual minimum');
-  assertExcludes(strip, '>transparent</span>',
+  t.excludes(strip, '>transparent</span>',
     'compact IN leaves decision ranks to the expanded detail');
-  assertContains(strip, '196k avg (min 194k)',
+  t.contains(strip, '196k avg (min 194k)',
     'HAVE side shows the deciding average and actual minimum');
-  assertExcludes(strip, '>good</span>',
+  t.excludes(strip, '>good</span>',
     'compact HAVE leaves decision ranks to the expanded detail');
-  assertContains(strip, 'genuine', 'spectral grade chip survives');
-  assertContains(strip, '~160k genuine',
+  t.contains(strip, 'genuine', 'spectral grade chip survives');
+  t.contains(strip, '~160k genuine',
     'ordinary avg basis does not suppress a distinct spectral floor');
-  assertExcludes(strip, 'MP3 V2', 'min-derived label replaced by the basis');
-  assertExcludes(strip, 'actual MP3',
+  t.excludes(strip, 'MP3 V2', 'min-derived label replaced by the basis');
+  t.excludes(strip, 'actual MP3',
     'materialized output stays in expanded detail instead of crowding the compact source strip');
 
   const detail = renderDownloadHistoryFixture({
@@ -970,11 +905,11 @@ console.log('renderEvidenceStrip() renders the persisted comparison basis when p
     materialized_avg_bitrate: 320,
     materialized_median_bitrate: 320,
   });
-  assertContains(detail, 'MP3 avg 320kbps · min 195kbps',
+  t.contains(detail, 'MP3 avg 320kbps · min 195kbps',
     'expanded detail retains the materialized output lineage');
 }
 
-console.log('Gas: contract, V0 proof, and materialized Opus output stay distinct');
+t.section('Gas: contract, V0 proof, and materialized Opus output stay distinct');
 {
   const strip = renderEvidenceFixture({
     outcome: 'force_import',
@@ -1013,28 +948,25 @@ console.log('Gas: contract, V0 proof, and materialized Opus output stay distinct
       verified_lossless_bypass: false,
     },
   });
-  assertContains(strip, '>FLAC - Opus</span>',
+  t.contains(strip, '>FLAC - Opus</span>',
     'IN suffixes the source codec with the selected storage codec');
-  assertContains(strip, '>132k avg (min 102k)</span>',
+  t.contains(strip, '>132k avg (min 102k)</span>',
     'IN metric stays numeric so it aligns with HAVE');
-  assertExcludes(strip, 'FLAC →', 'collapsed source uses the compact suffix grammar');
-  assertExcludes(strip, 'OPUS 128 contract',
+  t.excludes(strip, 'FLAC →', 'collapsed source uses the compact suffix grammar');
+  t.excludes(strip, 'OPUS 128 contract',
     'target contract remains in expanded details instead of the source strip');
-  assertContains(strip, '>MP3</span>',
+  t.contains(strip, '>MP3</span>',
     'HAVE names the pre-import codec');
-  assertContains(strip, '>128k avg (min 128k)</span>',
+  t.contains(strip, '>128k avg (min 128k)</span>',
     'HAVE uses the pre-import measurement');
   const outputCount = strip.split('132k avg (min 102k)').length - 1;
-  if (outputCount === 1) { passed++; } else {
-    failed++;
-    console.error(`  FAIL: materialized output belongs only to IN; rendered ${outputCount} times`);
-  }
-  assertExcludes(strip, '>transparent</span>',
+  t.equal(outputCount, 1, 'materialized output belongs only to IN');
+  t.excludes(strip, '>transparent</span>',
     'compact HAVE never substitutes a decision rank for measured spectral data');
-  assertContains(strip, '~128k suspect',
+  t.contains(strip, '~128k suspect',
     'HAVE keeps the existing spectral measurement after conversion');
-  assertContains(strip, 'V0 224k avg', 'source V0 proof remains explicit');
-  assertExcludes(strip, 'OPUS 128 min 191k', 'V0 minimum never wears an Opus label');
+  t.contains(strip, 'V0 224k avg', 'source V0 proof remains explicit');
+  t.excludes(strip, 'OPUS 128 min 191k', 'V0 minimum never wears an Opus label');
 
   const detail = renderDownloadHistoryFixture({
     outcome: 'force_import',
@@ -1079,17 +1011,17 @@ console.log('Gas: contract, V0 proof, and materialized Opus output stay distinct
     badge_class: 'badge-force',
     verdict: 'Force imported after manual review',
   });
-  assertContains(detail, 'Output', 'detail grid names the materialized side');
-  assertContains(detail, 'FLAC avg 811kbps · min 742kbps',
+  t.contains(detail, 'Output', 'detail grid names the materialized side');
+  t.contains(detail, 'FLAC avg 811kbps · min 742kbps',
     'detail source uses downloaded source measurements');
-  assertContains(detail, 'Target contract', 'detail names target policy separately');
-  assertContains(detail, 'OPUS avg 132kbps · min 102kbps',
+  t.contains(detail, 'Target contract', 'detail names target policy separately');
+  t.contains(detail, 'OPUS avg 132kbps · min 102kbps',
     'detail output is codec-aware');
-  assertContains(detail, 'OPUS 128 contract', 'detail comparison is contract-aware');
-  assertExcludes(detail, '>Min bitrate<', 'ambiguous unqualified row is gone');
+  t.contains(detail, 'OPUS 128 contract', 'detail comparison is contract-aware');
+  t.excludes(detail, '>Min bitrate<', 'ambiguous unqualified row is gone');
 }
 
-console.log('Amaterasu Shiroi: force import HAVE stays pre-import');
+t.section('Amaterasu Shiroi: force import HAVE stays pre-import');
 {
   const strip = renderEvidenceFixture({
     outcome: 'force_import',
@@ -1127,35 +1059,29 @@ console.log('Amaterasu Shiroi: force import HAVE stays pre-import');
       verified_lossless_bypass: false,
     },
   });
-  assertContains(strip, '>FLAC - Opus</span>',
+  t.contains(strip, '>FLAC - Opus</span>',
     'IN keeps the downloaded source and suffixes its storage codec');
-  assertContains(strip, '>124k avg (min 118k)</span>',
+  t.contains(strip, '>124k avg (min 118k)</span>',
     'IN metric contains only measured output bytes');
-  assertContains(strip, '~96k likely transcode', 'IN keeps source spectral evidence');
-  assertContains(strip, 'V0 258k avg (min 246k)', 'IN keeps its source V0 probe');
-  assertContains(strip, '>OPUS</span>', 'HAVE names the pre-import copy');
-  assertContains(strip, '>101k avg (min 90k)</span>',
+  t.contains(strip, '~96k likely transcode', 'IN keeps source spectral evidence');
+  t.contains(strip, 'V0 258k avg (min 246k)', 'IN keeps its source V0 probe');
+  t.contains(strip, '>OPUS</span>', 'HAVE names the pre-import copy');
+  t.contains(strip, '>101k avg (min 90k)</span>',
     'HAVE is populated from pre-import bytes');
-  assertExcludes(strip, '>transparent</span>',
+  t.excludes(strip, '>transparent</span>',
     'HAVE does not substitute the decision rank for spectral data');
-  assertExcludes(strip, '>excellent</span>', 'decision rank stays out of compact HAVE');
+  t.excludes(strip, '>excellent</span>', 'decision rank stays out of compact HAVE');
   // One cell renders the phrase twice (full + compact span); a leak into
   // HAVE would double that to 4.
   const spectralCount = strip.split('~96k likely transcode').length - 1;
-  if (spectralCount === 2) { passed++; } else {
-    failed++;
-    console.error(`  FAIL: candidate spectral belongs only to IN; rendered ${spectralCount} spans, expected 2`);
-  }
+  t.equal(spectralCount, 2, 'candidate spectral belongs only to IN');
   const v0Count = strip.split('V0 258k avg (min 246k)').length - 1;
-  if (v0Count === 1) { passed++; } else {
-    failed++;
-    console.error(`  FAIL: candidate V0 belongs only to IN; rendered ${v0Count} times`);
-  }
-  assertContains(strip, '~80k suspect', 'HAVE keeps its own spectral snapshot');
-  assertContains(strip, 'V0 220k avg (min 201k)', 'HAVE keeps its own V0 snapshot');
+  t.equal(v0Count, 1, 'candidate V0 belongs only to IN');
+  t.contains(strip, '~80k suspect', 'HAVE keeps its own spectral snapshot');
+  t.contains(strip, 'V0 220k avg (min 201k)', 'HAVE keeps its own V0 snapshot');
 }
 
-console.log('Absentee Schmotime: an upgrade keeps the pre-import copy in HAVE');
+t.section('Absentee Schmotime: an upgrade keeps the pre-import copy in HAVE');
 {
   // Live issue #709 regression: the converted output belongs to IN, while
   // HAVE remains the MP3 snapshot which the upgrade decision replaced.
@@ -1194,21 +1120,18 @@ console.log('Absentee Schmotime: an upgrade keeps the pre-import copy in HAVE');
       verified_lossless_bypass: true,
     },
   });
-  assertContains(strip, '>FLAC - Opus</span>', 'IN names the converted source');
-  assertContains(strip, '>136k avg (min 127k)</span>', 'IN uses measured Opus output');
-  assertContains(strip, '>MP3</span>', 'HAVE keeps the pre-import codec');
-  assertContains(strip, '>320k avg (min 320k)</span>',
+  t.contains(strip, '>FLAC - Opus</span>', 'IN names the converted source');
+  t.contains(strip, '>136k avg (min 127k)</span>', 'IN uses measured Opus output');
+  t.contains(strip, '>MP3</span>', 'HAVE keeps the pre-import codec');
+  t.contains(strip, '>320k avg (min 320k)</span>',
     'HAVE keeps the pre-import bitrate snapshot');
-  assertExcludes(strip, '>transparent</span>',
+  t.excludes(strip, '>transparent</span>',
     'compact upgrade leaves the internal rank in expanded detail');
   const incomingMetricCount = strip.split('136k avg (min 127k)').length - 1;
-  if (incomingMetricCount === 1) { passed++; } else {
-    failed++;
-    console.error(`  FAIL: incoming output must appear once; rendered ${incomingMetricCount} times`);
-  }
+  t.equal(incomingMetricCount, 1, 'incoming output must appear once');
 }
 
-console.log('every attempted import keeps materialized IN separate from historical HAVE');
+t.section('every attempted import keeps materialized IN separate from historical HAVE');
 {
   for (const [outcome, badge] of [
     ['success', 'Upgraded'],
@@ -1234,22 +1157,20 @@ console.log('every attempted import keeps materialized IN separate from historic
           existing_avg_bitrate: existingAvg,
           existing_min_bitrate: existingMin,
         });
-        assertContains(strip, `>${existing}</span>`,
+        t.contains(strip, `>${existing}</span>`,
           'generated upgrade HAVE keeps its pre-import codec');
-        assertContains(strip, `>${existingAvg}k avg (min ${existingMin}k)</span>`,
+        t.contains(strip, `>${existingAvg}k avg (min ${existingMin}k)</span>`,
           'generated upgrade HAVE keeps its pre-import measurements');
         const incomingCount = strip.split(`${incomingAvg}k avg (min ${incomingMin}k)`).length - 1;
-        if (incomingCount === 1) { passed++; } else {
-          failed++;
-          console.error(`  FAIL: attempted output bled into HAVE (${outcome}/${storage}/${existing}/${offset})`);
-        }
+        t.equal(incomingCount, 1,
+          `attempted output bled into HAVE (${outcome}/${storage}/${existing}/${offset})`);
         }
       }
     }
   }
 }
 
-console.log('Forty Days: provisional HAVE stays the comparable on-disk copy');
+t.section('Forty Days: provisional HAVE stays the comparable on-disk copy');
 {
   // Live issue #709 regression: a provisional candidate has a materialized
   // output measurement, but HAVE must remain the pre-attempt library snapshot
@@ -1281,21 +1202,21 @@ console.log('Forty Days: provisional HAVE stays the comparable on-disk copy');
     materialized_min_bitrate: 106,
     materialized_avg_bitrate: 122,
   });
-  assertContains(strip, '>FLAC - Opus</span>',
+  t.contains(strip, '>FLAC - Opus</span>',
     'IN names the provisional source and selected storage codec');
-  assertContains(strip, '>122k avg (min 106k)</span>',
+  t.contains(strip, '>122k avg (min 106k)</span>',
     'IN metric contains only the measured provisional result');
-  assertContains(strip, 'V0 223k avg (min 200k)', 'IN keeps source V0 evidence');
-  assertContains(strip, '>Opus</span>', 'HAVE names the comparable library copy');
-  assertContains(strip, '>113k avg (min 103k)</span>',
+  t.contains(strip, 'V0 223k avg (min 200k)', 'IN keeps source V0 evidence');
+  t.contains(strip, '>Opus</span>', 'HAVE names the comparable library copy');
+  t.contains(strip, '>113k avg (min 103k)</span>',
     'HAVE reports average and minimum for the pre-attempt copy');
-  assertContains(strip, '~96k likely transcode', 'HAVE keeps spectral evidence');
-  assertContains(strip, 'V0 207k avg (min 173k)', 'HAVE keeps its V0 probe');
-  assertExcludes(strip, 'avg 122k (min 106k)',
+  t.contains(strip, '~96k likely transcode', 'HAVE keeps spectral evidence');
+  t.contains(strip, 'V0 207k avg (min 173k)', 'HAVE keeps its V0 probe');
+  t.excludes(strip, 'avg 122k (min 106k)',
     'candidate output does not replace provisional comparison evidence');
 }
 
-console.log('Actual Life 3: current canonical evidence fully populates triage HAVE');
+t.section('Actual Life 3: current canonical evidence fully populates triage HAVE');
 {
   const strip = renderEvidenceFixture({
     outcome: 'rejected',
@@ -1317,18 +1238,18 @@ console.log('Actual Life 3: current canonical evidence fully populates triage HA
     existing_v0_probe_min_bitrate: 193,
     existing_v0_probe_avg_bitrate: 256,
   });
-  assertContains(strip, '>FLAC</span>', 'retained lossless keeps the bare source label');
-  assertContains(strip, '>725k avg (min 455k)</span>',
+  t.contains(strip, '>FLAC</span>', 'retained lossless keeps the bare source label');
+  t.contains(strip, '>725k avg (min 455k)</span>',
     'retained lossless metric reports average plus minimum');
-  assertContains(strip, '>Opus</span>', 'triage HAVE names the current copy');
-  assertContains(strip, '>129k avg (min 93k)</span>',
+  t.contains(strip, '>Opus</span>', 'triage HAVE names the current copy');
+  t.contains(strip, '>129k avg (min 93k)</span>',
     'triage HAVE reports average plus minimum');
-  assertContains(strip, '~96k suspect', 'triage HAVE keeps current spectral evidence');
-  assertContains(strip, 'V0 256k avg (min 193k)',
+  t.contains(strip, '~96k suspect', 'triage HAVE keeps current spectral evidence');
+  t.contains(strip, 'V0 256k avg (min 193k)',
     'triage HAVE keeps the canonical current V0 probe');
 }
 
-console.log('corrupt candidates suppress invalid IN quality claims while keeping HAVE');
+t.section('corrupt candidates suppress invalid IN quality claims while keeping HAVE');
 {
   const strip = renderEvidenceFixture({
     outcome: 'rejected',
@@ -1343,10 +1264,10 @@ console.log('corrupt candidates suppress invalid IN quality claims while keeping
     existing_min_bitrate: 192,
     existing_avg_bitrate: 224,
   });
-  assertContains(strip, '>FLAC</span>', 'corrupt source codec remains inspectable');
-  assertContains(strip, '>224k avg (min 192k)</span>', 'HAVE remains point-in-time evidence');
-  assertExcludes(strip, '0k', 'corrupt source never presents zero bitrate as quality evidence');
-  assertExcludes(strip, 'genuine', 'corrupt source never presents a positive spectral grade');
+  t.contains(strip, '>FLAC</span>', 'corrupt source codec remains inspectable');
+  t.contains(strip, '>224k avg (min 192k)</span>', 'HAVE remains point-in-time evidence');
+  t.excludes(strip, '0k', 'corrupt source never presents zero bitrate as quality evidence');
+  t.excludes(strip, 'genuine', 'corrupt source never presents a positive spectral grade');
 
   const detail = renderDownloadHistoryFixture({
     outcome: 'rejected', badge: 'Rejected',
@@ -1365,10 +1286,10 @@ console.log('corrupt candidates suppress invalid IN quality claims while keeping
     existing_format: 'MP3', existing_min_bitrate: 192,
     existing_avg_bitrate: 224,
   });
-  assertContains(detail, 'FLAC', 'expanded Source retains the honest codec');
-  assertExcludes(detail, '171kbps', 'expanded V0 cannot revive a corrupt candidate');
-  assertExcludes(detail, 'OPUS avg', 'expanded Output cannot revive converted candidate bytes');
-  assertExcludes(detail, 'Target contract', 'expanded conversion policy is hidden for corrupt input');
+  t.contains(detail, 'FLAC', 'expanded Source retains the honest codec');
+  t.excludes(detail, '171kbps', 'expanded V0 cannot revive a corrupt candidate');
+  t.excludes(detail, 'OPUS avg', 'expanded Output cannot revive converted candidate bytes');
+  t.excludes(detail, 'Target contract', 'expanded conversion policy is hidden for corrupt input');
 
   const legacy = renderEvidenceFixture({
     outcome: 'rejected', source_format: null, slskd_filetype: 'FLAC',
@@ -1378,15 +1299,11 @@ console.log('corrupt candidates suppress invalid IN quality claims while keeping
   });
   const sourceCodec = legacy.indexOf('>FLAC</span>');
   const haveRow = legacy.indexOf('r-ev-row r-ev-have');
-  if (sourceCodec !== -1 && sourceCodec < haveRow) {
-    passed++;
-  } else {
-    failed++;
-    console.error('FAIL: legacy corrupt source trusts captured slskd codec before filetype fallbacks');
-  }
+  t.ok(sourceCodec !== -1 && sourceCodec < haveRow,
+    'legacy corrupt source trusts captured slskd codec before filetype fallbacks');
 }
 
-console.log('lossless storage labels distinguish V0 from retained FLAC');
+t.section('lossless storage labels distinguish V0 from retained FLAC');
 {
   const v0 = renderEvidenceFixture({
     outcome: 'success', badge: 'Imported', was_converted: true,
@@ -1395,28 +1312,25 @@ console.log('lossless storage labels distinguish V0 from retained FLAC');
     materialized_format: 'MP3', materialized_min_bitrate: 220,
     materialized_avg_bitrate: 245,
   });
-  assertContains(v0, '>FLAC - V0</span>',
+  t.contains(v0, '>FLAC - V0</span>',
     'V0 target is suffixed to the lossless source label');
-  assertContains(v0, '>245k avg (min 220k)</span>',
+  t.contains(v0, '>245k avg (min 220k)</span>',
     'V0 target leaves the metric column numeric');
   const newImportMetricCount = v0.split('245k avg (min 220k)').length - 1;
-  if (newImportMetricCount === 1) { passed++; } else {
-    failed++;
-    console.error(`  FAIL: first import must leave HAVE empty; output rendered ${newImportMetricCount} times`);
-  }
-  assertContains(v0, '>—</span>',
+  t.equal(newImportMetricCount, 1, 'first import must leave HAVE empty');
+  t.contains(v0, '>—</span>',
     'first import makes the absent pre-import HAVE explicit');
 
   const flac = renderEvidenceFixture({
     outcome: 'success', badge: 'New', was_converted: false,
     source_format: 'FLAC', source_min_bitrate: 455, source_avg_bitrate: 725,
   });
-  assertContains(flac, '>FLAC</span>', 'retained FLAC target keeps the bare codec label');
-  assertContains(flac, '>725k avg (min 455k)</span>',
+  t.contains(flac, '>FLAC</span>', 'retained FLAC target keeps the bare codec label');
+  t.contains(flac, '>725k avg (min 455k)</span>',
     'retained FLAC metric contains only its actual bytes');
 }
 
-console.log('Iron & Wine: the temporary V0 minimum never wears the FLAC label');
+t.section('Iron & Wine: the temporary V0 minimum never wears the FLAC label');
 {
   const strip = renderEvidenceFixture({
     outcome: 'rejected',
@@ -1438,12 +1352,12 @@ console.log('Iron & Wine: the temporary V0 minimum never wears the FLAC label');
     existing_v0_probe_min_bitrate: 223,
     existing_v0_probe_avg_bitrate: 232,
   });
-  assertContains(strip, '>FLAC</span>', 'source remains labelled FLAC');
-  assertExcludes(strip, '>min 165k</span>', 'V0 minimum is not a FLAC measurement');
-  assertContains(strip, 'V0 171k avg (min 165k)', 'candidate V0 owns its minimum');
-  assertContains(strip, '>Opus</span>', 'pre-attempt existing Opus keeps its codec slot');
-  assertContains(strip, '>min 114k</span>', 'pre-attempt existing Opus keeps its real floor');
-  assertContains(strip, 'V0 232k avg (min 223k)', 'existing source V0 owns its minimum');
+  t.contains(strip, '>FLAC</span>', 'source remains labelled FLAC');
+  t.excludes(strip, '>min 165k</span>', 'V0 minimum is not a FLAC measurement');
+  t.contains(strip, 'V0 171k avg (min 165k)', 'candidate V0 owns its minimum');
+  t.contains(strip, '>Opus</span>', 'pre-attempt existing Opus keeps its codec slot');
+  t.contains(strip, '>min 114k</span>', 'pre-attempt existing Opus keeps its real floor');
+  t.contains(strip, 'V0 232k avg (min 223k)', 'existing source V0 owns its minimum');
 
   const detail = renderDownloadHistoryFixture({
     outcome: 'rejected',
@@ -1457,55 +1371,55 @@ console.log('Iron & Wine: the temporary V0 minimum never wears the FLAC label');
     existing_v0_probe_avg_bitrate: 232,
     verdict: 'Unproven lossless source not better than on-disk copy; searching continues',
   });
-  assertContains(detail, '171kbps avg · min 165kbps',
+  t.contains(detail, '171kbps avg · min 165kbps',
     'detail candidate V0 owns its minimum');
-  assertContains(detail, '232kbps avg · min 223kbps',
+  t.contains(detail, '232kbps avg · min 223kbps',
     'detail existing V0 owns its minimum');
 }
 
-console.log('evidence strip CSS keeps desktop alignment and gives mobile readable aligned one-line rows');
+t.section('evidence strip CSS keeps desktop alignment and gives mobile readable aligned one-line rows');
 {
   const css = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
-  assertContains(css, '.r-ev-row { display: contents; }',
+  t.contains(css, '.r-ev-row { display: contents; }',
     'desktop row wrappers participate in the parent grid instead of defining independent columns');
-  assertContains(css, 'grid-template-columns: 3.6em minmax(4.5em, 0.8fr) minmax(12em, 1.7fr) minmax(7.5em, 1fr) minmax(9em, 1.35fr)',
+  t.contains(css, 'grid-template-columns: 3.6em minmax(4.5em, 0.8fr) minmax(12em, 1.7fr) minmax(7.5em, 1fr) minmax(9em, 1.35fr)',
     'desktop reserves aligned tag/source/metric/spectral/V0 columns');
-  assertContains(css, '@media (max-width: 720px)', 'shared grid has a narrow-screen layout');
-  assertContains(css, '.r-evidence { grid-template-columns: 2.9em 3.2em minmax(8.5em, max-content) minmax(3em, 1fr) max-content; column-gap: 0.45em; font-size: 12px;',
+  t.contains(css, '@media (max-width: 720px)', 'shared grid has a narrow-screen layout');
+  t.contains(css, '.r-evidence { grid-template-columns: 2.9em 3.2em minmax(8.5em, max-content) minmax(3em, 1fr) max-content; column-gap: 0.45em; font-size: 12px;',
     'mobile fixes tag+source and floors the bitrate column at a labelled-pair width, so every metric cell (CBR pairs included) keeps aligned column edges');
-  assertContains(css, 'font-family: system-ui,',
+  t.contains(css, 'font-family: system-ui,',
     'mobile uses the narrow system font so full lines fit without squeezing');
-  assertContains(css, '.r-ev-cell { overflow: hidden; text-overflow: ellipsis; }',
+  t.contains(css, '.r-ev-cell { overflow: hidden; text-overflow: ellipsis; }',
     'squeezed cells drop end characters instead of wrapping');
-  assertContains(css, '.r-ev-full { display: none; } .r-ev-compact { display: inline; }',
+  t.contains(css, '.r-ev-full { display: none; } .r-ev-compact { display: inline; }',
     'mobile swaps in the spelled-out compact wording');
-  assertContains(css, '.r-ev-compact { display: none; }',
+  t.contains(css, '.r-ev-compact { display: none; }',
     'desktop keeps the full evidence wording');
-  assertExcludes(css, 'clamp(9px', 'mobile never shrinks evidence below readable size');
-  assertExcludes(css, 'grid-template-columns: max-content max-content max-content max-content max-content max-content;',
+  t.excludes(css, 'clamp(9px', 'mobile never shrinks evidence below readable size');
+  t.excludes(css, 'grid-template-columns: max-content max-content max-content max-content max-content max-content;',
     'the six-column mobile crush cannot return');
-  assertExcludes(css, 'column-gap: 1px', 'the 1px column crush cannot return');
-  assertExcludes(css, 'grid-template-rows: auto auto auto;',
+  t.excludes(css, 'column-gap: 1px', 'the 1px column crush cannot return');
+  t.excludes(css, 'grid-template-rows: auto auto auto;',
     'mobile does not spend three physical rows on each evidence side');
-  assertContains(css, '.r-evidence .r-ev-tag { color: #d3deea; font-weight: 900; font-size: 1.08em;',
+  t.contains(css, '.r-evidence .r-ev-tag { color: #d3deea; font-weight: 900; font-size: 1.08em;',
     'IN/HAVE labels are visibly prominent');
-  assertContains(css, '@media (min-width: 721px) { .r-ev-v0 { padding-left: 1em; } }',
+  t.contains(css, '@media (min-width: 721px) { .r-ev-v0 { padding-left: 1em; } }',
     'desktop V0 keeps a visible gutter after long spectral labels');
-  assertContains(css, '.recents-triage-label { color: #d66; font-weight: 600; }',
+  t.contains(css, '.recents-triage-label { color: #d66; font-weight: 600; }',
     'secondary triage annotations stay rejection-coloured');
-  assertExcludes(css, '.r-ev-cell { min-width: 0; overflow-wrap: anywhere;',
+  t.excludes(css, '.r-ev-cell { min-width: 0; overflow-wrap: anywhere;',
     'evidence tokens never use arbitrary mid-word wrapping');
-  assertExcludes(css, 'repeat(5, minmax(0, 1fr))',
+  t.excludes(css, 'repeat(5, minmax(0, 1fr))',
     'mobile evidence never collapses every field into equal tiny columns');
-  assertExcludes(css, 'grid-template-columns: 2.8em minmax(3.4em',
+  t.excludes(css, 'grid-template-columns: 2.8em minmax(3.4em',
     'the overlapping five-column mobile layout cannot return');
-  assertExcludes(css, 'minmax(4.5em, 0.75fr)',
+  t.excludes(css, 'minmax(4.5em, 0.75fr)',
     'desktop does not reserve a track for the permanently empty rank slot');
-  assertExcludes(css, 'minmax(8.5em, max-content) 0 minmax(3em, 1fr)',
+  t.excludes(css, 'minmax(8.5em, max-content) 0 minmax(3em, 1fr)',
     'mobile does not retain a zero-width track for the permanently empty rank slot');
 }
 
-console.log('renderEvidenceStrip() marks spectral-clamped rank values with ~');
+t.section('renderEvidenceStrip() marks spectral-clamped rank values with ~');
 {
   const strip = renderEvidenceFixture({
     actual_min_bitrate: 194,
@@ -1519,11 +1433,11 @@ console.log('renderEvidenceStrip() marks spectral-clamped rank values with ~');
       verified_lossless_bypass: false,
     },
   });
-  assertContains(strip, '~250k', 'clamped value gets the ~ prefix, no metric label');
-  assertExcludes(strip, 'avg 250k', 'clamped value must not claim a metric');
+  t.contains(strip, '~250k', 'clamped value gets the ~ prefix, no metric label');
+  t.excludes(strip, 'avg 250k', 'clamped value must not claim a metric');
 }
 
-console.log('renderEvidenceStrip() marks spectral_tiebreak values with ~ too (issue #813)');
+t.section('renderEvidenceStrip() marks spectral_tiebreak values with ~ too (issue #813)');
 {
   // Same clamped-value display rule as the rank branch — the coarse
   // rank band bucketed differing spectral estimates together, so the
@@ -1540,11 +1454,11 @@ console.log('renderEvidenceStrip() marks spectral_tiebreak values with ~ too (is
       verified_lossless_bypass: false,
     },
   });
-  assertContains(strip, '~200k', 'clamped value gets the ~ prefix, no metric label');
-  assertExcludes(strip, 'avg 200k', 'clamped value must not claim a metric');
+  t.contains(strip, '~200k', 'clamped value gets the ~ prefix, no metric label');
+  t.excludes(strip, 'avg 200k', 'clamped value must not claim a metric');
 }
 
-console.log('renderEvidenceStrip() clamps ONLY the candidate on spectral_candidate_bound');
+t.section('renderEvidenceStrip() clamps ONLY the candidate on spectral_candidate_bound');
 {
   // Issue #911's bound is asymmetric: the candidate is bounded by its own
   // spectral class while the HAVE keeps its real raw metric. A single
@@ -1564,15 +1478,15 @@ console.log('renderEvidenceStrip() clamps ONLY the candidate on spectral_candida
       verified_lossless_bypass: false,
     },
   });
-  assertContains(strip, '~160k', 'the bounded candidate value gets the ~ prefix');
-  assertExcludes(strip, 'avg 160k',
+  t.contains(strip, '~160k', 'the bounded candidate value gets the ~ prefix');
+  t.excludes(strip, 'avg 160k',
     'the candidate is CBR 320 — printing its class as an average is the display lie');
   // ...and the grade chip must not re-print the same floor beside it.
-  assertExcludes(strip, '~160k likely transcode',
+  t.excludes(strip, '~160k likely transcode',
     'the basis already carries the floor; the chip must not double it up');
 }
 
-console.log('renderEvidenceStrip() escapes basis strings');
+t.section('renderEvidenceStrip() escapes basis strings');
 {
   const strip = renderEvidenceFixture({
     actual_min_bitrate: 194,
@@ -1586,11 +1500,11 @@ console.log('renderEvidenceStrip() escapes basis strings');
       verified_lossless_bypass: false,
     },
   });
-  assertExcludes(strip, '<img src=x>', 'raw basis format not rendered');
-  assertExcludes(strip, '<b>x</b>', 'raw basis rank not rendered');
+  t.excludes(strip, '<img src=x>', 'raw basis format not rendered');
+  t.excludes(strip, '<b>x</b>', 'raw basis rank not rendered');
 }
 
-console.log('renderDownloadHistoryItem() renders a Compared row from the basis');
+t.section('renderDownloadHistoryItem() renders a Compared row from the basis');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'success',
@@ -1609,12 +1523,12 @@ console.log('renderDownloadHistoryItem() renders a Compared row from the basis')
       verified_lossless_bypass: false,
     },
   });
-  assertContains(html, 'Compared', 'Compared label rendered');
-  assertContains(html, 'MP3 avg 288k · transparent', 'new side with rank');
-  assertContains(html, 'MP3 avg 196k · good', 'existing side with rank');
+  t.contains(html, 'Compared', 'Compared label rendered');
+  t.contains(html, 'MP3 avg 288k · transparent', 'new side with rank');
+  t.contains(html, 'MP3 avg 196k · good', 'existing side with rank');
 }
 
-console.log('renderDownloadHistoryItem() Compared row notes the verified-lossless bypass');
+t.section('renderDownloadHistoryItem() Compared row notes the verified-lossless bypass');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'success',
@@ -1630,10 +1544,10 @@ console.log('renderDownloadHistoryItem() Compared row notes the verified-lossles
       verified_lossless_bypass: true,
     },
   });
-  assertContains(html, 'verified lossless bypass', 'bypass annotated');
+  t.contains(html, 'verified lossless bypass', 'bypass annotated');
 }
 
-console.log('renderDownloadHistoryItem() omits the Compared row without a basis');
+t.section('renderDownloadHistoryItem() omits the Compared row without a basis');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'success',
@@ -1641,10 +1555,10 @@ console.log('renderDownloadHistoryItem() omits the Compared row without a basis'
     created_at: '2026-07-10T14:46:05+00:00',
     actual_min_bitrate: 194,
   });
-  assertExcludes(html, 'Compared', 'no Compared row on legacy rows');
+  t.excludes(html, 'Compared', 'no Compared row on legacy rows');
 }
 
-console.log('renderDownloadHistoryItem() leads with the verdict, red on rejections');
+t.section('renderDownloadHistoryItem() leads with the verdict, red on rejections');
 {
   // Request 8781 / download_log 36660: a Rejected row whose quality
   // evidence all read positive (transparent vs transparent, verified
@@ -1672,18 +1586,14 @@ console.log('renderDownloadHistoryItem() leads with the verdict, red on rejectio
     },
   });
 
-  assertContains(html, 'p-hist-verdict-reject', 'rejected verdict gets the reject class');
+  t.contains(html, 'p-hist-verdict-reject', 'rejected verdict gets the reject class');
   const verdictPos = html.indexOf('mbid_missing');
   const gridPos = html.indexOf('p-hist-grid');
-  if (verdictPos !== -1 && gridPos !== -1 && verdictPos < gridPos) {
-    passed++;
-  } else {
-    failed++;
-    console.error('  FAIL: rejection verdict should render before the evidence grid');
-  }
+  t.ok(verdictPos !== -1 && gridPos !== -1 && verdictPos < gridPos,
+    'rejection verdict should render before the evidence grid');
 }
 
-console.log('renderDownloadHistoryItem() colors the verdict red across the failure family');
+t.section('renderDownloadHistoryItem() colors the verdict red across the failure family');
 {
   for (const outcome of [
     'rejected', 'failed', 'timeout', 'measurement_failed', 'user_offline', 'curator_ban',
@@ -1694,11 +1604,11 @@ console.log('renderDownloadHistoryItem() colors the verdict red across the failu
       created_at: '2026-07-10T23:19:10+00:00',
       verdict: 'some failure story',
     });
-    assertContains(html, 'p-hist-verdict-reject', `${outcome} verdict gets the reject class`);
+    t.contains(html, 'p-hist-verdict-reject', `${outcome} verdict gets the reject class`);
   }
 }
 
-console.log('renderDownloadHistoryItem() keeps success verdicts unstyled and above the grid');
+t.section('renderDownloadHistoryItem() keeps success verdicts unstyled and above the grid');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'success',
@@ -1707,19 +1617,15 @@ console.log('renderDownloadHistoryItem() keeps success verdicts unstyled and abo
     actual_min_bitrate: 194,
     verdict: 'Upgrade: MP3 V2 to MP3 320',
   });
-  assertContains(html, 'p-hist-verdict', 'verdict line present on success rows');
-  assertExcludes(html, 'p-hist-verdict-reject', 'success verdict keeps the default colour');
+  t.contains(html, 'p-hist-verdict', 'verdict line present on success rows');
+  t.excludes(html, 'p-hist-verdict-reject', 'success verdict keeps the default colour');
   const verdictPos = html.indexOf('Upgrade: MP3 V2 to MP3 320');
   const gridPos = html.indexOf('p-hist-grid');
-  if (verdictPos !== -1 && gridPos !== -1 && verdictPos < gridPos) {
-    passed++;
-  } else {
-    failed++;
-    console.error('  FAIL: success verdict should also render before the grid');
-  }
+  t.ok(verdictPos !== -1 && gridPos !== -1 && verdictPos < gridPos,
+    'success verdict should also render before the grid');
 }
 
-console.log('renderDownloadHistoryItem() surfaces beets_detail behind the forensics toggle');
+t.section('renderDownloadHistoryItem() surfaces beets_detail behind the forensics toggle');
 {
   // mbid_not_found rows carry the explanation ("Target MBID X not in
   // candidates") in beets_detail — previously dropped on the floor.
@@ -1730,21 +1636,17 @@ console.log('renderDownloadHistoryItem() surfaces beets_detail behind the forens
     verdict: 'mbid_not_found',
     beets_detail: 'Target MBID 3de1b986-1b7d-4769-ba9a-5d2b398d0331 not in candidates',
   });
-  assertContains(html, '<details class="p-hist-forensics">',
+  t.contains(html, '<details class="p-hist-forensics">',
     'forensics toggle present when beets_detail exists');
-  assertContains(html, 'Target MBID 3de1b986-1b7d-4769-ba9a-5d2b398d0331 not in candidates',
+  t.contains(html, 'Target MBID 3de1b986-1b7d-4769-ba9a-5d2b398d0331 not in candidates',
     'beets_detail reachable in forensics');
   const detailsStart = html.indexOf('<details');
   const detailPos = html.indexOf('Target MBID');
-  if (detailsStart !== -1 && detailPos > detailsStart) {
-    passed++;
-  } else {
-    failed++;
-    console.error('  FAIL: beets_detail should live inside the forensics toggle');
-  }
+  t.ok(detailsStart !== -1 && detailPos > detailsStart,
+    'beets_detail should live inside the forensics toggle');
 }
 
-console.log('renderDownloadHistoryItem() omits the forensics Detail row when beets_detail repeats the verdict');
+t.section('renderDownloadHistoryItem() omits the forensics Detail row when beets_detail repeats the verdict');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
@@ -1753,11 +1655,11 @@ console.log('renderDownloadHistoryItem() omits the forensics Detail row when bee
     verdict: 'audio_corrupt',
     beets_detail: 'audio_corrupt',
   });
-  assertExcludes(html, '<details class="p-hist-forensics">',
+  t.excludes(html, '<details class="p-hist-forensics">',
     'no forensics toggle for a redundant beets_detail');
 }
 
-console.log('renderDownloadHistoryItem() shows the raw peer message behind a humanized verdict');
+t.section('renderDownloadHistoryItem() shows the raw peer message behind a humanized verdict');
 {
   // Issue #868: the verdict interprets ("Peer X rejected all 29 files"),
   // so the peer's own words need their own row — transfer_detail is
@@ -1773,14 +1675,14 @@ console.log('renderDownloadHistoryItem() shows the raw peer message behind a hum
     transfer_message_label: 'Peer message',
   });
 
-  assertContains(html, 'class="p-hist-label">Peer message</span>',
+  t.contains(html, 'class="p-hist-label">Peer message</span>',
     'server-owned evidence label renders as its own row');
-  assertContains(html, '29\u00d7 &quot;Verification required&quot;',
+  t.contains(html, '29\u00d7 &quot;Verification required&quot;',
     'raw peer text is escaped and visible');
-  assertContains(html, 'color:#888;', 'raw peer text renders dim');
+  t.contains(html, 'color:#888;', 'raw peer text renders dim');
 }
 
-console.log('renderDownloadHistoryItem() labels a local storage failure as storage, not a peer message');
+t.section('renderDownloadHistoryItem() labels a local storage failure as storage, not a peer message');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'timeout',
@@ -1793,13 +1695,13 @@ console.log('renderDownloadHistoryItem() labels a local storage failure as stora
     transfer_message_label: 'Storage error',
   });
 
-  assertContains(html, 'class="p-hist-label">Storage error</span>',
+  t.contains(html, 'class="p-hist-label">Storage error</span>',
     'storage failures keep their own label');
-  assertExcludes(html, 'class="p-hist-label">Peer message</span>',
+  t.excludes(html, 'class="p-hist-label">Peer message</span>',
     'our own storage fault is never captioned as something a peer said');
 }
 
-console.log('renderDownloadHistoryItem() omits the evidence row when no transfer message exists');
+t.section('renderDownloadHistoryItem() omits the evidence row when no transfer message exists');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'failed',
@@ -1809,10 +1711,10 @@ console.log('renderDownloadHistoryItem() omits the evidence row when no transfer
     created_at: '2026-07-25T02:10:00+00:00',
     verdict: 'Download could not be staged for import in time; returned to the queue',
   });
-  assertExcludes(html, 'Peer message', 'no evidence row without evidence');
+  t.excludes(html, 'Peer message', 'no evidence row without evidence');
 }
 
-console.log('renderDownloadHistoryItem() escapes a hostile transfer message and label');
+t.section('renderDownloadHistoryItem() escapes a hostile transfer message and label');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'timeout',
@@ -1821,11 +1723,11 @@ console.log('renderDownloadHistoryItem() escapes a hostile transfer message and 
     transfer_message: '1\u00d7 "<img src=x onerror=alert(1)>"',
     transfer_message_label: '<script>bad</script>',
   });
-  assertExcludes(html, '<img src=x', 'peer text is escaped');
-  assertExcludes(html, '<script>bad', 'label is escaped');
+  t.excludes(html, '<img src=x', 'peer text is escaped');
+  t.excludes(html, '<script>bad', 'label is escaped');
 }
 
-console.log('renderDownloadHistoryItem() labels a machine reason code as such in forensics');
+t.section('renderDownloadHistoryItem() labels a machine reason code as such in forensics');
 {
   // Issue #868 review A4: PR1 persists the materialize reason in
   // beets_detail, which this card renders as a forensics row. The server
@@ -1841,14 +1743,14 @@ console.log('renderDownloadHistoryItem() labels a machine reason code as such in
     beets_detail_label: 'Reason code',
   });
 
-  assertContains(html, 'class="p-hist-label">Reason code</span>',
+  t.contains(html, 'class="p-hist-label">Reason code</span>',
     'server-owned forensics label renders');
-  assertContains(html, 'source_open_failed_ESTALE', 'the raw token stays visible');
-  assertExcludes(html, 'class="p-hist-label">Detail</span>',
+  t.contains(html, 'source_open_failed_ESTALE', 'the raw token stays visible');
+  t.excludes(html, 'class="p-hist-label">Detail</span>',
     'a reason code is not captioned as beets detail');
 }
 
-console.log('renderDownloadHistoryItem() keeps the Detail label for beets prose');
+t.section('renderDownloadHistoryItem() keeps the Detail label for beets prose');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
@@ -1857,11 +1759,11 @@ console.log('renderDownloadHistoryItem() keeps the Detail label for beets prose'
     verdict: 'Wrong match (dist 0.190)',
     beets_detail: 'Target MBID not in candidates',
   });
-  assertContains(html, 'class="p-hist-label">Detail</span>',
+  t.contains(html, 'class="p-hist-label">Detail</span>',
     'unlabelled details keep the historical caption');
 }
 
-console.log('spectralGradeIsAdmissible() withholds only the accusation');
+t.section('spectralGradeIsAdmissible() withholds only the accusation');
 {
   // Issue #829 PR4: undefined (no evidence join) keeps the historical
   // rendering; false neutralizes ONLY the two accusing grades.
@@ -1874,35 +1776,31 @@ console.log('spectralGradeIsAdmissible() withholds only the accusation');
     ['marginal', false, true],
   ];
   for (const [grade, admissible, expected] of cases) {
-    if (spectralGradeIsAdmissible(grade, admissible) === expected) {
-      passed++;
-    } else {
-      failed++;
-      console.error(`  FAIL: ${grade}/${admissible} should be ${expected}`);
-    }
+    t.equal(spectralGradeIsAdmissible(grade, admissible), expected,
+      `${grade}/${admissible} should be ${expected}`);
   }
 }
 
-console.log('spectralChip() keeps the grade but drops the accusing colour');
+t.section('spectralChip() keeps the grade but drops the accusing colour');
 {
   const accused = spectralChip('likely_transcode', 128, true);
-  assertContains(accused, 'quality-tone-poor',
+  t.contains(accused, 'quality-tone-poor',
     'an admissible transcode grade keeps its red tone');
-  assertExcludes(accused, 'audit-only',
+  t.excludes(accused, 'audit-only',
     'an admissible grade carries no audit-only suffix');
 
   const audited = spectralChip('likely_transcode', 128, false);
-  assertContains(audited, 'likely transcode',
+  t.contains(audited, 'likely transcode',
     'the measured grade stays visible as the audit fact');
-  assertContains(audited, 'audit-only',
+  t.contains(audited, 'audit-only',
     'an inadmissible grade is labelled audit-only');
-  assertContains(audited, 'quality-tone-unknown',
+  t.contains(audited, 'quality-tone-unknown',
     'an inadmissible grade loses the accusing tone');
-  assertExcludes(audited, 'quality-tone-poor',
+  t.excludes(audited, 'quality-tone-poor',
     'an inadmissible grade is never painted as a transcode');
 }
 
-console.log('renderDownloadHistoryItem() states the proof gate exactly once');
+t.section('renderDownloadHistoryItem() states the proof gate exactly once');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
@@ -1916,20 +1814,15 @@ console.log('renderDownloadHistoryItem() states the proof gate exactly once');
     verdict_tier_statement: 'Transcode detected: in-window spectral cliff',
     verdict_fired_legs: ['in_window_cliff'],
   });
-  assertContains(html, 'class="p-hist-label">Proof gate</span>',
+  t.contains(html, 'class="p-hist-label">Proof gate</span>',
     'the proof-gate row renders');
-  assertContains(html, 'Transcode detected: in-window spectral cliff',
+  t.contains(html, 'Transcode detected: in-window spectral cliff',
     'the tier statement renders verbatim');
   const statements = html.split('Transcode detected').length - 1;
-  if (statements === 1) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${statements} transcode statements, expected 1`);
-  }
+  t.equal(statements, 1, 'exactly one transcode statement');
 }
 
-console.log('renderDownloadHistoryItem() names the proof generation');
+t.section('renderDownloadHistoryItem() names the proof generation');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'success',
@@ -1938,13 +1831,13 @@ console.log('renderDownloadHistoryItem() names the proof generation');
     verdict: 'Imported',
     verified_lossless_generation: 'cliff/grade + ultrasonic legs',
   });
-  assertContains(html, 'class="p-hist-label">Verified lossless</span>',
+  t.contains(html, 'class="p-hist-label">Verified lossless</span>',
     'the proof-generation row renders');
-  assertContains(html, 'proved by cliff/grade + ultrasonic legs',
+  t.contains(html, 'proved by cliff/grade + ultrasonic legs',
     'the generation label renders verbatim');
 }
 
-console.log('renderDownloadHistoryItem() explains a skipped spectral pass with CD proof');
+t.section('renderDownloadHistoryItem() explains a skipped spectral pass with CD proof');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'success',
@@ -1957,22 +1850,22 @@ console.log('renderDownloadHistoryItem() explains a skipped spectral pass with C
     verified_lossless_generation: 'exact CD rip bit match',
     cd_rip_verification: validDualProviderProof(),
   });
-  assertContains(
+  t.contains(
     html,
     'CD bit-verified · CTDB confidence 11 + AccurateRip min confidence 3',
     'both provider-attributable positive confidences are visible',
   );
-  assertContains(html, '<span class="r-ev-tag">IN</span> not needed — CD bit match',
+  t.contains(html, '<span class="r-ev-tag">IN</span> not needed — CD bit match',
     'the candidate spectral side explains why measurement did not run');
-  assertContains(html, '<span class="r-ev-tag">HAVE</span>',
+  t.contains(html, '<span class="r-ev-tag">HAVE</span>',
     'the existing side remains present');
-  assertContains(html, 'genuine',
+  t.contains(html, 'genuine',
     'the existing spectral measurement is unchanged');
-  assertExcludes(html, '<span class="r-ev-tag">IN</span> unmeasured',
+  t.excludes(html, '<span class="r-ev-tag">IN</span> unmeasured',
     'the CD-proved candidate is not called unmeasured');
 }
 
-console.log('renderDownloadHistoryItem() surfaces the stage-2 counterfactual');
+t.section('renderDownloadHistoryItem() surfaces the stage-2 counterfactual');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
@@ -1982,13 +1875,13 @@ console.log('renderDownloadHistoryItem() surfaces the stage-2 counterfactual');
     stage2_if_stage1_deferred: 'downgrade',
     stage2_if_stage1_deferred_verdict: 'worse',
   });
-  assertContains(html, 'If stage 1 had deferred',
+  t.contains(html, 'If stage 1 had deferred',
     'the counterfactual row renders in forensics');
-  assertContains(html, 'stage2=downgrade, scoring the candidate worse',
+  t.contains(html, 'stage2=downgrade, scoring the candidate worse',
     'the counterfactual reads the same way pipeline-cli quality prints it');
 }
 
-console.log('renderDownloadHistoryItem() reports an unevaluable counterfactual');
+t.section('renderDownloadHistoryItem() reports an unevaluable counterfactual');
 {
   const html = renderDownloadHistoryFixture({
     outcome: 'rejected',
@@ -1997,48 +1890,48 @@ console.log('renderDownloadHistoryItem() reports an unevaluable counterfactual')
     verdict: 'Rejected',
     stage2_if_stage1_deferred: 'unavailable',
   });
-  assertContains(html, 'stage 2 could not be evaluated',
+  t.contains(html, 'stage 2 could not be evaluated',
     '"could not run" is distinct from "had nothing to say"');
 }
 
-console.log('spectralStripCell() states the fact instead of the accusation');
+t.section('spectralStripCell() states the fact instead of the accusation');
 {
   const audited = spectralStripCell('likely_transcode', '~128k ', false);
-  assertContains(audited, 'codec rolloff',
+  t.contains(audited, 'codec rolloff',
     'the strip states native rolloff for an audit-only codec');
-  assertExcludes(audited, '>~128k likely transcode<',
+  t.excludes(audited, '>~128k likely transcode<',
     'the strip does not stamp the grade');
-  assertContains(audited, 'Measured grade: likely transcode',
+  t.contains(audited, 'Measured grade: likely transcode',
     'the measured grade stays reachable in the hover title');
-  assertContains(audited, 'quality-tone-unknown',
+  t.contains(audited, 'quality-tone-unknown',
     'the strip cell loses the accusing tone');
   const accused = spectralStripCell('likely_transcode', '~128k ', true);
-  assertContains(accused, 'quality-tone-poor',
+  t.contains(accused, 'quality-tone-poor',
     'an admissible grade keeps its tone in the strip');
-  assertContains(accused, 'likely transcode',
+  t.contains(accused, 'likely transcode',
     'an admissible grade keeps its wording in the strip');
 }
 
-console.log('an unresolved codec never claims native encoder rolloff');
+t.section('an unresolved codec never claims native encoder rolloff');
 {
   const strip = spectralStripCell(
     'likely_transcode', '~128k ', false, 'codec_unresolved');
-  assertContains(strip, 'codec unresolved',
+  t.contains(strip, 'codec unresolved',
     'the strip says the codec is unknown');
-  assertExcludes(strip, 'rolloff',
+  t.excludes(strip, 'rolloff',
     'the strip never describes an encoder it could not identify');
   const chip = spectralChip('likely_transcode', 128, false, 'codec_unresolved');
-  assertContains(chip, 'codec unresolved',
+  t.contains(chip, 'codec unresolved',
     'the card says the codec is unknown');
-  assertExcludes(chip, 'native encoder behaviour',
+  t.excludes(chip, 'native encoder behaviour',
     'the card never describes an encoder it could not identify');
   const auditOnly = spectralChip(
     'likely_transcode', 128, false, 'audit_only_codec');
-  assertContains(auditOnly, 'native encoder behaviour',
+  t.contains(auditOnly, 'native encoder behaviour',
     'a resolved audit-only codec keeps the measured explanation');
 }
 
-console.log('renderEvidenceStrip() neutralizes an audit-only grade chip');
+t.section('renderEvidenceStrip() neutralizes an audit-only grade chip');
 {
   const audited = renderEvidenceFixture({
     outcome: 'rejected',
@@ -2047,9 +1940,9 @@ console.log('renderEvidenceStrip() neutralizes an audit-only grade chip');
     spectral_bitrate: 128,
     spectral_accusation_admissible: false,
   });
-  assertContains(audited, 'codec rolloff',
+  t.contains(audited, 'codec rolloff',
     'the strip states native rolloff for an audit-only IN codec');
-  assertExcludes(audited, 'quality-tone-poor',
+  t.excludes(audited, 'quality-tone-poor',
     'the strip never paints an audit-only codec as a transcode');
 
   const accused = renderEvidenceFixture({
@@ -2059,7 +1952,7 @@ console.log('renderEvidenceStrip() neutralizes an audit-only grade chip');
     spectral_bitrate: 128,
     spectral_accusation_admissible: true,
   });
-  assertContains(accused, 'quality-tone-poor',
+  t.contains(accused, 'quality-tone-poor',
     'an admissible transcode grade still reads as one');
 
   const auditedHave = renderEvidenceFixture({
@@ -2070,11 +1963,10 @@ console.log('renderEvidenceStrip() neutralizes an audit-only grade chip');
     existing_spectral_bitrate: 128,
     existing_spectral_accusation_admissible: false,
   });
-  assertContains(auditedHave, 'codec rolloff',
+  t.contains(auditedHave, 'codec rolloff',
     'the HAVE side is neutralized too (request 6387: the AAC is installed)');
-  assertExcludes(auditedHave, 'quality-tone-poor',
+  t.excludes(auditedHave, 'quality-tone-poor',
     'the HAVE side never paints an audit-only codec as a transcode');
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+t.done();

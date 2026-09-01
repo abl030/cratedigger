@@ -221,6 +221,8 @@ class TestExitCodeForHttpStatus(unittest.TestCase):
         ("success", 200, 0),
         ("accepted", 202, 0),
         ("edge of 2xx", 299, 0),
+        ("just below the 2xx band buckets to transient", 199, 5),
+        ("just above the 2xx band buckets to transient", 300, 5),
         ("input validation", 400, 3),
         ("not found", 404, 2),
         ("wrong state", 409, 4),

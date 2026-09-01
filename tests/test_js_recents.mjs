@@ -8,39 +8,13 @@ import { state } from '../web/js/state.js';
 import { esc } from '../web/js/util.js';
 import { validDualProviderProof } from './fixtures/cd_rip_proof.mjs';
 
+import { domStub, stubGlobals, suite } from './js_harness.mjs';
+
 const { renderRecentsItems: renderRecentsFixture } = __test__;
 
-let passed = 0;
-let failed = 0;
+const t = suite(import.meta.url);
 
-function assertContains(haystack, needle, msg) {
-  if (haystack.includes(needle)) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} - '${needle}' not in output`);
-  }
-}
-
-function assertExcludes(haystack, needle, msg) {
-  if (!haystack.includes(needle)) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} - unexpectedly found '${needle}'`);
-  }
-}
-
-function assertEqual(actual, expected, msg) {
-  if (actual === expected) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} - expected '${expected}', got '${actual}'`);
-  }
-}
-
-console.log('renderImportItems() consumes the server-classified display contract');
+t.section('renderImportItems() consumes the server-classified display contract');
 {
   const html = __test__.renderImportItems([{
     id: 77,
@@ -56,28 +30,28 @@ console.log('renderImportItems() consumes the server-classified display contract
     preview_message: 'Evidence ready for final check: import',
     preview_result: { stage_chain: ['stage2_import:import'] },
   }]);
-  assertContains(html, 'Tender Buttons', 'album title rendered');
-  assertContains(html, 'Broadcast', 'artist name rendered');
-  assertContains(html, 'Next check', 'server badge is rendered verbatim');
-  assertContains(html, 'preview: evidence_ready', 'preview state rendered');
-  assertContains(html, 'stage2_import:import', 'stage chain rendered');
+  t.contains(html, 'Tender Buttons', 'album title rendered');
+  t.contains(html, 'Broadcast', 'artist name rendered');
+  t.contains(html, 'Next check', 'server badge is rendered verbatim');
+  t.contains(html, 'preview: evidence_ready', 'preview state rendered');
+  t.contains(html, 'stage2_import:import', 'stage chain rendered');
 }
 
-console.log('renderRecentsSubnav() refreshes the active recents subtab');
+t.section('renderRecentsSubnav() refreshes the active recents subtab');
 {
   state.recentsSub = 'acquisition';
   const html = __test__.renderRecentsSubnav();
-  assertContains(html, 'window.setRecentsSub(\'history\')', 'history tab rendered');
-  assertContains(html, 'window.setRecentsSub(\'acquisition\')', 'acquisition tab rendered');
-  assertContains(html, '>Acquisition<', 'request lifecycle subtab has ownership-neutral name');
-  assertExcludes(html, '>Downloading<', 'old transfer-only label is gone');
-  assertContains(html, 'window.setRecentsSub(\'imports\')', 'imports tab rendered');
-  assertContains(html, '>Imports<', 'ambiguous Queue label is gone');
-  assertContains(html, 'window.loadRecents()', 'refresh reloads current recents subtab');
-  assertContains(html, 'subtab-refresh', 'refresh uses shared subtab layout');
+  t.contains(html, 'window.setRecentsSub(\'history\')', 'history tab rendered');
+  t.contains(html, 'window.setRecentsSub(\'acquisition\')', 'acquisition tab rendered');
+  t.contains(html, '>Acquisition<', 'request lifecycle subtab has ownership-neutral name');
+  t.excludes(html, '>Downloading<', 'old transfer-only label is gone');
+  t.contains(html, 'window.setRecentsSub(\'imports\')', 'imports tab rendered');
+  t.contains(html, '>Imports<', 'ambiguous Queue label is gone');
+  t.contains(html, 'window.loadRecents()', 'refresh reloads current recents subtab');
+  t.contains(html, 'subtab-refresh', 'refresh uses shared subtab layout');
 }
 
-console.log('renderRecentsCounts() stays focused on history filters');
+t.section('renderRecentsCounts() stays focused on history filters');
 {
   state.recentsFilter = 'all';
   state.recentsCounts = {
@@ -90,16 +64,16 @@ console.log('renderRecentsCounts() stays focused on history filters');
     matches_per_hour_6h: 2,
   };
   const html = __test__.renderRecentsCounts();
-  assertContains(html, '<div class="count-num">10</div><div class="count-label">all</div>',
+  t.contains(html, '<div class="count-num">10</div><div class="count-label">all</div>',
     'all count rendered');
-  assertContains(html, '<div class="count-num">3</div><div class="count-label">imported</div>',
+  t.contains(html, '<div class="count-num">3</div><div class="count-label">imported</div>',
     'imported count rendered');
-  assertContains(html, '<div class="count-num">7</div><div class="count-label">rejected</div>',
+  t.contains(html, '<div class="count-num">7</div><div class="count-label">rejected</div>',
     'rejected count rendered');
-  assertExcludes(html, 'match/hr', 'match rates are not rendered in count cards');
+  t.excludes(html, 'match/hr', 'match rates are not rendered in count cards');
 }
 
-console.log('renderRecentsItems() carries the detailed convergence action once');
+t.section('renderRecentsItems() carries the detailed convergence action once');
 {
   const html = renderRecentsFixture([{
     id: 10,
@@ -126,13 +100,13 @@ console.log('renderRecentsItems() carries the detailed convergence action once')
       signal_token: 'a'.repeat(64),
     },
   }]);
-  assertEqual((html.match(/class="convergence-prompt"/g) || []).length, 1,
+  t.equal((html.match(/class="convergence-prompt"/g) || []).length, 1,
     'Recents renders one detailed convergence prompt');
-  assertContains(html, '&quot;recents&quot;',
+  t.contains(html, '&quot;recents&quot;',
     'Recents action carries its refresh origin');
 }
 
-console.log('renderRecentsItems() shows attributable positive CD proof');
+t.section('renderRecentsItems() shows attributable positive CD proof');
 {
   const html = renderRecentsFixture([{
     id: 39293,
@@ -146,7 +120,7 @@ console.log('renderRecentsItems() shows attributable positive CD proof');
     summary: 'FLAC · exact CD rip bit match',
     cd_rip_verification: validDualProviderProof(),
   }]);
-  assertContains(
+  t.contains(
     html,
     'CD bit-verified · CTDB confidence 11 + AccurateRip min confidence 3',
     'the collapsed Recents row retains both positive provider confidences',
@@ -163,29 +137,29 @@ console.log('renderRecentsItems() shows attributable positive CD proof');
     border_color: '#1a4a2a',
     summary: 'MP3 320',
   }]);
-  assertExcludes(absent, 'CD bit-verified',
+  t.excludes(absent, 'CD bit-verified',
     'absence creates no failed or negative verification label');
 }
 
-console.log('recentsLogUrl() requests enough history for triage labels');
+t.section('recentsLogUrl() requests enough history for triage labels');
 {
   state.recentsFilter = 'all';
-  assertContains(__test__.recentsLogUrl(), '/api/pipeline/log?limit=500',
+  t.contains(__test__.recentsLogUrl(), '/api/pipeline/log?limit=500',
     'all recents requests the expanded bounded history window');
   state.recentsFilter = 'rejected';
-  assertContains(__test__.recentsLogUrl(), '/api/pipeline/log?outcome=rejected&limit=500',
+  t.contains(__test__.recentsLogUrl(), '/api/pipeline/log?outcome=rejected&limit=500',
     'filtered recents keeps outcome filter and expanded limit');
 }
 
-console.log('triageLabelText() restores the old recents label wording');
+t.section('triageLabelText() restores the old recents label wording');
 {
-  assertContains(__test__.triageLabelText('kept: would import'), 'triage - kept would import',
+  t.contains(__test__.triageLabelText('kept: would import'), 'triage - kept would import',
     'kept would import label uses old wording');
-  assertContains(__test__.triageLabelText('deleted: spectral reject'), 'triage - deleted spectral reject',
+  t.contains(__test__.triageLabelText('deleted: spectral reject'), 'triage - deleted spectral reject',
     'deleted spectral reject label uses old wording');
 }
 
-console.log('renderRecentsItems() shows match rates beside the first date header');
+t.section('renderRecentsItems() shows match rates beside the first date header');
 {
   const html = renderRecentsFixture([
     {
@@ -203,29 +177,35 @@ console.log('renderRecentsItems() shows match rates beside the first date header
     matches_per_hour_6h: 4.5,
     matches_per_hour_24h: 5.3333333333,
   });
-  assertContains(html, 'recents-date-header', 'first date uses date metric row');
-  assertContains(html, '6h 4.50 match/hr', '6h match rate rendered');
-  assertContains(html, '24h 5.33 match/hr', '24h match rate rendered');
+  t.contains(html, 'recents-date-header', 'first date uses date metric row');
+  t.contains(html, '6h 4.50 match/hr', '6h match rate rendered');
+  t.contains(html, '24h 5.33 match/hr', '24h match rate rendered');
 }
 
-console.log('matchRatesFromDashboardWindows() derives found enqueue rates from old dashboard payloads');
+t.section('matchRatesFromDashboardWindows() derives found enqueue rates from old dashboard payloads');
 {
   const rates = __test__.matchRatesFromDashboardWindows([
     {label: '24h', hours: 24, outcomes: {found: 132}},
     {label: '6h', hours: 6, outcomes: {found: 27}},
   ]);
-  if (rates.matches_24h === 132
-      && rates.matches_6h === 27
-      && rates.matches_per_hour_24h === 5.5
-      && rates.matches_per_hour_6h === 4.5) {
-    passed++;
-  } else {
-    failed++;
-    console.error('  FAIL: dashboard windows did not derive expected match rates');
-  }
+  t.deepEqual(
+    {
+      matches_24h: rates.matches_24h,
+      matches_6h: rates.matches_6h,
+      matches_per_hour_24h: rates.matches_per_hour_24h,
+      matches_per_hour_6h: rates.matches_per_hour_6h,
+    },
+    {
+      matches_24h: 132,
+      matches_6h: 27,
+      matches_per_hour_24h: 5.5,
+      matches_per_hour_6h: 4.5,
+    },
+    'dashboard windows derive a per-hour match rate for each window',
+  );
 }
 
-console.log('renderImportItems() shows server-classified uncertain preview failures');
+t.section('renderImportItems() shows server-classified uncertain preview failures');
 {
   const html = __test__.renderImportItems([{
     id: 78,
@@ -240,12 +220,12 @@ console.log('renderImportItems() shows server-classified uncertain preview failu
     album_title: 'Things We Lost in the Fire',
     preview_message: 'Preview failed: path_missing',
   }]);
-  assertContains(html, 'uncertain', 'uncertain badge rendered');
-  assertContains(html, 'Preview failed: path_missing', 'failure message rendered');
-  assertExcludes(html, 'next check', 'uncertain rows are not marked next');
+  t.contains(html, 'uncertain', 'uncertain badge rendered');
+  t.contains(html, 'Preview failed: path_missing', 'failure message rendered');
+  t.excludes(html, 'next check', 'uncertain rows are not marked next');
 }
 
-console.log('renderImportItems() renders server-classified measurement failure');
+t.section('renderImportItems() renders server-classified measurement failure');
 {
   // Post-U5: preview emits preview_status='measurement_failed' instead of
   // 'uncertain'. The badge must be present (no blank pill) and the border
@@ -264,14 +244,14 @@ console.log('renderImportItems() renders server-classified measurement failure')
     album_title: 'Souvlaki',
     preview_message: 'Preview measurement failed: snapshot_stale',
   }]);
-  assertContains(html, 'measurement failed', 'measurement_failed badge rendered');
-  assertContains(html, '#a33', 'measurement_failed uses confident_reject red border');
-  assertContains(html, 'Preview measurement failed: snapshot_stale',
+  t.contains(html, 'measurement failed', 'measurement_failed badge rendered');
+  t.contains(html, '#a33', 'measurement_failed uses confident_reject red border');
+  t.contains(html, 'Preview measurement failed: snapshot_stale',
     'measurement failure message rendered');
-  assertExcludes(html, 'next check', 'measurement_failed rows are not marked next');
+  t.excludes(html, 'next check', 'measurement_failed rows are not marked next');
 }
 
-console.log('renderImportItems() trusts the server summary over stale raw messages');
+t.section('renderImportItems() trusts the server summary over stale raw messages');
 {
   const html = __test__.renderImportItems([{
     id: 731,
@@ -287,13 +267,13 @@ console.log('renderImportItems() trusts the server summary over stale raw messag
     preview_message: 'Preview gate disabled',
     message: 'Rejected: high_distance - distance=0.1611',
   }]);
-  assertContains(html, 'Rejected: high_distance - distance=0.1611',
+  t.contains(html, 'Rejected: high_distance - distance=0.1611',
     'terminal failure message rendered');
-  assertExcludes(html, 'Preview gate disabled',
+  t.excludes(html, 'Preview gate disabled',
     'stale preview message hidden for terminal rows');
 }
 
-console.log('renderImportItems() surfaces failed force-import source cleanup');
+t.section('renderImportItems() surfaces failed force-import source cleanup');
 {
   const html = __test__.renderImportItems([{
     id: 40636,
@@ -315,13 +295,13 @@ console.log('renderImportItems() surfaces failed force-import source cleanup');
       },
     },
   }]);
-  assertContains(html, 'source deleted',
+  t.contains(html, 'source deleted',
     'cleanup-success chip rendered on failed force-import row');
-  assertContains(html, 'Parts &amp; Labor - Escapers Two',
+  t.contains(html, 'Parts &amp; Labor - Escapers Two',
     'cleanup path is escaped in chip hover text');
 }
 
-console.log('renderAcquisitionItems() shows current transfer progress and user');
+t.section('renderAcquisitionItems() shows current transfer progress and user');
 {
   const html = __test__.renderAcquisitionItems([{
     id: 81,
@@ -352,15 +332,15 @@ console.log('renderAcquisitionItems() shows current transfer progress and user')
       ],
     },
   }]);
-  assertContains(html, 'Ocean Songs', 'album title rendered');
-  assertContains(html, 'Dirty Three', 'artist name rendered');
-  assertContains(html, 'downloading', 'downloading badge rendered');
-  assertContains(html, 'mp3 320 · 1/2 files · peer-a · 1 queued',
+  t.contains(html, 'Ocean Songs', 'album title rendered');
+  t.contains(html, 'Dirty Three', 'artist name rendered');
+  t.contains(html, 'downloading', 'downloading badge rendered');
+  t.contains(html, 'mp3 320 · 1/2 files · peer-a · 1 queued',
     'download progress summary rendered');
-  assertContains(html, 'last: timeout', 'last outcome rendered');
+  t.contains(html, 'last: timeout', 'last outcome rendered');
 }
 
-console.log('renderAcquisitionItems() escapes current download fields');
+t.section('renderAcquisitionItems() escapes current download fields');
 {
   const html = __test__.renderAcquisitionItems([{
     id: 82,
@@ -374,14 +354,14 @@ console.log('renderAcquisitionItems() escapes current download fields');
       files: [{ username: '<peer>' }],
     },
   }]);
-  assertContains(html, '&lt;album&gt;', 'album is escaped');
-  assertContains(html, '&lt;artist&gt;', 'artist is escaped');
-  assertContains(html, '&lt;lossless&gt;', 'filetype is escaped');
-  assertContains(html, '&lt;peer&gt;', 'peer username is escaped');
-  assertExcludes(html, '<album>', 'raw album is not rendered');
+  t.contains(html, '&lt;album&gt;', 'album is escaped');
+  t.contains(html, '&lt;artist&gt;', 'artist is escaped');
+  t.contains(html, '&lt;lossless&gt;', 'filetype is escaped');
+  t.contains(html, '&lt;peer&gt;', 'peer username is escaped');
+  t.excludes(html, '<album>', 'raw album is not rendered');
 }
 
-console.log('renderAcquisitionItems() shows active YouTube ingest rows without processor ownership');
+t.section('renderAcquisitionItems() shows active YouTube ingest rows without processor ownership');
 {
   const row = __test__.normalizeYoutubeIngestItem({
     download_log_id: 301,
@@ -395,16 +375,16 @@ console.log('renderAcquisitionItems() shows active YouTube ingest rows without p
     },
   });
   const html = __test__.renderAcquisitionItems([row]);
-  assertEqual(row.processing_owner, null, 'YouTube normalization cannot grant processing ownership');
-  assertContains(html, 'YT Album', 'YT album title rendered');
-  assertContains(html, 'YT Artist', 'YT artist rendered');
-  assertContains(html, 'youtube ingest', 'YouTube ingest badge rendered');
-  assertContains(html, 'YouTube · 2 tracks · browse MPREb_yt',
+  t.equal(row.processing_owner, null, 'YouTube normalization cannot grant processing ownership');
+  t.contains(html, 'YT Album', 'YT album title rendered');
+  t.contains(html, 'YT Artist', 'YT artist rendered');
+  t.contains(html, 'youtube ingest', 'YouTube ingest badge rendered');
+  t.contains(html, 'YouTube · 2 tracks · browse MPREb_yt',
     'YouTube ingest summary rendered');
-  assertContains(html, '#202 · YT #301', 'request and download log ids rendered');
+  t.contains(html, '#202 · YT #301', 'request and download log ids rendered');
 }
 
-console.log('renderAcquisitionItems() consumes only the exact processing owner');
+t.section('renderAcquisitionItems() consumes only the exact processing owner');
 {
   const html = __test__.renderAcquisitionItems([{
     id: 203,
@@ -428,58 +408,53 @@ console.log('renderAcquisitionItems() consumes only the exact processing owner')
       preview_status: 'running',
     },
   }]);
-  assertContains(html, 'previewing', 'badge comes from durable owner state');
-  assertContains(html, 'job #304', 'summary names exact owner');
-  assertContains(html, '/api/import-jobs/304/recovery', 'row links exact owner recovery detail');
-  assertExcludes(html, '#9999', 'latest-job fallback is ignored');
-  assertExcludes(html, 'waiting for import', 'processing_started_at path inference is ignored');
+  t.contains(html, 'previewing', 'badge comes from durable owner state');
+  t.contains(html, 'job #304', 'summary names exact owner');
+  t.contains(html, '/api/import-jobs/304/recovery', 'row links exact owner recovery detail');
+  t.excludes(html, '#9999', 'latest-job fallback is ignored');
+  t.excludes(html, 'waiting for import', 'processing_started_at path inference is ignored');
 }
 
-console.log('loadRecents() consumes the combined Acquisition route without changing context');
+t.section('loadRecents() consumes the combined Acquisition route without changing context');
 {
-  const oldDocument = globalThis.document;
-  const oldFetch = globalThis.fetch;
   const content = { innerHTML: '' };
   const calls = [];
-  globalThis.document = {
-    getElementById(id) {
-      return id === 'recents-content' ? content : null;
+  const globals = stubGlobals({
+    document: domStub({ 'recents-content': content }),
+    fetch: async (url) => {
+      calls.push(String(url));
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            acquisition: [{
+              id: 205,
+              status: 'processing',
+              album_title: 'Acquiring',
+              artist_name: 'Owner',
+              created_at: '2026-07-29T02:00:00+00:00',
+              processing_owner: {
+                job_id: 306,
+                status: 'queued',
+                preview_status: 'evidence_ready',
+              },
+            }],
+            youtube_ingest: [],
+          };
+        },
+      };
     },
-  };
-  globalThis.fetch = async (url) => {
-    calls.push(String(url));
-    return {
-      ok: true,
-      status: 200,
-      async json() {
-        return {
-          acquisition: [{
-            id: 205,
-            status: 'processing',
-            album_title: 'Acquiring',
-            artist_name: 'Owner',
-            created_at: '2026-07-29T02:00:00+00:00',
-            processing_owner: {
-              job_id: 306,
-              status: 'queued',
-              preview_status: 'evidence_ready',
-            },
-          }],
-          youtube_ingest: [],
-        };
-      },
-    };
-  };
+  });
   state.recentsSub = 'acquisition';
   await __test__.loadRecents();
-  assertEqual(calls.join(','), '/api/pipeline/acquisition', 'only combined route is fetched');
-  assertContains(content.innerHTML, 'waiting to import', 'processing acquisition is rendered');
-  assertEqual(state.recentsSub, 'acquisition', 'active subview is preserved');
-  globalThis.document = oldDocument;
-  globalThis.fetch = oldFetch;
+  t.equal(calls.join(','), '/api/pipeline/acquisition', 'only combined route is fetched');
+  t.contains(content.innerHTML, 'waiting to import', 'processing acquisition is rendered');
+  t.equal(state.recentsSub, 'acquisition', 'active subview is preserved');
+  globals.restore();
 }
 
-console.log('renderRecentsItems() shows bad-extension postflight warning chip');
+t.section('renderRecentsItems() shows bad-extension postflight warning chip');
 {
   const html = renderRecentsFixture([{
     id: 584,
@@ -493,12 +468,12 @@ console.log('renderRecentsItems() shows bad-extension postflight warning chip');
     summary: 'MP3 320 · user',
     bad_extensions: ['01 One Too Many Itches.bak'],
   }]);
-  assertContains(html, 'bad ext: 1', 'bad extension chip rendered');
-  assertContains(html, '01 One Too Many Itches.bak',
+  t.contains(html, 'bad ext: 1', 'bad extension chip rendered');
+  t.contains(html, '01 One Too Many Itches.bak',
     'bad extension filename appears in hover detail');
 }
 
-console.log('renderRecentsItems() shows the track-length warning chip (issue #1178)');
+t.section('renderRecentsItems() shows the track-length warning chip (issue #1178)');
 {
   const warning = "Track length contradicts the matched release: "
     + "'00 - Hidden Track.flac' is 237.6s where the release declares "
@@ -515,22 +490,22 @@ console.log('renderRecentsItems() shows the track-length warning chip (issue #11
     summary: 'FLAC · lwl',
     track_length_warning: warning,
   }]);
-  assertContains(html, 'track length', 'track-length warning chip rendered');
-  assertContains(html, esc(warning),
+  t.contains(html, 'track length', 'track-length warning chip rendered');
+  t.contains(html, esc(warning),
     'the full derived sentence appears in the chip hover detail');
   // The chip is a WARNING, not a proof badge — badge-verified is the
   // green "positive proof" class this same module uses for CD-rip proof;
   // an accusing-looking amber chip must never render with the green
   // class, and this asserts the exact class attribute, not merely that
   // 'badge-warn' appears SOMEWHERE (disambig/bad-ext chips share it too).
-  assertContains(
+  t.contains(
     html,
     `class="badge badge-warn" title="${esc(warning)}">track length<`,
     'the chip renders with the badge-warn class, not badge-verified',
   );
 }
 
-console.log('renderRecentsItems() omits the track-length warning chip when the field is null');
+t.section('renderRecentsItems() omits the track-length warning chip when the field is null');
 {
   const html = renderRecentsFixture([{
     id: 40062,
@@ -544,11 +519,11 @@ console.log('renderRecentsItems() omits the track-length warning chip when the f
     summary: 'FLAC · lwl',
     track_length_warning: null,
   }]);
-  assertExcludes(html, 'track length',
+  t.excludes(html, 'track length',
     'no track-length chip rendered when the field is null');
 }
 
-console.log('renderRecentsItems() uses the main badge and server-composed summary for deleted triage');
+t.section('renderRecentsItems() uses the main badge and server-composed summary for deleted triage');
 {
   const html = renderRecentsFixture([{
     id: 725,
@@ -563,19 +538,19 @@ console.log('renderRecentsItems() uses the main badge and server-composed summar
     wrong_match_triage_summary: 'deleted: spectral reject',
     wrong_match_triage_detail: 'action: deleted reject · stages: mp3_spectral:reject',
   }]);
-  assertContains(html, 'Wrong match (dist 0.190) · download deleted: spectral reject · moundsofass',
+  t.contains(html, 'Wrong match (dist 0.190) · download deleted: spectral reject · moundsofass',
     'one server-composed summary keeps match verdict, cleanup disposition, and uploader');
-  assertContains(html, 'Triaged · download deleted',
+  t.contains(html, 'Triaged · download deleted',
     'deleted triage is the primary row badge');
-  assertContains(html, 'badge badge-rejected',
+  t.contains(html, 'badge badge-rejected',
     'deleted triage remains visually rejected');
-  assertExcludes(html, 'recents-triage-label',
+  t.excludes(html, 'recents-triage-label',
     'deleted triage does not render a second competing status label');
-  assertContains(html, 'mp3_spectral:reject',
+  t.contains(html, 'mp3_spectral:reject',
     'triage detail appears in hover text');
 }
 
-console.log('renderRecentsItems() uses an amber main badge for kept triage');
+t.section('renderRecentsItems() uses an amber main badge for kept triage');
 {
   const html = renderRecentsFixture([{
     id: 726,
@@ -590,13 +565,13 @@ console.log('renderRecentsItems() uses an amber main badge for kept triage');
     wrong_match_triage_summary: 'kept: would import',
     wrong_match_triage_detail: 'action: kept would import',
   }]);
-  assertContains(html, 'Triaged · download kept', 'kept triage is the primary row badge');
-  assertContains(html, 'badge badge-warn', 'kept triage uses the amber badge class');
-  assertExcludes(html, 'recents-triage-label',
+  t.contains(html, 'Triaged · download kept', 'kept triage is the primary row badge');
+  t.contains(html, 'badge badge-warn', 'kept triage uses the amber badge class');
+  t.excludes(html, 'recents-triage-label',
     'kept triage does not render a second competing status label');
 }
 
-console.log('renderRecentsItems() escapes wrong-match triage chip fields');
+t.section('renderRecentsItems() escapes wrong-match triage chip fields');
 {
   const html = renderRecentsFixture([{
     id: 726,
@@ -611,15 +586,15 @@ console.log('renderRecentsItems() escapes wrong-match triage chip fields');
     wrong_match_triage_summary: '<img src=x>',
     wrong_match_triage_detail: 'stage:<script>',
   }]);
-  assertContains(html, '&lt;img src=x&gt;',
+  t.contains(html, '&lt;img src=x&gt;',
     'triage summary is escaped');
-  assertContains(html, 'stage:&lt;script&gt;',
+  t.contains(html, 'stage:&lt;script&gt;',
     'triage detail is escaped');
-  assertExcludes(html, '<img src=x>',
+  t.excludes(html, '<img src=x>',
     'raw triage summary is not rendered');
 }
 
-console.log('renderRecentsItems() does not mark rejected history as cleared wrong-matches');
+t.section('renderRecentsItems() does not mark rejected history as cleared wrong-matches');
 {
   const html = renderRecentsFixture([{
     id: 15838,
@@ -634,11 +609,11 @@ console.log('renderRecentsItems() does not mark rejected history as cleared wron
     summary: 'downgrade · AliceLo',
     validation_result: null,
   }]);
-  assertExcludes(html, 'not in Wrong Matches',
+  t.excludes(html, 'not in Wrong Matches',
     'ordinary rejected history row is not labelled as a wrong-match cleanup result');
 }
 
-console.log('renderRecentsItems() does not mark visible wrong-match rows as cleared');
+t.section('renderRecentsItems() does not mark visible wrong-match rows as cleared');
 {
   const html = renderRecentsFixture([{
     id: 14534,
@@ -655,11 +630,11 @@ console.log('renderRecentsItems() does not mark visible wrong-match rows as clea
       failed_path: '/mnt/virtio/music/slskd/failed_imports/Parts & Labor - Escapers Two (2007)',
     },
   }]);
-  assertExcludes(html, 'not in Wrong Matches',
+  t.excludes(html, 'not in Wrong Matches',
     'actionable row with failed_path does not get cleared chip');
 }
 
-console.log('renderRecentsItems() shows the compact IN/HAVE evidence strip on quality rows');
+t.section('renderRecentsItems() shows the compact IN/HAVE evidence strip on quality rows');
 {
   const html = renderRecentsFixture([{
     id: 900,
@@ -677,12 +652,12 @@ console.log('renderRecentsItems() shows the compact IN/HAVE evidence strip on qu
     spectral_bitrate: 160,
     existing_min_bitrate: 320,
   }]);
-  assertContains(html, 'r-evidence', 'evidence strip rendered on quality rows');
-  assertContains(html, 'min 245k', 'incoming bitrate in strip, min-labelled');
-  assertContains(html, 'min 320k', 'on-disk bitrate in strip');
+  t.contains(html, 'r-evidence', 'evidence strip rendered on quality rows');
+  t.contains(html, 'min 245k', 'incoming bitrate in strip, min-labelled');
+  t.contains(html, 'min 320k', 'on-disk bitrate in strip');
 }
 
-console.log('renderRecentsItems() omits the evidence strip when a row has no measurements');
+t.section('renderRecentsItems() omits the evidence strip when a row has no measurements');
 {
   const html = renderRecentsFixture([{
     id: 902,
@@ -695,10 +670,10 @@ console.log('renderRecentsItems() omits the evidence strip when a row has no mea
     border_color: '#a33',
     summary: "Download failed: all 5 files errored — 5× 'Inactivity timeout'",
   }]);
-  assertExcludes(html, 'r-evidence', 'no strip without measurements');
+  t.excludes(html, 'r-evidence', 'no strip without measurements');
 }
 
-console.log('renderRecentsItems() surfaces retryable HAVE analysis failures');
+t.section('renderRecentsItems() surfaces retryable HAVE analysis failures');
 {
   const html = renderRecentsFixture([{
     id: 904,
@@ -716,17 +691,17 @@ console.log('renderRecentsItems() surfaces retryable HAVE analysis failures');
     installed_path: '/mnt/Music/Beets/Low/<current>',
     candidate_reference: '/mnt/Music/Incoming/candidate&next',
   }]);
-  assertContains(html, 'border-left-color:#a86f20', 'environment border is distinct');
-  assertContains(html, 'Environment failure', 'environment badge rendered');
-  assertContains(html, 'permission denied', 'failure category is visible');
-  assertContains(html, 'HAVE /mnt/Music/Beets/Low/&lt;current&gt;', 'installed path is visible and escaped');
-  assertContains(html, 'candidate /mnt/Music/Incoming/candidate&amp;next', 'candidate reference is visible and escaped');
-  assertContains(html, 'PermissionError: &lt;denied&gt;', 'raw analysis error is visible and escaped');
-  assertContains(html, 'remains wanted', 'retryable state copy rendered');
-  assertExcludes(html, 'PermissionError: <denied>', 'raw error HTML is never rendered');
+  t.contains(html, 'border-left-color:#a86f20', 'environment border is distinct');
+  t.contains(html, 'Environment failure', 'environment badge rendered');
+  t.contains(html, 'permission denied', 'failure category is visible');
+  t.contains(html, 'HAVE /mnt/Music/Beets/Low/&lt;current&gt;', 'installed path is visible and escaped');
+  t.contains(html, 'candidate /mnt/Music/Incoming/candidate&amp;next', 'candidate reference is visible and escaped');
+  t.contains(html, 'PermissionError: &lt;denied&gt;', 'raw analysis error is visible and escaped');
+  t.contains(html, 'remains wanted', 'retryable state copy rendered');
+  t.excludes(html, 'PermissionError: <denied>', 'raw error HTML is never rendered');
 }
 
-console.log('Recents row wires window.toggleDetail with (dl-<log id>, request_id)');
+t.section('Recents row wires window.toggleDetail with (dl-<log id>, request_id)');
 {
   const html = renderRecentsFixture([{
     id: 10,
@@ -742,13 +717,13 @@ console.log('Recents row wires window.toggleDetail with (dl-<log id>, request_id
   }]);
   // Exact handler + argument order (#1110/#1241 argument-inversion class):
   // first the detail element key from the download_log id, then request_id.
-  assertContains(html, "window.toggleDetail('dl-10', 41)",
+  t.contains(html, "window.toggleDetail('dl-10', 41)",
     'recents row onclick carries (dl-<download_log id>, request_id) in order');
-  assertContains(html, 'id="dl-10"',
+  t.contains(html, 'id="dl-10"',
     'detail placeholder id matches the toggle target');
 }
 
-console.log('Acquisition row wires window.toggleDetail with (acquisition-<id>, id)');
+t.section('Acquisition row wires window.toggleDetail with (acquisition-<id>, id)');
 {
   const html = renderAcquisitionItems([{
     id: 55,
@@ -757,9 +732,9 @@ console.log('Acquisition row wires window.toggleDetail with (acquisition-<id>, i
     artist_name: 'Acq Artist',
     created_at: '2026-08-03T12:00:00+00:00',
   }]);
-  assertContains(html, "window.toggleDetail('acquisition-55', 55)",
+  t.contains(html, "window.toggleDetail('acquisition-55', 55)",
     'acquisition row onclick carries (acquisition-<request id>, request id)');
-  assertContains(html, 'id="acquisition-55"',
+  t.contains(html, 'id="acquisition-55"',
     'detail placeholder id matches the toggle target');
 
   // The YouTube arm is the case where the two arguments DIVERGE (detail
@@ -774,11 +749,10 @@ console.log('Acquisition row wires window.toggleDetail with (acquisition-<id>, i
     artist_name: 'YT Artist',
     created_at: '2026-08-03T12:00:00+00:00',
   }]);
-  assertContains(yt, "window.toggleDetail('acquisition-youtube-301', 202)",
+  t.contains(yt, "window.toggleDetail('acquisition-youtube-301', 202)",
     'YouTube acquisition row keys the detail on the yt log id but navigates by request id');
-  assertContains(yt, 'id="acquisition-youtube-301"',
+  t.contains(yt, 'id="acquisition-youtube-301"',
     'YouTube detail placeholder id matches the toggle target');
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+t.done();

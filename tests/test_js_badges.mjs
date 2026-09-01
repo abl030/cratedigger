@@ -3,34 +3,11 @@
 import { renderStatusBadges } from '../web/js/badges.js';
 import { pipelineStore, updatePipelineStatus } from '../web/js/state.js';
 
-let passed = 0;
-let failed = 0;
+import { suite } from './js_harness.mjs';
 
-function assertContains(haystack, needle, message) {
-  if (haystack.includes(needle)) passed++;
-  else {
-    failed++;
-    console.error(`  FAIL: ${message} - '${needle}' not in output`);
-  }
-}
+const t = suite(import.meta.url);
 
-function assertExcludes(haystack, needle, message) {
-  if (!haystack.includes(needle)) passed++;
-  else {
-    failed++;
-    console.error(`  FAIL: ${message} - unexpectedly found '${needle}'`);
-  }
-}
-
-function assertFalse(value, message) {
-  if (!value) passed++;
-  else {
-    failed++;
-    console.error(`  FAIL: ${message}`);
-  }
-}
-
-console.log('renderStatusBadges() uses average while retaining the min floor');
+t.section('renderStatusBadges() uses average while retaining the min floor');
 {
   const html = renderStatusBadges({
     id: 'request-6039',
@@ -40,29 +17,29 @@ console.log('renderStatusBadges() uses average while retaining the min floor');
     library_avg_bitrate: 288,
     library_rank: 'transparent',
   });
-  assertContains(html, '>in library</span>', 'current holding remains a distinct presence fact');
-  assertContains(html, '>M V0</span>', 'avg 288 drives the independent quality badge');
-  assertContains(html, 'aria-label="current library quality: M V0"',
+  t.contains(html, '>in library</span>', 'current holding remains a distinct presence fact');
+  t.contains(html, '>M V0</span>', 'avg 288 drives the independent quality badge');
+  t.contains(html, 'aria-label="current library quality: M V0"',
     'the abbreviated quality band has an accessible label');
-  assertContains(html, 'badge-rank-transparent', 'canonical avg rank drives colour');
-  assertExcludes(html, 'M V2', 'min 194 does not drive badge label');
-  assertExcludes(html, 'in library ·', 'presence and quality are not collapsed');
+  t.contains(html, 'badge-rank-transparent', 'canonical avg rank drives colour');
+  t.excludes(html, 'M V2', 'min 194 does not drive badge label');
+  t.excludes(html, 'in library ·', 'presence and quality are not collapsed');
 }
 
-console.log('renderStatusBadges() escapes fallback quality labels at the badge HTML boundary');
+t.section('renderStatusBadges() escapes fallback quality labels at the badge HTML boundary');
 {
   const formats = '</span><img src=x onerror=alert(1)>';
   const html = renderStatusBadges({
     in_library: true,
     library_format: formats,
   });
-  assertContains(html, '>&lt;/SPAN&gt;&lt;IMG SRC=X ONERROR=ALERT(1)&gt;</span>',
+  t.contains(html, '>&lt;/SPAN&gt;&lt;IMG SRC=X ONERROR=ALERT(1)&gt;</span>',
     'unknown format label is rendered as text');
-  assertExcludes(html, formats.toUpperCase(),
+  t.excludes(html, formats.toUpperCase(),
     'unknown format label cannot close the badge or create markup');
 }
 
-console.log('renderStatusBadges() derives independent presence, acquisition, and tracking families');
+t.section('renderStatusBadges() derives independent presence, acquisition, and tracking families');
 {
   const statuses = [
     null,
@@ -92,19 +69,19 @@ console.log('renderStatusBadges() derives independent presence, acquisition, and
         ];
         for (const [className, expected, label] of facts) {
           if (expected) {
-            assertContains(html, className, `${label} renders for ${world}`);
+            t.contains(html, className, `${label} renders for ${world}`);
           } else {
-            assertExcludes(html, className, `${label} is absent for ${world}`);
+            t.excludes(html, className, `${label} is absent for ${world}`);
           }
         }
-        assertExcludes(html, 'identity drift', `no composite identity state for ${world}`);
-        assertExcludes(html, 'holding unknown', `no unknown-authority state for ${world}`);
+        t.excludes(html, 'identity drift', `no composite identity state for ${world}`);
+        t.excludes(html, 'holding unknown', `no unknown-authority state for ${world}`);
       }
     }
   }
 }
 
-console.log('renderStatusBadges() keeps carried proof independent of current presence and lifecycle');
+t.section('renderStatusBadges() keeps carried proof independent of current presence and lifecycle');
 {
   const missing = renderStatusBadges({
     in_library: false,
@@ -112,11 +89,11 @@ console.log('renderStatusBadges() keeps carried proof independent of current pre
     pipeline_status: 'wanted',
     pipeline_verified_lossless: true,
   });
-  assertContains(missing, '>captured<', 'history remains visible after the holding disappears');
-  assertContains(missing, '>missing<', 'current absence remains visible beside history');
-  assertContains(missing, '>verified<', 'carried proof survives current absence');
-  assertContains(missing, '>wanted<', 'current acquisition lifecycle remains independent');
-  assertExcludes(missing, 'search complete',
+  t.contains(missing, '>captured<', 'history remains visible after the holding disappears');
+  t.contains(missing, '>missing<', 'current absence remains visible beside history');
+  t.contains(missing, '>verified<', 'carried proof survives current absence');
+  t.contains(missing, '>wanted<', 'current acquisition lifecycle remains independent');
+  t.excludes(missing, 'search complete',
     'verified proof does not make a lifecycle claim');
 
   const replaced = renderStatusBadges({
@@ -125,14 +102,14 @@ console.log('renderStatusBadges() keeps carried proof independent of current pre
     pipeline_status: 'replaced',
     pipeline_provisional: true,
   });
-  assertContains(replaced, '>captured<', 'superseded history remains captured');
-  assertContains(replaced, '>missing<', 'superseded history can be currently missing');
-  assertContains(replaced, '>provisional<', 'provisional evidence remains independent');
-  assertContains(replaced, '>replaced<', 'superseded tracking renders explicitly');
-  assertExcludes(replaced, '>imported<', 'captured history is not duplicated as imported status');
+  t.contains(replaced, '>captured<', 'superseded history remains captured');
+  t.contains(replaced, '>missing<', 'superseded history can be currently missing');
+  t.contains(replaced, '>provisional<', 'provisional evidence remains independent');
+  t.contains(replaced, '>replaced<', 'superseded tracking renders explicitly');
+  t.excludes(replaced, '>imported<', 'captured history is not duplicated as imported status');
 }
 
-console.log('renderStatusBadges() never combines a live mutation with stale historical facts');
+t.section('renderStatusBadges() never combines a live mutation with stale historical facts');
 {
   pipelineStore.clear();
   updatePipelineStatus('status-only-reopen', 'wanted', 51);
@@ -144,9 +121,9 @@ console.log('renderStatusBadges() never combines a live mutation with stale hist
     pipeline_id: 50,
     pipeline_verified_lossless: true,
   });
-  assertContains(reopened, '>wanted<', 'live lifecycle overlays the stale row');
-  assertExcludes(reopened, '>captured<', 'stale status-only capture fallback is invalidated');
-  assertExcludes(reopened, '>verified<', 'stale proof is invalidated with the row projection');
+  t.contains(reopened, '>wanted<', 'live lifecycle overlays the stale row');
+  t.excludes(reopened, '>captured<', 'stale status-only capture fallback is invalidated');
+  t.excludes(reopened, '>verified<', 'stale proof is invalidated with the row projection');
 
   updatePipelineStatus('deleted-request', null, null);
   const deleted = renderStatusBadges({
@@ -157,9 +134,9 @@ console.log('renderStatusBadges() never combines a live mutation with stale hist
     pipeline_id: 52,
     pipeline_provisional: true,
   });
-  assertContains(deleted, '>untracked<', 'request deletion leaves an explicit local tombstone');
-  assertExcludes(deleted, '>captured<', 'deleted request history is not borrowed from the stale row');
-  assertExcludes(deleted, '>provisional<', 'deleted request proof is not borrowed from the stale row');
+  t.contains(deleted, '>untracked<', 'request deletion leaves an explicit local tombstone');
+  t.excludes(deleted, '>captured<', 'deleted request history is not borrowed from the stale row');
+  t.excludes(deleted, '>provisional<', 'deleted request proof is not borrowed from the stale row');
 
   const authoritativeOwner = {
     job_id: 303,
@@ -184,13 +161,13 @@ console.log('renderStatusBadges() never combines a live mutation with stale hist
       processing_owner: staleProjection,
       pipeline_verified_lossless: true,
     });
-    assertContains(staleOwner, '>needs recovery<',
+    t.contains(staleOwner, '>needs recovery<',
       `${axis} mismatch does not expire a newer exact-owner overlay`);
-    assertContains(staleOwner, 'job #303',
+    t.contains(staleOwner, 'job #303',
       `${axis} mismatch retains the live job-specific recovery reason`);
-    assertExcludes(staleOwner, '>captured<',
+    t.excludes(staleOwner, '>captured<',
       `${axis} mismatch keeps stale row facts suppressed`);
-    assertFalse(!pipelineStore.has(releaseId),
+    t.notOk(!pipelineStore.has(releaseId),
       `${axis} mismatch cannot acknowledge the lifecycle overlay`);
   }
 
@@ -210,11 +187,11 @@ console.log('renderStatusBadges() never combines a live mutation with stale hist
     processing_owner: authoritativeOwner,
     pipeline_verified_lossless: true,
   });
-  assertContains(matchingOwner, '>needs recovery<',
+  t.contains(matchingOwner, '>needs recovery<',
     'a complete matching refetch retains the authoritative owner state');
-  assertContains(matchingOwner, '>captured<',
+  t.contains(matchingOwner, '>captured<',
     'a complete matching refetch restores authoritative historical facts');
-  assertFalse(pipelineStore.has('processing-owner-refresh'),
+  t.notOk(pipelineStore.has('processing-owner-refresh'),
     'the complete owner projection acknowledges the lifecycle overlay');
 
   const refetched = renderStatusBadges({
@@ -225,9 +202,9 @@ console.log('renderStatusBadges() never combines a live mutation with stale hist
     pipeline_id: 51,
     pipeline_verified_lossless: true,
   });
-  assertContains(refetched, '>captured<', 'matching refetch restores durable history');
-  assertContains(refetched, '>verified<', 'matching refetch restores authoritative proof');
-  assertFalse(pipelineStore.has('status-only-reopen'),
+  t.contains(refetched, '>captured<', 'matching refetch restores durable history');
+  t.contains(refetched, '>verified<', 'matching refetch restores authoritative proof');
+  t.notOk(pipelineStore.has('status-only-reopen'),
     'matching refetch acknowledges and expires the local lifecycle overlay');
 
   const laterProcessing = renderStatusBadges({
@@ -243,16 +220,16 @@ console.log('renderStatusBadges() never combines a live mutation with stale hist
     },
     pipeline_verified_lossless: true,
   });
-  assertContains(laterProcessing, 'badge-processing',
+  t.contains(laterProcessing, 'badge-processing',
     'later server lifecycle remains visible after acknowledgement');
-  assertContains(laterProcessing, '>captured<',
+  t.contains(laterProcessing, '>captured<',
     'later authoritative row retains acquisition history');
-  assertContains(laterProcessing, '>verified<',
+  t.contains(laterProcessing, '>verified<',
     'later authoritative row retains proof');
   pipelineStore.clear();
 }
 
-console.log('renderStatusBadges() marks a provisional lossless-source install');
+t.section('renderStatusBadges() marks a provisional lossless-source install');
 {
   const html = renderStatusBadges({
     id: 'request-3652',
@@ -264,12 +241,12 @@ console.log('renderStatusBadges() marks a provisional lossless-source install');
     pipeline_provisional: true,
     pipeline_verified_lossless: false,
   });
-  assertContains(html, 'badge-provisional', 'provisional install renders chip');
-  assertContains(html, '>provisional<', 'chip label reads provisional');
-  assertExcludes(html, 'badge-verified', 'provisional never claims verified');
+  t.contains(html, 'badge-provisional', 'provisional install renders chip');
+  t.contains(html, '>provisional<', 'chip label reads provisional');
+  t.excludes(html, 'badge-verified', 'provisional never claims verified');
 }
 
-console.log('renderStatusBadges() marks a verified lossless install');
+t.section('renderStatusBadges() marks a verified lossless install');
 {
   const html = renderStatusBadges({
     id: 'request-8877',
@@ -281,14 +258,14 @@ console.log('renderStatusBadges() marks a verified lossless install');
     pipeline_verified_lossless: true,
     pipeline_provisional: false,
   });
-  assertContains(html, 'badge-verified', 'verified install renders chip');
-  assertContains(html, 'badge-rank-lossless',
+  t.contains(html, 'badge-verified', 'verified install renders chip');
+  t.contains(html, 'badge-rank-lossless',
     'verified identity reuses the brightest lossless bucket colour');
-  assertContains(html, '>verified<', 'chip label reads verified');
-  assertExcludes(html, 'badge-provisional', 'verified never doubles as provisional');
+  t.contains(html, '>verified<', 'chip label reads verified');
+  t.excludes(html, 'badge-provisional', 'verified never doubles as provisional');
 }
 
-console.log('renderStatusBadges() renders no identity chip without pipeline identity');
+t.section('renderStatusBadges() renders no identity chip without pipeline identity');
 {
   const html = renderStatusBadges({
     id: 'request-1',
@@ -298,11 +275,11 @@ console.log('renderStatusBadges() renders no identity chip without pipeline iden
     library_rank: 'transparent',
     pipeline_status: 'wanted',
   });
-  assertExcludes(html, 'badge-verified', 'plain install has no verified chip');
-  assertExcludes(html, 'badge-provisional', 'plain install has no provisional chip');
+  t.excludes(html, 'badge-verified', 'plain install has no verified chip');
+  t.excludes(html, 'badge-provisional', 'plain install has no provisional chip');
 }
 
-console.log('renderStatusBadges() renders processing from the exact owner state');
+t.section('renderStatusBadges() renders processing from the exact owner state');
 {
   const html = renderStatusBadges({
     id: 'request-processing',
@@ -314,11 +291,10 @@ console.log('renderStatusBadges() renders processing from the exact owner state'
       preview_status: 'evidence_ready',
     },
   });
-  assertContains(html, 'badge-processing', 'processing uses its dedicated badge');
-  assertContains(html, '>waiting to import<', 'canonical owner presentation drives label');
-  assertContains(html, 'job #908', 'badge title names exact owner');
-  assertExcludes(html, 'downloading', 'processor ownership is not labelled as transfer ownership');
+  t.contains(html, 'badge-processing', 'processing uses its dedicated badge');
+  t.contains(html, '>waiting to import<', 'canonical owner presentation drives label');
+  t.contains(html, 'job #908', 'badge title names exact owner');
+  t.excludes(html, 'downloading', 'processor ownership is not labelled as transfer ownership');
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+t.done();

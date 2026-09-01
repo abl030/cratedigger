@@ -44,6 +44,10 @@ _LINE_COMMENT_PREFIXES: dict[str, tuple[str, ...]] = {
     ".bash": ("#",),
     ".js": ("//",),
     ".json": ("//",),
+    # The JavaScript test suites and their shared harness (issue #1313
+    # candidate 6). Same syntax as ``.js``; a separate entry because the
+    # suffix is what dispatch keys on.
+    ".mjs": ("//",),
     ".nix": ("#",),
     ".py": ("#",),
     ".sh": ("#",),

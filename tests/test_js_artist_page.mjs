@@ -7,24 +7,10 @@ import {
 import { renderRgRow } from '../web/js/discography.js';
 import { classify as classifyType } from '../web/js/grouping.js';
 
-let passed = 0;
-let failed = 0;
+import { suite } from './js_harness.mjs';
 
-function assertEqual(actual, expected, msg) {
-  if (actual === expected) passed++;
-  else {
-    failed++;
-    console.error(`  FAIL: ${msg} - expected '${expected}', got '${actual}'`);
-  }
-}
-function assertContains(haystack, needle, msg) {
-  if (haystack.includes(needle)) passed++;
-  else { failed++; console.error(`  FAIL: ${msg} - '${needle}' missing`); }
-}
-function assertExcludes(haystack, needle, msg) {
-  if (!haystack.includes(needle)) passed++;
-  else { failed++; console.error(`  FAIL: ${msg} - '${needle}' present`); }
-}
+const t = suite(import.meta.url);
+
 function countOccurrences(haystack, needle) {
   return haystack.split(needle).length - 1;
 }
@@ -74,7 +60,7 @@ function classify(groups, albums = [], ungrouped = []) {
   });
 }
 
-console.log('simple catalogue partition is total and provenance-backed');
+t.section('simple catalogue partition is total and provenance-backed');
 {
   const world = [
     work('owned', { in_library: true }),
@@ -90,44 +76,44 @@ console.log('simple catalogue partition is total and provenance-backed');
   const buckets = [
     sections.inLibrary, sections.missing, sections.otherReleases,
   ];
-  assertEqual(
+  t.equal(
     buckets.flat().map(row => row.id).sort().join(','),
     world.map(row => row.id).sort().join(','),
     'every catalogue row appears exactly once',
   );
-  assertEqual(sections.inLibrary.map(row => row.id).join(','), 'owned',
+  t.equal(sections.inLibrary.map(row => row.id).join(','), 'owned',
     'ordinary exact-owned row is in library');
-  assertEqual(sections.missing.map(row => row.id).join(','), 'missing,mixed',
+  t.equal(sections.missing.map(row => row.id).join(','), 'missing,mixed',
     'ordinary and mixed ordinary rows remain mainline');
-  assertEqual(
+  t.equal(
     sections.otherReleases.map(row => row.id).join(','),
     'appearance,foreign,promo,unofficial,unknown',
     'appearances and exceptional or unknown rows share one Other area',
   );
 }
 
-console.log('unmatched masterless rows stay reachable inside Other releases');
+t.section('unmatched masterless rows stay reachable inside Other releases');
 {
   const ordinary = release('3938744', { title: 'Fraulein' });
   const promo = release('19254925', {
     title: 'Loup Garou', provenance: ['promo'], primary_types: ['Single'],
   });
   const sections = classify([], [], [ordinary, promo]);
-  assertEqual(sections.missing.length, 0,
+  t.equal(sections.missing.length, 0,
     'unassociated masterless releases never leak into Missing');
-  assertEqual(sections.otherReleases.map(row => row.id).join(','), '3938744,19254925',
+  t.equal(sections.otherReleases.map(row => row.id).join(','), '3938744,19254925',
     'every unmatched masterless release is in Other releases');
   const html = renderArtistSections(sections, {
     artistId: ARTIST_ID, artistName: ARTIST_NAME,
   });
-  assertExcludes(html, 'Ungrouped', 'storage topology is not a heading');
-  assertContains(html, "{masterless:true,source:'discogs',identityKind:'release'}",
+  t.excludes(html, 'Ungrouped', 'storage topology is not a heading');
+  t.contains(html, "{masterless:true,source:'discogs',identityKind:'release'}",
     'masterless row keeps exact release expansion');
-  assertContains(html, 'data-release-id="3938744"',
+  t.contains(html, 'data-release-id="3938744"',
     'masterless row remains ringable by exact release id');
 }
 
-console.log('paired display classification follows MB work precedence');
+t.section('paired display classification follows MB work precedence');
 {
   const mb = work('mb-live', {
     title: 'Live Pair', primary_types: ['Album'], secondary_types: ['Live'],
@@ -142,27 +128,27 @@ console.log('paired display classification follows MB work precedence');
     both: [{ mb, discogs: dg }], mb_unpaired: [], discogs_unpaired: [],
     discogs_ungrouped_releases: [],
   }, 'discogs');
-  assertEqual(classifyType(row), 'Live',
+  t.equal(classifyType(row), 'Live',
     'MB Live evidence keeps the selected Discogs Album out of Albums');
-  assertEqual(row.primary_types.join(','), 'Album',
+  t.equal(row.primary_types.join(','), 'Album',
     'selected structural evidence remains source-authored');
-  assertEqual(row.secondary_types.length, 0,
+  t.equal(row.secondary_types.length, 0,
     'selected secondary evidence remains source-authored');
-  assertEqual(row.format_qualifiers.join(','), 'Remix',
+  t.equal(row.format_qualifiers.join(','), 'Remix',
     'selected format qualifiers remain source-authored');
-  assertEqual(row.display_primary_types.join(','), 'Album',
+  t.equal(row.display_primary_types.join(','), 'Album',
     'positive MB structural evidence authors display classification');
-  assertEqual(row.display_secondary_types.join(','), 'Live',
+  t.equal(row.display_secondary_types.join(','), 'Live',
     'positive MB secondary evidence authors display classification');
-  assertEqual(row.display_format_qualifiers.length, 0,
+  t.equal(row.display_format_qualifiers.length, 0,
     'Discogs edition qualifiers cannot override known MB work evidence');
-  assertEqual(`${row.source}:${row.identity_kind}:${row.id}`, 'discogs:release:dg-album',
+  t.equal(`${row.source}:${row.identity_kind}:${row.id}`, 'discogs:release:dg-album',
     'display evidence never rewrites selected exact identity');
-  assertEqual(`${row.in_library}:${row.pipeline_status}:${row.pipeline_id}`, 'false:wanted:991',
+  t.equal(`${row.in_library}:${row.pipeline_status}:${row.pipeline_id}`, 'false:wanted:991',
     'display evidence never rewrites selected ownership or action state');
 }
 
-console.log('paired display precedence is stable in both source modes');
+t.section('paired display precedence is stable in both source modes');
 {
   const scenarios = [
     {
@@ -207,16 +193,16 @@ console.log('paired display precedence is stable in both source modes');
     };
     for (const source of ['mb', 'discogs']) {
       const [row] = composeCompareCatalogue(compare, source);
-      assertEqual(classifyType(row), scenario.expected,
+      t.equal(classifyType(row), scenario.expected,
         `${scenario.label} in ${source} mode`);
-      assertEqual(`${row.source}:${row.id}`,
+      t.equal(`${row.source}:${row.id}`,
         source === 'mb' ? `mb:${scenario.mb.id}` : `discogs:${scenario.dg.id}`,
         `${scenario.label} retains selected identity in ${source} mode`);
     }
   }
 }
 
-console.log('source toggle keeps unmatched counterpart works visible but exceptional');
+t.section('source toggle keeps unmatched counterpart works visible but exceptional');
 {
   const compare = {
     both: [],
@@ -227,35 +213,35 @@ console.log('source toggle keeps unmatched counterpart works visible but excepti
     discogs_ungrouped_releases: [],
   };
   const mbSections = classify(composeCompareCatalogue(compare, 'mb'));
-  assertEqual(mbSections.missing.map(row => row.id).join(','), 'mb-only',
+  t.equal(mbSections.missing.map(row => row.id).join(','), 'mb-only',
     'MB view keeps only its unmatched work in work-level Missing');
-  assertEqual(mbSections.otherReleases.map(row => row.id).join(','), 'dg-only',
+  t.equal(mbSections.otherReleases.map(row => row.id).join(','), 'dg-only',
     'unmatched Discogs master remains visible in Other on MB view');
   const dgSections = classifyArtistRows({
     artistId: '361476', artistName: ARTIST_NAME,
     releaseGroups: composeCompareCatalogue(compare, 'discogs'),
     ungroupedReleases: [], libraryAlbums: [],
   });
-  assertEqual(dgSections.missing.map(row => row.id).join(','), 'dg-only',
+  t.equal(dgSections.missing.map(row => row.id).join(','), 'dg-only',
     'Discogs view keeps only its unmatched master in work-level Missing');
-  assertEqual(dgSections.otherReleases.map(row => row.id).join(','), 'mb-only',
+  t.equal(dgSections.otherReleases.map(row => row.id).join(','), 'mb-only',
     'unmatched MB work remains visible in Other on Discogs view');
 }
 
-console.log('library-only suppression uses exact source/kind identity, including pairs');
+t.section('library-only suppression uses exact source/kind identity, including pairs');
 {
   const sameTitle = work('wrong-rg', { title: 'The Rolling Stones' });
   const album = library({
     album: 'The Rolling Stones', mb_releasegroupid: 'actual-rg',
     mb_albumid: 'actual-release',
   });
-  assertEqual(classify([sameTitle], [album]).inLibraryOrphans.length, 1,
+  t.equal(classify([sameTitle], [album]).inLibraryOrphans.length, 1,
     'same title does not hide a different edition');
-  assertEqual(classify([
+  t.equal(classify([
     work('actual-rg', { title: 'Different typography', in_library: true }),
   ], [album]).inLibraryOrphans.length, 0,
   'exact MB work suppresses its duplicate library row');
-  assertEqual(classify([], [album], [
+  t.equal(classify([], [album], [
     release('actual-release', { title: 'Different typography', in_library: true }),
   ]).inLibraryOrphans.length, 0,
   'exact Discogs release suppresses its duplicate library row');
@@ -268,13 +254,13 @@ console.log('library-only suppression uses exact source/kind identity, including
     mb_unpaired: [], discogs_unpaired: [], discogs_ungrouped_releases: [],
   }, 'discogs');
   const paired = classify(rows, [album]);
-  assertEqual(paired.inLibraryOrphans.length, 0,
+  t.equal(paired.inLibraryOrphans.length, 0,
     'exact owned counterpart suppresses a duplicate library orphan');
-  assertEqual(paired.missing.map(row => row.id).join(','), '3938744',
+  t.equal(paired.missing.map(row => row.id).join(','), '3938744',
     'selected Discogs pressing stays Missing when only MB counterpart is owned');
 }
 
-console.log('Deloris Fraulein renders once with selected-source exact identity');
+t.section('Deloris Fraulein renders once with selected-source exact identity');
 {
   const mbId = '1c9e2970-b221-30ab-93c6-7896b52a240b';
   const compare = {
@@ -299,11 +285,11 @@ console.log('Deloris Fraulein renders once with selected-source exact identity')
   const mbHtml = renderArtistSections(classify(mbRows, [album]), {
     artistId: ARTIST_ID, artistName: 'Deloris',
   });
-  assertEqual(countOccurrences(mbHtml, '<span class="rg-title">Fraulein</span>'), 1,
+  t.equal(countOccurrences(mbHtml, '<span class="rg-title">Fraulein</span>'), 1,
     'MB primary renders the paired work exactly once');
-  assertContains(mbHtml, `data-catalogue-source="mb"`,
+  t.contains(mbHtml, `data-catalogue-source="mb"`,
     'MB primary keeps MB source');
-  assertContains(mbHtml, `data-catalogue-id="${mbId}"`,
+  t.contains(mbHtml, `data-catalogue-id="${mbId}"`,
     'MB primary keeps exact release-group id');
 
   const dgRows = composeCompareCatalogue(compare, 'discogs');
@@ -311,25 +297,25 @@ console.log('Deloris Fraulein renders once with selected-source exact identity')
   const dgHtml = renderArtistSections(dgSections, {
     artistId: '361476', artistName: 'Deloris',
   });
-  assertEqual(countOccurrences(dgHtml, '<span class="rg-title">Fraulein</span>'), 1,
+  t.equal(countOccurrences(dgHtml, '<span class="rg-title">Fraulein</span>'), 1,
     'Discogs primary renders the paired work exactly once');
-  assertEqual(dgSections.inLibrary.length, 0,
+  t.equal(dgSections.inLibrary.length, 0,
     'counterpart ownership never claims the selected Discogs release');
-  assertEqual(dgSections.inLibraryOrphans.length, 0,
+  t.equal(dgSections.inLibraryOrphans.length, 0,
     'owned MB counterpart does not double-render as a library orphan');
-  assertContains(dgHtml, 'data-catalogue-source="discogs"',
+  t.contains(dgHtml, 'data-catalogue-source="discogs"',
     'Discogs primary keeps Discogs source');
-  assertContains(dgHtml, 'data-identity-kind="release"',
+  t.contains(dgHtml, 'data-identity-kind="release"',
     'Discogs primary keeps release identity kind');
-  assertContains(dgHtml, 'data-catalogue-id="3938744"',
+  t.contains(dgHtml, 'data-catalogue-id="3938744"',
     'Discogs primary keeps exact release id');
-  assertContains(dgHtml, 'other edition in library',
+  t.contains(dgHtml, 'other edition in library',
     'counterpart ownership is expressed without claiming exact ownership');
-  assertContains(dgHtml, '>wanted</span>',
+  t.contains(dgHtml, '>wanted</span>',
     'selected Discogs request status remains its exact action state');
 }
 
-console.log('associated positive ordinary evidence classifies without rewriting source provenance');
+t.section('associated positive ordinary evidence classifies without rewriting source provenance');
 {
   const mb = work('mb-split', {
     title: 'The Split', provenance: [], in_library: false,
@@ -342,15 +328,15 @@ console.log('associated positive ordinary evidence classifies without rewriting 
     mb_unpaired: [], discogs_unpaired: [], discogs_ungrouped_releases: [],
   }, 'mb');
   const sections = classify([row]);
-  assertEqual(row.provenance.length, 0,
+  t.equal(row.provenance.length, 0,
     'selected MB provenance remains source-authored unknown');
-  assertEqual(row.display_provenance.join(','), 'ordinary',
+  t.equal(row.display_provenance.join(','), 'ordinary',
     'display classification sees positive ordinary counterpart evidence');
-  assertEqual(sections.missing.map(item => item.id).join(','), 'mb-split',
+  t.equal(sections.missing.map(item => item.id).join(','), 'mb-split',
     'unknown plus ordinary associated row is in the normal album catalogue');
 }
 
-console.log('top-level vocabulary and defaults match the original simple model');
+t.section('top-level vocabulary and defaults match the original simple model');
 {
   const sections = classify([
     work('owned-album', { in_library: true, title: 'Owned Album' }),
@@ -375,27 +361,27 @@ console.log('top-level vocabulary and defaults match the original simple model')
   for (const id of [
     'catalogue-in-library', 'catalogue-in-flight',
     'catalogue-missing', 'catalogue-other-releases',
-  ]) assertContains(html, `id="${id}"`, `${id} top-level section exists`);
+  ]) t.contains(html, `id="${id}"`, `${id} top-level section exists`);
   for (const heading of ['Unpaired', 'Ungrouped', 'Appearances', 'Promo-only', 'Unofficial-only']) {
-    assertExcludes(html, heading, `${heading} is not page taxonomy`);
+    t.excludes(html, heading, `${heading} is not page taxonomy`);
   }
-  assertEqual(bodyIsOpenAfter(html, 'id="catalogue-in-library"'), true,
+  t.equal(bodyIsOpenAfter(html, 'id="catalogue-in-library"'), true,
     'In library is open');
-  assertEqual(bodyIsOpenAfter(html, 'id="catalogue-in-flight"'), true,
+  t.equal(bodyIsOpenAfter(html, 'id="catalogue-in-flight"'), true,
     'In flight is open');
-  assertEqual(bodyIsOpenAfter(html, 'id="catalogue-missing"'), true,
+  t.equal(bodyIsOpenAfter(html, 'id="catalogue-missing"'), true,
     'Missing is open');
-  assertEqual(bodyIsOpenAfter(html, 'id="catalogue-other-releases"'), false,
+  t.equal(bodyIsOpenAfter(html, 'id="catalogue-other-releases"'), false,
     'Other releases is collapsed');
-  assertEqual(bodyIsOpenAfter(html, 'Albums <span'), true,
+  t.equal(bodyIsOpenAfter(html, 'Albums <span'), true,
     'Albums is the only default-open musical bucket');
-  assertEqual(bodyIsOpenAfter(html, 'EPs <span'), false, 'EPs stay closed');
-  assertEqual(bodyIsOpenAfter(html, 'Compilations <span'), false,
+  t.equal(bodyIsOpenAfter(html, 'EPs <span'), false, 'EPs stay closed');
+  t.equal(bodyIsOpenAfter(html, 'Compilations <span'), false,
     'Compilations stay closed');
-  assertEqual(bodyIsOpenAfter(html, 'Live <span'), false, 'Live stays closed');
+  t.equal(bodyIsOpenAfter(html, 'Live <span'), false, 'Live stays closed');
 }
 
-console.log('Rolling Stones title collision never claims ownership or expands exceptions');
+t.section('Rolling Stones title collision never claims ownership or expands exceptions');
 {
   const rows = [
     work('bootleg-comp', {
@@ -414,42 +400,42 @@ console.log('Rolling Stones title collision never claims ownership or expands ex
   const html = renderArtistSections(sections, {
     artistId: ARTIST_ID, artistName: 'The Rolling Stones',
   });
-  assertEqual(bodyIsOpenAfter(html, 'id="catalogue-other-releases"'), false,
+  t.equal(bodyIsOpenAfter(html, 'id="catalogue-other-releases"'), false,
     'title-only ownership does not open Other releases');
-  assertEqual(bodyIsOpenAfter(html, 'Compilations <span'), false,
+  t.equal(bodyIsOpenAfter(html, 'Compilations <span'), false,
     'Compilation stays collapsed');
-  assertEqual(bodyIsOpenAfter(html, 'Live <span'), false,
+  t.equal(bodyIsOpenAfter(html, 'Live <span'), false,
     'Live stays collapsed');
   for (const id of ['bootleg-comp', 'bootleg-live']) {
     const start = html.indexOf(`data-rg-id="${id}"`);
     const header = html.slice(start, html.indexOf('</div>', start));
-    assertExcludes(header, 'in library', `${id} has no inherited ownership badge`);
+    t.excludes(header, 'in library', `${id} has no inherited ownership badge`);
   }
 }
 
-console.log('even exact-owned exceptional rows leave Other releases collapsed');
+t.section('even exact-owned exceptional rows leave Other releases collapsed');
 {
   const html = renderArtistSections(classify([
     work('owned-live', {
       provenance: ['unofficial'], secondary_types: ['Live'], in_library: true,
     }),
   ]), { artistId: ARTIST_ID, artistName: ARTIST_NAME });
-  assertEqual(bodyIsOpenAfter(html, 'id="catalogue-other-releases"'), false,
+  t.equal(bodyIsOpenAfter(html, 'id="catalogue-other-releases"'), false,
     'Other releases always starts collapsed');
-  assertEqual(bodyIsOpenAfter(html, 'Live <span'), false,
+  t.equal(bodyIsOpenAfter(html, 'Live <span'), false,
     'types inside Other releases always start collapsed');
 }
 
-console.log('mixed source-authored provenance stays visible on its row');
+t.section('mixed source-authored provenance stays visible on its row');
 {
   const html = renderRgRow(work('mixed', {
     provenance: ['ordinary', 'promo', 'unofficial'],
   }), { artistName: ARTIST_NAME, nameLC: ARTIST_NAME.toLowerCase() });
-  assertContains(html, '>promo</span>', 'mixed promo evidence chip');
-  assertContains(html, '>unofficial</span>', 'mixed unofficial evidence chip');
+  t.contains(html, '>promo</span>', 'mixed promo evidence chip');
+  t.contains(html, '>unofficial</span>', 'mixed unofficial evidence chip');
 }
 
-console.log('ownership credit variants preserve the established contract');
+t.section('ownership credit variants preserve the established contract');
 {
   const world = [
     work('id-match', { primary_artist_id: ARTIST_ID, artist_credit: 'Different' }),
@@ -462,13 +448,13 @@ console.log('ownership credit variants preserve the established contract');
   const sections = classify(world);
   const own = new Set(sections.missing.map(row => row.id));
   for (const id of ['id-match', 'exact-credit', 'slash-credit', 'comma-credit', 'empty-credit']) {
-    assertEqual(own.has(id), true, `${id} remains an own-work credit`);
+    t.equal(own.has(id), true, `${id} remains an own-work credit`);
   }
-  assertEqual(sections.otherReleases.map(row => row.id).join(','), 'foreign',
+  t.equal(sections.otherReleases.map(row => row.id).join(','), 'foreign',
     'foreign credit lands in Other releases');
 }
 
-console.log('in-flight lens includes transfer and exact processor ownership');
+t.section('in-flight lens includes transfer and exact processor ownership');
 {
   const albums = [
     library({ id: 1, album: 'DL', pipeline_status: 'downloading', pipeline_id: 11 }),
@@ -492,21 +478,21 @@ console.log('in-flight lens includes transfer and exact processor ownership');
       beets_album_id: null, pipeline_status: 'downloading', pipeline_id: 16,
     }),
   ];
-  assertEqual(classify([], albums).inFlight.map(row => row.album).join(','),
+  t.equal(classify([], albums).inFlight.map(row => row.album).join(','),
     'DL,Processing,Pipeline-only DL',
     'downloading and processing stay visible regardless of library ownership');
   const html = renderArtistSections(classify([], albums), {
     artistId: ARTIST_ID,
     artistName: ARTIST_NAME,
   });
-  assertContains(html, 'previewing', 'artist row consumes exact processing owner presentation');
-  assertContains(html, '/api/import-jobs/117/recovery', 'artist row links exact recovery detail');
+  t.contains(html, 'previewing', 'artist row consumes exact processing owner presentation');
+  t.contains(html, '/api/import-jobs/117/recovery', 'artist row links exact recovery detail');
 }
 
-console.log('empty and orphan-only artist worlds remain renderable');
+t.section('empty and orphan-only artist worlds remain renderable');
 {
   const empty = classify([], []);
-  assertEqual([
+  t.equal([
     empty.inLibrary, empty.inLibraryOrphans, empty.inFlight,
     empty.missing, empty.otherReleases,
   ].flat().length, 0, 'empty world has no synthetic rows');
@@ -517,12 +503,11 @@ console.log('empty and orphan-only artist worlds remain renderable');
   const html = renderArtistSections(orphanOnly, {
     artistId: ARTIST_ID, artistName: ARTIST_NAME,
   });
-  assertContains(html, 'In library <span class="type-count">1</span>',
+  t.contains(html, 'In library <span class="type-count">1</span>',
     'orphan-only In library section renders');
-  assertContains(html, 'Library-only editions <span class="type-count">1</span>',
+  t.contains(html, 'Library-only editions <span class="type-count">1</span>',
     'genuine orphan has its explicit subheader');
-  assertContains(html, 'Only Orphan', 'orphan row remains visible');
+  t.contains(html, 'Only Orphan', 'orphan row remains visible');
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
-process.exit(failed > 0 ? 1 : 0);
+t.done();

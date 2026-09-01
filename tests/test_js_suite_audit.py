@@ -89,6 +89,210 @@ def covered_js_suite_names(script_text: str, suite_names: set[str]) -> set[str]:
     return covered
 
 
+# The three shapes a suite must have to be on the shared harness at all:
+# it imports the module, builds a checker from its own module URL, and
+# reaches the single exit path. Deliberately bounded syntax -- this is a
+# local syntactic fact, not an attempt to understand the file.
+_HARNESS_IMPORT_RE = re.compile(
+    r"^import \{[^}]*\bsuite\b[^}]*\} from '\./js_harness\.mjs';$", re.MULTILINE
+)
+_HARNESS_SUITE_RE = re.compile(r"^const \w+ = suite\(import\.meta\.url\);$", re.MULTILINE)
+_HARNESS_DONE_RE = re.compile(r"^\w+\.done\(\);$", re.MULTILINE)
+
+# The two abandoned idioms. A suite carrying either is running its own
+# harness again, whatever else it also does.
+_OWN_COUNTER_RE = re.compile(r"^let (?:passed|failed) = 0;$", re.MULTILINE)
+_NODE_ASSERT_RE = re.compile(r"^import .*from 'node:assert(?:/strict)?';$", re.MULTILINE)
+
+
+def harness_violations(name: str, source: str) -> list[str]:
+    """Every way ``source`` fails to be a suite on the shared harness.
+
+    Accumulating rather than short-circuiting, so the known-bad self-tests
+    below can prove each clause trips on its own world instead of only
+    whichever happens to be checked first.
+    """
+    violations: list[str] = []
+    if _HARNESS_IMPORT_RE.search(source) is None:
+        violations.append(f"{name} does not import suite from ./js_harness.mjs")
+    if _HARNESS_SUITE_RE.search(source) is None:
+        violations.append(f"{name} never calls suite(import.meta.url)")
+    if _HARNESS_DONE_RE.search(source) is None:
+        violations.append(f"{name} never reaches the harness exit path")
+    if _OWN_COUNTER_RE.search(source) is not None:
+        violations.append(f"{name} declares its own passed/failed counter")
+    if _NODE_ASSERT_RE.search(source) is not None:
+        violations.append(f"{name} imports node:assert instead of the harness")
+    return violations
+
+
+class TestEveryJsSuiteUsesTheSharedHarness(unittest.TestCase):
+    """One harness, one idiom (issue #1313 candidate 6).
+
+    Before the shared module every suite hand-rolled its own assertion
+    helpers -- two incompatible idioms across 23 files, ~500 duplicated
+    lines, and failure reporting the coordinator could only read at FILE
+    granularity. Nothing but this audit stops the next suite from starting
+    a third idiom, because a bespoke harness passes perfectly well on its
+    own.
+    """
+
+    def test_every_suite_on_disk_is_on_the_shared_harness(self) -> None:
+        names = sorted(_js_suite_names_on_disk())
+        self.assertTrue(names, "no tests/test_js_*.mjs files found")
+        violations: list[str] = []
+        for name in names:
+            source = pinned_source(Path(TESTS_DIR) / name)
+            violations.extend(harness_violations(name, source))
+        self.assertEqual(
+            violations,
+            [],
+            "JavaScript suites must use tests/js_harness.mjs: "
+            + "; ".join(violations),
+        )
+
+    def test_the_harness_module_itself_is_present(self) -> None:
+        harness = Path(TESTS_DIR) / "js_harness.mjs"
+        self.assertTrue(harness.is_file(), "tests/js_harness.mjs is missing")
+        source = pinned_source(harness)
+        self.assertIn("export function suite(", source)
+        self.assertIn("CRATEDIGGER_JS_FAILURE", source)
+        self.assertIn("CRATEDIGGER_JS_DONE", source)
+
+    def test_the_harness_module_is_not_itself_run_as_a_suite(self) -> None:
+        """The harness must not match the glob `run_js_checks.sh` really uses.
+
+        The pattern is READ OUT of the script rather than hand-typed: an
+        earlier version compared two literals
+        (``fnmatch("js_harness.mjs", "test_js_*.mjs")``) and so proved
+        nothing about the script at all — the constant-versus-hand-typed-
+        literal shape `.claude/rules/code-quality.md` names.
+
+        Two different widenings reach two different clauses here, and the
+        distinction was mis-stated once (round-2 review, claim 1):
+
+        - ``tests/*js*.mjs`` does not contain the literal ``test_js_``, so
+          ``_FOR_GLOB_RE`` never matches it and the CARDINALITY assertion
+          fires ("got []"). That is a real kill, but not by the fnmatch
+          clause.
+        - ``tests/*[test_js_]*.mjs`` does match the regex AND matches
+          ``js_harness.mjs``, so it is what actually reaches the fnmatch
+          assertion below.
+
+        Both are covered: this test kills the first, and
+        ``test_a_glob_matching_the_harness_is_refused`` pins the second
+        against the parser directly.
+        """
+        script = pinned_source(Path(RUN_JS_CHECKS))
+        patterns = [
+            os.path.basename(m.group(2)) for m in _FOR_GLOB_RE.finditer(script)
+        ]
+        self.assertEqual(
+            len(patterns),
+            1,
+            f"expected exactly one JS-suite glob in the script, got {patterns}",
+        )
+        self.assertFalse(
+            fnmatch.fnmatch("js_harness.mjs", patterns[0]),
+            f"the script's glob {patterns[0]!r} would run the harness module "
+            "as if it were a suite",
+        )
+        self.assertNotIn("js_harness.mjs", _js_suite_names_on_disk())
+
+    def test_a_glob_matching_the_harness_is_refused(self) -> None:
+        """The fnmatch clause itself, driven by a glob the parser accepts.
+
+        `tests/*[test_js_]*.mjs` contains the literal `test_js_`, so
+        `_FOR_GLOB_RE` matches it and the cardinality assertion passes --
+        which is what makes this the world that reaches the fnmatch clause
+        rather than short-circuiting before it (round-2 review, mutant M42).
+        """
+        script = (
+            "for file in tests/*[test_js_]*.mjs; do\n"
+            '    node "$file"\n'
+            "done\n"
+        )
+        patterns = [
+            os.path.basename(m.group(2)) for m in _FOR_GLOB_RE.finditer(script)
+        ]
+        self.assertEqual(len(patterns), 1, "the parser must accept this glob")
+        self.assertTrue(
+            fnmatch.fnmatch("js_harness.mjs", patterns[0]),
+            "this world exists precisely because the harness DOES match it",
+        )
+        self.assertTrue(
+            covered_js_suite_names(script, {"test_js_util.mjs"}),
+            "and the glob still covers real suites, so nothing else objects",
+        )
+
+    KNOWN_BAD = (
+        (
+            "no harness import",
+            "const t = suite(import.meta.url);\nt.done();\n",
+            "does not import suite",
+        ),
+        (
+            "imported but never constructed",
+            "import { suite } from './js_harness.mjs';\nt.done();\n",
+            "never calls suite(import.meta.url)",
+        ),
+        (
+            "constructed but never finished",
+            (
+                "import { suite } from './js_harness.mjs';\n"
+                "const t = suite(import.meta.url);\n"
+            ),
+            "never reaches the harness exit path",
+        ),
+        (
+            "a third idiom smuggled in beside the harness",
+            (
+                "import { suite } from './js_harness.mjs';\n"
+                "const t = suite(import.meta.url);\n"
+                "let passed = 0;\n"
+                "t.done();\n"
+            ),
+            "declares its own passed/failed counter",
+        ),
+        (
+            "node:assert smuggled in beside the harness",
+            (
+                "import assert from 'node:assert/strict';\n"
+                "import { suite } from './js_harness.mjs';\n"
+                "const t = suite(import.meta.url);\n"
+                "t.done();\n"
+            ),
+            "imports node:assert instead of the harness",
+        ),
+    )
+
+    def test_each_clause_trips_on_its_own_known_bad_world(self) -> None:
+        for label, source, expected in self.KNOWN_BAD:
+            with self.subTest(world=label):
+                violations = harness_violations("test_js_x.mjs", source)
+                self.assertEqual(
+                    len(violations),
+                    1,
+                    f"{label} should trip exactly one clause, got {violations}",
+                )
+                self.assertIn(expected, violations[0])
+
+    def test_a_conforming_world_trips_nothing(self) -> None:
+        source = (
+            "import { renderThing } from '../web/js/thing.js';\n"
+            "\n"
+            "import { suite } from './js_harness.mjs';\n"
+            "\n"
+            "const t = suite(import.meta.url);\n"
+            "\n"
+            "t.section('renderThing()');\n"
+            "t.equal(renderThing(), 'x', 'it renders');\n"
+            "\n"
+            "t.done();\n"
+        )
+        self.assertEqual(harness_violations("test_js_x.mjs", source), [])
+
+
 class TestJsSuiteAudit(unittest.TestCase):
     """Every tests/test_js_*.mjs file must run every scripts/run_tests.sh pass."""
 

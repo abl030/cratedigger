@@ -892,6 +892,7 @@ def seed_visible_wrong_match(
     request_id: int = 1,
     quarantine: str = "wrong_matches",
     name: str = "Artist - Album (2024) [abcd1234]",
+    soulseek_username: str | None = None,
 ) -> SeededWrongMatch:
     """Create a real quarantine folder and the rows that make it visible.
 
@@ -920,6 +921,7 @@ def seed_visible_wrong_match(
     download_log_id = db.log_download(
         request_id,
         outcome="rejected",
+        soulseek_username=soulseek_username,
         validation_result={
             "scenario": "wrong_match",
             "detail": "wrong album",

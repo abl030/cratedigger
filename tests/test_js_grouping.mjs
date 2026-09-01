@@ -5,81 +5,64 @@
 
 import { classify, renderTypedSections, SECTION_ORDER } from '../web/js/grouping.js';
 
-let passed = 0;
-let failed = 0;
+import { suite } from './js_harness.mjs';
 
-function assertEqual(actual, expected, msg) {
-  if (actual === expected) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} — expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
-  }
-}
+const t = suite(import.meta.url);
 
-function assertContains(haystack, needle, msg) {
-  if (haystack.includes(needle)) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} — '${needle}' not found in output`);
-  }
-}
-
-console.log('classify()');
+t.section('classify()');
 // MB-style RGs (type + secondary_types)
-assertEqual(classify({ type: 'Album', secondary_types: [] }), 'Albums', 'plain Album');
-assertEqual(classify({ type: 'EP', secondary_types: [] }), 'EPs', 'plain EP');
-assertEqual(classify({ type: 'Single', secondary_types: [] }), 'Singles', 'plain Single');
-assertEqual(classify({ type: 'Album', secondary_types: ['Compilation'] }), 'Compilations', 'compilation wins over Album');
-assertEqual(classify({ type: 'Album', secondary_types: ['Live'] }), 'Live', 'live wins over Album');
-assertEqual(classify({ type: 'Album', secondary_types: ['Remix'] }), 'Remixes', 'remix wins');
-assertEqual(classify({ type: 'Album', secondary_types: ['DJ-mix'] }), 'DJ Mixes', 'DJ-mix wins');
-assertEqual(classify({ type: 'Album', secondary_types: ['Demo'] }), 'Demos', 'demo wins');
-assertEqual(classify({ type: 'Album', secondary_types: ['Mixtape/Street'] }), 'Other', 'unknown secondary -> Other');
+t.equal(classify({ type: 'Album', secondary_types: [] }), 'Albums', 'plain Album');
+t.equal(classify({ type: 'EP', secondary_types: [] }), 'EPs', 'plain EP');
+t.equal(classify({ type: 'Single', secondary_types: [] }), 'Singles', 'plain Single');
+t.equal(classify({ type: 'Album', secondary_types: ['Compilation'] }), 'Compilations', 'compilation wins over Album');
+t.equal(classify({ type: 'Album', secondary_types: ['Live'] }), 'Live', 'live wins over Album');
+t.equal(classify({ type: 'Album', secondary_types: ['Remix'] }), 'Remixes', 'remix wins');
+t.equal(classify({ type: 'Album', secondary_types: ['DJ-mix'] }), 'DJ Mixes', 'DJ-mix wins');
+t.equal(classify({ type: 'Album', secondary_types: ['Demo'] }), 'Demos', 'demo wins');
+t.equal(classify({ type: 'Album', secondary_types: ['Mixtape/Street'] }), 'Other', 'unknown secondary -> Other');
 
 // Normalized artist rows: structural membership is authoritative. The legacy
 // representative scalar is never allowed to invent an Album/EP/Single.
-assertEqual(classify({
+t.equal(classify({
   type: 'Album', primary_types: [], secondary_types: [], format_qualifiers: [],
 }), 'Other', 'empty structural evidence defeats representative scalar Album');
-assertEqual(classify({
+t.equal(classify({
   type: 'Other', primary_types: ['EP'], secondary_types: [], format_qualifiers: [],
 }), 'EPs', 'positive structural EP evidence owns the section');
-assertEqual(classify({
+t.equal(classify({
   type: 'Album', primary_types: [], secondary_types: [],
   format_qualifiers: ['Compilation'],
 }), 'Compilations', 'Discogs Compilation qualifier stays a compilation');
-assertEqual(classify({
+t.equal(classify({
   primary_types: ['Album'], secondary_types: [], format_qualifiers: ['Remix'],
   display_primary_types: ['Album'], display_secondary_types: ['Live'],
   display_format_qualifiers: ['Remix', 'Demo'],
 }), 'Live', 'paired display Live evidence overrides selected Album/Remix evidence');
-assertEqual(classify({
+t.equal(classify({
   primary_types: [], secondary_types: [], format_qualifiers: [],
   display_primary_types: ['EP'], display_secondary_types: [],
   display_format_qualifiers: [],
 }), 'EPs', 'paired display structural evidence fills a selected unknown type');
 
 // Analysis-style (primary_type)
-assertEqual(classify({ primary_type: 'Album' }), 'Albums', 'analysis primary_type Album');
-assertEqual(classify({ primary_type: 'Single' }), 'Singles', 'analysis primary_type Single');
+t.equal(classify({ primary_type: 'Album' }), 'Albums', 'analysis primary_type Album');
+t.equal(classify({ primary_type: 'Single' }), 'Singles', 'analysis primary_type Single');
 
 // Library-style (lowercase from beets albumtype)
-assertEqual(classify({ type: 'album' }), 'Albums', 'beets lowercase album');
-assertEqual(classify({ type: 'ep' }), 'EPs', 'beets lowercase ep');
-assertEqual(classify({ type: 'single' }), 'Singles', 'beets lowercase single');
-assertEqual(classify({ type: 'compilation' }), 'Compilations', 'beets compilation');
-assertEqual(classify({ type: 'soundtrack' }), 'Compilations', 'beets soundtrack -> Compilations');
-assertEqual(classify({ type: 'live' }), 'Live', 'beets live');
-assertEqual(classify({ type: '' }), 'Other', 'empty -> Other');
-assertEqual(classify({}), 'Other', 'no type -> Other');
+t.equal(classify({ type: 'album' }), 'Albums', 'beets lowercase album');
+t.equal(classify({ type: 'ep' }), 'EPs', 'beets lowercase ep');
+t.equal(classify({ type: 'single' }), 'Singles', 'beets lowercase single');
+t.equal(classify({ type: 'compilation' }), 'Compilations', 'beets compilation');
+t.equal(classify({ type: 'soundtrack' }), 'Compilations', 'beets soundtrack -> Compilations');
+t.equal(classify({ type: 'live' }), 'Live', 'beets live');
+t.equal(classify({ type: '' }), 'Other', 'empty -> Other');
+t.equal(classify({}), 'Other', 'no type -> Other');
 
-console.log('SECTION_ORDER');
-assertEqual(SECTION_ORDER[0], 'Albums', 'Albums is first in order');
-assertEqual(SECTION_ORDER[2], 'Singles', 'Singles is third');
+t.section('SECTION_ORDER');
+t.equal(SECTION_ORDER[0], 'Albums', 'Albums is first in order');
+t.equal(SECTION_ORDER[2], 'Singles', 'Singles is third');
 
-console.log('renderTypedSections()');
+t.section('renderTypedSections()');
 const rows = [
   { id: 'a1', title: 'First Album', type: 'Album', first_release_date: '2001' },
   { id: 'a2', title: 'Second Album', type: 'Album', first_release_date: '2003' },
@@ -89,26 +72,26 @@ const rows = [
 const html = renderTypedSections(rows, (r) => `<div data-id="${r.id}">${r.title}</div>`);
 
 // Each section header rendered with its count
-assertContains(html, 'Albums <span class="type-count">2</span>', 'Albums section header has count 2');
-assertContains(html, 'EPs <span class="type-count">1</span>', 'EPs section header');
-assertContains(html, 'Singles <span class="type-count">1</span>', 'Singles section header');
+t.contains(html, 'Albums <span class="type-count">2</span>', 'Albums section header has count 2');
+t.contains(html, 'EPs <span class="type-count">1</span>', 'EPs section header');
+t.contains(html, 'Singles <span class="type-count">1</span>', 'Singles section header');
 
 // Within Albums, sorted by date — first comes before second
 const firstIdx = html.indexOf('First Album');
 const secondIdx = html.indexOf('Second Album');
-assertEqual(firstIdx < secondIdx, true, 'within Albums, oldest first');
+t.equal(firstIdx < secondIdx, true, 'within Albums, oldest first');
 
 // Section order: Albums before EPs before Singles
 const albumsIdx = html.indexOf('Albums <span');
 const epsIdx = html.indexOf('EPs <span');
 const singlesIdx = html.indexOf('Singles <span');
-assertEqual(albumsIdx < epsIdx, true, 'Albums section appears before EPs section');
-assertEqual(epsIdx < singlesIdx, true, 'EPs section appears before Singles section');
+t.equal(albumsIdx < epsIdx, true, 'Albums section appears before EPs section');
+t.equal(epsIdx < singlesIdx, true, 'EPs section appears before Singles section');
 
 // Albums section is open by default
-assertContains(html, '<div class="type-body open">', 'Albums section is open by default');
+t.contains(html, '<div class="type-body open">', 'Albums section is open by default');
 
-console.log('renderTypedSections() with custom classify');
+t.section('renderTypedSections() with custom classify');
 const compareRows = [
   { mb: { type: 'Album', first_release_date: '2001' }, discogs: { type: 'Album' } },
   { mb: { type: 'EP', first_release_date: '2002' }, discogs: null },
@@ -121,15 +104,15 @@ const cmpHtml = renderTypedSections(
     dateOf: (p) => String((p.mb || p.discogs).first_release_date || ''),
   },
 );
-assertContains(cmpHtml, 'Albums <span class="type-count">1</span>', 'compare: Albums bucket counted');
-assertContains(cmpHtml, 'EPs <span class="type-count">1</span>', 'compare: EPs bucket counted');
+t.contains(cmpHtml, 'Albums <span class="type-count">1</span>', 'compare: Albums bucket counted');
+t.contains(cmpHtml, 'EPs <span class="type-count">1</span>', 'compare: EPs bucket counted');
 
-console.log('renderTypedSections() with defaultOpen=null');
+t.section('renderTypedSections() with defaultOpen=null');
 const closedHtml = renderTypedSections(rows, (r) => '', { defaultOpen: null });
-assertEqual(closedHtml.includes('<div class="type-body open">'), false,
+t.equal(closedHtml.includes('<div class="type-body open">'), false,
   'no section is open when defaultOpen=null');
 
-console.log('renderTypedSections() with multiple explicit open sections');
+t.section('renderTypedSections() with multiple explicit open sections');
 const selectedHtml = renderTypedSections(rows, (r) => `<div>${r.title}</div>`, {
   defaultOpen: null,
   openSections: ['EPs', 'Singles'],
@@ -140,16 +123,15 @@ function typeIsOpen(html, type) {
   const body = html.slice(start).match(/<div class="type-body([^"]*)">/);
   return Boolean(body && body[1].split(/\s+/).includes('open'));
 }
-assertEqual(typeIsOpen(selectedHtml, 'Albums'), false,
+t.equal(typeIsOpen(selectedHtml, 'Albums'), false,
   'Albums stays closed when it is not selected');
-assertEqual(typeIsOpen(selectedHtml, 'EPs'), true,
+t.equal(typeIsOpen(selectedHtml, 'EPs'), true,
   'EPs opens when selected');
-assertEqual(typeIsOpen(selectedHtml, 'Singles'), true,
+t.equal(typeIsOpen(selectedHtml, 'Singles'), true,
   'Singles opens when selected');
 
-console.log('renderTypedSections() empty input');
+t.section('renderTypedSections() empty input');
 const emptyHtml = renderTypedSections([], (r) => '');
-assertEqual(emptyHtml, '', 'empty input -> empty output');
+t.equal(emptyHtml, '', 'empty input -> empty output');
 
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+t.done();

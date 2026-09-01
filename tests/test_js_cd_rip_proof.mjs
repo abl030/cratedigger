@@ -7,36 +7,29 @@ import {
   validDualProviderProof,
 } from './fixtures/cd_rip_proof.mjs';
 
-let passed = 0;
-let failed = 0;
+import { suite } from './js_harness.mjs';
 
-function assertEqual(actual, expected, message) {
-  if (actual === expected) passed++;
-  else {
-    failed++;
-    console.error(`  FAIL: ${message} — expected '${expected}', got '${actual}'`);
-  }
-}
+const t = suite(import.meta.url);
 
-console.log('cdRipProofPresentation() renders CTDB confidence');
+t.section('cdRipProofPresentation() renders CTDB confidence');
 {
-  assertEqual(
+  t.equal(
     cdRipProofPresentation(validCtdbProof())?.text,
     'CD bit-verified · CTDB confidence 24',
     'CTDB proof names its positive whole-disc confidence',
   );
 }
 
-console.log('cdRipProofPresentation() renders conservative AccurateRip confidence');
+t.section('cdRipProofPresentation() renders conservative AccurateRip confidence');
 {
-  assertEqual(
+  t.equal(
     cdRipProofPresentation(validAccurateRipProof())?.text,
     'CD bit-verified · AccurateRip min confidence 1',
     'AccurateRip proof reports the minimum across every track',
   );
 }
 
-console.log('cdRipProofPresentation() is positive-only and fail-closed');
+t.section('cdRipProofPresentation() is positive-only and fail-closed');
 {
   const partial = {
     algorithm: 'cd-rip-bit-verifier-v1',
@@ -45,15 +38,15 @@ console.log('cdRipProofPresentation() is positive-only and fail-closed');
   const malformed = validAccurateRipProof();
   malformed.accuraterip.track_confidences = [5, 0, 8];
 
-  assertEqual(cdRipProofPresentation(null), null,
+  t.equal(cdRipProofPresentation(null), null,
     'absent evidence has no negative presentation');
-  assertEqual(cdRipProofPresentation(partial), null,
+  t.equal(cdRipProofPresentation(partial), null,
     'a partial provider shape cannot mint a proof label');
-  assertEqual(cdRipProofPresentation(malformed), null,
+  t.equal(cdRipProofPresentation(malformed), null,
     'a non-positive track confidence cannot mint a proof label');
 }
 
-console.log('cdRipProofPresentation() rejects deterministic known-bad wire mutations');
+t.section('cdRipProofPresentation() rejects deterministic known-bad wire mutations');
 {
   const topLevelMutations = [
     ['algorithm', (proof) => { proof.algorithm = 'cd-rip-bit-verifier-v0'; }],
@@ -67,7 +60,7 @@ console.log('cdRipProofPresentation() rejects deterministic known-bad wire mutat
     for (const makeProof of [validCtdbProof, validAccurateRipProof]) {
       const proof = makeProof();
       mutate(proof);
-      assertEqual(cdRipProofPresentation(proof), null,
+      t.equal(cdRipProofPresentation(proof), null,
         `${name} mutation fails closed for each provider`);
     }
   }
@@ -95,17 +88,16 @@ console.log('cdRipProofPresentation() rejects deterministic known-bad wire mutat
   for (const [name, makeProof, mutate] of providerMutations) {
     const proof = makeProof();
     mutate(proof);
-    assertEqual(cdRipProofPresentation(proof), null,
+    t.equal(cdRipProofPresentation(proof), null,
       `${name} mutation cannot mint a label`);
   }
 
   const dualProvider = validDualProviderProof();
-  assertEqual(
+  t.equal(
     cdRipProofPresentation(dualProvider)?.text,
     'CD bit-verified · CTDB confidence 11 + AccurateRip min confidence 3',
     'two complete positive providers retain both conservative confidences',
   );
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+t.done();
