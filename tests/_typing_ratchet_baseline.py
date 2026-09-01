@@ -9,8 +9,8 @@ hatches with:
 
 TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "lib/beets_delete.py": {"any": 7},
-    "lib/browse.py": {"any": 18},
-    "lib/context.py": {"any": 23},
+    "lib/browse.py": {"any": 17},
+    "lib/context.py": {"any": 22},
     "lib/destructive_release_service.py": {"any": 9},
     "lib/disk_coverage_service.py": {"any": 5},
     "lib/dispatch/evidence_gate.py": {"any": 1},

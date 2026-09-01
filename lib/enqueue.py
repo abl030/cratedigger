@@ -242,9 +242,11 @@ def prepare_find_download_context(
         if selected:
             search_dir_audio_count[user] = selected
 
-    from lib.context import CratediggerContext
+    from lib.context import CratediggerContext, CycleCollaborators
 
-    peer_cache = ctx.peer_cache.fork() if getattr(ctx.peer_cache, "fork", None) else ctx.peer_cache
+    # A per-worker fork, never the owner's instance: PeerCache is not shared
+    # across threads. ``None`` (Redis down / disabled) forks to None.
+    peer_cache = ctx.peer_cache.fork() if ctx.peer_cache is not None else None
 
     plan_execution = (
         getattr(search_result, "plan_execution", None)
@@ -252,9 +254,19 @@ def prepare_find_download_context(
     )
 
     return CratediggerContext(
-        cfg=ctx.cfg,
-        slskd=ctx.slskd,
-        pipeline_db_source=_WorkerPipelineDBSource(),
+        # Every collaborator named explicitly, never dataclasses.replace on
+        # the owner's value: replace() kwargs are checked by pyright for
+        # neither name nor type, so the two substitutions below (a worker's
+        # own DB source, a FORKED peer cache) would sit beside four
+        # unchecked forwards (#1313).
+        collaborators=CycleCollaborators(
+            cfg=ctx.cfg,
+            slskd=ctx.slskd,
+            pipeline_db_source=_WorkerPipelineDBSource(),
+            download_ownership=ctx.download_ownership,
+            claimed_queue_keys_registry=ctx.claimed_queue_keys_registry,
+            peer_cache=peer_cache,
+        ),
         search_cache={album_id: search_cache},
         folder_cache=ctx.folder_cache,
         user_upload_speed=user_upload_speed,
@@ -263,9 +275,6 @@ def prepare_find_download_context(
         denied_users_cache={request_id: set(denied_users)},
         cooled_down_users=set(ctx.cooled_down_users),
         prefetched_album_tracks={album_id: list(tracks)},
-        peer_cache=peer_cache,
-        download_ownership=ctx.download_ownership,
-        claimed_queue_keys_registry=ctx.claimed_queue_keys_registry,
         browse_coordinator=coordinator,
         browse_coordinator_lock=ctx.browse_coordinator_lock,
         active_plan_execution=plan_execution,
@@ -717,7 +726,7 @@ def _cross_cycle_conflict_checker(
     ``_cross_request_conflict_ids`` already documents) when
     ``ctx.download_ownership`` is not wired.
     """
-    writer = getattr(ctx, "download_ownership", None)
+    writer = ctx.download_ownership
     if writer is None:
         yield None
         return
@@ -795,7 +804,7 @@ def _claim_initial_download_ownership(
 ) -> DownloadOwnershipClaim:
     entry = _planned_grab_entry(album, files, allowed_filetype)
     request_id = entry.db_request_id
-    writer = getattr(ctx, "download_ownership", None)
+    writer = ctx.download_ownership
     if writer is None or request_id is None:
         return DownloadOwnershipClaim(
             entry=entry,
@@ -898,7 +907,7 @@ def _persist_claimed_download_state(
 ) -> bool:
     if not claim.claimed or claim.request_id is None:
         return True
-    writer = getattr(ctx, "download_ownership", None)
+    writer = ctx.download_ownership
     if writer is None:
         return True
     assert claim.enqueued_at is not None
@@ -926,7 +935,7 @@ def _reset_claim_after_verified_no_acceptance(
 ) -> _ClaimResolution:
     if not claim.claimed or claim.request_id is None:
         return _ClaimResolution("verified_no_acceptance")
-    writer = getattr(ctx, "download_ownership", None)
+    writer = ctx.download_ownership
     if writer is None:
         return _ClaimResolution("verified_no_acceptance")
     assert claim.enqueued_at is not None
@@ -983,7 +992,7 @@ def _leave_claim_for_poll_recovery(
 ) -> _ClaimResolution:
     if not claim.claimed or claim.request_id is None:
         return _ClaimResolution("failed")
-    writer = getattr(ctx, "download_ownership", None)
+    writer = ctx.download_ownership
     if writer is not None:
         assert claim.enqueued_at is not None
         updated = writer.update_state_if_downloading(
@@ -1016,7 +1025,7 @@ def _handle_claimed_partial_failure(
 ) -> _ClaimResolution:
     if not claim.claimed or claim.request_id is None:
         return _ClaimResolution("verified_no_acceptance")
-    writer = getattr(ctx, "download_ownership", None)
+    writer = ctx.download_ownership
     if writer is None:
         return _ClaimResolution("verified_no_acceptance")
     assert claim.enqueued_at is not None

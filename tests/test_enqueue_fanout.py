@@ -59,7 +59,11 @@ from tests.fakes import (
     FakeSlskdAPI,
     FakeSlskdTransfers,
 )
-from tests.helpers import make_request_row
+from tests.helpers import (
+    make_cycle_collaborators,
+    make_request_row,
+    rebind_collaborators,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -96,9 +100,11 @@ def _make_ctx(
     for username in denied_users or []:
         db.denylist.append(DenylistEntry(request_id=1, username=username))
     ctx = CratediggerContext(
-        cfg=cfg,
-        slskd=FakeSlskdAPI(),
-        pipeline_db_source=FakePipelineDBSource(db),
+        collaborators=make_cycle_collaborators(
+            cfg=cfg,
+            slskd=FakeSlskdAPI(),
+            pipeline_db_source=FakePipelineDBSource(db),
+        ),
         user_upload_speed=user_upload_speed or {},
         cooled_down_users=cooled_down_users or set(),
     )
@@ -156,15 +162,23 @@ def _ctx_with_download_ownership(
     registry: ClaimedQueueKeysRegistry | None = None,
 ) -> CratediggerContext:
     ctx = _make_ctx(cfg, user_upload_speed={"u00": 10_000, "u01": 9_999})
-    ctx.slskd = slskd if slskd is not None else FakeSlskdAPI()
-    ctx.pipeline_db_source = FakePipelineDBSource(db)
+    rebind_collaborators(
+        ctx,
+        slskd=slskd if slskd is not None else FakeSlskdAPI(),
+    )
+    rebind_collaborators(ctx, pipeline_db_source=FakePipelineDBSource(db))
     ctx.current_album_cache[1] = _album_with_request(1)
-    ctx.download_ownership = DownloadOwnershipWriter(db_factory=lambda: db)
+    rebind_collaborators(
+        ctx,
+        download_ownership=DownloadOwnershipWriter(db_factory=lambda: db),
+    )
     # A fresh registry per call by default (one cycle == one registry);
     # cross-request tests pass a SHARED instance to model two candidates
     # evaluated within the same cycle (issue #1178 PR2 review F7).
-    ctx.claimed_queue_keys_registry = (
-        registry if registry is not None else ClaimedQueueKeysRegistry())
+    rebind_collaborators(
+        ctx,
+        claimed_queue_keys_registry=registry if registry is not None else ClaimedQueueKeysRegistry(),
+    )
     return ctx
 
 
@@ -759,9 +773,11 @@ class TestBrokenUserPerCycle(unittest.TestCase):
         """A fresh CratediggerContext starts with empty broken_user."""
         cfg = _make_cfg()
         ctx = CratediggerContext(
-            cfg=cfg,
-            slskd=FakeSlskdAPI(),
-            pipeline_db_source=FakePipelineDBSource(),
+            collaborators=make_cycle_collaborators(
+                cfg=cfg,
+                slskd=FakeSlskdAPI(),
+                pipeline_db_source=FakePipelineDBSource(),
+            ),
         )
         self.assertEqual(ctx.broken_user, set())
 
@@ -791,14 +807,16 @@ class TestFindDownloadWorkerContext(unittest.TestCase):
         )
         source.db = db
         ctx = CratediggerContext(
-            cfg=cfg,
-            slskd=FakeSlskdAPI(),
-            pipeline_db_source=source,
+            collaborators=make_cycle_collaborators(
+                cfg=cfg,
+                slskd=FakeSlskdAPI(),
+                pipeline_db_source=source,
+                claimed_queue_keys_registry=ClaimedQueueKeysRegistry(),
+            ),
             search_cache={1: {"fast": {"flac": ["dirA"]}}},
             user_upload_speed={"fast": 100},
             search_dir_audio_count={"fast": {"dirA": 1}},
             cooled_down_users={"cooled"},
-            claimed_queue_keys_registry=ClaimedQueueKeysRegistry(),
         )
         album = MagicMock(id=1, db_request_id=1)
 
@@ -850,9 +868,11 @@ class TestFindDownloadWorkerContext(unittest.TestCase):
         from lib.enqueue import _get_denied_users
 
         ctx = CratediggerContext(
-            cfg=_make_cfg(),
-            slskd=FakeSlskdAPI(),
-            pipeline_db_source=_WorkerPipelineDBSource(),
+            collaborators=make_cycle_collaborators(
+                cfg=_make_cfg(),
+                slskd=FakeSlskdAPI(),
+                pipeline_db_source=_WorkerPipelineDBSource(),
+            ),
         )
 
         with self.assertRaises(AssertionError):

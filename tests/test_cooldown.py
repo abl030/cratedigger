@@ -21,6 +21,7 @@ from tests.fakes import (
 from tests.helpers import (
     make_active_download_state_json,
     make_ctx_with_fake_db,
+    make_cycle_collaborators,
     make_download_file,
     make_grab_list_entry,
     make_request_row,
@@ -146,9 +147,11 @@ class TestEnqueueCooldownFiltering(unittest.TestCase):
         # than MagicMock proxies.
         cfg = CratediggerConfig.from_ini(configparser.ConfigParser())
         ctx = CratediggerContext(
-            cfg=cfg,
-            slskd=slskd if slskd is not None else FakeSlskdAPI(),
-            pipeline_db_source=FakePipelineDBSource(db),
+            collaborators=make_cycle_collaborators(
+                cfg=cfg,
+                slskd=slskd if slskd is not None else FakeSlskdAPI(),
+                pipeline_db_source=FakePipelineDBSource(db),
+            ),
             cooled_down_users=cooled_down_users or set(),
         )
         return ctx

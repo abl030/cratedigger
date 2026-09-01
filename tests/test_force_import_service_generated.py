@@ -38,6 +38,7 @@ from lib.validation_envelope import decode_validation_envelope
 from tests.dispatch_helpers import claim_next_import_job
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
+    make_cycle_collaborators,
     make_download_file,
     make_grab_list_entry,
     make_request_row,
@@ -152,9 +153,11 @@ def _runtime_context(
         borrowed_db=db,  # pyright: ignore[reportArgumentType]
     )
     return CratediggerContext(
-        cfg=cfg,
-        slskd=None,
-        pipeline_db_source=source,
+        collaborators=make_cycle_collaborators(
+            cfg=cfg,
+            slskd=None,
+            pipeline_db_source=source,
+        ),
     )
 
 

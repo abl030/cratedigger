@@ -23,16 +23,22 @@ from lib.cycle_summary import (
 )
 from lib.matching import check_for_match
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
-from tests.helpers import make_ctx_with_fake_db
+from tests.helpers import (
+    make_ctx_with_fake_db,
+    make_cycle_collaborators,
+    rebind_collaborators,
+)
 
 
 def _make_ctx() -> CratediggerContext:
     cfg = MagicMock()
     cfg.var_dir = "/tmp/unused"
     return CratediggerContext(
-        cfg=cfg,
-        slskd=FakeSlskdAPI(),
-        pipeline_db_source=FakePipelineDBSource(),
+        collaborators=make_cycle_collaborators(
+            cfg=cfg,
+            slskd=FakeSlskdAPI(),
+            pipeline_db_source=FakePipelineDBSource(),
+        ),
     )
 
 
@@ -50,9 +56,11 @@ def _make_real_cfg() -> CratediggerConfig:
 def _make_real_ctx() -> CratediggerContext:
     cfg = _make_real_cfg()
     ctx = CratediggerContext(
-        cfg=cfg,
-        slskd=FakeSlskdAPI(),
-        pipeline_db_source=FakePipelineDBSource(),
+        collaborators=make_cycle_collaborators(
+            cfg=cfg,
+            slskd=FakeSlskdAPI(),
+            pipeline_db_source=FakePipelineDBSource(),
+        ),
     )
     album = MagicMock()
     album.title = "Cool Album"
@@ -83,8 +91,11 @@ class TestPhase1ContextForwarding(unittest.TestCase):
     """
 
     def _owner_ctx(self) -> CratediggerContext:
+        from lib.download_ownership import DownloadOwnershipWriter
         ctx = _make_ctx()
-        ctx.download_ownership = object()
+        ledger = FakePipelineDB()
+        rebind_collaborators(ctx, download_ownership=DownloadOwnershipWriter(
+            db_factory=lambda: ledger, close_after_use=False))
         ctx.cooled_down_users = {"grumpy-peer"}
         return ctx
 

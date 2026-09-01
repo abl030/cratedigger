@@ -44,6 +44,7 @@ from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 from tests.helpers import (
     make_ctx_with_fake_db,
+    make_cycle_collaborators,
     make_download_directory,
     make_download_file,
     make_download_user,
@@ -52,6 +53,7 @@ from tests.helpers import (
     make_requests_http_error,
     make_transfer_snapshot,
     own_transfer_keys,
+    rebind_collaborators,
 )
 
 
@@ -111,8 +113,13 @@ def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None):
         slskd = FakeSlskdAPI()
     if pipeline_db_source is None:
         pipeline_db_source = FakePipelineDBSource()
-    return CratediggerContext(cfg=cfg, slskd=slskd,
-                          pipeline_db_source=pipeline_db_source)
+    return CratediggerContext(
+        collaborators=make_cycle_collaborators(
+            cfg=cfg,
+            slskd=slskd,
+            pipeline_db_source=pipeline_db_source,
+        ),
+    )
 
 
 class TestDownloadModuleBoundary(unittest.TestCase):
@@ -588,8 +595,11 @@ class TestCancelAndDelete(unittest.TestCase):
         # real ownership collaborator over a fake DB rather than a ctx
         # with no ownership wired at all — production always has one.
         self.ledger_db = FakePipelineDB()
-        ctx.download_ownership = DownloadOwnershipWriter(
-            db_factory=lambda: self.ledger_db, close_after_use=False)
+        rebind_collaborators(
+            ctx,
+            download_ownership=DownloadOwnershipWriter(
+            db_factory=lambda: self.ledger_db, close_after_use=False),
+        )
         return ctx, slskd, tmpdir
 
     def _own(self, *files) -> None:
@@ -824,7 +834,7 @@ class TestCancelAndDelete(unittest.TestCase):
         f = make_download_file()
         f.local_path = local_path
         self._own(f)  # owned — but with no collaborator we cannot know it
-        ctx.download_ownership = None
+        rebind_collaborators(ctx, download_ownership=None)
 
         with self.assertLogs("cratedigger", level="WARNING") as logs:
             ok = cancel_and_delete([f], ctx)
@@ -841,20 +851,25 @@ class TestCancelAndDelete(unittest.TestCase):
         The early exit is what keeps a caller with nothing to clean up
         from opening a DB handle to ask about zero keys.
         """
+        from lib.download_ownership import DownloadOwnershipWriter
         from lib.slskd_transfers import cancel_and_delete
         ctx, slskd, _ = self._ctx()
-        asked: list[object] = []
+        opened: list[object] = []
 
-        def _record(keys):
-            asked.append(keys)
-            return set()
+        def _recording_factory() -> FakePipelineDB:
+            opened.append(object())
+            return self.ledger_db
 
-        ctx.download_ownership.owned_transfer_keys = _record
+        # The db_factory seam, not a patched method: the claim IS "no DB
+        # handle is opened", so recording the real writer's own factory
+        # measures it directly (#1313).
+        rebind_collaborators(ctx, download_ownership=DownloadOwnershipWriter(
+            db_factory=_recording_factory, close_after_use=False))
 
         ok = cancel_and_delete([], ctx)
 
         self.assertTrue(ok)
-        self.assertEqual(asked, [])
+        self.assertEqual(opened, [])
         self.assertEqual(slskd.transfers.cancel_download_calls, [])
 
     def test_empty_file_list_with_no_collaborator_stays_silent(self):
@@ -869,7 +884,7 @@ class TestCancelAndDelete(unittest.TestCase):
         """
         from lib.slskd_transfers import cancel_and_delete
         ctx, _, _ = self._ctx()
-        ctx.download_ownership = None
+        rebind_collaborators(ctx, download_ownership=None)
 
         with patch.object(logging.getLogger("cratedigger"), "warning") as warn:
             ok = cancel_and_delete([], ctx)
@@ -917,10 +932,16 @@ class TestCancelAndDelete(unittest.TestCase):
         f.local_path = local_path
         self._own(f)
 
-        def _boom(_keys):
+        from lib.download_ownership import DownloadOwnershipWriter
+
+        def _boom() -> FakePipelineDB:
             raise RuntimeError("ledger unavailable")
 
-        ctx.download_ownership.owned_transfer_keys = _boom
+        # The DB handle itself is what fails in production, so the failure
+        # is injected at the writer's own db_factory rather than by
+        # replacing its method (#1313).
+        rebind_collaborators(ctx, download_ownership=DownloadOwnershipWriter(
+            db_factory=_boom, close_after_use=False))
 
         with self.assertLogs("cratedigger", level="WARNING") as logs:
             ok = cancel_and_delete([f], ctx)
@@ -1352,7 +1373,10 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
     def _ctx_with_ownership(self, db, slskd):
         from lib.download_ownership import DownloadOwnershipWriter
         ctx = _make_ctx(slskd=slskd)
-        ctx.download_ownership = DownloadOwnershipWriter(db_factory=lambda: db)
+        rebind_collaborators(
+            ctx,
+            download_ownership=DownloadOwnershipWriter(db_factory=lambda: db),
+        )
         return ctx
 
     def test_ledger_insert_precedes_the_post(self):
@@ -6336,8 +6360,11 @@ class TestPollActiveDownloads(unittest.TestCase):
             filename="user1\\Music\\01.flac")])
         fake_db.confirm_transfer_enqueue(
             "user1", "user1\\Music\\01.flac", request_id=1)
-        ctx.download_ownership = DownloadOwnershipWriter(
-            db_factory=lambda: fake_db, close_after_use=False)
+        rebind_collaborators(
+            ctx,
+            download_ownership=DownloadOwnershipWriter(
+            db_factory=lambda: fake_db, close_after_use=False),
+        )
 
         poll_active_downloads(ctx)
 

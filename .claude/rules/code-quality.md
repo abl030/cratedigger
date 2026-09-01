@@ -1059,6 +1059,8 @@ Always use these instead of inventing parallel scaffolding:
 - `make_download_file(...)` — real `DownloadFile` (not MagicMock)
 - `make_grab_list_entry(...)` — real `GrabListEntry`
 - `make_ctx_with_fake_db(fake_db)` — `CratediggerContext` wired to a fake
+- `make_cycle_collaborators(...)` / `make_worker_collaborators(...)` — the two `lib/context.py` collaborator worlds with test defaults (#1313). The production types require ALL their fields (a construction site cannot forget one; that requiredness replaced the hand-registered construction audit), so the defaults live here: a test says "I don't care about this collaborator" by omitting it, while production must name every one. Build a context as `CratediggerContext(collaborators=make_cycle_collaborators(...), <scratch kwargs>)`
+- `rebind_collaborators(ctx, *, download_ownership=..., ...)` — swap one collaborator on an existing context. `ctx.download_ownership = w` no longer works (the value is frozen); this is the test-only replacement, and there is deliberately no production equivalent
 - `make_web_runtime(base=None, *, db=None, beets=None)` — the one place a `FakePipelineDB`/`FakeBeetsDB` is placed into `web/runtime.py::WebRuntime`'s production-typed handle fields (#1313). Two scoped `pyright: ignore`s mark that gap; everything else about a runtime is varied with plain `dataclasses.replace`, which Pyright does NOT check (measured against pyright 1.1.412: it rejects neither an unknown field name nor a wrong-typed value), so the checked surfaces are constructor calls and attribute access
 - plus the slskd envelope/event builders, `make_candidate_summary`,
   `delete_all_rows`/`REQUEST_CASCADE_RESET_TABLES`, `make_socket_file`,

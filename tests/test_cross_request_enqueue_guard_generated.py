@@ -82,7 +82,11 @@ from lib.grab_list import DownloadFile, GrabListEntry
 from lib.pipeline_db import TransferLedgerRow
 from lib.processing_paths import attempt_fingerprint
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_ctx_with_fake_db, make_request_row
+from tests.helpers import (
+    make_ctx_with_fake_db,
+    make_request_row,
+    rebind_collaborators,
+)
 
 _USERNAMES = ("peer0", "peer1")
 _FILENAMES = ("a.flac", "b.flac", "c.flac")
@@ -218,13 +222,16 @@ def _run_world(world: GuardWorld) -> dict[tuple[int, int], bool]:
     db = FakePipelineDB()
     writer = DownloadOwnershipWriter(db_factory=lambda: db)
     ctx = make_ctx_with_fake_db(db)
-    ctx.download_ownership = writer
+    rebind_collaborators(ctx, download_ownership=writer)
 
     proceeded: dict[tuple[int, int], bool] = {}
     ordinal = [0]
     seen_request_ids: set[int] = set()
     for cycle_idx, cycle in enumerate(world.cycles):
-        ctx.claimed_queue_keys_registry = ClaimedQueueKeysRegistry()
+        rebind_collaborators(
+            ctx,
+            claimed_queue_keys_registry=ClaimedQueueKeysRegistry(),
+        )
         for attempt in cycle.attempts:
             if attempt.request_id not in seen_request_ids:
                 # Seed ONLY on first appearance. A retry (a request_id

@@ -551,9 +551,16 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # test_search_exec.py pins the shared ``submit_search_with_retry``
     # policy shape ``_submit_plan_search``'s own policy construction
     # depends on.
+    # ``tests.test_cycle_startup`` closes a second, adjacent gap found by
+    # #1313: the startup/cycle hand-off (``run_startup_and_cycle``,
+    # ``build_cycle_collaborators``, ``_run_phase1``) had NO selected
+    # behavior module at all, because the claims about it lived in
+    # ``tests/test_convergence_runner_generated.py`` and nothing mapped
+    # cratedigger.py to it.
     "cratedigger.py": (
         "tests.test_slskd_searches",
         "tests.test_search_exec",
+        "tests.test_cycle_startup",
     ),
     # lib/dispatch/entry_points.py lives under lib/ so
     # _direct_test_candidates fires, but it only ever probes

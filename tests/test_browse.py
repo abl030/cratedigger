@@ -36,6 +36,10 @@ from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.peer_cache import PeerCache
 from tests.fakes import FakeSlskdAPI
+from tests.helpers import (
+    make_cycle_collaborators,
+    rebind_collaborators,
+)
 from tests.test_peer_cache import FakeRedis
 
 
@@ -56,9 +60,11 @@ def _filter_cfg() -> CratediggerConfig:
 def _make_ctx(slskd: Any) -> CratediggerContext:
     """Minimal context wired to a slskd fake — only fields the fan-out reads."""
     return CratediggerContext(
-        cfg=MagicMock(),
-        slskd=slskd,
-        pipeline_db_source=MagicMock(),
+        collaborators=make_cycle_collaborators(
+            cfg=MagicMock(),
+            slskd=slskd,
+            pipeline_db_source=MagicMock(),
+        ),
     )
 
 
@@ -296,7 +302,7 @@ class TestFanoutBrowseHappyPath(unittest.TestCase):
         peer_cache.set_directory("user1", "A", directory)
 
         ctx = _make_ctx(slskd)
-        ctx.peer_cache = peer_cache
+        rebind_collaborators(ctx, peer_cache=peer_cache)
         result = _fanout_browse_users([("user1", "A")], slskd, ctx, max_workers=4)
 
         self.assertEqual(slskd.users.directory_calls, [])
@@ -313,7 +319,7 @@ class TestFanoutBrowseHappyPath(unittest.TestCase):
         peer_cache.set_negative("user1", "A")
 
         ctx = _make_ctx(slskd)
-        ctx.peer_cache = peer_cache
+        rebind_collaborators(ctx, peer_cache=peer_cache)
         result = _fanout_browse_users([("user1", "A")], slskd, ctx, max_workers=4)
 
         self.assertEqual(slskd.users.directory_calls, [])
@@ -329,7 +335,7 @@ class TestFanoutBrowseHappyPath(unittest.TestCase):
         peer_cache = PeerCache(redis, ttl_seconds=60, speed_ttl_seconds=10)
 
         ctx = _make_ctx(slskd)
-        ctx.peer_cache = peer_cache
+        rebind_collaborators(ctx, peer_cache=peer_cache)
         result = _fanout_browse_users([("user1", "A")], slskd, ctx, max_workers=4)
 
         self.assertEqual(result.browse_attempts, 1)
@@ -343,7 +349,7 @@ class TestFanoutBrowseHappyPath(unittest.TestCase):
         peer_cache = PeerCache(redis, ttl_seconds=60, speed_ttl_seconds=10)
 
         ctx = _make_ctx(slskd)
-        ctx.peer_cache = peer_cache
+        rebind_collaborators(ctx, peer_cache=peer_cache)
         result = _fanout_browse_users([("user1", "A")], slskd, ctx, max_workers=4)
 
         self.assertEqual(result.browse_attempts, 1)

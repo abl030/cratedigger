@@ -29,6 +29,10 @@ from lib.matching import (
 from lib.peer_cache import PeerCache
 from lib.quality import CandidateScore
 from tests.fakes import FakePipelineDBSource, FakeSlskdAPI
+from tests.helpers import (
+    make_cycle_collaborators,
+    rebind_collaborators,
+)
 from tests.test_peer_cache import FakeRedis
 
 # ---------------------------------------------------------------------------
@@ -74,9 +78,11 @@ def _make_ctx(
     album_artist: str = "Test Artist",
 ) -> CratediggerContext:
     ctx = CratediggerContext(
-        cfg=cfg,
-        slskd=FakeSlskdAPI(),
-        pipeline_db_source=FakePipelineDBSource(),
+        collaborators=make_cycle_collaborators(
+            cfg=cfg,
+            slskd=FakeSlskdAPI(),
+            pipeline_db_source=FakePipelineDBSource(),
+        ),
     )
     ctx.current_album_cache[album_id] = _make_album(album_title, album_artist)
     return ctx
@@ -543,7 +549,7 @@ class TestCheckForMatchCandidateAccumulation(unittest.TestCase):
         redis = FakeRedis()
         peer_cache = PeerCache(redis, ttl_seconds=60, speed_ttl_seconds=10)
         peer_cache.set_negative(self.username, "dirA")
-        self.ctx.peer_cache = peer_cache
+        rebind_collaborators(self.ctx, peer_cache=peer_cache)
 
         result = check_for_match(
             self.tracks, "flac", ["dirA"], self.username, self.ctx,
@@ -560,7 +566,7 @@ class TestCheckForMatchCandidateAccumulation(unittest.TestCase):
         redis = FakeRedis()
         peer_cache = PeerCache(redis, ttl_seconds=60, speed_ttl_seconds=10)
         peer_cache.set_negative(self.username, "dirA")
-        self.ctx.peer_cache = peer_cache
+        rebind_collaborators(self.ctx, peer_cache=peer_cache)
         self.ctx.peer_cache_negative_skips.add((self.username, "dirA"))
 
         result = check_for_match(

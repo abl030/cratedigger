@@ -16,13 +16,17 @@ from unittest.mock import MagicMock
 
 from lib.context import CratediggerContext
 from lib.cycle_summary import format_cycle_summary
+from tests.helpers import make_cycle_collaborators
 
 
 class TestContextCounterDefault(unittest.TestCase):
 
     def test_default_zero(self):
         ctx = CratediggerContext(
-            cfg=MagicMock(), slskd=MagicMock(), pipeline_db_source=MagicMock(),
+            collaborators=make_cycle_collaborators(
+                cfg=MagicMock(),
+                pipeline_db_source=MagicMock(),
+            ),
         )
         self.assertEqual(ctx.cycle_searches_watchdog_killed, 0)
 
@@ -35,7 +39,10 @@ class TestCycleSummaryWatchdogField(unittest.TestCase):
 
     def _ctx(self, **fields) -> CratediggerContext:
         ctx = CratediggerContext(
-            cfg=MagicMock(), slskd=MagicMock(), pipeline_db_source=MagicMock(),
+            collaborators=make_cycle_collaborators(
+                cfg=MagicMock(),
+                pipeline_db_source=MagicMock(),
+            ),
         )
         for k, v in fields.items():
             setattr(ctx, k, v)
@@ -63,7 +70,10 @@ class TestLogSearchResultIncrementsCounter(unittest.TestCase):
         # Bare MagicMock() already provides this — every attribute access
         # auto-vivifies — so no explicit setup is needed.
         return CratediggerContext(
-            cfg=MagicMock(), slskd=MagicMock(), pipeline_db_source=MagicMock(),
+            collaborators=make_cycle_collaborators(
+                cfg=MagicMock(),
+                pipeline_db_source=MagicMock(),
+            ),
         )
 
     def _result(self, *, watchdog_fired: bool, outcome: str = "no_results"):
@@ -130,7 +140,10 @@ class TestRemovedFieldsAreGone(unittest.TestCase):
 
     def test_context_does_not_have_cycle_deadline(self):
         ctx = CratediggerContext(
-            cfg=MagicMock(), slskd=MagicMock(), pipeline_db_source=MagicMock(),
+            collaborators=make_cycle_collaborators(
+                cfg=MagicMock(),
+                pipeline_db_source=MagicMock(),
+            ),
         )
         self.assertFalse(hasattr(ctx, "cycle_deadline"))
         self.assertFalse(hasattr(ctx, "cycle_deadline_skipped"))
