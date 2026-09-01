@@ -20,6 +20,23 @@ import os
 import subprocess
 
 
+def _synth_timeout_seconds(duration: int) -> int:
+    """Wall-clock budget for one sox synthesis of ``duration`` seconds.
+
+    sox's cost is linear in the duration asked for, so a FLAT budget is
+    only right at one duration. The 30 s constant this replaced was sized
+    for the 5 s default and left the one 800 s caller 3.5x headroom
+    (measured idle on doc1: `make_test_flac(800)` takes 8.54 s, 0.011 s
+    per synthesised second) — thin enough that a loaded gate host ate it,
+    and `tests.test_conversion_e2e` flaked. The slope is per-generator,
+    and this budget is sized for the expensive one: `make_long_test_flac`
+    runs at 0.001 s per second, so it gets 10x more room than it needs.
+    That is fine. The budget is a wedge detector, not a performance
+    assertion.
+    """
+    return 30 + duration // 2
+
+
 def make_test_flac(path: str, cutoff_hz: int = 15500, duration: int = 5) -> None:
     """Generate a single FLAC file with predictable V0 bitrate.
 
@@ -36,7 +53,34 @@ def make_test_flac(path: str, cutoff_hz: int = 15500, duration: int = 5) -> None
         "vol", "0.4", "tremolo", "5", "40",
         "sinc", f"-{cutoff_hz}",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
+    _run_sox(cmd, path, duration)
+
+
+def make_long_test_flac(path: str, duration: int) -> None:
+    """Generate a FLAC whose only contract is the duration ffprobe reads.
+
+    ``make_test_flac``'s five oscillators, tremolo and sinc filter exist
+    for its V0-bitrate contract, and a long one is expensive: 800 s cost
+    8.54 s and 91.9 MB, paid into the shared test tmpfs whose exhaustion
+    is its own recurring incident class (#1111, #1214). A caller that only
+    needs a long container — the conversion-timeout wiring test probes the
+    duration and fakes the conversion itself — gets one here for 0.80 s
+    and 2.5 MB: mono, 8 kHz, one sine. Both figures measured on doc1 at
+    load 2.3. There is NO bitrate contract; use ``make_test_flac`` if you
+    need one.
+    """
+    cmd = [
+        "sox", "-n", "-r", "8000", "-c", "1", "-b", "16", path,
+        "synth", str(duration), "sine", "440",
+    ]
+    _run_sox(cmd, path, duration)
+
+
+def _run_sox(cmd: list[str], path: str, duration: int) -> None:
+    result = subprocess.run(
+        cmd, capture_output=True, text=True,
+        timeout=_synth_timeout_seconds(duration), check=False,
+    )
     if result.returncode != 0:
         raise RuntimeError(f"sox failed: {result.stderr}")
     if not os.path.exists(path):
