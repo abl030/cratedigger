@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.phase_parsers import python_tests
 from scripts.run_test_suite import PhaseSpec, _default_phases, run_suite
 from scripts.targeted_test_selection import (
     changed_paths_from_git,
@@ -36,7 +37,7 @@ def targeted_phases(selectors: Sequence[str]) -> tuple[PhaseSpec, ...]:
             "python",
             python_command,
             shlex.join(python_command),
-            "python",
+            python_tests.parse_failures,
         ),
     )
 

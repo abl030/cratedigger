@@ -18,6 +18,19 @@ from unittest import mock
 
 import msgspec
 
+from scripts.phase_parsers import (
+    PhaseFailures,
+    PhaseLog,
+    dead_code,
+    js_checks,
+    pyright_checks,
+    python_tests,
+    ruff,
+)
+from scripts.phase_parsers.python_tests import (
+    FAILURE_MARKER_PREFIX,
+    CheckFailureMarker,
+)
 from scripts.run_python_tests import (
     TEST_HOST_MEMORY_EXHAUSTED,
     TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE,
@@ -25,15 +38,10 @@ from scripts.run_python_tests import (
 )
 from scripts.run_targeted_tests import targeted_phases
 from scripts.run_test_suite import (
-    FAILURE_MARKER_PREFIX,
-    CheckFailure,
-    CheckFailureMarker,
     CheckSummary,
-    ParserKind,
     PhaseSpec,
     _active_processes_lock,
     _default_phases,
-    _parse_failures,
     dirty_state_fingerprint,
     run_suite,
 )
@@ -105,6 +113,16 @@ def _marker_wait_then_guarded_sigterm_source(marker: Path) -> str:
     )
 
 
+def _no_dialect(_log: PhaseLog) -> PhaseFailures:
+    """A fixture phase whose exit code is the whole verdict.
+
+    Test-local on purpose. No production phase names a parser that reads
+    nothing, so a shared one would be a `scripts/` function only tests
+    reach — which is what the vulture sweep says about it, correctly.
+    """
+    return PhaseFailures()
+
+
 class SuiteCoordinatorTestCase(unittest.TestCase):
     def setUp(self) -> None:
         shared = Path(
@@ -156,7 +174,9 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         self,
     ) -> None:
         pyright_phases = tuple(
-            phase for phase in _default_phases() if phase.parser == "pyright"
+            phase
+            for phase in _default_phases()
+            if phase.parser is pyright_checks.parse_failures
         )
 
         self.assertEqual(tuple(phase.name for phase in pyright_phases), ("pyright",))
@@ -190,7 +210,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         command = "python3 scripts/run_targeted_tests.py tests.test_alpha"
 
         result, _output = self._run(
-            (PhaseSpec("alpha", _python_command("ok", 0), "alpha", "generic"),),
+            (PhaseSpec("alpha", _python_command("ok", 0), "alpha", _no_dialect),),
             command=command,
         )
 
@@ -214,7 +234,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     "CRATEDIGGER_JS_FAILURE\tweb/js/bad.js\tSyntaxError", 1
                 ),
                 "bash scripts/run_js_checks.sh syntax",
-                "js-syntax",
+                js_checks.parse_syntax_failures,
             ),
             PhaseSpec(
                 "js-unit",
@@ -223,7 +243,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     1,
                 ),
                 "bash scripts/run_js_checks.sh unit",
-                "js-unit",
+                js_checks.parse_unit_failures,
             ),
             PhaseSpec(
                 "pyright",
@@ -233,7 +253,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     1,
                 ),
                 "python3 scripts/run_pyright_checks.py",
-                "pyright",
+                pyright_checks.parse_failures,
             ),
             PhaseSpec(
                 "ruff",
@@ -243,7 +263,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     1,
                 ),
                 "bash scripts/run_ruff.sh",
-                "ruff",
+                ruff.parse_failures,
             ),
             PhaseSpec(
                 "vulture",
@@ -252,14 +272,14 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     3,
                 ),
                 "bash scripts/find_dead_code.sh",
-                "vulture",
+                dead_code.parse_failures,
                 (3,),
             ),
             PhaseSpec(
                 "python",
                 _python_command(f"{FAILURE_MARKER_PREFIX}{python_marker}", 1),
                 "python3 scripts/run_python_tests.py",
-                "python",
+                python_tests.parse_failures,
             ),
         )
 
@@ -313,13 +333,13 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                 "missing",
                 ("/definitely/missing/cratedigger-check",),
                 "missing-check",
-                "generic",
+                _no_dialect,
             ),
             PhaseSpec(
                 "later",
                 _python_command("later phase ran", 0),
                 "later-check",
-                "generic",
+                _no_dialect,
             ),
         )
 
@@ -363,13 +383,13 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     ),
                 ),
                 "interrupting-check",
-                "generic",
+                _no_dialect,
             ),
             PhaseSpec(
                 "must-not-run",
                 _python_command("wrong", 0),
                 "must-not-run",
-                "generic",
+                _no_dialect,
             ),
         )
 
@@ -416,7 +436,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                 "js-syntax",
                 (sys.executable, "-c", poll_script),
                 "leading-check",
-                "generic",
+                _no_dialect,
             ),
             PhaseSpec(
                 "python",
@@ -426,7 +446,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     f"import pathlib; pathlib.Path({str(marker)!r}).touch()",
                 ),
                 "python3 scripts/run_python_tests.py",
-                "python",
+                python_tests.parse_failures,
             ),
         )
 
@@ -481,7 +501,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     ),
                 ),
                 "leading-check",
-                "generic",
+                _no_dialect,
             ),
             PhaseSpec(
                 "js-unit",
@@ -491,7 +511,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     f"import pathlib; pathlib.Path({str(js_unit_sentinel)!r}).touch()",
                 ),
                 "js-unit-check",
-                "generic",
+                _no_dialect,
             ),
             PhaseSpec(
                 "python",
@@ -501,7 +521,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     _marker_wait_then_guarded_sigterm_source(leading_marker),
                 ),
                 "python3 scripts/run_python_tests.py",
-                "python",
+                python_tests.parse_failures,
             ),
         )
 
@@ -591,13 +611,13 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                 "js-syntax",
                 _python_command("ok", 0),
                 "leading-check",
-                "generic",
+                _no_dialect,
             ),
             PhaseSpec(
                 "python",
                 _python_command("ok", 0),
                 "python3 scripts/run_python_tests.py",
-                "python",
+                python_tests.parse_failures,
             ),
         )
         with mock.patch.object(
@@ -653,7 +673,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     "pass",
                     _python_command("ok", 0),
                     "pass-check",
-                    "generic",
+                    _no_dialect,
                 ),
             )
         )
@@ -677,7 +697,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     1,
                 ),
                 "python3 scripts/run_python_tests.py",
-                "python",
+                python_tests.parse_failures,
             ),
         )
 
@@ -704,7 +724,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                             "must-not-run",
                             _python_command("wrong", 0),
                             "must-not-run",
-                            "generic",
+                            _no_dialect,
                         ),
                     ),
                     runtime_dir=runtime,
@@ -759,7 +779,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     3,
                 ),
                 "bash scripts/find_dead_code.sh",
-                "vulture",
+                dead_code.parse_failures,
                 (3,),
             ),
         )
@@ -829,7 +849,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
                 ),
                 "python3 scripts/run_python_tests.py",
-                "python",
+                python_tests.parse_failures,
             ),
         )
 
@@ -911,7 +931,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE,
                 ),
                 "python3 scripts/run_python_tests.py",
-                "python",
+                python_tests.parse_failures,
             ),
         )
 
@@ -2239,7 +2259,7 @@ class FinalGateReceiptRetirementTestCase(unittest.TestCase):
 
         phases = (
             PhaseSpec(
-                "must-not-run", (sys.executable, "-c", "pass"), "n", "generic"
+                "must-not-run", (sys.executable, "-c", "pass"), "n", _no_dialect
             ),
         )
         stream = io.StringIO()
@@ -2290,7 +2310,7 @@ class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
                     f"open({str(sentinel)!r}, 'w').close()",
                 ),
                 "must-not-run",
-                "generic",
+                _no_dialect,
             ),
         )
         stream = io.StringIO()
@@ -2806,109 +2826,6 @@ class JsCheckHelperTestCase(unittest.TestCase):
         self.assertEqual(result.stdout.count("CRATEDIGGER_JS_FAILURE"), 2)
         self.assertIn("tests/test_js_a.mjs::sec::one", result.stdout)
         self.assertIn("suite exited before reaching", result.stdout)
-
-
-class TestJavaScriptFailureIdentityIsPerAssertion(unittest.TestCase):
-    """A per-assertion identity still yields a runnable per-FILE rerun.
-
-    `tests/js_harness.mjs` names one failed assertion per marker, as
-    `<file>::<section>::<message>`. `_parse_failures` therefore takes the
-    owner and the rerun command from the file half -- the index entry stays
-    specific while `node <owner>` stays something you can actually paste.
-    """
-
-    def _failures(
-        self, parser: ParserKind, marker: str
-    ) -> tuple[CheckFailure, ...]:
-        with tempfile.TemporaryDirectory() as tmp:
-            log = Path(tmp) / "phase.log"
-            log.write_text(marker + "\n", encoding="utf-8")
-            phase = PhaseSpec(
-                parser,
-                ("true",),
-                f"bash scripts/run_js_checks.sh {parser}",
-                parser,
-            )
-            failures, _metrics = _parse_failures(phase, log)
-        return failures
-
-    def test_owner_and_rerun_come_from_the_file_half_of_the_identity(
-        self,
-    ) -> None:
-        (failure,) = self._failures(
-            "js-unit",
-            "CRATEDIGGER_JS_FAILURE\t"
-            "tests/test_js_recents.mjs::renderRecents()::badge is escaped\t"
-            "expected 'a', got 'b'",
-        )
-
-        self.assertEqual(
-            failure.identity,
-            "tests/test_js_recents.mjs::renderRecents()::badge is escaped",
-        )
-        self.assertEqual(failure.owner, "tests/test_js_recents.mjs")
-        self.assertEqual(
-            failure.rerun_command, "node tests/test_js_recents.mjs"
-        )
-        self.assertEqual(failure.detail, "expected 'a', got 'b'")
-
-    def test_two_assertions_in_one_file_are_two_distinct_index_entries(
-        self,
-    ) -> None:
-        first, second = self._failures(
-            "js-unit",
-            "CRATEDIGGER_JS_FAILURE\ttests/test_js_a.mjs::s::one\tboom\n"
-            "CRATEDIGGER_JS_FAILURE\ttests/test_js_a.mjs::s::two\tbang",
-        )
-
-        self.assertNotEqual(first.identity, second.identity)
-        self.assertEqual(first.owner, second.owner)
-        self.assertEqual(first.rerun_command, second.rerun_command)
-
-    def test_a_marker_with_too_few_fields_is_refused_not_guessed(self) -> None:
-        """A short marker is a broken tool, not a failure to half-read.
-
-        `_parse_failures` raises rather than unpacking whatever it got, and
-        the suite turns that into an infrastructure-failure -- the honest
-        label. Nothing constrained either the refusal or the split's field
-        bound before (independent review, mutants C1 and C2).
-        """
-        with self.assertRaises(ValueError) as caught:
-            self._failures(
-                "js-unit", "CRATEDIGGER_JS_FAILURE\tonly-two-fields"
-            )
-        self.assertIn("malformed JavaScript failure marker", str(caught.exception))
-
-    def test_a_tab_inside_the_detail_stays_in_the_detail(self) -> None:
-        """The split stops at three fields, so field three keeps its tabs.
-
-        The harness collapses tabs before writing, but the bound is what
-        makes a fourth field impossible: widening it would drop everything
-        after a stray tab instead of keeping it as detail.
-        """
-        (failure,) = self._failures(
-            "js-unit",
-            "CRATEDIGGER_JS_FAILURE\ttests/test_js_a.mjs::s::one\t"
-            "left\tright",
-        )
-
-        self.assertEqual(failure.identity, "tests/test_js_a.mjs::s::one")
-        self.assertEqual(failure.detail, "left\tright")
-
-    def test_a_syntax_marker_carries_a_bare_path_and_is_unaffected(
-        self,
-    ) -> None:
-        (failure,) = self._failures(
-            "js-syntax",
-            "CRATEDIGGER_JS_FAILURE\tweb/js/bad.js\tnode --check failed",
-        )
-
-        self.assertEqual(failure.identity, "web/js/bad.js")
-        self.assertEqual(failure.owner, "web/js/bad.js")
-        self.assertEqual(
-            failure.rerun_command,
-            "node --check --input-type=module < web/js/bad.js",
-        )
 
 
 class TestCoordinatorRunsAsAScript(unittest.TestCase):

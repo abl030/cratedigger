@@ -6,8 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
-import re
-import shlex
 import signal
 import subprocess
 import sys
@@ -26,6 +24,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.phase_parsers import (
+    PARSER_ERRORS,
+    CheckFailure,
+    PhaseFailureParser,
+    PhaseFailures,
+    PhaseLog,
+    dead_code,
+    indexed_failure,
+    js_checks,
+    pyright_checks,
+    python_tests,
+    ruff,
+)
 from scripts.test_substrate import (
     BUNDLE_ANNOUNCEMENT_PREFIX,
     CANONICAL_COMMAND,
@@ -45,18 +56,6 @@ from scripts.test_substrate import (
 
 SCHEMA_VERSION = 1
 RUNNER_VERSION = "1"
-FAILURE_MARKER_PREFIX = "CRATEDIGGER_CHECK_FAILURE "
-METRICS_MARKER_PREFIX = "CRATEDIGGER_CHECK_METRICS "
-
-ParserKind = Literal[
-    "generic",
-    "js-syntax",
-    "js-unit",
-    "pyright",
-    "ruff",
-    "vulture",
-    "python",
-]
 PhaseState = Literal[
     "not-run",
     "running",
@@ -81,7 +80,9 @@ class PhaseSpec:
     name: str
     command: tuple[str, ...]
     rerun_command: str
-    parser: ParserKind
+    #: Reads this phase's log. Named per phase so the coordinator never
+    #: learns a tool's output format; see `scripts/phase_parsers/`.
+    parser: PhaseFailureParser
     failure_exit_codes: tuple[int, ...] = (1,)
 
 
@@ -92,34 +93,6 @@ class PhaseExecution:
     exit_code: int
     elapsed_seconds: float
     infrastructure_error: str | None = None
-
-
-class CheckFailureMarker(msgspec.Struct, frozen=True):
-    """Structured failure marker emitted by the Python test scheduler."""
-
-    identity: str
-    owner: str
-    detail: str
-    test_ids: tuple[str, ...] = ()
-
-
-class CheckMetricsMarker(msgspec.Struct, frozen=True):
-    """Structured completion metrics emitted by a validation phase."""
-
-    tests_run: int = 0
-    targets_run: int = 0
-    scheduled_targets: int = 0
-
-
-class CheckFailure(msgspec.Struct, frozen=True):
-    """One compact failure-index entry linking to complete evidence."""
-
-    identity: str
-    owner: str
-    detail: str
-    rerun_command: str
-    log: str
-    test_ids: tuple[str, ...] = ()
 
 
 class CheckPhase(msgspec.Struct, frozen=True):
@@ -331,43 +304,44 @@ def _publish_summary(bundle: Path, summary: CheckSummary) -> None:
 
 
 def _default_phases() -> tuple[PhaseSpec, ...]:
+    """The canonical suite: a command, and who reads what it writes."""
     return (
         PhaseSpec(
             "js-syntax",
             ("bash", "scripts/run_js_checks.sh", "syntax"),
             "bash scripts/run_js_checks.sh syntax",
-            "js-syntax",
+            js_checks.parse_syntax_failures,
         ),
         PhaseSpec(
             "js-unit",
             ("bash", "scripts/run_js_checks.sh", "unit"),
             "bash scripts/run_js_checks.sh unit",
-            "js-unit",
+            js_checks.parse_unit_failures,
         ),
         PhaseSpec(
             "pyright",
             ("python3", "scripts/run_pyright_checks.py"),
             "python3 scripts/run_pyright_checks.py",
-            "pyright",
+            pyright_checks.parse_failures,
         ),
         PhaseSpec(
             "ruff",
             ("bash", "scripts/run_ruff.sh"),
             "bash scripts/run_ruff.sh",
-            "ruff",
+            ruff.parse_failures,
         ),
         PhaseSpec(
             "vulture",
             ("bash", "scripts/find_dead_code.sh"),
             "bash scripts/find_dead_code.sh",
-            "vulture",
+            dead_code.parse_failures,
             (3,),
         ),
         PhaseSpec(
             "python",
             ("python3", "scripts/run_python_tests.py"),
             "python3 scripts/run_python_tests.py",
-            "python",
+            python_tests.parse_failures,
         ),
     )
 
@@ -421,191 +395,6 @@ def execute_phase(
             infrastructure_error=f"phase terminated by signal {signum}",
         )
     return PhaseExecution(exit_code=exit_code, elapsed_seconds=elapsed)
-
-
-_PYRIGHT = re.compile(
-    r"^(?P<owner>.+?):(?P<line>\d+):(?P<column>\d+) - error: (?P<detail>.+)$"
-)
-_RUFF = re.compile(
-    r"^(?P<owner>.+?):(?P<line>\d+):(?P<column>\d+): "
-    r"(?P<code>[A-Z]+\d+) (?P<detail>.+)$"
-)
-_RUFF_FULL_HEADER = re.compile(r"^(?P<code>[A-Z]+\d+) (?P<detail>.+)$")
-_RUFF_FULL_LOCATION = re.compile(
-    r"^\s*-->\s*(?P<owner>.+?):(?P<line>\d+):(?P<column>\d+)$"
-)
-_VULTURE = re.compile(
-    r"^(?P<owner>.+?):(?P<line>\d+): (?P<detail>.+? \(\d+% confidence\))$"
-)
-_VULTURE_FRESHNESS = re.compile(
-    r"^\+(?P<identity>\S+)\s+# (?P<detail>unused .+?) "
-    r"\((?P<owner>[^:]+):(?P<line>\d+)\)$"
-)
-
-
-def _indexed_failure(
-    *,
-    identity: str,
-    owner: str,
-    detail: str,
-    rerun_command: str,
-    log: str,
-    test_ids: tuple[str, ...] = (),
-) -> CheckFailure:
-    return CheckFailure(
-        identity=identity,
-        owner=owner,
-        detail=detail,
-        rerun_command=rerun_command,
-        log=log,
-        test_ids=test_ids,
-    )
-
-
-def _parse_failures(
-    phase: PhaseSpec,
-    log_path: Path,
-) -> tuple[tuple[CheckFailure, ...], CheckMetricsMarker]:
-    output = log_path.read_text(encoding="utf-8", errors="replace")
-    failures: list[CheckFailure] = []
-    metrics = CheckMetricsMarker()
-    pending_ruff: tuple[str, str] | None = None
-    for line in output.splitlines():
-        if phase.parser in {"js-syntax", "js-unit"} and line.startswith(
-            "CRATEDIGGER_JS_FAILURE\t"
-        ):
-            fields = line.split("\t", 2)
-            if len(fields) != 3:
-                raise ValueError(f"malformed JavaScript failure marker: {line}")
-            identity, detail = fields[1:]
-            # `tests/js_harness.mjs` names one FAILED ASSERTION per marker,
-            # as `<file>::<section>::<message>`; the file is everything
-            # before the first `::`. Owner and rerun therefore stay the
-            # runnable suite while the index entry stays per-assertion.
-            # A `js-syntax` marker carries a bare path and is unaffected.
-            owner = identity.split("::", 1)[0]
-            rerun = (
-                "node --check --input-type=module "
-                f"< {shlex.quote(owner)}"
-                if phase.parser == "js-syntax"
-                else f"node {shlex.quote(owner)}"
-            )
-            failures.append(
-                _indexed_failure(
-                    identity=identity,
-                    owner=owner,
-                    detail=detail,
-                    rerun_command=rerun,
-                    log=log_path.name,
-                )
-            )
-            continue
-        if phase.parser == "pyright" and (match := _PYRIGHT.match(line)):
-            owner = match.group("owner").strip()
-            failures.append(
-                _indexed_failure(
-                    identity=(
-                        f"{owner}:{match.group('line')}:{match.group('column')}"
-                    ),
-                    owner=owner,
-                    detail=match.group("detail"),
-                    rerun_command=phase.rerun_command,
-                    log=log_path.name,
-                )
-            )
-            continue
-        if phase.parser == "ruff" and (match := _RUFF.match(line)):
-            owner = match.group("owner").strip()
-            failures.append(
-                _indexed_failure(
-                    identity=(
-                        f"{owner}:{match.group('line')}:{match.group('column')}"
-                    ),
-                    owner=owner,
-                    detail=f"{match.group('code')} {match.group('detail')}",
-                    rerun_command=f"bash scripts/run_ruff.sh {shlex.quote(owner)}",
-                    log=log_path.name,
-                )
-            )
-            continue
-        if phase.parser == "ruff" and (match := _RUFF_FULL_HEADER.match(line)):
-            pending_ruff = (match.group("code"), match.group("detail"))
-            continue
-        if (
-            phase.parser == "ruff"
-            and pending_ruff is not None
-            and (match := _RUFF_FULL_LOCATION.match(line))
-        ):
-            owner = match.group("owner").strip()
-            code, detail = pending_ruff
-            failures.append(
-                _indexed_failure(
-                    identity=(
-                        f"{owner}:{match.group('line')}:{match.group('column')}"
-                    ),
-                    owner=owner,
-                    detail=f"{code} {detail}",
-                    rerun_command=f"bash scripts/run_ruff.sh {shlex.quote(owner)}",
-                    log=log_path.name,
-                )
-            )
-            pending_ruff = None
-            continue
-        if phase.parser == "vulture" and (match := _VULTURE.match(line)):
-            owner = match.group("owner").strip()
-            failures.append(
-                _indexed_failure(
-                    identity=f"{owner}:{match.group('line')}",
-                    owner=owner,
-                    detail=match.group("detail"),
-                    rerun_command=phase.rerun_command,
-                    log=log_path.name,
-                )
-            )
-            continue
-        if phase.parser == "vulture" and (
-            match := _VULTURE_FRESHNESS.match(line)
-        ):
-            owner = match.group("owner").strip()
-            failures.append(
-                _indexed_failure(
-                    identity=f"{owner}:{match.group('line')}",
-                    owner=owner,
-                    detail=(
-                        f"{match.group('identity')}: {match.group('detail')}"
-                    ),
-                    rerun_command=phase.rerun_command,
-                    log=log_path.name,
-                )
-            )
-            continue
-        if phase.parser == "python" and line.startswith(FAILURE_MARKER_PREFIX):
-            marker = msgspec.json.decode(
-                line.removeprefix(FAILURE_MARKER_PREFIX).encode(),
-                type=CheckFailureMarker,
-            )
-            rerun = (
-                "python3 -m unittest " + shlex.join(marker.test_ids)
-                if marker.test_ids
-                else phase.rerun_command
-            )
-            failures.append(
-                _indexed_failure(
-                    identity=marker.identity,
-                    owner=marker.owner,
-                    detail=marker.detail,
-                    rerun_command=rerun,
-                    log=log_path.name,
-                    test_ids=marker.test_ids,
-                )
-            )
-            continue
-        if phase.parser == "python" and line.startswith(METRICS_MARKER_PREFIX):
-            metrics = msgspec.json.decode(
-                line.removeprefix(METRICS_MARKER_PREFIX).encode(),
-                type=CheckMetricsMarker,
-            )
-    return tuple(failures), metrics
 
 
 def _replace_phase(
@@ -810,7 +599,7 @@ def _execute_suite(
         phase_finished = _utc_now()
 
         if interrupted_signal is not None:
-            interrupted_failure = _indexed_failure(
+            interrupted_failure = indexed_failure(
                 identity=spec.name,
                 owner="",
                 detail=f"interrupted by signal {interrupted_signal}",
@@ -836,11 +625,19 @@ def _execute_suite(
 
         parser_error: str | None = None
         try:
-            failures, metrics = _parse_failures(spec, log_path)
-        except (OSError, ValueError, msgspec.DecodeError, msgspec.ValidationError) as exc:
+            parsed = spec.parser(
+                PhaseLog(
+                    text=log_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    ),
+                    log_name=log_path.name,
+                    rerun_command=spec.rerun_command,
+                )
+            )
+        except PARSER_ERRORS as exc:
             parser_error = f"{type(exc).__name__}: {exc}"
-            failures = ()
-            metrics = CheckMetricsMarker()
+            parsed = PhaseFailures()
+        failures = parsed.failures
 
         infrastructure_error = execution.infrastructure_error or parser_error
         if execution.exit_code == 0 and failures:
@@ -862,7 +659,7 @@ def _execute_suite(
                 f"phase failed with exit {execution.exit_code}"
             )
             failures = (
-                _indexed_failure(
+                indexed_failure(
                     identity=spec.name,
                     owner="",
                     detail=detail,
@@ -881,9 +678,9 @@ def _execute_suite(
             elapsed_seconds=execution.elapsed_seconds,
             exit_code=execution.exit_code,
             failures=failures,
-            tests_run=metrics.tests_run,
-            targets_run=metrics.targets_run,
-            scheduled_targets=metrics.scheduled_targets,
+            tests_run=parsed.tests_run,
+            targets_run=parsed.targets_run,
+            scheduled_targets=parsed.scheduled_targets,
         )
         with publish_lock:
             summary = _replace_phase(summary, index, completed_phase)
