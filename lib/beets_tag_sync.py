@@ -45,6 +45,14 @@ Two measured properties of the pinned beets runtime (#1260 review F4/F5):
   corruption. Recorded in ``lib/merge_rekey_service.py``'s witness
   docstring, whose lane enumeration this module extends.
 
+Those three callers reach the lane through exactly TWO entry points, and
+what separates them is which side closes the Beets handle: the route
+(with the CLI relaying it) borrows the server's and must not close it,
+the merge seam opens its own and must. There is deliberately no third.
+An owned-handle album entry existed until #1313 with no production caller
+at all, and that bystander is what this lane's generated property was
+patrolling instead of either real one.
+
 Design, deliberately parallel to ``lib/beets_retag.py``:
 
 * **Compare-and-set, twice.** The service refuses unless the album's DB
@@ -101,7 +109,6 @@ from lib.beets_db import (
 )
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 from lib.retag_divergence_audit import (
-    OwnedSingleAlbumRetagDivergenceBeetsDB,
     RetagDivergenceAlbum,
     SingleAlbumRetagDivergenceBeetsDB,
     _BeetsAuthorityUnavailable,
@@ -202,7 +209,6 @@ class TagSyncLockDB(Protocol):
 #: The Beets read surface is EXACTLY the census's single-album protocol —
 #: this lane verifies through the same instrument the dashboard renders.
 TagSyncBeetsDB = SingleAlbumRetagDivergenceBeetsDB
-OwnedTagSyncBeetsDB = OwnedSingleAlbumRetagDivergenceBeetsDB
 
 
 class ReleaseTagSyncBeetsDB(SingleAlbumRetagDivergenceBeetsDB, Protocol):
@@ -215,7 +221,14 @@ class OwnedReleaseTagSyncBeetsDB(ReleaseTagSyncBeetsDB, Protocol):
     def close(self) -> None: ...
 
 
-type TagSyncBeetsFactory = Callable[[], OwnedTagSyncBeetsDB]
+#: The two factory shapes, one per entry point, and the difference between
+#: them is the whole reason there are two entry points: the borrowed one
+#: takes a handle whose lifecycle belongs to the web server's request
+#: thread and must survive the call, the release one takes a handle it
+#: opened and must close. Protocols are structural, so an owned handle
+#: also satisfies the borrowed shape — the names, not the types, are what
+#: stop a caller leaking one.
+type BorrowedTagSyncBeetsFactory = Callable[[], TagSyncBeetsDB]
 type ReleaseTagSyncBeetsFactory = Callable[[], OwnedReleaseTagSyncBeetsDB]
 
 
@@ -302,9 +315,10 @@ def sync_album_file_tags(
     """Sync exactly one album's file tags from its Beets DB identity.
 
     Pure composition over an already-open ``beets`` handle — no
-    availability mediation here; the ``*_from_factory`` entry points own
-    that, mirroring ``lib/retag_divergence_audit.py``'s split. Beets-read
-    exceptions propagate to those wrappers; ``run_write`` exceptions are
+    availability mediation here, mirroring ``lib/retag_divergence_audit.
+    py``'s split: ``_sync_with_mediated_beets`` types the availability
+    failure and each entry point owns its handle's lifecycle. Beets-read
+    exceptions propagate to that mediator; ``run_write`` exceptions are
     converted to a diagnostic note and never decide anything — the
     post-write re-read of the files does.
     """
@@ -466,6 +480,16 @@ def sync_album_file_tags(
     )
 
 
+def _unavailable_result(
+    category: str, *, album_id: int | None,
+) -> TagSyncResult:
+    return TagSyncResult(
+        outcome=RESULT_BEETS_UNAVAILABLE,
+        album_id=album_id,
+        error_message=f"current Beets authority unavailable ({category})",
+    )
+
+
 def _sync_with_mediated_beets(
     beets: TagSyncBeetsDB,
     lock_db: TagSyncLockDB,
@@ -474,7 +498,15 @@ def _sync_with_mediated_beets(
     expected_mb_albumid: str,
     read_tag: Callable[[str], str],
     run_write: TagSyncWriteFn,
-) -> TagSyncResult | _BeetsAuthorityUnavailable:
+) -> TagSyncResult:
+    """Run the sync over an open handle, typing expected unavailability.
+
+    Both entry points below reach the write through here, so an authority
+    that goes away mid-sync becomes the same typed ``beets_unavailable``
+    on either. That can happen on the POST-write re-read, so unlike every
+    other non-accepting outcome this one does NOT promise the file-tag
+    world was left untouched.
+    """
     from lib.beets_db import beets_authority_availability_category
 
     try:
@@ -489,47 +521,11 @@ def _sync_with_mediated_beets(
         category = beets_authority_availability_category(exc)
         if category is None:
             raise
-        return _BeetsAuthorityUnavailable(category)
-
-
-def _unavailable_result(
-    category: str, *, album_id: int | None,
-) -> TagSyncResult:
-    return TagSyncResult(
-        outcome=RESULT_BEETS_UNAVAILABLE,
-        album_id=album_id,
-        error_message=f"current Beets authority unavailable ({category})",
-    )
-
-
-def sync_album_file_tags_from_factory(
-    beets_factory: TagSyncBeetsFactory,
-    lock_db: TagSyncLockDB,
-    *,
-    album_id: int,
-    expected_mb_albumid: str,
-    read_tag: Callable[[str], str] = read_mb_albumid_tag,
-    run_write: TagSyncWriteFn = run_beets_write_tags,
-) -> TagSyncResult:
-    """Own Beets open/sync/close; type only expected unavailability."""
-    opened = _open_beets_authority(beets_factory)
-    if isinstance(opened, _BeetsAuthorityUnavailable):
-        return _unavailable_result(opened.category, album_id=album_id)
-    with closing(opened):
-        result = _sync_with_mediated_beets(
-            opened, lock_db,
-            album_id=album_id,
-            expected_mb_albumid=expected_mb_albumid,
-            read_tag=read_tag,
-            run_write=run_write,
-        )
-    if isinstance(result, TagSyncResult):
-        return result
-    return _unavailable_result(result.category, album_id=album_id)
+        return _unavailable_result(category, album_id=album_id)
 
 
 def sync_album_file_tags_from_borrowed_factory(
-    beets_factory: Callable[[], TagSyncBeetsDB],
+    beets_factory: BorrowedTagSyncBeetsFactory,
     lock_db: TagSyncLockDB,
     *,
     album_id: int,
@@ -537,20 +533,21 @@ def sync_album_file_tags_from_borrowed_factory(
     read_tag: Callable[[str], str] = read_mb_albumid_tag,
     run_write: TagSyncWriteFn = run_beets_write_tags,
 ) -> TagSyncResult:
-    """Mediate a server-owned Beets handle without closing its lifecycle."""
+    """The dashboard button's entry (``web/routes/retag_divergence_audit.py``,
+    relayed by ``pipeline-cli sync-file-tags``): mediate a server-owned
+    Beets handle without ever closing it — the request thread that lent it
+    keeps using it after this returns.
+    """
     opened = _open_beets_authority(beets_factory)
     if isinstance(opened, _BeetsAuthorityUnavailable):
         return _unavailable_result(opened.category, album_id=album_id)
-    result = _sync_with_mediated_beets(
+    return _sync_with_mediated_beets(
         opened, lock_db,
         album_id=album_id,
         expected_mb_albumid=expected_mb_albumid,
         read_tag=read_tag,
         run_write=run_write,
     )
-    if isinstance(result, TagSyncResult):
-        return result
-    return _unavailable_result(result.category, album_id=album_id)
 
 
 def sync_release_file_tags_from_factory(
@@ -561,10 +558,12 @@ def sync_release_file_tags_from_factory(
     read_tag: Callable[[str], str] = read_mb_albumid_tag,
     run_write: TagSyncWriteFn = run_beets_write_tags,
 ) -> TagSyncResult:
-    """The merge seam's entry: resolve the ONE album currently at
-    ``release_id`` and sync its file tags. Refuses (typed, world
-    untouched) unless Beets resolves exactly one current album there —
-    merging or deleting an ambiguous pair is the operator's call.
+    """The merge seam's entry (``lib/download_validation.py``): resolve the
+    ONE album currently at ``release_id`` and sync its file tags. Refuses
+    (typed, world untouched) unless Beets resolves exactly one current
+    album there — merging or deleting an ambiguous pair is the operator's
+    call. Unlike the borrowed entry above this one OPENED the handle, so
+    every path past the open closes it exactly once.
     """
     from lib.beets_db import beets_authority_availability_category
 
@@ -612,16 +611,13 @@ def sync_release_file_tags_from_factory(
                 ),
             )
         assert isinstance(resolution, CurrentBeetsUnique)
-        result = _sync_with_mediated_beets(
+        return _sync_with_mediated_beets(
             opened, lock_db,
             album_id=resolution.album_id,
             expected_mb_albumid=identity.release_id,
             read_tag=read_tag,
             run_write=run_write,
         )
-    if isinstance(result, TagSyncResult):
-        return result
-    return _unavailable_result(result.category, album_id=resolution.album_id)
 
 
 __all__ = [
@@ -636,19 +632,17 @@ __all__ = [
     "RESULT_SYNCED",
     "TAG_SYNC_HTTP_STATUS",
     "TAG_SYNC_TIMEOUT_SECONDS",
+    "BorrowedTagSyncBeetsFactory",
     "OwnedReleaseTagSyncBeetsDB",
-    "OwnedTagSyncBeetsDB",
     "ReleaseTagSyncBeetsDB",
     "ReleaseTagSyncBeetsFactory",
     "TagSyncBeetsDB",
-    "TagSyncBeetsFactory",
     "TagSyncLockDB",
     "TagSyncResult",
     "TagSyncWriteFn",
     "run_beets_write_tags",
     "sync_album_file_tags",
     "sync_album_file_tags_from_borrowed_factory",
-    "sync_album_file_tags_from_factory",
     "sync_release_file_tags_from_factory",
     "tag_sync_query",
 ]

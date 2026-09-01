@@ -33,6 +33,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import sqlite3
 import subprocess as sp
 import tempfile
 import unittest
@@ -60,10 +61,10 @@ from lib.beets_tag_sync import (
     RESULT_RESIDUAL_DIVERGENCE,
     RESULT_SYNCED,
     TAG_SYNC_HTTP_STATUS,
+    TAG_SYNC_TIMEOUT_SECONDS,
     TagSyncResult,
     run_beets_write_tags,
     sync_album_file_tags_from_borrowed_factory,
-    sync_album_file_tags_from_factory,
     sync_release_file_tags_from_factory,
     tag_sync_query,
 )
@@ -92,6 +93,28 @@ def _silence_logs() -> Generator[None]:
         logging.disable(previous)
 
 
+def real_beets_authority_failure() -> sqlite3.DatabaseError:
+    """The exception a Beets read raises when the library goes away.
+
+    Produced by a real ``sqlite3`` call rather than hand-typed, so it
+    carries the ``sqlite_errorcode`` that
+    ``beets_authority_availability_category`` actually classifies (Rule B
+    /Rule C). Asserted here rather than trusted: a stand-in that failed to
+    classify would send the caller down the re-raise arm and every test
+    built on it would be describing a world production never has.
+    """
+    from lib.beets_db import beets_authority_availability_category
+
+    try:
+        sqlite3.connect("/nonexistent-cratedigger-beets-dir/library.db").execute(
+            "SELECT 1",
+        )
+    except sqlite3.DatabaseError as exc:
+        assert beets_authority_availability_category(exc) is not None
+        return exc
+    raise AssertionError("sqlite opened a database under a missing directory")
+
+
 class _FakeSyncBeets:
     """The narrow Beets surface the sync lane reads, over a mutable world.
 
@@ -101,12 +124,16 @@ class _FakeSyncBeets:
     write's report.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, fail_authority_on: str = "") -> None:
         self.rows: dict[int, BeetsAlbumIdentityRow] = {}
         self.file_tags: dict[str, str] = {}
         self.unreadable: set[str] = set()
         self.resolutions: dict[str, CurrentBeetsResolution] = {}
         self.close_calls = 0
+        #: "" | "read" | "resolve" — which read raises a real Beets
+        #: availability failure, and how many times it fired.
+        self.fail_authority_on = fail_authority_on
+        self.authority_raises = 0
 
     def seed_album(
         self,
@@ -128,14 +155,21 @@ class _FakeSyncBeets:
         for path in item_paths:
             self.file_tags[path] = file_tag
 
+    def _maybe_fail(self, site: str) -> None:
+        if self.fail_authority_on == site:
+            self.authority_raises += 1
+            raise real_beets_authority_failure()
+
     def get_album_mb_identity(
         self, album_id: int,
     ) -> BeetsAlbumIdentityRow | None:
+        self._maybe_fail("read")
         return self.rows.get(album_id)
 
     def resolve_current_release(
         self, identity: ReleaseIdentity,
     ) -> CurrentBeetsResolution:
+        self._maybe_fail("resolve")
         return self.resolutions.get(
             identity.release_id, CurrentBeetsMissing(identity),
         )
@@ -204,10 +238,11 @@ def _sync(
     expected: str = DB_ID,
     lock_db: FakePipelineDB | None = None,
 ) -> TagSyncResult:
+    """Drive the album branch through the adapter the web route calls."""
     db = lock_db if lock_db is not None else FakePipelineDB()
     write.lock_db = db
     with _silence_logs():
-        return sync_album_file_tags_from_factory(
+        return sync_album_file_tags_from_borrowed_factory(
             lambda: beets,
             db,
             album_id=album_id,
@@ -243,8 +278,13 @@ class TestSyncOutcomeBranches(unittest.TestCase):
         result = _sync(beets, write, album_id=999)
 
         self.assertEqual(result.outcome, RESULT_NOT_FOUND)
+        # Every refusal names the album the caller asked about — it is
+        # what the dashboard re-renders the row from.
+        self.assertEqual(result.album_id, 999)
         self.assertEqual(write.calls, [])
-        self.assertEqual(beets.close_calls, 1)
+        # A refusal is where a borrowed handle would get closed by
+        # accident; the request thread that lent it keeps using it.
+        self.assertEqual(beets.close_calls, 0)
 
     def test_db_absent_identity_is_refused(self) -> None:
         beets = _FakeSyncBeets()
@@ -411,7 +451,7 @@ class TestSyncOutcomeBranches(unittest.TestCase):
             raise FileNotFoundError("Beets DB not configured")
 
         with _silence_logs():
-            result = sync_album_file_tags_from_factory(
+            result = sync_album_file_tags_from_borrowed_factory(
                 broken_factory,
                 FakePipelineDB(),
                 album_id=ALBUM_ID,
@@ -421,6 +461,74 @@ class TestSyncOutcomeBranches(unittest.TestCase):
             )
 
         self.assertEqual(result.outcome, RESULT_BEETS_UNAVAILABLE)
+        # The category is the only detail the operator's 503 carries, and
+        # the album id is what the browser re-renders the row from.
+        self.assertEqual(result.album_id, ALBUM_ID)
+        assert result.error_message is not None
+        self.assertIn("FileNotFoundError", result.error_message)
+
+    def _seed_authority_failure_world(self, site: str) -> _FakeSyncBeets:
+        beets = _FakeSyncBeets(fail_authority_on=site)
+        beets.seed_album(ALBUM_ID, DB_ID, (TRACK,), file_tag=OLD_TAG)
+        beets.resolutions[DB_ID] = CurrentBeetsUnique(
+            identity=ReleaseIdentity(source="musicbrainz", release_id=DB_ID),
+            album_id=ALBUM_ID, album_path="/library/x", items=(), selectors=(),
+        )
+        return beets
+
+    def test_an_authority_failure_mid_sync_is_typed_not_raised(self) -> None:
+        """The open succeeded and Beets then went away under a read. Both
+        entries mediate that through one place, so pin it on both: an
+        escaping DatabaseError would reach the route as a 500 and the merge
+        seam as a swallowed import-time exception. The release entry's own
+        resolve-site conversion is a second, separate ``except`` and gets
+        its own case."""
+        beets = self._seed_authority_failure_world("read")
+        write = _RecordingWrite(beets)
+
+        with _silence_logs():
+            borrowed = sync_album_file_tags_from_borrowed_factory(
+                lambda: beets, FakePipelineDB(),
+                album_id=ALBUM_ID, expected_mb_albumid=DB_ID,
+                read_tag=beets.read_tag, run_write=write,
+            )
+            owned = sync_release_file_tags_from_factory(
+                lambda: beets, FakePipelineDB(),
+                release_id=DB_ID, read_tag=beets.read_tag, run_write=write,
+            )
+            resolving = self._sync_release_authority_failure(
+                self._seed_authority_failure_world("resolve"),
+            )
+
+        for label, result in (
+            ("borrowed/read", borrowed),
+            ("owned/read", owned),
+            ("owned/resolve", resolving),
+        ):
+            with self.subTest(case=label):
+                self.assertEqual(result.outcome, RESULT_BEETS_UNAVAILABLE)
+                # The category is what tells the operator WHICH failure
+                # this was, and it is the only detail the 503 carries.
+                assert result.error_message is not None
+                self.assertIn("sqlite_", result.error_message)
+        self.assertEqual(borrowed.album_id, ALBUM_ID)
+        self.assertEqual(beets.authority_raises, 2)
+        self.assertEqual(write.calls, [])
+        # The release entry still owes its handle a close on the way out
+        # of the exception; the borrowed one still owes it nothing.
+        self.assertEqual(beets.close_calls, 1)
+
+    def _sync_release_authority_failure(
+        self, beets: _FakeSyncBeets,
+    ) -> TagSyncResult:
+        result = sync_release_file_tags_from_factory(
+            lambda: beets, FakePipelineDB(),
+            release_id=DB_ID, read_tag=beets.read_tag,
+            run_write=_RecordingWrite(beets),
+        )
+        self.assertEqual(beets.close_calls, 1)
+        return result
+
 
     def test_borrowed_factory_never_closes_the_handle(self) -> None:
         beets = _FakeSyncBeets()
@@ -500,6 +608,10 @@ class TestReleaseEntry(unittest.TestCase):
 
         self.assertEqual(result.outcome, RESULT_NOT_UNIQUE)
         self.assertEqual(write.calls, [])
+        # Which albums collided is the operator's next move, so it is the
+        # one part of this refusal's prose that carries data.
+        assert result.error_message is not None
+        self.assertIn("7, 9", result.error_message)
 
     def test_non_musicbrainz_release_is_refused(self) -> None:
         beets = _FakeSyncBeets()
@@ -509,6 +621,63 @@ class TestReleaseEntry(unittest.TestCase):
 
         self.assertEqual(result.outcome, RESULT_IDENTITY_MISMATCH)
         self.assertEqual(write.calls, [])
+
+    def test_every_path_past_the_open_closes_the_handle_once(self) -> None:
+        """The seam's handle is this entry's to close, and a refusal is the
+        branch that leaks one. Nothing pinned this before #1313."""
+        unique = CurrentBeetsUnique(
+            identity=ReleaseIdentity(source="musicbrainz", release_id=DB_ID),
+            album_id=ALBUM_ID, album_path="/library/x", items=(), selectors=(),
+        )
+        ambiguous = CurrentBeetsAmbiguous(
+            identity=ReleaseIdentity(source="musicbrainz", release_id=DB_ID),
+            album_ids=(7, 9), reason="multiple_matches",
+        )
+        for label, resolution, expected in (
+            ("unique", unique, RESULT_SYNCED),
+            ("ambiguous", ambiguous, RESULT_NOT_UNIQUE),
+            ("missing", None, RESULT_NOT_FOUND),
+        ):
+            with self.subTest(resolution=label):
+                beets = _FakeSyncBeets()
+                beets.seed_album(ALBUM_ID, DB_ID, (TRACK,), file_tag=OLD_TAG)
+                if resolution is not None:
+                    beets.resolutions[DB_ID] = resolution
+
+                result = self._sync_release(beets, _RecordingWrite(beets))
+
+                self.assertEqual(result.outcome, expected)
+                self.assertEqual(beets.close_calls, 1)
+
+    def test_an_unopenable_authority_is_typed_with_its_category(self) -> None:
+        """The seam's own open-failure lane, which is a different site
+        from the album entry's and composes the same operator detail."""
+        def broken_factory() -> _FakeSyncBeets:
+            raise real_beets_authority_failure()
+
+        with _silence_logs():
+            result = sync_release_file_tags_from_factory(
+                broken_factory, FakePipelineDB(), release_id=DB_ID,
+            )
+
+        self.assertEqual(result.outcome, RESULT_BEETS_UNAVAILABLE)
+        assert result.error_message is not None
+        self.assertIn("sqlite_", result.error_message)
+
+    def test_a_refusal_before_the_open_never_takes_a_handle(self) -> None:
+        opens = []
+
+        def factory() -> _FakeSyncBeets:
+            opens.append(_FakeSyncBeets())
+            return opens[-1]
+
+        with _silence_logs():
+            result = sync_release_file_tags_from_factory(
+                factory, FakePipelineDB(), release_id="[r123456]",
+            )
+
+        self.assertEqual(result.outcome, RESULT_IDENTITY_MISMATCH)
+        self.assertEqual(opens, [])
 
 
 class TestHttpStatusMap(unittest.TestCase):
@@ -533,9 +702,10 @@ class TestRunBeetsWriteTagsSeam(unittest.TestCase):
 
     def test_argv_shape(self) -> None:
         recorded: list[list[str]] = []
+        timeouts: list[object] = []
 
         def runner(argv: list[str], **kwargs: object) -> sp.CompletedProcess[bytes]:
-            del kwargs
+            timeouts.append(kwargs.get("timeout"))
             recorded.append(argv)
             return sp.CompletedProcess(argv, 0, b"", b"")
 
@@ -560,6 +730,10 @@ class TestRunBeetsWriteTagsSeam(unittest.TestCase):
         self.assertEqual(
             argv[4:], [f"album_id:={ALBUM_ID}", f"mb_albumid:={DB_ID}"],
         )
+        # The bound is the reason a wedged `beet write` cannot stall the
+        # web request or the importer that called it; forwarding None
+        # would wait forever and nothing else would notice.
+        self.assertEqual(timeouts, [TAG_SYNC_TIMEOUT_SECONDS])
 
 
 def _read_file_mb_albumid(path: Path) -> str:
@@ -617,13 +791,18 @@ class TestRealBeetsWriteTagSync(unittest.TestCase):
             lib._close()
             decoy_mtime_before = decoy_path.stat().st_mtime_ns
 
-            with patch.dict(
+            # The borrowed entry is the album adapter production has, so
+            # the caller owns the handle here exactly as the web route's
+            # request thread does.
+            with contextlib.closing(
+                BeetsDB(str(library_db), library_root=str(root)),
+            ) as handle, patch.dict(
                 os.environ,
                 {"CRATEDIGGER_RUNTIME_CONFIG": str(base / "config.ini")},
                 clear=False,
             ), _silence_logs():
-                result = sync_album_file_tags_from_factory(
-                    lambda: BeetsDB(str(library_db), library_root=str(root)),
+                result = sync_album_file_tags_from_borrowed_factory(
+                    lambda: handle,
                     FakePipelineDB(),
                     album_id=album_id,
                     expected_mb_albumid=MERGED,

@@ -1,10 +1,25 @@
 """Generated properties for the one-album file-tag sync lane (#1260).
 
 The pins in ``tests/test_beets_tag_sync.py`` prove the exact branches;
-these properties patrol the world space around them, driving the REAL
-``sync_album_file_tags_from_factory`` over every combination of (DB
-identity × authorized identity × file-tag world × lock state × what the
-write subprocess actually does).
+these properties patrol the world space around them, driving BOTH entry
+points production actually calls over every combination of (entry × DB
+identity × authorized identity × release resolution × authority failure ×
+file-tag world × lock state × what the write subprocess actually does):
+
+* ``sync_album_file_tags_from_borrowed_factory`` — the census card's
+  button, through ``web/routes/retag_divergence_audit.py`` and the
+  ``pipeline-cli sync-file-tags`` relay behind it.
+* ``sync_release_file_tags_from_factory`` — the merge seam, through
+  ``lib/download_validation.py``.
+
+Until #1313 every clause below ran against a third entry point,
+``sync_album_file_tags_from_factory``, which had no production caller at
+all: a bystander by the house outermost-real-adapter rule, and the one
+whose lifecycle (it closed the handle) neither survivor shares. It is
+gone; the entry dimension is what replaced it. The boundary stops here
+rather than at the HTTP route above it, because the route only maps an
+outcome to a status code and ``tests/web/test_routes_retag_divergence_
+audit.py`` owns that mapping.
 
 Invariants patrolled — each a module-level accumulating checker (every
 clause evaluates; ordering cannot mask one) with a message-asserting
@@ -29,9 +44,25 @@ V   **Verdict from the re-read files.** ``synced`` is claimed only over a
     mediated wrapper, ``beets_unavailable`` (authority raised on the
     post-write re-read) after a landed write — worlds ``_FakeSyncBeets``
     cannot produce, which is exactly why those outcomes after a write ARE
-    the returncode-mutant signature here. A future world that vanishes
-    the album or fails the authority mid-run must widen V6's (and V4's)
-    carve-outs before it lands.
+    the returncode-mutant signature here. #1313 added authority failure to
+    the world space and V6 survived unwidened, because all three injection
+    sites fire strictly BEFORE the write: no world can reach the write and
+    then lose the authority, so ``beets_unavailable`` after a write is
+    still the mutant signature and not a legitimate outcome. A world that
+    vanishes the album mid-sync, or one that fails the authority on the
+    POST-write re-read, still has to widen V6 (and V4) before it lands.
+R   **Release resolution gating.** The release entry's refusal names what
+    Beets actually said: an ambiguous resolution refuses ``not_unique``, a
+    missing one ``not_found``, and ``not_unique`` is claimed nowhere else.
+A   **Authority failure is typed, never raised.** Whenever the Beets
+    authority actually went away — at the factory, at the identity read,
+    or at the release resolution — the caller is told
+    ``beets_unavailable``. Reached through one mediator, so the two
+    entries cannot drift apart on it.
+L   **Handle lifecycle.** The borrowed entry NEVER closes the handle it
+    was lent, on any path including every refusal — the request thread
+    that lent it keeps using it. The release entry closes every handle it
+    opened, exactly once, on every path past the open.
 I   **Seam inertness.** ``lib.download_validation.
     _sync_file_tags_after_merge_rekey`` — the merge seam's best-effort
     caller — returns ``None`` and never raises, whatever the sync
@@ -51,23 +82,29 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.beets_child import BeetsChildRun
+from lib.beets_db import CurrentBeetsAmbiguous, CurrentBeetsUnique
 from lib.beets_tag_sync import (
     RESULT_ALREADY_SYNCED,
     RESULT_BEETS_UNAVAILABLE,
+    RESULT_NOT_FOUND,
+    RESULT_NOT_UNIQUE,
     RESULT_RESIDUAL_DIVERGENCE,
     RESULT_SYNCED,
     TAG_SYNC_HTTP_STATUS,
     TagSyncResult,
-    sync_album_file_tags_from_factory,
+    sync_album_file_tags_from_borrowed_factory,
+    sync_release_file_tags_from_factory,
 )
 from lib.config import CratediggerConfig
 from lib.download_validation import _sync_file_tags_after_merge_rekey
+from lib.release_identity import ReleaseIdentity
 from tests.fakes import FakePipelineDB
 from tests.test_beets_tag_sync import (
     ALBUM_ID,
     DB_ID,
     OLD_TAG,
     _FakeSyncBeets,
+    real_beets_authority_failure,
 )
 
 THIRD_ID = "9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4"
@@ -79,6 +116,20 @@ IDENTITIES = (DB_ID, OLD_TAG, THIRD_ID)
 WRITE_MODES = (
     "applies", "applies_nonzero", "noop", "raise", "raise_after_apply",
 )
+
+#: The two production entry points, by the lifecycle each takes.
+ENTRIES = ("borrowed_album", "owned_release")
+
+#: What Beets answers the release entry's ``resolve_current_release``.
+#: Inert on the album entry, which is handed an album id directly.
+RESOLUTIONS = ("unique", "missing", "ambiguous")
+
+#: Where the Beets authority goes away, if it does. ``open`` is the
+#: factory raising, ``read``/``resolve`` are the two reads a live handle
+#: can lose the library under. Whether an injected failure actually FIRES
+#: depends on how far the code got, so nothing here is derived from the
+#: control flow — the checkers read the fake's own raise counter.
+AUTHORITY_FAILURES = ("none", "open", "read", "resolve")
 
 _REFUSAL_OUTCOMES = frozenset({
     "not_found", "identity_mismatch", "db_identity_absent",
@@ -100,9 +151,15 @@ def _silence_logs() -> Generator[None]:
 class SyncWorld:
     """One generated world, plus what running the real service produced."""
 
+    entry: str
     album_present: bool
     db_identity: str
+    #: The album entry's authorized identity, and the release entry's
+    #: release id — the same value either way, because the release entry
+    #: authorizes the resolved album with the release id it was given.
     expected: str
+    resolution: str
+    authority_failure: str
     #: (path, initial file tag, unreadable) per item.
     files: tuple[tuple[str, str, bool], ...]
     lock_granted: bool
@@ -116,12 +173,18 @@ class SyncRun:
     write_calls: tuple[tuple[str, str], ...]
     initial_tags: dict[str, str]
     final_tags: dict[str, str]
+    open_calls: int
+    close_calls: int
+    #: How many times the injected authority failure actually fired.
+    authority_raises: int
 
 
 def _files_strategy() -> st.SearchStrategy[tuple[tuple[str, str, bool], ...]]:
     entry = st.tuples(
         st.sampled_from(IDENTITIES + ("",)),
-        st.booleans(),
+        # Unreadable is a real but uncommon world, and at 50% it halved
+        # how often any album had a readable divergent file to write.
+        st.sampled_from((False, False, False, True)),
     )
     return st.lists(entry, min_size=0, max_size=3).map(
         lambda entries: tuple(
@@ -131,21 +194,74 @@ def _files_strategy() -> st.SearchStrategy[tuple[tuple[str, str, bool], ...]]:
     )
 
 
-def sync_worlds() -> st.SearchStrategy[SyncWorld]:
-    return st.builds(
-        SyncWorld,
-        album_present=st.booleans(),
-        db_identity=st.sampled_from(IDENTITIES + ("",)),
-        expected=st.sampled_from(IDENTITIES + ("", "junk", "[r123456]")),
-        files=_files_strategy(),
-        lock_granted=st.booleans(),
-        write_mode=st.sampled_from(WRITE_MODES),
+#: Weighted so the write path is reachable often enough to patrol. Every
+#: world the uniform version could draw is still drawable — this steers
+#: the budget, it does not filter (#1313). Measured: the uniform strategy
+#: authorized a write 1 time in 400 and never once through the release
+#: entry. With this weighting the derandomized suite tier's 150 examples
+#: reach 8 album writes and 41 authority failures, and still 0 release
+#: writes — that one cell is carried by its ``@example`` pin at the
+#: gating tier and by the draw itself at fuzz depth (17 release writes in
+#: 1,000 examples). Do not read those pins as belt-and-braces; for the
+#: release write the pin IS the belt.
+_MOSTLY_TRUE = st.sampled_from((True, True, True, False))
+
+
+@st.composite
+def sync_worlds(draw: st.DrawFn) -> SyncWorld:
+    db_identity = draw(st.sampled_from(IDENTITIES + ("",)))
+    return SyncWorld(
+        entry=draw(st.sampled_from(ENTRIES)),
+        album_present=draw(_MOSTLY_TRUE),
+        db_identity=db_identity,
+        # The authorizing case is one exact value out of six, so drawing
+        # it independently almost never happens. Half the worlds now take
+        # it, and the other half still draw the whole pool.
+        expected=draw(st.one_of(
+            st.just(db_identity),
+            st.sampled_from(IDENTITIES + ("", "junk", "[r123456]")),
+        )),
+        resolution=draw(st.sampled_from(("unique", *RESOLUTIONS))),
+        # Weighted toward a live authority so the write path keeps its
+        # share of the budget; every failure site is still drawable.
+        authority_failure=draw(st.sampled_from(
+            ("none", "none", "none", *AUTHORITY_FAILURES[1:]),
+        )),
+        files=draw(_files_strategy()),
+        lock_granted=draw(_MOSTLY_TRUE),
+        write_mode=draw(st.sampled_from(WRITE_MODES)),
     )
+
+
+def _seed_resolution(beets: _FakeSyncBeets, world: SyncWorld) -> None:
+    """Teach the fake what Beets answers for ``world.expected``.
+
+    Only reached for a real MusicBrainz id: the release entry refuses
+    anything else before it ever opens a handle, so a resolution keyed on
+    ``"junk"`` would be unreachable and the checkers would be legislating
+    over a world production cannot produce.
+    """
+    identity = ReleaseIdentity(source="musicbrainz", release_id=world.expected)
+    if world.resolution == "unique":
+        beets.resolutions[world.expected] = CurrentBeetsUnique(
+            identity=identity, album_id=ALBUM_ID,
+            album_path="/library/a", items=(), selectors=(),
+        )
+    elif world.resolution == "ambiguous":
+        beets.resolutions[world.expected] = CurrentBeetsAmbiguous(
+            identity=identity, album_ids=(7, 9), reason="multiple_matches",
+        )
+    # "missing" is the fake's own default — seed nothing.
 
 
 def run_sync_world(world: SyncWorld) -> SyncRun:
     """Drive the REAL service over ``world`` with leaf-seam fakes only."""
-    beets = _FakeSyncBeets()
+    beets = _FakeSyncBeets(
+        fail_authority_on=(
+            world.authority_failure
+            if world.authority_failure in ("read", "resolve") else ""
+        ),
+    )
     if world.album_present:
         beets.seed_album(
             ALBUM_ID, world.db_identity,
@@ -155,6 +271,8 @@ def run_sync_world(world: SyncWorld) -> SyncRun:
             beets.file_tags[path] = tag
             if unreadable:
                 beets.unreadable.add(path)
+    if world.entry == "owned_release" and world.expected in IDENTITIES:
+        _seed_resolution(beets, world)
     initial_tags = dict(beets.file_tags)
 
     write_calls: list[tuple[str, str]] = []
@@ -184,35 +302,74 @@ def run_sync_world(world: SyncWorld) -> SyncRun:
     lock_db = FakePipelineDB()
     lock_db.set_advisory_lock_result(world.lock_granted)
 
+    opens = 0
+    open_raises = 0
+
+    def factory() -> _FakeSyncBeets:
+        nonlocal opens, open_raises
+        if world.authority_failure == "open":
+            open_raises += 1
+            raise real_beets_authority_failure()
+        opens += 1
+        return beets
+
     with _silence_logs():
-        result = sync_album_file_tags_from_factory(
-            lambda: beets,
-            lock_db,
-            album_id=ALBUM_ID,
-            expected_mb_albumid=world.expected,
-            read_tag=beets.read_tag,
-            run_write=run_write,
-        )
+        if world.entry == "borrowed_album":
+            result = sync_album_file_tags_from_borrowed_factory(
+                factory,
+                lock_db,
+                album_id=ALBUM_ID,
+                expected_mb_albumid=world.expected,
+                read_tag=beets.read_tag,
+                run_write=run_write,
+            )
+        else:
+            result = sync_release_file_tags_from_factory(
+                factory,
+                lock_db,
+                release_id=world.expected,
+                read_tag=beets.read_tag,
+                run_write=run_write,
+            )
     return SyncRun(
         world=world,
         result=result,
         write_calls=tuple(write_calls),
         initial_tags=initial_tags,
         final_tags=dict(beets.file_tags),
+        open_calls=opens,
+        close_calls=beets.close_calls,
+        authority_raises=open_raises + beets.authority_raises,
     )
 
 
-def _write_authorized(world: SyncWorld) -> bool:
+def _write_authorized(run: SyncRun) -> bool:
     """The one world shape that authorizes a write, independently derived.
 
     Since #1260 review F6 the write additionally requires at least one
     READABLE file that actually disagrees — an album whose only
     non-agreeing items are unreadable refuses without launching the
     subprocess, because a write cannot heal what cannot be read back.
+
+    The release entry adds one condition on top of the album entry's, and
+    only one: Beets must name exactly one current album at that release.
+    Everything after the resolution is the same authorization, which is
+    why the entry dimension multiplies this world space instead of
+    forking it (#1313).
+
+    Whether an injected authority failure fired is read off the fake's own
+    raise counter rather than re-derived from how far the code should have
+    got — that derivation would be the production control flow written
+    twice, and it would agree with production by construction.
     """
+    if run.authority_raises:
+        return False
+    world = run.world
     if not world.album_present:
         return False
     if world.expected not in IDENTITIES:
+        return False
+    if world.entry == "owned_release" and world.resolution != "unique":
         return False
     if world.db_identity == "" or world.db_identity != world.expected:
         return False
@@ -238,7 +395,7 @@ def _post_converged(run: SyncRun) -> bool:
 def write_gating_violations(run: SyncRun) -> list[str]:
     """W — every clause evaluates; ordering cannot mask one."""
     violations: list[str] = []
-    authorized = _write_authorized(run.world)
+    authorized = _write_authorized(run)
     if run.write_calls and not authorized:
         violations.append(
             "W1: the write ran in a world that never authorizes one",
@@ -308,24 +465,111 @@ def verdict_violations(run: SyncRun) -> list[str]:
     return violations
 
 
+def release_resolution_violations(run: SyncRun) -> list[str]:
+    """R — the release entry's refusal names what Beets actually said."""
+    violations: list[str] = []
+    world = run.world
+    outcome = run.result.outcome
+    resolved = (
+        world.entry == "owned_release" and world.expected in IDENTITIES
+    )
+    if resolved and world.resolution == "ambiguous" \
+            and outcome != RESULT_NOT_UNIQUE:
+        violations.append(
+            "R1: an ambiguous release resolution must refuse not_unique, "
+            f"not {outcome!r}",
+        )
+    if resolved and world.resolution == "missing" \
+            and outcome != RESULT_NOT_FOUND:
+        violations.append(
+            "R2: a release no album holds must refuse not_found, not "
+            f"{outcome!r}",
+        )
+    if outcome == RESULT_NOT_UNIQUE and not (
+        resolved and world.resolution == "ambiguous"
+    ):
+        violations.append(
+            "R3: not_unique claimed outside an ambiguous release resolution",
+        )
+    return violations
+
+
+def authority_violations(run: SyncRun) -> list[str]:
+    """A — a Beets authority that goes away is typed, never raised."""
+    violations: list[str] = []
+    if run.authority_raises and run.result.outcome != RESULT_BEETS_UNAVAILABLE:
+        violations.append(
+            "A1: the Beets authority failed and the caller was told "
+            f"{run.result.outcome!r} instead of beets_unavailable",
+        )
+    return violations
+
+
+def lifecycle_violations(run: SyncRun) -> list[str]:
+    """L — who closes the Beets handle is the difference between the two
+    entry points, so it is the one thing neither can be sloppy about."""
+    violations: list[str] = []
+    if run.world.entry == "borrowed_album" and run.close_calls:
+        violations.append(
+            f"L1: the borrowed entry closed a lent handle {run.close_calls} "
+            "time(s); the request thread that lent it is still using it",
+        )
+    if run.world.entry == "owned_release" \
+            and run.close_calls != run.open_calls:
+        violations.append(
+            f"L2: the release entry opened {run.open_calls} handle(s) and "
+            f"closed {run.close_calls}",
+        )
+    return violations
+
+
+def _world(
+    *,
+    entry: str = "borrowed_album",
+    album_present: bool = True,
+    db_identity: str = DB_ID,
+    expected: str = DB_ID,
+    resolution: str = "unique",
+    authority_failure: str = "none",
+    files: tuple[tuple[str, str, bool], ...] = (
+        ("/library/a/01.opus", OLD_TAG, False),
+    ),
+    lock_granted: bool = True,
+    write_mode: str = "applies",
+) -> SyncWorld:
+    """The converging album world every self-test starts from."""
+    return SyncWorld(
+        entry=entry, album_present=album_present, db_identity=db_identity,
+        expected=expected, resolution=resolution,
+        authority_failure=authority_failure, files=files,
+        lock_granted=lock_granted, write_mode=write_mode,
+    )
+
+
 class TestTagSyncProperties(unittest.TestCase):
     @settings(deadline=None)
     @given(world=sync_worlds())
     @example(world=SyncWorld(
         # The live RA.1000 world: one divergent readable file, lock free.
+        entry="borrowed_album",
         album_present=True, db_identity=DB_ID, expected=DB_ID,
+        resolution="unique", authority_failure="none",
         files=(("/library/a/01.opus", OLD_TAG, False),),
         lock_granted=True, write_mode="applies",
     ))
     @example(world=SyncWorld(
         # S2's exit-code world: green write that changes nothing.
+        entry="borrowed_album",
         album_present=True, db_identity=DB_ID, expected=DB_ID,
+        resolution="unique", authority_failure="none",
         files=(("/library/a/01.opus", OLD_TAG, False),),
         lock_granted=True, write_mode="noop",
     ))
     @example(world=SyncWorld(
         # A raise whose effect landed must still read as synced.
+        entry="borrowed_album",
         album_present=True, db_identity=DB_ID, expected=DB_ID,
+        resolution="unique", authority_failure="none",
         files=(("/library/a/01.opus", OLD_TAG, False),),
         lock_granted=True, write_mode="raise_after_apply",
     ))
@@ -334,13 +578,49 @@ class TestTagSyncProperties(unittest.TestCase):
         # returncode-reading mutant flips this off ``synced`` (#1278
         # item-4 reflection, SD1). Pinned so the derandomized suite tier
         # kills that mutant, not just the fuzz tier.
+        entry="borrowed_album",
         album_present=True, db_identity=DB_ID, expected=DB_ID,
+        resolution="unique", authority_failure="none",
         files=(("/library/a/01.opus", OLD_TAG, False),),
         lock_granted=True, write_mode="applies_nonzero",
     ))
+    @example(world=SyncWorld(
+        # The merge seam's own happy path: the release resolves to one
+        # album and the same write lands through the other entry.
+        entry="owned_release",
+        album_present=True, db_identity=DB_ID, expected=DB_ID,
+        resolution="unique", authority_failure="none",
+        files=(("/library/a/01.opus", OLD_TAG, False),),
+        lock_granted=True, write_mode="applies",
+    ))
+    @example(world=SyncWorld(
+        # L2's decisive world: an ambiguous resolution returns from
+        # inside the ``closing`` block, which is where a handle leaks.
+        entry="owned_release",
+        album_present=True, db_identity=DB_ID, expected=DB_ID,
+        resolution="ambiguous", authority_failure="none",
+        files=(("/library/a/01.opus", OLD_TAG, False),),
+        lock_granted=True, write_mode="applies",
+    ))
+    @example(world=_world(
+        # A1's decisive world: the handle opens, then Beets goes away
+        # under the identity read. The release entry must still close.
+        entry="owned_release", authority_failure="read",
+    ))
+    @example(world=_world(
+        # The same failure at the release resolution, one call earlier.
+        entry="owned_release", authority_failure="resolve",
+    ))
+    @example(world=_world(authority_failure="open"))
     def test_write_gating_and_verdict(self, world: SyncWorld) -> None:
         run = run_sync_world(world)
-        violations = write_gating_violations(run) + verdict_violations(run)
+        violations = (
+            write_gating_violations(run)
+            + verdict_violations(run)
+            + release_resolution_violations(run)
+            + authority_violations(run)
+            + lifecycle_violations(run)
+        )
         if violations:
             self.fail(
                 f"world={world!r} outcome={run.result.outcome!r}: "
@@ -394,13 +674,12 @@ class TestCheckersTripOnViolations(unittest.TestCase):
         ),
         initial_tags: dict[str, str] | None = None,
         final_tags: dict[str, str] | None = None,
+        open_calls: int = 1,
+        close_calls: int = 0,
+        authority_raises: int = 0,
     ) -> SyncRun:
         return SyncRun(
-            world=world if world is not None else SyncWorld(
-                album_present=True, db_identity=DB_ID, expected=DB_ID,
-                files=(("/library/a/01.opus", OLD_TAG, False),),
-                lock_granted=True, write_mode="applies",
-            ),
+            world=world if world is not None else _world(),
             result=result if result is not None else TagSyncResult(
                 outcome=RESULT_SYNCED, album_id=ALBUM_ID,
             ),
@@ -413,16 +692,13 @@ class TestCheckersTripOnViolations(unittest.TestCase):
                 final_tags if final_tags is not None
                 else {"/library/a/01.opus": DB_ID}
             ),
+            open_calls=open_calls,
+            close_calls=close_calls,
+            authority_raises=authority_raises,
         )
 
     def test_w1_trips_on_an_unauthorized_write(self) -> None:
-        run = self._base_run(
-            world=SyncWorld(
-                album_present=True, db_identity=DB_ID, expected=OLD_TAG,
-                files=(("/library/a/01.opus", OLD_TAG, False),),
-                lock_granted=True, write_mode="applies",
-            ),
-        )
+        run = self._base_run(world=_world(expected=OLD_TAG))
         self.assertTrue(
             any(v.startswith("W1") for v in write_gating_violations(run)),
         )
@@ -529,6 +805,75 @@ class TestCheckersTripOnViolations(unittest.TestCase):
         an authority failure can strike after the write mutated files, and
         claiming the world untouched there would be a false invariant."""
         self.assertNotIn(RESULT_BEETS_UNAVAILABLE, _REFUSAL_OUTCOMES)
+
+    def test_r1_trips_when_an_ambiguous_release_refuses_something_else(
+        self,
+    ) -> None:
+        run = self._base_run(
+            world=_world(entry="owned_release", resolution="ambiguous"),
+            result=TagSyncResult(outcome=RESULT_NOT_FOUND),
+            close_calls=1,
+        )
+        violations = release_resolution_violations(run)
+        self.assertTrue(any(v.startswith("R1") for v in violations), violations)
+
+    def test_r2_trips_when_a_missing_release_refuses_something_else(
+        self,
+    ) -> None:
+        run = self._base_run(
+            world=_world(entry="owned_release", resolution="missing"),
+            result=TagSyncResult(outcome=RESULT_NOT_UNIQUE),
+            close_calls=1,
+        )
+        violations = release_resolution_violations(run)
+        self.assertTrue(any(v.startswith("R2") for v in violations), violations)
+
+    def test_r3_trips_on_not_unique_from_the_album_entry(self) -> None:
+        """The album entry has no resolution step, so it can never have a
+        reason to say not_unique."""
+        run = self._base_run(
+            result=TagSyncResult(outcome=RESULT_NOT_UNIQUE, album_id=ALBUM_ID),
+        )
+        violations = release_resolution_violations(run)
+        self.assertTrue(any(v.startswith("R3") for v in violations), violations)
+        self.assertEqual([v for v in violations if not v.startswith("R3")], [])
+
+    def test_a1_trips_when_a_dead_authority_answers_something_else(
+        self,
+    ) -> None:
+        run = self._base_run(
+            world=_world(authority_failure="read"),
+            result=TagSyncResult(outcome=RESULT_NOT_FOUND),
+            write_calls=(), authority_raises=1,
+            final_tags={"/library/a/01.opus": OLD_TAG},
+        )
+        violations = authority_violations(run)
+        self.assertTrue(any(v.startswith("A1") for v in violations), violations)
+
+    def test_l1_trips_when_the_borrowed_entry_closes_a_lent_handle(
+        self,
+    ) -> None:
+        run = self._base_run(close_calls=1)
+        violations = lifecycle_violations(run)
+        self.assertTrue(any(v.startswith("L1") for v in violations), violations)
+
+    def test_l2_trips_when_the_release_entry_leaks_its_own_handle(
+        self,
+    ) -> None:
+        run = self._base_run(
+            world=_world(entry="owned_release"),
+            open_calls=1, close_calls=0,
+        )
+        violations = lifecycle_violations(run)
+        self.assertTrue(any(v.startswith("L2") for v in violations), violations)
+
+    def test_l2_trips_on_a_double_close_too(self) -> None:
+        run = self._base_run(
+            world=_world(entry="owned_release"),
+            open_calls=1, close_calls=2,
+        )
+        violations = lifecycle_violations(run)
+        self.assertTrue(any(v.startswith("L2") for v in violations), violations)
 
 
 if __name__ == "__main__":
