@@ -1262,8 +1262,9 @@ def detect_va_compilation(
 # Side-table writes happen from the main thread only. Worker threads
 # accumulate write attempts in a ``_DeferredRecorder``; the main thread
 # flushes them to ``pdb`` after the budget loop. This keeps the real
-# psycopg2 connection safe (single connection, not thread-safe per
-# upstream docs) without modifying U2's resolvers.
+# connection safe (one ``PipelineDB``, whose ``_ensure_conn`` can replace
+# ``self.conn`` under a concurrent caller, and whose cursors cannot
+# overlap) without modifying U2's resolvers.
 
 
 _DEFAULT_BUDGET_SECONDS = 3.0
@@ -1295,8 +1296,11 @@ class _DeferredRecorder:
 
     Workers route their inline ``_record()`` calls through here; the
     main thread flushes after ``resolve_all`` finishes. Required because
-    psycopg2 connections are not thread-safe (the resolvers are called
-    from worker threads). The lock guards the in-process list, not
+    a ``PipelineDB`` is not safe to share across threads: psycopg2 itself
+    reports ``threadsafety == 2`` (a connection may be shared, a cursor
+    may not), but ``_ensure_conn`` also replaces ``self.conn`` in place,
+    and the resolvers run on worker threads. The lock guards the
+    in-process list, not
     pdb — pdb is only touched from the main thread.
     """
 

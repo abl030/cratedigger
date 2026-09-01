@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 import unittest
+from contextlib import closing, contextmanager
 from unittest.mock import patch
 
 from lib.import_execution import CancellationToken
@@ -21,7 +22,12 @@ from web.triage_runner import (
 
 
 class _ClosableDB:
-    """Minimal sweep-DB stand-in recording close() calls."""
+    """Minimal sweep-DB stand-in recording close() calls.
+
+    Entered through ``contextlib.closing`` below, which is exactly what
+    ``WebRuntime.open_background_db`` does for a handle it opened: yield
+    it, then close it when the block ends.
+    """
 
     def __init__(self) -> None:
         self.closed = 0
@@ -60,8 +66,8 @@ class TriageRunnerTest(unittest.TestCase):
         self.runner = TriageRunner()
         self.db = _ClosableDB()
 
-    def _factory(self):
-        return self.db
+    def _session(self):
+        return closing(self.db)
 
     def test_initial_status_is_idle(self) -> None:
         status = self.runner.status()
@@ -82,7 +88,7 @@ class TriageRunnerTest(unittest.TestCase):
                                             kept_uncertain=1)
 
         started = self.runner.start(
-            db_factory=self._factory, cleanup_fn=cleanup_fn,
+            db_session=self._session, cleanup_fn=cleanup_fn,
         )
         self.assertTrue(started)
         self.runner.join(timeout=5)
@@ -131,7 +137,7 @@ class TriageRunnerTest(unittest.TestCase):
 
         with patch.object(WrongMatchCleanupSummary, "to_dict", spy_to_dict):
             self.assertTrue(self.runner.start(
-                db_factory=self._factory, cleanup_fn=cleanup_fn,
+                db_session=self._session, cleanup_fn=cleanup_fn,
             ))
             self.runner.join(timeout=5)
 
@@ -148,12 +154,12 @@ class TriageRunnerTest(unittest.TestCase):
             return WrongMatchCleanupSummary(processed=0)
 
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=cleanup_fn,
+            db_session=self._session, cleanup_fn=cleanup_fn,
         ))
         self.assertTrue(entered.wait(timeout=5))
         self.assertEqual(self.runner.status()["state"], STATE_RUNNING)
         self.assertFalse(self.runner.start(
-            db_factory=self._factory, cleanup_fn=cleanup_fn,
+            db_session=self._session, cleanup_fn=cleanup_fn,
         ))
 
         release.set()
@@ -162,7 +168,7 @@ class TriageRunnerTest(unittest.TestCase):
 
         # A finished runner accepts the next sweep.
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=cleanup_fn,
+            db_session=self._session, cleanup_fn=cleanup_fn,
         ))
         self.runner.join(timeout=5)
 
@@ -171,7 +177,7 @@ class TriageRunnerTest(unittest.TestCase):
             raise RuntimeError("sweep blew up")
 
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=cleanup_fn,
+            db_session=self._session, cleanup_fn=cleanup_fn,
         ))
         self.runner.join(timeout=5)
 
@@ -182,21 +188,127 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertIsNone(status["summary"])
         self.assertEqual(self.db.closed, 1)
 
-    def test_db_factory_failure_records_error(self) -> None:
-        def bad_factory():
+    def test_db_session_failure_records_error(self) -> None:
+        def bad_session():
             raise RuntimeError("no dsn")
 
         def cleanup_fn(db, *, confirm_all_wrong_matches, cancellation_token=None):
             raise AssertionError("must not run without a db")
 
         self.assertTrue(self.runner.start(
-            db_factory=bad_factory, cleanup_fn=cleanup_fn,
+            db_session=bad_session, cleanup_fn=cleanup_fn,
         ))
         self.runner.join(timeout=5)
 
         status = self.runner.status()
         self.assertEqual(status["state"], STATE_FAILED)
         self.assertIn("no dsn", str(status["error"]))
+        # The status endpoint renders finished_at on every terminal
+        # state, so the failure path owes one too.
+        self.assertIsNotNone(status["finished_at"])
+
+    def test_a_session_whose_exit_fails_marks_the_sweep_failed(self) -> None:
+        """The exit runs before the terminal state is written.
+
+        Production's session swallows its own close errors, so it cannot
+        reach this; an injected session can, and the contract should be
+        the one ``start`` documents rather than an accident of ordering.
+        """
+        @contextmanager
+        def exit_fails():
+            yield self.db
+            raise RuntimeError("close blew up")
+
+        def cleanup_fn(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            return WrongMatchCleanupSummary(processed=7, deleted=0)
+
+        self.assertTrue(self.runner.start(
+            db_session=exit_fails, cleanup_fn=cleanup_fn,
+        ))
+        self.runner.join(timeout=5)
+
+        status = self.runner.status()
+        self.assertEqual(status["state"], STATE_FAILED)
+        self.assertIn("close blew up", str(status["error"]))
+        self.assertIsNotNone(status["finished_at"])
+        # The cost of that ordering, pinned so it stays visible: seven
+        # rows genuinely ran and the operator is shown nothing.
+        self.assertIsNone(status["summary"])
+
+    def test_a_base_exception_still_records_a_terminal_state(self) -> None:
+        """Nothing is parked: a sweep killed by a KeyboardInterrupt on
+        its own thread must not leave the runner RUNNING forever, which
+        would refuse every later start until the web process restarted.
+        """
+        def cleanup_fn(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            raise KeyboardInterrupt("operator interrupted the sweep thread")
+
+        # The re-raise reaches threading's excepthook, which would print
+        # a traceback into every green suite log. Swallow it here and
+        # assert it fired, which also pins that the exception really is
+        # re-raised rather than absorbed.
+        escaped: list[type[BaseException] | None] = []
+        default_hook = threading.excepthook
+        threading.excepthook = lambda args: escaped.append(args.exc_type)
+        self.addCleanup(setattr, threading, "excepthook", default_hook)
+
+        self.assertTrue(self.runner.start(
+            db_session=self._session, cleanup_fn=cleanup_fn,
+        ))
+        self.runner.join(timeout=5)
+
+        self.assertEqual(escaped, [KeyboardInterrupt])
+        status = self.runner.status()
+        self.assertEqual(status["state"], STATE_FAILED)
+        self.assertIn("KeyboardInterrupt", str(status["error"]))
+        self.assertIsNotNone(status["finished_at"])
+        # And the runner is usable again rather than wedged.
+        self.assertTrue(self.runner.start(
+            db_session=self._session,
+            cleanup_fn=lambda db, **kwargs: WrongMatchCleanupSummary(processed=0),
+        ))
+        self.runner.join(timeout=5)
+        self.assertEqual(self.runner.status()["state"], STATE_COMPLETED)
+
+    def test_a_refused_thread_spawn_does_not_leave_the_runner_running(
+        self,
+    ) -> None:
+        """``start`` writes RUNNING before it spawns.
+
+        A refused spawn (``RuntimeError: can't start new thread``, which
+        a ThreadingHTTPServer under thread pressure can genuinely reach)
+        otherwise leaves that RUNNING with nothing to clear it: every
+        later sweep refused, and ``join`` raising "cannot join thread
+        before it is started" for the life of the process.
+        """
+        with (
+            patch.object(
+                threading.Thread,
+                "start",
+                side_effect=RuntimeError("can't start new thread"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "can't start new thread"),
+        ):
+            self.runner.start(
+                db_session=self._session, cleanup_fn=self._never_runs,
+            )
+
+        status = self.runner.status()
+        self.assertEqual(status["state"], STATE_FAILED)
+        self.assertIn("can't start new thread", str(status["error"]))
+        self.assertIsNotNone(status["finished_at"])
+        # Not wedged: join is safe and the next sweep is admitted.
+        self.runner.join(timeout=1)
+        self.assertTrue(self.runner.start(
+            db_session=self._session,
+            cleanup_fn=lambda db, **kwargs: WrongMatchCleanupSummary(processed=0),
+        ))
+        self.runner.join(timeout=5)
+        self.assertEqual(self.runner.status()["state"], STATE_COMPLETED)
+
+    @staticmethod
+    def _never_runs(db, *, confirm_all_wrong_matches, cancellation_token=None):
+        raise AssertionError("the sweep must not run when the spawn failed")
 
 
 class TriageRunnerCancellationTest(unittest.TestCase):
@@ -207,8 +319,8 @@ class TriageRunnerCancellationTest(unittest.TestCase):
         self.runner = TriageRunner()
         self.db = _ClosableDB()
 
-    def _factory(self):
-        return self.db
+    def _session(self):
+        return closing(self.db)
 
     def test_cancel_with_no_sweep_running_is_not_an_error(self) -> None:
         """Cancel with nothing running just returns the idle snapshot."""
@@ -235,7 +347,7 @@ class TriageRunnerCancellationTest(unittest.TestCase):
             )
 
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=cleanup_fn,
+            db_session=self._session, cleanup_fn=cleanup_fn,
         ))
         self.assertTrue(entered.wait(timeout=5))
 
@@ -259,7 +371,7 @@ class TriageRunnerCancellationTest(unittest.TestCase):
             )
 
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=cleanup_fn,
+            db_session=self._session, cleanup_fn=cleanup_fn,
         ))
         self.runner.join(timeout=5)
 
@@ -292,7 +404,7 @@ class TriageRunnerCancellationTest(unittest.TestCase):
             return WrongMatchCleanupSummary(processed=2, deleted=2)
 
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=cleanup_fn,
+            db_session=self._session, cleanup_fn=cleanup_fn,
         ))
         self.assertTrue(entered.wait(timeout=5))
 
@@ -317,7 +429,7 @@ class TriageRunnerCancellationTest(unittest.TestCase):
             return WrongMatchCleanupSummary(processed=1, deleted=1)
 
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=cleanup_fn,
+            db_session=self._session, cleanup_fn=cleanup_fn,
         ))
         self.runner.join(timeout=5)
         self.assertEqual(self.runner.status()["state"], STATE_COMPLETED)
@@ -348,8 +460,8 @@ class TriageRunnerStickyCancelTest(unittest.TestCase):
         self.runner = TriageRunner(now_fn=self.clock)
         self.db = _ClosableDB()
 
-    def _factory(self):
-        return self.db
+    def _session(self):
+        return closing(self.db)
 
     @staticmethod
     def _cleanup_fn(db, *, confirm_all_wrong_matches, cancellation_token=None):
@@ -371,7 +483,7 @@ class TriageRunnerStickyCancelTest(unittest.TestCase):
         self.assertEqual(result["state"], STATE_IDLE)
 
         started = self.runner.start(
-            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+            db_session=self._session, cleanup_fn=self._cleanup_fn,
         )
         self.assertTrue(started, "a start() admitted within the window is "
                                   "still admitted, never refused")
@@ -394,7 +506,7 @@ class TriageRunnerStickyCancelTest(unittest.TestCase):
         self.assertEqual(result["state"], STATE_IDLE)
 
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+            db_session=self._session, cleanup_fn=self._cleanup_fn,
         ))
         self.runner.join(timeout=5)
 
@@ -414,7 +526,7 @@ class TriageRunnerStickyCancelTest(unittest.TestCase):
         self.clock.advance(PENDING_CANCEL_WINDOW_SECONDS / 2)
 
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+            db_session=self._session, cleanup_fn=self._cleanup_fn,
         ))
         self.runner.join(timeout=5)
 
@@ -433,7 +545,7 @@ class TriageRunnerStickyCancelTest(unittest.TestCase):
         self.clock.advance(PENDING_CANCEL_WINDOW_SECONDS + 1.0)
 
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+            db_session=self._session, cleanup_fn=self._cleanup_fn,
         ))
         self.runner.join(timeout=5)
 
@@ -460,7 +572,7 @@ class TriageRunnerStickyCancelTest(unittest.TestCase):
         self.runner.cancel("genuine_second_cancel", arm_pending=True)
 
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+            db_session=self._session, cleanup_fn=self._cleanup_fn,
         ))
         self.runner.join(timeout=5)
 
@@ -481,7 +593,7 @@ class TriageRunnerStickyCancelTest(unittest.TestCase):
         self.runner.cancel("first_stale_cancel", arm_pending=True)
         self.clock.advance(PENDING_CANCEL_WINDOW_SECONDS + 1.0)
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+            db_session=self._session, cleanup_fn=self._cleanup_fn,
         ))
         self.runner.join(timeout=5)
         self.assertEqual(self.runner.status()["state"], STATE_COMPLETED,
@@ -489,7 +601,7 @@ class TriageRunnerStickyCancelTest(unittest.TestCase):
 
         self.runner.cancel("second_genuine_cancel", arm_pending=True)
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+            db_session=self._session, cleanup_fn=self._cleanup_fn,
         ))
         self.runner.join(timeout=5)
         status = self.runner.status()
@@ -504,13 +616,13 @@ class TriageRunnerStickyCancelTest(unittest.TestCase):
         must not leak forward and poison a second, later sweep too."""
         self.runner.cancel("ctrl_c_race", arm_pending=True)
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+            db_session=self._session, cleanup_fn=self._cleanup_fn,
         ))
         self.runner.join(timeout=5)
         self.assertEqual(self.runner.status()["state"], STATE_CANCELLED)
 
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+            db_session=self._session, cleanup_fn=self._cleanup_fn,
         ))
         self.runner.join(timeout=5)
         status = self.runner.status()
@@ -540,7 +652,7 @@ class TriageRunnerStickyCancelTest(unittest.TestCase):
             )
 
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=blocking_cleanup_fn,
+            db_session=self._session, cleanup_fn=blocking_cleanup_fn,
         ))
         self.assertTrue(entered.wait(timeout=5))
         result = self.runner.cancel("operator_stop")
@@ -551,7 +663,7 @@ class TriageRunnerStickyCancelTest(unittest.TestCase):
 
         # No cancel() was armed since -- this start() must run normally.
         self.assertTrue(self.runner.start(
-            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+            db_session=self._session, cleanup_fn=self._cleanup_fn,
         ))
         self.runner.join(timeout=5)
         status = self.runner.status()

@@ -31,8 +31,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from lib.beets_db import BeetsDB, open_beets_db
+from lib.beets_delete import BeetsDeleteFn
 from lib.convergence_service import ConvergenceSignal
-from lib.destructive_release_service import BeetsDeleteFn, DeleteNotifyFn
+from lib.destructive_release_service import DeleteNotifyFn
 from lib.pipeline_db import PipelineDB
 from lib.pipeline_db.rows import ArtistRequestRow
 from web import overlay as _overlay
@@ -91,9 +92,16 @@ class WebRuntime:
     #: speaks HTTP/1.1 keep-alive, so a browser's persistent connections
     #: each pin one worker thread (and its handles) across many requests.
     #: One-shot clients (curl, the importer's notify hooks) cost one
-    #: connect/teardown each — fine at single-operator scale. Neither
-    #: psycopg2 connections nor sqlite3 handles are safe to share across
-    #: threads, which is why this exists at all.
+    #: connect/teardown each — fine at single-operator scale. A
+    #: ``PipelineDB`` is not safe to share across threads (``_ensure_conn``
+    #: replaces ``self.conn`` in place, under whichever caller happens to
+    #: be mid-statement, and one handle is one session, so both threads
+    #: would sit inside the same session-level advisory locks), and a
+    #: sqlite3 handle is bound to its opening thread outright
+    #: (``check_same_thread``). That is why this exists at all. Note
+    #: psycopg2 itself reports ``threadsafety == 2``: sharing a raw
+    #: connection is allowed and it is the wrapper's semantics, not
+    #: libpq's, that make it wrong here.
     _threads: threading.local = field(
         init=False,
         default_factory=threading.local,
@@ -115,17 +123,52 @@ class WebRuntime:
             self._threads.db = handle
         return handle
 
-    def new_db(self) -> PipelineDB:
-        """Open a fresh pipeline-DB connection for a background thread.
+    @contextmanager
+    def open_background_db(self) -> Generator[PipelineDB]:
+        """A scoped pipeline handle for work that outlives the request.
 
-        Background work that outlives a request (the bulk-triage sweep)
-        must not borrow a request thread's handle. Falls back to the
-        shared handle when no DSN is configured (test harness — the one
-        fake stands in for both).
+        The bulk-triage sweep runs on its own thread for minutes after
+        its POST has answered 202, so it must not borrow the request
+        thread's handle. One handle is one PostgreSQL session: the two
+        threads would share session-level advisory locks and whatever
+        transaction either one opened, and
+        :meth:`close_thread_handles` would release the connection out
+        from under the sweep the moment the request's own connection
+        ended.
+
+        Under a DSN this opens a connection nothing else holds and
+        closes it on the way out. A failing close is swallowed rather
+        than raised at the caller, whose own work already succeeded or
+        failed on its own terms — the same best-effort teardown
+        :meth:`close_thread_handles` performs, though that one swallows
+        silently and this one logs.
+
+        With no DSN it yields the injected shared handle and leaves it
+        OPEN. The dev server and the test harness own that one, so the
+        rule teardown already follows applies here too — the runtime
+        closes only what the runtime opened. The separation above is
+        genuinely absent in that case, one session serving both threads,
+        which is accepted for those two callers and never reached in
+        production, where the DSN is always set.
+
+        A context manager rather than a method returning a handle, so
+        ownership is structural instead of conventional: nothing can
+        pass this where :meth:`db` belongs, or the reverse, without
+        Pyright saying so.
         """
-        if self.db_dsn:
-            return PipelineDB(self.db_dsn)
-        return self.db()
+        if not self.db_dsn:
+            yield self.db()
+            return
+        handle = PipelineDB(self.db_dsn)
+        try:
+            yield handle
+        finally:
+            try:
+                handle.close()
+            except Exception:
+                # Best-effort, like close_thread_handles: the caller's
+                # own work already succeeded or failed on its own terms.
+                log.exception("Background pipeline DB handle failed to close")
 
     def db_available(self) -> bool:
         """True when :meth:`db` can return a handle."""
