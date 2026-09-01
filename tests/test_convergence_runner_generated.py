@@ -414,8 +414,9 @@ class TestRegisteredStepFailureMessagesReachable(unittest.TestCase):
     operator sees. The sweep-internal cells (what each swallows, and
     with what degradation) are stated — with each cell mapped to the
     module that pins it — in
-    ``tests/test_slskd_sweep_exception_contracts.py``, which also pins
-    the pipeline-DB propagate/degrade cells directly.
+    ``tests/test_slskd_sweep_exception_contracts.py``, which also
+    directly pins the pipeline-DB propagate/degrade cells and the
+    reaper's per-item removal-failure cell.
 
     One row is fail-closed LEGISLATION rather than reachability proof:
     ``log_cycle_summary``'s world (``ctx.cycle_start = None``) is not

@@ -286,8 +286,17 @@ class TestDiskReaperDbFailureSeams(unittest.TestCase):
 
     def test_removal_failure_is_logged_and_the_sweep_continues(self):
         """The reaper's per-item cell: one file's failed unlink is logged
-        and the remaining eligible files are still reaped — never an
-        aborted sweep, never an exception."""
+        and files walked AFTER it are still reaped — never an aborted
+        sweep, never an exception.
+
+        ``os.walk`` yields ``filenames`` in readdir order, which on this
+        tmpfs put the healthy file FIRST — letting a ``continue``→
+        ``break`` mutant survive the pin's own headline claim (#1312
+        round-3 review, mutant 4). The walk is wrapped to sort each
+        directory's filenames (a filesystem leaf seam, like the
+        ``os.remove`` injection below) so the poisoned ``01 -`` file is
+        provably visited before the healthy ``02 -`` file.
+        """
         with tempfile.TemporaryDirectory() as root:
             db = FakePipelineDB()
             db.seed_request(make_request_row(id=1, status="imported"))
@@ -297,13 +306,20 @@ class TestDiskReaperDbFailureSeams(unittest.TestCase):
                 db, root, "02 - Healthy.flac", request_id=1)
 
             real_remove = os.remove
+            real_walk = os.walk
 
             def _selective_remove(path: str) -> None:
                 if path == poisoned:
                     raise OSError("injected: unlink refused")
                 real_remove(path)
 
+            def _sorted_walk(top: str, topdown: bool = True):
+                for dirpath, dirnames, filenames in real_walk(
+                        top, topdown=topdown):
+                    yield dirpath, dirnames, sorted(filenames)
+
             with (
+                patch("os.walk", side_effect=_sorted_walk),
                 patch("os.remove", side_effect=_selective_remove),
                 self.assertLogs("cratedigger", level="WARNING") as logs,
             ):

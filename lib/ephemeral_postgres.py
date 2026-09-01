@@ -88,12 +88,17 @@ class EphemeralPostgres:
             # (tests/test_pipeline_db.py::TestReadProjectionValueParity,
             # get_pipeline_dashboard_metrics' match_rate_series_28d) then
             # fails in two one-hour UTC wall-clock windows per day
-            # (00:00-01:00 and 17:00-18:00 UTC on a UTC+8 host), whenever a
-            # row seeded 25h ago lands a different number of CALENDAR days
-            # back in the two frames. Reproduced on pristine main
-            # 2026-09-01 00:04-00:07 UTC; passed at 23:10 UTC on the same
-            # trees. Test worlds must be deterministic, so the disposable
-            # cluster is pinned to the same frame the fakes mirror.
+            # (00:00-01:00 UTC, when the 25h-old seeded row crosses an
+            # extra UTC midnight, and 16:00-17:00 UTC — Perth midnight —
+            # when it crosses an extra LOCAL midnight; enumerated over all
+            # 24 hours in real PG during review), whenever that row lands a
+            # different number of CALENDAR days back in the two frames.
+            # Reproduced on pristine main 2026-09-01 00:04-00:07 UTC;
+            # passed at 23:10 UTC on the same trees. UTC is also
+            # PRODUCTION's own frame — doc2's PostgreSQL reports
+            # TimeZone=GMT (measured 2026-09-01) — so this pins the
+            # disposable cluster to the frame both production and the
+            # fakes already share; doc1's host zone was the outlier.
             "-c timezone=UTC",
             # PostgreSQL defers unlinking relation files replaced by TRUNCATE
             # until a checkpoint — no longer triggered by any test-reset
