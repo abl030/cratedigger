@@ -294,7 +294,8 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # and tests/world_model/ are covered by prefix rules below instead of
     # listed file-by-file here — tests/fakes/ and tests/web/ are NOT (a
     # per-file entry here always wins over the tests/fakes/ prefix rule,
-    # which only adds tests.test_fakes on top). Sorted by path (ASCII, so
+    # which only adds tests.test_fakes plus any derived
+    # tests.test_fakes_<stem> on top). Sorted by path (ASCII, so
     # underscore-prefixed entries sort first).
     "tests/__init__.py": (
         # Sets the ambient BEETSDIR default + writes the suite's minimal
@@ -1742,6 +1743,27 @@ def _direct_test_candidates(path: PurePosixPath) -> tuple[str, ...]:
     return ()
 
 
+def _fake_cluster_neighbours(path: PurePosixPath, repo_root: Path) -> tuple[str, ...]:
+    """``<stem>.py`` in a mirrored cluster to its ``tests.test_fakes_<stem>``.
+
+    ``tests/fakes/pipeline_db/`` mirrors ``lib/pipeline_db/`` module for
+    module, and ``tests/fakes/<name>.py`` names its own fake (#1313). Each
+    cluster's fake self-tests live in ``tests/test_fakes_<stem>.py``, so one
+    derived name serves both callers: an edit to a production DB cluster and
+    an edit to the fake that mirrors it both select that cluster's tests.
+
+    This ADDS precision; it is not the fail-closed floor. ``tests.test_fakes``
+    still holds the cross-cluster tests and the fake-to-production signature
+    contract, and both call sites append it (directly, or through
+    PIPELINE_DB_NEIGHBOURS), so a cluster with no sibling module yet still
+    resolves a real consumer rather than nothing.
+    """
+    derived = f"tests.test_fakes_{path.stem}"
+    if _existing_module(derived, repo_root) is None:
+        return ()
+    return (derived,)
+
+
 def _resolve_neighbours(
     relative_path: str,
     path: PurePosixPath,
@@ -1773,10 +1795,12 @@ def _resolve_neighbours(
             neighbours.append(candidate)
     if relative_path.startswith("lib/pipeline_db/"):
         neighbours.extend(PIPELINE_DB_NEIGHBOURS)
+        neighbours.extend(_fake_cluster_neighbours(path, repo_root))
     if relative_path.startswith("migrations/"):
         neighbours.extend((*PIPELINE_DB_NEIGHBOURS, "tests.test_migrator"))
     if relative_path.startswith("tests/fakes/"):
         neighbours.append("tests.test_fakes")
+        neighbours.extend(_fake_cluster_neighbours(path, repo_root))
     if relative_path.startswith("tests/structural_audits/"):
         neighbours.extend(STRUCTURAL_AUDIT_NEIGHBOURS)
     if relative_path.startswith("tests/world_model/"):

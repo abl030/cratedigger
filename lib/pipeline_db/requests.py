@@ -165,7 +165,7 @@ def collect_pipeline_overlays(
     a modern Discogs row and its legacy twin that stores the same numeric
     id in ``mb_release_id`` — so the dedicated-column match wins the key.
 
-    ``tests/fakes/pipeline_db.py`` builds the same raw rows and calls this,
+    ``tests/fakes/pipeline_db/requests.py`` builds the same raw rows and calls this,
     so the two surfaces cannot disagree on precedence (issue #1278 item 7).
     """
     overlays: dict[str, dict[str, object]] = {}

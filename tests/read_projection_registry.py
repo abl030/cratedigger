@@ -2,7 +2,7 @@
 
 The write side has ``.claude/rules/test-fidelity.md`` Rule A: every
 ``PipelineDB`` write method carries a real-PG round-trip test. The READ
-side has the mirror problem — ``FakePipelineDB`` (``tests/fakes/pipeline_db.py``)
+side has the mirror problem — ``FakePipelineDB`` (``tests/fakes/pipeline_db/``)
 hand-mirrors production ``SELECT`` projections across ~62 ``get_*`` /
 ``list_*`` methods. When the fake's projection drifts from production's
 (a column the fake returns that production doesn't, or vice-versa),
@@ -673,7 +673,8 @@ ALLOWLIST: dict[str, str] = {
     "get_owned_transfer_keys":
         "set[tuple[str,str]] (username, filename) membership keys — "
         "scalar set, no row projection; fake<->PG semantics pinned by "
-        "mirrored tests in test_fakes.py + test_pipeline_db.py",
+        "mirrored tests in test_fakes_transfer_ledger.py + "
+        "test_pipeline_db.py",
     "get_retained_failure_paths":
         "set[str] retained paths — scalar set, no row projection; "
         "measurement-failure and quarantine semantics are pinned by mirrored "
