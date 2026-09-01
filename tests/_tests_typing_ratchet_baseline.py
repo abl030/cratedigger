@@ -76,7 +76,6 @@ TESTS_TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "tests/test_import_dispatch.py": {"type_ignore": 2},
     "tests/test_import_manifest.py": {"any": 7, "cast": 7},
     "tests/test_import_manifest_generated.py": {"cast": 2},
-    "tests/test_import_one_stages.py": {"any": 2, "cast": 2},
     "tests/test_import_operation_fence.py": {"any": 10, "cast": 7},
     "tests/test_import_operation_fence_generated.py": {"type_ignore": 1},
     "tests/test_import_preview.py": {"any": 8, "cast": 3},

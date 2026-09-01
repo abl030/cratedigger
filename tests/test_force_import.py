@@ -1,7 +1,8 @@
 """Tests for force-import feature — CLI, DB, and import_one --force flag.
 
 Tests cover:
-- import_one.py --force flag (raises max_distance to the shared override)
+- import_one.py --force flag (raises the run's apply-time distance ceiling to
+  the shared override)
 - pipeline_cli.py force-import command
 - pipeline_db.py get_download_log_entry() method
 - 'force_import' outcome in download_log
@@ -10,14 +11,16 @@ Tests cover:
 import json
 import os
 import sys
+import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 # Bootstrap ephemeral PostgreSQL if available
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
 
 from tests.helpers import REQUEST_CASCADE_RESET_TABLES, delete_all_rows
+from tests.test_import_one_stages import run_evidence_authorized_import
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
@@ -34,65 +37,72 @@ def make_db():
 # ---------------------------------------------------------------------------
 
 class TestImportOneForceFlag(unittest.TestCase):
-    """Test that import_one.main() toggles max_distance from the real CLI flag."""
+    """``--force`` raises the ceiling the Beets child actually runs under.
 
-    def setUp(self) -> None:
-        # import_one.main() calls reset_umask() (sets umask to 0o002 for the
-        # subprocess chain, GH #84). Restore so later tests keep their default.
-        self._saved_umask = os.umask(0o022)
-        os.umask(self._saved_umask)
-        self.addCleanup(os.umask, self._saved_umask)
+    The ceiling used to be a module attribute ``main()`` mutated, and these
+    tests read it back off the module. It is now derived per run and threaded
+    into ``run_import``, so they assert the value the child was handed.
 
-    def test_force_flag_raises_max_distance_to_the_shared_override(self) -> None:
-        """--force must raise ``max_distance`` to the ONE override constant.
+    That value is still a proxy, not the decided outcome: ``run_import`` is
+    an intermediate, and the outermost real adapter for a distance ceiling
+    is the ``dist > max_distance`` comparison inside ``_run_import_once``.
+    ``tests/test_disambiguation.py::TestApplyDistanceCeiling`` drives that
+    comparison and asserts apply-versus-reject flipping on the ceiling
+    alone; these tests pin that the flag reaches it.
+    """
 
-        The expected value comes from the producing module, not a literal:
+    def test_force_flag_raises_the_ceiling_to_the_shared_override(self) -> None:
+        """The expected value comes from the producing module, not a literal.
+
         ``lib.beets.FORCE_IMPORT_DISTANCE_THRESHOLD`` is the same number the
         force lane hands ``beets_validate``, so both comparison sites in a
         force import run under one override (#1080).
         """
+        from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _result, ceilings = run_evidence_authorized_import(
+                tmpdir, force=True)
+
+        self.assertEqual(ceilings, [FORCE_IMPORT_DISTANCE_THRESHOLD])
+
+    def test_a_default_run_keeps_the_default_ceiling(self) -> None:
+        from harness import import_one
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _result, ceilings = run_evidence_authorized_import(tmpdir)
+
+        self.assertEqual(ceilings, [import_one.DEFAULT_MAX_DISTANCE])
+
+    def test_argv_is_where_force_enters(self) -> None:
+        """``--force`` on the real CLI contract, and nothing else, sets it."""
+        from harness.import_one import ImportOneRequest
+
+        forced = ImportOneRequest.from_argv(
+            ["/tmp/staged-album", "mbid-123", "--force"])
+        plain = ImportOneRequest.from_argv(["/tmp/staged-album", "mbid-123"])
+
+        self.assertTrue(forced.force)
+        self.assertFalse(plain.force)
+
+    def test_a_force_run_does_not_raise_a_later_default_run(self) -> None:
+        """The override lives on one request, not on the process.
+
+        While the ceiling was a module global, a ``--force`` run left it
+        raised for everything after it. One process, two runs, is the whole
+        point of the split.
+        """
         from harness import import_one
         from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
 
-        class _StopAfterForce(Exception):
-            pass
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _forced, forced_ceilings = run_evidence_authorized_import(
+                os.path.join(tmpdir, "first"), force=True)
+            _plain, plain_ceilings = run_evidence_authorized_import(
+                os.path.join(tmpdir, "second"))
 
-        original = import_one.max_distance
-        try:
-            with patch.object(
-                sys, "argv",
-                ["import_one.py", "/tmp/staged-album", "mbid-123", "--force"],
-            ), patch("harness.import_one._log"), patch(
-                "harness.import_one.BeetsDB", side_effect=_StopAfterForce
-            ), self.assertRaises(_StopAfterForce):
-                import_one.main()
-
-            self.assertEqual(
-                import_one.max_distance, FORCE_IMPORT_DISTANCE_THRESHOLD,
-            )
-        finally:
-            import_one.max_distance = original
-
-    def test_default_main_keeps_max_distance(self) -> None:
-        """Without --force, main() must leave max_distance at the default."""
-        from harness import import_one
-
-        class _StopBeforeWork(Exception):
-            pass
-
-        original = import_one.max_distance
-        try:
-            with patch.object(
-                sys, "argv",
-                ["import_one.py", "/tmp/staged-album", "mbid-123"],
-            ), patch("harness.import_one._log"), patch(
-                "harness.import_one.BeetsDB", side_effect=_StopBeforeWork
-            ), self.assertRaises(_StopBeforeWork):
-                import_one.main()
-
-            self.assertEqual(import_one.max_distance, original)
-        finally:
-            import_one.max_distance = original
+        self.assertEqual(forced_ceilings, [FORCE_IMPORT_DISTANCE_THRESHOLD])
+        self.assertEqual(plain_ceilings, [import_one.DEFAULT_MAX_DISTANCE])
 
 
 # ---------------------------------------------------------------------------

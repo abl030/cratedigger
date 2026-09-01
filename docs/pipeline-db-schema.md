@@ -1417,7 +1417,7 @@ below — see `lib.wrong_match_delete_service`).
 2. Resolve path (handle both relative and absolute) → verify files still exist.
 3. Look up `mb_release_id` from `album_requests` via `request_id`.
 4. Enqueue `import_jobs(job_type='force_import')` with a dedupe key for the `download_log` row.
-5. `cratedigger-importer` claims the job and calls the existing dispatch path, including `import_one.py --force` (sets `max_distance=999` — everything else runs normally: conversion, spectral, quality comparison).
+5. `cratedigger-importer` claims the job and calls the existing dispatch path, including `import_one.py --force` (raises that run's apply-time `max_distance` to 999 — everything else runs normally: conversion, spectral, quality comparison).
 6. The worker marks the job `completed` or `failed`; the import internals still write `download_log` and `album_requests` outcomes.
 7. **Force-import success consumes its source** (issue #1077, D7): the worker
    deletes the reviewed source directory and clears the actionable

@@ -41,6 +41,18 @@ def direct_loaded_args_attributes(source: str) -> frozenset[str]:
     )
 
 
+def direct_loaded_request_attributes(source: str) -> frozenset[str]:
+    """Return direct ``request.<attr>`` reads in the bounded source file."""
+    return frozenset(
+        node.attr
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.ctx, ast.Load)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "request"
+    )
+
+
 def assert_argparse_destinations_match_reads(
     parser: argparse.ArgumentParser,
     source: str,
@@ -54,11 +66,53 @@ def assert_argparse_destinations_match_reads(
     )
 
 
+def assert_every_destination_is_consumed(
+    parser: argparse.ArgumentParser,
+    source: str,
+) -> None:
+    """Require every parser destination to be READ, not merely copied.
+
+    ``assert_argparse_destinations_match_reads`` used to carry this for
+    free: the ``args.<attr>`` reads it counts sat at their points of use, so
+    deleting a flag's only consumer turned it red. Since #1313 all 18 of
+    them live inside ``ImportOneRequest.from_namespace``, and that check
+    now proves only that argv is COPIED into the dataclass — a flag parsed,
+    stored, and never looked at again would pass it. This is the other
+    half: the same bounded grammar, one attribute name further on.
+    """
+    declared = parser_destinations(parser)
+    consumed = direct_loaded_request_attributes(source)
+    assert declared <= consumed, (
+        "argparse destinations copied into ImportOneRequest but never read "
+        f"as request.<attr>: {sorted(declared - consumed)!r}"
+    )
+
+
 class TestImportOneArgparseAudit(unittest.TestCase):
     def test_real_import_one_parser_destinations_match_direct_reads(self) -> None:
         source = IMPORT_ONE_PATH.read_text(encoding="utf-8")
 
         assert_argparse_destinations_match_reads(import_one.build_parser(), source)
+
+    def test_every_real_destination_is_consumed_not_just_copied(self) -> None:
+        source = IMPORT_ONE_PATH.read_text(encoding="utf-8")
+
+        assert_every_destination_is_consumed(import_one.build_parser(), source)
+
+    def test_a_copied_but_unread_destination_is_rejected(self) -> None:
+        """The known-bad world: parsed, stored on the request, never read."""
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--target-format")
+        parser.add_argument("--never-read")
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            "never read as request.<attr>: \\['never_read'\\]",
+        ):
+            assert_every_destination_is_consumed(
+                parser,
+                "value = request.target_format\n",
+            )
 
     def test_historical_filetype_read_is_rejected_including_conditionals(self) -> None:
         source = IMPORT_ONE_PATH.read_text(encoding="utf-8")
@@ -108,7 +162,13 @@ class TestImportOneArgparseAudit(unittest.TestCase):
 
     def test_main_gets_argv_from_the_one_parser_builder(self) -> None:
         class _ParserSentinel:
-            def parse_args(self) -> argparse.Namespace:
+            # Mirrors the real ``parse_args(args=None)`` signature —
+            # ``ImportOneRequest.from_argv`` forwards its argv argument, and
+            # a sentinel that could not accept one would fail for the wrong
+            # reason.
+            def parse_args(
+                self, args: list[str] | None = None,
+            ) -> argparse.Namespace:
                 raise RuntimeError("parser sentinel")
 
         with (

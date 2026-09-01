@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
 import subprocess
 import sys
 from collections import Counter
@@ -697,13 +700,26 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_discogs_cover_art_fallback",
         "tests.test_discogs_cover_art_fallback_generated",
     ),
-    # harness/import_one.py's basename probes resolve its stage tests, but
-    # tests/test_disambiguation.py is what pins the SECOND harness pass's
-    # argv (--preserve-discogs-flat-subtracks on the retry) — exactly the
+    # harness/import_one.py has NO basename probe: _direct_test_candidates
+    # covers lib/, scripts/ and top-level files, and a harness/ path matches
+    # none of them, so before this list the file resolved to exactly
+    # tests.test_disambiguation plus the harness/ prefix rule's
+    # tests.test_harness_beets2_contract — editing the privileged Beets
+    # mutation child ran neither its 250-test stage module nor its
+    # --force tests (#1313, the argv-adapter item). The entry that used to
+    # sit here claimed those probes existed; they never did.
+    #
+    # test_disambiguation also pins the SECOND harness pass's argv
+    # (--preserve-discogs-flat-subtracks on the retry) — exactly the
     # construction lib/beets_child.py::harness_session_argv now owns
-    # (#1278 item 4, PR 2 review).
+    # (#1278 item 4, PR 2 review) — and, since #1313, the apply-time
+    # distance ceiling's only apply-versus-reject coverage.
     "harness/import_one.py": (
         "tests.test_disambiguation",
+        "tests.test_import_one_stages",
+        "tests.test_import_one_request_generated",
+        "tests.test_import_one_argparse_audit",
+        "tests.test_force_import",
     ),
     # lib/quality/wire_types.py holds the harness wire Structs (#1278
     # item 8). The lib/quality/ prefix rule selects only the quality
@@ -1599,6 +1615,346 @@ ROOT_COVERAGE_RULES: tuple[RootCoverageRule, ...] = (
 )
 
 
+@dataclass(frozen=True)
+class SelectionRule:
+    """One path-matched neighbour contribution, as data (issue #1313).
+
+    The basename conventions and the directory rules used to be hand-written
+    ``if`` branches: all six in ``_direct_test_candidates``, and nine of the
+    twelve in ``_resolve_neighbours`` (the other three are the self-selector
+    and two existence checks, none of which is a rule) — so the modules they
+    name were invisible to
+    `tests/test_selection_coverage_audit.py`'s contract A — that audit's
+    own docstring recorded the inline literals as out of reach. As rows
+    they are ordinary data, audited like `EXACT_PATH_NEIGHBOURS` and
+    `ROOT_COVERAGE_RULES`, and `explain` can name the rule behind every
+    selected module.
+
+    This changes NO selection outcome. It is not a coverage inference of
+    any kind: a row still names its modules by hand, and nothing here reads
+    an import graph.
+
+    Matching is an AND of independent conditions, each unconstrained when
+    its field is empty:
+
+    - ``prefixes`` / ``exact_paths`` — together one OR'd path test, the
+      shape the `nix/` + `flake.nix` and `harness/` + `lib/beets.py` rules
+      already had;
+    - ``root`` — ``path.parts[:1] == (root,)``, the same first-component
+      guard `RootCoverageRule.covers` uses;
+    - ``top_level`` — ``len(path.parts) == 1``;
+    - ``suffixes`` — the file suffix, which is what keeps the `.sh` probe
+      off `.py` files and vice versa;
+    - ``excluded_prefixes`` — subtracted last, so `web/routes/` stays out
+      of the `web/` basename rule.
+
+    A row contributes ``neighbours`` verbatim, then whichever of its
+    ``derived`` templates (formatted with the changed file's ``stem``)
+    names a module that exists on disk. A row with no matcher at all would
+    match every path, so `_assert_selection_rules_well_formed` refuses one
+    at import time.
+    """
+
+    name: str
+    description: str
+    prefixes: tuple[str, ...] = ()
+    exact_paths: tuple[str, ...] = ()
+    root: str | None = None
+    top_level: bool = False
+    suffixes: tuple[str, ...] = ()
+    excluded_prefixes: tuple[str, ...] = ()
+    neighbours: tuple[str, ...] = ()
+    derived: tuple[str, ...] = ()
+
+    def matches(self, relative_path: str, path: PurePosixPath) -> bool:
+        """True when this rule's every stated condition holds for ``path``."""
+        if (self.prefixes or self.exact_paths) and not (
+            any(relative_path.startswith(p) for p in self.prefixes)
+            or relative_path in self.exact_paths
+        ):
+            return False
+        if self.root is not None and path.parts[:1] != (self.root,):
+            return False
+        if self.top_level and len(path.parts) != 1:
+            return False
+        if self.suffixes and path.suffix not in self.suffixes:
+            return False
+        return not any(
+            relative_path.startswith(excluded)
+            for excluded in self.excluded_prefixes
+        )
+
+    def render_derived(self, path: PurePosixPath) -> tuple[str, ...]:
+        """This rule's derived module names for ``path``, unchecked.
+
+        Existence is the caller's business: `_direct_test_candidates`
+        deliberately returns unchecked candidates (its own contract since
+        issue #1081), while `contribute` splits them into real and missing.
+        """
+        return tuple(
+            template.format(stem=path.stem) for template in self.derived
+        )
+
+    def contribute(
+        self, path: PurePosixPath, repo_root: Path
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """``(modules, unresolved)`` — what this rule adds, and what it wanted.
+
+        ``unresolved`` is what makes `explain` useful: a derived name with
+        no module file on disk is the single most common reason a path
+        resolves less than its author expected.
+        """
+        existing, unresolved = _split_existing(
+            self.render_derived(path), repo_root
+        )
+        return (*self.neighbours, *existing), unresolved
+
+
+#: Basename conventions: "a file at this path is covered by a test module
+#: named after its stem". Mutually exclusive by construction — disjoint
+#: roots, disjoint suffixes within a root, and a top-level rule no rooted
+#: path can reach — so AT MOST one row matches any path (most paths match
+#: none) and `_basename_rule` can speak of "the" matching rule.
+#: `tests/test_targeted_test_selection.py` pins that over every real file
+#: under a root these rules can reach, plus shapes the tree does not hold.
+#: Every candidate is checked for real existence before it is selected, so a
+#: row claims a naming convention, never evidence that the matched module
+#: executes the file.
+BASENAME_RULES: tuple[SelectionRule, ...] = (
+    SelectionRule(
+        name="basename:scripts/*.sh",
+        description=(
+            "a shell wrapper under scripts/ is driven by tests/test_<stem>.py"
+        ),
+        root="scripts",
+        suffixes=(".sh",),
+        derived=("tests.test_{stem}",),
+        # Issue #1278 item 9. Five of the sixteen wrappers already had a
+        # matching tests/test_<stem>.py and needed no hand-written entry
+        # once this probe existed; scripts/test_tmpfs.sh had an entry
+        # naming exactly the module this probe finds, deleted as redundant
+        # in the same change. Deliberately scripts-only: widening it to
+        # every root is latent (harness/run_beets_harness.sh and three
+        # docs/research wrappers have no matching module), pinned by
+        # test_shell_probe_is_scoped_to_the_scripts_root.
+    ),
+    SelectionRule(
+        name="basename:lib/*.py",
+        description=(
+            "a lib module is covered by tests/test_<stem>.py and its "
+            "generated sibling"
+        ),
+        root="lib",
+        suffixes=(".py",),
+        derived=("tests.test_{stem}", "tests.test_{stem}_generated"),
+        # The _generated probe is the same mechanical basename-only shape
+        # as its deterministic twin (issue #1199 review F5): a lib/ file
+        # whose ONLY coverage is a generated module resolves too.
+    ),
+    SelectionRule(
+        name="basename:scripts/*.py",
+        description="a script is covered by tests/test_<stem>.py",
+        root="scripts",
+        suffixes=(".py",),
+        derived=("tests.test_{stem}",),
+        # No _generated sibling probe here, unlike lib/ above.
+    ),
+    SelectionRule(
+        name="basename:web/*.py",
+        description=(
+            "a non-route web module is covered by tests/test_web_<stem>.py "
+            "or tests/web/test_<stem>.py"
+        ),
+        root="web",
+        suffixes=(".py",),
+        excluded_prefixes=("web/routes/",),
+        derived=("tests.test_web_{stem}", "tests.web.test_{stem}"),
+        # web/routes/ is excluded because its own prefix rule below already
+        # derives tests.web.test_routes_<stem> plus ROUTE_NEIGHBOURS.
+    ),
+    SelectionRule(
+        name="basename:<top-level>.py",
+        description=(
+            "a top-level module is covered by tests/test_<stem>.py"
+        ),
+        top_level=True,
+        suffixes=(".py",),
+        derived=("tests.test_{stem}",),
+        # Two top-level .py files exist. album_source.py is the one this row
+        # actually serves -- tests/test_album_source.py exists, so the row
+        # resolves it with no entry. cratedigger.py is the other, and has no
+        # tests.test_cratedigger, which is why it carries a hand-written
+        # EXACT_PATH_NEIGHBOURS entry instead.
+    ),
+)
+
+#: Directory rules: "anything under here also regresses these modules".
+#: Unlike the basename stage, which takes THE one matching row, this loop
+#: accumulates every row that matches. No two of today's rows can both match
+#: (no row's prefix or exact path is a prefix of another's), so that
+#: difference is currently unobservable and the row order below is not
+#: pinned by anything — what IS pinned is the stage order: table entry, then
+#: self-selector, then basename, then these.
+PREFIX_RULES: tuple[SelectionRule, ...] = (
+    SelectionRule(
+        name="prefix:lib/pipeline_db/",
+        description=(
+            "a production DB cluster regresses the shared boundary "
+            "contracts and its own mirrored fake's self-tests"
+        ),
+        prefixes=("lib/pipeline_db/",),
+        neighbours=PIPELINE_DB_NEIGHBOURS,
+        derived=("tests.test_fakes_{stem}",),
+        # tests/fakes/pipeline_db/ mirrors this package module for module
+        # (#1313 candidate 4), so ONE derived name serves both sides: the
+        # tests/fakes/ row below spells the same template. It ADDS
+        # precision and is not the floor — PIPELINE_DB_NEIGHBOURS already
+        # carries tests.test_fakes, which holds the cross-cluster tests and
+        # the fake-to-production signature contract, so a cluster with no
+        # sibling module yet still resolves a real consumer.
+    ),
+    SelectionRule(
+        name="prefix:migrations/",
+        description="a migration regresses the DB contracts and the migrator",
+        prefixes=("migrations/",),
+        neighbours=(*PIPELINE_DB_NEIGHBOURS, "tests.test_migrator"),
+    ),
+    SelectionRule(
+        name="prefix:tests/fakes/",
+        description=(
+            "a fake regresses the fake-to-production contract and, when it "
+            "has one, its own cluster's self-tests"
+        ),
+        prefixes=("tests/fakes/",),
+        neighbours=("tests.test_fakes",),
+        derived=("tests.test_fakes_{stem}",),
+        # The derived half is why editing tests/fakes/beets.py reaches
+        # tests.test_fakes_beets: since the #1313 split, tests/test_fakes.py
+        # does not name FakeBeetsDB at all, so the fixed half alone would
+        # select a module that never loads the fake being edited — the same
+        # shape as the deploy_hold instance in issue #1081 review round 2.
+    ),
+    SelectionRule(
+        name="prefix:tests/structural_audits/",
+        description="shared structural-audit support regresses its audits",
+        prefixes=("tests/structural_audits/",),
+        neighbours=STRUCTURAL_AUDIT_NEIGHBOURS,
+    ),
+    SelectionRule(
+        name="prefix:tests/world_model/",
+        description="world-model support regresses the burst and its drivers",
+        prefixes=("tests/world_model/",),
+        neighbours=WORLD_MODEL_NEIGHBOURS,
+    ),
+    SelectionRule(
+        name="prefix:web/routes/",
+        description=(
+            "a route regresses the route audits and its own contract tests"
+        ),
+        prefixes=("web/routes/",),
+        neighbours=ROUTE_NEIGHBOURS,
+        derived=("tests.web.test_routes_{stem}",),
+    ),
+    SelectionRule(
+        name="prefix:nix/",
+        description="Nix module or flake pin regresses the module contract",
+        prefixes=("nix/",),
+        exact_paths=("flake.nix", "flake.lock"),
+        neighbours=("tests.test_nix_module",),
+    ),
+    SelectionRule(
+        name="prefix:harness/",
+        description="harness code regresses the real-beets drift gate",
+        prefixes=("harness/",),
+        exact_paths=("lib/beets.py",),
+        neighbours=("tests.test_harness_beets2_contract",),
+    ),
+    SelectionRule(
+        name="prefix:lib/quality/",
+        description="a quality module regresses the decision album test set",
+        prefixes=("lib/quality/",),
+        neighbours=(
+            "tests.test_quality_decisions",
+            "tests.test_quality_classification",
+            "tests.test_quality_generated",
+        ),
+    ),
+)
+
+#: Every path-matched rule, in resolution order: the basename stage first,
+#: then the directory rules. `_resolve_neighbours` consumes exactly this
+#: order, `explain` enumerates it, and
+#: `tests/test_selection_coverage_audit.py`'s contract A now checks the
+#: modules these rows name — which no audit could see while they were
+#: inline literals inside two if-chains.
+SELECTION_RULES: tuple[SelectionRule, ...] = (*BASENAME_RULES, *PREFIX_RULES)
+
+#: What `resolve_attributed_neighbours` calls the two mechanisms that are
+#: not `SELECTION_RULES` rows, so `explain` names every source the same way.
+EXACT_TABLE_SOURCE = "table:EXACT_PATH_NEIGHBOURS"
+SELF_SELECTOR_SOURCE = "self-selector"
+
+
+@dataclass(frozen=True)
+class NeighbourSource:
+    """One mechanism's contribution to a path's neighbours, with its name."""
+
+    name: str
+    description: str
+    modules: tuple[str, ...]
+    unresolved: tuple[str, ...] = ()
+
+
+def _assert_selection_rules_well_formed(
+    rules: Sequence[SelectionRule],
+) -> None:
+    """Every row names and describes itself uniquely, matches something, and
+    adds something.
+
+    Four ways a row can be silently wrong. A row with no matcher matches
+    EVERY path, so its modules would join every selection in the repository.
+    A row with neither ``neighbours`` nor ``derived`` matches paths and
+    contributes nothing, which reads as coverage and is not. A duplicate
+    ``name`` makes `explain`'s attribution ambiguous and lets one row's pin
+    silently stand in for another's.
+
+    A duplicate ``description`` is the subtlest, and it is why this clause
+    exists rather than leaving descriptions to review: `explain` prints one
+    beside every attributed module, so a row wearing a neighbour's sentence
+    tells an operator that a route file matched a rule for non-route files.
+    The review round's mutant did exactly that and nothing failed.
+    """
+    seen: set[str] = set()
+    described: set[str] = set()
+    for rule in rules:
+        if rule.name in seen:
+            raise ValueError(f"duplicate SelectionRule name: {rule.name}")
+        seen.add(rule.name)
+        if rule.description in described:
+            raise ValueError(
+                f"duplicate SelectionRule description on {rule.name}: "
+                f"{rule.description}"
+            )
+        described.add(rule.description)
+        if not (
+            rule.prefixes
+            or rule.exact_paths
+            or rule.root is not None
+            or rule.top_level
+        ):
+            raise ValueError(
+                f"SelectionRule {rule.name} constrains no path and would "
+                "match every file in the repository"
+            )
+        if not (rule.neighbours or rule.derived):
+            raise ValueError(
+                f"SelectionRule {rule.name} contributes no test module"
+            )
+
+
+_assert_selection_rules_well_formed(SELECTION_RULES)
+
+
 def _assert_no_double_registration(
     exact_path_neighbours: Mapping[str, tuple[str, ...]],
     admitted_gap_registry: Mapping[str, str],
@@ -1710,58 +2066,117 @@ def ambient_test_modules(repo_root: Path) -> tuple[str, ...]:
     return tuple(dict.fromkeys((*ALWAYS_AMBIENT_TESTS, *audit_modules)))
 
 
-def _direct_test_candidates(path: PurePosixPath) -> tuple[str, ...]:
-    stem = path.stem
-    if path.parts[:1] == ("scripts",) and path.suffix == ".sh":
-        # The same mechanical basename-only probe every .py root gets, for
-        # the shell wrappers under scripts/ (issue #1278 item 9). Five of
-        # the sixteen already have a tests/test_<stem>.py that drives them
-        # and needed no entry once this probe existed; scripts/test_tmpfs.sh
-        # had a hand-written entry naming exactly the module this probe now
-        # finds, and it was deleted as redundant in the same change. The
-        # caller still checks the candidate really exists via
-        # _existing_module, so this claims nothing: it is a naming
-        # convention, not evidence that the matched module executes or
-        # reads the wrapper.
-        return (f"tests.test_{stem}",)
-    if path.suffix != ".py":
-        return ()
-    if path.parts[:1] == ("lib",):
-        # tests.test_<stem>_generated is the same mechanical basename-only
-        # probe as tests.test_<stem> above, just for the generated sibling
-        # (issue #1199 review F5) -- both are checked for real existence by
-        # the caller via _existing_module before being added, so this is
-        # not hand-curation: a lib/ file whose ONLY coverage is a generated
-        # module (no deterministic tests.test_<stem>) now resolves too.
-        return (f"tests.test_{stem}", f"tests.test_{stem}_generated")
-    if path.parts[:1] == ("scripts",):
-        return (f"tests.test_{stem}",)
-    if path.parts[:1] == ("web",) and path.parts[:2] != ("web", "routes"):
-        return (f"tests.test_web_{stem}", f"tests.web.test_{stem}")
-    if len(path.parts) == 1:
-        return (f"tests.test_{stem}",)
-    return ()
+def _split_existing(
+    candidates: Iterable[str], repo_root: Path
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Partition derived module names into those on disk and those not.
 
-
-def _fake_cluster_neighbours(path: PurePosixPath, repo_root: Path) -> tuple[str, ...]:
-    """``<stem>.py`` in a mirrored cluster to its ``tests.test_fakes_<stem>``.
-
-    ``tests/fakes/pipeline_db/`` mirrors ``lib/pipeline_db/`` module for
-    module, and ``tests/fakes/<name>.py`` names its own fake (#1313). Each
-    cluster's fake self-tests live in ``tests/test_fakes_<stem>.py``, so one
-    derived name serves both callers: an edit to a production DB cluster and
-    an edit to the fake that mirrors it both select that cluster's tests.
-
-    This ADDS precision; it is not the fail-closed floor. ``tests.test_fakes``
-    still holds the cross-cluster tests and the fake-to-production signature
-    contract, and both call sites append it (directly, or through
-    PIPELINE_DB_NEIGHBOURS), so a cluster with no sibling module yet still
-    resolves a real consumer rather than nothing.
+    One splitter for both callers — `SelectionRule.contribute` and the
+    basename stage in `resolve_attributed_neighbours` — so "what counts as
+    resolvable" cannot come to mean two things.
     """
-    derived = f"tests.test_fakes_{path.stem}"
-    if _existing_module(derived, repo_root) is None:
-        return ()
-    return (derived,)
+    existing: list[str] = []
+    missing: list[str] = []
+    for candidate in candidates:
+        if _existing_module(candidate, repo_root) is None:
+            missing.append(candidate)
+        else:
+            existing.append(candidate)
+    return tuple(existing), tuple(missing)
+
+
+def _basename_rule(path: PurePosixPath) -> SelectionRule | None:
+    """The one BASENAME_RULES row that matches ``path``, if any.
+
+    The rows are mutually exclusive by construction — disjoint roots,
+    disjoint suffixes within a root, and a top-level rule no rooted path can
+    reach — so "the matching rule" is well defined and this is not a
+    first-match tie-break. `tests/test_targeted_test_selection.py` pins that
+    over every tracked file, because the claim is what lets `explain`
+    attribute a basename hit to one named rule.
+    """
+    relative_path = path.as_posix()
+    for rule in BASENAME_RULES:
+        if rule.matches(relative_path, path):
+            return rule
+    return None
+
+
+def _direct_test_candidates(path: PurePosixPath) -> tuple[str, ...]:
+    """The basename-convention module names for ``path``, existence unchecked.
+
+    The caller checks each candidate really exists via `_existing_module`,
+    so this claims nothing beyond a naming convention: never evidence that
+    the matched module executes or reads the file.
+    """
+    rule = _basename_rule(path)
+    return () if rule is None else rule.render_derived(path)
+
+
+def resolve_attributed_neighbours(
+    relative_path: str,
+    path: PurePosixPath,
+    repo_root: Path,
+    *,
+    exact_path_neighbours: Mapping[str, tuple[str, ...]] = EXACT_PATH_NEIGHBOURS,
+) -> tuple[NeighbourSource, ...]:
+    """Every mechanism's contribution, named, in resolution order.
+
+    `_resolve_neighbours` is the flattening of this, so the two cannot drift
+    — and `explain` can answer "which rule selected this module", which
+    previously meant reading the file or diffing a run (issue #1313).
+
+    A source appears for every mechanism that MATCHED, including one that
+    contributed nothing because its derived module does not exist: that case
+    is the most useful thing `explain` reports.
+    """
+    sources: list[NeighbourSource] = []
+    entry = exact_path_neighbours.get(relative_path, ())
+    if entry:
+        sources.append(
+            NeighbourSource(
+                EXACT_TABLE_SOURCE,
+                "hand-authored entry for this exact path",
+                tuple(entry),
+            )
+        )
+    module = _path_module(path)
+    if module is not None and module.startswith("tests."):
+        sources.append(
+            NeighbourSource(
+                SELF_SELECTOR_SOURCE,
+                "the changed file is itself a runnable test module",
+                (module,),
+            )
+        )
+    basename_rule = _basename_rule(path)
+    if basename_rule is not None:
+        # Deliberately routed through `_direct_test_candidates` rather than
+        # `basename_rule.contribute`, which would be one call rather than
+        # two: that function is the name every admitted-gap rationale and
+        # registry comment in this file cites for the basename probe,
+        # including two dated measurement records, so it stays the
+        # production candidate source instead of becoming a test-only
+        # synonym for the same five rows.
+        modules, unresolved = _split_existing(
+            _direct_test_candidates(path), repo_root
+        )
+        sources.append(
+            NeighbourSource(
+                basename_rule.name,
+                basename_rule.description,
+                modules,
+                unresolved,
+            )
+        )
+    for rule in PREFIX_RULES:
+        if not rule.matches(relative_path, path):
+            continue
+        modules, unresolved = rule.contribute(path, repo_root)
+        sources.append(
+            NeighbourSource(rule.name, rule.description, modules, unresolved)
+        )
+    return tuple(sources)
 
 
 def _resolve_neighbours(
@@ -1786,46 +2201,16 @@ def _resolve_neighbours(
     exist to answer. It is a definition-time default, so a replacement must
     be passed explicitly; patching the module binding does not reach it.
     """
-    neighbours: list[str] = list(exact_path_neighbours.get(relative_path, ()))
-    module = _path_module(path)
-    if module is not None and module.startswith("tests."):
-        neighbours.append(module)
-    for candidate in _direct_test_candidates(path):
-        if _existing_module(candidate, repo_root) is not None:
-            neighbours.append(candidate)
-    if relative_path.startswith("lib/pipeline_db/"):
-        neighbours.extend(PIPELINE_DB_NEIGHBOURS)
-        neighbours.extend(_fake_cluster_neighbours(path, repo_root))
-    if relative_path.startswith("migrations/"):
-        neighbours.extend((*PIPELINE_DB_NEIGHBOURS, "tests.test_migrator"))
-    if relative_path.startswith("tests/fakes/"):
-        neighbours.append("tests.test_fakes")
-        neighbours.extend(_fake_cluster_neighbours(path, repo_root))
-    if relative_path.startswith("tests/structural_audits/"):
-        neighbours.extend(STRUCTURAL_AUDIT_NEIGHBOURS)
-    if relative_path.startswith("tests/world_model/"):
-        neighbours.extend(WORLD_MODEL_NEIGHBOURS)
-    if relative_path.startswith("web/routes/"):
-        neighbours.extend(ROUTE_NEIGHBOURS)
-        route_test = f"tests.web.test_routes_{path.stem}"
-        if _existing_module(route_test, repo_root) is not None:
-            neighbours.append(route_test)
-    if relative_path.startswith("nix/") or relative_path in {
-        "flake.nix",
-        "flake.lock",
-    }:
-        neighbours.append("tests.test_nix_module")
-    if relative_path.startswith("harness/") or relative_path == "lib/beets.py":
-        neighbours.append("tests.test_harness_beets2_contract")
-    if relative_path.startswith("lib/quality/"):
-        neighbours.extend(
-            (
-                "tests.test_quality_decisions",
-                "tests.test_quality_classification",
-                "tests.test_quality_generated",
-            )
+    return [
+        module
+        for source in resolve_attributed_neighbours(
+            relative_path,
+            path,
+            repo_root,
+            exact_path_neighbours=exact_path_neighbours,
         )
-    return neighbours
+        for module in source.modules
+    ]
 
 
 def _changed_path_neighbours(
@@ -1968,3 +2353,146 @@ def changed_paths_from_git(
             *_git_output(repo_root, "ls-files", "--others", "--exclude-standard"),
         )
     )
+
+
+def _root_coverage_lines(
+    relative_path: str,
+    path: PurePosixPath,
+    repo_root: Path,
+) -> tuple[str, ...]:
+    """How the fail-closed contract treats this path, and what it selects.
+
+    Reads `ROOT_COVERAGE_RULES` as data and calls the REAL
+    `_changed_path_neighbours` for the verdict, then applies the REAL
+    `_paired_module` on top, which is the other half of what
+    `expand_test_selection` does per path. Neither is reimplemented here, so
+    the reported selection cannot disagree with a run — except for the
+    ambient audits, which are named rather than listed because they are the
+    same on every path. That resolver call writes the admitted-gap note to
+    stderr; it is swallowed because this report already states the gap and
+    its rationale in full.
+    """
+    lines: list[str] = []
+    covering = [rule for rule in ROOT_COVERAGE_RULES if rule.covers(path)]
+    if not covering:
+        lines.append(
+            "  policed by: nothing — no ROOT_COVERAGE_RULES row covers this "
+            "root and suffix, so resolving zero neighbours here is silent"
+        )
+    for rule in covering:
+        rationale = rule.registry.get(relative_path)
+        if rationale is None:
+            lines.append(
+                f"  policed by: the {rule.root}/ row — zero neighbours here "
+                f"raises unless {rule.registry_name} admits the path"
+            )
+            continue
+        lines.append(f"  admitted gap in {rule.registry_name}: {rationale}")
+        if rule.admitted_selects_nothing:
+            lines.append(
+                "      this registry selects NOTHING at all: every module "
+                "above is discarded before resolution, so a registration "
+                "cannot be a lookalike neighbour set (issue #1081)"
+            )
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buffer):
+            selected = _changed_path_neighbours(relative_path, repo_root)
+    except ValueError as exc:
+        lines.append(f"  selects: NOTHING — this path fails closed: {exc}")
+        return tuple(lines)
+    # expand_test_selection adds a deterministic/generated sibling for every
+    # module it selects, which no rule contributes and no source above can
+    # name. Reporting the neighbours alone under-stated what really runs on
+    # 254 of 1,619 tracked paths (measured: tests 149, migrations 82,
+    # scripts 13, web 5, lib 4, top level 1) -- migrations/*.sql pull in
+    # tests.test_migrator_generated, and a lib/ module whose only coverage is
+    # a generated sibling gets it from here, not from a rule. It never
+    # under-stated in the dangerous direction: of those 254, zero resolve no
+    # neighbours at all, so the report never said "nothing" while something
+    # ran.
+    paired = [
+        sibling
+        for module in _ordered_unique(selected)
+        if (sibling := _paired_module(module, repo_root)) is not None
+    ]
+    if paired:
+        lines.append(
+            "  paired siblings — added by expand_test_selection, not by any "
+            "rule:"
+        )
+        lines.extend(f"      {module}" for module in paired)
+    # De-duplicated because that is what actually runs: expand_test_selection
+    # collapses repeats before the runner sees them, so a module two
+    # mechanisms both name is one target. The per-source breakdown above
+    # still shows both mechanisms naming it.
+    unique = _ordered_unique((*selected, *paired))
+    lines.append(
+        "  selects: "
+        + (", ".join(unique) if unique else "nothing beyond the ambient gates")
+    )
+    lines.append(
+        "      plus every ambient audit and ratchet, which run on every "
+        "selection regardless of the path"
+    )
+    return tuple(lines)
+
+
+def explain_path(relative_path: str, repo_root: Path) -> tuple[str, ...]:
+    """Report lines explaining how selection resolves one path.
+
+    Answers the question the selection machinery could not answer before
+    (issue #1313): which mechanism contributed each selected module, which
+    matched but found nothing on disk, and whether the fail-closed contract
+    is watching this path at all. The path need not exist — the resolver
+    never stats its own target, only candidate test modules — so a path can
+    be explained before the file is written.
+    """
+    path = PurePosixPath(relative_path)
+    lines = [relative_path]
+    sources = resolve_attributed_neighbours(relative_path, path, repo_root)
+    if not sources:
+        lines.append("  (no mechanism matched this path)")
+    for source in sources:
+        lines.append(f"  {source.name} — {source.description}")
+        lines.extend(f"      {module}" for module in source.modules)
+        lines.extend(
+            f"      {module}  (no module file on disk)"
+            for module in source.unresolved
+        )
+    lines.extend(_root_coverage_lines(relative_path, path, repo_root))
+    return tuple(lines)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """`explain` a path's selection: which rule contributes which module."""
+    parser = argparse.ArgumentParser(
+        prog="targeted_test_selection",
+        description=(
+            "Explain how targeted test selection resolves a repository path."
+        ),
+    )
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    explain = subcommands.add_parser(
+        "explain",
+        help="show which rule contributes each test module for a path",
+    )
+    explain.add_argument(
+        "paths",
+        nargs="+",
+        metavar="PATH",
+        help="repository-relative path, e.g. lib/download.py",
+    )
+    args = parser.parse_args(argv)
+
+    repo_root = Path(__file__).resolve().parent.parent
+    for index, relative_path in enumerate(args.paths):
+        if index:
+            print()
+        for line in explain_path(relative_path, repo_root):
+            print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

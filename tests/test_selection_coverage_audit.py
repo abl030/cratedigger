@@ -39,7 +39,10 @@ probe); its own both-directions exactness lives in
 Plus three contracts on `EXACT_PATH_NEIGHBOURS` itself, which the twin
 audits could not see at all:
 
-A. every dotted module a mapping names really exists on disk;
+A. every dotted module a mapping names really exists on disk — since issue
+   #1313 this also covers every fixed module a `SELECTION_RULES` row names,
+   which no audit could see while those were inline literals inside two
+   if-chains;
 B. no entry is fully redundant with what the path would resolve WITHOUT it;
 C. every entry whose deletion the fail-closed rules could NOT catch carries
    an explicit pin here.
@@ -71,6 +74,7 @@ from scripts.targeted_test_selection import (
     ALWAYS_AMBIENT_TESTS,
     EXACT_PATH_NEIGHBOURS,
     ROOT_COVERAGE_RULES,
+    SELECTION_RULES,
     RootCoverageRule,
     _assert_registries_disjoint,
     _changed_path_neighbours,
@@ -123,22 +127,28 @@ AUDITED_RULES: tuple[RootCoverageRule, ...] = tuple(
 
 
 def shared_neighbour_sets() -> dict[str, tuple[str, ...]]:
-    """Every module-level neighbour tuple the production module exports.
+    """Every fixed neighbour tuple the production module holds.
 
-    Derived by introspection over the `*_NEIGHBOURS`-named module
-    attributes plus `ALWAYS_AMBIENT_TESTS`, not hand-listed (issue #1278
-    item 9 review F7): a new shared tuple is covered by contract A the
-    moment it is added, and a hand-list silently would not cover it.
-    `EXACT_PATH_NEIGHBOURS` matches the name convention but is a dict, so
-    the `isinstance` filter keeps it out — its per-path entries are fed to
-    contract A separately.
+    Two sources, both DATA, neither hand-listed (issue #1278 item 9 review
+    F7): the `*_NEIGHBOURS`-named module attributes plus
+    `ALWAYS_AMBIENT_TESTS`, and every `SELECTION_RULES` row's `neighbours`.
+    A new shared tuple or a new rule is covered by contract A the moment it
+    is added. `EXACT_PATH_NEIGHBOURS` matches the name convention but is a
+    dict, so the `isinstance` filter keeps it out — its per-path entries are
+    fed to contract A separately.
 
-    This is bounded name-convention introspection of DATA (module
-    attributes), never a source scan. Deliberately outside its reach: the
-    module names spelled as inline literals inside `_resolve_neighbours`'
-    own prefix rules. A nonexistent one there fails loudly downstream at
-    the first selection that hits the rule ("unknown test selector"),
-    which is why chasing them into a source scanner is not worth it.
+    The rules half is new with issue #1313, and it closes what this
+    docstring used to record as a deliberate hole: the module names spelled
+    as inline literals inside `_resolve_neighbours`' own prefix rules were
+    outside every audit, failing only downstream at the first selection that
+    hit the rule ("unknown test selector"). As rows they are ordinary data,
+    reachable by the same introspection — no source scan required, which is
+    why the hole was worth closing this way rather than with a scanner.
+
+    Still outside its reach, and correctly so: a row's `derived` templates.
+    They are formatted with a changed file's stem, so there is no fixed name
+    to check; `contribute` existence-checks each one at resolution time
+    instead, and `explain` reports the misses.
     """
     sets: dict[str, tuple[str, ...]] = {
         "ALWAYS_AMBIENT_TESTS": ALWAYS_AMBIENT_TESTS,
@@ -149,13 +159,16 @@ def shared_neighbour_sets() -> dict[str, tuple[str, ...]]:
         value = getattr(targeted_test_selection, name)
         if isinstance(value, tuple):
             sets[name] = value
+    for rule in SELECTION_RULES:
+        if rule.neighbours:
+            sets[f"SELECTION_RULES[{rule.name}]"] = rule.neighbours
     return sets
 
 #: Per-root subdirectory for the NESTED unmapped probe. A top-level probe
 #: alone cannot distinguish the real `path.parts[:1] == (root,)` guard from
 #: a narrower `len(path.parts) == 2` mutant (issue #1199 review F2), so each
 #: probe goes one level deeper. Each directory is chosen to dodge every
-#: prefix rule in `_resolve_neighbours` (`tests/fakes/`,
+#: `PREFIX_RULES` row (`tests/fakes/`,
 #: `tests/structural_audits/`, `tests/world_model/`, `lib/pipeline_db/`,
 #: `lib/quality/` all resolve neighbours unconditionally and would make the
 #: probe resolve rather than raise). Keyed by root, so a new rule with no
@@ -251,8 +264,16 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_discogs_cover_art_fallback_generated",
     ),
     # The harness/ prefix rule resolves tests.test_harness_beets2_contract
-    # regardless, masking the loss of the second-pass argv coverage.
-    "harness/import_one.py": ("tests.test_disambiguation",),
+    # regardless, masking the loss of everything else: no basename probe
+    # reaches a harness/ path, so this entry is the ONLY thing selecting
+    # the import child's own stage, argv, and force coverage.
+    "harness/import_one.py": (
+        "tests.test_disambiguation",
+        "tests.test_import_one_stages",
+        "tests.test_import_one_request_generated",
+        "tests.test_import_one_argparse_audit",
+        "tests.test_force_import",
+    ),
     # Basename probes resolve tests.test_beets_child(_generated).
     "lib/beets_child.py": (
         "tests.test_beets_delete",
@@ -567,8 +588,9 @@ class TestRootCoverageRegistriesAreExact(unittest.TestCase):
         without stopping the walk.
 
         The second half is what the deleted twins lacked (review M48): they
-        threw the resolved tuple away, so deleting `_resolve_neighbours`'
-        `module.startswith("tests.")` self-selector guard — which makes
+        threw the resolved tuple away, so deleting the
+        `module.startswith("tests.")` self-selector guard (in
+        `resolve_attributed_neighbours` since #1313) — which makes
         `scripts/test_substrate.py` emit the bogus selector
         `scripts.test_substrate`, the exact #1081 founding defect of an
         unrunnable selector reaching the runner — left every test green.
@@ -649,13 +671,21 @@ class TestExactPathNeighbourMappings(unittest.TestCase):
     def test_the_shared_tuple_sweep_is_not_vacuous(self) -> None:
         """The introspection above is only as good as what it finds: an
         empty or collapsed sweep would make contract A silently narrower
-        than its docstring claims.
+        than its docstring claims. Both halves are checked, because either
+        can collapse independently — dropping the `SELECTION_RULES` loop
+        would restore the exact inline-literal hole issue #1313 closed, and
+        every other test here would stay green.
         """
         sets = shared_neighbour_sets()
 
         self.assertIn("ALWAYS_AMBIENT_TESTS", sets)
         self.assertIn("WEB_TEST_HARNESS_NEIGHBOURS", sets)
         self.assertNotIn("EXACT_PATH_NEIGHBOURS", sets)
+        self.assertIn("SELECTION_RULES[prefix:lib/quality/]", sets)
+        self.assertEqual(
+            len([name for name in sets if name.startswith("SELECTION_RULES[")]),
+            len([rule for rule in SELECTION_RULES if rule.neighbours]),
+        )
         self.assertTrue(all(sets.values()), sets)
 
     def test_no_entry_is_fully_redundant_with_its_own_fallback(self) -> None:
