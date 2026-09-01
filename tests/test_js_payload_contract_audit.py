@@ -326,28 +326,38 @@ function renderWithShadow(helpers) {
                 "unsupported optional audited renderer call",
             ),
             (
-                "const render = renderDownloadHistoryItem; "
-                "render({invented_client_only: 1});",
+                (
+                    "const render = renderDownloadHistoryItem; "
+                    "render({invented_client_only: 1});"
+                ),
                 "unsupported indirect/aliased audited renderer reference",
             ),
             (
-                "let render; render = renderDownloadHistoryItem; "
-                "render({invented_client_only: 1});",
+                (
+                    "let render; render = renderDownloadHistoryItem; "
+                    "render({invented_client_only: 1});"
+                ),
                 "unsupported indirect/aliased audited renderer reference",
             ),
             (
-                "const {renderDownloadHistoryItem: render} = helpers; "
-                "render({invented_client_only: 1});",
+                (
+                    "const {renderDownloadHistoryItem: render} = helpers; "
+                    "render({invented_client_only: 1});"
+                ),
                 "unsupported indirect/aliased audited renderer reference",
             ),
             (
-                "let render; ({renderDownloadHistoryItem: render} = helpers); "
-                "render({invented_client_only: 1});",
+                (
+                    "let render; ({renderDownloadHistoryItem: render} = helpers); "
+                    "render({invented_client_only: 1});"
+                ),
                 "unsupported indirect/aliased audited renderer reference",
             ),
             (
-                "import {renderDownloadHistoryItem as render} from './fixture.js'; "
-                "render({invented_client_only: 1});",
+                (
+                    "import {renderDownloadHistoryItem as render} from './fixture.js'; "
+                    "render({invented_client_only: 1});"
+                ),
                 "unsupported aliased audited renderer import",
             ),
         )
