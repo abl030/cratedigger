@@ -1339,7 +1339,7 @@ _MEASUREMENT_TRIGGERS: tuple[_Trigger, ...] = (
     ),
     _Trigger(
         trigger="current beets path was not returned",
-        produced_by="lib/import_preview.py",
+        produced_by="lib/current_library_evidence.py",
         evidence="current Beets path was not returned",
         probe="failed: current Beets path was not returned",
         expect="the installed library copy has no path on record",

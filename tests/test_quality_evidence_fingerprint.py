@@ -196,7 +196,9 @@ class TestFingerprintAlbumPathConsumerWiring(unittest.TestCase):
     """The two quality-critical consumers delegate their path witness."""
 
     def test_consumers_use_the_helper_not_the_primitives(self) -> None:
-        from lib.import_preview import persist_exact_current_spectral_from_attempt
+        from lib.current_library_evidence import (
+            persist_exact_current_spectral_from_attempt,
+        )
         from lib.sidecar_service import write_sidecar_for_request
 
         for consumer in (

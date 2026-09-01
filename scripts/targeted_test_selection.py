@@ -187,6 +187,18 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_slskd_searches",
         "tests.test_slskd_sweep_exception_contracts",
     ),
+    "lib/measurement.py": (
+        # The basename probe resolves tests.test_measurement on its own, so
+        # this file is never zero-neighbour — but the ONLY coverage of
+        # diagnostic_from_stderr / STDERR_DIAGNOSTIC_MAX_CHARS (a generated
+        # property plus its known-bad checker self-test) lives in a module
+        # named for the concern, not the file stem. Issue #1313 moved that
+        # helper here from lib/import_preview.py and made it public, so its
+        # tests must follow the code. Maskable — pinned in
+        # MASKABLE_ENTRY_PINS.
+        "tests.test_measurement",
+        "tests.test_measurement_observability",
+    ),
     "lib/startup_reconciliation.py": (
         # Was an admitted zero-neighbour gap (issue #1199, measured
         # 2026-08-19): there is no tests.test_startup_reconciliation, so

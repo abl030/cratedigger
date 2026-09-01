@@ -19,6 +19,11 @@ from lib.beets_delete import (
     BeetsDeleteRequest,
 )
 from lib.config import CratediggerConfig
+from lib.current_library_evidence import (
+    HaveEnrichment,
+    enrich_incomplete_current_evidence_for_request,
+    persist_exact_current_spectral_from_attempt,
+)
 from lib.destructive_release_service import (
     BanSourceReleaseMismatch,
     BanSourceRequest,
@@ -43,9 +48,7 @@ from lib.import_execution import (
 )
 from lib.import_preview import (
     ImportPreviewResult,
-    enrich_incomplete_current_evidence_for_request,
     force_action_copy_path,
-    persist_exact_current_spectral_from_attempt,
 )
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
@@ -604,7 +607,7 @@ class LifecycleWorld:
             raise AssertionError("drifted release disappeared from scratch Beets")
         return result
 
-    def enrich_current_evidence(self, request_id: int) -> str:
+    def enrich_current_evidence(self, request_id: int) -> HaveEnrichment:
         """Complete a changed installed snapshot through production helpers."""
 
         release = self._release_by_request[request_id]
@@ -628,7 +631,10 @@ class LifecycleWorld:
                 median_bitrate_kbps=198,
             ),
         )
-        if outcome not in {"complete", "enriched"}:
+        if outcome not in {
+            HaveEnrichment.COMPLETE,
+            HaveEnrichment.ENRICHED,
+        }:
             raise AssertionError(
                 "production current-evidence enrichment did not converge: "
                 f"request={request_id} outcome={outcome!r}"

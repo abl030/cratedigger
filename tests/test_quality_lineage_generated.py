@@ -19,9 +19,10 @@ from lib.beets_db import (
     CurrentBeetsUnique,
     release_identity_for_lookup,
 )
-from lib.import_evidence import ensure_current_evidence_for_action
-from lib.import_preview import (
+from lib.current_library_evidence import (
     EnrichmentPlan,
+    HaveEnrichment,
+    HavePreparation,
     enrich_current_v0_research_for_preview,
     enrich_incomplete_current_evidence_for_request,
     load_current_evidence_for_preview,
@@ -29,6 +30,7 @@ from lib.import_preview import (
     plan_current_evidence_enrichment,
     prepare_current_evidence_for_failure,
 )
+from lib.import_evidence import ensure_current_evidence_for_action
 from lib.measurement import PreimportMeasurement
 from lib.media_readiness import kbps_from_bps
 from lib.pipeline_db.download_log import (
@@ -218,29 +220,38 @@ def assert_failure_enrichment_matches_library_membership(
     *,
     album_present: bool,
     current_evidence_id: int | None,
-    outcome: str,
+    outcome: HavePreparation | HaveEnrichment,
 ) -> None:
-    """An installed exact release must acquire a linked HAVE snapshot."""
+    """An installed exact release must acquire a linked HAVE snapshot.
+
+    Both failure-lane vocabularies carry their own ``NO_CURRENT_EVIDENCE``
+    member meaning the same thing — Beets authoritatively holds nothing —
+    and this checker patrols either, so it compares against both.
+    """
+    absent_outcomes = (
+        HavePreparation.NO_CURRENT_EVIDENCE,
+        HaveEnrichment.NO_CURRENT_EVIDENCE,
+    )
     if album_present and current_evidence_id is None:
         raise AssertionError("installed release remained without linked HAVE")
-    if album_present and outcome == "no_current_evidence":
+    if album_present and outcome in absent_outcomes:
         raise AssertionError("installed release was classified as absent HAVE")
     if not album_present and current_evidence_id is not None:
         raise AssertionError("absent release fabricated a HAVE snapshot")
-    if not album_present and outcome != "no_current_evidence":
+    if not album_present and outcome not in absent_outcomes:
         raise AssertionError("absent release did not retain no-HAVE outcome")
 
 
 def assert_failure_v1_refresh_phases(
     *,
-    outcome: str,
+    outcome: HavePreparation,
     initial_lineage: int,
     prepared_lineage: int | None,
     refresh_status: str,
     final_lineage: int | None,
 ) -> None:
     """Failure preparation refreshes identity before later enrichment."""
-    if outcome != "ready":
+    if outcome != HavePreparation.READY:
         raise AssertionError("installed current evidence was not prepared")
     if (initial_lineage == 1
             and prepared_lineage != CURRENT_EVIDENCE_LINEAGE_VERSION):
@@ -353,17 +364,92 @@ class TestQualityLineagePins(unittest.TestCase):
             assert_failure_enrichment_matches_library_membership(
                 album_present=True,
                 current_evidence_id=None,
-                outcome="no_current_evidence",
+                outcome=HaveEnrichment.NO_CURRENT_EVIDENCE,
             )
+
+    def test_failure_enrichment_checker_rejects_absent_classification(self):
+        """Clause 2: a linked installed release called absent, per vocabulary."""
+        for outcome in (
+            HavePreparation.NO_CURRENT_EVIDENCE,
+            HaveEnrichment.NO_CURRENT_EVIDENCE,
+        ):
+            with self.subTest(outcome=outcome), self.assertRaisesRegex(
+                AssertionError, "classified as absent HAVE",
+            ):
+                assert_failure_enrichment_matches_library_membership(
+                    album_present=True,
+                    current_evidence_id=7,
+                    outcome=outcome,
+                )
+
+    def test_failure_enrichment_checker_rejects_fabricated_snapshot(self):
+        """Clause 3: nothing installed, yet a HAVE row got linked."""
+        with self.assertRaisesRegex(AssertionError, "fabricated a HAVE snapshot"):
+            assert_failure_enrichment_matches_library_membership(
+                album_present=False,
+                current_evidence_id=7,
+                outcome=HaveEnrichment.NO_CURRENT_EVIDENCE,
+            )
+
+    def test_failure_enrichment_checker_rejects_lost_absent_outcome(self):
+        """Clause 4: nothing installed, but the outcome claims otherwise."""
+        for outcome in (HavePreparation.READY, HaveEnrichment.ENRICHED):
+            with self.subTest(outcome=outcome), self.assertRaisesRegex(
+                AssertionError, "did not retain no-HAVE outcome",
+            ):
+                assert_failure_enrichment_matches_library_membership(
+                    album_present=False,
+                    current_evidence_id=None,
+                    outcome=outcome,
+                )
+
+    def test_failure_lineage_checker_rejects_unprepared_outcome(self):
+        """Clause 1: every non-READY preparation outcome trips."""
+        for outcome in (
+            HavePreparation.FAILED,
+            HavePreparation.NO_CURRENT_EVIDENCE,
+        ):
+            with self.subTest(outcome=outcome), self.assertRaisesRegex(
+                AssertionError, "was not prepared",
+            ):
+                assert_failure_v1_refresh_phases(
+                    outcome=outcome,
+                    initial_lineage=1,
+                    prepared_lineage=CURRENT_EVIDENCE_LINEAGE_VERSION,
+                    refresh_status="wanted",
+                    final_lineage=CURRENT_EVIDENCE_LINEAGE_VERSION,
+                )
 
     def test_failure_lineage_checker_rejects_retained_v1(self):
         with self.assertRaisesRegex(AssertionError, "ambiguous lineage"):
             assert_failure_v1_refresh_phases(
-                outcome="ready",
+                outcome=HavePreparation.READY,
                 initial_lineage=1,
                 prepared_lineage=1,
                 refresh_status="wanted",
                 final_lineage=CURRENT_EVIDENCE_LINEAGE_VERSION,
+            )
+
+    def test_failure_lineage_checker_rejects_premature_refresh(self):
+        """Clause 3: the refresh ran before the request became wanted."""
+        with self.assertRaisesRegex(AssertionError, "before request became wanted"):
+            assert_failure_v1_refresh_phases(
+                outcome=HavePreparation.READY,
+                initial_lineage=1,
+                prepared_lineage=CURRENT_EVIDENCE_LINEAGE_VERSION,
+                refresh_status="downloading",
+                final_lineage=CURRENT_EVIDENCE_LINEAGE_VERSION,
+            )
+
+    def test_failure_lineage_checker_rejects_ambiguous_final_lineage(self):
+        """Clause 4: the post-failure refresh left ambiguous lineage behind."""
+        with self.assertRaisesRegex(AssertionError, "post-failure refresh"):
+            assert_failure_v1_refresh_phases(
+                outcome=HavePreparation.READY,
+                initial_lineage=1,
+                prepared_lineage=CURRENT_EVIDENCE_LINEAGE_VERSION,
+                refresh_status="wanted",
+                final_lineage=1,
             )
 
     def test_import_attempt_checker_rejects_v1_decision_evidence(self):
@@ -624,7 +710,7 @@ class TestQualityLineagePins(unittest.TestCase):
                 )
 
         current = db.load_album_quality_evidence_by_id(current_id)
-        self.assertEqual(enriched, "enriched")
+        self.assertEqual(enriched, HaveEnrichment.ENRICHED)
         assert_failure_v1_refresh_phases(
             outcome=prepared,
             initial_lineage=1,

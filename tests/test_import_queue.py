@@ -32,6 +32,7 @@ from lib.beets_delete import (
     BeetsDeleteRequest,
 )
 from lib.config import CratediggerConfig
+from lib.current_library_evidence import HaveEnrichment, HavePreparation
 from lib.dispatch import (
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
     DISPATCH_CODE_REQUEUE_EXHAUSTED,
@@ -6193,7 +6194,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             beets_directory=_HERMETIC_BEETS_PAIR[1],
         )
 
-        def prepare(db_arg: Any, **kwargs: Any) -> str:
+        def prepare(db_arg: Any, **kwargs: Any) -> HavePreparation:
             self.assertIs(db_arg, db)
             self.assertEqual(kwargs, {
                 "request_id": 42,
@@ -6202,9 +6203,9 @@ class TestImportPreviewWorker(unittest.TestCase):
                 "beets_library_root": cfg.beets_directory,
             })
             order.append("prepare")
-            return "ready"
+            return HavePreparation.READY
 
-        def enrich(db_arg: Any, **kwargs: Any) -> str:
+        def enrich(db_arg: Any, **kwargs: Any) -> HaveEnrichment:
             self.assertIs(db_arg, db)
             self.assertEqual(kwargs, {
                 "request_id": 42,
@@ -6213,7 +6214,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 "beets_library_root": cfg.beets_directory,
             })
             order.append("enrich")
-            return "complete"
+            return HaveEnrichment.COMPLETE
 
         with patch(
             "scripts.import_preview_worker.read_runtime_config",
@@ -6787,7 +6788,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 db,
                 claimed,
                 prepare_failure_have_fn=(
-                    lambda *_args, **_kwargs: "no_current_evidence"
+                    lambda *_args, **_kwargs: HavePreparation.NO_CURRENT_EVIDENCE
                 ),
                 current_evidence_loader=stale_current,
                 runtime_config=cfg,
@@ -6833,7 +6834,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 db,
                 claimed,
                 prepare_failure_have_fn=(
-                    lambda *_args, **_kwargs: "no_current_evidence"
+                    lambda *_args, **_kwargs: HavePreparation.NO_CURRENT_EVIDENCE
                 ),
                 current_evidence_loader=raising_current,
                 runtime_config=cfg,
@@ -7048,6 +7049,122 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         assert linked is not None
         self.assertEqual(linked.measurement.spectral_grade, "suspect")
         self.assertEqual(linked.measurement.spectral_bitrate_kbps, 128)
+
+    def test_reused_have_spectral_is_durable_before_marking_importable(self):
+        """The HAVE write must land BEFORE the job becomes importable.
+
+        The sibling above proves both writes eventually happened; it cannot
+        distinguish that from marking the job importable first and persisting
+        afterwards, which is exactly the window in which the importer reads a
+        spectrally blind HAVE row (download_log 37206). This pin records the
+        real call order through the production DB port.
+        """
+        from lib.beets_db import AlbumInfo
+        from lib.measurement import ExistingSpectralAuditLookup
+        from lib.quality import SpectralAnalysisDetail
+        from scripts import import_preview_worker
+
+        class OrderRecordingDB(FakePipelineDB):
+            """Records the two writes whose ORDER is the invariant."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.write_order: list[str] = []
+
+            def persist_current_spectral_measurement(self, **kwargs):
+                self.write_order.append("persist_have_spectral")
+                return super().persist_current_spectral_measurement(**kwargs)
+
+            def mark_import_job_preview_importable(self, *args, **kwargs):
+                self.write_order.append("mark_importable")
+                return super().mark_import_job_preview_importable(
+                    *args, **kwargs,
+                )
+
+        with _force_preview_source() as (source, cfg), \
+             tempfile.TemporaryDirectory() as existing:
+            for root in (source, existing):
+                with open(os.path.join(root, "01.mp3"), "wb") as handle:
+                    handle.write(b"audio")
+            db = OrderRecordingDB()
+            db.seed_request(make_request_row(id=42, mb_release_id="mbid-42"))
+            _seed_current_for_request(
+                db,
+                42,
+                mb_release_id="mbid-42",
+                source_path=existing,
+                files=snapshot_audio_files(existing),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320,
+                    format="MP3",
+                    is_cbr=True,
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="MP3",
+            )
+            fake_beets = FakeBeetsDB()
+            fake_beets.set_album_info("mbid-42", AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                is_cbr=True,
+                album_path=existing,
+                format="MP3",
+            ))
+            download_log_id = _force_download_log(db, 42, source)
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
+            assert claimed is not None
+            self._seed_evidence_for_download_log(db, download_log_id, source)
+
+            def analyze(path: str) -> SpectralAnalysisDetail:
+                return SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="suspect" if path == existing else "genuine",
+                    bitrate_kbps=128 if path == existing else None,
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
+                )
+
+            with patch(
+                "lib.beets_db.BeetsDB",
+                lambda *_args, **_kwargs: fake_beets,
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                    spectral_detail_analyzer=analyze,
+                    existing_spectral_resolver=lambda _mbid: (
+                        ExistingSpectralAuditLookup(path=existing)
+                    ),
+                    runtime_config=cfg,
+                )
+            order = list(db.write_order)
+
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        self.assertIn("persist_have_spectral", order)
+        self.assertIn("mark_importable", order)
+        self.assertLess(
+            order.index("persist_have_spectral"),
+            order.index("mark_importable"),
+            f"HAVE spectral must be durable before the job is importable: {order}",
+        )
 
     def test_reused_evidence_never_overwrites_present_have_spectral(self):
         """A fresh audit scan must not clobber persisted HAVE provenance."""

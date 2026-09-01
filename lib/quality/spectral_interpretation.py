@@ -628,8 +628,8 @@ def resolve_measured_codec_family(
     codec the evidence row describes. 6,193 live rows are ``codec=opus,
     was_converted_from=flac, spectral_subject=source`` — an Opus copy
     correctly wearing its source FLAC's spectral evidence under R19
-    (``lib/import_preview.py::preserve_existing_source_spectral``). Keying
-    off the row's own codec would discard the largest lossless-lineage
+    (``lib/current_library_evidence.py::preserve_existing_source_spectral``).
+    Keying off the row's own codec would discard the largest lossless-lineage
     evidence cohort in the library and score it on the wrong semantics.
 
     Ladder, in order:

@@ -229,6 +229,14 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_slskd_searches",
         "tests.test_slskd_sweep_exception_contracts",
     ),
+    # The basename probe resolves tests.test_measurement regardless,
+    # masking the loss of the only module covering the public
+    # diagnostic_from_stderr helper #1313 moved here (tests/
+    # test_measurement_observability.py).
+    "lib/measurement.py": (
+        "tests.test_measurement",
+        "tests.test_measurement_observability",
+    ),
     # The harness/ prefix rule resolves tests.test_harness_beets2_contract
     # regardless (and beets_compat.py's basename probe its own era pins),
     # masking the loss of the duplicates-seam composition coverage.
