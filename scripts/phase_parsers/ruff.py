@@ -9,11 +9,11 @@ the only parser that has to hold state across lines:
 * `full`, the header and the location on separate lines —
   `CODE message`, then `  --> path:line:col`
 
-The pairing is deliberately forgiving in one direction only. A header
-with no location that follows contributes nothing, because `full` also
-prints a `help:` block and a source excerpt between violations and a
-header only becomes an index entry once its location arrives. A location
-with no pending header is ignored for the same reason.
+The pairing contributes an entry only when both halves are present. A
+header whose location never arrives is dropped, and so is a location
+with nothing pending, because `full` prints a `help:` block and a source
+excerpt between violations and either half alone names a violation this
+parser cannot place.
 
 Ruff runs per file, so the rerun narrows to the one file that failed.
 """

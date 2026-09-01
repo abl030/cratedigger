@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from pathlib import Path
 
 import msgspec
 
@@ -30,6 +31,7 @@ from scripts.phase_parsers import (
     python_tests,
     ruff,
 )
+from scripts.targeted_test_selection import expand_test_selection
 
 
 def _log(text: str, *, rerun: str = "bash scripts/rerun.sh") -> PhaseLog:
@@ -482,6 +484,46 @@ class TestPythonSchedulerDialect(unittest.TestCase):
             )
 
 
+class TestEveryParserSelectsThisModule(unittest.TestCase):
+    """Editing a parser must run its dialect tests, all six of them.
+
+    Five of the six fail closed without the `prefix:scripts/phase_parsers/`
+    row, because the basename probe derives `tests.test_<stem>` and no
+    `tests/test_ruff.py`, `test_dead_code.py`, `test_js_checks.py`,
+    `test_python_tests.py` or `test___init__.py` exists. `pyright_checks.py`
+    is the exception and the reason this pin is here: `tests/
+    test_pyright_checks.py` DOES exist, for `scripts/run_pyright_checks.py`,
+    so that one file would quietly resolve a wrong-subject module instead
+    of raising. `PREFIX_RULES` rows have no `MASKABLE_ENTRY_PINS`
+    equivalent, so without this, deleting the row is silent for exactly
+    the file whose name collides.
+    """
+
+    def test_each_parser_module_resolves_the_dialect_tests(self) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        package = repo_root / "scripts" / "phase_parsers"
+        modules = sorted(path.name for path in package.glob("*.py"))
+        self.assertEqual(
+            modules,
+            [
+                "__init__.py",
+                "dead_code.py",
+                "js_checks.py",
+                "pyright_checks.py",
+                "python_tests.py",
+                "ruff.py",
+            ],
+        )
+        for name in modules:
+            with self.subTest(module=name):
+                selected = expand_test_selection(
+                    (),
+                    changed_paths=(f"scripts/phase_parsers/{name}",),
+                    repo_root=repo_root,
+                )
+                self.assertIn("tests.test_phase_parsers", selected)
+
+
 class TestDialectsDoNotOverlap(unittest.TestCase):
     """Each parser reads its own tool's output and nobody else's.
 
@@ -500,6 +542,18 @@ class TestDialectsDoNotOverlap(unittest.TestCase):
             '{"identity": "a", "owner": "b", "detail": "c"}'
         ),
     )
+
+    def test_ruff_reads_nothing_from_another_tools_output(self) -> None:
+        """The one this class exists for: `CODE message` is a loose shape.
+
+        Ruff's full-format header pattern matches any capitalised word
+        with digits followed by text, so it is the dialect most likely to
+        claim a neighbour's line. It needs a location on the next line to
+        produce anything, and none of these supply one.
+        """
+        for text in self.OTHER_TOOLS:
+            with self.subTest(text=text):
+                self.assertEqual(ruff.parse_failures(_log(text)).failures, ())
 
     def test_pyright_reads_nothing_from_another_tools_output(self) -> None:
         for text in self.OTHER_TOOLS:

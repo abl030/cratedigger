@@ -9,9 +9,10 @@ That wrapper reports two different things and this parser reads both:
   whose added lines read
   `+identifier  # unused function (path:line)`
 
-The second is why the phase's failure exit code is 3 rather than 1: a
-stale whitelist is a distinct verdict from live dead code, and both need
-to reach the index by identifier so a reader knows which name moved.
+The phase's failure exit code is 3 rather than 1 because that is what
+vulture itself exits on a finding; the wrapper's freshness check returns
+3 to match it, not the other way round. Both reports reach the index by
+identifier, so a reader knows which name moved.
 
 Neither finding is separately runnable, so the rerun stays the phase's
 own command.

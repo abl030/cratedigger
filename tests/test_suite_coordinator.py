@@ -29,7 +29,9 @@ from scripts.phase_parsers import (
 )
 from scripts.phase_parsers.python_tests import (
     FAILURE_MARKER_PREFIX,
+    METRICS_MARKER_PREFIX,
     CheckFailureMarker,
+    CheckMetricsMarker,
 )
 from scripts.run_python_tests import (
     TEST_HOST_MEMORY_EXHAUSTED,
@@ -324,6 +326,90 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
             0o600,
         )
         self.assertTrue((result.bundle / "summary.md").is_file())
+
+    def test_a_phases_counts_reach_the_bundle_on_their_own_field(self) -> None:
+        """The coordinator wires three ints from a parser into `CheckPhase`.
+
+        Three swappable ints on one adapter, and until #1313's review
+        round nothing outside the dialect tests read them at all: a
+        `tests_run`/`targets_run` transposition in the `CheckPhase(...)`
+        call landed wrong counts in `summary.json` with every test green.
+        The values are pairwise distinct so a swap cannot pass.
+        """
+        marker = METRICS_MARKER_PREFIX + msgspec.json.encode(
+            CheckMetricsMarker(
+                tests_run=12034, targets_run=214, scheduled_targets=220
+            )
+        ).decode()
+
+        result, _terminal = self._run(
+            (
+                PhaseSpec(
+                    "python",
+                    _python_command(marker, 0),
+                    "python3 scripts/run_python_tests.py",
+                    python_tests.parse_failures,
+                ),
+            )
+        )
+        (phase,) = decode_summary(result.bundle / "summary.json").phases
+
+        self.assertEqual(phase.tests_run, 12034)
+        self.assertEqual(phase.targets_run, 214)
+        self.assertEqual(phase.scheduled_targets, 220)
+
+    def test_a_parser_is_handed_its_own_phases_rerun_command(self) -> None:
+        """`PhaseLog.rerun_command` is what a parser falls back to.
+
+        The dialect tests all pass their own `rerun`, so none of them can
+        see the coordinator handing over the wrong string. A Python
+        failure marker carrying no test IDs takes that fallback, which
+        makes the whole path observable from out here.
+        """
+        marker = FAILURE_MARKER_PREFIX + msgspec.json.encode(
+            CheckFailureMarker(
+                identity="whole-phase", owner="", detail="exploded"
+            )
+        ).decode()
+
+        result, _terminal = self._run(
+            (
+                PhaseSpec(
+                    "python",
+                    _python_command(marker, 1),
+                    "python3 scripts/run_python_tests.py --test tests.test_x",
+                    python_tests.parse_failures,
+                ),
+            )
+        )
+        (phase,) = decode_summary(result.bundle / "summary.json").phases
+
+        self.assertEqual(
+            phase.failures[0].rerun_command,
+            "python3 scripts/run_python_tests.py --test tests.test_x",
+        )
+
+    def test_each_default_phase_reads_its_own_wrappers_dialect(self) -> None:
+        """A wrong-but-well-typed callable is the one thing the tag change
+        did not make impossible.
+
+        Every parser satisfies `PhaseFailureParser`, so swapping two of
+        them in `_default_phases()` is type-clean and silently mis-parses
+        — the old regime's failure mode, unchanged. This is the pin.
+        """
+        parsers = {phase.name: phase.parser for phase in _default_phases()}
+
+        self.assertEqual(
+            parsers,
+            {
+                "js-syntax": js_checks.parse_syntax_failures,
+                "js-unit": js_checks.parse_unit_failures,
+                "pyright": pyright_checks.parse_failures,
+                "ruff": ruff.parse_failures,
+                "vulture": dead_code.parse_failures,
+                "python": python_tests.parse_failures,
+            },
+        )
 
     def test_command_start_failure_is_indexed_and_does_not_stop_later_phase(
         self,

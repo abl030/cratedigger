@@ -78,10 +78,12 @@ PhaseFailureParser = Callable[[PhaseLog], PhaseFailures]
 
 #: What a parser is allowed to raise when a log is malformed. The
 #: coordinator catches exactly these and reports the phase as an
-#: infrastructure failure rather than a clean pass, so a dialect that
-#: needs a new one adds it HERE — the alternative is the coordinator
-#: growing a bare `except Exception`, which would swallow a real defect
-#: in a parser as if the tool had misbehaved.
+#: infrastructure failure rather than a clean pass. It is the one thing
+#: here that names a dialect's exception types rather than its own, and
+#: it lives at the contract because the coordinator is what catches
+#: them; a dialect needing a new one adds it HERE. The alternative is
+#: the coordinator growing a bare `except Exception`, which would
+#: swallow a real defect in a parser as if the tool had misbehaved.
 PARSER_ERRORS: tuple[type[Exception], ...] = (
     OSError,
     ValueError,
