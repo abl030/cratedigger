@@ -700,13 +700,26 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_discogs_cover_art_fallback",
         "tests.test_discogs_cover_art_fallback_generated",
     ),
-    # harness/import_one.py's basename probes resolve its stage tests, but
-    # tests/test_disambiguation.py is what pins the SECOND harness pass's
-    # argv (--preserve-discogs-flat-subtracks on the retry) — exactly the
+    # harness/import_one.py has NO basename probe: _direct_test_candidates
+    # covers lib/, scripts/ and top-level files, and a harness/ path matches
+    # none of them, so before this list the file resolved to exactly
+    # tests.test_disambiguation plus the harness/ prefix rule's
+    # tests.test_harness_beets2_contract — editing the privileged Beets
+    # mutation child ran neither its 250-test stage module nor its
+    # --force tests (#1313, the argv-adapter item). The entry that used to
+    # sit here claimed those probes existed; they never did.
+    #
+    # test_disambiguation also pins the SECOND harness pass's argv
+    # (--preserve-discogs-flat-subtracks on the retry) — exactly the
     # construction lib/beets_child.py::harness_session_argv now owns
-    # (#1278 item 4, PR 2 review).
+    # (#1278 item 4, PR 2 review) — and, since #1313, the apply-time
+    # distance ceiling's only apply-versus-reject coverage.
     "harness/import_one.py": (
         "tests.test_disambiguation",
+        "tests.test_import_one_stages",
+        "tests.test_import_one_request_generated",
+        "tests.test_import_one_argparse_audit",
+        "tests.test_force_import",
     ),
     # lib/quality/wire_types.py holds the harness wire Structs (#1278
     # item 8). The lib/quality/ prefix rule selects only the quality
