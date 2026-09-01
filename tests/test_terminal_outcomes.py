@@ -32,6 +32,7 @@ from lib.import_queue import (
     local_import_payload,
     youtube_import_payload,
 )
+from lib.import_worker_loop import execution_lease_from_job
 from lib.pipeline_db import (
     BACKOFF_BASE_MINUTES,
     PipelineDB,
@@ -528,7 +529,7 @@ def _prepare_automation_terminal_command(
     job = db.get_import_job(job_id)
     request = db.get_request(request_id)
     assert job is not None and request is not None
-    lease = importer._execution_lease_from_job(job)
+    lease = execution_lease_from_job(job)
     assert lease is not None
     state = ActiveDownloadState.from_raw(request["active_download_state"])
     assert state.current_path is not None
@@ -621,7 +622,7 @@ def _prepare_automation_preview_terminal_command(
     job = db.get_import_job(job_id)
     request = db.get_request(request_id)
     assert job is not None and request is not None
-    lease = importer._execution_lease_from_job(job)
+    lease = execution_lease_from_job(job)
     assert lease is not None
     state = ActiveDownloadState.from_raw(request["active_download_state"])
     assert state.current_path is not None
@@ -2329,7 +2330,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
 
         job = db.get_import_job(job_id)
         assert job is not None
-        execution_lease = importer._execution_lease_from_job(job)
+        execution_lease = execution_lease_from_job(job)
         assert execution_lease is not None
         process_album = RecordingProcessAlbum(outcome=completion)
 

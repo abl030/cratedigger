@@ -32,12 +32,12 @@ from lib.import_queue import (
     IMPORT_JOB_YOUTUBE,
     youtube_import_payload,
 )
+from lib.import_worker_loop import execution_lease_from_job
 from lib.pipeline_db.rows import DownloadLogWithEvidenceRow
 from lib.quality import DownloadInfo
 from lib.quality_evidence import snapshot_audio_files
 from scripts.importer import (
     _WORLD_FAILURE_AUDIT_PREFIX,
-    _execution_lease_from_job,
     process_claimed_job,
 )
 from tests.beets_world import BeetsWorld
@@ -557,7 +557,7 @@ def _exercise_world(
     execution_lease=importer_lease,)
     assert claimed is not None
     if world.job_type == IMPORT_JOB_AUTOMATION:
-        importer_lease = _execution_lease_from_job(claimed)
+        importer_lease = execution_lease_from_job(claimed)
         assert importer_lease is not None
 
     launch_release = release_id

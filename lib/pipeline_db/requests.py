@@ -2075,7 +2075,11 @@ class _RequestsMixin(_PipelineDBBase):
           first two are each claim's own request predicate copied verbatim,
           so "still claimed" means the same thing here as it did at claim
           time; the third has no claim at all — it IS the operator, acting
-          on an ``imported`` row nothing else currently owns:
+          on an ``imported`` row nothing else currently owns. Since issue
+          #1313 the two named claim methods are lane-taking wrappers, so the
+          predicates below live in ``import_jobs.py``'s
+          ``_claim_automation_job_in_lane`` and
+          ``_claim_request_scoped_job_in_lane``:
 
           - ``claim_automation_import_job_under_lock`` — ``status =
             'processing'`` and ``active_automation_import_job_id = %s``. That

@@ -43,8 +43,6 @@ from lib.import_execution import (
     ExecutionLeaseSnapshot,
     ExecutionLivenessProbe,
     OwnerSessionIdentity,
-    ProcessIdentity,
-    capture_execution_lease,
     probe_execution_liveness,
 )
 from lib.import_preview import (
@@ -78,6 +76,14 @@ from lib.import_queue import (
     ImportJob,
     LocalImportPayload,
     YoutubeImportPayload,
+)
+from lib.import_worker_loop import (
+    CandidateScanCursor,
+    ClaimState,
+    capture_worker_execution_lease,
+    claim_one_candidate,
+    execution_lease_from_job,
+    stage_dsn,
 )
 from lib.measurement import (
     ExistingSpectralAuditLookup,
@@ -120,14 +126,6 @@ PREVIEW_STALE_RECOVERY_INTERVAL_SECONDS = 60.0
 PREVIEW_STALE_AGE = timedelta(minutes=15)
 PREVIEW_SYSTEMD_UNIT = "cratedigger-import-preview-worker.service"
 PREVIEW_CANDIDATE_SCAN_LIMIT = 32
-
-
-@dataclass
-class _ClaimState:
-    claimed: bool = False
-
-    def mark(self) -> None:
-        self.claimed = True
 
 
 FailureHavePrepareFn = Callable[..., str]
@@ -551,11 +549,6 @@ class _PreviewHeartbeatDB(Protocol):
     ) -> bool: ...
 
     def close(self) -> None: ...
-
-
-@dataclass
-class _CandidateScanCursor:
-    offset: int = 0
 
 
 def _force_download_log_failed_path(
@@ -1944,6 +1937,174 @@ def _process_force_claim(
         stage_db.close()
 
 
+@dataclass(frozen=True)
+class _PreviewClaimAttempt:
+    """Everything a preview claim route needs for one candidate, one pass."""
+
+    db: _ImportPreviewJobClaimer
+    worker_id: str
+    execution_lease: ExecutionLeaseSnapshot | None
+    heartbeat_interval: float
+    runtime_config: CratediggerConfig | None
+    stage_db_factory: Callable[[str], object]
+    heartbeat_db_factory: Callable[[str], _PreviewHeartbeatDB]
+    #: The caller's own value, ``None`` included. Carried beside the
+    #: defaulted one for FIDELITY, not for a runtime hazard: the ladder's
+    #: pinned-session arms passed ``heartbeat_db_factory or PipelineDB`` and
+    #: its ``else`` arm passed the raw value, and ``process_fn`` reads
+    #: ``None`` as "use my own default". Since production never overrides
+    #: ``process_fn`` the two are equivalent in production; the distinction
+    #: is observable only to a test that inspects the forwarded kwarg, which
+    #: is exactly how the ladder's own behaviour is pinned.
+    raw_heartbeat_db_factory: Callable[[str], _PreviewHeartbeatDB] | None
+    candidate_measurement_fn: Callable[..., ImportPreviewResult] | None
+    process_fn: Callable[..., ImportJob | None]
+    claim_state: ClaimState
+
+    def dsn(self) -> str | None:
+        """The pinned-session routes each open a stage connection of their own."""
+        return stage_dsn(self.db)
+
+
+class _PreviewClaimRoute(Protocol):
+    """How ``run_once`` claims and previews one candidate of a given kind."""
+
+    def __call__(
+        self,
+        candidate: ImportJob,
+        attempt: _PreviewClaimAttempt,
+    ) -> ImportJob | None: ...
+
+
+def _preview_route_automation(
+    candidate: ImportJob,
+    attempt: _PreviewClaimAttempt,
+) -> ImportJob | None:
+    """Claim one automation candidate on its own pinned IMPORT session.
+
+    Both misses below leave the claim unmarked, so the shared scan moves on
+    to the next candidate exactly as the old ``continue`` arms did:
+    automation stays invisible without a complete invocation lease, and
+    every pinned-session route needs a DSN of its own.
+    """
+    if attempt.execution_lease is None:
+        return None
+    dsn = attempt.dsn()
+    if dsn is None:
+        return None
+    return _process_automation_claim(
+        candidate,
+        dsn=dsn,
+        worker_id=attempt.worker_id,
+        execution_lease=attempt.execution_lease,
+        heartbeat_interval=attempt.heartbeat_interval,
+        runtime_config=attempt.runtime_config,
+        stage_db_factory=attempt.stage_db_factory,
+        heartbeat_db_factory=attempt.heartbeat_db_factory,
+        candidate_measurement_fn=attempt.candidate_measurement_fn,
+        claim_callback=attempt.claim_state.mark,
+        process_fn=attempt.process_fn,
+    )
+
+
+def _preview_route_request_scoped(
+    candidate: ImportJob,
+    attempt: _PreviewClaimAttempt,
+    *,
+    claim_fn: Callable[..., ImportJob | None],
+) -> ImportJob | None:
+    """The force/local-import preview claim, differing only in ``claim_fn``."""
+    dsn = attempt.dsn()
+    if dsn is None:
+        return None
+    return _process_force_claim(
+        candidate,
+        dsn=dsn,
+        worker_id=attempt.worker_id,
+        heartbeat_interval=attempt.heartbeat_interval,
+        runtime_config=attempt.runtime_config,
+        stage_db_factory=attempt.stage_db_factory,
+        heartbeat_db_factory=attempt.heartbeat_db_factory,
+        candidate_measurement_fn=attempt.candidate_measurement_fn,
+        claim_callback=attempt.claim_state.mark,
+        process_fn=attempt.process_fn,
+        claim_fn=claim_fn,
+    )
+
+
+def _preview_route_force_import(
+    candidate: ImportJob,
+    attempt: _PreviewClaimAttempt,
+) -> ImportJob | None:
+    return _preview_route_request_scoped(
+        candidate, attempt, claim_fn=_claim_force_import_preview,
+    )
+
+
+def _preview_route_local_import(
+    candidate: ImportJob,
+    attempt: _PreviewClaimAttempt,
+) -> ImportJob | None:
+    return _preview_route_request_scoped(
+        candidate, attempt, claim_fn=_claim_local_import_preview,
+    )
+
+
+def _preview_route_plain(
+    candidate: ImportJob,
+    attempt: _PreviewClaimAttempt,
+) -> ImportJob | None:
+    """Claim one candidate on the queue connection, with no pinned session."""
+    job = attempt.db.claim_import_preview_job_candidate(
+        candidate.id,
+        worker_id=attempt.worker_id,
+    )
+    if job is None:
+        return None
+    attempt.claim_state.mark()
+    logger.info(
+        "Claimed import preview job %s (%s)",
+        job.id,
+        job.job_type,
+    )
+    return attempt.process_fn(
+        attempt.db,
+        job,
+        heartbeat_interval=attempt.heartbeat_interval,
+        runtime_config=attempt.runtime_config,
+        heartbeat_db_factory=attempt.raw_heartbeat_db_factory,
+        candidate_measurement_fn=attempt.candidate_measurement_fn,
+    )
+
+
+#: The one place every preview CLAIM-ROUTE decision in this module is made
+#: — the preview lane's twin of ``scripts/importer.py``'s
+#: ``_IMPORT_JOB_KINDS``, which replaced the same if/elif ladder on the
+#: import side (issue #1278). Scope, deliberately narrow: this module still
+#: decides on ``job_type`` elsewhere (the action-copy prefix table, the
+#: preview-input ladder, the front-gate arms); only claiming routes here.
+#: Positive routing, like the candidate scans' own ``job_type`` table:
+#: every type is named.
+_PREVIEW_CLAIM_ROUTES: dict[str, _PreviewClaimRoute] = {
+    IMPORT_JOB_AUTOMATION: _preview_route_automation,
+    IMPORT_JOB_FORCE: _preview_route_force_import,
+    IMPORT_JOB_LOCAL: _preview_route_local_import,
+    IMPORT_JOB_YOUTUBE: _preview_route_plain,
+}
+
+#: NOT a fifth route: the exact shape the pre-registry ``else`` arm gave a
+#: ``job_type`` no adapter claims. ``ImportJob.from_row`` runs
+#: ``validate_job_type``, so nothing can reach it today — it exists so an
+#: unvalidated type still claims through the unguarded route rather than
+#: crashing the scan, exactly as the ladder's ``else`` did.
+_UNROUTED_PREVIEW_CLAIM_ROUTE: _PreviewClaimRoute = _preview_route_plain
+
+
+def _preview_claim_route_for(job_type: str) -> _PreviewClaimRoute:
+    """Answer "how is this preview candidate claimed" once, for every caller."""
+    return _PREVIEW_CLAIM_ROUTES.get(job_type, _UNROUTED_PREVIEW_CLAIM_ROUTE)
+
+
 def run_once(
     db: _ImportPreviewJobClaimer,
     *,
@@ -1957,113 +2118,43 @@ def run_once(
     process_fn: Callable[..., ImportJob | None] = (
         process_claimed_preview_job_with_heartbeat
     ),
-    scan_cursor: _CandidateScanCursor | None = None,
+    scan_cursor: CandidateScanCursor | None = None,
 ) -> ImportJob | None:
-    cursor = scan_cursor or _CandidateScanCursor()
-    capture = execution_lease_factory or capture_execution_lease
-    try:
-        execution_lease = capture(systemd_unit=PREVIEW_SYSTEMD_UNIT)
-    except ValueError:
-        # Non-systemd development runs may still process Force/local-import/YouTube jobs.
-        # Automation remains invisible to claim without a complete lease.
-        execution_lease = None
-    candidates = db.peek_import_preview_job_candidates(
-        execution_lease=execution_lease,
-        limit=PREVIEW_CANDIDATE_SCAN_LIMIT,
-        offset=cursor.offset,
+    cursor = scan_cursor or CandidateScanCursor()
+    execution_lease = capture_worker_execution_lease(
+        systemd_unit=PREVIEW_SYSTEMD_UNIT,
+        factory=execution_lease_factory,
     )
-    if not candidates and cursor.offset:
-        cursor.offset = 0
-        candidates = db.peek_import_preview_job_candidates(
+
+    def _peek(offset: int) -> list[ImportJob]:
+        return db.peek_import_preview_job_candidates(
             execution_lease=execution_lease,
             limit=PREVIEW_CANDIDATE_SCAN_LIMIT,
-            offset=0,
+            offset=offset,
         )
-    for candidate in candidates:
-        claim_state = _ClaimState()
 
-        if candidate.job_type == IMPORT_JOB_AUTOMATION:
-            if execution_lease is None:
-                continue
-            dsn = getattr(db, "dsn", None)
-            if not dsn:
-                continue
-            result = _process_automation_claim(
-                candidate,
-                dsn=str(dsn),
-                worker_id=worker_id,
-                execution_lease=execution_lease,
-                heartbeat_interval=heartbeat_interval,
-                runtime_config=runtime_config,
-                stage_db_factory=stage_db_factory or PipelineDB,
-                heartbeat_db_factory=heartbeat_db_factory or PipelineDB,
-                candidate_measurement_fn=candidate_measurement_fn,
-                claim_callback=claim_state.mark,
-                process_fn=process_fn,
-            )
-        elif candidate.job_type == IMPORT_JOB_FORCE:
-            dsn = getattr(db, "dsn", None)
-            if not dsn:
-                continue
-            result = _process_force_claim(
-                candidate,
-                dsn=str(dsn),
-                worker_id=worker_id,
-                heartbeat_interval=heartbeat_interval,
-                runtime_config=runtime_config,
-                stage_db_factory=stage_db_factory or PipelineDB,
-                heartbeat_db_factory=heartbeat_db_factory or PipelineDB,
-                candidate_measurement_fn=candidate_measurement_fn,
-                claim_callback=claim_state.mark,
-                process_fn=process_fn,
-            )
-        elif candidate.job_type == IMPORT_JOB_LOCAL:
-            dsn = getattr(db, "dsn", None)
-            if not dsn:
-                continue
-            result = _process_force_claim(
-                candidate,
-                dsn=str(dsn),
-                worker_id=worker_id,
-                heartbeat_interval=heartbeat_interval,
-                runtime_config=runtime_config,
-                stage_db_factory=stage_db_factory or PipelineDB,
-                heartbeat_db_factory=heartbeat_db_factory or PipelineDB,
-                candidate_measurement_fn=candidate_measurement_fn,
-                claim_callback=claim_state.mark,
-                process_fn=process_fn,
-                claim_fn=_claim_local_import_preview,
-            )
-        else:
-            job = db.claim_import_preview_job_candidate(
-                candidate.id,
-                worker_id=worker_id,
-            )
-            if job is None:
-                continue
-            claim_state.mark()
-            logger.info(
-                "Claimed import preview job %s (%s)",
-                job.id,
-                job.job_type,
-            )
-            result = process_fn(
-                db,
-                job,
-                heartbeat_interval=heartbeat_interval,
-                runtime_config=runtime_config,
-                heartbeat_db_factory=heartbeat_db_factory,
-                candidate_measurement_fn=candidate_measurement_fn,
-            )
+    def _claim(
+        candidate: ImportJob,
+        claim_state: ClaimState,
+    ) -> ImportJob | None:
+        attempt = _PreviewClaimAttempt(
+            db=db,
+            worker_id=worker_id,
+            execution_lease=execution_lease,
+            heartbeat_interval=heartbeat_interval,
+            runtime_config=runtime_config,
+            stage_db_factory=stage_db_factory or PipelineDB,
+            heartbeat_db_factory=heartbeat_db_factory or PipelineDB,
+            raw_heartbeat_db_factory=heartbeat_db_factory,
+            candidate_measurement_fn=candidate_measurement_fn,
+            process_fn=process_fn,
+            claim_state=claim_state,
+        )
+        return _preview_claim_route_for(candidate.job_type)(candidate, attempt)
 
-        if not claim_state.claimed:
-            continue
-        # The only successful-claim exit for every job type. Any success is
-        # a bounded revisit point for older rows that may now be claimable.
-        cursor.offset = 0
-        return result
-    cursor.offset += len(candidates)
-    return None
+    return claim_one_candidate(
+        scan_cursor=cursor, peek=_peek, claim=_claim,
+    )
 
 
 def recover_abandoned_preview_jobs(
@@ -2074,46 +2165,6 @@ def recover_abandoned_preview_jobs(
     return db.requeue_stale_import_preview_jobs(
         older_than=older_than,
         message=STALE_PREVIEW_MESSAGE,
-    )
-
-
-def _execution_lease_from_job(
-    job: ImportJob,
-) -> ExecutionLeaseSnapshot | None:
-    values = (
-        job.execution_invocation_id,
-        job.execution_host_boot_id,
-        job.execution_systemd_unit,
-        job.execution_worker_pid,
-        job.execution_worker_start_ticks,
-    )
-    if any(value is None for value in values):
-        return None
-    assert job.execution_invocation_id is not None
-    assert job.execution_host_boot_id is not None
-    assert job.execution_systemd_unit is not None
-    assert job.execution_worker_pid is not None
-    assert job.execution_worker_start_ticks is not None
-    child = (
-        ProcessIdentity(
-            job.execution_beets_pid,
-            job.execution_beets_start_ticks,
-        )
-        if (
-            job.execution_beets_pid is not None
-            and job.execution_beets_start_ticks is not None
-        )
-        else None
-    )
-    return ExecutionLeaseSnapshot(
-        host_boot_id=job.execution_host_boot_id,
-        invocation_id=job.execution_invocation_id,
-        systemd_unit=job.execution_systemd_unit,
-        worker=ProcessIdentity(
-            job.execution_worker_pid,
-            job.execution_worker_start_ticks,
-        ),
-        beets=child,
     )
 
 
@@ -2139,7 +2190,7 @@ def recover_running_preview_jobs(
             or job.preview_status != "running"
         ):
             continue
-        lease = _execution_lease_from_job(job)
+        lease = execution_lease_from_job(job)
         if lease is None:
             continue
         decision = probe_execution_liveness(
@@ -2207,7 +2258,7 @@ def run_threaded_workers(
     def worker_loop(index: int) -> None:
         thread_db = PipelineDB(dsn)
         thread_worker_id = f"{worker_id}:preview-{index}"
-        scan_cursor = _CandidateScanCursor()
+        scan_cursor = CandidateScanCursor()
         try:
             while not stop.is_set():
                 try:
@@ -2363,7 +2414,7 @@ def main() -> int:
             db,
             worker_id=worker_id,
             runtime_config=admitted_config,
-            scan_cursor=_CandidateScanCursor(),
+            scan_cursor=CandidateScanCursor(),
         )
         return 0
     finally:

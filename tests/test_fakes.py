@@ -7950,6 +7950,115 @@ class TestFakeListLibraryRequestCandidates(unittest.TestCase):
         )
 
 
+class TestFakeClaimMirrorsProductionsLaneGuards(unittest.TestCase):
+    """Two guards the fake used to be more permissive about than production.
+
+    Issue #1313's mutant round found both: production's claim SQL binds the
+    caller's ``request_id`` in the job guard and NULLs the preview lane's
+    ``cleared_columns``, and no fake-driven test observed either.
+    """
+
+    def _owner(self, db: FakePipelineDB, request_id: int):
+        db.seed_request(make_request_row(
+            id=request_id,
+            mb_release_id=f"fake-lane-guard-{request_id}",
+            status="wanted",
+        ))
+        return handoff_automation_owner(db, request_id)
+
+    def test_an_automation_claim_naming_another_request_is_refused(
+        self,
+    ) -> None:
+        """The owner pointer alone must not admit a mismatched request id.
+
+        ``_automation_job_has_authority`` reads only the row's own owner
+        state, so without the caller-supplied ``request_id`` in the row
+        guard the fake would claim here while production's SQL refuses.
+        """
+        from lib.import_execution import (
+            ExecutionLeaseSnapshot,
+            ProcessIdentity,
+        )
+
+        db = FakePipelineDB()
+        job = self._owner(db, 4401)
+        bystander = self._owner(db, 4402)
+        lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-lane-guard",
+            invocation_id="invocation-lane-guard",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(pid=601, start_ticks=6001),
+        )
+        self.assertIsNone(
+            db.claim_automation_import_preview_job_under_lock(
+                job.id,
+                request_id=bystander.request_id or 0,
+                worker_id="preview",
+                execution_lease=lease,
+            ),
+        )
+        self.assertIsNone(
+            db.claim_automation_import_job_under_lock(
+                job.id,
+                request_id=bystander.request_id or 0,
+                worker_id="importer",
+                execution_lease=lease,
+            ),
+        )
+        # ... and the exact request still claims it.
+        self.assertIsNotNone(
+            db.claim_automation_import_preview_job_under_lock(
+                job.id,
+                request_id=job.request_id or 0,
+                worker_id="preview",
+                execution_lease=lease,
+            ),
+        )
+
+    def test_a_preview_claim_clears_the_previous_attempts_message(
+        self,
+    ) -> None:
+        """The real worker-restart sequence, driven through the fake."""
+        from lib.import_queue import IMPORT_JOB_YOUTUBE
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=4403,
+            mb_release_id="fake-lane-clear",
+            status="wanted",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=4403,
+            payload={
+                "staged_path": "/incoming/album",
+                "request_id": 4403,
+                "browse_id": "MPREb_lane",
+                "download_log_id": 1,
+            },
+        )
+        self.assertIsNotNone(
+            db.claim_import_preview_job_candidate(job.id, worker_id="first"),
+        )
+        requeued = db.requeue_running_import_preview_jobs(
+            message="worker restarted mid-preview",
+        )
+        self.assertEqual([row.id for row in requeued], [job.id])
+        requeued_row = db.get_import_job(job.id)
+        assert requeued_row is not None
+        self.assertEqual(
+            requeued_row.preview_message, "worker restarted mid-preview",
+        )
+        reclaimed = db.claim_import_preview_job_candidate(
+            job.id, worker_id="second",
+        )
+        assert reclaimed is not None
+        # ``preview_message`` is the only half this constrains: the requeue
+        # already NULLs ``preview_error``, so asserting it here would pin a
+        # bystander.
+        self.assertIsNone(reclaimed.preview_message)
+
+
 class TestFakeMergeRekeyForceClaimFence(unittest.TestCase):
     """The fake's force arm, term for term against the real SQL (#1080).
 

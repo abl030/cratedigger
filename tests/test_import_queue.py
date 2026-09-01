@@ -70,6 +70,10 @@ from lib.import_queue import (
     import_preview_requeue_exhausted,
     validate_payload,
 )
+from lib.import_worker_loop import (
+    CandidateScanCursor,
+    execution_lease_from_job,
+)
 from lib.pipeline_db._core import OwnerSessionLost
 from lib.pipeline_db.cleanup_journal import CleanupJournalConflict
 from lib.pipeline_db.import_jobs import _default_force_action_copy_path
@@ -4153,7 +4157,7 @@ class TestAutomationImporterOwnership(unittest.TestCase):
         stored = db.get_import_job(1)
         assert stored is not None
         self.assertEqual((stored.status, stored.attempts), ("queued", 0))
-        self.assertIsNone(importer._execution_lease_from_job(stored))
+        self.assertIsNone(execution_lease_from_job(stored))
 
         progressed = importer.run_once(
             db,  # pyright: ignore[reportArgumentType]
@@ -6508,8 +6512,8 @@ class TestImportPreviewWorker(unittest.TestCase):
 
         def cursor_recreation_mutant() -> list[object]:
             return [
-                import_preview_worker._CandidateScanCursor(),
-                import_preview_worker._CandidateScanCursor(),
+                CandidateScanCursor(),
+                CandidateScanCursor(),
             ]
 
         with self.assertRaisesRegex(AssertionError, "recreated"):

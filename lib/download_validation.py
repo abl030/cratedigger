@@ -276,9 +276,12 @@ class MergeRekeyDB(Protocol):
 
 
 #: The two request states an import claim can legally rekey identity from.
-#: Verbatim the complement of ``claim_force_import_job_under_lock``'s request
-#: fence: ``processing`` belongs to an automation owner (and is that claim's
-#: own arm below), and ``replaced`` rows are frozen audit ancestors.
+#: Verbatim the complement of the request fence
+#: ``claim_force_import_job_under_lock`` claims through — since issue #1313
+#: that fence lives in the lane-taking
+#: ``_ImportJobsMixin._claim_request_scoped_job_in_lane``, which force and
+#: local share. ``processing`` belongs to an automation owner (and is that
+#: claim's own arm below), and ``replaced`` rows are frozen audit ancestors.
 _FORCE_CLAIM_EXCLUDED_STATUSES: Final = frozenset({"processing", "replaced"})
 
 

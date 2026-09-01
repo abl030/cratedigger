@@ -60,6 +60,7 @@ from lib.import_execution import (
     OwnerSessionIdentity,
     OwnerSessionProbe,
 )
+from lib.import_job_lane import IMPORT_LANE, PREVIEW_LANE, JobLane
 from lib.import_queue import (
     IMPORT_JOB_ACTIVE_STATUSES,
     IMPORT_JOB_AUTOMATION,
@@ -1762,32 +1763,114 @@ class FakePipelineDB:
             )[offset:offset + limit]
         ]
 
+    def _lane_claimable_row(
+        self,
+        job_id: int,
+        *,
+        lane: JobLane,
+        job_type: str,
+        request_id: int | None = None,
+    ):
+        """The exact row a claim in ``lane`` may take, or ``None``.
+
+        Mirrors the production claim's own row guard: exact id, exact type,
+        ``status='queued'``, and the lane's entry ``preview_status``.
+        """
+        return next(
+            (
+                candidate
+                for candidate in self._import_jobs
+                if candidate.get("id") == job_id
+                and candidate.get("job_type") == job_type
+                and candidate.get("status") == "queued"
+                and candidate.get("preview_status")
+                == lane.entry_preview_status
+                and (
+                    request_id is None
+                    or candidate.get("request_id") == request_id
+                )
+            ),
+            None,
+        )
+
+    def _claim_unguarded_candidate_in_lane(
+        self,
+        job_id: int,
+        *,
+        lane: JobLane,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        # youtube_import only (issue #1176 PR3) — local_import claims
+        # through the request-scoped path instead.
+        row = self._lane_claimable_row(
+            job_id, lane=lane, job_type=IMPORT_JOB_YOUTUBE,
+        )
+        if row is None:
+            return None
+        return self._claim_job_row_in_lane(
+            row,
+            lane=lane,
+            worker_id=worker_id,
+            execution_lease=None,
+        )
+
+    def _claim_automation_job_in_lane(
+        self,
+        job_id: int,
+        *,
+        lane: JobLane,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> ImportJob | None:
+        row = self._lane_claimable_row(
+            job_id,
+            lane=lane,
+            job_type=IMPORT_JOB_AUTOMATION,
+            request_id=request_id,
+        )
+        if row is None or not self._automation_job_has_authority(row):
+            return None
+        return self._claim_job_row_in_lane(
+            row,
+            lane=lane,
+            worker_id=worker_id,
+            execution_lease=execution_lease,
+        )
+
+    def _claim_request_scoped_job_in_lane(
+        self,
+        job_id: int,
+        *,
+        lane: JobLane,
+        job_type: str,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        """Force and local share one request-currency guard (issue #1176 PR3)."""
+        row = self._lane_claimable_row(
+            job_id, lane=lane, job_type=job_type, request_id=request_id,
+        )
+        if row is None or not self._force_job_request_is_current(
+            row,
+            request_id=request_id,
+        ):
+            return None
+        return self._claim_job_row_in_lane(
+            row,
+            lane=lane,
+            worker_id=worker_id,
+            execution_lease=None,
+        )
+
     def claim_import_job_candidate(
         self,
         job_id: int,
         *,
         worker_id: str | None = None,
     ) -> ImportJob | None:
-        row = next(
-            (
-                candidate
-                for candidate in self._import_jobs
-                if candidate.get("id") == job_id
-                # youtube_import only (issue #1176 PR3) — local_import
-                # claims through claim_local_import_job_under_lock instead.
-                and candidate.get("job_type") == IMPORT_JOB_YOUTUBE
-                and candidate.get("status") == "queued"
-                and candidate.get("preview_status")
-                in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
-            ),
-            None,
-        )
-        if row is None:
-            return None
-        return self._claim_import_job_row(
-            row,
-            worker_id=worker_id,
-            execution_lease=None,
+        return self._claim_unguarded_candidate_in_lane(
+            job_id, lane=IMPORT_LANE, worker_id=worker_id,
         )
 
     def claim_automation_import_job_under_lock(
@@ -1798,23 +1881,10 @@ class FakePipelineDB:
         worker_id: str | None,
         execution_lease: ExecutionLeaseSnapshot,
     ) -> ImportJob | None:
-        row = next(
-            (
-                candidate
-                for candidate in self._import_jobs
-                if candidate["id"] == job_id
-                and candidate.get("request_id") == request_id
-                and candidate.get("job_type") == IMPORT_JOB_AUTOMATION
-                and candidate.get("status") == "queued"
-                and candidate.get("preview_status")
-                in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
-            ),
-            None,
-        )
-        if row is None or not self._automation_job_has_authority(row):
-            return None
-        return self._claim_import_job_row(
-            row,
+        return self._claim_automation_job_in_lane(
+            job_id,
+            lane=IMPORT_LANE,
+            request_id=request_id,
             worker_id=worker_id,
             execution_lease=execution_lease,
         )
@@ -1842,28 +1912,12 @@ class FakePipelineDB:
         request_id: int,
         worker_id: str | None,
     ) -> ImportJob | None:
-        row = next(
-            (
-                candidate
-                for candidate in self._import_jobs
-                if candidate["id"] == job_id
-                and candidate.get("request_id") == request_id
-                and candidate.get("job_type") == IMPORT_JOB_FORCE
-                and candidate.get("status") == "queued"
-                and candidate.get("preview_status")
-                in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
-            ),
-            None,
-        )
-        if row is None or not self._force_job_request_is_current(
-            row,
+        return self._claim_request_scoped_job_in_lane(
+            job_id,
+            lane=IMPORT_LANE,
+            job_type=IMPORT_JOB_FORCE,
             request_id=request_id,
-        ):
-            return None
-        return self._claim_import_job_row(
-            row,
             worker_id=worker_id,
-            execution_lease=None,
         )
 
     def claim_local_import_job_under_lock(
@@ -1873,45 +1927,31 @@ class FakePipelineDB:
         request_id: int,
         worker_id: str | None,
     ) -> ImportJob | None:
-        """Mirrors ``claim_force_import_job_under_lock`` exactly (issue
-        #1176 PR3), reusing the same request-currency guard."""
-        row = next(
-            (
-                candidate
-                for candidate in self._import_jobs
-                if candidate["id"] == job_id
-                and candidate.get("request_id") == request_id
-                and candidate.get("job_type") == IMPORT_JOB_LOCAL
-                and candidate.get("status") == "queued"
-                and candidate.get("preview_status")
-                in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
-            ),
-            None,
-        )
-        if row is None or not self._force_job_request_is_current(
-            row,
+        return self._claim_request_scoped_job_in_lane(
+            job_id,
+            lane=IMPORT_LANE,
+            job_type=IMPORT_JOB_LOCAL,
             request_id=request_id,
-        ):
-            return None
-        return self._claim_import_job_row(
-            row,
             worker_id=worker_id,
-            execution_lease=None,
         )
 
-    def _claim_import_job_row(
+    def _claim_job_row_in_lane(
         self,
         row: dict[str, Any],
         *,
+        lane: JobLane,
         worker_id: str | None,
         execution_lease: ExecutionLeaseSnapshot | None,
     ) -> ImportJob:
+        """Stamp one claim, reading every column name from the lane value."""
         now = _utcnow()
-        row["status"] = "running"
-        row["attempts"] = int(row.get("attempts") or 0) + 1
-        row["worker_id"] = worker_id
-        row["started_at"] = row.get("started_at") or now
-        row["heartbeat_at"] = now
+        row[lane.status_column] = "running"
+        row[lane.attempts_column] = int(row.get(lane.attempts_column) or 0) + 1
+        row[lane.worker_id_column] = worker_id
+        row[lane.started_at_column] = row.get(lane.started_at_column) or now
+        row[lane.heartbeat_at_column] = now
+        for column in lane.cleared_columns:
+            row[column] = None
         if execution_lease is not None:
             self._persist_execution_lease(row, execution_lease)
         row["updated_at"] = now
@@ -2635,25 +2675,8 @@ class FakePipelineDB:
         *,
         worker_id: str | None = None,
     ) -> ImportJob | None:
-        row = next(
-            (
-                candidate
-                for candidate in self._import_jobs
-                if candidate.get("id") == job_id
-                # youtube_import only (issue #1176 PR3) — local_import
-                # claims through claim_local_import_preview_job_under_lock.
-                and candidate.get("job_type") == IMPORT_JOB_YOUTUBE
-                and candidate.get("status") == "queued"
-                and candidate.get("preview_status") == "waiting"
-            ),
-            None,
-        )
-        if row is None:
-            return None
-        return self._claim_import_preview_row(
-            row,
-            worker_id=worker_id,
-            execution_lease=None,
+        return self._claim_unguarded_candidate_in_lane(
+            job_id, lane=PREVIEW_LANE, worker_id=worker_id,
         )
 
     def claim_automation_import_preview_job_under_lock(
@@ -2664,22 +2687,10 @@ class FakePipelineDB:
         worker_id: str | None,
         execution_lease: ExecutionLeaseSnapshot,
     ) -> ImportJob | None:
-        row = next(
-            (
-                candidate
-                for candidate in self._import_jobs
-                if candidate["id"] == job_id
-                and candidate.get("request_id") == request_id
-                and candidate.get("job_type") == IMPORT_JOB_AUTOMATION
-                and candidate.get("status") == "queued"
-                and candidate.get("preview_status") == "waiting"
-            ),
-            None,
-        )
-        if row is None or not self._automation_job_has_authority(row):
-            return None
-        return self._claim_import_preview_row(
-            row,
+        return self._claim_automation_job_in_lane(
+            job_id,
+            lane=PREVIEW_LANE,
+            request_id=request_id,
             worker_id=worker_id,
             execution_lease=execution_lease,
         )
@@ -2691,27 +2702,12 @@ class FakePipelineDB:
         request_id: int,
         worker_id: str | None,
     ) -> ImportJob | None:
-        row = next(
-            (
-                candidate
-                for candidate in self._import_jobs
-                if candidate["id"] == job_id
-                and candidate.get("request_id") == request_id
-                and candidate.get("job_type") == IMPORT_JOB_FORCE
-                and candidate.get("status") == "queued"
-                and candidate.get("preview_status") == "waiting"
-            ),
-            None,
-        )
-        if row is None or not self._force_job_request_is_current(
-            row,
+        return self._claim_request_scoped_job_in_lane(
+            job_id,
+            lane=PREVIEW_LANE,
+            job_type=IMPORT_JOB_FORCE,
             request_id=request_id,
-        ):
-            return None
-        return self._claim_import_preview_row(
-            row,
             worker_id=worker_id,
-            execution_lease=None,
         )
 
     def claim_local_import_preview_job_under_lock(
@@ -2721,50 +2717,13 @@ class FakePipelineDB:
         request_id: int,
         worker_id: str | None,
     ) -> ImportJob | None:
-        """Mirrors ``claim_force_import_preview_job_under_lock`` exactly
-        (issue #1176 PR3)."""
-        row = next(
-            (
-                candidate
-                for candidate in self._import_jobs
-                if candidate["id"] == job_id
-                and candidate.get("request_id") == request_id
-                and candidate.get("job_type") == IMPORT_JOB_LOCAL
-                and candidate.get("status") == "queued"
-                and candidate.get("preview_status") == "waiting"
-            ),
-            None,
-        )
-        if row is None or not self._force_job_request_is_current(
-            row,
+        return self._claim_request_scoped_job_in_lane(
+            job_id,
+            lane=PREVIEW_LANE,
+            job_type=IMPORT_JOB_LOCAL,
             request_id=request_id,
-        ):
-            return None
-        return self._claim_import_preview_row(
-            row,
             worker_id=worker_id,
-            execution_lease=None,
         )
-
-    def _claim_import_preview_row(
-        self,
-        row,
-        *,
-        worker_id: str | None,
-        execution_lease: ExecutionLeaseSnapshot | None,
-    ) -> ImportJob:
-        now = _utcnow()
-        row["preview_status"] = "running"
-        row["preview_attempts"] = int(row.get("preview_attempts") or 0) + 1
-        row["preview_worker_id"] = worker_id
-        row["preview_started_at"] = row.get("preview_started_at") or now
-        row["preview_heartbeat_at"] = now
-        row["preview_message"] = None
-        row["preview_error"] = None
-        if execution_lease is not None:
-            self._persist_execution_lease(row, execution_lease)
-        row["updated_at"] = now
-        return ImportJob.from_row(copy.deepcopy(row))
 
     def heartbeat_import_job_preview(
         self,
