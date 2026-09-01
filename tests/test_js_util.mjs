@@ -6,8 +6,37 @@
 import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, youtubeBrowseUrl, renderForensicBlock, parsePastedId, youtubeSectionState, consoleEmphasis, withApplyDistance, isExternalAuthInterruption, wrongMatchExplorerFailureCopy } from '../web/js/util.js';
 import { state } from '../web/js/state.js';
 import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, loadLabelReleases, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls, renderLabelRows } from '../web/js/labels.js';
-import { __test__ as longTailTest } from '../web/js/long_tail.js';
-import { __test__ as longTailConsoleTest } from '../web/js/long_tail_console.js';
+import {
+  bandLabel,
+  countOtherBandMatches,
+  defaultBand,
+  deriveBandTabs,
+  filterRows,
+  renderLongTailBody,
+  renderLongTailRow,
+} from '../web/js/long_tail.js';
+import {
+  PEERS_VISIBLE_CAP,
+  acceptDisabledReason,
+  buildAcceptSiblingOptions,
+  canAcceptSibling,
+  consoleStates,
+  intentToggleTarget,
+  renderActionsBar,
+  renderConsoleShell,
+  renderPanelError,
+  renderPeersBody,
+  renderRescueConfirm,
+  renderRescuesBody,
+  renderSiblingsBody,
+  renderUnfindableBody,
+  renderYoutubeBody,
+  rescueOutcomeCopy,
+  youtubeBestDistance,
+  youtubeFailureReason,
+  youtubeHistoryRows,
+  youtubeRescueTargets,
+} from '../web/js/long_tail_console.js';
 import { wrapFetchWithSessionGuard, buildSessionExpiredOverlay, installSessionGuard } from '../web/js/session.js';
 
 const t = suite(import.meta.url);
@@ -1237,17 +1266,8 @@ t.equal(activeRgSet.has('rg-1'), true, 'active-RG Set hit');
 t.equal(activeRgSet.has('rg-not-active'), false, 'active-RG Set miss');
 
 // --- long_tail.js pure helpers (U3) ---
-t.section('long_tail.js __test__');
+t.section('long_tail.js pure helpers');
 {
-  const {
-    bandLabel,
-    deriveBandTabs,
-    defaultBand,
-    filterRows,
-    countOtherBandMatches,
-    renderLongTailRow,
-  } = longTailTest;
-
   // A mixed cohort spanning Missing + several on-disk bands, deliberately
   // out of canonical order so the ordering assertion is meaningful.
   const cohort = [
@@ -1401,7 +1421,6 @@ t.section('long_tail.js __test__');
   );
 
   // --- renderLongTailBody: the three list states (DOM-free string paint) ---
-  const { renderLongTailBody } = longTailTest;
   // Empty cohort -> empty-cohort affordance, never blank.
   state.longTail = { rows: [], band: null, query: '' };
   const emptyCohort = renderLongTailBody();
@@ -1442,21 +1461,8 @@ t.section('long_tail.js __test__');
 }
 
 // --- long_tail_console.js action console pure helpers (U4) ---
-t.section('long_tail_console.js __test__ (U4 console)');
+t.section('long_tail_console.js pure helpers (U4 console)');
 {
-  const {
-    renderUnfindableBody,
-    renderPeersBody,
-    renderRescuesBody,
-    renderSiblingsBody,
-    renderYoutubeBody,
-    renderConsoleShell,
-    renderPanelError,
-    youtubeHistoryRows,
-    youtubeFailureReason,
-    PEERS_VISIBLE_CAP,
-  } = longTailConsoleTest;
-
   // --- renderUnfindableBody: categorised vs not-yet-categorised ---
   // Categorised → category badge + forensics rollup.
   const categorised = renderUnfindableBody({
@@ -1703,16 +1709,8 @@ t.section('long_tail_console.js __test__ (U4 console)');
 }
 
 // --- long_tail_console.js U5 rescue flow pure helpers ---
-t.section('long_tail_console.js __test__ (U5 rescue flow)');
+t.section('long_tail_console.js pure helpers (U5 rescue flow)');
 {
-  const {
-    youtubeBestDistance,
-    youtubeRescueTargets,
-    rescueOutcomeCopy,
-    renderYoutubeBody,
-    renderRescueConfirm,
-  } = longTailConsoleTest;
-
   // --- youtubeBestDistance: lowest ok distance, ignores non-ok rows ---
   t.equal(
     youtubeBestDistance({ distances: [
@@ -1841,16 +1839,8 @@ t.section('long_tail_console.js __test__ (U5 rescue flow)');
 }
 
 // --- long_tail_console.js U6 secondary-action pure helpers ---
-t.section('long_tail_console.js __test__ (U6 secondary actions)');
+t.section('long_tail_console.js pure helpers (U6 secondary actions)');
 {
-  const {
-    canAcceptSibling,
-    acceptDisabledReason,
-    intentToggleTarget,
-    buildAcceptSiblingOptions,
-    renderActionsBar,
-  } = longTailConsoleTest;
-
   // --- canAcceptSibling: MB-only predicate (KTD7) ---
   t.equal(
     canAcceptSibling({ source: 'request' }, 'rg-1'),
@@ -1971,7 +1961,6 @@ t.section('long_tail_console.js console persistence (#398 / #481 item 1)');
   // Open-console tracking lives in the module-scoped `consoleStates` map
   // (#481 item 1 — no longer on shared state; see tests/test_js_long_tail_console.mjs
   // for the pure open/close/prune/canStart/settle transition coverage).
-  const { consoleStates } = longTailConsoleTest;
   t.ok(consoleStates instanceof Map,
     'consoleStates is a Map (open-console ids persist across re-renders)');
   // The DOM-side entry points are no-ops outside a browser — must not throw

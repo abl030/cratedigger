@@ -21,13 +21,12 @@
  * test suite both confirm no TDZ error at import.
  *
  * Pure / DOM-free helpers (band ordering, tab derivation, in-band search
- * filtering, cross-band match count) are exported via `__test__` for the
- * Node unit suite. Rendering and fetch live alongside them but never leak
+ * filtering, cross-band match count) are named exports the Node unit suite
+ * imports directly. Rendering and fetch live alongside them but never leak
  * into the pure helpers.
  *
  * Shape mirrors `web/js/search_plan.js` / `web/js/recents.js`:
- * `// @ts-check`, ES6 module, JSDoc on exports, the
- * `export const __test__ = {…}` named-object test convention.
+ * `// @ts-check`, ES6 module, JSDoc on exports.
  */
 
 import { state, API } from './state.js';
@@ -582,16 +581,3 @@ export function onLongTailSearchInput(value) {
 }
 
 
-export const __test__ = {
-  MISSING_BAND,
-  BAND_ORDER,
-  bandLabel,
-  deriveBandTabs,
-  defaultBand,
-  filterRows,
-  countOtherBandMatches,
-  renderLongTailRow,
-  renderLongTailBody,
-  applyLongTailLoadFailure,
-  shouldPaintLongTailLoadFailure,
-};
