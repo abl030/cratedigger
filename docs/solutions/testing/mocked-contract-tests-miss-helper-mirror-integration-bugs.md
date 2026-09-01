@@ -30,7 +30,7 @@ The contract test that *should* have caught this looked like:
 
 ```python
 def test_mb_release_resolved(self):
-    with patch("web.server.mb_api") as mock_mb:
+    with patch("web.routes.browse.mb_api") as mock_mb:
         mock_mb.get_release.return_value = {
             "id": self.MB_RELEASE_ID,
             "title": "Test Release",

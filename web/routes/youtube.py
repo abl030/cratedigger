@@ -44,7 +44,7 @@ from web.routes._registry import (
     pattern_route,
     route,
 )
-from web.routes._server_access import _server
+from web.runtime import runtime
 
 log = logging.getLogger(__name__)
 
@@ -164,11 +164,11 @@ def post_youtube_album(
     # actually exercised).
     from lib.beets_distance import compute_beets_distance
 
-    s = _server()
+    rt = runtime()
     try:
         result = resolve_youtube_album(
             identifier,
-            pdb=s._db(),
+            pdb=rt.db(),
             mb_get_release=lambda m: mb_api.get_release(m, fresh=False),
             mb_get_release_group_releases=mb_api.get_release_group_releases,
             discogs_get_release=lambda d: discogs_api.get_release(
@@ -254,8 +254,8 @@ def post_pipeline_youtube_rescue(
     if req is None:
         return
 
-    s = _server()
-    svc = default_youtube_ingest_service_factory(s._db())
+    rt = runtime()
+    svc = default_youtube_ingest_service_factory(rt.db())
     result = svc.submit(request_id, req.browse_id)
 
     payload = msgspec.to_builtins(result)

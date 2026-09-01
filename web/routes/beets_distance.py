@@ -9,7 +9,7 @@ from lib.release_identity import detect_release_source
 from web import discogs as discogs_api
 from web import mb as mb_api
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route
-from web.routes._server_access import _server
+from web.runtime import runtime
 
 
 class _RedisFingerprintCache:
@@ -114,11 +114,11 @@ def get_beets_distance(
             return discogs_api.get_release(int(m), fresh=False)
         return mb_api.get_release(m, fresh=False)
 
-    s = _server()
+    rt = runtime()
     result = compute_beets_distance(
         download_log_id,
         mbid,
-        pdb=s._db(),
+        pdb=rt.db(),
         mb_get_release=get_release_fn,
         cache=_RedisFingerprintCache(),
     )

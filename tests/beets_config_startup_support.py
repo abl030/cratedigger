@@ -144,20 +144,40 @@ def _snapshot_runtime_tree(
 
 
 def _snapshot_web_process_state() -> tuple[object, ...]:
-    """Capture Beets, web globals, and caches that admission may rebind."""
+    """Capture Beets, the installed runtime, and caches admission may rebind.
+
+    The five separate ``server.beets_db_path`` / ``beets_library_root`` /
+    ``canonical_origin`` / ``insecure_mode`` / ``_db_dsn`` reads this used
+    to make are one entry now: the installed :class:`WebRuntime`, or
+    ``None`` when startup failed before installing one (#1313). The
+    runtime carries every field those five did plus the snapshot paths
+    and the two delete seams, and equality on a frozen dataclass covers
+    all of them.
+
+    Honest limit: on the one path that compares this snapshot, startup is
+    rejected *before* ``install_runtime`` is reached, so the entry is
+    ``None`` on both sides every time and does not currently
+    discriminate. It is fail-closed legislation for a startup that
+    installs a runtime and then fails — not a guard with a live world
+    behind it today.
+    """
     from beets import config as active_beets_config
 
     from web import cache
+    from web.runtime import runtime
+
+    try:
+        installed: object = runtime()
+    except RuntimeError:
+        # No runtime installed — the fail-closed state a startup that
+        # never reached its serve block correctly leaves behind.
+        installed = None
 
     return (
         active_beets_config["library"].as_filename(),
         active_beets_config["directory"].as_filename(),
         active_beets_config["statefile"].as_filename(),
-        server.beets_db_path,
-        server.beets_library_root,
-        server.canonical_origin,
-        server.insecure_mode,
-        server._db_dsn,
+        installed,
         server.mb_api.MB_API_BASE,
         server._discogs.DISCOGS_API_BASE,
         id(cache._redis),
@@ -258,13 +278,13 @@ def _exercise_real_rejection_and_restart(
 
     world = BeetsContractWorld(role=case.role)
     saved_umask = os.umask(0o027) if case.role == "main" else None
+    # The four web globals this used to save and restore are gone: a
+    # `main()` that fails before its serve block installs no `WebRuntime`
+    # at all, so there is nothing of that kind left behind to restore
+    # (#1313). The mirror bases and the redis handle are still real
+    # process state a rejected startup could touch.
     prior_web_globals = (
         (
-            server.beets_db_path,
-            server.beets_library_root,
-            server.canonical_origin,
-            server.insecure_mode,
-            server._db_dsn,
             server.mb_api.MB_API_BASE,
             server._discogs.DISCOGS_API_BASE,
             cache._redis,
@@ -368,11 +388,6 @@ def _exercise_real_rejection_and_restart(
             from web import cache
 
             (
-                server.beets_db_path,
-                server.beets_library_root,
-                server.canonical_origin,
-                server.insecure_mode,
-                server._db_dsn,
                 server.mb_api.MB_API_BASE,
                 server._discogs.DISCOGS_API_BASE,
                 cache._redis,

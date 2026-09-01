@@ -16,8 +16,9 @@ import msgspec
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.fakes import FakeBeetsDB
-from tests.helpers import make_request_row
+from tests.helpers import make_request_row, make_web_runtime
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
+from web.runtime import WebRuntime, install_runtime, runtime
 
 MB_RELEASE_1 = "00000000-0000-0000-0000-000000000001"
 MB_RELEASE_2 = "00000000-0000-0000-0000-000000000002"
@@ -41,8 +42,9 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
     ``pipeline-cli long-tail`` wraps (CLI ⇄ API symmetry). Drives the
     real service + DB cohort query against a fresh :class:`FakePipelineDB`
     (no service mocking, per MOCKS: LEAF-SEAM ONLY). Banding's beets
-    collaborator (``_beets_db``) is the leaf seam — patched at
-    ``web.server`` only when a test exercises a particular resolved world.
+    collaborator (``WebRuntime.beets_db``) is the leaf seam — injected via
+    the installed runtime only when a test exercises a particular
+    resolved world.
     """
 
     # The frontend long-tail list renders these fields per row out of the
@@ -213,7 +215,7 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
         beets_db.set_mbid_detail(
             MB_RELEASE_1, {"beets_format": "MP3", "beets_bitrate": 194,
                            "beets_avg_bitrate": 320})
-        with patch("web.server._beets_db", return_value=beets_db):
+        with install_runtime(make_web_runtime(runtime(), beets=beets_db)):
             status, data = self._get("/api/pipeline/long-tail")
 
         self.assertEqual(status, 200)
@@ -227,7 +229,7 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
 
         beets_db = FakeBeetsDB()
         beets_db.set_album_exists(MB_RELEASE_1, True)
-        with patch("web.server._beets_db", return_value=beets_db):
+        with install_runtime(make_web_runtime(runtime(), beets=beets_db)):
             status, data = self._get("/api/pipeline/long-tail")
 
         self.assertEqual(status, 200)
@@ -271,8 +273,9 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
             album_title="Discogs Authority Failed",
         ))
 
-        with patch(
-            "web.server._beets_db",
+        with patch.object(
+            WebRuntime,
+            "beets_db",
             side_effect=FileNotFoundError("Beets DB not found"),
         ):
             status, data = self._get(
@@ -298,7 +301,9 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
                 del identities
                 raise failure
 
-        with patch("web.server._beets_db", return_value=LockedBeetsDB()):
+        with install_runtime(
+            make_web_runtime(runtime(), beets=LockedBeetsDB()),
+        ):
             status, data = self._get(
                 "/api/pipeline/long-tail?band=missing")
 
@@ -315,7 +320,7 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
         beets = FakeBeetsDB()
         beets.set_album_ids_for_release(MB_RELEASE_1, [10, 11])
 
-        with patch("web.server._beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, data = self._get("/api/pipeline/long-tail")
 
         self.assertEqual(status, 409)
@@ -348,9 +353,8 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
                 del identities
                 return {}
 
-        with patch(
-            "web.server._beets_db",
-            return_value=OmittedAuthorityBeetsDB(),
+        with install_runtime(
+            make_web_runtime(runtime(), beets=OmittedAuthorityBeetsDB()),
         ):
             status, data = self._get("/api/pipeline/long-tail")
 
@@ -372,7 +376,9 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
                 del identities
                 raise failure
 
-        with patch("web.server._beets_db", return_value=BrokenSchemaBeetsDB()):
+        with install_runtime(
+            make_web_runtime(runtime(), beets=BrokenSchemaBeetsDB()),
+        ):
             status, data = self._get("/api/pipeline/long-tail")
 
         self.assertEqual(status, 500)

@@ -32,6 +32,7 @@ from tests.web._harness import (
     _fresh_triage_runner,
 )
 from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
+from web.runtime import WebRuntime
 
 
 @contextmanager
@@ -515,7 +516,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                     "beets_avg_bitrate": 256, "beets_tracks": 10},
     }
 
-    @patch("web.server.check_beets_library_detail",
+    @patch.object(WebRuntime, "check_beets_library_detail",
            return_value=_IN_LIBRARY_BEETS)
     def test_group_badge_withholds_the_accusation_for_an_audit_only_have(
         self, _mock_beets,
@@ -549,7 +550,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(
             group["current_spectral_accusation_withheld"], "audit_only_codec")
 
-    @patch("web.server.check_beets_library_detail",
+    @patch.object(WebRuntime, "check_beets_library_detail",
            return_value=_IN_LIBRARY_BEETS)
     def test_group_badge_keeps_the_accusation_for_a_real_codec(
         self, _mock_beets,
@@ -579,7 +580,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertIs(group["current_spectral_accusation_admissible"], True)
         self.assertIsNone(group["current_spectral_accusation_withheld"])
 
-    @patch("web.server.check_beets_library_detail",
+    @patch.object(WebRuntime, "check_beets_library_detail",
            return_value=_IN_LIBRARY_BEETS)
     def test_group_badge_has_no_flags_without_linked_evidence(
         self, _mock_beets,
@@ -1341,7 +1342,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(len(by_req[1]["entries"]), 2)
         self.assertEqual(len(by_req[2]["entries"]), 1)
 
-    @patch("web.server.check_beets_library_detail",
+    @patch.object(WebRuntime, "check_beets_library_detail",
            return_value={"abc-123": {"beets_format": "MP3",
                                      "beets_bitrate": 194,
                                      "beets_avg_bitrate": 288,
@@ -1408,9 +1409,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertFalse(group["verified_lossless"],
                          "verified_lossless must read False when nothing is on disk.")
 
-    @patch("web.server.check_beets_by_artist_album",
+    @patch.object(WebRuntime, "check_beets_by_artist_album",
            create=True, return_value=12)
-    @patch("web.server.check_beets_library_detail", return_value={})
+    @patch.object(WebRuntime, "check_beets_library_detail", return_value={})
     def test_group_in_library_false_when_mbid_not_in_beets(
             self, _mock_detail, _mock_fuzzy):
         """No exact MBID hit → ``in_library`` is False, quality blanks.
@@ -1449,9 +1450,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertIsNone(group["quality_label"])
         self.assertIsNone(group["quality_rank"])
 
-    @patch("web.server.check_beets_by_artist_album",
+    @patch.object(WebRuntime, "check_beets_by_artist_album",
            create=True, return_value=12)
-    @patch("web.server.check_beets_library_detail", return_value={})
+    @patch.object(WebRuntime, "check_beets_library_detail", return_value={})
     def test_group_in_library_false_for_mbidless_request(
             self, _mock_detail, _mock_fuzzy):
         """Request with no MBID → always ``in_library`` False (issue #123).

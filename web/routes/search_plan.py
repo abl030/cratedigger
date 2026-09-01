@@ -14,9 +14,10 @@ import msgspec
 from pydantic import BaseModel, Field, model_validator
 
 from lib.quality import CandidateScore
+from web.overlay import serialize_row
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route
-from web.routes._server_access import _server
+from web.runtime import runtime
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ def get_pipeline_search_plan(
         build_inspection_payload,
     )
     include_stats = params.get("stats", ["1"])[0] != "0"
-    db = _server()._db()
+    db = runtime().db()
     payload = build_inspection_payload(
         db, int(req_id_str), include_stats=include_stats)
     if isinstance(payload, RequestNotFound):
@@ -87,7 +88,7 @@ def get_pipeline_search_plan_dry_run(
     else:
         prepend_artist = prepend_artist_raw == "1"
 
-    db = _server()._db()
+    db = runtime().db()
     cfg = read_runtime_config()
     svc = SearchPlanService(db, cfg)
     result = svc.dry_run_for_request(
@@ -171,7 +172,7 @@ def get_pipeline_search_plan_saturation(
             )
             return
 
-    db = _server()._db()
+    db = runtime().db()
     cfg = read_runtime_config()
     svc = SearchPlanService(db, cfg)
     result = svc.saturation_for_request(
@@ -246,13 +247,12 @@ def get_pipeline_search_plan_history(
             h._error("before_id must be an integer")
             return
 
-    db = _server()._db()
+    db = runtime().db()
     cfg = read_runtime_config()
     svc = SearchPlanService(db, cfg)
     result = svc.history_for_request(
         request_id, limit=limit, before_id=before_id,
     )
-    s = _server()
     if result.outcome == RESULT_HISTORY_PAGE_SUCCESS:
         # F1: map rows through _serialize_row so datetime fields
         # (created_at) become ISO strings before json.dumps is called.
@@ -260,7 +260,7 @@ def get_pipeline_search_plan_history(
         # for symmetric wire-boundary strictness (mirrors _build_last_search_payload).
         serialized_rows: list[dict[str, object]] = []
         for r in result.rows:
-            sr = s._serialize_row(r)
+            sr = serialize_row(r)
             raw_candidates = sr.get("candidates")
             if raw_candidates is not None:
                 try:
@@ -342,7 +342,7 @@ def post_pipeline_search_plan_regenerate(
     if req_body is None:
         return
     prepend_artist: bool | None = req_body.prepend_artist
-    db = _server()._db()
+    db = runtime().db()
     cfg = read_runtime_config()
     svc = SearchPlanService(db, cfg)
     result = svc.generate_for_request(
@@ -453,7 +453,7 @@ def post_pipeline_search_plan_advance(
     if req_body is None:
         return
 
-    db = _server()._db()
+    db = runtime().db()
     cfg = read_runtime_config()
     svc = SearchPlanService(db, cfg)
     result = svc.advance_for_request(

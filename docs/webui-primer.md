@@ -72,7 +72,8 @@ depends on.
 
 | File | Purpose |
 |------|---------|
-| `web/server.py` | HTTP server with JSON API endpoints |
+| `web/server.py` | HTTP server, route dispatch tables, and startup: builds one `WebRuntime` and installs it around the serve loop |
+| `web/runtime.py` | The frozen `WebRuntime` every route reads through `runtime()` — admitted config, injected handles, per-thread DB handles |
 | `web/mb.py` | MusicBrainz API helpers (search, artist discography, releases) |
 | `web/discogs.py` | Discogs mirror API helpers (search, artist releases, master pressings) |
 | `web/index.html` | Frontend HTML shell and inline CSS |

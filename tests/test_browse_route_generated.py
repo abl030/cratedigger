@@ -15,6 +15,7 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers active profile
 from web.routes.browse import _resolve_discogs, get_artist, get_browse_resolve
+from web.runtime import WebRuntime, install_runtime
 
 _CLEAN_ERROR = "MusicBrainz fallback unavailable, retry"
 _NOT_FOUND_ERROR = "MusicBrainz artist not found"
@@ -97,6 +98,13 @@ def assert_mb_resolver_adapter_boundary(
 class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
     ARTIST_ID = "664c3e0e-42d8-48c1-b209-1efca19c0325"
 
+    def setUp(self) -> None:
+        super().setUp()
+        # get_artist() reads the process runtime unconditionally before
+        # dispatching to the MB adapter (#1313); every scenario here hits
+        # an early-return failure branch that never touches it further.
+        self.enterContext(install_runtime(WebRuntime()))
+
     def test_contract_checker_rejects_known_bad_payload(self):
         raw_reason = "raw transport secret"
         with self.assertRaisesRegex(AssertionError, "unstable retry payload"):
@@ -133,7 +141,7 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
     ) -> None:
         raw_reason = f"raw-mb-transport-secret::{reason_suffix}"
         handler = _RecordingHandler()
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.get_artist_release_groups.side_effect = URLError(raw_reason)
             get_artist(handler, {}, self.ARTIST_ID)
 
@@ -170,7 +178,7 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
             fp=None,
         )
         handler = _RecordingHandler()
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.get_artist_release_groups.side_effect = error
             get_artist(handler, {}, self.ARTIST_ID)
 
@@ -185,6 +193,12 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
 
 
 class TestBrowseResolverMusicBrainzIdGenerated(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        # _resolve_mb() reads the process runtime unconditionally (#1313);
+        # the accepted-canonical-UUID case below reaches it.
+        self.enterContext(install_runtime(WebRuntime()))
+
     def test_mbid_adapter_boundary_checker_rejects_known_bad_dispatch(self):
         """Fault qualification: an adapter call for a bad UUID trips the oracle."""
         handler = _RecordingHandler()
@@ -199,7 +213,7 @@ class TestBrowseResolverMusicBrainzIdGenerated(unittest.TestCase):
     @example(raw_id="x" * 2049)
     def test_invalid_mb_identifier_never_reaches_the_adapter(self, raw_id: str) -> None:
         handler = _RecordingHandler()
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             get_browse_resolve(handler, {
                 "id": [raw_id], "source": ["mb"], "kind": ["unknown"],
             })
@@ -221,7 +235,7 @@ class TestBrowseResolverMusicBrainzIdGenerated(unittest.TestCase):
         handler = _RecordingHandler()
         # Each generated UUID has a fresh metadata-cache key, so this drives
         # the real cache boundary without patching its owned implementation.
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.get_release.return_value = {
                 "artist_id": "artist", "artist_name": "Artist",
                 "release_group_id": "group",
@@ -233,7 +247,7 @@ class TestBrowseResolverMusicBrainzIdGenerated(unittest.TestCase):
 
         for noncanonical in (canonical.upper(), value.hex, f"urn:uuid:{canonical}"):
             handler = _RecordingHandler()
-            with patch("web.server.mb_api") as mock_mb:
+            with patch("web.routes.browse.mb_api") as mock_mb:
                 get_browse_resolve(handler, {
                     "id": [noncanonical], "source": ["mb"], "kind": ["release"],
                 })
@@ -279,7 +293,7 @@ class TestBrowseResolverInputBoundaryGenerated(unittest.TestCase):
         self, value: uuid.UUID,
     ) -> None:
         handler = _RecordingHandler()
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             get_browse_resolve(handler, {
                 "id": [str(value)], "source": ["mb"], "kind": ["master"],
             })

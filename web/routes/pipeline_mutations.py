@@ -25,8 +25,8 @@ from lib.request_creation_service import (
 )
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, route
-from web.routes._server_access import _server
 from web.routes.pipeline import _serialize_import_job
+from web.runtime import runtime
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,8 @@ from lib import transitions
 # Module-level DI seam for the operator transition service. Routes call
 # this name (not ``transitions.finalize_operator_request`` directly) so tests can
 # swap it via ``patch.object(routes.pipeline_mutations, "finalize_request",
-# new=...)`` at the same module-level scope as ``web.server.db``. See the
-# leaf-seam allowlist in ``tests/_mock_audit_scanner.py``.
+# new=...)`` at this module's own scope. See the leaf-seam allowlist in
+# ``tests/_mock_audit_scanner.py``.
 finalize_request = transitions.finalize_operator_request
 from lib.force_import_service import (
     FORCE_IMPORT_HTTP_STATUS,
@@ -241,9 +241,9 @@ def _queue_existing_upgrade(h: RouteHandler, db: PipelineDB,
 
 
 def _create_or_resume(creation: RequestCreationInput) -> RequestCreationResult:
-    s = _server()
+    rt = runtime()
     return RequestCreationService(
-        s._db(), read_runtime_config(),
+        rt.db(), read_runtime_config(),
     ).create_or_resume(creation)
 
 
@@ -272,16 +272,16 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
     req = parse_body(h, body, PipelineAddRequest)
     if req is None:
         return
-    s = _server()
+    rt = runtime()
     mbid = normalize_release_id(req.mb_release_id)
     discogs_id = normalize_release_id(req.discogs_release_id)
     source = req.source
 
     if discogs_id:
         # Discogs flow: store discogs ID in both columns for pipeline compat
-        existing = s._db().get_request_by_release_id(discogs_id)
+        existing = rt.db().get_request_by_release_id(discogs_id)
         if existing and existing["status"] != "initializing":
-            _add_exists_response(h, s._db(), existing["id"])
+            _add_exists_response(h, rt.db(), existing["id"])
             return
 
         # Bypass the 24h meta cache — this write path persists artist /
@@ -309,7 +309,7 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
         if creation_result is None:
             return
         if creation_result.outcome == "exists":
-            _add_exists_response(h, s._db(), creation_result.request_id)
+            _add_exists_response(h, rt.db(), creation_result.request_id)
             return
         req_id = creation_result.request_id
         assert req_id is not None
@@ -324,9 +324,9 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
         return
 
     # MusicBrainz flow
-    existing = s._db().get_request_by_release_id(mbid)
+    existing = rt.db().get_request_by_release_id(mbid)
     if existing and existing["status"] != "initializing":
-        _add_exists_response(h, s._db(), existing["id"])
+        _add_exists_response(h, rt.db(), existing["id"])
         return
 
     # Bypass the 24h meta cache — same reason as the Discogs branch
@@ -362,7 +362,7 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
     if creation_result is None:
         return
     if creation_result.outcome == "exists":
-        _add_exists_response(h, s._db(), creation_result.request_id)
+        _add_exists_response(h, rt.db(), creation_result.request_id)
         return
     req_id = creation_result.request_id
     assert req_id is not None
@@ -401,9 +401,9 @@ def post_pipeline_mark_incomplete(
     req_body = parse_body(h, body, PipelineMarkIncompleteRequest)
     if req_body is None:
         return
-    s = _server()
+    rt = runtime()
     result = set_incomplete_mark(
-        s._db(), req_body.id, marked=req_body.marked,
+        rt.db(), req_body.id, marked=req_body.marked,
     )
     status = INCOMPLETE_MARK_HTTP_STATUS[result.outcome]
     if status != 200:
@@ -426,11 +426,11 @@ def post_pipeline_update(h: RouteHandler, body: dict[str, object]) -> None:
     req_body = parse_body(h, body, PipelineUpdateRequest)
     if req_body is None:
         return
-    s = _server()
+    rt = runtime()
     req_id = req_body.id
     new_status = req_body.status
 
-    req = s._db().get_request(int(req_id))
+    req = rt.db().get_request(int(req_id))
     if not req:
         h._error("Not found", 404)
         return
@@ -441,7 +441,7 @@ def post_pipeline_update(h: RouteHandler, body: dict[str, object]) -> None:
         mbid = req.get("mb_release_id")
         quality = None
         min_br = None
-        b = s._beets_db()
+        b = rt.beets_db()
         if mbid and b and b.album_exists(mbid):
             # Preserve a stricter existing override (e.g. "lossless"
             # set by the quality gate) — reverting status shouldn't
@@ -455,7 +455,7 @@ def post_pipeline_update(h: RouteHandler, body: dict[str, object]) -> None:
         if min_br is not None:
             wanted_fields["min_bitrate"] = min_br
         result = finalize_request(
-            s._db(),
+            rt.db(),
             int(req_id),
             transitions.RequestTransition.to_wanted_fields(
                 from_status=req["status"],
@@ -464,7 +464,7 @@ def post_pipeline_update(h: RouteHandler, body: dict[str, object]) -> None:
         )
     else:
         result = finalize_request(
-            s._db(),
+            rt.db(),
             int(req_id),
             transitions.RequestTransition.status_only(
                 new_status,
@@ -488,7 +488,7 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
     req = parse_body(h, body, PipelineUpgradeRequest)
     if req is None:
         return
-    s = _server()
+    rt = runtime()
     mbid = normalize_release_id(req.mb_release_id)
     if not mbid:
         # ``normalize_release_id`` strips/lowercases and can return None
@@ -499,13 +499,13 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
     source = detect_release_source(mbid)
 
     min_bitrate = None
-    b = s._beets_db()
+    b = rt.beets_db()
     if b:
         min_bitrate = b.get_min_bitrate(mbid)
 
-    existing = s._db().get_request_by_release_id(mbid)
+    existing = rt.db().get_request_by_release_id(mbid)
     if existing and existing["status"] != "initializing":
-        _queue_existing_upgrade(h, s._db(), existing, min_bitrate)
+        _queue_existing_upgrade(h, rt.db(), existing, min_bitrate)
     else:
         # Brand-new request — no prior override to preserve.
         quality = QUALITY_UPGRADE_TIERS
@@ -574,11 +574,11 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
         if creation_result is None:
             return
         if creation_result.outcome == "exists":
-            existing_after_race = s._db().get_request(creation_result.request_id or 0)
+            existing_after_race = rt.db().get_request(creation_result.request_id or 0)
             if existing_after_race is None:
                 h._error("Request disappeared during creation", 409)
                 return
-            _queue_existing_upgrade(h, s._db(), existing_after_race, min_bitrate)
+            _queue_existing_upgrade(h, rt.db(), existing_after_race, min_bitrate)
             return
         req_id = creation_result.request_id
         assert req_id is not None
@@ -601,7 +601,7 @@ def post_pipeline_set_quality(h: RouteHandler, body: dict[str, object]) -> None:
     req_body = parse_body(h, body, PipelineSetQualityRequest)
     if req_body is None:
         return
-    s = _server()
+    rt = runtime()
     mbid = normalize_release_id(req_body.mb_release_id)
     new_status = req_body.status
     min_bitrate = req_body.min_bitrate
@@ -610,7 +610,7 @@ def post_pipeline_set_quality(h: RouteHandler, body: dict[str, object]) -> None:
         h._error("Missing mb_release_id")
         return
 
-    existing = s._db().get_request_by_release_id(mbid)
+    existing = rt.db().get_request_by_release_id(mbid)
     if not existing:
         h._error("Not found in pipeline", 404)
         return
@@ -628,7 +628,7 @@ def post_pipeline_set_quality(h: RouteHandler, body: dict[str, object]) -> None:
             return
         if new_status == "imported":
             if min_bitrate is None and mbid:
-                b = s._beets_db()
+                b = rt.beets_db()
                 if b:
                     min_bitrate = b.get_avg_bitrate_kbps(mbid)
             imported_fields: dict[str, object] = {
@@ -637,7 +637,7 @@ def post_pipeline_set_quality(h: RouteHandler, body: dict[str, object]) -> None:
             if min_bitrate is not None:
                 imported_fields["min_bitrate"] = int(min_bitrate)
             result = finalize_request(
-                s._db(),
+                rt.db(),
                 req_id,
                 transitions.RequestTransition.to_imported_fields(
                     from_status=existing["status"],
@@ -649,7 +649,7 @@ def post_pipeline_set_quality(h: RouteHandler, body: dict[str, object]) -> None:
             if min_bitrate is not None:
                 wanted_fields["min_bitrate"] = min_bitrate
             result = finalize_request(
-                s._db(),
+                rt.db(),
                 req_id,
                 transitions.RequestTransition.to_wanted_fields(
                     from_status=existing["status"],
@@ -661,7 +661,7 @@ def post_pipeline_set_quality(h: RouteHandler, body: dict[str, object]) -> None:
             if min_bitrate is not None:
                 unsearchable_fields["min_bitrate"] = min_bitrate
             result = finalize_request(
-                s._db(),
+                rt.db(),
                 req_id,
                 transitions.RequestTransition.to_unsearchable_fields(
                     from_status=existing["status"],
@@ -675,21 +675,21 @@ def post_pipeline_set_quality(h: RouteHandler, body: dict[str, object]) -> None:
     elif min_bitrate is not None:
         if existing["status"] == "replaced":
             result = finalize_request(
-                s._db(),
+                rt.db(),
                 req_id,
                 transitions.RequestTransition.to_wanted(
                     from_status="replaced"),
             )
             if not _transition_applied_or_respond(h, result):
                 return
-        applied = s._db().update_request_fields(
+        applied = rt.db().update_request_fields(
             req_id,
             expected_status=str(existing["status"]),
             min_bitrate=min_bitrate,
         )
         if not _request_fields_applied_or_respond(
             h,
-            s._db(),
+            rt.db(),
             req_id,
             expected_status=str(existing["status"]),
             applied=applied,
@@ -728,7 +728,7 @@ def post_pipeline_set_intent(h: RouteHandler, body: dict[str, object]) -> None:
     req_body = parse_body(h, body, PipelineSetIntentRequest)
     if req_body is None:
         return
-    s = _server()
+    rt = runtime()
     intent_str = req_body.intent.strip()
     if intent_str not in ("lossless", "default"):
         h._error(f"Invalid intent: {intent_str!r}. Valid: lossless, default")
@@ -737,7 +737,7 @@ def post_pipeline_set_intent(h: RouteHandler, body: dict[str, object]) -> None:
         "lossless" if intent_str == "lossless" else "default"
     )
 
-    result = set_lossless_intent(s._db(), req_body.id, intent=intent)
+    result = set_lossless_intent(rt.db(), req_body.id, intent=intent)
     if isinstance(result, transitions.TransitionConflict):
         _transition_applied_or_respond(h, result)
         return
@@ -785,20 +785,20 @@ def post_pipeline_ban_source(h: RouteHandler, body: dict[str, object]) -> None:
     req_body = parse_body(h, body, PipelineBanSourceRequest)
     if req_body is None:
         return
-    s = _server()
-    b = s._beets_db()
+    rt = runtime()
+    b = rt.beets_db()
     if b is None:
         h._error("Beets DB not available", 503)
         return
     result = ban_source(
-        pipeline_db=s._db(),
+        pipeline_db=rt.db(),
         beets_db=b,
         request=BanSourceRequest(
             request_id=req_body.request_id,
             expected_release_id=req_body.mb_release_id,
         ),
         finalize_request_fn=finalize_request,
-        beets_delete_fn=s.beets_delete_fn,
+        beets_delete_fn=rt.beets_delete_fn,
     )
     if isinstance(result, BanSourceRequestNotFound):
         h._error("Request not found", 404)
@@ -872,10 +872,10 @@ def post_pipeline_force_import(h: RouteHandler, body: dict[str, object]) -> None
     req_body = parse_body(h, body, PipelineForceImportRequest)
     if req_body is None:
         return
-    s = _server()
+    rt = runtime()
     log_id = req_body.download_log_id
 
-    result = enqueue_force_import(s._db(), read_runtime_config(), int(log_id))
+    result = enqueue_force_import(rt.db(), read_runtime_config(), int(log_id))
     if result.outcome == RESULT_DOWNLOAD_LOG_MISSING:
         h._error(
             f"Download log entry {log_id} not found",
@@ -912,7 +912,7 @@ def post_pipeline_force_import(h: RouteHandler, body: dict[str, object]) -> None
     assert result.request_id is not None
     job = result.job
     request_id = result.request_id
-    req = s._db().get_request(request_id)
+    req = rt.db().get_request(request_id)
     assert req is not None
 
     h._json({
@@ -936,11 +936,11 @@ def post_pipeline_import_local(h: RouteHandler, body: dict[str, object]) -> None
     req_body = parse_body(h, body, PipelineImportLocalRequest)
     if req_body is None:
         return
-    s = _server()
+    rt = runtime()
     request_id = req_body.request_id
 
     result = enqueue_local_import(
-        s._db(),
+        rt.db(),
         read_runtime_config(),
         request_id=request_id,
         source_path=req_body.source_path,
@@ -974,7 +974,7 @@ def post_pipeline_import_local(h: RouteHandler, body: dict[str, object]) -> None
         return
     assert result.job is not None
     job = result.job
-    req = s._db().get_request(request_id)
+    req = rt.db().get_request(request_id)
     assert req is not None
 
     h._json({
@@ -997,9 +997,9 @@ def post_pipeline_delete(h: RouteHandler, body: dict[str, object]) -> None:
     req_body = parse_body(h, body, PipelineDeleteRequest)
     if req_body is None:
         return
-    s = _server()
+    rt = runtime()
     req_id = req_body.id
-    result = delete_pipeline_request(s._db(), int(req_id))
+    result = delete_pipeline_request(rt.db(), int(req_id))
     if isinstance(result, PipelineDeleteNotFound):
         h._error("Not found", 404)
         return

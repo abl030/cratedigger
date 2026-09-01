@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import ClassVar
 from unittest.mock import patch
@@ -42,8 +43,9 @@ from lib.retag_divergence_census_snapshot import (
     write_retag_divergence_census_snapshot,
 )
 from tests.fakes import FakeBeetsDB
-from tests.helpers import make_request_row
+from tests.helpers import make_request_row, make_web_runtime
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
+from web.runtime import install_runtime, runtime
 
 
 class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
@@ -171,8 +173,6 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         ))
 
     def test_pipeline_dashboard_disk_coverage_contract(self):
-        import web.server as srv
-
         self.db.seed_request(make_request_row(
             id=9101, status="imported",
             mb_release_id="00000000-0000-4000-8000-000000009101",
@@ -207,7 +207,7 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         # on-disk so it doesn't pollute the drift assertion below.
         beets.set_album_exists(self.db.request(100)["mb_release_id"], True)
 
-        with patch.object(srv, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, data = self._get("/api/pipeline/dashboard")
 
         self.assertEqual(status, 200)
@@ -234,9 +234,7 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         })
 
     def test_pipeline_dashboard_disk_coverage_null_without_beets(self):
-        from web import server
-
-        with patch.object(server, "_beets_db", return_value=None):
+        with install_runtime(replace(runtime(), shared_beets=None)):
             status, data = self._get("/api/pipeline/dashboard")
 
         self.assertEqual(status, 200)
@@ -434,30 +432,19 @@ DASHBOARD_LIBRARY_COMPLETENESS_FIELDS = DASHBOARD_RETAG_DIVERGENCE_CENSUS_FIELDS
 
 @contextmanager
 def _retag_census_snapshot_path_set(path):
-    """Plain module-global override + manual restore — mirrors the
-    established ``srv.beets_db_path = ...`` convention
-    (`tests/web/test_routes_library.py`) for a plain config string, not
-    `unittest.mock.patch`: the mock-audit's leaf-seam rule targets
-    Mock/MagicMock stand-ins for collaborators, not direct assignment to
-    a module-level data attribute."""
-    import web.server as srv
-    previous = srv.retag_census_snapshot_path
-    srv.retag_census_snapshot_path = path
-    try:
+    """Derive a runtime carrying the overridden snapshot path and install
+    it for the duration of the block — the #1313 runtime-value successor
+    to the old plain-module-global-override convention."""
+    with install_runtime(replace(runtime(), retag_census_snapshot_path=path)):
         yield
-    finally:
-        srv.retag_census_snapshot_path = previous
 
 
 @contextmanager
 def _library_completeness_snapshot_path_set(path):
-    import web.server as srv
-    previous = srv.library_completeness_snapshot_path
-    srv.library_completeness_snapshot_path = path
-    try:
+    with install_runtime(
+        replace(runtime(), library_completeness_snapshot_path=path),
+    ):
         yield
-    finally:
-        srv.library_completeness_snapshot_path = previous
 
 
 def _snapshot(
@@ -503,9 +490,9 @@ class TestPipelineDashboardRetagDivergenceCensusContract(_FakeDbWebServerCase):
         self.db.seed_request(make_request_row(id=100, status="wanted"))
 
     def test_missing_state_when_no_snapshot_path_configured(self) -> None:
-        import web.server as srv
-
-        with patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()):
+        with install_runtime(
+            make_web_runtime(runtime(), beets=_PoisonedBeetsDB()),
+        ):
             status, data = self._get("/api/pipeline/dashboard")
 
         self.assertEqual(status, 200)
@@ -523,13 +510,13 @@ class TestPipelineDashboardRetagDivergenceCensusContract(_FakeDbWebServerCase):
         )
 
     def test_missing_state_when_path_configured_but_file_absent(self) -> None:
-        import web.server as srv
-
         with tempfile.TemporaryDirectory() as tmpdir:
             path = retag_divergence_census_snapshot_path(tmpdir)
             with (
                 _retag_census_snapshot_path_set(path),
-                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+                install_runtime(
+                    make_web_runtime(runtime(), beets=_PoisonedBeetsDB()),
+                ),
             ):
                 status, data = self._get("/api/pipeline/dashboard")
 
@@ -537,15 +524,15 @@ class TestPipelineDashboardRetagDivergenceCensusContract(_FakeDbWebServerCase):
         self.assertEqual(data["retag_divergence_census"]["state"], "missing")
 
     def test_ok_state_reads_a_published_snapshot(self) -> None:
-        import web.server as srv
-
         with tempfile.TemporaryDirectory() as tmpdir:
             path = retag_divergence_census_snapshot_path(tmpdir)
             snapshot = _snapshot("divergence_found")
             write_retag_divergence_census_snapshot(path, snapshot)
             with (
                 _retag_census_snapshot_path_set(path),
-                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+                install_runtime(
+                    make_web_runtime(runtime(), beets=_PoisonedBeetsDB()),
+                ),
             ):
                 status, data = self._get("/api/pipeline/dashboard")
 
@@ -573,7 +560,6 @@ class TestPipelineDashboardRetagDivergenceCensusContract(_FakeDbWebServerCase):
         truncation: albums_shown/albums_listed_total tell the caller
         exactly what happened. The persisted file on disk is untouched
         (this route only reads it)."""
-        import web.server as srv
         from web.routes.pipeline_dashboard import (
             DASHBOARD_RETAG_CENSUS_ALBUM_CAP,
         )
@@ -603,7 +589,9 @@ class TestPipelineDashboardRetagDivergenceCensusContract(_FakeDbWebServerCase):
             write_retag_divergence_census_snapshot(path, snapshot)
             with (
                 _retag_census_snapshot_path_set(path),
-                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+                install_runtime(
+                    make_web_runtime(runtime(), beets=_PoisonedBeetsDB()),
+                ),
             ):
                 status, data = self._get("/api/pipeline/dashboard")
 
@@ -633,15 +621,15 @@ class TestPipelineDashboardRetagDivergenceCensusContract(_FakeDbWebServerCase):
         self.assertEqual(len(read_back.report.albums), total_albums)
 
     def test_unreadable_state_on_malformed_snapshot_file(self) -> None:
-        import web.server as srv
-
         with tempfile.TemporaryDirectory() as tmpdir:
             path = retag_divergence_census_snapshot_path(tmpdir)
             with open(path, "wb") as fh:
                 fh.write(b"not json at all")
             with (
                 _retag_census_snapshot_path_set(path),
-                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+                install_runtime(
+                    make_web_runtime(runtime(), beets=_PoisonedBeetsDB()),
+                ),
                 self.assertLogs(
                     "web.routes.pipeline_dashboard", level="ERROR",
                 ),
@@ -662,7 +650,6 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
         self.db.seed_request(make_request_row(id=100, status="wanted"))
 
     def test_snapshot_is_capped_without_changing_persisted_totals(self) -> None:
-        import web.server as srv
         from web.routes.pipeline_dashboard import (
             DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP,
         )
@@ -679,7 +666,9 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
             write_library_completeness_snapshot(path, snapshot)
             with (
                 _library_completeness_snapshot_path_set(path),
-                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+                install_runtime(
+                    make_web_runtime(runtime(), beets=_PoisonedBeetsDB()),
+                ),
             ):
                 status, data = self._get("/api/pipeline/dashboard")
             persisted = read_library_completeness_snapshot(path)
@@ -697,8 +686,9 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
         self.assertEqual(len(persisted.report.albums), count)
 
     def test_missing_snapshot_never_scans_beets(self) -> None:
-        import web.server as srv
-        with patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()):
+        with install_runtime(
+            make_web_runtime(runtime(), beets=_PoisonedBeetsDB()),
+        ):
             status, data = self._get("/api/pipeline/dashboard")
         self.assertEqual(status, 200)
         self.assertEqual(data["library_completeness"], {
@@ -711,8 +701,6 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
         pipeline ``request_id`` and its ``marked_incomplete`` state so the
         card can offer the mark/clear action inline; a census album with no
         resolvable request carries ``request_id=None``."""
-        import web.server as srv
-
         self.db.seed_request(make_request_row(
             id=310, status="imported", mb_release_id="rel-marked",
         ))
@@ -744,7 +732,9 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
             write_library_completeness_snapshot(path, snapshot)
             with (
                 _library_completeness_snapshot_path_set(path),
-                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+                install_runtime(
+                    make_web_runtime(runtime(), beets=_PoisonedBeetsDB()),
+                ),
             ):
                 status, data = self._get("/api/pipeline/dashboard")
         self.assertEqual(status, 200)
@@ -762,8 +752,6 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
         ``processing`` row missing its owner join (RuntimeError). One such
         row must degrade that one album to actionless — never 500 the
         whole dashboard route."""
-        import web.server as srv
-
         self.db.seed_request(make_request_row(
             id=320, status="imported", mb_release_id="rel-healthy",
         ))
@@ -789,13 +777,13 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = library_completeness_snapshot_path(tmpdir)
             write_library_completeness_snapshot(path, snapshot)
-            # _beets_db → None skips the Disk Coverage card, whose own
-            # unguarded presentation read would otherwise trip over the
-            # broken row first — this test isolates the completeness
-            # enrichment's per-album guard.
+            # An unavailable shared Beets handle skips the Disk Coverage
+            # card, whose own unguarded presentation read would otherwise
+            # trip over the broken row first — this test isolates the
+            # completeness enrichment's per-album guard.
             with (
                 _library_completeness_snapshot_path_set(path),
-                patch.object(srv, "_beets_db", return_value=None),
+                install_runtime(replace(runtime(), shared_beets=None)),
                 self.assertLogs(
                     "web.routes.pipeline_dashboard", level="ERROR"),
             ):
@@ -808,14 +796,15 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
         self.assertFalse(by_release["rel-broken"]["marked_incomplete"])
 
     def test_unreadable_snapshot_is_in_band_error(self) -> None:
-        import web.server as srv
         with tempfile.TemporaryDirectory() as tmpdir:
             path = library_completeness_snapshot_path(tmpdir)
             with open(path, "wb") as fh:
                 fh.write(b"broken")
             with (
                 _library_completeness_snapshot_path_set(path),
-                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+                install_runtime(
+                    make_web_runtime(runtime(), beets=_PoisonedBeetsDB()),
+                ),
                 self.assertLogs("web.routes.pipeline_dashboard", level="ERROR"),
             ):
                 status, data = self._get("/api/pipeline/dashboard")
@@ -827,14 +816,14 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
         permissions, or the path resolving to a directory) must ALSO
         never 500 the whole dashboard, not just a content-decode
         failure."""
-        import web.server as srv
-
         with tempfile.TemporaryDirectory() as tmpdir:
             path = retag_divergence_census_snapshot_path(tmpdir)
             write_retag_divergence_census_snapshot(path, _snapshot("clean"))
             with (
                 _retag_census_snapshot_path_set(path),
-                patch.object(srv, "_beets_db", return_value=_PoisonedBeetsDB()),
+                install_runtime(
+                    make_web_runtime(runtime(), beets=_PoisonedBeetsDB()),
+                ),
                 patch(
                     "lib.retag_divergence_census_snapshot.open",
                     side_effect=PermissionError("denied"),

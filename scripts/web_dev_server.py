@@ -8,8 +8,10 @@ fixtures, the production API, or local route code against a live read-only DB.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import html
 import json
+import logging
 import mimetypes
 import os
 import secrets
@@ -23,7 +25,7 @@ from email.message import Message
 from http.client import HTTPMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import IO
+from typing import IO, TYPE_CHECKING
 from urllib.parse import ParseResult, parse_qs, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -31,11 +33,18 @@ WEB_ROOT = REPO_ROOT / "web"
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "web"
 PROD_BASE_URL = "https://music.ablz.au"
 
+# The web process's logger name, so a dev session's records interleave
+# with the production route code it is driving.
+log = logging.getLogger("cratedigger-web")
+
 sys.path.insert(0, str(REPO_ROOT))
 
 from web.index_document import (
     render_index_document,
 )
+
+if TYPE_CHECKING:
+    from lib.pipeline_db import PipelineDB
 
 FALLBACK_FIXTURES: dict[str, dict[str, object]] = {
     "/api/pipeline/all": {
@@ -456,7 +465,7 @@ class DevHandler(BaseHTTPRequestHandler):
                 self._error(str(exc), 503)
             except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 web_server.log.exception("dev live-db GET %s failed", path)
-                web_server._try_reconnect_db()
+                _drop_live_db_connection()
                 self._error(str(exc), 500)
 
     def _serve_events(self) -> None:
@@ -550,6 +559,63 @@ class DevHandler(BaseHTTPRequestHandler):
 # replace the shared handle while another handler is still using it.
 _LIVE_DB_DISPATCH_LOCK = threading.Lock()
 
+# The installed live-db ``WebRuntime``, held open for the process the way
+# the module globals it replaced were simply left set. ``configure_live_db``
+# closes it first so a second configuration in the same process cannot
+# inherit the previous session or a stale snapshot path.
+_LIVE_DB_RUNTIME = contextlib.ExitStack()
+
+# The exact handle ``configure_live_db`` opened, so ``reset_live_db_runtime``
+# closes that one rather than whatever ``runtime()`` happens to expose (a
+# test may have derived a runtime over it, and a caller that never
+# configured live-db at all must not have its fake closed out from under it).
+_live_db_handle: PipelineDB | None = None
+
+
+def reset_live_db_runtime() -> None:
+    """Uninstall whatever ``configure_live_db`` last installed, and close
+    the read-only connection it opened.
+
+    Closing is the load-bearing half. The module-global predecessor closed
+    the handle it replaced inline; without that, every reconfiguration in
+    a long-lived dev or test process leaks one PostgreSQL backend. Dev
+    sessions run to process exit and never call this; tests configuring a
+    live-db runtime call it in teardown.
+    """
+    global _live_db_handle
+
+    _LIVE_DB_RUNTIME.close()
+    handle, _live_db_handle = _live_db_handle, None
+    if handle is not None:
+        try:
+            handle.conn.close()
+        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
+            pass
+
+
+def _drop_live_db_connection() -> None:
+    """Drop the wedged connection on the shared read-only handle.
+
+    ``_ReadOnlyDevPipelineDB._connect`` re-applies the read-only session
+    default on every connect, ``PipelineDB._ensure_conn``'s self-heal
+    included, so the next request reopens read-only without replacing the
+    handle — pinned directly by ``ConfigureLiveDbReadOnlyTest``
+    ``.test_internal_reconnect_restores_read_only_session_default``.
+    Production's own reconnect (``WebRuntime.drop_thread_db``) is inert
+    here by design: live-db leaves the DSN unset so every request shares
+    this one session rather than opening per-thread ones.
+    """
+    from web.runtime import runtime
+
+    handle = runtime().shared_db
+    if handle is None:
+        return
+    try:
+        handle.conn.close()
+    except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
+        pass
+    log.info("Dropped wedged dev live-db connection; next request reconnects")
+
 
 def _api_fixture_slug(path: str) -> str:
     return path.strip("/").replace("/", "__")
@@ -578,9 +644,9 @@ def configure_live_db(
     if not config.dsn:
         raise SystemExit("--dsn or PIPELINE_DB_DSN is required for --data live-db")
 
-    import web.server as web_server
     from lib.pipeline_db import PipelineDB
-    from web import discogs, mb
+    from web import cache, discogs, mb
+    from web.runtime import WebRuntime, install_runtime
 
     class _ReadOnlyDevPipelineDB(PipelineDB):
         """PipelineDB whose initial and self-healed sessions are read-only."""
@@ -605,62 +671,58 @@ def configure_live_db(
         mirror_request_counts.record_discogs if config.measure_mirror_requests else None
     )
 
-    def connect_readonly() -> None:
-        replacement = _ReadOnlyDevPipelineDB(config.dsn)
-        previous = web_server.db
-        if previous is not None:
-            try:
-                previous.conn.close()
-            except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
-                pass
-        web_server.db = replacement
-        web_server.log.info("Connected dev live-db session in read-only mode")
-
-    # Deliberately do NOT set web_server._db_dsn: with a DSN present,
-    # `_db()` opens fresh per-thread connections (#427) that would skip
-    # the read-only session flag below. Leaving the DSN unset routes
-    # every request through this single injected read-only handle.
-    connect_readonly()
-    web_server._try_reconnect_db = connect_readonly
-
-    # Only set the path — never inject a shared BeetsDB handle. sqlite3
-    # connections are bound to their opening thread, and the dev server
-    # is the same ThreadingHTTPServer as production, so a shared handle
-    # 500s on the second worker thread ("SQLite objects created in a
-    # thread can only be used in that same thread"). With `_beets` left
-    # None and the path set, `_beets_db()` opens per-thread read-only
-    # handles exactly like production.
-    web_server.beets_db_path = config.beets_db
-    if config.beets_db is not None:
-        assert config.beets_directory is not None
-        web_server.beets_library_root = config.beets_directory
-    web_server._beets = None
-
-    # ``configure_live_db`` is reusable in test/dev processes; a later
-    # configuration without a snapshot directory must not inherit one.
-    web_server.retag_census_snapshot_path = None
-    web_server.library_completeness_snapshot_path = None
+    retag_census_snapshot_path: str | None = None
     if config.retag_census_runtime_dir is not None:
         from lib.retag_divergence_census_snapshot import (
             retag_divergence_census_snapshot_path,
         )
-        web_server.retag_census_snapshot_path = (
-            retag_divergence_census_snapshot_path(
-                config.retag_census_runtime_dir,
-            )
+        retag_census_snapshot_path = retag_divergence_census_snapshot_path(
+            config.retag_census_runtime_dir,
         )
+    completeness_snapshot_path: str | None = None
     if config.library_completeness_runtime_dir is not None:
         from lib.library_completeness_snapshot import (
             library_completeness_snapshot_path,
         )
-        web_server.library_completeness_snapshot_path = (
-            library_completeness_snapshot_path(
-                config.library_completeness_runtime_dir,
-            )
+        completeness_snapshot_path = library_completeness_snapshot_path(
+            config.library_completeness_runtime_dir,
         )
+    if config.beets_db is not None:
+        assert config.beets_directory is not None
+
+    # `shared_db` and no `db_dsn`: with a DSN present, `WebRuntime.db`
+    # opens fresh per-thread connections (#427) that would skip the
+    # read-only session flag. Leaving the DSN unset routes every request
+    # through this single injected read-only handle.
+    #
+    # `beets_db_path` and no `shared_beets`, for the opposite reason:
+    # sqlite3 connections are bound to their opening thread, and the dev
+    # server is the same ThreadingHTTPServer as production, so a shared
+    # handle 500s on the second worker thread ("SQLite objects created in
+    # a thread can only be used in that same thread"). With the pair set
+    # and no injected handle, `WebRuntime.beets_db` opens per-thread
+    # read-only handles exactly like production.
+    #
+    # Every field is stated here rather than derived from the previous
+    # configuration: `configure_live_db` is reusable in test/dev
+    # processes, and a later configuration without a snapshot directory
+    # must not inherit one. `reset_live_db_runtime` drops the previous
+    # install before this one lands.
+    global _live_db_handle
+
+    reset_live_db_runtime()
+    _live_db_handle = _ReadOnlyDevPipelineDB(config.dsn)
+    _LIVE_DB_RUNTIME.enter_context(install_runtime(WebRuntime(
+        shared_db=_live_db_handle,
+        beets_db_path=config.beets_db,
+        beets_library_root=config.beets_directory or "",
+        retag_census_snapshot_path=retag_census_snapshot_path,
+        library_completeness_snapshot_path=completeness_snapshot_path,
+    )))
+    log.info("Connected dev live-db session in read-only mode")
 
     if config.redis_host:
-        web_server.cache.init(config.redis_host, config.redis_port)
+        cache.init(config.redis_host, config.redis_port)
 
 
 def build_config(args: argparse.Namespace) -> DevConfig:

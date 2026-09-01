@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import unittest
+from dataclasses import replace
 
 import msgspec
 from hypothesis import example, given
@@ -32,6 +33,7 @@ from web.library_album_row import (
     LibraryAlbumRow,
 )
 from web.library_artist_service import build_library_artist_rows
+from web.runtime import install_runtime, runtime
 
 MB_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 DISCOGS_ID = "12856590"
@@ -290,8 +292,6 @@ class TestCurrentLibraryFailureRouteGenerated(_FakeDbWebServerCase):
         self,
         failure_kind: str,
     ) -> None:
-        import web.server as srv
-
         if failure_kind == "oserror":
             exc: Exception = OSError("generated authority read failure")
             expected_status = 503
@@ -313,14 +313,11 @@ class TestCurrentLibraryFailureRouteGenerated(_FakeDbWebServerCase):
             status="imported",
             mb_release_id=MB_ID,
         ))
-        prior_beets = srv._beets
         failing_beets = _GeneratedFailingResolver(exc)
-        srv._beets = failing_beets
-        try:
-            with self.assertLogs(level="ERROR"):
-                status, payload = self._get("/api/pipeline/90")
-        finally:
-            srv._beets = prior_beets
+        with install_runtime(replace(
+            runtime(), shared_beets=failing_beets,
+        )), self.assertLogs(level="ERROR"):
+            status, payload = self._get("/api/pipeline/90")
 
         assert_failed_beets_read_has_no_display(
             status,

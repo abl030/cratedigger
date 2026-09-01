@@ -69,7 +69,7 @@ from lib.triage_service import (
 )
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route, route
-from web.routes._server_access import _server
+from web.runtime import runtime
 
 
 def get_triage_quarantine(
@@ -91,7 +91,7 @@ def get_triage_quarantine(
     )
 
     try:
-        db = _server()._db()
+        db = runtime().db()
     except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         h._json(
             {"error": "Could not open pipeline database for quarantine scan"},
@@ -130,7 +130,7 @@ def get_triage_for_request(
     from lib.triage_service import compose_triage_for_request
 
     request_id = int(req_id_str)
-    db = _server()._db()
+    db = runtime().db()
     result = compose_triage_for_request(request_id, db)
     if result is None:
         h._json(
@@ -210,7 +210,7 @@ def get_triage_list(
             )
             return
 
-    db = _server()._db()
+    db = runtime().db()
     try:
         results = list_triage(
             filter_spec, db, page_size=limit, after_request_id=after,
@@ -273,7 +273,7 @@ def post_stop_converged_search(
     payload = parse_body(h, body, StopConvergedSearchRequest)
     if payload is None:
         return
-    result = ConvergenceStopService(_server()._db()).stop(
+    result = ConvergenceStopService(runtime().db()).stop(
         int(req_id_str),
         signal_token=payload.signal_token,
     )

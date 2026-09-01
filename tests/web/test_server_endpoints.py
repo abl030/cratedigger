@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
+from dataclasses import replace
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
@@ -32,6 +33,7 @@ from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from tests.web._harness import _FakeDbWebServerCase
 from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
+from web.runtime import WebRuntime, install_runtime, runtime
 
 CANONICAL_ORIGIN = "https://music.ablz.au"
 INSECURE_AUTH_WARNING_COPY = (
@@ -324,14 +326,8 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             return body
 
     def _index_bytes(self, *, insecure: bool) -> bytes:
-        from web import server as web_server
-
-        previous_mode = web_server.insecure_mode
-        try:
-            web_server.configure_insecure_mode(insecure)
+        with install_runtime(replace(runtime(), insecure_mode=insecure)):
             return self._current_index_bytes()
-        finally:
-            web_server.configure_insecure_mode(previous_mode)
 
     def test_secure_index_omits_insecure_footer_byte_for_byte(self) -> None:
         secure = self._index_bytes(insecure=False)
@@ -379,16 +375,12 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         """
         from web import server as web_server
 
-        previous_insecure = web_server.insecure_mode
-        try:
-            web_server.configure_insecure_mode(False)
+        with install_runtime(replace(runtime(), insecure_mode=False)):
             with self.assertLogs("cratedigger-web", level="INFO") as captured:
-                web_server.configure_external_auth_mode(True)
+                web_server.announce_external_auth_mode(True)
             body = self._current_index_bytes()
-        finally:
-            web_server.configure_insecure_mode(previous_insecure)
 
-        self.assertFalse(web_server.insecure_mode)
+        self.assertFalse(runtime().insecure_mode)
         self.assertNotIn(INSECURE_AUTH_WARNING_COPY, body)
         self.assertNotIn(b'<footer class="insecure-auth-footer"', body)
         self.assertEqual(len(captured.records), 1)
@@ -402,7 +394,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         from web import server as web_server
 
         with self.assertNoLogs("cratedigger-web", level="INFO"):
-            web_server.configure_external_auth_mode(False)
+            web_server.announce_external_auth_mode(False)
 
     def test_index_renderer_rejects_duplicate_footer_marker(self) -> None:
         from web.index_document import render_index_document
@@ -503,13 +495,10 @@ class TestServerEndpoints(_FakeDbWebServerCase):
     def test_insecure_startup_emits_one_critical_warning(self) -> None:
         from web import server as web_server
 
-        with (
-            patch.object(web_server, "insecure_mode", False),
-            self.assertLogs(
-                "cratedigger-web", level="CRITICAL",
-            ) as captured,
-        ):
-            web_server.configure_insecure_mode(True)
+        with self.assertLogs(
+            "cratedigger-web", level="CRITICAL",
+        ) as captured:
+            web_server.announce_insecure_mode(True)
 
         self.assertEqual(len(captured.records), 1)
         self.assertEqual(captured.records[0].levelno, logging.CRITICAL)
@@ -521,24 +510,16 @@ class TestServerEndpoints(_FakeDbWebServerCase):
     def test_secure_startup_emits_no_insecure_warning(self) -> None:
         from web import server as web_server
 
-        with (
-            patch.object(web_server, "insecure_mode", True),
-            self.assertNoLogs("cratedigger-web", level="CRITICAL"),
-        ):
-            web_server.configure_insecure_mode(False)
+        with self.assertNoLogs("cratedigger-web", level="CRITICAL"):
+            web_server.announce_insecure_mode(False)
 
     def test_insecure_configuration_composes_with_http_rendering(self) -> None:
         from web import server as web_server
 
-        previous_mode = web_server.insecure_mode
-        self.addCleanup(
-            setattr, web_server, "insecure_mode", previous_mode,
-        )
-
-        with self.assertLogs(
-            "cratedigger-web", level="CRITICAL",
-        ) as captured:
-            web_server.configure_insecure_mode(True)
+        with install_runtime(
+            replace(runtime(), insecure_mode=True),
+        ), self.assertLogs("cratedigger-web", level="CRITICAL") as captured:
+            web_server.announce_insecure_mode(True)
             insecure = self._current_index_bytes()
 
         self.assertEqual(len(captured.records), 1)
@@ -549,8 +530,10 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         )
         assert_insecure_footer_contract(insecure)
 
-        with self.assertNoLogs("cratedigger-web", level="CRITICAL"):
-            web_server.configure_insecure_mode(False)
+        with install_runtime(
+            replace(runtime(), insecure_mode=False),
+        ), self.assertNoLogs("cratedigger-web", level="CRITICAL"):
+            web_server.announce_insecure_mode(False)
             secure = self._current_index_bytes()
 
         self.assertNotIn(INSECURE_AUTH_WARNING_COPY, secure)
@@ -1104,7 +1087,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
                 }],
             },
         ]
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.get_artist_releases_with_recordings.return_value = fake_releases
             mock_mb.get_artist_name.return_value = "Test Artist"
             status, data = self._get("/api/artist/664c3e0e-42d8-48c1-b209-1efca19c0325/disambiguate")
@@ -1165,7 +1148,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
                                        "recording": {"id": "rec-2", "title": "Song Live"}}]}],
             },
         ]
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.get_artist_releases_with_recordings.return_value = fake_releases
             mock_mb.get_artist_name.return_value = "Test Artist"
             status, data = self._get("/api/artist/664c3e0e-42d8-48c1-b209-1efca19c0325/disambiguate")
@@ -1176,7 +1159,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
 
 
 class TestFuzzyShimRemoved(unittest.TestCase):
-    """Issue #123: ``web.server.check_beets_by_artist_album`` deleted.
+    """Issue #123: ``check_beets_by_artist_album`` deleted from the web layer.
 
     Guard against accidental reintroduction — the shim was the only
     path from the web layer into the fuzzy fallback, so deleting it
@@ -1306,7 +1289,7 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
             f"{[r.getMessage() for r in errors_with_exc]}",
         )
 
-    @patch("web.server._try_reconnect_db")
+    @patch.object(WebRuntime, "drop_thread_db")
     def test_brokenpipe_during_post_does_not_trigger_reconnect(self, mock_reconnect):
         """Wedge regression: BrokenPipeError reaches the typed except
         clause first, never the catch-all that reconnects."""
@@ -1316,7 +1299,7 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
                        {"id": 100, "intent": "default"})
         self._assert_no_reconnect_no_traceback(mock_reconnect, cm.records, "BrokenPipeError")
 
-    @patch("web.server._try_reconnect_db")
+    @patch.object(WebRuntime, "drop_thread_db")
     def test_connection_reset_during_post_does_not_trigger_reconnect(self, mock_reconnect):
         """Sibling disconnect class — same handling expected."""
         self.raising_db.update_error = ConnectionResetError(104, "Connection reset by peer")
@@ -1325,7 +1308,7 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
                        {"id": 100, "intent": "default"})
         self._assert_no_reconnect_no_traceback(mock_reconnect, cm.records, "ConnectionResetError")
 
-    @patch("web.server._try_reconnect_db")
+    @patch.object(WebRuntime, "drop_thread_db")
     def test_connection_aborted_during_post_does_not_trigger_reconnect(self, mock_reconnect):
         """Sibling disconnect class — same handling expected."""
         self.raising_db.update_error = ConnectionAbortedError(103, "Software caused connection abort")
@@ -1334,7 +1317,7 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
                        {"id": 100, "intent": "default"})
         self._assert_no_reconnect_no_traceback(mock_reconnect, cm.records, "ConnectionAbortedError")
 
-    @patch("web.server._try_reconnect_db")
+    @patch.object(WebRuntime, "drop_thread_db")
     def test_real_db_error_still_triggers_reconnect(self, mock_reconnect):
         """R3 regression guard: psycopg2.OperationalError must still hit
         the catch-all and trigger _try_reconnect_db. The narrowing must
@@ -1361,7 +1344,7 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
         # Server returns 500.
         self.assertEqual(status, 500)
 
-    @patch("web.server._try_reconnect_db")
+    @patch.object(WebRuntime, "drop_thread_db")
     def test_other_exception_in_handler_still_triggers_reconnect(self, mock_reconnect):
         """Unchanged-behaviour regression guard: a real handler bug
         (e.g. ValueError) still hits the catch-all. Narrowing this
@@ -1413,7 +1396,7 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
             )
         assert_clean_generic_failure(status, data, detail, cm.records)
 
-    @patch("web.server._try_reconnect_db")
+    @patch.object(WebRuntime, "drop_thread_db")
     def test_normal_post_no_reconnect_no_warning(self, mock_reconnect):
         """Happy path regression guard: a successful POST does not
         trigger any reconnect or disconnect-warning side effects."""

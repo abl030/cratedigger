@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import ClassVar
 from unittest.mock import patch
@@ -18,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.helpers import make_request_row
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
+from web.runtime import install_runtime, runtime
 
 
 class TestTriageRouteContracts(_FakeDbWebServerCase):
@@ -151,11 +153,9 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
         self.assertIn("error", data)
 
     def test_quarantine_db_acquisition_failure_returns_stable_503(self):
-        import web.server as srv
-
         # Exercise the real route + Handler harness with no injected DB. This
-        # makes web.server._db() fail at acquisition before the service runs.
-        with patch.object(srv, "db", None):
+        # makes WebRuntime.db() fail at acquisition before the service runs.
+        with install_runtime(replace(runtime(), shared_db=None)):
             status, data = self._get("/api/triage/quarantine")
 
         self.assertEqual(status, 503)

@@ -6,6 +6,7 @@ tests/web/_harness.py.
 import os
 import sys
 import unittest
+from dataclasses import replace
 from typing import ClassVar
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -13,7 +14,9 @@ from urllib.error import HTTPError
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.fakes import FakeBeetsDB
+from tests.helpers import make_web_runtime
 from tests.web._harness import _assert_required_fields, _WebServerCase
+from web.runtime import WebRuntime, install_runtime, runtime
 
 
 class TestLabelRouteContracts(_WebServerCase):
@@ -111,9 +114,9 @@ class TestLabelRouteContracts(_WebServerCase):
 
     def test_label_detail_contract(self):
         with patch("web.routes.labels.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={}), \
-                patch("web.server._beets_db", return_value=None):
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}), \
+                install_runtime(replace(runtime(), shared_beets=None)):
             mock_dg.get_label.return_value = self._make_label_entity()
             mock_dg.get_label_releases.return_value = {
                 "results": [self._make_release_row()],
@@ -136,9 +139,9 @@ class TestLabelRouteContracts(_WebServerCase):
 
     def test_label_detail_forwards_sub_labels(self):
         with patch("web.routes.labels.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={}), \
-                patch("web.server._beets_db", return_value=None):
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}), \
+                install_runtime(replace(runtime(), shared_beets=None)):
             mock_dg.get_label.return_value = self._make_label_entity(
                 sub_labels=[
                     {"id": 25693, "name": "Hymen Substream", "release_count": 7},
@@ -169,13 +172,10 @@ class TestLabelRouteContracts(_WebServerCase):
             held_id, {"beets_format": "FLAC", "beets_bitrate": 900,
                       "beets_avg_bitrate": 1100})
 
-        def _compute_rank(fmt, br):
-            return "lossless" if fmt == "FLAC" else "transparent"
-
         with patch("web.routes.labels.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library",
+                patch.object(WebRuntime, "check_beets_library",
                       return_value={held_id}), \
-                patch("web.server.check_pipeline",
+                patch.object(WebRuntime, "check_pipeline",
                       return_value={in_pipeline_id: {
                           "id": 99,
                           "status": "wanted",
@@ -183,9 +183,7 @@ class TestLabelRouteContracts(_WebServerCase):
                           "verified_lossless": False,
                           "provisional_lossless": False,
                       }}), \
-                patch("web.server._beets_db", return_value=beets_db), \
-                patch("web.server.compute_library_rank",
-                      side_effect=_compute_rank):
+                install_runtime(make_web_runtime(runtime(), beets=beets_db)):
             mock_dg.get_label.return_value = self._make_label_entity()
             mock_dg.get_label_releases.return_value = {
                 "results": [
@@ -240,9 +238,9 @@ class TestLabelRouteContracts(_WebServerCase):
     def test_label_detail_include_sublabels_param_forwarded(self):
         """`?include_sublabels=false` flows through to the adapter call."""
         with patch("web.routes.labels.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={}), \
-                patch("web.server._beets_db", return_value=None):
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}), \
+                install_runtime(replace(runtime(), shared_beets=None)):
             mock_dg.get_label.return_value = self._make_label_entity()
             mock_dg.get_label_releases.return_value = {
                 "results": [],
@@ -262,9 +260,9 @@ class TestLabelRouteContracts(_WebServerCase):
         big_entity = self._make_label_entity(
             id="1", name="Universal Music Group", release_count=5000)
         with patch("web.routes.labels.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={}), \
-                patch("web.server._beets_db", return_value=None):
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}), \
+                install_runtime(replace(runtime(), shared_beets=None)):
             mock_dg.get_label.return_value = big_entity
             mock_dg.get_label_releases.return_value = {
                 "results": [],
@@ -284,9 +282,9 @@ class TestLabelRouteContracts(_WebServerCase):
         big_entity = self._make_label_entity(
             id="1", name="Universal Music Group", release_count=5000)
         with patch("web.routes.labels.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={}), \
-                patch("web.server._beets_db", return_value=None):
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}), \
+                install_runtime(replace(runtime(), shared_beets=None)):
             mock_dg.get_label.return_value = big_entity
             mock_dg.get_label_releases.return_value = {
                 "results": [],
@@ -305,9 +303,9 @@ class TestLabelRouteContracts(_WebServerCase):
         small_entity = self._make_label_entity(
             id="757", name="Hymen Records", release_count=42)
         with patch("web.routes.labels.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={}), \
-                patch("web.server._beets_db", return_value=None):
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}), \
+                install_runtime(replace(runtime(), shared_beets=None)):
             mock_dg.get_label.return_value = small_entity
             mock_dg.get_label_releases.return_value = {
                 "results": [],
@@ -336,9 +334,9 @@ class TestLabelRouteContracts(_WebServerCase):
     def test_label_detail_accepts_truthy_synonyms(self):
         """`include_sublabels=1` and `=0` are valid spellings."""
         with patch("web.routes.labels.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={}), \
-                patch("web.server._beets_db", return_value=None):
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}), \
+                install_runtime(replace(runtime(), shared_beets=None)):
             mock_dg.get_label.return_value = self._make_label_entity()
             mock_dg.get_label_releases.return_value = {
                 "results": [],
@@ -374,9 +372,9 @@ class TestLabelRouteContracts(_WebServerCase):
     def test_label_detail_forwards_pagination_params(self):
         """`?page=2&per_page=50` flows through to the adapter — Plan 003 U1."""
         with patch("web.routes.labels.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={}), \
-                patch("web.server._beets_db", return_value=None):
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}), \
+                install_runtime(replace(runtime(), shared_beets=None)):
             mock_dg.get_label.return_value = self._make_label_entity()
             mock_dg.get_label_releases.return_value = {
                 "results": [],
@@ -395,9 +393,9 @@ class TestLabelRouteContracts(_WebServerCase):
     def test_label_detail_clamps_per_page(self):
         """`?per_page=500` clamps to the mirror's 100-row label-release max."""
         with patch("web.routes.labels.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={}), \
-                patch("web.server._beets_db", return_value=None):
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}), \
+                install_runtime(replace(runtime(), shared_beets=None)):
             mock_dg.get_label.return_value = self._make_label_entity()
             mock_dg.get_label_releases.return_value = {
                 "results": [],
@@ -461,9 +459,9 @@ class TestLabelRouteContracts(_WebServerCase):
         """Plan 002 U3: when the adapter signals a 503 fallback, the route
         forwards `sub_labels_dropped=True` so the UI can surface a banner."""
         with patch("web.routes.labels.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={}), \
-                patch("web.server._beets_db", return_value=None):
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}), \
+                install_runtime(replace(runtime(), shared_beets=None)):
             mock_dg.get_label.return_value = self._make_label_entity()
             mock_dg.get_label_releases.return_value = {
                 "results": [],
@@ -480,9 +478,9 @@ class TestLabelRouteContracts(_WebServerCase):
         """Plan 002 U3: every label-detail response carries the field with
         default False so the contract is stable."""
         with patch("web.routes.labels.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={}), \
-                patch("web.server._beets_db", return_value=None):
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}), \
+                install_runtime(replace(runtime(), shared_beets=None)):
             mock_dg.get_label.return_value = self._make_label_entity()
             mock_dg.get_label_releases.return_value = {
                 "results": [],

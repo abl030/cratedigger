@@ -18,8 +18,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakeBeetsDB
-from tests.helpers import make_request_row
+from tests.helpers import make_request_row, make_web_runtime
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
+from web.runtime import WebRuntime, install_runtime, runtime
 
 
 class TestReplacedFilterContract(_FakeDbWebServerCase):
@@ -877,10 +878,10 @@ class TestPipelineMergeRekeyContract(_FakeDbWebServerCase):
     def test_merge_rekey_beets_open_failure_returns_503_not_500(self):
         """#1089 MAJOR-1 (review round 2): the classified boundary must
         cover OPENING the database, not just reads through an already-open
-        handle. ``s._beets_db()`` itself raises here — before
+        handle. ``rt.beets_db()`` itself raises here — before
         ``MergeRekeyService`` is even constructed, so
         ``_patch_service`` (which patches ``rekey_request``) cannot model
-        this; the real seam is ``web.server._beets_db``, a real
+        this; the real seam is ``WebRuntime.beets_db`` (#1313), a real
         ``sqlite3.OperationalError`` shaped exactly like
         ``beets_authority_availability_category`` classifies (test-fidelity
         Rule B). Before the fix this reached no classified branch at all
@@ -888,11 +889,9 @@ class TestPipelineMergeRekeyContract(_FakeDbWebServerCase):
         """
         import sqlite3
 
-        import web.server as srv
-
         locked = sqlite3.OperationalError("unable to open database file")
         locked.sqlite_errorcode = sqlite3.SQLITE_CANTOPEN
-        with patch.object(srv, "_beets_db", side_effect=locked):
+        with patch.object(WebRuntime, "beets_db", side_effect=locked):
             status, data = self._post("/api/pipeline/42/merge-rekey", {})
         self.assertEqual(status, 503)
         self.assertIn("error", data)
@@ -980,8 +979,6 @@ class TestPipelineMergeRekeyContract(_FakeDbWebServerCase):
             artist_name="Rebecca Black", album_title="Sing It",
         ))
 
-        import web.server as srv
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             real_path = os.path.join(tmp_dir, "01 Track.flac")
             with open(real_path, "wb") as handle:
@@ -1017,7 +1014,7 @@ class TestPipelineMergeRekeyContract(_FakeDbWebServerCase):
             self.addCleanup(configure_canonical_base, previous_base)
             configure_canonical_base("http://fake-mirror/ws/2")
             with (
-                patch.object(srv, "_beets_db", return_value=beets),
+                install_runtime(make_web_runtime(runtime(), beets=beets)),
                 # The TRUE external edge (#1089 NOTE-2, review round 2) —
                 # canonical_release_status is ~50 lines of real decision logic,
                 # not a thin forwarder, so it is not allowlisted; this patches

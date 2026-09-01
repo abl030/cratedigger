@@ -38,8 +38,9 @@ from lib.import_queue import ImportJob
 if TYPE_CHECKING:
     from lib.pipeline_db import LatestDownloadSummary
 
+from web.overlay import serialize_row
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route, route
-from web.routes._server_access import _server
+from web.runtime import runtime
 
 logger = logging.getLogger(__name__)
 
@@ -93,16 +94,16 @@ def get_pipeline_log(h: RouteHandler, params: dict[str, list[str]]) -> None:
     outcome_filter = params.get("outcome", [None])[0]
     if outcome_filter not in (None, "imported", "rejected"):
         outcome_filter = None
-    entries = _server()._db().get_log(
+    entries = runtime().db().get_log(
         limit=_pipeline_log_limit(params),
         outcome_filter=outcome_filter,
     )
     mbids = list({
         str(e["mb_release_id"]) for e in entries if e.get("mb_release_id")
     })
-    beets_info = _server().check_beets_library_detail(mbids) if mbids else {}
+    beets_info = runtime().check_beets_library_detail(mbids) if mbids else {}
     source_ids = [entry["id"] for entry in entries]
-    linked_rows = _server()._db().get_linked_import_logs(source_ids)
+    linked_rows = runtime().db().get_linked_import_logs(source_ids)
     result = build_recents_download_log_rows(
         entries,
         linked_successor_rows=linked_rows,
@@ -114,7 +115,7 @@ def get_pipeline_log(h: RouteHandler, params: dict[str, list[str]]) -> None:
         if isinstance(request_id, int) and request_id not in seen_request_ids:
             request_ids.append(request_id)
             seen_request_ids.add(request_id)
-    signals = _server()._db().get_convergence_signals(request_ids)
+    signals = runtime().db().get_convergence_signals(request_ids)
     _attach_convergence_prompts(result, signals)
     for item in result:
         mbid = item.get("mb_release_id")
@@ -125,7 +126,7 @@ def get_pipeline_log(h: RouteHandler, params: dict[str, list[str]]) -> None:
             item["beets_bitrate"] = bi.get("beets_bitrate")
             item["beets_avg_bitrate"] = bi.get("beets_avg_bitrate")
     # Count recents filters plus found-search enqueue rates (single query).
-    counts = _server()._db().get_download_log_counts()
+    counts = runtime().db().get_download_log_counts()
     h._json({
         "log": result,
         "counts": {
@@ -141,8 +142,8 @@ def get_pipeline_log(h: RouteHandler, params: dict[str, list[str]]) -> None:
 
 
 def get_pipeline_status(h: RouteHandler, params: dict[str, list[str]]) -> None:
-    counts = _server()._db().count_by_status()
-    wanted = _server()._db().get_wanted(limit=50)
+    counts = runtime().db().count_by_status()
+    wanted = runtime().db().get_wanted(limit=50)
     h._json({
         "counts": counts,
         "wanted": [
@@ -187,8 +188,8 @@ IMPORTED_RECENT_LIMIT = 100
 
 
 def get_pipeline_all(h: RouteHandler, params: dict[str, list[str]]) -> None:
-    s = _server()
-    counts = s._db().count_by_status()
+    rt = runtime()
+    counts = rt.db().count_by_status()
     all_data: dict[str, object] = {"counts": counts}
     status_items: dict[str, list[dict[str, object]]] = {}
     all_ids: list[int] = []
@@ -204,14 +205,14 @@ def get_pipeline_all(h: RouteHandler, params: dict[str, list[str]]) -> None:
         statuses = statuses + ("replaced",)
     for status in statuses:
         if status == "imported":
-            db_rows = s._db().get_by_status(
+            db_rows = rt.db().get_by_status(
                 "imported", limit=IMPORTED_RECENT_LIMIT, newest_first=True)
         else:
-            db_rows = s._db().get_by_status(status)
-        rows = [s._serialize_row(r) for r in db_rows]
+            db_rows = rt.db().get_by_status(status)
+        rows = [serialize_row(r) for r in db_rows]
         status_items[status] = rows
         all_ids.extend([int(str(r["id"])) for r in rows])
-    summaries = s._db().get_latest_download_summaries(all_ids)
+    summaries = rt.db().get_latest_download_summaries(all_ids)
     for status in statuses:
         all_data[status] = _attach_latest_download_summaries(
             status_items[status],
@@ -226,11 +227,11 @@ def get_pipeline_all(h: RouteHandler, params: dict[str, list[str]]) -> None:
 
 def get_pipeline_search(h: RouteHandler, params: dict[str, list[str]]) -> None:
     """Operator search over artist/album across every status (#426)."""
-    s = _server()
+    rt = runtime()
     query = params.get("q", [""])[0]
-    rows = [s._serialize_row(r) for r in s._db().search_requests(query)]
+    rows = [serialize_row(r) for r in rt.db().search_requests(query)]
     ids = [int(str(r["id"])) for r in rows]
-    summaries = s._db().get_latest_download_summaries(ids)
+    summaries = rt.db().get_latest_download_summaries(ids)
     h._json({
         "query": query,
         "items": _attach_latest_download_summaries(rows, summaries),
@@ -239,11 +240,11 @@ def get_pipeline_search(h: RouteHandler, params: dict[str, list[str]]) -> None:
 
 
 def get_pipeline_downloading(h: RouteHandler, params: dict[str, list[str]]) -> None:
-    s = _server()
-    counts = s._db().count_by_status()
-    rows = [s._serialize_row(r) for r in s._db().get_by_status("downloading")]
+    rt = runtime()
+    counts = rt.db().count_by_status()
+    rows = [serialize_row(r) for r in rt.db().get_by_status("downloading")]
     ids = [int(str(r["id"])) for r in rows]
-    summaries = s._db().get_latest_download_summaries(ids)
+    summaries = rt.db().get_latest_download_summaries(ids)
     h._json({
         "counts": counts,
         "downloading": _attach_latest_download_summaries(rows, summaries),
@@ -256,21 +257,21 @@ def get_pipeline_acquisition(
 ) -> None:
     """Return active downloader/processor requests plus YouTube ingest."""
     del params
-    s = _server()
-    payload = s._db().get_acquisition(youtube_limit=50)
+    rt = runtime()
+    payload = rt.db().get_acquisition(youtube_limit=50)
     acquisition = [
-        s._serialize_row(row)
+        serialize_row(row)
         for row in payload["acquisition"]
     ]
     ids = [int(str(row["id"])) for row in acquisition]
-    summaries = s._db().get_latest_download_summaries(ids)
+    summaries = rt.db().get_latest_download_summaries(ids)
     h._json({
         "acquisition": _attach_latest_download_summaries(
             acquisition,
             summaries,
         ),
         "youtube_ingest": [
-            s._serialize_row(row)
+            serialize_row(row)
             for row in payload["youtube_ingest"]
         ],
     })
@@ -327,25 +328,25 @@ def _build_last_search_payload(
 
 
 def get_pipeline_detail(h: RouteHandler, params: dict[str, list[str]], req_id_str: str) -> None:
-    s = _server()
+    rt = runtime()
     req_id = int(req_id_str)
-    req = s._db().get_request(req_id)
+    req = rt.db().get_request(req_id)
     if not req:
         h._error("Not found", 404)
         return
-    tracks = s._db().get_tracks(req_id)
-    history = s._db().get_download_history(req_id)
+    tracks = rt.db().get_tracks(req_id)
+    history = rt.db().get_download_history(req_id)
     history_items = [item.to_dict() for item in build_download_history_rows(history)]
-    search_history = s._db().get_search_history(req_id)
+    search_history = rt.db().get_search_history(req_id)
     last_search = _build_last_search_payload(search_history)
-    request_payload = s._serialize_row(req)
+    request_payload = serialize_row(req)
     # The detail header's Quality row picks its grade from a fallback
     # chain over BOTH the installed copy and the last download, so it
     # needs both audit-only pairs and applies whichever matches the grade
     # it selected (issue #829 Phase 5 PR4). Each pair is derived by the
     # one shared rule from the measurement that produced ITS grade; an
     # absent pair keeps the historical accusing render.
-    current_evidence = s._db().load_album_quality_evidence_by_id(
+    current_evidence = rt.db().load_album_quality_evidence_by_id(
         req["current_evidence_id"]
     )
     if (
@@ -374,7 +375,7 @@ def get_pipeline_detail(h: RouteHandler, params: dict[str, list[str]], req_id_st
     request_payload["last_download_spectral_accusation_withheld"] = (
         candidate_flags.withheld)
     try:
-        b = s._beets_db()
+        b = rt.beets_db()
         current = resolve_request_current_library(req, b)
     except Exception as exc:
         category = beets_authority_availability_category(exc)
@@ -433,7 +434,7 @@ def get_pipeline_requests_by_rg(h: RouteHandler, params: dict[str, list[str]], r
     inverted-click picker (R7) to ask the operator which existing
     request should be replaced.
     """
-    db = _server()._db()
+    db = runtime().db()
     rows = db.list_requests_in_release_group(rg_id, exclude_replaced=True)
     requests = [
         {
@@ -443,9 +444,7 @@ def get_pipeline_requests_by_rg(h: RouteHandler, params: dict[str, list[str]], r
             "status": r.get("status"),
             "artist_name": r.get("artist_name"),
             "album_title": r.get("album_title"),
-            "processing_owner": _server()._serialize_row(r).get(
-                "processing_owner"
-            ),
+            "processing_owner": serialize_row(r).get("processing_owner"),
         }
         for r in rows
     ]
@@ -460,7 +459,7 @@ def get_pipeline_active_rgs(h: RouteHandler, params: dict[str, list[str]]) -> No
     from this list and uses ``set.has(row.release_group_id)`` per
     Browse-search row to compute the Replace button enable state.
     """
-    db = _server()._db()
+    db = runtime().db()
     ids = sorted(db.list_active_release_group_ids())
     h._json({"release_group_ids": ids})
 
@@ -489,19 +488,19 @@ def get_import_jobs(h: RouteHandler, params: dict[str, list[str]]) -> None:
     except ValueError:
         h._error("Invalid request_id")
         return
-    jobs = _server()._db().list_import_jobs(
+    jobs = runtime().db().list_import_jobs(
         status=status,
         request_id=request_id,
         limit=50,
     )
     h._json({
         "jobs": [_serialize_import_job(job) for job in jobs],
-        "counts": _server()._db().count_import_jobs_by_status(),
+        "counts": runtime().db().count_import_jobs_by_status(),
     })
 
 
 def get_import_jobs_timeline(h: RouteHandler, params: dict[str, list[str]]) -> None:
-    db = _server()._db()
+    db = runtime().db()
     jobs = db.list_import_job_timeline(limit=50)
     serialized: list[dict[str, object]] = []
     for queue_position, job in enumerate(jobs):
@@ -525,7 +524,7 @@ def get_import_jobs_timeline(h: RouteHandler, params: dict[str, list[str]]) -> N
 
 
 def get_import_job(h: RouteHandler, params: dict[str, list[str]], job_id_str: str) -> None:
-    job = _server()._db().get_import_job(int(job_id_str))
+    job = runtime().db().get_import_job(int(job_id_str))
     if job is None:
         h._error("Import job not found", 404)
         return
@@ -542,10 +541,10 @@ def get_import_job_recovery(
         get_automation_recovery_detail,
     )
 
-    server = _server()
+    rt = runtime()
     result = get_automation_recovery_detail(
-        server._db(),
-        server._beets_db(),
+        rt.db(),
+        rt.beets_db(),
         int(job_id_str),
     )
     h._json(

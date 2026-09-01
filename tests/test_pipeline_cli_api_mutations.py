@@ -12,6 +12,7 @@ import threading
 import unittest
 import urllib.error
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import ClassVar, Self
@@ -22,8 +23,9 @@ from scripts.pipeline_cli import api_mutations
 from scripts.pipeline_cli.routes_meta import _build_parser
 from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakePipelineDB, FakeYTMusic
-from tests.helpers import make_request_row
+from tests.helpers import make_request_row, make_web_runtime
 from tests.web._harness import _FakeDbWebServerCase
+from web.runtime import WebRuntime, install_runtime, runtime
 
 
 class _Response:
@@ -714,7 +716,6 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
             id=316, mb_release_id=merged, status="imported",
             artist_name="Rebecca Black", album_title="Sing It",
         ))
-        import web.server as srv
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             # #1089 MAJOR-C (review round 3): the evidence-lineage witness
@@ -750,7 +751,7 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
             self.addCleanup(configure_canonical_base, previous_base)
             configure_canonical_base("http://fake-mirror/ws/2")
             with (
-                patch.object(srv, "_beets_db", return_value=beets),
+                install_runtime(make_web_runtime(runtime(), beets=beets)),
                 # The TRUE external edge (#1089 NOTE-2, review round 2). The
                 # service's default seam is the TAGGED resolver
                 # (production_tagged_canonical_release_fn), which calls
@@ -781,7 +782,6 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
         """The seventh adapter (#1260): a 409 identity_mismatch round trip
         — the compare-and-set refusal — which needs only a Beets identity
         seed and never launches the write subprocess."""
-        import web.server as srv
         from lib.beets_db import BeetsAlbumIdentityRow
         from tests.fakes import FakeBeetsDB
 
@@ -793,7 +793,7 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
                 item_paths=(),
             ),
         ])
-        with patch.object(srv, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             code, body = self._call(
                 api_mutations.cmd_sync_file_tags,
                 album_id=42,
@@ -813,7 +813,6 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
         really written; unconfigured snapshot path relays 503→5."""
         import tempfile
 
-        import web.server as srv
         from lib.library_completeness_snapshot import (
             library_completeness_snapshot_path,
             library_completeness_trigger_path,
@@ -821,25 +820,21 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             snapshot_path = library_completeness_snapshot_path(tmpdir)
-            previous = srv.library_completeness_snapshot_path
-            srv.library_completeness_snapshot_path = snapshot_path
-            try:
+            with install_runtime(replace(
+                runtime(), library_completeness_snapshot_path=snapshot_path,
+            )):
                 code, body = self._call(api_mutations.cmd_library_census_refresh)
                 trigger_exists = os.path.exists(
                     library_completeness_trigger_path(tmpdir),
                 )
-            finally:
-                srv.library_completeness_snapshot_path = previous
         self.assertEqual(code, 0)
         self.assertEqual(body["outcome"], "requested")
         self.assertTrue(trigger_exists)
 
-        previous = srv.library_completeness_snapshot_path
-        srv.library_completeness_snapshot_path = None
-        try:
+        with install_runtime(replace(
+            runtime(), library_completeness_snapshot_path=None,
+        )):
             code, body = self._call(api_mutations.cmd_library_census_refresh)
-        finally:
-            srv.library_completeness_snapshot_path = previous
         self.assertEqual(code, 5)
         self.assertEqual(body["outcome"], "unconfigured")
 
@@ -871,13 +866,11 @@ class TestApiMutationUnixRealRouteRoundTrips(unittest.TestCase):
         from web import server as srv
 
         self._srv = srv
-        self._saved_db = srv.db
-        self._saved_dsn = srv._db_dsn
-        self._saved_origin = srv.canonical_origin
         self.db = FakePipelineDB()
-        srv.db = self.db
-        srv._db_dsn = None
-        srv.canonical_origin = "https://music.ablz.au"
+        self.enterContext(install_runtime(make_web_runtime(
+            WebRuntime(canonical_origin="https://music.ablz.au"),
+            db=self.db,
+        )))
 
         class RecordingHandler(srv.Handler):
             observations: ClassVar[list[tuple[str, str, str | None, str | None]]] = []
@@ -910,9 +903,6 @@ class TestApiMutationUnixRealRouteRoundTrips(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
-        self._srv.db = self._saved_db
-        self._srv._db_dsn = self._saved_dsn
-        self._srv.canonical_origin = self._saved_origin
         self._temp_dir.cleanup()
 
     def _call(self, handler, **values: object) -> tuple[int, dict[str, object]]:

@@ -77,8 +77,16 @@ def get_api_index(h: RouteHandler, params: dict[str, list[str]]) -> None:
     use ``parse_body``; null otherwise.
 
     #496: reads directly from the merged ``RouteRegistration`` list
-    (``srv.ALL_ROUTES``) rather than four separate dispatch/description
-    dicts — one source of truth for path, method, and description.
+    (``web.server.ALL_ROUTES``) rather than four separate
+    dispatch/description dicts — one source of truth for path, method,
+    and description.
+
+    The deferred import is the one that survived #1313's ``WebRuntime``
+    split, and for the original reason rather than a lingering habit:
+    ``ALL_ROUTES`` is built at ``web/server.py`` import time by merging
+    every route module — this one included — so the cycle it dodges is
+    real and unavoidable, and the value it reads is a structural
+    registry rather than any part of the per-process runtime.
     """
     from web import server as srv
 
