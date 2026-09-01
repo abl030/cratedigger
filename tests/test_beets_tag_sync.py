@@ -124,15 +124,23 @@ class _FakeSyncBeets:
     write's report.
     """
 
-    def __init__(self, *, fail_authority_on: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        fail_authority_on: str = "",
+        failure: Exception | None = None,
+    ) -> None:
         self.rows: dict[int, BeetsAlbumIdentityRow] = {}
         self.file_tags: dict[str, str] = {}
         self.unreadable: set[str] = set()
         self.resolutions: dict[str, CurrentBeetsResolution] = {}
         self.close_calls = 0
-        #: "" | "read" | "resolve" — which read raises a real Beets
-        #: availability failure, and how many times it fired.
+        #: "" | "read" | "resolve" — which read raises, and how many
+        #: times it fired. ``failure`` defaults to a real Beets
+        #: availability error; pass an unrelated exception to check that
+        #: the mediator does NOT launder it into ``beets_unavailable``.
         self.fail_authority_on = fail_authority_on
+        self.failure = failure
         self.authority_raises = 0
 
     def seed_album(
@@ -158,7 +166,7 @@ class _FakeSyncBeets:
     def _maybe_fail(self, site: str) -> None:
         if self.fail_authority_on == site:
             self.authority_raises += 1
-            raise real_beets_authority_failure()
+            raise self.failure or real_beets_authority_failure()
 
     def get_album_mb_identity(
         self, album_id: int,
@@ -314,10 +322,34 @@ class TestSyncOutcomeBranches(unittest.TestCase):
         beets.seed_album(ALBUM_ID, DB_ID, (TRACK,), file_tag=OLD_TAG)
         write = _RecordingWrite(beets)
 
-        for bad in ("", "not-a-uuid", "[r123456]"):
+        # "123456" is the only one of these that parses to an identity at
+        # all — a DISCOGS one — so it is the only one reaching the guard's
+        # source != "musicbrainz" half. The other three resolve to None
+        # and exercise the first half (#1313 mutant runner).
+        for bad in ("", "not-a-uuid", "[r123456]", "123456"):
             with self.subTest(expected=bad):
                 result = _sync(beets, write, expected=bad)
                 self.assertEqual(result.outcome, RESULT_IDENTITY_MISMATCH)
+        self.assertEqual(write.calls, [])
+
+    def test_a_discogs_identity_the_db_agrees_with_is_still_refused(
+        self,
+    ) -> None:
+        """The one world where the entry guard's ``source`` half is the
+        only thing standing: a Beets album whose ``mb_albumid`` IS the
+        Discogs id the caller authorized. Every other Discogs world is
+        caught downstream by the identity compare-and-set, which is why
+        removing that half of the guard survives every other test. Without
+        it this reaches ``tag_sync_query``, whose own MusicBrainz-only
+        refusal is a ``ValueError`` — an exception out of a typed lane,
+        not an outcome (#1313 mutant runner)."""
+        beets = _FakeSyncBeets()
+        beets.seed_album(ALBUM_ID, "123456", (TRACK,), file_tag=OLD_TAG)
+        write = _RecordingWrite(beets)
+
+        result = _sync(beets, write, expected="123456")
+
+        self.assertEqual(result.outcome, RESULT_IDENTITY_MISMATCH)
         self.assertEqual(write.calls, [])
 
     def test_agreeing_album_is_already_synced_without_a_write(self) -> None:
@@ -518,6 +550,21 @@ class TestSyncOutcomeBranches(unittest.TestCase):
         # of the exception; the borrowed one still owes it nothing.
         self.assertEqual(beets.close_calls, 1)
 
+    def test_an_unrelated_bug_is_not_laundered_into_unavailable(self) -> None:
+        """The other half of the mediator's classify-or-re-raise, which
+        nothing exercised: an exception Beets availability does NOT
+        explain must escape, not come back as a retryable 503. Laundering
+        it would tell the operator to retry a real defect forever."""
+        beets = self._seed_authority_failure_world("read")
+        beets.failure = RuntimeError("a genuine bug, not an absent library")
+
+        with _silence_logs(), self.assertRaises(RuntimeError):
+            sync_album_file_tags_from_borrowed_factory(
+                lambda: beets, FakePipelineDB(),
+                album_id=ALBUM_ID, expected_mb_albumid=DB_ID,
+                read_tag=beets.read_tag, run_write=_RecordingWrite(beets),
+            )
+
     def _sync_release_authority_failure(
         self, beets: _FakeSyncBeets,
     ) -> TagSyncResult:
@@ -614,13 +661,22 @@ class TestReleaseEntry(unittest.TestCase):
         self.assertIn("7, 9", result.error_message)
 
     def test_non_musicbrainz_release_is_refused(self) -> None:
-        beets = _FakeSyncBeets()
-        write = _RecordingWrite(beets)
+        """Both halves of the guard, which are different worlds. A bare
+        numeric id really does parse — to a DISCOGS identity — and that is
+        the half the ``source != "musicbrainz"`` clause exists for. The
+        ``[r…]`` spelling this test used to pass resolves to no identity
+        at all, so it only ever exercised the other half (#1313)."""
+        for release_id in ("123456", "[r123456]", "junk", ""):
+            with self.subTest(release_id=release_id):
+                beets = _FakeSyncBeets()
+                write = _RecordingWrite(beets)
 
-        result = self._sync_release(beets, write, release_id="[r123456]")
+                result = self._sync_release(
+                    beets, write, release_id=release_id,
+                )
 
-        self.assertEqual(result.outcome, RESULT_IDENTITY_MISMATCH)
-        self.assertEqual(write.calls, [])
+                self.assertEqual(result.outcome, RESULT_IDENTITY_MISMATCH)
+                self.assertEqual(write.calls, [])
 
     def test_every_path_past_the_open_closes_the_handle_once(self) -> None:
         """The seam's handle is this entry's to close, and a refusal is the

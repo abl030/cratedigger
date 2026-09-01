@@ -72,6 +72,12 @@ class TestAudioFixtures(unittest.TestCase):
                  "-of", "csv=p=0", flac],
                 capture_output=True, text=True, timeout=30, check=True)
             self.assertAlmostEqual(float(probed.stdout.strip()), 800, delta=1)
+            # Being CHEAP is the other half of the contract, and the only
+            # reason this generator exists — 800 s through make_test_flac
+            # costs 91.9 MB of the shared test tmpfs, this one 2.5 MB.
+            # Without this, mono/8 kHz/one sine can drift back to the
+            # expensive shape and nothing notices (#1313 mutant runner).
+            self.assertLess(os.path.getsize(flac), 8_000_000)
 
     def test_the_sox_budget_is_not_flat(self):
         """A flat budget is right at one duration only — which is what put
@@ -91,6 +97,9 @@ class TestAudioFixtures(unittest.TestCase):
             make_test_flac(os.path.join(d, "long.flac"), duration=800)
             make_long_test_flac(os.path.join(d, "cheap.flac"), duration=800)
 
+        # Not-flat and not-below-the-old-floor are the claims; the SLOPE
+        # is deliberately unpinned, because it has no correct value, only
+        # a safe direction (a steeper budget survives, by design).
         short, long_chain, long_cheap = captured
         self.assertGreater(long_chain, short)
         self.assertEqual(long_chain, long_cheap,

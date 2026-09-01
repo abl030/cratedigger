@@ -220,9 +220,13 @@ def sync_worlds(draw: st.DrawFn) -> SyncWorld:
         # The authorizing case is one exact value out of six, so drawing
         # it independently almost never happens. Half the worlds now take
         # it, and the other half still draw the whole pool.
+        # "123456" is the only value here that parses to a real DISCOGS
+        # identity; "junk" and "[r123456]" both resolve to no identity at
+        # all, so without it the guards' source != "musicbrainz" half is
+        # unreachable by the whole harness (#1313 mutant runner).
         expected=draw(st.one_of(
             st.just(db_identity),
-            st.sampled_from(IDENTITIES + ("", "junk", "[r123456]")),
+            st.sampled_from(IDENTITIES + ("", "junk", "[r123456]", "123456")),
         )),
         resolution=draw(st.sampled_from(("unique", *RESOLUTIONS))),
         # Weighted toward a live authority so the write path keeps its
@@ -628,6 +632,25 @@ class TestTagSyncProperties(unittest.TestCase):
         entry="owned_release", authority_failure="resolve",
     ))
     @example(world=_world(authority_failure="open"))
+    @example(world=_world(
+        # R1/R2's own regression world, and the reason it is pinned: with
+        # the authority-failure gate reverted the property stays GREEN at
+        # the derandomized suite tier and only goes red at fuzz depth
+        # (measured by the #1313 mutant runner). No other @example
+        # combines a failed authority with a non-unique resolution — they
+        # all default resolution="unique" — so without these two the
+        # gating tier's only protection is the deterministic self-test.
+        entry="owned_release", resolution="missing", authority_failure="open",
+    ))
+    @example(world=_world(
+        entry="owned_release", resolution="ambiguous",
+        authority_failure="resolve",
+    ))
+    @example(world=_world(
+        # A real Discogs identity, the only value in the pool that reaches
+        # the guards' source != "musicbrainz" half.
+        entry="owned_release", expected="123456",
+    ))
     def test_write_gating_and_verdict(self, world: SyncWorld) -> None:
         run = run_sync_world(world)
         violations = (
